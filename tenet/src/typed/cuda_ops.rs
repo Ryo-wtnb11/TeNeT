@@ -7,10 +7,9 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
     /// Runtime CUDA context.
     ///
     /// Dense storage uploads directly. Compact diagonal storage is expanded
-    /// operation-locally and becomes dense on device; the source's reusable
-    /// dense cache stays cold, and a roundtrip remains dense rather than
-    /// recovering compactness. A lazy adjoint transfers only its canonical
-    /// parent and rebuilds a cold lazy view over the device parent.
+    /// operation-locally and becomes dense on device; a roundtrip remains
+    /// dense rather than recovering compactness. A lazy adjoint transfers only its canonical
+    /// parent and rebuilds a lazy view over the device parent.
     ///
     /// Every payload of the base family uploads: `f64`, `Complex64`, `f32`
     /// and `Complex32`. Single precision moves exactly half the bytes of its
@@ -3164,7 +3163,9 @@ where
         }
     }
 
-    pub(super) fn fusion_operand_and_data(&self) -> (tenet_tensors::FusionOperand<'_>, &[D]) {
+    pub(super) fn fusion_operand_and_data(
+        &self,
+    ) -> (tenet_tensors::FusionOperand<'_>, std::borrow::Cow<'_, [D]>) {
         match &self.repr {
             TypedTensorRepr::Owned(body) => (
                 tenet_tensors::FusionOperand::direct(body.space.space()),
@@ -3172,7 +3173,7 @@ where
             ),
             TypedTensorRepr::Adjoint(view) => (
                 tenet_tensors::FusionOperand::adjoint(view.parent.space.space()),
-                view.parent.materialized_dense_data(),
+                std::borrow::Cow::Borrowed(view.parent_data()),
             ),
         }
     }
@@ -3317,7 +3318,7 @@ where
         let data = tenet_tensors::oriented_fusion_restrict_owned(
             destination.space().structure(),
             source,
-            source_data,
+            &source_data,
             &restriction_starts(self.rank(), legs),
         )
         .map_err(Error::from)?;
@@ -3377,7 +3378,7 @@ where
             &mut data,
             self.logical_space().space().structure(),
             source,
-            source_data,
+            &source_data,
             &ranges,
         )
         .map_err(Error::from)?;
@@ -3538,7 +3539,7 @@ where
         let data = tenet_tensors::oriented_fusion_restrict_owned(
             destination.space().structure(),
             source,
-            source_data,
+            &source_data,
             &starts,
         )
         .map_err(Error::from)?;
@@ -3598,7 +3599,19 @@ where
         })
     }
 
-    fn cat_operand(&self) -> Result<(CatOperandLayout<'_>, &[D]), Error> {
+    fn owned_cat_layout(&self) -> Result<CatOperandLayout<'_>, Error> {
+        let space = self.logical_space().space();
+        CatOperandLayout::owned(space.structure(), space.nout(), space.nin())
+    }
+
+    fn adjoint_logical_for_cat(&self) -> Result<Option<Self>, Error> {
+        match &self.repr {
+            TypedTensorRepr::Owned(_) => Ok(None),
+            TypedTensorRepr::Adjoint(_) => self.materialized_tensor_uncached().map(Some),
+        }
+    }
+
+    fn cat_operand(&self) -> Result<(CatOperandLayout<'_>, std::borrow::Cow<'_, [D]>), Error> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => Ok((
                 CatOperandLayout::owned(
@@ -3614,7 +3627,7 @@ where
                     view.parent.space.space().nout(),
                     view.parent.space.space().nin(),
                 )?,
-                view.parent.materialized_dense_data(),
+                std::borrow::Cow::Borrowed(view.parent_data()),
             )),
         }
     }
@@ -3628,8 +3641,7 @@ where
     /// This is the remedy for operations that reject lazy or compact inputs,
     /// such as `*_overwrite_into` sources and checked-Generic
     /// factorizations. A lazy adjoint is conjugate-transposed from its parent
-    /// in one pass, without filling or sharing the cache [`Self::data`]
-    /// publishes.
+    /// in one pass.
     ///
     /// Why not named `copy`: TensorKit's `copy(::DiagonalTensorMap)` stays
     /// diagonal, and `Clone` here is a shallow handle copy.
@@ -3664,8 +3676,9 @@ where
     /// [`Error::Operation`] only if an engine-internal layout invariant is
     /// broken.
     pub fn materialize(&self) -> Result<Self, Error> {
-        let TypedTensorRepr::Owned(body) = &self.repr else {
-            return self.materialized_tensor_uncached();
+        let body = match &self.repr {
+            TypedTensorRepr::Owned(body) => body,
+            TypedTensorRepr::Adjoint(view) => return self.materialize_adjoint(view),
         };
         let data = match body.data.as_ref() {
             TypedData::Dense(data) => data.clone(),
@@ -3682,9 +3695,6 @@ where
     /// in its new body: a dense payload is shared at pointer cost; a lazy
     /// adjoint or a compact spectrum goes through [`Self::materialize`] into
     /// a **fresh** dense payload (one copy) — the #613 Group 4 contract.
-    /// Never the body-local `dense_cache`: that buffer belongs to this body's
-    /// space/payload pairing and only lends a borrowed slice (see the
-    /// [`TypedTensorBody::data`] rationale).
     ///
     /// Infallible for the reason [`TypedTensorBody::materialized_dense_data`]
     /// is: the diagonal fill is total on a bond space this module built from
@@ -3706,14 +3716,17 @@ where
         )
     }
 
-    /// Builds an operation-local logical tensor without publishing the
-    /// receiver's reusable materialization cache, but still constructs a full
-    /// receiver-sized logical payload. Prefer an oriented kernel or algebraic
-    /// redirect when one implements the same semantics.
+    /// Builds an operation-local logical tensor: a full receiver-sized
+    /// logical payload, released with the operation. Prefer an oriented
+    /// kernel or algebraic redirect when one implements the same semantics.
     pub(super) fn materialized_tensor_uncached(&self) -> Result<Self, Error> {
         let TypedTensorRepr::Adjoint(view) = &self.repr else {
             return Ok(self.clone());
         };
+        self.materialize_adjoint(view)
+    }
+
+    fn materialize_adjoint(&self, view: &TypedAdjointView<R, D>) -> Result<Self, Error> {
         if view.borrowed {
             // Backstop: every refusing operation checks first, by name, with
             // `refuse_borrowed_view`.
@@ -3728,7 +3741,7 @@ where
         let data = tenet_tensors::materialize_adjoint_data_dyn(
             view.parent.space.space(),
             view.logical_space.space(),
-            view.parent.materialized_dense_data(),
+            view.parent_data(),
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
@@ -3760,14 +3773,15 @@ where
     /// unrepresentable — widen with [`Self::convert`] first.
     /// A lazy adjoint is read from parent storage through the oriented copy
     /// plan without publishing a receiver-sized materialization. A compact
-    /// diagonal operand is materialized dense once on demand.
+    /// diagonal operand is densified into an operation-local buffer on every
+    /// call; nothing is retained.
     ///
     /// # Complexity
     ///
     /// One output admission and allocation plus a single
     /// `O(len(self) + len(other))` copy pass over the compiled per-sector slab
     /// plan. If an oriented geometry is conservatively declined, correctness
-    /// falls back to operation-local uncached materialization and retries the
+    /// falls back to operation-local materialization and retries the
     /// plan against the already-admitted output.
     ///
     /// # Errors
@@ -3824,7 +3838,7 @@ where
         )
         .map_err(TypedFacadeError::<R>::from)?
         {
-            plan.execute(lhs_data, rhs_data)
+            plan.execute(&lhs_data, &rhs_data)
                 .map_err(TypedFacadeError::<R>::from)?
         } else {
             // Why not recurse through `cat`: output admission has succeeded,
@@ -3835,14 +3849,29 @@ where
             other
                 .refuse_borrowed_view("cat")
                 .map_err(TypedFacadeError::<R>::from)?;
-            let lhs = self
-                .materialized_tensor_uncached()
+            // Only a lazy adjoint needs a logical payload; an owned operand
+            // reuses the buffer read above, so a compact operand is not
+            // densified a second time.
+            let lhs_local = self
+                .adjoint_logical_for_cat()
                 .map_err(TypedFacadeError::<R>::from)?;
-            let rhs = other
-                .materialized_tensor_uncached()
+            let rhs_local = other
+                .adjoint_logical_for_cat()
                 .map_err(TypedFacadeError::<R>::from)?;
-            let (lhs_layout, lhs_data) = lhs.cat_operand().map_err(TypedFacadeError::<R>::from)?;
-            let (rhs_layout, rhs_data) = rhs.cat_operand().map_err(TypedFacadeError::<R>::from)?;
+            let (lhs_layout, lhs_data) = match &lhs_local {
+                Some(local) => local.cat_operand(),
+                None => self
+                    .owned_cat_layout()
+                    .map(|layout| (layout, std::borrow::Cow::Borrowed(&*lhs_data))),
+            }
+            .map_err(TypedFacadeError::<R>::from)?;
+            let (rhs_layout, rhs_data) = match &rhs_local {
+                Some(local) => local.cat_operand(),
+                None => other
+                    .owned_cat_layout()
+                    .map(|layout| (layout, std::borrow::Cow::Borrowed(&*rhs_data))),
+            }
+            .map_err(TypedFacadeError::<R>::from)?;
             let plan = compile_cat_plan(
                 space.space().structure(),
                 space.space().nout(),
@@ -3856,60 +3885,13 @@ where
                     "owned cat operands did not produce a copy plan",
                 ))
             })?;
-            plan.execute(lhs_data, rhs_data)
+            plan.execute(&lhs_data, &rhs_data)
                 .map_err(TypedFacadeError::<R>::from)?
         };
         Ok(Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
-    }
-}
-
-impl<R, D, S> TensorMap<R, D, S>
-where
-    D: TensorScalar,
-    S: HostReadableStorage<D>,
-{
-    /// Whole reduced payload in the tensor's logical coupled-sector layout.
-    ///
-    /// These are fusion-tree-indexed reduced block entries, not entries in the
-    /// physical carrier basis. Use [`Self::to_physical_dense`] when the
-    /// provider implements [`PhysicalFusionBasis`] and physical entries are
-    /// required.
-    ///
-    /// A lazy adjoint is materialized into host storage at most once across
-    /// all clones. The canonical parent payload remains in `S`.
-    #[deprecated(
-        note = "use `dense_data()`, which never copies; for a lazy adjoint or a compact diagonal call `materialize()` first"
-    )]
-    #[inline]
-    pub fn data(&self) -> &[D] {
-        match &self.repr {
-            TypedTensorRepr::Owned(body) => body.materialized_dense_data(),
-            TypedTensorRepr::Adjoint(view) => view
-                .materialized
-                .get_or_init(|| {
-                    debug_assert!(
-                        !view.borrowed,
-                        "no operand position reads a borrowed view through data()"
-                    );
-                    #[cfg(test)]
-                    observe_adjoint_materialization();
-                    let _host_pool = self.runtime.enter_host_pool();
-                    let data = tenet_tensors::materialize_adjoint_data_dyn(
-                        view.parent.space.space(),
-                        view.logical_space.space(),
-                        view.parent.materialized_dense_data(),
-                    )
-                    .expect("a pre-admitted typed adjoint must materialize");
-                    #[cfg(test)]
-                    view.materialized_body_builds
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    Arc::new(TypedTensorBody::dense(view.logical_space.clone(), data))
-                })
-                .materialized_dense_data(),
-        }
     }
 }
 
@@ -3945,8 +3927,7 @@ where
     ///
     /// [`Error::Unsupported`] with [`crate::error::Alternative::Materialize`]
     /// for a lazy adjoint or a compact diagonal, whose entries are not stored
-    /// densely; call [`Self::materialize`] first. Never copies, even when an
-    /// earlier implicit materialization is cached.
+    /// densely; call [`Self::materialize`] first. Never copies.
     pub fn dense_data(&self) -> Result<&[D], Error> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => match &*body.data {
@@ -3963,15 +3944,43 @@ where
     D: TensorScalar,
     S: HostReadableStorage<D>,
 {
-    pub(super) fn materialized_dense_data(&self) -> &[D] {
+    /// The payload in the dense coupled layout: borrowed for a dense payload,
+    /// densified into an operation-local buffer for a compact diagonal.
+    ///
+    /// Why not cached in the body: a retained densification is an implicit
+    /// receiver-sized copy the caller never asked for (#1548). Every caller
+    /// that reaches the compact arm documents the copy as part of its cost.
+    pub(super) fn materialized_dense_data(&self) -> std::borrow::Cow<'_, [D]> {
         match &*self.data {
+            TypedData::Dense(data) => std::borrow::Cow::Borrowed(data.as_slice()),
+            TypedData::Diagonal(spectrum) => {
+                #[cfg(test)]
+                DIAGONAL_MATERIALIZATIONS.set(DIAGONAL_MATERIALIZATIONS.get().saturating_add(1));
+                std::borrow::Cow::Owned(
+                    tenet_matrixalgebra::diagonal_bond_data(
+                        self.space.space(),
+                        spectrum,
+                        &|value| value,
+                    )
+                    .expect("diagonal fill is total on the stored bond space"),
+                )
+            }
+        }
+    }
+}
+
+impl<R, D, S> TypedAdjointView<R, D, S>
+where
+    S: HostReadableStorage<D>,
+{
+    /// The parent payload, which is dense by the [`TypedAdjointView::new`]
+    /// invariant.
+    pub(super) fn parent_data(&self) -> &[D] {
+        match &*self.parent.data {
             TypedData::Dense(data) => data.as_slice(),
-            TypedData::Diagonal(spectrum) => self.dense_cache.get_or_init(|| {
-                tenet_matrixalgebra::diagonal_bond_data(self.space.space(), spectrum, &|value| {
-                    value
-                })
-                .expect("diagonal fill is total on the stored bond space")
-            }),
+            TypedData::Diagonal(_) => {
+                unreachable!("TypedAdjointView::new admits only dense parents")
+            }
         }
     }
 }
@@ -4139,7 +4148,8 @@ where
             TypedData::Diagonal(spectrum) => spectrum.clone(),
             TypedData::Dense(_) => {
                 let structure = self.logical_space().space().structure();
-                let data = body.materialized_dense_data();
+                let payload = body.materialized_dense_data();
+                let data: &[D] = &payload;
                 let mut collected = Vec::with_capacity(structure.block_count());
                 for index in 0..structure.block_count() {
                     let block = structure
@@ -4250,10 +4260,11 @@ where
             return Ok(false);
         }
         let materialized = self.materialized_tensor_uncached()?;
-        let data = materialized
+        let data_payload = materialized
             .owned_body()
             .expect("uncached materialization is owned")
             .materialized_dense_data();
+        let data: &[D] = &data_payload;
         let mut norm = 0.0_f64;
         let mut offdiag = 0.0_f64;
         for index in 0..self.logical_space().space().structure().block_count() {
@@ -4499,15 +4510,16 @@ where
     /// returned, so iteration is infallible. In particular, a checked-provider
     /// decode failure exposes no prefix. Blocks remain in canonical stored order.
     ///
-    /// Dense tensors copy no numeric payload. Compact diagonals and lazy
-    /// adjoints follow the deprecated `data()`: the logical dense payload is materialized
-    /// at most once and then shared by all views and clones.
+    /// Copies no numeric payload.
     ///
     /// # Errors
     ///
-    /// Returns an error if the provider cannot decode a stored fusion-tree
-    /// label, or if stored block metadata does not form a valid view into the
-    /// logical tensor data.
+    /// [`Error::Unsupported`] with [`crate::error::Alternative::Materialize`]
+    /// for a lazy adjoint or a compact diagonal, whose subblocks are not
+    /// stored densely; call [`Self::materialize`] first. Otherwise an error
+    /// if the provider cannot decode a stored fusion-tree label, or if stored
+    /// block metadata does not form a valid view into the logical tensor
+    /// data.
     #[expect(
         clippy::type_complexity,
         reason = "the public block iterator yields labelled trees with borrowed block views"
@@ -4518,6 +4530,10 @@ where
         impl ExactSizeIterator<Item = (BlockFusionTrees<R::Sector>, BlockView<'a, D>)> + 'a,
         TypedFacadeError<R>,
     > {
+        let data = self
+            .dense_data()
+            .map_err(|_| borrowed_view_unsupported("subblocks"))
+            .map_err(TypedFacadeError::<R>::from)?;
         let structure = self.logical_space().space().structure();
         let mut labelled = Vec::with_capacity(structure.block_count());
         for index in 0..structure.block_count() {
@@ -4529,10 +4545,6 @@ where
             labelled.push((trees, block));
         }
 
-        // #1548 decides this implicit materialization of a lazy adjoint or a
-        // compact diagonal; the migration phase keeps it.
-        #[allow(deprecated)]
-        let data = self.data();
         let blocks = labelled
             .into_iter()
             .map(|(trees, block)| {

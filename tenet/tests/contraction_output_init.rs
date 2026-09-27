@@ -88,15 +88,11 @@ macro_rules! check_owned {
             expected.dense_data().unwrap(),
             $terms,
         );
-        let lhs_coupled: HashSet<_> = $lhs
-            .subblocks()
-            .unwrap()
-            .map(|(trees, _)| trees.coupled().clone())
+        let lhs_coupled: HashSet<_> = (0..$lhs.subblock_count())
+            .map(|index| $lhs.subblock_fusion_trees(index).unwrap().coupled().clone())
             .collect();
-        let rhs_coupled: HashSet<_> = $rhs
-            .subblocks()
-            .unwrap()
-            .map(|(trees, _)| trees.coupled().clone())
+        let rhs_coupled: HashSet<_> = (0..$rhs.subblock_count())
+            .map(|index| $rhs.subblock_fusion_trees(index).unwrap().coupled().clone())
             .collect();
         let mut inactive = 0usize;
         for (trees, view) in output.subblocks().unwrap() {

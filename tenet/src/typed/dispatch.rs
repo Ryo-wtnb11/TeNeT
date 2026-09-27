@@ -164,7 +164,8 @@ where
     /// operation publishes one fresh scaled payload on the exact admitted
     /// space and provider allocation. A lazy adjoint redirects through its
     /// parent with the inverse operation. Multiplicity-free compact spectra
-    /// retain their existing representation-preserving path.
+    /// retain their existing representation-preserving path; a checked-Generic
+    /// compact factor is densified into an operation-local buffer first.
     ///
     /// # Errors
     ///
@@ -204,8 +205,8 @@ where
     /// compact spectrum factor materializes first (the flipped space is no
     /// longer a bond space, so the result cannot stay compact). The same
     /// facade narrowings as [`Self::twist`] apply: a lazy dense adjoint
-    /// redirects through the parent with the inverse categorical map and
-    /// stays cold; there is no device arm, and checked Generic follows its
+    /// redirects through the parent with the inverse categorical map without
+    /// materializing; there is no device arm, and checked Generic follows its
     /// provider-mode dispatch.
     ///
     /// # Errors

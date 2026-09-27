@@ -120,7 +120,6 @@ where
         repr: owned_repr(TypedTensorBody {
             space,
             data: Arc::new(TypedData::Dense(core.data().to_vec())),
-            dense_cache: std::sync::OnceLock::new(),
         }),
     }
 }

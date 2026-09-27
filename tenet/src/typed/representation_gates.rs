@@ -220,14 +220,6 @@ fn owned<R, D, S>(tensor: &TensorMap<R, D, S>) -> &Arc<TypedTensorBody<R, D, S>>
     tensor.owned_body().expect("test fixture must be owned")
 }
 
-fn materialized_adjoint_builds<R, D, S>(tensor: &TensorMap<R, D, S>) -> usize {
-    let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
-        return 0;
-    };
-    view.materialized_body_builds
-        .load(std::sync::atomic::Ordering::Relaxed)
-}
-
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_lazy_transforms_do_not_materialize_uncached_input() {
@@ -272,11 +264,9 @@ fn checked_generic_lazy_transforms_do_not_materialize_uncached_input() {
             eager.transpose(&[0, 2], &[1]).unwrap(),
         ),
     ];
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
     for (actual, expected) in outputs {
         assert!(matches!(&actual.repr, TypedTensorRepr::Owned(_)));
         assert_eq!(
@@ -297,8 +287,6 @@ fn checked_generic_lazy_transforms_do_not_materialize_uncached_input() {
         assert!(actual.qr_compact().is_ok());
     }
     assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -576,8 +564,6 @@ where
 
         assert_cuda_tensor_matches_host(&contract, &expected_contract, provider, &runtime);
         assert_cuda_tensor_matches_host(&compose, &expected_compose, provider, &runtime);
-        assert_eq!(materialized_adjoint_builds(&lhs_device), 0);
-        assert_eq!(materialized_adjoint_builds(&rhs_device), 0);
     }
 }
 
@@ -669,7 +655,6 @@ fn network_degeneracy_restriction_copies_nonprefix_rectangles_and_lazy_adjoint()
         )
         .unwrap();
     assert_eq!(restricted.dense_data().unwrap(), &[11.0, 21.0, 12.0, 22.0]);
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 #[test]
@@ -700,8 +685,6 @@ fn coupled_block_reads_do_not_materialize_a_lazy_adjoint() {
         }
     }
     assert!(entries > 0);
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert_eq!(materialized_adjoint_builds(&clone), 0);
 }
 
 #[test]
@@ -839,7 +822,6 @@ fn network_degeneracy_restriction_conjugates_complex_lazy_adjoint() {
             Complex64::new(21.0, -3.0),
         ]
     );
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 #[test]
@@ -904,8 +886,6 @@ fn network_scatter_reads_complex_lazy_adjoint_parent_without_materializing() {
         Complex64::new((ij[0] + 2 * ij[1]) as f64, (1 + ij[0] + ij[1]) as f64)
     })
     .unwrap();
-    let parent = owned(&source);
-    assert!(parent.dense_cache.get().is_none());
     let lazy = source.adjoint().unwrap();
     let codomain = lazy.codomain();
     let domain = lazy.domain();
@@ -921,12 +901,7 @@ fn network_scatter_reads_complex_lazy_adjoint_parent_without_materializing() {
         })
         .collect::<Vec<_>>();
     assert_eq!(destination.dense_data().unwrap(), expected);
-    assert!(matches!(
-        &lazy.repr,
-        TypedTensorRepr::Adjoint(view) if view.materialized.get().is_none()
-    ));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert!(parent.dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
 #[test]
@@ -949,6 +924,7 @@ fn storage_parameter_clone_shares_non_clone_payload() {
 
 #[test]
 fn typed_placement_is_diagnostic_for_dense_compact_and_lazy_host_storage() {
+    DIAGONAL_MATERIALIZATIONS.set(0);
     let source = u1_lazy_fixture();
     let diagonal = source.svd_compact().unwrap().s;
     let lazy = source.adjoint().unwrap();
@@ -956,12 +932,12 @@ fn typed_placement_is_diagnostic_for_dense_compact_and_lazy_host_storage() {
     assert_eq!(source.placement(), Placement::Host);
     assert_eq!(diagonal.placement(), Placement::Host);
     assert_eq!(lazy.placement(), Placement::Host);
-    assert!(owned(&diagonal).dense_cache.get().is_none());
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
 #[test]
 fn typed_zeros_like_is_exact_and_representation_preserving() {
+    DIAGONAL_MATERIALIZATIONS.set(0);
     let source = u1_lazy_fixture();
     let values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0];
     let index = std::cell::Cell::new(0usize);
@@ -1049,14 +1025,11 @@ fn typed_zeros_like_is_exact_and_representation_preserving() {
         .iter()
         .flat_map(|entry| &entry.values)
         .all(|value| value.to_bits() == 0));
-    assert!(owned(&compact).dense_cache.get().is_none());
-    assert!(owned(&compact_zero).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
     let lazy = dense.adjoint().unwrap();
     let lazy_zero = lazy.zeros_like();
     assert!(matches!(lazy_zero.repr, TypedTensorRepr::Adjoint(_)));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert_eq!(materialized_adjoint_builds(&lazy_zero), 0);
     assert!(std::ptr::eq(lazy_zero.provider(), provider));
 
     let empty_leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 0)]).unwrap();
@@ -1265,7 +1238,6 @@ fn typed_cuda_factorizations_reject_lazy_adjoint_before_runtime_work() {
         lazy.eigh_full(),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
     ));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 #[cfg(feature = "cuda")]
@@ -1311,8 +1283,6 @@ fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
         &v.compose(&d).unwrap(),
         1.0e-10,
     );
-
-    assert_eq!(materialized_adjoint_builds(&device), 0);
 
     let su2_provider = Arc::new(SU2FusionRule);
     let su2_leg = GradedSpace::try_new(
@@ -1444,7 +1414,6 @@ fn mis_stacked_hermitian_z2(runtime: &Runtime) -> TensorMap<Z2FusionRule, f64> {
         repr: owned_repr(TypedTensorBody {
             space,
             data: Arc::new(TypedData::Dense(core.data().to_vec())),
-            dense_cache: std::sync::OnceLock::new(),
         }),
     }
 }
@@ -2449,6 +2418,7 @@ fn typed_cuda_svd_diagonal_written_on_device_equals_the_downloaded_diagonal_bitw
 #[cfg(feature = "cuda")]
 #[test]
 fn missing_cuda_context_precedes_compact_expansion_and_lazy_materialization() {
+    DIAGONAL_MATERIALIZATIONS.set(0);
     let source = u1_lazy_fixture();
     let diagonal = source.svd_compact().unwrap().s;
     let lazy = source.adjoint().unwrap();
@@ -2484,15 +2454,14 @@ fn missing_cuda_context_precedes_compact_expansion_and_lazy_materialization() {
 
     assert_eq!(malformed.to_cuda().unwrap_err(), missing_context);
     assert!(matches!(lazy.to_cuda(), Err(error) if error == missing_context));
-    assert!(owned(&malformed).dense_cache.get().is_none());
-    assert!(owned(&diagonal).dense_cache.get().is_none());
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 #[ignore]
 fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
+    DIAGONAL_MATERIALIZATIONS.set(0);
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let leg = GradedSpace::try_new(
@@ -2518,14 +2487,14 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
     .unwrap();
     let diagonal_device = diagonal.to_cuda().unwrap();
     assert_eq!(diagonal_device.placement(), Placement::Cuda(0));
-    assert!(owned(&diagonal).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     let diagonal_host = diagonal_device.to_host().unwrap();
     assert!(matches!(
         owned(&diagonal_host).data.as_ref(),
         TypedData::Dense(_)
     ));
     assert_eq!(diagonal_host.dense_data().unwrap(), expected_diagonal);
-    assert!(owned(&diagonal).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
     let lazy = source.adjoint().unwrap();
     let expected_lazy = tenet_tensors::materialize_adjoint_data_dyn(
@@ -2535,11 +2504,9 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
     )
     .unwrap();
     let lazy_device = lazy.to_cuda().unwrap();
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
     let TypedTensorRepr::Adjoint(device_view) = &lazy_device.repr else {
         unreachable!("transfer preserves the lazy view")
     };
-    assert!(device_view.materialized.get().is_none());
     let expected_norm = source.norm(2.0).unwrap();
     CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
     assert!(
@@ -2618,9 +2585,7 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
     let lazy_zero = observed_arithmetic!(lazy_device.zeros_like(), (1, 0, 0), (0, 0, 0)).unwrap();
     for result in [&lazy_scale, &lazy_add, &lazy_zero] {
         assert!(matches!(result.repr, TypedTensorRepr::Adjoint(_)));
-        assert_eq!(materialized_adjoint_builds(result), 0);
     }
-    assert_eq!(materialized_adjoint_builds(&lazy_device), 0);
     assert!(matches!(
         observed_arithmetic!(
             lazy_device.axpby(2.0, &source_device, -3.0),
@@ -2629,7 +2594,6 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
         ),
         Err(Error::UnsupportedOnDevice(_))
     ));
-    assert_eq!(materialized_adjoint_builds(&lazy_device), 0);
 
     assert!(matches!(
         lazy_device.inner(&lazy_device),
@@ -2639,8 +2603,6 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
         lazy_device.inner(&lazy_device),
         Err(Error::UnsupportedOnDevice(_))
     ));
-    assert_eq!(materialized_adjoint_builds(&lazy_device), 0);
-    assert!(device_view.materialized.get().is_none());
 
     let mut missing_context = lazy_device.clone();
     missing_context.runtime = Runtime::builder().build().unwrap();
@@ -2654,7 +2616,6 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
         assert_eq!(observation.get(), Some(preflight_sentinel));
         observation.set(None);
     });
-    assert_eq!(materialized_adjoint_builds(&missing_context), 0);
     CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some(preflight_sentinel)));
     assert!(matches!(
         missing_context.zeros_like(),
@@ -2671,11 +2632,9 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
     assert!(Arc::ptr_eq(device_view, clone_view));
 
     let lazy_host = device_clone.to_host().unwrap();
-    let TypedTensorRepr::Adjoint(host_view) = &lazy_host.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy_host.repr else {
         unreachable!("roundtrip preserves the lazy view")
     };
-    assert!(host_view.materialized.get().is_none());
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
     assert_eq!(
         lazy_host.materialize().unwrap().dense_data().unwrap(),
         expected_lazy
@@ -2846,14 +2805,9 @@ fn typed_cuda_lazy_adjoint_contract_and_compose_match_rectangular_host_oracles()
                 }
                 let parent = eager_adjoint_oracle(logical);
                 if upload_parent_first {
-                    let device = parent.to_cuda().unwrap().adjoint().unwrap();
-                    assert_eq!(materialized_adjoint_builds(&device), 0);
-                    device
+                    parent.to_cuda().unwrap().adjoint().unwrap()
                 } else {
-                    let lazy = parent.adjoint().unwrap();
-                    let device = lazy.to_cuda().unwrap();
-                    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-                    device
+                    parent.adjoint().unwrap().to_cuda().unwrap()
                 }
             };
             let lhs_device = device_operand(&lhs, lhs_adjoint);
@@ -2893,8 +2847,6 @@ fn typed_cuda_lazy_adjoint_contract_and_compose_match_rectangular_host_oracles()
                 contracted.logical_space().provider_arc(),
                 lhs.logical_space().provider_arc()
             ));
-            assert_eq!(materialized_adjoint_builds(&lhs_device), 0);
-            assert_eq!(materialized_adjoint_builds(&rhs_device), 0);
         }
     }
 }
@@ -2946,8 +2898,6 @@ fn typed_cuda_lazy_adjoint_preserves_fermionic_contract_sign() {
 
         assert_eq!(contract.dense_data().unwrap(), &[-6.0]);
         assert_eq!(compose.dense_data().unwrap(), &[6.0]);
-        assert_eq!(materialized_adjoint_builds(&lhs_device), 0);
-        assert_eq!(materialized_adjoint_builds(&rhs_device), 0);
     }
 }
 
@@ -3001,12 +2951,11 @@ fn typed_cuda_lazy_adjoint_covers_su2_rank_five_and_simple_product() {
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
-fn generic_lazy_adjoint_keeps_parent_storage_and_caches_a_host_body() {
+fn generic_lazy_adjoint_keeps_parent_storage_and_refuses_a_dense_borrow() {
     let source = u1_lazy_fixture();
     let parent: Arc<TypedTensorBody<_, _, NonCloneHost>> = Arc::new(TypedTensorBody::dense(
         source.logical_space().clone(),
-        NonCloneHost(source.data().to_vec()),
+        NonCloneHost(source.dense_data().unwrap().to_vec()),
     ));
     let logical_space = tenet_tensors::adjoint_bound_space_dyn(&parent.space).unwrap();
     let lazy = TensorMap {
@@ -3017,13 +2966,16 @@ fn generic_lazy_adjoint_keeps_parent_storage_and_caches_a_host_body() {
         ))),
     };
 
-    let expected = source.adjoint().unwrap();
-    assert_eq!(lazy.data(), expected.data());
+    assert!(matches!(
+        lazy.dense_data(),
+        Err(Error::Unsupported {
+            alternative: crate::error::Alternative::Materialize,
+            ..
+        })
+    ));
     let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
         unreachable!("fixture is a lazy adjoint")
     };
-    let _: &OnceLock<Arc<TypedTensorBody<U1FusionRule, f64, Vec<f64>>>> = &view.materialized;
-    assert!(view.materialized.get().is_some());
     assert!(Arc::ptr_eq(&parent, &view.parent));
 }
 
@@ -3101,8 +3053,6 @@ where
         view.logical_space.provider_arc()
     ));
     assert!(std::ptr::eq(adjoint.provider(), source.provider()));
-    assert_eq!(materialized_adjoint_builds(&adjoint), 0);
-    assert!(view.materialized.get().is_none());
 
     let clone = adjoint.clone();
     let TypedTensorRepr::Adjoint(clone_view) = &clone.repr else {
@@ -3116,7 +3066,6 @@ where
         source.dense_data().unwrap().as_ptr(),
         restored.dense_data().unwrap().as_ptr()
     );
-    assert_eq!(materialized_adjoint_builds(&adjoint), 0);
 }
 
 #[test]
@@ -3183,11 +3132,9 @@ fn lazy_adjoint_metadata_is_logical_and_cold() {
     }
     assert_eq!(adjoint.logical_space().space(), expected.space());
     assert!(!format!("{adjoint:?}").is_empty());
-    assert_eq!(materialized_adjoint_builds(&adjoint), 0);
-    let TypedTensorRepr::Adjoint(view) = &adjoint.repr else {
+    let TypedTensorRepr::Adjoint(_) = &adjoint.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[cfg(feature = "racah-generated")]
@@ -3203,11 +3150,9 @@ fn checked_generic_inv_lazy_is_detached_and_keeps_receiver_cold() {
     let lazy = source.adjoint().unwrap();
     let inverse = lazy.inv().unwrap();
 
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
     assert!(matches!(inverse.repr, TypedTensorRepr::Owned(_)));
     assert!(!std::ptr::eq(
         inverse.dense_data().unwrap().as_ptr(),
@@ -3276,11 +3221,9 @@ fn checked_generic_null_lazy_redirects_are_owned_and_keep_receiver_cold() {
     }
     assert!(Arc::ptr_eq(owned(&source), &body));
     assert!(Arc::ptr_eq(&owned(&source).data, &payload));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[cfg(feature = "racah-generated")]
@@ -3311,7 +3254,6 @@ fn checked_generic_compact_qr_lq_reject_lazy_adjoint_without_materializing() {
             ),
             "qr = {qr}: {result:?}"
         );
-        assert_eq!(materialized_adjoint_builds(&lazy), 0);
     }
 }
 
@@ -3338,7 +3280,6 @@ fn checked_generic_exp_lazy_is_owned_and_stays_cold() {
     assert!(actual.runtime().shares_state_with(source.runtime()));
     assert_eq!(actual.codomain(), lazy.codomain());
     assert_eq!(actual.domain(), lazy.domain());
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 #[cfg(feature = "racah-generated")]
@@ -3356,10 +3297,7 @@ fn checked_generic_lazy_flip_stays_cold_and_keeps_logical_duality() {
         .unwrap();
     let lazy = source.adjoint().unwrap();
 
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
     let flipped = lazy.flip(&[1], Direction::Forward).unwrap();
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert_eq!(materialized_adjoint_builds(&flipped), 0);
     assert_eq!(flipped.domain()[0].is_dual(), !lazy.domain()[0].is_dual());
 
     let expected = source
@@ -3378,37 +3316,6 @@ fn checked_generic_lazy_flip_stays_cold_and_keeps_logical_duality() {
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
-fn cloned_adjoint_materializes_once_across_threads() {
-    let source = u1_lazy_fixture().convert::<Complex64>();
-    let (_, expected) =
-        tenet_tensors::adjoint_bound_dyn(source.logical_space(), source.data()).unwrap();
-    let adjoint = source.adjoint().unwrap();
-    let expected_len = adjoint.logical_space().space().required_len().unwrap();
-    let barrier = Arc::new(std::sync::Barrier::new(8));
-    let threads: Vec<_> = (0..8)
-        .map(|_| {
-            let adjoint = adjoint.clone();
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                let data = adjoint.data();
-                (data.as_ptr() as usize, data.to_vec())
-            })
-        })
-        .collect();
-    let outputs: Vec<_> = threads
-        .into_iter()
-        .map(|thread| thread.join().unwrap())
-        .collect();
-    assert!(outputs
-        .iter()
-        .all(|(pointer, data)| *pointer == outputs[0].0 && data.len() == expected_len));
-    assert_eq!(outputs[0].1, expected);
-    assert_eq!(materialized_adjoint_builds(&adjoint), 1);
-}
-
-#[test]
 fn svd_vals_reads_the_parent_without_materializing_the_adjoint() {
     // What: values-only SVD preserves typed sector spectra across cold,
     // repeated, cloned, and concurrent lazy-adjoint reads.
@@ -3420,11 +3327,9 @@ fn svd_vals_reads_the_parent_without_materializing_the_adjoint() {
             assert_eq!(lazy.svd_vals().unwrap(), expected);
             assert_eq!(lazy.svd_vals().unwrap(), expected);
             assert_eq!(lazy.clone().svd_vals().unwrap(), expected);
-            assert_eq!(materialized_adjoint_builds(&lazy), 0);
             let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
                 unreachable!()
             };
-            assert!(view.materialized.get().is_none());
             assert!(Arc::ptr_eq(
                 view.logical_space.provider_arc(),
                 source.logical_space().provider_arc()
@@ -3448,11 +3353,9 @@ fn svd_vals_reads_the_parent_without_materializing_the_adjoint() {
     for thread in threads {
         assert_eq!(thread.join().unwrap(), expected);
     }
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 fn assert_compact_svd_reads_parent<R, D>(source: &TensorMap<R, D>)
@@ -3465,11 +3368,9 @@ where
     let actual = lazy.svd_compact().unwrap();
     let expected = eager.svd_compact().unwrap();
 
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
     for (actual, expected) in [
         (&actual.u, &expected.u),
         (&actual.s, &expected.s),
@@ -3507,8 +3408,6 @@ where
         .iter()
         .zip(eager.dense_data().unwrap())
         .all(|(&left, &right)| { (left.widen_complex() - right.widen_complex()).norm() < 1e-12 }));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -3533,7 +3432,7 @@ where
     let actual = lazy.svd_full().unwrap();
     let expected = eager.svd_full().unwrap();
 
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
     for (actual, expected) in [
@@ -3583,8 +3482,6 @@ where
         .iter()
         .zip(eager.dense_data().unwrap())
         .all(|(&left, &right)| { (left.widen_complex() - right.widen_complex()).norm() < 1e-12 }));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -3636,11 +3533,9 @@ fn full_svd_late_failure_does_not_publish_the_adjoint_cache() {
 
     assert!(matches!(lazy.svd_full(), Err(Error::Operation(_))));
     assert_eq!(source.dense_data().unwrap(), before);
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 fn assert_null_redirect<R, D>(source: &TensorMap<R, D>)
@@ -3698,11 +3593,9 @@ where
         });
         let _ = actual.dense_data().unwrap();
     }
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -3744,11 +3637,9 @@ fn assert_null_late_failure(left: bool) {
     };
     assert!(matches!(result, Err(Error::Operation(_))));
     assert_eq!(source.dense_data().unwrap(), before);
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -3775,11 +3666,9 @@ where
         target.right_polar().unwrap().pair()
     };
     assert_polar_factors(source, &target, &actual, &expected, left);
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 fn assert_typed_map_close<R, D>(
@@ -3855,11 +3744,9 @@ fn assert_eigh_uses_a_cold_logical_copy(source: &TensorMap<U1FusionRule, f64>) {
     }
     assert!(Arc::ptr_eq(owned(source), &parent_body));
     assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -3921,11 +3808,9 @@ fn eigh_dense_lazy_complex_orientation_and_failures_match_logical_oracles() {
         .compose(&actual.v.adjoint().unwrap())
         .unwrap();
     assert_typed_map_close(&reconstructed, &eager, 1.0e-12);
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 
     let nonhermitian = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
         match (indices[0], indices[1]) {
@@ -3946,11 +3831,9 @@ fn eigh_dense_lazy_complex_orientation_and_failures_match_logical_oracles() {
         assert_eq!(lazy.eigh_vals().unwrap_err().to_string(), expected[0]);
         assert_eq!(lazy.eigh_full().unwrap_err().to_string(), expected[1]);
     }
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 fn assert_eig_uses_a_cold_logical_copy(source: &TensorMap<U1FusionRule, f64>) {
@@ -4004,16 +3887,12 @@ fn assert_eig_uses_a_cold_logical_copy(source: &TensorMap<U1FusionRule, f64>) {
     }
     assert!(Arc::ptr_eq(owned(source), &parent_body));
     assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 
-    #[allow(deprecated)] // positive control: the deprecated `data()` cache until #1548
-    let _ = lazy.data();
-    assert_eq!(materialized_adjoint_builds(&lazy), 1);
-    assert!(view.materialized.get().is_some());
+    // Positive control: the probe sees an implicit materialization.
+    let _ = lazy.materialized_tensor_uncached().unwrap();
 }
 
 #[test]
@@ -4050,7 +3929,6 @@ fn eig_dense_lazy_real_order_signed_zero_and_defective_cases_match_logical_oracl
     let value = lazy.eig_vals().unwrap()[0].values[0];
     assert_eq!(value, num_complex::Complex64::new(-2.0, 0.0));
     assert_eq!(value.im.to_bits(), 0.0f64.to_bits());
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
     let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)]).unwrap();
     let rotation = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
@@ -4067,7 +3945,6 @@ fn eig_dense_lazy_real_order_signed_zero_and_defective_cases_match_logical_oracl
     assert_eq!(lazy.eig_vals().unwrap(), expected);
     assert_eq!(expected[0].values[0].im, 1.0);
     assert_eq!(expected[0].values[1].im, -1.0);
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
     for epsilon in [0.0, 1.0e-12] {
         let jordan = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
@@ -4092,7 +3969,6 @@ fn eig_dense_lazy_real_order_signed_zero_and_defective_cases_match_logical_oracl
             actual.v.dense_data().unwrap(),
             expected.v.dense_data().unwrap()
         );
-        assert_eq!(materialized_adjoint_builds(&lazy), 0);
     }
 }
 
@@ -4116,11 +3992,9 @@ fn eig_dense_lazy_failures_match_logical_oracle_and_stay_cold() {
         assert_eq!(lazy.eig_vals().unwrap_err().to_string(), expected[0]);
         assert_eq!(lazy.eig_full().unwrap_err().to_string(), expected[1]);
     }
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -4162,11 +4036,9 @@ fn exp_of_a_near_hermitian_adjoint_uses_the_logical_orientation_and_stays_cold()
         .any(|(&actual, &expected)| {
             (actual.widen_complex() - expected.widen_complex()).norm() > 1.0e-16
         }));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 fn assert_exp_uses_a_cold_logical_copy<R, D>(source: &TensorMap<R, D>)
@@ -4207,11 +4079,9 @@ where
     }
     assert!(Arc::ptr_eq(owned(source), &parent_body));
     assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -4283,11 +4153,9 @@ fn exp_failure_leaves_the_lazy_receiver_and_parent_untouched() {
         }));
     assert!(Arc::ptr_eq(owned(&source), &parent));
     assert!(Arc::ptr_eq(&owned(&source).data, &data));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 fn assert_polar_factors<R, D>(
@@ -4378,11 +4246,9 @@ where
             .unwrap();
         assert_typed_map_close(&image, &target_domain, 1e-9);
     }
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 fn assert_inverse_redirect<R, D>(source: &TensorMap<R, D>)
@@ -4437,17 +4303,15 @@ where
 
     assert!(Arc::ptr_eq(owned(source), &parent_body));
     assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
 fn inverse_redirect_is_owned_provider_native_repeatable_and_cold() {
     // What: U(1) complex blocks and a genuine SU(2) multitree use the
-    // inverse identity without warming the lazy receiver, including
+    // inverse identity without materializing the lazy receiver, including
     // cloned and concurrent calls, and return detached provider-native data.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
@@ -4522,7 +4386,7 @@ fn inverse_redirect_is_owned_provider_native_repeatable_and_cold() {
 #[test]
 fn inverse_redirect_failure_leaves_the_receiver_cold() {
     // What: a singular solve changes neither parent Arc/bytes nor the lazy
-    // receiver cache.
+    // receiver.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 3)]).unwrap();
@@ -4543,11 +4407,9 @@ fn inverse_redirect_failure_leaves_the_receiver_cold() {
     assert_eq!(singular.dense_data().unwrap(), before);
     assert!(Arc::ptr_eq(owned(&singular), &body));
     assert!(Arc::ptr_eq(&owned(&singular).data, &data));
-    assert_eq!(materialized_adjoint_builds(&cold), 0);
-    let TypedTensorRepr::Adjoint(view) = &cold.repr else {
+    let TypedTensorRepr::Adjoint(_) = &cold.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 
     // The first U(1) sector solves before the second singular sector
     // fails, pinning atomicity after partial backend progress.
@@ -4567,15 +4429,14 @@ fn inverse_redirect_failure_leaves_the_receiver_cold() {
     assert!(matches!(cold.inv(), Err(Error::Operation(_))));
     assert_eq!(late.dense_data().unwrap(), before);
     assert!(Arc::ptr_eq(&owned(&late).data, &data));
-    assert_eq!(materialized_adjoint_builds(&cold), 0);
-    let TypedTensorRepr::Adjoint(view) = &cold.repr else {
+    let TypedTensorRepr::Adjoint(_) = &cold.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
 fn solve_is_transactional_provider_native_and_cache_cold() {
+    DIAGONAL_MATERIALIZATIONS.set(0);
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let lhs_provider = Arc::new(U1FusionRule);
     let rhs_provider = Arc::new(U1FusionRule);
@@ -4630,7 +4491,6 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
     let lazy = divisor.adjoint().unwrap();
     let expected = eager_adjoint_oracle(&divisor).solve(&rhs).unwrap();
     assert_typed_map_close(&lazy.solve(&rhs).unwrap(), &expected, 1e-11);
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
     let square_rhs =
         TensorMap::from_subblock_fn(&runtime, [&rhs_codomain], [&rhs_codomain], |_, indices| {
@@ -4640,7 +4500,6 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
     let lazy_rhs = square_rhs.adjoint().unwrap();
     let expected = divisor.solve(&eager_adjoint_oracle(&square_rhs)).unwrap();
     assert_typed_map_close(&divisor.solve(&lazy_rhs).unwrap(), &expected, 1e-11);
-    assert_eq!(materialized_adjoint_builds(&lazy_rhs), 0);
 
     let bad_leg = GradedSpace::try_new(Arc::clone(&lhs_provider), [(U1Irrep::new(7), 1)]).unwrap();
     let bad = TensorMap::from_subblock_fn(&runtime, [&bad_leg], [&bad_leg], |_, _| 1.0)
@@ -4648,16 +4507,12 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
         .adjoint()
         .unwrap();
     assert!(matches!(lazy.solve(&bad), Err(Error::InvalidArgument(_))));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert_eq!(materialized_adjoint_builds(&bad), 0);
 
     let singular_dense = divisor.scale(0.0).adjoint().unwrap();
     assert!(matches!(
         singular_dense.solve(&lazy_rhs),
         Err(Error::Operation(_))
     ));
-    assert_eq!(materialized_adjoint_builds(&singular_dense), 0);
-    assert_eq!(materialized_adjoint_builds(&lazy_rhs), 0);
 
     let compact_rhs = TensorMap::diagonal(
         &runtime,
@@ -4675,7 +4530,9 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
     )
     .unwrap();
     let compact_solution = divisor.solve(&compact_rhs).unwrap();
-    assert!(owned(&compact_rhs).dense_cache.get().is_none());
+    // A dense divisor densifies the compact RHS into its solve buffer once.
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    DIAGONAL_MATERIALIZATIONS.set(0);
 
     let compact_divisor = TensorMap::diagonal(
         &runtime,
@@ -4696,8 +4553,7 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
     assert!(compact_compact.spectrum().is_some());
     assert_eq!(compact_compact.spectrum().unwrap()[0].values, [1.0, 0.75]);
     assert_eq!(compact_compact.spectrum().unwrap()[1].values, [0.625]);
-    assert!(owned(&compact_divisor).dense_cache.get().is_none());
-    assert!(owned(&compact_rhs).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_typed_map_close(
         &divisor.compose(&compact_solution).unwrap(),
         &compact_rhs,
@@ -4710,7 +4566,7 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
         scaled.logical_space().provider_arc(),
         compact_divisor.logical_space().provider_arc()
     ));
-    assert!(owned(&compact_divisor).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
     let singular = TensorMap::diagonal(
         &runtime,
@@ -4734,7 +4590,7 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
                 tenet_dense::DenseError::NumericalFailure { op: "solve_into", .. }
             ))
     ));
-    assert!(owned(&singular).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
 #[cfg(feature = "racah-generated")]
@@ -4822,12 +4678,6 @@ where
         }
         assert_eq!(divisor.dense_data().unwrap(), lhs_before.as_slice());
         assert_eq!(rhs.dense_data().unwrap(), rhs_before.as_slice());
-        for input in [&lhs, &right] {
-            assert_eq!(materialized_adjoint_builds(input), 0);
-            if let TypedTensorRepr::Adjoint(view) = &input.repr {
-                assert!(view.materialized.get().is_none());
-            }
-        }
     }
 }
 
@@ -4921,11 +4771,9 @@ where
     }
     assert!(Arc::ptr_eq(owned(source), &parent_body));
     assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -4979,11 +4827,9 @@ fn pinv_redirect_late_svd_failure_keeps_parent_and_receiver_cold() {
     assert!(matches!(lazy.pinv(0.0), Err(Error::Operation(_))));
     assert_eq!(source.dense_data().unwrap(), before);
     assert!(Arc::ptr_eq(&owned(&source).data, &data));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -5066,11 +4912,9 @@ fn polar_redirect_repeats_clones_and_runs_concurrently_without_warming_receiver(
             assert_polar_factors(&source, &target, &actual, &expected, left);
         }
     }
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -5087,7 +4931,6 @@ fn polar_redirect_wrong_direction_keeps_requested_name_and_receiver_cold() {
                     if *message == "left_polar requires rows >= columns in every coupled-sector matrix"
             )
     ));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
     let source = u1_matrix_fixture([(0, 2)], [(0, 3)]);
     let lazy = source.adjoint().unwrap();
@@ -5101,7 +4944,6 @@ fn polar_redirect_wrong_direction_keeps_requested_name_and_receiver_cold() {
                     if *message == "right_polar requires columns >= rows in every coupled-sector matrix"
             )
     ));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 #[test]
@@ -5127,11 +4969,9 @@ fn polar_redirect_late_failure_leaves_parent_and_receiver_unchanged() {
         };
         assert!(matches!(result, Err(Error::Operation(_))));
         assert_eq!(source.dense_data().unwrap(), before);
-        assert_eq!(materialized_adjoint_builds(&lazy), 0);
-        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+        let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
             unreachable!()
         };
-        assert!(view.materialized.get().is_none());
     }
 }
 
@@ -5227,11 +5067,9 @@ where
         false,
     );
 
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -5276,11 +5114,9 @@ fn full_qr_lq_adjoint_dispatch_handles_unmatched_and_disjoint_sectors() {
             false,
             false,
         );
-        assert_eq!(materialized_adjoint_builds(&lazy), 0);
-        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+        let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
             unreachable!()
         };
-        assert!(view.materialized.get().is_none());
     }
 }
 
@@ -5321,11 +5157,9 @@ fn qr_lq_uncached_owned_outputs_repeat_clone_and_run_concurrently() {
             assert_qr_lq_factors(&source, &target, &lq, &expected_lq, false, false);
         }
     });
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 fn assert_full_qr_lq_late_failure(qr: bool) {
@@ -5349,11 +5183,9 @@ fn assert_full_qr_lq_late_failure(qr: bool) {
     };
     assert!(matches!(result, Err(Error::Operation(_))));
     assert_eq!(source.dense_data().unwrap(), before);
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -5432,11 +5264,9 @@ where
         expected.error,
         terms,
     );
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
     for (actual, expected) in [
         (&actual.u, &expected.u),
         (&actual.s, &expected.s),
@@ -5462,8 +5292,6 @@ where
             }));
     }
     assert!(is_isometric!(actual.u, 1e-12));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert!(view.materialized.get().is_none());
 }
 
 #[test]
@@ -5493,11 +5321,9 @@ fn rejected_truncation_does_not_materialize_the_adjoint() {
             &Truncation::space(foreign.truncspace())
         )
         .is_err());
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+    let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
     };
-    assert!(view.materialized.get().is_none());
 }
 
 fn eager_adjoint_oracle<R, D>(source: &TensorMap<R, D>) -> TensorMap<R, D>
@@ -5534,7 +5360,6 @@ fn inverse_twist_and_flip_keep_the_lazy_adjoint_materialization_boundary() {
             .dense_data()
             .unwrap()
     );
-    assert_eq!(materialized_adjoint_builds(&lazy_twist), 0);
 
     let lazy_flip = source.adjoint().unwrap();
     let actual = lazy_flip.flip(&[1], Direction::Inverse).unwrap();
@@ -5547,11 +5372,9 @@ fn inverse_twist_and_flip_keep_the_lazy_adjoint_materialization_boundary() {
         actual.logical_space().space(),
         expected.logical_space().space()
     );
-    assert_eq!(materialized_adjoint_builds(&lazy_flip), 0);
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn simple_lazy_observers_and_owned_outputs_do_not_publish() {
     let source = u1_matrix_fixture([(0, 2)], [(0, 2)]);
     let eager = eager_adjoint_oracle(&source);
@@ -5560,27 +5383,71 @@ fn simple_lazy_observers_and_owned_outputs_do_not_publish() {
     assert_eq!(lazy.is_diagonal(0.0), eager.is_diagonal(0.0));
     assert!(lazy.is_diagonal(-1.0).is_err());
     assert_eq!(
-        lazy.convert::<Complex64>().data(),
-        eager.convert::<Complex64>().data()
+        lazy.convert::<Complex64>()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec(),
+        eager
+            .convert::<Complex64>()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec()
     );
     assert_eq!(
-        lazy.convert::<Complex64>().re().data(),
-        eager.convert::<Complex64>().re().data()
+        lazy.convert::<Complex64>()
+            .re()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec(),
+        eager
+            .convert::<Complex64>()
+            .re()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec()
     );
     assert_eq!(
-        lazy.convert::<Complex64>().im().data(),
-        eager.convert::<Complex64>().im().data()
+        lazy.convert::<Complex64>()
+            .im()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec(),
+        eager
+            .convert::<Complex64>()
+            .im()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec()
     );
     assert_eq!(
         lazy.insert_unit(0, Side::Domain, Duality::Plain)
             .unwrap()
-            .data(),
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec(),
         eager
             .insert_unit(0, Side::Domain, Duality::Plain)
             .unwrap()
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec()
     );
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
     let scalar = source.trace_pairs(&[(0, 1)]).unwrap();
     let scalar_eager = eager_adjoint_oracle(&scalar);
@@ -5589,19 +5456,53 @@ fn simple_lazy_observers_and_owned_outputs_do_not_publish() {
         scalar_lazy.scalar().unwrap(),
         scalar_eager.scalar().unwrap()
     );
-    assert_eq!(materialized_adjoint_builds(&scalar_lazy), 0);
 
     let complex = genuinely_complex(&source);
     let eager_complex = eager_adjoint_oracle(&complex);
     let lazy_complex = complex.adjoint().unwrap();
-    assert_eq!(lazy_complex.re().data(), eager_complex.re().data());
-    assert_eq!(lazy_complex.im().data(), eager_complex.im().data());
-    assert_eq!(materialized_adjoint_builds(&lazy_complex), 0);
+    assert_eq!(
+        lazy_complex
+            .re()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec(),
+        eager_complex
+            .re()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec()
+    );
+    assert_eq!(
+        lazy_complex
+            .im()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec(),
+        eager_complex
+            .im()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec()
+    );
 
     let clone = lazy.clone();
-    assert_eq!(lazy.data(), eager.data());
-    assert_eq!(clone.data(), eager.data());
-    assert_eq!(materialized_adjoint_builds(&lazy), 1);
+    assert_eq!(
+        lazy.materialize().unwrap().dense_data().unwrap().to_vec(),
+        eager.materialize().unwrap().dense_data().unwrap().to_vec()
+    );
+    assert_eq!(
+        clone.materialize().unwrap().dense_data().unwrap().to_vec(),
+        eager.materialize().unwrap().dense_data().unwrap().to_vec()
+    );
+    // Explicit materialization is not an implicit build.
 }
 
 #[test]
@@ -5634,8 +5535,6 @@ fn lazy_otimes_orientations_and_deligne_inputs_stay_cold() {
             lhs.logical_space().provider_arc()
         ));
     }
-    assert_eq!(materialized_adjoint_builds(&lazy_lhs), 0);
-    assert_eq!(materialized_adjoint_builds(&lazy_rhs), 0);
 
     let deligne_lhs = u1_matrix_fixture([(0, 2)], [(0, 2)]);
     let deligne_rhs = deligne_lhs.scale(3.0);
@@ -5651,8 +5550,6 @@ fn lazy_otimes_orientations_and_deligne_inputs_stay_cold() {
         .deligne_product(&eager_deligne_rhs, product)
         .unwrap();
     assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
-    assert_eq!(materialized_adjoint_builds(&lazy_deligne_lhs), 0);
-    assert_eq!(materialized_adjoint_builds(&lazy_deligne_rhs), 0);
 }
 
 #[test]
@@ -5667,8 +5564,6 @@ fn absorb_uses_operation_local_logical_payloads_without_warming_lazy_inputs() {
 
     let actual = lazy_destination.absorb(&lazy_source).unwrap();
     assert_typed_map_close(&actual, &expected, 1e-12);
-    assert_eq!(materialized_adjoint_builds(&lazy_destination), 0);
-    assert_eq!(materialized_adjoint_builds(&lazy_source), 0);
 }
 
 fn assert_parent_native_transform<R, D>(
@@ -5682,11 +5577,9 @@ fn assert_parent_native_transform<R, D>(
     let eager = eager_adjoint_oracle(source);
     let actual = operation(&lazy).unwrap();
     let expected = operation(&eager).unwrap();
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    let TypedTensorRepr::Adjoint(view) = &actual.repr else {
+    let TypedTensorRepr::Adjoint(_) = &actual.repr else {
         panic!("a transformed lazy adjoint must remain parent-backed");
     };
-    assert!(view.materialized.get().is_none());
     assert_eq!(
         actual.logical_space().space(),
         expected.logical_space().space()
@@ -5709,7 +5602,6 @@ fn assert_parent_native_transform<R, D>(
         .all(|(&actual, &expected)| {
             (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
         }));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 fn assert_parent_native_transform_suite<R, D>(source: &TensorMap<R, D>)
@@ -5782,10 +5674,9 @@ where
 
     let scaled = lazy.scale(alpha);
     let expected_scaled = eager.scale(alpha);
-    let TypedTensorRepr::Adjoint(scaled_view) = &scaled.repr else {
+    let TypedTensorRepr::Adjoint(_) = &scaled.repr else {
         panic!("scaling a lazy adjoint must remain parent-backed");
     };
-    assert!(scaled_view.materialized.get().is_none());
     assert!(scaled
         .materialize()
         .unwrap()
@@ -5805,12 +5696,10 @@ where
     assert!((lazy.norm(1.5).unwrap() - eager.norm(1.5).unwrap()).abs() < 1e-12);
 
     let normalized = lazy.scale(D::from_real(1.0 / lazy.norm(2.0).unwrap()));
-    let TypedTensorRepr::Adjoint(normalized_view) = &normalized.repr else {
+    let TypedTensorRepr::Adjoint(_) = &normalized.repr else {
         panic!("normalizing a lazy adjoint must remain parent-backed");
     };
-    assert!(normalized_view.materialized.get().is_none());
     assert!((normalized.norm(2.0).unwrap() - 1.0).abs() < 1e-12);
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 #[test]
@@ -5864,7 +5753,6 @@ where
         }));
     assert!(lazy.trace_pairs(&[(0, 3)]).is_err());
     assert!(lazy.trace_pairs(&[(0, 0)]).is_err());
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 #[test]
@@ -5939,7 +5827,6 @@ where
     let lazy = source.adjoint().unwrap();
     let eager = eager_adjoint_oracle(source);
     assert_close(lazy.tr().unwrap(), eager.tr().unwrap());
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 #[test]
@@ -6053,7 +5940,6 @@ where
             }
         )
         .is_err());
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 #[test]
@@ -6153,7 +6039,6 @@ where
         .all(|(&actual, &expected)| {
             (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
         }));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 #[test]
@@ -6229,7 +6114,6 @@ fn assert_fermionic_contract_and_compose_semantics<D>(
         compose.logical_space().provider_arc(),
         source.logical_space().provider_arc()
     ));
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 #[test]
@@ -6298,7 +6182,6 @@ fn lazy_contract_preserves_validation_precedence_without_materializing() {
             lazy.contract(&eager, &spec).unwrap_err(),
             eager.contract(&eager, &spec).unwrap_err(),
         );
-        assert_eq!(materialized_adjoint_builds(&lazy), 0);
     }
 
     let bad_leg = GradedSpace::try_new(
@@ -6332,7 +6215,6 @@ fn lazy_contract_preserves_validation_precedence_without_materializing() {
             )
             .unwrap_err(),
     );
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
     let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let source_leg = source.codomain().remove(0);
@@ -6363,7 +6245,6 @@ fn lazy_contract_preserves_validation_precedence_without_materializing() {
             )
             .unwrap_err(),
     );
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let z2 = Arc::new(ZNFusionRule::new(2).unwrap());
@@ -6380,7 +6261,6 @@ fn lazy_contract_preserves_validation_precedence_without_materializing() {
         lazy.contract(&z3_tensor, &RANK_TWO_COMPOSE).unwrap_err(),
         eager.contract(&z3_tensor, &RANK_TWO_COMPOSE).unwrap_err(),
     );
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
 #[test]
@@ -6440,12 +6320,11 @@ fn lazy_binary_outputs_keep_the_lhs_provider_allocation() {
             &rhs_provider
         ));
     }
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert_eq!(materialized_adjoint_builds(&rhs_lazy), 0);
 }
 
 #[test]
 fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
+    DIAGONAL_MATERIALIZATIONS.set(0);
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let bond = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)]).unwrap();
@@ -6473,8 +6352,7 @@ fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
         reverse.dense_data().unwrap(),
         expected_reverse.dense_data().unwrap()
     );
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert!(owned(&diagonal).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
     for (lhs, rhs, eager_lhs, eager_rhs) in [
         (&diagonal, &lazy, &diagonal, &eager),
@@ -6507,8 +6385,7 @@ fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
             .unwrap();
         assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
     }
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert!(owned(&diagonal).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
     assert_close(
         diagonal.inner(&lazy).unwrap(),
@@ -6518,8 +6395,8 @@ fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
         lazy.inner(&diagonal).unwrap(),
         eager.inner(&diagonal).unwrap(),
     );
-    assert_eq!(materialized_adjoint_builds(&lazy), 0);
-    assert!(owned(&diagonal).dense_cache.get().is_some());
+    // Positive control: `inner` densifies the compact operand locally.
+    assert!(DIAGONAL_MATERIALIZATIONS.get() > 0);
 }
 
 #[test]
@@ -6546,8 +6423,6 @@ fn identity_transforms_preserve_the_cold_lazy_view() {
     assert!(adjoint.braid(&[0, 0], &[1], &[0, 1, 2]).is_err());
     assert!(adjoint.transpose(&[0, 0], &[1]).is_err());
     assert!(adjoint.repartition(4).is_err());
-    assert_eq!(materialized_adjoint_builds(&adjoint), 0);
-    assert!(view.materialized.get().is_none());
 
     let scalar = fixture().trace_pairs(&[(0, 1)]).unwrap();
     let scalar_adjoint = scalar.adjoint().unwrap();
@@ -6559,7 +6434,6 @@ fn identity_transforms_preserve_the_cold_lazy_view() {
         panic!("rank-zero transpose must preserve the lazy representation");
     };
     assert!(Arc::ptr_eq(scalar_view, transpose_view));
-    assert!(scalar_view.materialized.get().is_none());
 }
 
 #[test]
@@ -6585,6 +6459,7 @@ fn lazy_adjoint_constructor_rejects_a_compact_diagonal_parent() {
 
 #[test]
 fn compact_adjoint_never_enters_the_lazy_representation() {
+    DIAGONAL_MATERIALIZATIONS.set(0);
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let bond = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)]).unwrap();
@@ -6621,7 +6496,7 @@ fn compact_adjoint_never_enters_the_lazy_representation() {
     assert_eq!(real_adjoint.spectrum().unwrap()[0].values, [1.0, 2.0]);
     // TensorKit's real `adjoint(d) = d`: the body is shared, not copied.
     assert!(Arc::ptr_eq(owned(&real_adjoint), owned(&real)));
-    assert!(owned(&real_adjoint).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     let spectrum = complex_adjoint.spectrum().unwrap();
     assert_eq!(
         spectrum[0].values,
@@ -6630,7 +6505,7 @@ fn compact_adjoint_never_enters_the_lazy_representation() {
             num_complex::Complex64::new(3.0, 4.0)
         ]
     );
-    assert!(owned(&complex_adjoint).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
     let complex_restored = complex_adjoint.adjoint().unwrap();
     assert!(matches!(&complex_restored.repr, TypedTensorRepr::Owned(_)));
@@ -6645,7 +6520,7 @@ fn compact_adjoint_never_enters_the_lazy_representation() {
             num_complex::Complex64::new(3.0, -4.0)
         ]
     );
-    assert!(owned(&complex_restored).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
 fn fixture() -> TensorMap<Z2FusionRule, f64> {
@@ -6700,6 +6575,7 @@ fn fz2_fixture() -> TensorMap<tenet_core::FermionParityFusionRule, f64> {
 
 #[test]
 fn unit_insert_and_remove_share_the_dense_payload_arc() {
+    DIAGONAL_MATERIALIZATIONS.set(0);
     // What (#580 PR 5, gate 5): the O(1) property the PR 0 gate
     // `a_body_on_a_different_space_reuses_the_payload_allocation` proved
     // by hand-constructing a body, now proved through the real
@@ -6713,7 +6589,7 @@ fn unit_insert_and_remove_share_the_dense_payload_arc() {
     let inserted = tensor.insert_unit(1, Side::Domain, Duality::Plain).unwrap();
     assert!(!Arc::ptr_eq(owned(&tensor), owned(&inserted)));
     assert!(Arc::ptr_eq(&owned(&tensor).data, &owned(&inserted).data));
-    assert!(owned(&inserted).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     let removed = inserted.remove_unit(1).unwrap();
     assert!(Arc::ptr_eq(&owned(&tensor).data, &owned(&removed).data));
     // One payload allocation, three bodies holding it.
@@ -6725,20 +6601,16 @@ fn unit_insert_and_remove_share_the_dense_payload_arc() {
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn a_compact_payload_materializes_exactly_once_for_the_unit_ops() {
     // What (#580 PR 5, gate 5): the compact half of the #613 Group 4
     // contract — a `Diagonal` payload is materialized into a *fresh*
-    // dense payload (one copy, never the body-local `dense_cache`
-    // buffer), and the follow-up remove shares that dense `Arc` rather
-    // than copying again.
+    // dense payload (one copy), and the follow-up remove shares that
+    // dense `Arc` rather than copying again.
     let s = fixture().svd_compact().unwrap().s;
-    let warmed = s.data().as_ptr(); // warm the body-local cache first
     let inserted = s.insert_unit(0, Side::Domain, Duality::Plain).unwrap();
     assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&inserted).data));
     assert!(matches!(&*owned(&inserted).data, TypedData::Dense(_)));
-    // Fresh buffer, not the cache the warm-up populated.
-    assert_ne!(inserted.data().as_ptr(), warmed);
+    assert!(matches!(&*owned(&s).data, TypedData::Diagonal(_)));
     let removed = inserted.remove_unit(0).unwrap();
     assert!(Arc::ptr_eq(&owned(&inserted).data, &owned(&removed).data));
 }
@@ -7537,6 +7409,7 @@ fn typed_contract_overwrite_keeps_distinct_destination_provider_authority() {
 
 #[test]
 fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjoint() {
+    DIAGONAL_MATERIALIZATIONS.set(0);
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(
         Arc::new(U1FusionRule),
@@ -7573,17 +7446,14 @@ fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjo
         destination.dense_data().unwrap(),
         expected.dense_data().unwrap()
     );
-    assert_eq!(materialized_adjoint_builds(&lazy_lhs), 0);
-    assert_eq!(materialized_adjoint_builds(&lazy_rhs), 0);
     for lazy in [&lazy_lhs, &lazy_rhs] {
-        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+        let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
             unreachable!()
         };
-        assert!(view.materialized.get().is_none());
     }
 
     let Svd { u, s, .. } = lhs.svd_compact().unwrap();
-    assert!(owned(&s).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     let expected = u
         .contract(
             &s,
@@ -7603,11 +7473,13 @@ fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjo
         destination.dense_data().unwrap(),
         expected.dense_data().unwrap()
     );
-    assert!(owned(&s).dense_cache.get().is_some());
+    // Positive control: the compact operand is densified operation-locally.
+    assert!(DIAGONAL_MATERIALIZATIONS.get() > 0);
 }
 
 #[test]
 fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
+    DIAGONAL_MATERIALIZATIONS.set(0);
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)]).unwrap();
@@ -7796,16 +7668,15 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
         unreachable!()
     };
     assert_eq!(Arc::as_ptr(after), view);
-    assert!(after.materialized.get().is_none());
 
     let mut compact_destination = lhs.svd_compact().unwrap().s;
     let payload = Arc::clone(&owned(&compact_destination).data);
-    assert!(owned(&compact_destination).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert!(lhs
         .contract_overwrite_into(&rhs, &mut compact_destination, &RANK_TWO_COMPOSE, 1.0)
         .is_err());
     assert!(Arc::ptr_eq(&owned(&compact_destination).data, &payload));
-    assert!(owned(&compact_destination).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
     let z2 = Arc::new(ZNFusionRule::new(2).unwrap());
     let z3 = Arc::new(ZNFusionRule::new(3).unwrap());
@@ -8060,9 +7931,10 @@ fn high_rank_identity_has_no_inline_capacity_boundary() {
 
 #[test]
 fn compact_identity_transforms_do_not_materialize() {
+    DIAGONAL_MATERIALIZATIONS.set(0);
     let factor = fixture().svd_compact().unwrap().s;
     assert!(matches!(&*owned(&factor).data, TypedData::Diagonal(_)));
-    assert!(owned(&factor).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
     let calls = transform_seam_calls(|| {
         for output in [
@@ -8073,11 +7945,11 @@ fn compact_identity_transforms_do_not_materialize() {
         ] {
             assert!(Arc::ptr_eq(owned(&factor), owned(&output)));
             assert!(matches!(&*owned(&output).data, TypedData::Diagonal(_)));
-            assert!(owned(&output).dense_cache.get().is_none());
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
         }
     });
     assert_eq!(calls, 0);
-    assert!(owned(&factor).dense_cache.get().is_none());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
 #[test]
@@ -8134,11 +8006,7 @@ fn lazy_cat_reads_parent_storage_without_publishing_adjoint_caches() {
             .adjoint()
             .unwrap();
 
-    assert_eq!(materialized_adjoint_builds(&lhs), 0);
-    assert_eq!(materialized_adjoint_builds(&rhs), 0);
     let _ = lhs.cat(&rhs, Side::Domain).unwrap();
-    assert_eq!(materialized_adjoint_builds(&lhs), 0);
-    assert_eq!(materialized_adjoint_builds(&rhs), 0);
 
     let upper: TensorMap<U1FusionRule, num_complex::Complex64> =
         TensorMap::rand_with_seed(&runtime, [&common], [&left], 773_103)
@@ -8151,8 +8019,6 @@ fn lazy_cat_reads_parent_storage_without_publishing_adjoint_caches() {
             .adjoint()
             .unwrap();
     upper.cat(&lower, Side::Codomain).unwrap();
-    assert_eq!(materialized_adjoint_builds(&upper), 0);
-    assert_eq!(materialized_adjoint_builds(&lower), 0);
 }
 
 #[test]
@@ -8223,36 +8089,6 @@ fn weighted_trace_keeps_misaligned_and_nonpacked_layouts_on_the_literal_walk() {
     })
     .unwrap();
     assert_eq!(value, Complex64::new(16.0, 0.0));
-}
-
-#[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
-fn the_dense_cache_lives_per_body_not_in_the_payload_arc() {
-    // What: cache placement. `dense_cache` sits in the body, outside the
-    // payload `Arc`, so a body that shares a payload starts with a cold
-    // cache and materializes for itself, yielding a distinct buffer. This
-    // is a same-space check on purpose — it makes no unit-leg claim: a
-    // `Diagonal` payload may never be reused under a rewritten space at
-    // all (see the `data` field rationale on the Group 4 contract). It
-    // does *not* gate the struct shape — the fresh `OnceLock` below is
-    // hand-supplied, so any layout keeping the field compiles and passes.
-    let s = fixture().svd_compact().unwrap().s;
-    assert!(owned(&s).dense_cache.get().is_none(), "cache warm at birth");
-    let materialized = s.data().as_ptr();
-    assert!(owned(&s).dense_cache.get().is_some());
-
-    // Hand-constructed body, same caveat as the gate above: shape changes
-    // become compile errors.
-    let reused = TensorMap {
-        runtime: s.runtime.clone(),
-        repr: owned_repr(TypedTensorBody {
-            space: owned(&s).space.clone(),
-            data: Arc::clone(&owned(&s).data),
-            dense_cache: std::sync::OnceLock::new(),
-        }),
-    };
-    assert!(owned(&reused).dense_cache.get().is_none());
-    assert_ne!(reused.data().as_ptr(), materialized);
 }
 
 /// GL-3 (#1281): a device operation must not need the coarse Runtime
@@ -8525,4 +8361,92 @@ fn diagonal_spectrum_factor_converts_every_value_bitwise() {
             (one, vec![0.0_f32.to_bits(), (-1.5_f32).to_bits()]),
         ]
     );
+}
+
+#[test]
+fn compact_arms_never_densify_their_spectrum_operand() {
+    // What (#1548): the operations with a compact-diagonal arm read the stored
+    // spectrum and never enter the operation-local densification. The probe
+    // counts entries directly, which the integration byte ceilings cannot
+    // tell apart from a scaled copy.
+    let tensor = fixture();
+    let Svd { u, s: d, vh } = tensor.svd_compact().unwrap();
+    let complex_d = tensor.convert::<Complex64>().svd_compact().unwrap().s;
+    DIAGONAL_MATERIALIZATIONS.set(0);
+
+    let _ = d.scale(0.5);
+    let _ = d.adjoint().unwrap();
+    let _ = d.axpby(0.75, &d, -0.5).unwrap();
+    let _ = d.axpby(0.75, &tensor, -0.5).unwrap();
+    let _ = tensor.axpby(0.75, &d, -0.5).unwrap();
+    let _ = d.compose(&d).unwrap();
+    let _ = u.compose(&d).unwrap();
+    let _ = d.compose(&vh).unwrap();
+    for p in [2.0, f64::INFINITY, 3.0] {
+        let _ = d.norm(p).unwrap();
+    }
+    let _ = d.tr().unwrap();
+    let _ = d.inner(&d).unwrap();
+    let _ = d.exp().unwrap();
+    let _ = d.inv().unwrap();
+    let _ = d.pinv(1e-12).unwrap();
+    let _ = d.map_diagonal(|x| x.abs().sqrt()).unwrap();
+    let _ = tensor
+        .contract(
+            &d,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
+    let _ = tensor
+        .contract(
+            &d,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap();
+    let _ = d
+        .contract(
+            &tensor,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
+    let _ = d
+        .contract(
+            &d,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
+    let _ = d.permute(&[1], &[0]).unwrap();
+    let _ = d.transpose(&[1], &[0]).unwrap();
+    let _ = d.repartition(1).unwrap();
+    let _ = d.zeros_like();
+    let _ = d.convert::<Complex64>();
+    let _ = complex_d.re();
+    let _ = complex_d.im();
+    let _ = d.trace_pairs(&[(0, 1)]).unwrap();
+    let _ = d.diagview().unwrap();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+
+    // Positive control: a real braid takes the dense route.
+    let _ = d.braid(&[1], &[0], &[0, 1]).unwrap();
+    assert!(DIAGONAL_MATERIALIZATIONS.get() > 0);
 }

@@ -139,12 +139,16 @@ where
     let mapped_output_axes;
     let mapped_trace_lhs;
     let mapped_trace_rhs;
+    let payload;
     let (source_space, source_data, axes) = match &tensor.repr {
-        TypedTensorRepr::Owned(body) => (
-            &body.space,
-            body.materialized_dense_data(),
-            tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs),
-        ),
+        TypedTensorRepr::Owned(body) => {
+            payload = body.materialized_dense_data();
+            (
+                &body.space,
+                &*payload,
+                tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs),
+            )
+        }
         TypedTensorRepr::Adjoint(view) => {
             let parent = view.parent.space.space();
             mapped_output_axes =
@@ -155,7 +159,7 @@ where
                 logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_rhs);
             (
                 &view.parent.space,
-                view.parent.materialized_dense_data(),
+                view.parent_data(),
                 tenet_tensors::TensorTraceAxisSpec::new_with_conjugation(
                     &mapped_output_axes,
                     &mapped_trace_lhs,
@@ -209,7 +213,7 @@ where
     /// in `O(sum_c k_c)`; other compact cases materialize. Checked Generic
     /// requires [`tenet_core::CheckedGenericPivotal`] and admits the output
     /// with the source's exact provider `Arc`. Lazy adjoints are read through
-    /// their parent without filling the receiver cache.
+    /// their parent without materializing.
     ///
     /// # Errors
     ///
@@ -314,7 +318,7 @@ where
     let mut lease = lhs.runtime.lease_context()?;
     let data = tree_transform_owned_multiplicity_free_into(
         lease.context().multiplicity_free_lane::<D>()?,
-        BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
+        BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())?,
         TreeTransformOperation::permute(
             codomain.iter().copied().map(position),
             domain.iter().copied().map(position),
@@ -417,8 +421,14 @@ where
         tensorcontract_owned_multiplicity_free_into(
             lease.context().multiplicity_free_lane::<D>()?,
             &destination,
-            BoundDynamicTensorRef::try_new(&lhs_body.space, lhs_body.materialized_dense_data())?,
-            BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())?,
+            BoundDynamicTensorRef::try_new(
+                &lhs_body.space,
+                lhs_body.materialized_dense_data().as_ref(),
+            )?,
+            BoundDynamicTensorRef::try_new(
+                &rhs_body.space,
+                rhs_body.materialized_dense_data().as_ref(),
+            )?,
             lhs_axes,
             rhs_axes,
             output_order,
@@ -430,9 +440,9 @@ where
             lease.context().multiplicity_free_lane::<D>()?,
             &destination,
             lhs_operand,
-            lhs_data,
+            &lhs_data,
             rhs_operand,
-            rhs_data,
+            &rhs_data,
             lhs_axes,
             rhs_axes,
             output_order,
@@ -480,11 +490,11 @@ where
                 D::lane(lease.context())?,
                 BoundDynamicTensorRef::try_new(
                     &lhs_body.space,
-                    lhs_body.materialized_dense_data(),
+                    lhs_body.materialized_dense_data().as_ref(),
                 )?,
                 BoundDynamicTensorRef::try_new(
                     &rhs_body.space,
-                    rhs_body.materialized_dense_data(),
+                    rhs_body.materialized_dense_data().as_ref(),
                 )?,
                 &lhs_axes,
                 &rhs_axes,
@@ -496,10 +506,10 @@ where
                 D::lane(lease.context())?,
                 lhs.logical_space(),
                 lhs_operand,
-                lhs_data,
+                &lhs_data,
                 rhs.logical_space(),
                 rhs_operand,
-                rhs_data,
+                &rhs_data,
                 &lhs_axes,
                 &rhs_axes,
                 OutputAxisOrder::identity(),
@@ -705,7 +715,7 @@ where
     /// checked-Generic, use six GEMMs, one solve and the necessary Padé
     /// squarings per sector with `O(max_c n_c²)` workspace. Coupled sectors are
     /// never mixed. A dense lazy adjoint builds one operation-local logical
-    /// payload per call without publishing its receiver cache. Compact
+    /// payload per call, released with the call. Compact
     /// multiplicity-free input remains `O(rank)` elementwise.
     ///
     /// TensorKit's diagonal implementation is the reference for the compact

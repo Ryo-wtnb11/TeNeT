@@ -87,7 +87,7 @@
 //! inspection ([`TensorMap::codomain`], [`TensorMap::domain`],
 //! [`TensorMap::subblock_fusion_trees`], [`TensorMap::subblock`],
 //! [`TensorMap::subblock_count`], [`TensorMap::block`], [`TensorMap::blocks`],
-//! [`TensorMap::data`], [`TensorMap::runtime`]),
+//! [`TensorMap::dense_data`], [`TensorMap::runtime`]),
 //! the index-manipulation and contraction operations
 //! ([`TensorMap::permute`], [`TensorMap::braid`], [`TensorMap::transpose`],
 //! [`TensorMap::repartition`],
@@ -132,8 +132,8 @@
 //! A compact factor holds `Σ_c k_c` values rather than the `Σ_c k_c²`
 //! block-diagonal buffer it would fill, which is what TensorKit's
 //! `DiagonalTensorMap` is. It is a storage property and not a type: no signature
-//! mentions it, [`TensorMap::data`] still reports the dense buffer (materialized
-//! once, on demand, shared by every clone), and the operations that can exploit
+//! mentions it, [`TensorMap::dense_data`] refuses it (call
+//! [`TensorMap::materialize`] for the dense buffer), and the operations that can exploit
 //! it — [`TensorMap::compose`],
 //! [`TensorMap::scale`], [`TensorMap::axpby`], [`TensorMap::adjoint`],
 //! [`TensorMap::trace_pairs`] on its full-pair arm, and the reductions — do so
@@ -202,7 +202,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
 use smallvec::SmallVec;
@@ -453,7 +453,9 @@ use tensor_repr::{
 };
 #[cfg(test)]
 #[allow(unused_imports)]
-use tensor_repr::{observe_adjoint_materialization, UNCACHED_ADJOINT_MATERIALIZATIONS};
+use tensor_repr::{
+    observe_adjoint_materialization, DIAGONAL_MATERIALIZATIONS, UNCACHED_ADJOINT_MATERIALIZATIONS,
+};
 pub use tensor_repr::{
     NetworkPayloadStorage, NetworkReuseClass, PayloadConversion, PhysicalDense,
     RuntimeDetachedTensorMap, TensorMap, TensorRef,

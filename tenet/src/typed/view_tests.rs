@@ -15,7 +15,9 @@ use tenet_core::{
     U1FusionRule, U1Irrep, Z2Irrep,
 };
 
-use super::{ContractSpec, GradedSpace, Side, TensorMap, ADJOINT_MATERIALIZATIONS};
+use super::{
+    ContractSpec, GradedSpace, Side, TensorMap, ADJOINT_MATERIALIZATIONS, DIAGONAL_MATERIALIZATIONS,
+};
 use crate::error::{Alternative, Error};
 use crate::runtime::Runtime;
 
@@ -374,8 +376,8 @@ fn a_plain_view_is_the_tensor_itself() {
     let a: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v, &v], 1).unwrap();
     let b: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &v], [&v], 2).unwrap();
     let lazy = b.adjoint().unwrap();
-    // `&lazy` is not marked: the owned lazy adjoint keeps its implicit
-    // materialization until #1548.
+    // `&lazy` is not marked: `otimes` materializes an owned lazy adjoint
+    // operation-locally, as its cost section documents.
     let (result, entries) = probe(|| a.otimes(&lazy));
     assert!(entries >= 1);
     result.unwrap();
@@ -689,34 +691,113 @@ fn cat_refuses_an_adjoint_view_when_its_plan_declines() {
     assert_same_tensor!(a.cat(&lazy, Side::Domain).unwrap(), fast, "cat fallback");
 }
 
-/// #1547: `dense_data` borrows dense Host storage (the same slice `data()`
-/// returns) and refuses a lazy adjoint or a compact diagonal with
-/// `Unsupported { Materialize }`, entering neither adjoint materialization
-/// nor the diagonal densification, even after `data()` has cached one.
+/// #1548: the declined-plan fallback of `cat` materializes only a lazy
+/// adjoint; an owned operand reuses the buffer read for the plan, so a
+/// compact diagonal is densified once, not twice. The result is bitwise the
+/// fast-plan result and an all-materialized oracle.
 #[test]
-#[allow(deprecated)]
+fn cat_fallback_densifies_a_compact_operand_once_and_matches_the_plan() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            super::CAT_PLAN_DECLINES_ORIENTED.set(false);
+        }
+    }
+    let runtime = runtime();
+    let bond = u1(&[(-1, 2), (0, 1), (1, 3)]);
+    let spectra = bond
+        .sectors()
+        .unwrap()
+        .into_iter()
+        .enumerate()
+        .map(|(i, sector)| super::SectorSpectrum {
+            values: (0..bond.degeneracy(&sector).unwrap())
+                .map(|k| 1.25 + i as f64 + 0.5 * k as f64)
+                .collect(),
+            sector,
+        })
+        .collect::<Vec<_>>();
+    let d: TensorMap<_, f64> = TensorMap::diagonal(&runtime, &bond, spectra).unwrap();
+    let x: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&bond], [&bond], 7).unwrap();
+    let y: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&bond], [&bond], 8).unwrap();
+    let lazy = y.adjoint().unwrap();
+    let eager = lazy.materialize().unwrap();
+    let bits = |t: &TensorMap<_, f64>| {
+        t.dense_data()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>()
+    };
+    let _reset = Reset;
+    for side in [Side::Domain, Side::Codomain] {
+        for (name, lhs, rhs, compact) in [
+            ("d|lazy", &d, &lazy, 1usize),
+            ("lazy|d", &lazy, &d, 1),
+            ("x|lazy", &x, &lazy, 0),
+            ("lazy|x", &lazy, &x, 0),
+        ] {
+            let oracle_lhs = if std::ptr::eq(lhs, &lazy) {
+                &eager
+            } else {
+                lhs
+            };
+            let oracle_rhs = if std::ptr::eq(rhs, &lazy) {
+                &eager
+            } else {
+                rhs
+            };
+            super::CAT_PLAN_DECLINES_ORIENTED.set(false);
+            let oracle = oracle_lhs
+                .materialize()
+                .unwrap()
+                .cat(&oracle_rhs.materialize().unwrap(), side)
+                .unwrap();
+            let fast = lhs.cat(rhs, side).unwrap();
+            super::CAT_PLAN_DECLINES_ORIENTED.set(true);
+            DIAGONAL_MATERIALIZATIONS.set(0);
+            let slow = lhs.cat(rhs, side).unwrap();
+            let entries = DIAGONAL_MATERIALIZATIONS.get();
+            super::CAT_PLAN_DECLINES_ORIENTED.set(false);
+            assert_eq!(
+                bits(&slow),
+                bits(&fast),
+                "{name} {side:?}: fallback vs plan"
+            );
+            assert_eq!(
+                bits(&slow),
+                bits(&oracle),
+                "{name} {side:?}: fallback vs oracle"
+            );
+            assert_eq!(slow.codomain(), oracle.codomain(), "{name} {side:?}");
+            assert_eq!(slow.domain(), oracle.domain(), "{name} {side:?}");
+            assert_eq!(slow.codomain(), fast.codomain(), "{name} {side:?}");
+            assert_eq!(slow.domain(), fast.domain(), "{name} {side:?}");
+            assert_eq!(entries, compact, "{name} {side:?}: densifications");
+        }
+    }
+}
+
+/// #1547/#1548: `dense_data` borrows dense Host storage and refuses a lazy
+/// adjoint or a compact diagonal with `Unsupported { Materialize }`,
+/// entering neither adjoint materialization nor diagonal densification.
+#[test]
 fn dense_data_borrows_dense_storage_and_never_materializes() {
     let runtime = runtime();
     let v = su2(&[(0, 2), (1, 1)]);
     let t: TensorMap<_, Complex64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 3).unwrap();
     let (dense, entries) = probe(|| t.dense_data().unwrap());
     assert_eq!(entries, 0);
-    assert_eq!(dense.as_ptr(), t.data().as_ptr());
-    assert_eq!(dense.len(), t.data().len());
+    assert_eq!(dense.as_ptr(), t.dense_data().unwrap().as_ptr());
 
     let adjoint = t.adjoint().unwrap();
-    for data_fills in [1, 0] {
-        let (refused, entries) = probe(|| adjoint.dense_data().map(<[_]>::len));
-        assert_eq!(entries, 0, "dense_data entered adjoint materialization");
-        assert!(is_unsupported(&refused.unwrap_err(), "dense_data"));
-        // Positive control: the deprecated `data()` still materializes, once.
-        let (_, entries) = probe(|| adjoint.data().len());
-        assert_eq!(entries, data_fills);
-    }
-    assert_eq!(
-        adjoint.materialize().unwrap().dense_data().unwrap(),
-        adjoint.data()
-    );
+    let (refused, entries) = probe(|| adjoint.dense_data().map(<[_]>::len));
+    assert_eq!(entries, 0, "dense_data entered adjoint materialization");
+    assert!(is_unsupported(&refused.unwrap_err(), "dense_data"));
+    // Positive control: the explicit path enters the probe.
+    let (materialized, entries) = probe(|| adjoint.materialize().unwrap());
+    assert_eq!(entries, 1);
+    assert_eq!(materialized.dense_data().unwrap().len(), dense.len());
 
     let bond = u1(&[(0, 2), (1, 1)]);
     let spectra = bond
@@ -729,10 +810,21 @@ fn dense_data_borrows_dense_storage_and_never_materializes() {
         })
         .collect::<Vec<_>>();
     let d: TensorMap<_, f64> = TensorMap::diagonal(&runtime, &bond, spectra).unwrap();
-    let densified = |d: &TensorMap<_, f64>| d.owned_body().unwrap().dense_cache.get().is_some();
+    DIAGONAL_MATERIALIZATIONS.set(0);
     assert!(is_unsupported(&d.dense_data().unwrap_err(), "dense_data"));
-    assert!(!densified(&d), "dense_data densified a compact diagonal");
-    assert_eq!(d.materialize().unwrap().dense_data().unwrap(), d.data());
-    assert!(densified(&d), "positive control: data() densifies");
-    assert!(is_unsupported(&d.dense_data().unwrap_err(), "dense_data"));
+    assert!(is_unsupported(
+        &d.subblocks().map(|_| ()).unwrap_err(),
+        "subblocks"
+    ));
+    assert_eq!(
+        DIAGONAL_MATERIALIZATIONS.get(),
+        0,
+        "dense_data densified a compact diagonal"
+    );
+    let dense_d = d.materialize().unwrap();
+    assert_eq!(dense_d.dense_data().unwrap().len(), 2 * 2 + 1);
+    assert!(dense_d.subblocks().is_ok());
+    let (refused, entries) = probe(|| adjoint.subblocks().map(|_| ()));
+    assert_eq!(entries, 0, "subblocks entered adjoint materialization");
+    assert!(is_unsupported(&refused.unwrap_err(), "subblocks"));
 }

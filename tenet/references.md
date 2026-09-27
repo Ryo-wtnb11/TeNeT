@@ -83,7 +83,7 @@ upstream location (the note says why).
 | `typed::TensorMap::compose` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:388-420` | fermionic supertrace twist applied only in `blas_contract!`, never in `mul!` |
 | `typed::TensorMap::compose` | TensorKit | 0.17.0 | `tensors/linalg.jl:38-42` | categorical composition `compose` behind `A * B` |
 | `typed::TensorMap::contract` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:119-146` | `TO.tensorcontract!` and its explicit `pAB` output permutation |
-| `typed::TensorMap::data` | TensorKit | 0.17.0 | `tensors/tensor.jl:10-35` | `TensorMap`'s flat `data` vector — the coupled-sector matrix layout tenet's storage claims equivalence with |
+| `typed::TensorMap::dense_data` | TensorKit | 0.17.0 | `tensors/tensor.jl:10-35` | `TensorMap`'s flat `data` vector — the coupled-sector matrix layout tenet's storage claims equivalence with |
 | `typed::TensorMap::inner` | TensorKit | 0.17.0 | `tensors/linalg.jl:255` | TensorKit exposes the same inner product as `LinearAlgebra.dot` |
 | `typed::TensorMap::eig_full` | MatrixAlgebraKit | 0.6.9 | `interface/eig.jl:12-33` | typed facade |
 | `typed::TensorMap::eig_vals` | MatrixAlgebraKit | 0.6.9 | `interface/eig.jl:140-158` | typed facade |

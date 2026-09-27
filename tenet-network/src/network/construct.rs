@@ -320,9 +320,10 @@ impl Network {
         R::Mode: HostNetworkModeDispatch<R, D>,
         D: TensorScalar,
     {
-        // Compact diagonal readback may allocate a hidden full dense cache;
-        // reject it before restriction/provider work until that representation
-        // has a separately accountable copy leaf.
+        // Slicing reads each input once per slice; a compact diagonal would be
+        // densified operation-locally on every one of those reads. Reject it
+        // before restriction/provider work until that copy is accounted for
+        // once per execution.
         if tensors
             .iter()
             .any(|tensor| tensor.network_has_compact_payload())

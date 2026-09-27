@@ -459,10 +459,11 @@ where
     pub(super) fn commit(self) -> Result<TensorMap<P, D>, Error> {
         let source = self.source;
         let materialized = source.materialized_tensor_uncached()?;
-        let data = materialized
+        let data_payload = materialized
             .owned_body()
             .expect("uncached materialization is owned")
             .materialized_dense_data();
+        let data: &[D] = &data_payload;
         let blocks = self.blocks;
         let codomain = self.codomain;
         let domain = self.domain;

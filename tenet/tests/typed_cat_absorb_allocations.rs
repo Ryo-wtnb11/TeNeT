@@ -169,11 +169,11 @@ fn typed_absorb_clones_the_destination_once() {
 }
 
 #[test]
-fn typed_cat_materializes_a_compact_operand_exactly_once() {
-    // What: a compact diagonal operand (svd_compact's `s`) is materialized
-    // dense once, into the shared body cache — the first cat pays the
-    // dense-cache allocation, the second cat on the same handle pays only the
-    // output.
+fn typed_cat_densifies_a_compact_operand_per_call_and_retains_nothing() {
+    // What: a compact diagonal operand (svd_compact's `s`) is densified into
+    // an operation-local buffer once per operand per call (#1548): no
+    // densification is retained, so a repeated cat costs the same as the
+    // first.
     const DEGENERACY: usize = 128;
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, DEGENERACY)]).unwrap();
@@ -181,32 +181,27 @@ fn typed_cat_materializes_a_compact_operand_exactly_once() {
     let tensor: TensorMap<Z2FusionRule, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| pseudo_random(&mut state))
             .unwrap();
-    // Warm every layout cache with a throwaway spectrum factor, so the
-    // measured handle below starts with warm layouts but a cold body cache.
+    // Warm every layout cache with a throwaway spectrum factor.
     let warmup: TensorMap<Z2FusionRule, f64> = tensor.svd_compact().unwrap().s;
     black_box(warmup.cat(&warmup, Side::Domain).unwrap());
 
     let s: TensorMap<Z2FusionRule, f64> = tensor.svd_compact().unwrap().s;
     let dense_payload = DEGENERACY * DEGENERACY * std::mem::size_of::<f64>();
     let output_payload = 2 * dense_payload;
+    // Both operands are compact, so each call densifies two of them.
+    let expected = (output_payload + 2 * dense_payload) as u64;
 
-    let (cold, _) = measured_allocations(output_payload, || s.cat(&s, Side::Domain).unwrap());
-    assert!(
-        cold >= (dense_payload + output_payload) as u64,
-        "first cat on a compact operand allocated only {cold} B — the dense \
-         materialization ({dense_payload} B) did not happen here, so it must \
-         have been built eagerly at construction"
-    );
-
-    let (warm, payload_allocations) = measured_allocations(output_payload, || {
-        black_box(s.cat(&s, Side::Domain).unwrap());
-    });
-    assert_eq!(payload_allocations, 1);
-    assert!(
-        warm <= output_payload as u64 + STRUCTURAL_TOLERANCE,
-        "second cat re-materialized the compact operand: {warm} B allocated \
-         for a {output_payload} B output"
-    );
+    for call in ["first", "second"] {
+        let (bytes, payload_allocations) = measured_allocations(output_payload, || {
+            black_box(s.cat(&s, Side::Domain).unwrap());
+        });
+        assert_eq!(payload_allocations, 1, "{call} cat");
+        assert!(
+            (expected..=expected + STRUCTURAL_TOLERANCE).contains(&bytes),
+            "{call} cat allocated {bytes} B; expected the output plus one \
+             densification per compact operand ({expected} B)"
+        );
+    }
 }
 
 #[test]

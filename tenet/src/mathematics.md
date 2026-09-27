@@ -507,7 +507,7 @@ column-major order; individual fusion-tree subblocks are strided views into
 the sector matrix.
 
 This is the layout behind [`crate::core::FusionTensorMapSpace`]. The
-user-layer [`crate::prelude::TensorMap::data`] method exposes the same flat
+user-layer [`crate::prelude::TensorMap::dense_data`] method borrows the same flat
 storage.
 
 ## Inner Products, Norms, And Truncation

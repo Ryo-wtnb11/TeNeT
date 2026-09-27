@@ -288,7 +288,8 @@ where
     /// Overwrites `destination` with `alpha * self.contract(other, spec)` while
     /// preserving the destination's provider, space, body, and dense Host
     /// allocation. `destination` must have the space of that result, including
-    /// its codomain/domain split.
+    /// its codomain/domain split. A compact diagonal operand is densified into
+    /// an operation-local buffer where [`Self::contract`] has no scaling arm.
     ///
     /// # Errors
     ///
@@ -404,9 +405,9 @@ where
             &execution_destination,
             destination_data,
             lhs,
-            lhs_data,
+            &lhs_data,
             rhs,
-            rhs_data,
+            &rhs_data,
             TensorContractSpec::new_with_conjugation(
                 lhs_axes,
                 rhs_axes,
@@ -437,8 +438,8 @@ where
     /// A non-identity transform of a factor in compact diagonal storage
     /// ([`Self::svd_compact`]'s `s`, [`Self::eigh_full`]'s `d`) is
     /// **materialized** here, and so by [`Self::braid`], [`Self::transpose`]
-    /// and [`Self::repartition`] as well: the result
-    /// is a dense `Σ_c k_c²` buffer. An exact identity returns the source body
+    /// and [`Self::repartition`] as well: the input is densified into an
+    /// operation-local buffer and the result is a dense `Σ_c k_c²` buffer. An exact identity returns the source body
     /// unchanged and preserves compact storage.
     /// TensorKit draws the line in the same place — its `DiagonalTensorMap`
     /// implements only the two permutations that leave a diagonal diagonal —
@@ -509,6 +510,9 @@ where
     /// crosses above at each transposition; for a symmetric (bosonic) braiding
     /// they cannot change the result, and this is then [`Self::permute`].
     ///
+    /// A compact diagonal is densified into an operation-local buffer first:
+    /// one `Σ_c n_c²` copy, released with the call.
+    ///
     /// # Errors
     ///
     /// [`Error::InvalidArgument`] when `levels` does not have one entry per
@@ -559,7 +563,9 @@ where
     /// The planar order — codomain followed by reversed domain — is preserved;
     /// legs that cross the boundary are bent, and so arrive with their dual
     /// flag flipped and their sectors dualized, without any braid being
-    /// introduced.
+    /// introduced. The identity repartition returns its input unchanged; a
+    /// compact diagonal whose boundary moves is densified into an
+    /// operation-local buffer first.
     ///
     /// # Errors
     ///
@@ -659,7 +665,8 @@ where
     ///
     /// Equal provider identities are sufficient; the two tensors may own
     /// different `Arc` allocations. The output always retains `self`'s exact
-    /// provider allocation.
+    /// provider allocation. A compact diagonal operand is densified into an
+    /// operation-local buffer first; the output is dense either way.
     ///
     /// # Errors
     ///
@@ -730,7 +737,7 @@ where
         let body = self.owned_body().expect("owned tree transform input");
         let (space, data) = tree_transform_owned_multiplicity_free(
             D::lane(lease.context())?,
-            BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
+            BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())?,
             operation,
         )?;
         Ok(Self {
@@ -789,7 +796,7 @@ where
         let body = self.owned_body().expect("owned tree transform input");
         let (space, data) = tree_transform_owned_multiplicity_free(
             lease.context().multiplicity_free_lane::<D>()?,
-            BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
+            BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())?,
             operation,
         )?;
         Ok(Self {
@@ -1146,7 +1153,9 @@ where
     /// dispatches to scaling, with no braiding or recoupling. The result is the
     /// same tensor the dense route computes, so this is a cost question only,
     /// and any operand or destination that does not fit falls through to the
-    /// dense path rather than being refused.
+    /// dense path rather than being refused. That path, and every
+    /// checked-Generic composition, densifies a compact operand into an
+    /// operation-local buffer first.
     ///
     /// # Errors
     ///
@@ -1465,9 +1474,9 @@ where
             tenet_tensors::oriented_fusion_add_owned(
                 self.logical_space().space().structure(),
                 operand,
-                source,
+                &source,
                 operand,
-                source,
+                &source,
                 D::from_real(1.0),
                 D::from_real(0.0),
             )?
@@ -1475,6 +1484,7 @@ where
             self.owned_body()
                 .expect("owned scaled-axis input")
                 .materialized_dense_data()
+                .as_ref()
                 .to_vec()
         };
         tenet_matrixalgebra::scale_axis_by_spectrum_mapped(
@@ -1537,13 +1547,16 @@ where
         Ok(decoded)
     }
 
-    /// Borrowed seam view of this tensor map.
-    fn bound_ref(&self) -> Result<BoundDynamicTensorRef<'_, R, D>, Error> {
+    /// The bound space and dense payload of this owned tensor map; a compact
+    /// diagonal is densified operation-locally.
+    #[allow(clippy::type_complexity)]
+    fn bound_payload(
+        &self,
+    ) -> Result<(&BoundDynamicFusionMapSpace<R>, std::borrow::Cow<'_, [D]>), Error> {
         let body = self.owned_body().ok_or_else(|| {
             internal_layout_error("factorization input must be owned after adjoint dispatch")
         })?;
-        BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
-            .map_err(Error::from)
+        Ok((&body.space, body.materialized_dense_data()))
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `svd_compact`: `t = u * s * vh` with
@@ -1558,8 +1571,8 @@ where
     /// `Σ_c k_c²` block-diagonal buffer — matching the `DiagonalTensorMap`
     /// TensorKit's own `svd_compact` returns. A downstream `u.compose(&s)` or
     /// `s.compose(&vh)` takes the O(d·n) bond-scaling path rather than a dense
-    /// GEMM. [`Self::data`] still reports the dense buffer, materializing it
-    /// once on demand; a caller who only needs the values should reach for
+    /// GEMM. [`Self::materialize`] builds the dense buffer on request; a
+    /// caller who only needs the values should reach for
     /// [`Self::svd_vals`], which builds no factor at all.
     ///
     /// # Errors
@@ -1611,13 +1624,14 @@ where
         let (u, vh, mut spectrum) = match &self.repr {
             TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_compact_adjoint_factors_dyn(
                 dense.dense(),
-                &BoundDynamicTensorRef::try_new(
-                    &view.parent.space,
-                    view.parent.materialized_dense_data(),
-                )?,
+                &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
             )?,
             TypedTensorRepr::Owned(_) => {
-                tenet_matrixalgebra::svd_compact_factors_dyn(dense.dense(), &self.bound_ref()?)?
+                let (bound_space, bound_payload) = self.bound_payload()?;
+                tenet_matrixalgebra::svd_compact_factors_dyn(
+                    dense.dense(),
+                    &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+                )?
             }
         };
         Ok(Svd {
@@ -1651,13 +1665,14 @@ where
         let out = match &self.repr {
             TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_full_adjoint_dyn(
                 dense.dense(),
-                &BoundDynamicTensorRef::try_new(
-                    &view.parent.space,
-                    view.parent.materialized_dense_data(),
-                )?,
+                &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
             )?,
             TypedTensorRepr::Owned(_) => {
-                tenet_matrixalgebra::svd_full_dyn(dense.dense(), &self.bound_ref()?)?
+                let (bound_space, bound_payload) = self.bound_payload()?;
+                tenet_matrixalgebra::svd_full_dyn(
+                    dense.dense(),
+                    &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+                )?
             }
         };
         let (u, s, vh, _) = out.into_parts();
@@ -1691,13 +1706,14 @@ where
         let raw = match &self.repr {
             TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_vals_dyn(
                 dense.dense(),
-                &BoundDynamicTensorRef::try_new(
-                    &view.parent.space,
-                    view.parent.materialized_dense_data(),
-                )?,
+                &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
             )?,
             TypedTensorRepr::Owned(_) => {
-                tenet_matrixalgebra::svd_vals_dyn(dense.dense(), &self.bound_ref()?)?
+                let (bound_space, bound_payload) = self.bound_payload()?;
+                tenet_matrixalgebra::svd_vals_dyn(
+                    dense.dense(),
+                    &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+                )?
             }
         };
         self.decode_spectrum(raw)
@@ -1714,12 +1730,11 @@ where
     ///
     /// `O(Σ_c n_c³)` — sectorwise cubic; the seam runs one dense QR per
     /// coupled-sector matrix. A lazy adjoint first allocates its whole logical
-    /// dense payload as an operation-local owned tensor. That allocation is
-    /// not published in the receiver's reusable materialization cache, and
-    /// the returned factors are owned. A compact-diagonal payload
-    /// (TensorKit's `DiagonalTensorMap`) is materialized into the dense coupled
-    /// buffer first, through the same [`Self::data`] route as
-    /// [`Self::left_polar`]. TensorKit 0.17 *does* keep a diagonal QR compact
+    /// dense payload as an operation-local owned tensor, released with the
+    /// operation, and the returned factors are owned. A compact-diagonal
+    /// payload (TensorKit's `DiagonalTensorMap`) is densified into an
+    /// operation-local coupled buffer first, as for [`Self::left_polar`].
+    /// TensorKit 0.17 *does* keep a diagonal QR compact
     /// (MatrixAlgebraKit's `DiagonalAlgorithm`); that fast path is not adopted
     /// here — the issue #613 Group 4 contract requires every compact fast path
     /// to be re-proven individually, the same deferral the polars record.
@@ -1731,7 +1746,11 @@ where
             return self.materialized_tensor_uncached()?.qr_compact();
         }
         let mut dense = self.runtime.lease_dense();
-        let Qr { q, r } = tenet_matrixalgebra::qr_compact_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
+        let Qr { q, r } = tenet_matrixalgebra::qr_compact_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+        )?;
         Ok(Qr {
             q: self.wrap_bound_factor(q),
             r: self.wrap_bound_factor(r),
@@ -1750,9 +1769,9 @@ where
     /// For sector shape `m_c x n_c`, dense work is `O(m_c² n_c)` when
     /// `m_c <= n_c`, and `O(m_c²(n_c + m_c))` when completion is required.
     /// Source packing and owned factor publication are additional costs. A
-    /// lazy adjoint also allocates its whole logical payload without publishing
-    /// it in the receiver cache. A compact-diagonal payload is materialized
-    /// dense first (TensorKit's `DiagonalAlgorithm` covers `qr_full!` too —
+    /// lazy adjoint also allocates its whole logical payload for the call. A
+    /// compact-diagonal payload is densified into an operation-local buffer
+    /// first (TensorKit's `DiagonalAlgorithm` covers `qr_full!` too —
     /// same non-adoption, same #613 Group 4 deferral).
     pub(super) fn qr_full_multiplicity_free(&self) -> Result<Qr<Self>, Error>
     where
@@ -1762,7 +1781,11 @@ where
             return self.materialized_tensor_uncached()?.qr_full();
         }
         let mut dense = self.runtime.lease_dense();
-        let Qr { q, r } = tenet_matrixalgebra::qr_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
+        let Qr { q, r } = tenet_matrixalgebra::qr_full_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+        )?;
         Ok(Qr {
             q: self.wrap_bound_factor(q),
             r: self.wrap_bound_factor(r),
@@ -1780,9 +1803,9 @@ where
     ///
     /// Sectorwise cubic. A lazy adjoint runs compact QR on its owned parent,
     /// reverses and adjoints the factors, then materializes both outputs into
-    /// detached owned tensors. This publishes no receiver cache and retains
-    /// neither parent factor buffer. A compact-diagonal payload is materialized
-    /// dense first (TensorKit's `DiagonalAlgorithm` covers the LQ pair as well
+    /// detached owned tensors, retaining neither parent factor buffer. A
+    /// compact-diagonal payload is densified into an operation-local buffer
+    /// first (TensorKit's `DiagonalAlgorithm` covers the LQ pair as well
     /// — same non-adoption, same #613 Group 4 deferral).
     pub(super) fn lq_compact_multiplicity_free(&self) -> Result<Lq<Self>, Error>
     where
@@ -1796,7 +1819,11 @@ where
             });
         }
         let mut dense = self.runtime.lease_dense();
-        let Lq { l, q } = tenet_matrixalgebra::lq_compact_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
+        let Lq { l, q } = tenet_matrixalgebra::lq_compact_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+        )?;
         Ok(Lq {
             l: self.wrap_bound_factor(l),
             q: self.wrap_bound_factor(q),
@@ -1830,7 +1857,11 @@ where
             });
         }
         let mut dense = self.runtime.lease_dense();
-        let Lq { l, q } = tenet_matrixalgebra::lq_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
+        let Lq { l, q } = tenet_matrixalgebra::lq_full_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+        )?;
         Ok(Lq {
             l: self.wrap_bound_factor(l),
             q: self.wrap_bound_factor(q),
@@ -1878,7 +1909,11 @@ where
                 .materialized_tensor_uncached();
         }
         let mut dense = self.runtime.lease_dense();
-        let out = tenet_matrixalgebra::left_null_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
+        let out = tenet_matrixalgebra::left_null_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+        )?;
         Ok(self.wrap_bound_factor(out))
     }
 
@@ -1914,7 +1949,11 @@ where
                 .materialized_tensor_uncached();
         }
         let mut dense = self.runtime.lease_dense();
-        let out = tenet_matrixalgebra::right_null_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
+        let out = tenet_matrixalgebra::right_null_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+        )?;
         Ok(self.wrap_bound_factor(out))
     }
 
@@ -1928,7 +1967,7 @@ where
     /// not. A lazy typed adjoint executes
     /// the opposite polar on its exact owned parent, keeps the already-owned
     /// positive factor, and returns an owned adjoint of the isometry without
-    /// publishing the receiver's materialization cache.
+    /// materializing the receiver.
     ///
     /// # Errors
     ///
@@ -1941,8 +1980,8 @@ where
     ///
     /// `O(Σ_c n_c³)` — sectorwise cubic, no global materialization; the seam
     /// factorizes each coupled sector on its own. A compact-diagonal payload
-    /// (TensorKit's `DiagonalTensorMap`) materializes through the same
-    /// [`Self::data`] route as [`Self::qr_compact`] first: TensorKit 0.17 has
+    /// (TensorKit's `DiagonalTensorMap`) is densified into an operation-local
+    /// buffer first, as for [`Self::qr_compact`]: TensorKit 0.17 has
     /// no diagonal polar specialization either (its `DiagonalAlgorithm`
     /// table gives `DiagonalTensorMap` only `copy_input` for the polars, so
     /// it dispatches dense per block), and the
@@ -1958,10 +1997,7 @@ where
             let LeftPolar { w, p } = tenet_matrixalgebra::left_polar_adjoint_parent_dyn(
                 dense.dense(),
                 lease.context().multiplicity_free_lane::<D>()?,
-                &BoundDynamicTensorRef::try_new(
-                    &view.parent.space,
-                    view.parent.materialized_dense_data(),
-                )?,
+                &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
             )?;
             return Ok(LeftPolar {
                 w: self.wrap_bound_factor(w),
@@ -1973,10 +2009,11 @@ where
         // lease order matches every existing site that takes both lanes.
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
         let LeftPolar { w, p } = tenet_matrixalgebra::left_polar_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>()?,
-            &self.bound_ref()?,
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
         Ok(LeftPolar {
             w: self.wrap_bound_factor(w),
@@ -2014,10 +2051,7 @@ where
             let RightPolar { p, wh: w } = tenet_matrixalgebra::right_polar_adjoint_parent_dyn(
                 dense.dense(),
                 lease.context().multiplicity_free_lane::<D>()?,
-                &BoundDynamicTensorRef::try_new(
-                    &view.parent.space,
-                    view.parent.materialized_dense_data(),
-                )?,
+                &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
             )?;
             return Ok(RightPolar {
                 p: self.wrap_bound_factor(p),
@@ -2027,10 +2061,11 @@ where
         // See `left_polar` for the lease order rationale.
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
         let RightPolar { p, wh: w } = tenet_matrixalgebra::right_polar_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>()?,
-            &self.bound_ref()?,
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
         Ok(RightPolar {
             p: self.wrap_bound_factor(p),
@@ -2065,7 +2100,11 @@ where
                 .eigh_full_multiplicity_free();
         }
         let mut dense = self.runtime.lease_dense();
-        let out = tenet_matrixalgebra::eigh_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
+        let out = tenet_matrixalgebra::eigh_full_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+        )?;
         let (v, mut eigenvalues) = out.into_parts();
         Ok(Eigh {
             d: self.diagonal_factor(&mut eigenvalues, D::from_real)?,
@@ -2095,7 +2134,11 @@ where
                 .eigh_vals_multiplicity_free();
         }
         let mut dense = self.runtime.lease_dense();
-        let raw = tenet_matrixalgebra::eigh_vals_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
+        let raw = tenet_matrixalgebra::eigh_vals_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+        )?;
         self.decode_spectrum(raw)
     }
 
@@ -2137,7 +2180,11 @@ where
                 .eig_full_multiplicity_free();
         }
         let mut dense = self.runtime.lease_dense();
-        let out = tenet_matrixalgebra::eig_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
+        let out = tenet_matrixalgebra::eig_full_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+        )?;
         let (v, mut eigenvalues) = out.into_parts();
         Ok(Eig {
             d: diagonal_factor_on(
@@ -2173,7 +2220,11 @@ where
                 .eig_vals_multiplicity_free();
         }
         let mut dense = self.runtime.lease_dense();
-        let raw = tenet_matrixalgebra::eig_vals_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
+        let raw = tenet_matrixalgebra::eig_vals_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+        )?;
         self.decode_spectrum(raw)
     }
 
@@ -2202,7 +2253,7 @@ where
         let out = tenet_matrixalgebra::exp_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>()?,
-            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
+            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())?,
         )?;
         Ok(self.wrap_bound_factor(out))
     }
@@ -2228,7 +2279,7 @@ where
             })?));
         }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            // (A†)^-1 = (A^-1)†. Keep the receiver's lazy cache cold by
+            // (A†)^-1 = (A^-1)†. Avoid materializing the receiver by
             // solving the owned parent, then detach the final adjoint so the
             // result retains neither the parent inverse nor its payload.
             return self
@@ -2238,7 +2289,11 @@ where
                 .materialized_tensor_uncached();
         }
         let mut dense = self.runtime.lease_dense();
-        let out = tenet_matrixalgebra::inv_direct_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (bound_space, bound_payload) = self.bound_payload()?;
+        let out = tenet_matrixalgebra::inv_direct_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+        )?;
         Ok(self.wrap_bound_factor(out))
     }
 
@@ -2319,25 +2374,14 @@ where
             .transpose()?;
         let lhs = lhs_local.as_ref().unwrap_or(self);
         let rhs = rhs_local.as_ref().unwrap_or(rhs);
-        let rhs_dense = rhs
-            .spectrum()
-            .map(|spectrum| {
-                tenet_matrixalgebra::diagonal_bond_data(
-                    rhs.logical_space().space(),
-                    spectrum,
-                    &|value| value,
-                )
-                .map_err(Error::from)
-            })
-            .transpose()?;
-        let rhs_ref = match &rhs_dense {
-            Some(data) => BoundDynamicTensorRef::try_new(rhs.logical_space(), data)?,
-            None => rhs.bound_ref()?,
-        };
-
+        let (lhs_space, lhs_payload) = lhs.bound_payload()?;
+        let (rhs_space, rhs_payload) = rhs.bound_payload()?;
         let mut dense = self.runtime.lease_dense();
-        let out =
-            tenet_matrixalgebra::solve_left_direct_dyn(dense.dense(), &lhs.bound_ref()?, &rhs_ref)?;
+        let out = tenet_matrixalgebra::solve_left_direct_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(lhs_space, &lhs_payload)?,
+            &BoundDynamicTensorRef::try_new(rhs_space, &rhs_payload)?,
+        )?;
         Ok(self.wrap_bound_factor(out))
     }
 
@@ -2386,20 +2430,20 @@ where
             TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::pinv_adjoint_parent_dyn(
                 dense.dense(),
                 lease.context().multiplicity_free_lane::<D>()?,
-                &BoundDynamicTensorRef::try_new(
-                    &view.parent.space,
-                    view.parent.materialized_dense_data(),
-                )?,
+                &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
                 rcond,
             )
             .map_err(pinv_seam_error)?,
-            TypedTensorRepr::Owned(_) => tenet_matrixalgebra::pinv_dyn(
-                dense.dense(),
-                lease.context().multiplicity_free_lane::<D>()?,
-                &self.bound_ref()?,
-                rcond,
-            )
-            .map_err(pinv_seam_error)?,
+            TypedTensorRepr::Owned(_) => {
+                let (bound_space, bound_payload) = self.bound_payload()?;
+                tenet_matrixalgebra::pinv_dyn(
+                    dense.dense(),
+                    lease.context().multiplicity_free_lane::<D>()?,
+                    &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+                    rcond,
+                )
+                .map_err(pinv_seam_error)?
+            }
         };
         Ok(self.wrap_bound_factor(out))
     }
@@ -2509,9 +2553,9 @@ where
                 let mut data = tenet_tensors::oriented_fusion_add_owned(
                     self.logical_space().space().structure(),
                     operand,
-                    dense,
+                    &dense,
                     operand,
-                    dense,
+                    &dense,
                     beta,
                     D::from_real(0.0),
                 )?;
@@ -2523,9 +2567,9 @@ where
                 let mut data = tenet_tensors::oriented_fusion_add_owned(
                     self.logical_space().space().structure(),
                     operand,
-                    dense,
+                    &dense,
                     operand,
-                    dense,
+                    &dense,
                     alpha,
                     D::from_real(0.0),
                 )?;
@@ -2537,9 +2581,9 @@ where
             let data = tenet_tensors::oriented_fusion_add_owned(
                 self.logical_space().space().structure(),
                 lhs,
-                lhs_data,
+                &lhs_data,
                 rhs,
-                rhs_data,
+                &rhs_data,
                 alpha,
                 beta,
             )?;
@@ -2581,7 +2625,8 @@ where
                     other
                         .owned_body()
                         .expect("owned add input")
-                        .materialized_dense_data(),
+                        .materialized_dense_data()
+                        .as_ref(),
                     beta,
                     diagonal,
                     alpha,
@@ -2592,7 +2637,8 @@ where
                     self.logical_space().space(),
                     self.owned_body()
                         .expect("owned add input")
-                        .materialized_dense_data(),
+                        .materialized_dense_data()
+                        .as_ref(),
                     alpha,
                     diagonal,
                     beta,
@@ -2604,12 +2650,14 @@ where
             self.owned_body()
                 .expect("owned add input")
                 .materialized_dense_data()
+                .as_ref()
                 .iter()
                 .zip(
                     other
                         .owned_body()
                         .expect("owned add input")
-                        .materialized_dense_data(),
+                        .materialized_dense_data()
+                        .as_ref(),
                 )
                 .map(|(&x, &y)| scale_value(x, alpha) + scale_value(y, beta))
                 .collect(),
@@ -2653,6 +2701,7 @@ where
             self.owned_body()
                 .expect("owned scale input")
                 .materialized_dense_data()
+                .as_ref()
                 .iter()
                 .map(|&value| scale_value(value, factor))
                 .collect(),
@@ -2731,7 +2780,7 @@ where
                     logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_rhs);
                 (
                     &view.parent.space,
-                    Some(view.parent.materialized_dense_data()),
+                    Some(view.parent_data()),
                     tenet_tensors::TensorTraceAxisSpec::new_with_conjugation(
                         &mapped_output_axes,
                         &mapped_trace_lhs,
@@ -2817,11 +2866,17 @@ where
                 });
             }
         }
-        let source_data = source_data.unwrap_or_else(|| {
-            self.owned_body()
-                .expect("owned trace input")
-                .materialized_dense_data()
-        });
+        let owned_payload;
+        let source_data = match source_data {
+            Some(data) => data,
+            None => {
+                owned_payload = self
+                    .owned_body()
+                    .expect("owned trace input")
+                    .materialized_dense_data();
+                &owned_payload
+            }
+        };
         let data = tenet_tensors::tensortrace_fusion_dyn_owned_checked(
             &space,
             source_space,
@@ -2840,10 +2895,10 @@ where
     /// c64 entries are conjugated as well.
     ///
     /// Dense storage is a lazy parent-backed view, matching TensorKit's
-    /// `AdjointTensorMap`: metadata swaps immediately, and only [`Self::data`]
-    /// publishes a deferred whole-payload materialization across clones.
+    /// `AdjointTensorMap`: metadata swaps immediately, and only
+    /// [`Self::materialize`] builds the whole logical payload.
     /// Compact diagonal storage keeps its established `O(Σ_c k_c)` owned
-    /// conjugation path and never enters the general lazy cell.
+    /// conjugation path and never becomes a lazy view.
     ///
     /// # Errors
     ///
@@ -2890,10 +2945,11 @@ where
             };
             return parent.norm_multiplicity_free();
         }
-        let data = self
+        let data_payload = self
             .owned_body()
             .expect("owned norm input")
             .materialized_dense_data();
+        let data: &[D] = &data_payload;
         rescaled_power_norm(
             self.weighted_self_inner()?.re,
             2.0,
@@ -2943,14 +2999,13 @@ where
             return Ok(Self::spectrum_max_abs(spectrum));
         }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            return Ok(max_abs(
-                view.parent.materialized_dense_data().iter().copied(),
-            ));
+            return Ok(max_abs(view.parent_data().iter().copied()));
         }
         Ok(max_abs(
             self.owned_body()
                 .expect("owned norm input")
                 .materialized_dense_data()
+                .as_ref()
                 .iter()
                 .copied(),
         ))
@@ -2991,10 +3046,11 @@ where
         }
         let structure = self.logical_space().space().structure();
         let nout = self.logical_space().space().nout();
-        let data = self
+        let data_payload = self
             .owned_body()
             .expect("owned norm input")
             .materialized_dense_data();
+        let data: &[D] = &data_payload;
         let weight_of = |coupled| Ok::<_, Error>(provider.dim_scalar(coupled));
         rescaled_power_norm(
             coupled_region_weighted_sum(structure, nout, data, weight_of, power)?,
@@ -3017,10 +3073,12 @@ where
             self.logical_space().space().nout(),
             self.owned_body()
                 .expect("owned norm input")
-                .materialized_dense_data(),
+                .materialized_dense_data()
+                .as_ref(),
             self.owned_body()
                 .expect("owned norm input")
-                .materialized_dense_data(),
+                .materialized_dense_data()
+                .as_ref(),
         )
     }
 
@@ -3047,8 +3105,8 @@ where
             ));
         }
         // Two compact spectra reduce without either being materialized. A
-        // compact/dense pair needs the compact factor's dense cache, while a
-        // lazy dense operand remains parent-oriented.
+        // compact/dense pair densifies the compact factor for this call, while
+        // a lazy dense operand remains parent-oriented.
         if let (Some(lhs), Some(rhs)) = (self.spectrum(), other.spectrum()) {
             let provider = self.logical_space().provider();
             return Ok(D::from_complex64(Self::compact_inner(lhs, rhs, provider)?));
@@ -3064,18 +3122,18 @@ where
                     tenet_tensors::oriented_fusion_inner(
                         lhs.parent.space.space().structure(),
                         tenet_tensors::FusionOperand::direct(rhs.parent.space.space()),
-                        rhs.parent.materialized_dense_data(),
+                        rhs.parent_data(),
                         tenet_tensors::FusionOperand::direct(lhs.parent.space.space()),
-                        lhs.parent.materialized_dense_data(),
+                        lhs.parent_data(),
                         |sector| provider.dim_scalar(sector),
                     )?
                 }
                 _ => tenet_tensors::oriented_fusion_inner(
                     self.logical_space().space().structure(),
                     lhs_operand,
-                    lhs_data,
+                    &lhs_data,
                     rhs_operand,
-                    rhs_data,
+                    &rhs_data,
                     |sector| provider.dim_scalar(sector),
                 )?,
             };
@@ -3089,11 +3147,13 @@ where
             self.logical_space().space().nout(),
             self.owned_body()
                 .expect("owned inner input")
-                .materialized_dense_data(),
+                .materialized_dense_data()
+                .as_ref(),
             other
                 .owned_body()
                 .expect("owned inner input")
-                .materialized_dense_data(),
+                .materialized_dense_data()
+                .as_ref(),
         )?))
     }
 
@@ -3146,7 +3206,8 @@ where
             self.logical_space().space().nout(),
             self.owned_body()
                 .expect("owned trace input")
-                .materialized_dense_data(),
+                .materialized_dense_data()
+                .as_ref(),
             |sector| Ok::<_, Error>(provider.dim_scalar(sector)),
         )?))
     }
@@ -3155,7 +3216,9 @@ where
     /// contracting every leg — TensorKit `scalar` (an empty payload reads
     /// as zero there too).
     ///
-    /// Returns `D` directly: the value is the sum of the coupled payload.
+    /// Returns `D` directly: the value is the sum of the coupled payload. A
+    /// lazy adjoint is materialized operation-locally; a rank-0 payload holds
+    /// at most one value per coupled sector.
     ///
     /// # Errors
     ///
@@ -3174,6 +3237,7 @@ where
             .owned_body()
             .expect("uncached materialization is owned")
             .materialized_dense_data()
+            .as_ref()
             .iter()
             .fold(D::from_real(0.0), |acc, &value| acc + value))
     }
@@ -3251,6 +3315,7 @@ where
             .owned_body()
             .expect("owned twist input")
             .materialized_dense_data()
+            .as_ref()
             .to_vec();
         scale_blocks_impl(self.logical_space().space(), &mut data, &|key| match key {
             BlockKey::FusionTree(key) => twist_block_factor(provider, key, nout, legs, inverse),
@@ -3309,6 +3374,7 @@ where
             .owned_body()
             .expect("owned flip input")
             .materialized_dense_data()
+            .as_ref()
             .to_vec();
         scale_blocks_impl(space.space(), &mut data, &|key| match key {
             BlockKey::FusionTree(key) => {
@@ -3325,7 +3391,7 @@ where
     /// A zero tensor on the same spaces and dtype as `self` (TensorKit
     /// `zerovector`). Dense and compact payloads are freshly initialized to
     /// exact positive zero, independently of non-finite source values. A lazy
-    /// adjoint zeros its canonical parent and stays a cold lazy adjoint.
+    /// adjoint zeros its canonical parent and stays a lazy adjoint.
     pub fn zeros_like(&self) -> Self {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let parent = Self {
@@ -3353,6 +3419,7 @@ where
             self.owned_body()
                 .expect("owned zero input")
                 .materialized_dense_data()
+                .as_ref()
                 .len()
         ])
     }
@@ -3406,8 +3473,8 @@ where
     /// The fresh bond contains `n_c - rank_c` directions per sector. It uses
     /// the same numerical cutoff and cost as [`Self::left_null`], with rows and
     /// columns exchanged. Compact inputs are materialized first; a lazy
-    /// adjoint uses the left null space of its owned parent without caching the
-    /// receiver. Checked results use the source provider instance, and a
+    /// adjoint uses the left null space of its owned parent without
+    /// materializing the receiver. Checked results use the source provider instance, and a
     /// failure returns no tensor.
     pub fn right_null(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorNullDispatch<R, D>>::right_null(self)
@@ -3431,7 +3498,7 @@ where
     /// Cost is `O(sum_c m_c * n_c * min(m_c, n_c))` plus sectorwise
     /// composition. Compact diagonal input is materialized first. A lazy
     /// adjoint runs the opposite decomposition on its owned parent and returns
-    /// detached owned factors without caching the receiver. Checked factors
+    /// detached owned factors without materializing the receiver. Checked factors
     /// use the same provider instance as `self`. If that provider rejects an
     /// output space or any sector computation fails, no factors are returned.
     ///
@@ -3653,7 +3720,7 @@ where
     /// O(1) for a dense payload: the new body shares the payload allocation,
     /// exactly as TensorKit's `copy = false` default shares `t.data` for an
     /// ordinary `TensorMap`. A lazy dense adjoint is first converted to a
-    /// fresh uncached dense tensor. A compact spectrum factor materializes
+    /// fresh dense tensor. A compact spectrum factor materializes
     /// into a fresh dense payload first (one copy) — the #613 Group 4
     /// contract; TensorKit routes its `DiagonalTensorMap` through the generic
     /// similar+block-copy branch for the same reason. No device arm.
