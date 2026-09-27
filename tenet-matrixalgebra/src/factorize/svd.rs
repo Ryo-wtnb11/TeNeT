@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Compact (thin, untruncated) fusion-tensor SVD `t = U * S * Vh`
 /// (MatrixAlgebraKit `svd_compact`).
 ///
@@ -16,16 +15,14 @@ pub struct SvdCompact<R, D, const NOUT: usize, const NIN: usize> {
     pub singular_values: Vec<SectorSpectrum>,
 }
 
-
 /// Dynamic-rank [`SvdCompact`].
 #[derive(Clone, Debug)]
 pub struct SvdCompactDyn<R, D> {
-    u: BoundDynFactor<R, D>,
-    s: BoundDynFactor<R, D>,
-    vh: BoundDynFactor<R, D>,
-    singular_values: Vec<SectorSpectrum>,
+    pub(super) u: BoundDynFactor<R, D>,
+    pub(super) s: BoundDynFactor<R, D>,
+    pub(super) vh: BoundDynFactor<R, D>,
+    pub(super) singular_values: Vec<SectorSpectrum>,
 }
-
 
 impl<R, D> SvdCompactDyn<R, D> {
     pub fn u(&self) -> &BoundDynFactor<R, D> {
@@ -60,7 +57,6 @@ impl<R, D> SvdCompactDyn<R, D> {
     }
 }
 
-
 pub(super) fn diagonal_bond_svd_factor<R, D, V>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<V>],
@@ -78,7 +74,6 @@ where
     BoundDynFactor::from_bound(space, data, 1, 1)
 }
 
-
 #[cfg(test)]
 pub(super) fn record_diagonal_bond_build<V>(spectrum: &[SectorSpectrum<V>]) {
     DIAGONAL_BOND_BUILD_PROBE.with(|probe| {
@@ -91,7 +86,6 @@ pub(super) fn record_diagonal_bond_build<V>(spectrum: &[SectorSpectrum<V>]) {
         probe.set(current);
     });
 }
-
 
 #[doc(hidden)]
 pub fn diagonal_bond_bound_space_like<R, V>(
@@ -114,7 +108,6 @@ where
     authority.derive_from_final_homspace(homspace)
 }
 
-
 pub fn diagonal_bond_bound_space<R, V>(
     provider: Arc<R>,
     spectrum: &[SectorSpectrum<V>],
@@ -134,7 +127,6 @@ where
     );
     BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(provider, homspace)
 }
-
 
 /// Fills the dense block-diagonal data of `space` from `spectrum`, mapping
 /// each value through `to_scalar`. Only the
@@ -182,7 +174,6 @@ where
     Ok(data)
 }
 
-
 /// Scales one bond axis of `data` (laid out per `space`) by the per-sector
 /// `spectrum`, in place — the block-local realization of TensorKit's
 /// `DiagonalTensorMap` multiplication. `axis = None` scales each block's
@@ -203,7 +194,6 @@ where
 {
     scale_axis_by_spectrum_mapped(space, data, axis, spectrum, D::from_real)
 }
-
 
 /// Value-generic sibling of [`scale_axis_by_spectrum`]. Why not convert the
 /// spectrum before this call: a complex spectrum cannot pass through the
@@ -287,7 +277,6 @@ where
     Ok(())
 }
 
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct CompactSvdCopyProbe {
@@ -299,24 +288,23 @@ pub(crate) struct CompactSvdCopyProbe {
     pub owned_output_owner_reused: usize,
 }
 
-
 #[cfg(test)]
 thread_local! {
-    static COMPACT_SVD_COPY_PROBE: Cell<CompactSvdCopyProbe> = Cell::default();
-    static COMPACT_QR_COPY_PROBE: Cell<CompactQrCopyProbe> = Cell::default();
-    static EIGH_COPY_PROBE: Cell<EighCopyProbe> = Cell::default();
-    static EIGH_OWNED_VECTOR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-    static CHECKED_EIGH_PAIR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-    static CHECKED_COMPACT_SVD_STAGE_POINTERS: RefCell<Vec<(usize, usize)>> =
+    pub(super) static COMPACT_SVD_COPY_PROBE: Cell<CompactSvdCopyProbe> = Cell::default();
+    pub(super) static COMPACT_QR_COPY_PROBE: Cell<CompactQrCopyProbe> = Cell::default();
+    pub(super) static EIGH_COPY_PROBE: Cell<EighCopyProbe> = Cell::default();
+    pub(super) static EIGH_OWNED_VECTOR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    pub(super) static CHECKED_EIGH_PAIR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    pub(super) static CHECKED_COMPACT_SVD_STAGE_POINTERS: RefCell<Vec<(usize, usize)>> =
         const { RefCell::new(Vec::new()) };
-    static GENERIC_COMPACT_SVD_FALLBACK_POINTERS: RefCell<Vec<(usize, usize)>> =
+    pub(super) static GENERIC_COMPACT_SVD_FALLBACK_POINTERS: RefCell<Vec<(usize, usize)>> =
         const { RefCell::new(Vec::new()) };
-    static MF_COMPACT_SVD_FALLBACK_POINTERS: RefCell<Vec<(usize, usize)>> =
+    pub(super) static MF_COMPACT_SVD_FALLBACK_POINTERS: RefCell<Vec<(usize, usize)>> =
         const { RefCell::new(Vec::new()) };
-    static COMPACT_LQ_COPY_PROBE: Cell<CompactLqCopyProbe> = Cell::default();
-    static DIAGONAL_BOND_BUILD_PROBE: Cell<DiagonalBondBuildProbe> = Cell::default();
-    static VALUES_MATRICIZATION_FALLBACKS: Cell<usize> = const { Cell::new(0) };
-    static CHECKED_COMPACT_INPUT_OBSERVATIONS: RefCell<Vec<CheckedCompactInputObservation>> =
+    pub(super) static COMPACT_LQ_COPY_PROBE: Cell<CompactLqCopyProbe> = Cell::default();
+    pub(super) static DIAGONAL_BOND_BUILD_PROBE: Cell<DiagonalBondBuildProbe> = Cell::default();
+    pub(super) static VALUES_MATRICIZATION_FALLBACKS: Cell<usize> = const { Cell::new(0) };
+    pub(super) static CHECKED_COMPACT_INPUT_OBSERVATIONS: RefCell<Vec<CheckedCompactInputObservation>> =
         const { RefCell::new(Vec::new()) };
 }
 
@@ -325,12 +313,10 @@ pub(crate) fn reset_checked_compact_svd_stage_pointers() {
     CHECKED_COMPACT_SVD_STAGE_POINTERS.with(|pointers| pointers.borrow_mut().clear());
 }
 
-
 #[cfg(test)]
 pub(crate) fn checked_compact_svd_stage_pointers() -> Vec<(usize, usize)> {
     CHECKED_COMPACT_SVD_STAGE_POINTERS.with(|pointers| pointers.borrow().clone())
 }
-
 
 #[cfg(test)]
 pub(super) fn record_checked_compact_svd_stage_gauge<D>(u: &[D], vt: &[D]) {
@@ -341,18 +327,15 @@ pub(super) fn record_checked_compact_svd_stage_gauge<D>(u: &[D], vt: &[D]) {
     });
 }
 
-
 #[cfg(test)]
 pub(crate) fn reset_generic_compact_svd_fallback_pointers() {
     GENERIC_COMPACT_SVD_FALLBACK_POINTERS.with(|pointers| pointers.borrow_mut().clear());
 }
 
-
 #[cfg(test)]
 pub(crate) fn generic_compact_svd_fallback_pointers() -> Vec<(usize, usize)> {
     GENERIC_COMPACT_SVD_FALLBACK_POINTERS.with(|pointers| pointers.borrow().clone())
 }
-
 
 #[cfg(test)]
 pub(super) fn record_generic_compact_svd_fallback_gauge<D>(u: &[D], vt: &[D]) {
@@ -363,18 +346,15 @@ pub(super) fn record_generic_compact_svd_fallback_gauge<D>(u: &[D], vt: &[D]) {
     });
 }
 
-
 #[cfg(test)]
 pub(crate) fn reset_mf_compact_svd_fallback_pointers() {
     MF_COMPACT_SVD_FALLBACK_POINTERS.with(|pointers| pointers.borrow_mut().clear());
 }
 
-
 #[cfg(test)]
 pub(crate) fn mf_compact_svd_fallback_pointers() -> Vec<(usize, usize)> {
     MF_COMPACT_SVD_FALLBACK_POINTERS.with(|pointers| pointers.borrow().clone())
 }
-
 
 #[cfg(test)]
 pub(super) fn record_mf_compact_svd_fallback_gauge<D>(u: &[D], vt: &[D]) {
@@ -385,7 +365,6 @@ pub(super) fn record_mf_compact_svd_fallback_gauge<D>(u: &[D], vt: &[D]) {
     });
 }
 
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct DiagonalBondBuildProbe {
@@ -393,30 +372,25 @@ pub(crate) struct DiagonalBondBuildProbe {
     pub values: usize,
 }
 
-
 #[cfg(test)]
 pub(crate) fn reset_compact_svd_copy_probe() {
     COMPACT_SVD_COPY_PROBE.with(|probe| probe.set(CompactSvdCopyProbe::default()));
 }
-
 
 #[cfg(test)]
 pub(crate) fn compact_svd_copy_probe() -> CompactSvdCopyProbe {
     COMPACT_SVD_COPY_PROBE.with(Cell::get)
 }
 
-
 #[cfg(test)]
 pub(crate) fn reset_diagonal_bond_build_probe() {
     DIAGONAL_BOND_BUILD_PROBE.with(|probe| probe.set(DiagonalBondBuildProbe::default()));
 }
 
-
 #[cfg(test)]
 pub(crate) fn diagonal_bond_build_probe() -> DiagonalBondBuildProbe {
     DIAGONAL_BOND_BUILD_PROBE.with(Cell::get)
 }
-
 
 #[cfg(test)]
 pub(super) fn record_compact_svd_input_pack<D>(matricizations: &[SectorMatricization<D>]) {
@@ -431,7 +405,6 @@ pub(super) fn record_compact_svd_input_pack<D>(matricizations: &[SectorMatriciza
     });
 }
 
-
 #[cfg(test)]
 pub(super) fn record_compact_svd_output_scatter<D>(elements: usize) {
     COMPACT_SVD_COPY_PROBE.with(|probe| {
@@ -441,7 +414,6 @@ pub(super) fn record_compact_svd_output_scatter<D>(elements: usize) {
         probe.set(current);
     });
 }
-
 
 /// All singular values per coupled sector, descending (MatrixAlgebraKit
 /// `svd_vals`). Runs the dense SVD per sector through the executor and keeps
@@ -457,7 +429,6 @@ where
 {
     svd_vals_dyn(dense, &input.dynamic())
 }
-
 
 /// Dynamic-rank [`svd_vals`].
 pub fn svd_vals_dyn<E, R, D>(
@@ -499,7 +470,6 @@ where
     Ok(singular_values)
 }
 
-
 /// Compact (untruncated) fusion-tensor SVD through the device boundary.
 pub fn svd_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
@@ -519,7 +489,6 @@ where
     })
 }
 
-
 /// The compact-SVD factors without materializing the diagonal `S`:
 /// `(U, Vh, spectrum)`. The shared core of every SVD entry point.
 /// [`svd_compact_dyn`] wraps this and adds the dense `S` as a tensor for callers
@@ -530,7 +499,6 @@ pub type SvdFactorsDyn<R, D> = (
     BoundDynFactor<R, D>,
     Vec<SectorSpectrum>,
 );
-
 
 pub fn svd_compact_factors_dyn<E, R, D>(
     dense: &mut E,
@@ -543,7 +511,6 @@ where
 {
     svd_compact_factors_dyn_with_direction(dense, input, None, CompactSvdGauge::Left)
 }
-
 
 /// Compact SVD factors for the logical adjoint without constructing its input:
 /// if `A = U S Vh`, returns `(V, Uh, spectrum)` with the phase gauge applied
@@ -567,16 +534,14 @@ where
     ))
 }
 
-
 pub(super) struct CompactSvdNumericalStage<D> {
-    rows: usize,
-    cols: usize,
-    rank: usize,
-    u: Vec<D>,
-    singular_values: Vec<f64>,
-    vt: Vec<D>,
+    pub(super) rows: usize,
+    pub(super) cols: usize,
+    pub(super) rank: usize,
+    pub(super) u: Vec<D>,
+    pub(super) singular_values: Vec<f64>,
+    pub(super) vt: Vec<D>,
 }
-
 
 pub(super) fn compact_svd_numerical_stage<E, D>(
     dense: &mut E,
@@ -613,7 +578,6 @@ where
     })
 }
 
-
 #[cfg(test)]
 pub(crate) fn compact_svd_numerical_stage_lengths_for_test<E, D>(
     dense: &mut E,
@@ -629,13 +593,11 @@ where
     Ok((stage.u.len(), stage.singular_values.len(), stage.vt.len()))
 }
 
-
 #[derive(Clone, Copy)]
 pub(super) enum CompactSvdGauge {
     Left,
     AdjointLeft,
 }
-
 
 pub(super) fn svd_compact_factors_dyn_with_direction<E, R, D>(
     dense: &mut E,
@@ -757,7 +719,6 @@ where
     Ok((u, vh, singular_values))
 }
 
-
 pub(super) fn svd_compact_direct_regions<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -838,7 +799,6 @@ where
     Ok((u, vh, singular_values))
 }
 
-
 /// Dynamic-rank [`svd_compact`]: the [`svd_compact_factors_dyn`] core plus the
 /// diagonal `S` materialized as a `bond <- bond` tensor.
 pub fn svd_compact_dyn<E, R, D>(
@@ -859,7 +819,6 @@ where
         singular_values,
     })
 }
-
 
 /// Host-side truncation decision over the spectra of a bond factorization:
 /// the selection magnitude is `|value|` and each `spectra` entry is stored
@@ -898,7 +857,6 @@ where
     .map_err(OperationError::from)
 }
 
-
 /// Full fusion-tensor SVD `t = U * S * Vh` (MatrixAlgebraKit `svd_full`):
 /// per sector `U` is the square `m x m` unitary, `S` the rectangular
 /// `m x n` diagonal, and `Vh` the square `n x n` unitary.
@@ -910,16 +868,14 @@ pub struct SvdFull<R, D, const NOUT: usize, const NIN: usize> {
     pub singular_values: Vec<SectorSpectrum>,
 }
 
-
 /// Dynamic-rank [`SvdFull`].
 #[derive(Clone, Debug)]
 pub struct SvdFullDyn<R, D> {
-    u: BoundDynFactor<R, D>,
-    s: BoundDynFactor<R, D>,
-    vh: BoundDynFactor<R, D>,
-    singular_values: Vec<SectorSpectrum>,
+    pub(super) u: BoundDynFactor<R, D>,
+    pub(super) s: BoundDynFactor<R, D>,
+    pub(super) vh: BoundDynFactor<R, D>,
+    pub(super) singular_values: Vec<SectorSpectrum>,
 }
-
 
 impl<R, D> SvdFullDyn<R, D> {
     pub fn u(&self) -> &BoundDynFactor<R, D> {
@@ -950,7 +906,6 @@ impl<R, D> SvdFullDyn<R, D> {
     }
 }
 
-
 /// Full fusion-tensor SVD through the device boundary.
 ///
 /// A provider that advertises [`DenseExecutor::supports_svd_full`] factorizes
@@ -979,7 +934,6 @@ where
     })
 }
 
-
 /// Dynamic-rank [`svd_full`].
 pub fn svd_full_dyn<E, R, D>(
     dense: &mut E,
@@ -992,7 +946,6 @@ where
 {
     svd_full_oriented_dyn(dense, input, FactorPlacement::Direct)
 }
-
 
 /// Full SVD factors for the logical adjoint without constructing its input.
 #[doc(hidden)]
@@ -1007,7 +960,6 @@ where
 {
     svd_full_oriented_dyn(dense, input, FactorPlacement::Adjoint)
 }
-
 
 #[expect(
     clippy::type_complexity,
@@ -1049,7 +1001,6 @@ where
     let vh = compact_factor_output_owned(outputs.remove(0), &[cols, cols], "svd_full_owned")?;
     Ok(Some((u, singular_values, vh)))
 }
-
 
 pub(super) fn svd_full_oriented_dyn<E, R, D>(
     dense: &mut E,
@@ -1253,7 +1204,6 @@ where
     })
 }
 
-
 /// Completes `k` orthonormal columns (`m x k`, column-major) to a full
 /// `m x m` orthonormal basis via an economy QR of `[Q1 | I]`; the first `k`
 /// columns are returned unchanged.
@@ -1297,7 +1247,6 @@ where
     full[rows * rank..].copy_from_slice(&q[rows * rank..rows * rows]);
     Ok(full)
 }
-
 
 /// Rectangular diagonal `W_row <- W_col` bond factor (the `S` of the full
 /// SVD): per sector shape `[rows, cols]` with the spectrum on the diagonal.
@@ -1359,7 +1308,6 @@ where
     }
     BoundDynFactor::from_bound(space, data, 1, 1)
 }
-
 
 #[doc(hidden)]
 pub fn rectangular_diagonal_bond_tensor_generic_checked<R, D>(
@@ -1425,7 +1373,6 @@ where
     BoundDynFactor::from_bound(space, data, 1, 1).map_err(CheckedGenericFactorPlanError::from)
 }
 
-
 /// Positive-diagonal gauge (MatrixAlgebraKit `positive = true`, the default
 /// of the Householder QR/LQ algorithms since MAK 0.6.8 / TensorKit 0.17):
 /// absorbs the unitary phase `D = diag(phase(R_jj))` into `Q`, i.e.
@@ -1444,7 +1391,6 @@ pub(crate) fn positive_diagonal_gauge<D: FactorScalar>(
 ) {
     positive_diagonal_gauge_strided(q, q_rows, q_rows, r, r_rows, r_rows, r_cols);
 }
-
 
 pub(super) fn positive_diagonal_gauge_strided<D: FactorScalar>(
     q: &mut [D],
@@ -1474,7 +1420,6 @@ pub(super) fn positive_diagonal_gauge_strided<D: FactorScalar>(
     }
 }
 
-
 pub(crate) fn svd_compact_gauge<D: FactorScalar>(
     u: &mut [D],
     u_rows: usize,
@@ -1493,7 +1438,6 @@ pub(crate) fn svd_compact_gauge<D: FactorScalar>(
     }
 }
 
-
 pub(crate) fn svd_compact_adjoint_gauge<D: FactorScalar>(
     u: &mut [D],
     u_rows: usize,
@@ -1511,7 +1455,6 @@ pub(crate) fn svd_compact_adjoint_gauge<D: FactorScalar>(
         }
     }
 }
-
 
 pub(crate) fn svd_full_gauge<D: FactorScalar>(
     u: &mut [D],
@@ -1543,7 +1486,6 @@ pub(crate) fn svd_full_gauge<D: FactorScalar>(
     }
 }
 
-
 pub(super) fn phase_of_largest_abs_col<D: FactorScalar>(
     data: &[D],
     rows: usize,
@@ -1562,7 +1504,6 @@ pub(super) fn phase_of_largest_abs_col<D: FactorScalar>(
     }
     unit_phase(best, best_norm_sqr)
 }
-
 
 pub(super) fn phase_of_largest_abs_row<D: FactorScalar>(
     data: &[D],
@@ -1583,7 +1524,6 @@ pub(super) fn phase_of_largest_abs_row<D: FactorScalar>(
     unit_phase(best, best_norm_sqr)
 }
 
-
 pub(super) fn unit_phase<D: FactorScalar>(value: Complex64, norm_sqr: f64) -> (D, bool) {
     if norm_sqr == 0.0 || (value.im == 0.0 && value.re >= 0.0) {
         (D::from_real(1.0), false)
@@ -1591,7 +1531,6 @@ pub(super) fn unit_phase<D: FactorScalar>(value: Complex64, norm_sqr: f64) -> (D
         (D::from_complex64(value / norm_sqr.sqrt()), true)
     }
 }
-
 
 /// Compact SVD owns U and Vt, while S remains the host-side spectrum used by
 /// the existing truncation and diagonal construction paths.
@@ -1619,7 +1558,6 @@ where
     compact_svd_outputs(outputs, rows, cols)
 }
 
-
 /// Compact SVD of each column-major `(data, rows, cols)` block, submitted as one
 /// executor batch so the backend admits the whole coupled-sector loop once.
 #[expect(
@@ -1640,7 +1578,6 @@ where
         .map(|(outputs, &(_, rows, cols))| compact_svd_outputs(outputs, rows, cols))
         .collect()
 }
-
 
 #[expect(
     clippy::type_complexity,
@@ -1665,7 +1602,6 @@ pub(super) fn compact_svd_outputs<D: FactorScalar>(
     Ok((u, singular_values, vt))
 }
 
-
 pub(super) fn concat_compact_svd_factor_regions<D>(
     regions: Vec<Option<Vec<D>>>,
     required_len: usize,
@@ -1685,7 +1621,6 @@ pub(super) fn concat_compact_svd_factor_regions<D>(
     });
     output
 }
-
 
 #[doc(hidden)]
 pub fn diagonal_bond_bound_space_generic_checked<R, V>(
@@ -1709,7 +1644,6 @@ where
         .map_err(CheckedGenericFactorPlanError::from)
 }
 
-
 #[doc(hidden)]
 pub fn diagonal_bond_svd_factor_generic_checked<R, D, V>(
     provider: Arc<R>,
@@ -1726,7 +1660,6 @@ where
         .map_err(CheckedGenericFactorPlanError::from)?;
     BoundDynFactor::from_bound(space, data, 1, 1).map_err(CheckedGenericFactorPlanError::from)
 }
-
 
 /// Generic sibling of [`svd_compact_factors_dyn`] (SU(N)): identical dense
 /// per-sector SVD + gauge + scatter; only the space builders differ.
@@ -1828,7 +1761,6 @@ where
     Ok((u, vh, singular_values))
 }
 
-
 pub fn diagonal_bond_bound_space_generic<R, V>(
     provider: Arc<R>,
     spectrum: &[SectorSpectrum<V>],
@@ -1848,7 +1780,6 @@ where
     );
     BoundDynamicFusionMapSpace::from_final_homspace_generic(provider, homspace)
 }
-
 
 /// Generic sibling of [`svd_vals_dyn`].
 pub fn svd_vals_dyn_generic<E, R, D>(
@@ -1884,7 +1815,6 @@ where
     Ok(singular_values)
 }
 
-
 /// Checked-Generic sibling of [`decide_bond_truncation`], public and hidden for
 /// the same reason.
 #[doc(hidden)]
@@ -1918,7 +1848,6 @@ where
     .map_err(|error| CheckedGenericFactorPlanError::Operation(error.into()))
 }
 
-
 /// Checked-Generic compact SVD. Dense SVD is unchanged; all provider-bound
 /// output spaces are admitted through the checked staging boundary.
 #[doc(hidden)]
@@ -1935,14 +1864,12 @@ where
     Ok(Svd { u, s, vh })
 }
 
-
 pub(super) type CheckedCompactSvdWithSpectrum<R, D> = (
     BoundDynFactor<R, D>,
     BoundDynFactor<R, D>,
     BoundDynFactor<R, D>,
     Vec<SectorSpectrum>,
 );
-
 
 pub(super) fn svd_compact_with_spectrum_dyn_checked_generic<E, R, D>(
     dense: &mut E,
@@ -1995,7 +1922,6 @@ where
     )?;
     Ok((u, s, vh, singular_values))
 }
-
 
 /// Checked-Generic full SVD. Dense work is performed before any output-space
 /// publication; checked factor builders then admit square outer factors and
@@ -2169,7 +2095,6 @@ where
         singular_values,
     })
 }
-
 
 /// Checked-Generic singular values only. No factor-space publication occurs.
 #[doc(hidden)]

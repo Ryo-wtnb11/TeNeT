@@ -1,36 +1,31 @@
 use super::*;
 
-
 #[derive(Clone, Copy)]
 pub(super) struct InverseSectorRoute {
-    source: usize,
-    output: usize,
+    pub(super) source: usize,
+    pub(super) output: usize,
 }
-
 
 #[derive(Clone, Copy)]
 pub(super) struct SolveLeftSectorRoute {
-    divisor: usize,
-    rhs: usize,
-    output: usize,
+    pub(super) divisor: usize,
+    pub(super) rhs: usize,
+    pub(super) output: usize,
 }
-
 
 pub(super) struct InverseMatrixRoute {
-    source: usize,
-    output: usize,
-    rows: Vec<InverseBasisExtent>,
-    cols: Vec<InverseBasisExtent>,
+    pub(super) source: usize,
+    pub(super) output: usize,
+    pub(super) rows: Vec<InverseBasisExtent>,
+    pub(super) cols: Vec<InverseBasisExtent>,
 }
-
 
 #[derive(Clone, Copy)]
 pub(super) struct InverseBasisExtent {
-    source_offset: usize,
-    output_offset: usize,
-    extent: usize,
+    pub(super) source_offset: usize,
+    pub(super) output_offset: usize,
+    pub(super) extent: usize,
 }
-
 
 pub(crate) fn inverse_by_sector_dyn<E, R, D>(
     dense: &mut E,
@@ -55,7 +50,6 @@ where
     let output_space = input.space().derive_from_final_homspace(inverse_homspace)?;
     inverse_by_sector_dyn_into(dense, input, output_space)
 }
-
 
 /// Coefficient-free inverse execution into an already admitted swapped output.
 ///
@@ -163,7 +157,6 @@ where
     )
 }
 
-
 /// `rcond * sigma_max` over every sector's singular values, rejecting a
 /// non-finite one in the same pass.
 ///
@@ -188,7 +181,6 @@ pub(crate) fn pinv_cutoff(
         })?;
     Ok(rcond * sigma_max)
 }
-
 
 /// Coefficient-free pseudo-inverse into an already admitted swapped space.
 ///
@@ -263,13 +255,13 @@ where
     )?;
 
     struct Stage<D> {
-        route: InverseSectorRoute,
-        rows: usize,
-        cols: usize,
-        rank: usize,
-        u: Vec<D>,
-        singular_values: Vec<f64>,
-        vt: Vec<D>,
+        pub(super) route: InverseSectorRoute,
+        pub(super) rows: usize,
+        pub(super) cols: usize,
+        pub(super) rank: usize,
+        pub(super) u: Vec<D>,
+        pub(super) singular_values: Vec<f64>,
+        pub(super) vt: Vec<D>,
     }
 
     let mut output_data = vec![D::zero(); output_space.space().required_len()?];
@@ -347,7 +339,6 @@ where
     )
 }
 
-
 pub(super) fn compile_pinv_region_routes(
     source: &[CoupledSectorRegion],
     output: &[CoupledSectorRegion],
@@ -390,7 +381,6 @@ pub(super) fn compile_pinv_region_routes(
     Ok(routes)
 }
 
-
 pub(crate) fn solve_left_by_sector_dyn<E, R, D>(
     dense: &mut E,
     divisor: &BoundDynamicTensorRef<'_, R, D>,
@@ -430,7 +420,6 @@ where
         .derive_from_final_homspace(output_homspace)?;
     solve_left_by_sector_dyn_into(dense, divisor, rhs, output_space)
 }
-
 
 pub(crate) fn solve_left_by_sector_dyn_into<E, R, D>(
     dense: &mut E,
@@ -560,7 +549,6 @@ where
     )
 }
 
-
 pub(super) fn compile_solve_left_region_routes(
     divisor: &[CoupledSectorRegion],
     rhs: &[CoupledSectorRegion],
@@ -620,7 +608,6 @@ pub(super) fn compile_solve_left_region_routes(
     Ok(routes)
 }
 
-
 pub(super) fn solve_left_sector<E, D>(
     dense: &mut E,
     divisor: &[D],
@@ -650,7 +637,6 @@ where
         )
         .map_err(OperationError::Dense)
 }
-
 
 /// Walks the coupled-sector matricization of an endomorphism and replaces each
 /// square block by `apply`'s image of it, writing into a freshly derived
@@ -708,7 +694,6 @@ where
         .derive_from_final_homspace(source_space.homspace().clone())?;
     map_square_sectors_dyn_into(input, output_space, init, apply)
 }
-
 
 pub(crate) fn map_square_sectors_dyn_into<R, D, S, I, F>(
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -820,7 +805,6 @@ where
     )
 }
 
-
 pub(super) fn compile_inverse_region_routes(
     source: &[CoupledSectorRegion],
     output: &[CoupledSectorRegion],
@@ -854,7 +838,6 @@ pub(super) fn compile_inverse_region_routes(
     Ok(routes)
 }
 
-
 #[cfg(test)]
 pub(crate) fn validate_inverse_region_routes_for_test(
     source: &[CoupledSectorRegion],
@@ -872,7 +855,6 @@ pub(crate) fn validate_inverse_region_routes_for_test(
         .unwrap_or(0);
     compile_inverse_region_routes(source, output, source_len, output_len).map(|_| ())
 }
-
 
 pub(super) fn validate_inverse_region(
     source: &CoupledSectorRegion,
@@ -894,7 +876,6 @@ pub(super) fn validate_inverse_region(
     Ok(())
 }
 
-
 pub(super) fn validate_region_range(
     region: &CoupledSectorRegion,
     data_len: usize,
@@ -908,7 +889,6 @@ pub(super) fn validate_region_range(
     }
     Ok(())
 }
-
 
 pub(super) fn compile_inverse_matrix_routes<D>(
     source: &[SectorMatricization<D>],
@@ -953,7 +933,6 @@ pub(super) fn compile_inverse_matrix_routes<D>(
     }
     Ok(routes)
 }
-
 
 pub(super) fn compile_inverse_basis_extents(
     source: &[(FusionTreeKey, usize, Vec<usize>)],
@@ -1001,7 +980,6 @@ pub(super) fn compile_inverse_basis_extents(
     Ok(extents)
 }
 
-
 pub(super) fn identity_workspace<D: FactorScalar>(order: usize) -> Result<Vec<D>, OperationError> {
     let elements = order
         .checked_mul(order)
@@ -1012,7 +990,6 @@ pub(super) fn identity_workspace<D: FactorScalar>(order: usize) -> Result<Vec<D>
     }
     Ok(identity)
 }
-
 
 pub(super) fn solve_inverse_sector<E, D>(
     dense: &mut E,
@@ -1045,7 +1022,6 @@ where
         )
         .map_err(OperationError::Dense)
 }
-
 
 pub(super) fn reorder_inverse_solution<D: Copy>(
     source: &[D],

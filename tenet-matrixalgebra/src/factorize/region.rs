@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Scalar contract for the factorization layer: dense-executor I/O plus the
 /// adjoint and real-embedding used by the factor builders. Implemented for
 /// the double-precision real and complex scalars.
@@ -45,7 +44,6 @@ pub trait FactorScalar: DenseRecouplingScalar {
     /// is `inf` in `f32`.
     fn safe_minimum() -> f64;
 }
-
 
 impl FactorScalar for f32 {
     type Eig = num_complex::Complex32;
@@ -96,7 +94,6 @@ impl FactorScalar for f32 {
     }
 }
 
-
 impl FactorScalar for f64 {
     type Eig = Complex64;
     type Real = f64;
@@ -141,7 +138,6 @@ impl FactorScalar for f64 {
         f64::MIN_POSITIVE
     }
 }
-
 
 impl FactorScalar for num_complex::Complex32 {
     type Eig = num_complex::Complex32;
@@ -192,7 +188,6 @@ impl FactorScalar for num_complex::Complex32 {
     }
 }
 
-
 impl FactorScalar for Complex64 {
     type Eig = Complex64;
     type Real = f64;
@@ -238,12 +233,10 @@ impl FactorScalar for Complex64 {
     }
 }
 
-
 /// Magnitude used by the truncation selection over a spectrum.
 pub trait SpectrumMagnitude: Copy {
     fn magnitude(self) -> f64;
 }
-
 
 impl SpectrumMagnitude for f64 {
     fn magnitude(self) -> f64 {
@@ -251,13 +244,11 @@ impl SpectrumMagnitude for f64 {
     }
 }
 
-
 impl SpectrumMagnitude for Complex64 {
     fn magnitude(self) -> f64 {
         self.norm()
     }
 }
-
 
 // The single-precision magnitudes widen *before* the absolute value or the
 // hypotenuse, so a `Complex32` whose components straddle the `f32` range still
@@ -269,13 +260,11 @@ impl SpectrumMagnitude for f32 {
     }
 }
 
-
 impl SpectrumMagnitude for num_complex::Complex32 {
     fn magnitude(self) -> f64 {
         Complex64::new(f64::from(self.re), f64::from(self.im)).norm()
     }
 }
-
 
 /// One coupled sector's factorization spectrum, stored descending by
 /// magnitude: singular values (`f64`), Hermitian eigenvalues (signed `f64`),
@@ -286,7 +275,6 @@ pub struct SectorSpectrum<V = f64> {
     pub values: Vec<V>,
 }
 
-
 // ---------------------------------------------------------------------------
 // Dynamic-rank representation.
 // ---------------------------------------------------------------------------
@@ -296,14 +284,12 @@ pub struct SectorSpectrum<V = f64> {
 /// returns).
 pub(crate) type DynFactor<D> = (DynamicFusionMapSpace, Vec<D>);
 
-
 /// Typed tensor plus the sole provider authority accepted by provider-sensitive
 /// factorization and matrix-function APIs.
 pub struct BoundTensorMapRef<'a, R, D, const NOUT: usize, const NIN: usize> {
-    space: &'a BoundDynamicFusionMapSpace<R>,
-    tensor: &'a TensorMap<D, NOUT, NIN>,
+    pub(super) space: &'a BoundDynamicFusionMapSpace<R>,
+    pub(super) tensor: &'a TensorMap<D, NOUT, NIN>,
 }
-
 
 /// Owned typed tensor that retains the provider authority for its fusion
 /// space. Provider-sensitive operations consume this type or its borrowed
@@ -326,10 +312,9 @@ pub struct BoundTensorMapRef<'a, R, D, const NOUT: usize, const NIN: usize> {
 /// ```
 #[derive(Clone, Debug)]
 pub struct BoundTensorMap<R, D, const NOUT: usize, const NIN: usize> {
-    space: BoundDynamicFusionMapSpace<R>,
-    tensor: TensorMap<D, NOUT, NIN>,
+    pub(super) space: BoundDynamicFusionMapSpace<R>,
+    pub(super) tensor: TensorMap<D, NOUT, NIN>,
 }
-
 
 impl<R, D, const NOUT: usize, const NIN: usize> BoundTensorMap<R, D, NOUT, NIN>
 where
@@ -373,7 +358,6 @@ where
     }
 }
 
-
 impl<R, D, const NOUT: usize, const NIN: usize> std::ops::Deref
     for BoundTensorMap<R, D, NOUT, NIN>
 {
@@ -383,7 +367,6 @@ impl<R, D, const NOUT: usize, const NIN: usize> std::ops::Deref
         &self.tensor
     }
 }
-
 
 impl<'a, R, D, const NOUT: usize, const NIN: usize> BoundTensorMapRef<'a, R, D, NOUT, NIN>
 where
@@ -410,17 +393,14 @@ where
     }
 }
 
-
 /// Owned dynamic factor that retains the provider used to create its complete
 /// fusion space.
 pub struct BoundDynFactor<R, D> {
-    space: BoundDynamicFusionMapSpace<R>,
-    data: Vec<D>,
+    pub(super) space: BoundDynamicFusionMapSpace<R>,
+    pub(super) data: Vec<D>,
 }
 
-
 pub(super) type DynamicFactorPair<R, D> = (BoundDynFactor<R, D>, BoundDynFactor<R, D>);
-
 
 impl<R, D> fmt::Debug for BoundDynFactor<R, D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -430,7 +410,6 @@ impl<R, D> fmt::Debug for BoundDynFactor<R, D> {
             .finish()
     }
 }
-
 
 impl<R, D> Clone for BoundDynFactor<R, D>
 where
@@ -443,7 +422,6 @@ where
         }
     }
 }
-
 
 impl<R, D> BoundDynFactor<R, D> {
     pub(crate) fn from_bound(
@@ -494,7 +472,6 @@ impl<R, D> BoundDynFactor<R, D> {
     }
 }
 
-
 pub(crate) fn adjoint_bound_factor<R, D>(
     factor: &BoundDynFactor<R, D>,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
@@ -508,7 +485,6 @@ where
     BoundDynFactor::from_bound(space, data, nout, nin)
 }
 
-
 /// Rank-erases the fusion space of a typed tensor (shared handles, no copy).
 pub(crate) fn dyn_space_of<D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
@@ -519,7 +495,6 @@ pub(crate) fn dyn_space_of<D, const NOUT: usize, const NIN: usize>(
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
     ))
 }
-
 
 /// Rebuilds a typed tensor from a dynamic factor: the subblock structure and
 /// hom space are shared as-is (identical layout by construction), only the
@@ -572,7 +547,6 @@ where
         .map_err(OperationError::from_core_preserving_context)
 }
 
-
 pub(crate) fn typed_from_bound_factor<R, D, const NOUT: usize, const NIN: usize>(
     factor: BoundDynFactor<R, D>,
 ) -> Result<BoundTensorMap<R, D, NOUT, NIN>, OperationError>
@@ -585,27 +559,24 @@ where
     Ok(BoundTensorMap { space, tensor })
 }
 
-
 pub(super) struct SectorMatricization<D> {
-    sector: SectorId,
-    rows: usize,
-    cols: usize,
+    pub(super) sector: SectorId,
+    pub(super) rows: usize,
+    pub(super) cols: usize,
     /// (codomain tree, row offset, codomain degeneracy shape)
-    row_trees: Vec<(FusionTreeKey, usize, Vec<usize>)>,
+    pub(super) row_trees: Vec<(FusionTreeKey, usize, Vec<usize>)>,
     /// (domain tree, column offset, domain degeneracy shape)
-    col_trees: Vec<(FusionTreeKey, usize, Vec<usize>)>,
+    pub(super) col_trees: Vec<(FusionTreeKey, usize, Vec<usize>)>,
     /// Column-major `rows x cols` matrix.
-    data: Vec<D>,
+    pub(super) data: Vec<D>,
 }
-
 
 #[derive(Clone, Copy)]
 pub(super) struct TreeExtentRef<'a> {
-    tree: &'a FusionTreeKey,
-    offset: usize,
-    shape: &'a [usize],
+    pub(super) tree: &'a FusionTreeKey,
+    pub(super) offset: usize,
+    pub(super) shape: &'a [usize],
 }
-
 
 // Keeps publication generic over owned packs and cached regions without
 // allocating a second list of borrowed tree descriptors.
@@ -616,7 +587,6 @@ pub(super) trait SectorGeometry {
     fn tree_count(&self, side: FactorSide) -> usize;
     fn tree(&self, side: FactorSide, index: usize) -> Option<TreeExtentRef<'_>>;
 }
-
 
 impl<D> SectorGeometry for SectorMatricization<D> {
     fn sector(&self) -> SectorId {
@@ -651,7 +621,6 @@ impl<D> SectorGeometry for SectorMatricization<D> {
     }
 }
 
-
 impl SectorGeometry for CoupledSectorRegion {
     fn sector(&self) -> SectorId {
         self.coupled()
@@ -685,14 +654,12 @@ impl SectorGeometry for CoupledSectorRegion {
     }
 }
 
-
 pub(super) struct SectorMatrixRef<'a, D> {
-    sector: SectorId,
-    rows: usize,
-    cols: usize,
-    data: &'a [D],
+    pub(super) sector: SectorId,
+    pub(super) rows: usize,
+    pub(super) cols: usize,
+    pub(super) data: &'a [D],
 }
-
 
 pub(super) enum InputMatricizations<'a, D> {
     Regions {
@@ -702,16 +669,15 @@ pub(super) enum InputMatricizations<'a, D> {
     Packed(Vec<SectorMatricization<D>>),
 }
 
-
 impl<'a, D: FactorScalar> InputMatricizations<'a, D> {
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         match self {
             Self::Regions { regions, .. } => regions.len(),
             Self::Packed(matrices) => matrices.len(),
         }
     }
 
-    fn get(&self, index: usize) -> Result<SectorMatrixRef<'_, D>, OperationError> {
+    pub(super) fn get(&self, index: usize) -> Result<SectorMatrixRef<'_, D>, OperationError> {
         match self {
             Self::Regions { data, regions } => {
                 let region = &regions[index];
@@ -742,14 +708,17 @@ impl<'a, D: FactorScalar> InputMatricizations<'a, D> {
     }
 
     #[cfg(test)]
-    fn is_packed(&self) -> bool {
+    pub(super) fn is_packed(&self) -> bool {
         matches!(self, Self::Packed(_))
     }
 
     /// Eigenvalues are basis-invariant only when row `i` and column `i` name
     /// the same tree state, so each sector must stack its row and column trees
     /// identically (outer-multiplicity vertices included).
-    fn validate_endomorphism_stacking(&self, message: &'static str) -> Result<(), OperationError> {
+    pub(super) fn validate_endomorphism_stacking(
+        &self,
+        message: &'static str,
+    ) -> Result<(), OperationError> {
         match self {
             Self::Regions { regions, .. } => {
                 validate_endomorphism_tree_stacking(regions.as_ref(), message)
@@ -758,7 +727,7 @@ impl<'a, D: FactorScalar> InputMatricizations<'a, D> {
         }
     }
 
-    fn validate_hermitian(&self) -> Result<(), OperationError> {
+    pub(super) fn validate_hermitian(&self) -> Result<(), OperationError> {
         match self {
             Self::Regions { data, regions } => validate_hermitian_regions(data, regions),
             Self::Packed(matrices) => validate_hermitian_matricizations(matrices),
@@ -766,10 +735,18 @@ impl<'a, D: FactorScalar> InputMatricizations<'a, D> {
     }
 }
 
-
 /// Binds `$geometry` to the admitted input's per-sector geometry
 /// (`&[CoupledSectorRegion]` or `&[SectorMatricization<D>]`) for the
 /// `SectorGeometry`-generic publication helpers.
+///
+/// `macro_rules!` items cannot carry `pub(super)`/`pub(crate)` path
+/// visibility, only `pub` (equivalent to `#[macro_export]`) or none (textual
+/// scope only); `#[macro_export]` is the only way to reach this macro from
+/// sibling files under `factorize/` without hoisting the whole crate through
+/// old-style `#[macro_use]` ordering. `#[doc(hidden)]` keeps it out of the
+/// crate's public rustdoc surface, matching its original crate-private reach.
+#[macro_export]
+#[doc(hidden)]
 macro_rules! with_input_geometry {
     ($input:expr, |$geometry:ident| $body:expr) => {
         match $input {
@@ -785,7 +762,6 @@ macro_rules! with_input_geometry {
     };
 }
 
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CheckedCompactOperation {
@@ -793,7 +769,6 @@ pub(crate) enum CheckedCompactOperation {
     Svd,
     Lq,
 }
-
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -805,18 +780,15 @@ pub(crate) struct CheckedCompactInputObservation {
     pub elements: usize,
 }
 
-
 #[cfg(test)]
 pub(crate) fn reset_checked_compact_input_observations() {
     CHECKED_COMPACT_INPUT_OBSERVATIONS.with(|observations| observations.borrow_mut().clear());
 }
 
-
 #[cfg(test)]
 pub(crate) fn checked_compact_input_observations() -> Vec<CheckedCompactInputObservation> {
     CHECKED_COMPACT_INPUT_OBSERVATIONS.with(|observations| observations.borrow().clone())
 }
-
 
 #[cfg(test)]
 pub(super) fn record_checked_compact_input<D>(
@@ -838,24 +810,20 @@ pub(super) fn record_checked_compact_input<D>(
     });
 }
 
-
 #[cfg(test)]
 pub(crate) fn reset_values_matricization_fallbacks() {
     VALUES_MATRICIZATION_FALLBACKS.with(|count| count.set(0));
 }
-
 
 #[cfg(test)]
 pub(crate) fn values_matricization_fallbacks() -> usize {
     VALUES_MATRICIZATION_FALLBACKS.with(Cell::get)
 }
 
-
 #[cfg(test)]
 pub(super) fn record_values_matricization_fallback() {
     VALUES_MATRICIZATION_FALLBACKS.with(|count| count.set(count.get() + 1));
 }
-
 
 #[cfg(feature = "diagnostics")]
 #[doc(hidden)]
@@ -866,7 +834,6 @@ pub struct SectorMatricizationDiagnostic {
     pub cols: usize,
     pub elements: usize,
 }
-
 
 #[cfg(feature = "diagnostics")]
 #[doc(hidden)]
@@ -891,23 +858,21 @@ where
     )
 }
 
-
 #[derive(Clone, Copy)]
 pub(super) enum PolarDirection {
     Left,
     Right,
 }
 
-
 impl PolarDirection {
-    fn accepts(self, rows: usize, cols: usize) -> bool {
+    pub(super) fn accepts(self, rows: usize, cols: usize) -> bool {
         match self {
             Self::Left => rows >= cols,
             Self::Right => cols >= rows,
         }
     }
 
-    fn error(self) -> OperationError {
+    pub(super) fn error(self) -> OperationError {
         OperationError::InvalidArgument {
             message: match self {
                 Self::Left => "left_polar requires rows >= columns in every coupled-sector matrix",
@@ -918,7 +883,6 @@ impl PolarDirection {
         }
     }
 }
-
 
 pub(super) fn validate_polar_direction(
     acceptance_direction: PolarDirection,
@@ -949,16 +913,14 @@ pub(super) fn validate_polar_direction(
     Ok(())
 }
 
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CompactFactorRoute {
-    source_region: usize,
-    left_region: Option<usize>,
-    right_region: Option<usize>,
-    sector: SectorId,
-    rank: usize,
+    pub(super) source_region: usize,
+    pub(super) left_region: Option<usize>,
+    pub(super) right_region: Option<usize>,
+    pub(super) sector: SectorId,
+    pub(super) rank: usize,
 }
-
 
 /// Per-call routing from the source coupled-sector regions to the two factor
 /// regions. Owned by the calling factorization and dropped with it.
@@ -968,15 +930,14 @@ pub(crate) struct CompactFactorRoute {
 /// call with no owner to serve.
 #[derive(Debug)]
 pub(crate) struct CompactFactorPlan {
-    source_layout: ValidatedDynamicFusionLayout,
-    source_regions: Arc<[CoupledSectorRegion]>,
-    left_layout: ValidatedDynamicFusionLayout,
-    right_layout: ValidatedDynamicFusionLayout,
-    left_regions: Arc<[CoupledSectorRegion]>,
-    right_regions: Arc<[CoupledSectorRegion]>,
-    routes: Vec<CompactFactorRoute>,
+    pub(super) source_layout: ValidatedDynamicFusionLayout,
+    pub(super) source_regions: Arc<[CoupledSectorRegion]>,
+    pub(super) left_layout: ValidatedDynamicFusionLayout,
+    pub(super) right_layout: ValidatedDynamicFusionLayout,
+    pub(super) left_regions: Arc<[CoupledSectorRegion]>,
+    pub(super) right_regions: Arc<[CoupledSectorRegion]>,
+    pub(super) routes: Vec<CompactFactorRoute>,
 }
-
 
 #[doc(hidden)]
 #[derive(Debug)]
@@ -984,7 +945,6 @@ pub enum CheckedGenericFactorPlanError<E> {
     Provider(E),
     Operation(OperationError),
 }
-
 
 impl<E> From<CheckedGenericStructureError<E>> for CheckedGenericFactorPlanError<E> {
     fn from(error: CheckedGenericStructureError<E>) -> Self {
@@ -997,24 +957,21 @@ impl<E> From<CheckedGenericStructureError<E>> for CheckedGenericFactorPlanError<
     }
 }
 
-
 impl<E> From<OperationError> for CheckedGenericFactorPlanError<E> {
     fn from(error: OperationError) -> Self {
         Self::Operation(error)
     }
 }
 
-
 pub(crate) struct PreparedGenericCompactFactorPlan {
-    source_layout: ValidatedDynamicFusionLayout,
-    source_regions: Arc<[CoupledSectorRegion]>,
-    left: PreparedCheckedGenericDynamicSpace,
-    right: PreparedCheckedGenericDynamicSpace,
-    left_regions: Arc<[CoupledSectorRegion]>,
-    right_regions: Arc<[CoupledSectorRegion]>,
-    routes: Vec<CompactFactorRoute>,
+    pub(super) source_layout: ValidatedDynamicFusionLayout,
+    pub(super) source_regions: Arc<[CoupledSectorRegion]>,
+    pub(super) left: PreparedCheckedGenericDynamicSpace,
+    pub(super) right: PreparedCheckedGenericDynamicSpace,
+    pub(super) left_regions: Arc<[CoupledSectorRegion]>,
+    pub(super) right_regions: Arc<[CoupledSectorRegion]>,
+    pub(super) routes: Vec<CompactFactorRoute>,
 }
-
 
 pub(super) fn compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
@@ -1024,7 +981,6 @@ where
 {
     build_compact_factor_plan(input, input.validated_layout())
 }
-
 
 pub(super) fn compact_factor_plan_generic<R>(
     input: &BoundDynamicFusionMapSpace<R>,
@@ -1040,7 +996,6 @@ where
         Err(CheckedGenericFactorPlanError::Operation(error)) => Err(error),
     }
 }
-
 
 pub(super) fn prepare_compact_factor_plan_generic_checked<R, P>(
     input: &BoundDynamicFusionMapSpace<R>,
@@ -1091,7 +1046,6 @@ where
     }))
 }
 
-
 pub(super) fn source_factor_tree_extents_match(
     source: &[CoupledSectorRegion],
     left: &[CoupledSectorRegion],
@@ -1115,7 +1069,6 @@ pub(super) fn source_factor_tree_extents_match(
             && source_region.col_trees() == right[right_index].col_trees()
     })
 }
-
 
 pub(super) fn finish_compact_factor_plan_generic<R>(
     input: &BoundDynamicFusionMapSpace<R>,
@@ -1148,10 +1101,9 @@ where
     }))
 }
 
-
 #[cfg(test)]
 thread_local! {
-    static GENERIC_FACTOR_PLAN_FINISH_CALLS: Cell<usize> = const { Cell::new(0) };
+    pub(super) static GENERIC_FACTOR_PLAN_FINISH_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -1159,12 +1111,10 @@ pub(crate) fn reset_generic_factor_plan_finish_calls() {
     GENERIC_FACTOR_PLAN_FINISH_CALLS.with(|calls| calls.set(0));
 }
 
-
 #[cfg(test)]
 pub(crate) fn generic_factor_plan_finish_calls() -> usize {
     GENERIC_FACTOR_PLAN_FINISH_CALLS.with(Cell::get)
 }
-
 
 #[cfg(test)]
 pub(crate) fn prepare_compact_factor_plan_generic_checked_for_test<R, P>(
@@ -1178,7 +1128,6 @@ where
     prepare_compact_factor_plan_generic_checked(input, provider)
 }
 
-
 #[cfg(test)]
 pub(crate) fn finish_compact_factor_plan_generic_for_test<R>(
     input: &BoundDynamicFusionMapSpace<R>,
@@ -1189,7 +1138,6 @@ where
 {
     finish_compact_factor_plan_generic(input, prepared).map(|plan| plan.is_some())
 }
-
 
 pub(super) fn build_compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
@@ -1237,7 +1185,6 @@ where
     }))
 }
 
-
 pub(super) fn compact_factor_routes_preserve_tree_order(
     routes: &[CompactFactorRoute],
     source: &[CoupledSectorRegion],
@@ -1255,7 +1202,6 @@ pub(super) fn compact_factor_routes_preserve_tree_order(
     })
 }
 
-
 /// The bond leg `W` shared by both compact factors: one sector per source
 /// region with degeneracy `min(rows, cols)`.
 pub(super) fn compact_bond_leg(regions: &[CoupledSectorRegion]) -> SectorLeg {
@@ -1266,7 +1212,6 @@ pub(super) fn compact_bond_leg(regions: &[CoupledSectorRegion]) -> SectorLeg {
         false,
     )
 }
-
 
 pub(super) fn compile_compact_factor_routes(
     source_regions: &[CoupledSectorRegion],
@@ -1308,7 +1253,6 @@ pub(super) fn compile_compact_factor_routes(
     Ok(routes)
 }
 
-
 #[cfg(test)]
 pub(crate) fn compact_factor_plan_for_test<R>(
     input: &BoundDynamicFusionMapSpace<R>,
@@ -1318,7 +1262,6 @@ where
 {
     compact_factor_plan(input)
 }
-
 
 #[cfg(test)]
 #[expect(
@@ -1339,7 +1282,6 @@ pub(crate) fn compact_factor_plan_regions_for_test(
     )
 }
 
-
 #[cfg(test)]
 pub(crate) fn validate_compact_factor_routes_for_test(
     source: &[CoupledSectorRegion],
@@ -1349,14 +1291,12 @@ pub(crate) fn validate_compact_factor_routes_for_test(
     compile_compact_factor_routes(source, u, vh)
 }
 
-
 #[cfg(test)]
 pub(crate) fn compact_factor_plan_routes_for_test(
     plan: &CompactFactorPlan,
 ) -> &[CompactFactorRoute] {
     &plan.routes
 }
-
 
 #[cfg(test)]
 impl CompactFactorRoute {
@@ -1365,11 +1305,9 @@ impl CompactFactorRoute {
     }
 }
 
-
 pub(super) fn region_sector(region: &CoupledSectorRegion) -> SectorId {
     region.coupled()
 }
-
 
 pub(super) fn sector_region_index_map(
     regions: &[CoupledSectorRegion],
@@ -1385,7 +1323,6 @@ pub(super) fn sector_region_index_map(
     Ok(by_sector)
 }
 
-
 /// Sector -> region index lookup over one factor's region table.
 ///
 /// Canonical factor layouts list their regions strictly sorted by coupled
@@ -1398,9 +1335,8 @@ pub(super) enum SectorRegionIndex<'a> {
     Map(FxHashMap<SectorId, usize>),
 }
 
-
 impl<'a> SectorRegionIndex<'a> {
-    fn new(regions: &'a [CoupledSectorRegion]) -> Result<Self, OperationError> {
+    pub(super) fn new(regions: &'a [CoupledSectorRegion]) -> Result<Self, OperationError> {
         if regions
             .windows(2)
             .all(|pair| region_sector(&pair[0]) < region_sector(&pair[1]))
@@ -1411,14 +1347,13 @@ impl<'a> SectorRegionIndex<'a> {
         }
     }
 
-    fn get(&self, sector: SectorId) -> Option<usize> {
+    pub(super) fn get(&self, sector: SectorId) -> Option<usize> {
         match self {
             Self::Sorted(regions) => regions.binary_search_by_key(&sector, region_sector).ok(),
             Self::Map(map) => map.get(&sector).copied(),
         }
     }
 }
-
 
 pub(super) fn sector_region_index_of(
     regions: &SectorRegionIndex<'_>,
@@ -1434,7 +1369,6 @@ pub(super) fn sector_region_index_of(
             },
         })
 }
-
 
 pub(super) fn validate_factor_region(
     region: &CoupledSectorRegion,
@@ -1452,7 +1386,6 @@ pub(super) fn validate_factor_region(
     }
     Ok(())
 }
-
 
 pub(super) fn validate_no_unused_factor_regions(
     regions: &[CoupledSectorRegion],
@@ -1474,34 +1407,30 @@ pub(super) fn validate_no_unused_factor_regions(
     Ok(())
 }
 
-
 /// One coupled sector's factor pair: `left` is `left_rows x kept` (leading
 /// columns of a column-major matrix), `right` is `kept x cols` (leading rows
 /// of a column-major matrix with leading dimension `right_leading`).
 pub(super) struct FactorPair<D> {
-    sector: SectorId,
-    kept: usize,
-    left: Vec<D>,
-    left_rows: usize,
-    right: Vec<D>,
-    right_leading: usize,
+    pub(super) sector: SectorId,
+    pub(super) kept: usize,
+    pub(super) left: Vec<D>,
+    pub(super) left_rows: usize,
+    pub(super) right: Vec<D>,
+    pub(super) right_leading: usize,
 }
-
 
 pub(super) struct SectorRank {
-    sector: SectorId,
-    kept: usize,
+    pub(super) sector: SectorId,
+    pub(super) kept: usize,
 }
-
 
 pub(super) struct GenericFactorPairSpaces<R> {
-    left: BoundDynamicFusionMapSpace<R>,
-    right: BoundDynamicFusionMapSpace<R>,
-    left_keys: Vec<FusionTreePairKey>,
-    right_keys: Vec<FusionTreePairKey>,
-    ordered: bool,
+    pub(super) left: BoundDynamicFusionMapSpace<R>,
+    pub(super) right: BoundDynamicFusionMapSpace<R>,
+    pub(super) left_keys: Vec<FusionTreePairKey>,
+    pub(super) right_keys: Vec<FusionTreePairKey>,
+    pub(super) ordered: bool,
 }
-
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1522,10 +1451,9 @@ pub(crate) struct GenericPairPublicationProbe {
     pub fallback_publications: usize,
 }
 
-
 #[cfg(test)]
 thread_local! {
-    static GENERIC_PAIR_PUBLICATION_PROBE: Cell<GenericPairPublicationProbe> = Cell::default();
+    pub(super) static GENERIC_PAIR_PUBLICATION_PROBE: Cell<GenericPairPublicationProbe> = Cell::default();
 }
 
 #[cfg(test)]
@@ -1533,12 +1461,10 @@ pub(crate) fn reset_generic_pair_publication_probe() {
     GENERIC_PAIR_PUBLICATION_PROBE.set(GenericPairPublicationProbe::default());
 }
 
-
 #[cfg(test)]
 pub(crate) fn generic_pair_publication_probe() -> GenericPairPublicationProbe {
     GENERIC_PAIR_PUBLICATION_PROBE.get()
 }
-
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1553,10 +1479,9 @@ pub(crate) struct OneSidedPublicationProbe {
     pub plan_bytes: usize,
 }
 
-
 #[cfg(test)]
 thread_local! {
-    static ONE_SIDED_PUBLICATION_PROBE: Cell<OneSidedPublicationProbe> = Cell::default();
+    pub(super) static ONE_SIDED_PUBLICATION_PROBE: Cell<OneSidedPublicationProbe> = Cell::default();
 }
 
 #[cfg(test)]
@@ -1564,16 +1489,14 @@ pub(crate) fn reset_one_sided_publication_probe() {
     ONE_SIDED_PUBLICATION_PROBE.set(OneSidedPublicationProbe::default());
 }
 
-
 #[cfg(test)]
 pub(crate) fn one_sided_publication_probe() -> OneSidedPublicationProbe {
     ONE_SIDED_PUBLICATION_PROBE.get()
 }
 
-
 #[cfg(test)]
 thread_local! {
-    static FACTOR_BUFFER_BUILD_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    pub(super) static FACTOR_BUFFER_BUILD_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }
 
 #[cfg(test)]
@@ -1581,12 +1504,10 @@ pub(crate) fn reset_factor_buffer_build_counts_for_test() {
     FACTOR_BUFFER_BUILD_COUNTS.set((0, 0));
 }
 
-
 #[cfg(test)]
 pub(crate) fn factor_buffer_build_counts_for_test() -> (usize, usize) {
     FACTOR_BUFFER_BUILD_COUNTS.get()
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum FactorSide {
@@ -1594,13 +1515,11 @@ pub(super) enum FactorSide {
     Right,
 }
 
-
 #[derive(Clone, Copy)]
 pub(super) enum FactorPlacement {
     Direct,
     Adjoint,
 }
-
 
 pub(super) fn build_bound_factor_space<R>(
     authority: &BoundDynamicFusionMapSpace<R>,
@@ -1618,7 +1537,6 @@ where
     };
     authority.derive_from_final_homspace(hom)
 }
-
 
 #[doc(hidden)]
 pub fn build_bound_factor_space_generic_checked<R>(
@@ -1640,7 +1558,6 @@ where
     BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(authority, hom)
         .map_err(CheckedGenericFactorPlanError::from)
 }
-
 
 /// Builds the `(codomain <- W, W <- domain)` factor pair shared by SVD and
 /// the orthogonal factorizations, in the coupled-sector matrix layout.
@@ -1678,7 +1595,6 @@ where
     ))
 }
 
-
 pub(super) fn build_left_bound_factor<R, D, M>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
@@ -1704,7 +1620,6 @@ where
     )
 }
 
-
 pub(super) fn build_bound_factor<R, D, M>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
@@ -1728,7 +1643,6 @@ where
         FactorPlacement::Direct,
     )
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_bound_factor_with_placement<R, D, M>(
@@ -1878,7 +1792,6 @@ where
     BoundDynFactor::from_bound(space, data, nout, nin)
 }
 
-
 pub(super) fn scatter_left_sector_blocks<D, M>(
     left_space: &DynamicFusionMapSpace,
     left_data: &mut [D],
@@ -1919,7 +1832,6 @@ where
     }
     Ok(())
 }
-
 
 pub(super) fn scatter_right_sector_blocks<D, M>(
     right_space: &DynamicFusionMapSpace,
@@ -1962,7 +1874,6 @@ where
     Ok(())
 }
 
-
 pub(super) fn reorder_columns_in_place<D: Copy>(
     vectors: &mut [D],
     n: usize,
@@ -1992,7 +1903,6 @@ pub(super) fn reorder_columns_in_place<D: Copy>(
     }
 }
 
-
 #[cfg(test)]
 pub(crate) fn reorder_columns_in_place_for_test<D: Copy>(
     vectors: &mut [D],
@@ -2003,7 +1913,6 @@ pub(crate) fn reorder_columns_in_place_for_test<D: Copy>(
 ) {
     reorder_columns_in_place(vectors, n, order, visited, column_scratch);
 }
-
 
 /// The test probes follow the scope body: it may run on a backend worker
 /// thread, and the probes are thread-local so that parallel tests stay apart.
@@ -2017,17 +1926,16 @@ macro_rules! test_probes {
         }
 
         impl TestProbes {
-            fn take() -> Self {
+            pub(super) fn take() -> Self {
                 Self { $($field: $key.take(),)* }
             }
 
-            fn put(self) {
+            pub(super) fn put(self) {
                 $($key.set(self.$field);)*
             }
         }
     };
 }
-
 
 #[cfg(test)]
 test_probes! {
@@ -2050,7 +1958,6 @@ test_probes! {
     placement_index: PLACEMENT_INDEX_PROBE: PlacementIndexProbe,
     scatter_visits: SCATTER_VISIT_PROBE: ScatterVisitProbe,
 }
-
 
 /// Runs one streaming per-block factorization loop inside a single executor
 /// linear-algebra scope: the backend admits the call once, while the loop
@@ -2097,7 +2004,6 @@ where
     })
 }
 
-
 pub(super) fn factorize_col_major_batch<E, D>(
     dense: &mut E,
     op: DenseFactorization,
@@ -2140,7 +2046,6 @@ where
     Ok(outputs)
 }
 
-
 pub(super) fn compact_factor_output_owned<D: FactorScalar>(
     tensor: DenseTensor,
     expected_shape: &[usize],
@@ -2177,7 +2082,6 @@ pub(super) fn compact_factor_output_owned<D: FactorScalar>(
     }
     D::dense_into_vec(tensor).map_err(OperationError::Dense)
 }
-
 
 pub(super) fn compact_real_spectrum_owned<D: FactorScalar>(
     tensor: DenseTensor,
@@ -2216,8 +2120,10 @@ pub(super) fn compact_real_spectrum_owned<D: FactorScalar>(
     Ok(spectrum)
 }
 
-
-pub(super) fn concat_compact_factor_regions<D>(regions: Vec<Option<Vec<D>>>, required_len: usize) -> Vec<D> {
+pub(super) fn concat_compact_factor_regions<D>(
+    regions: Vec<Option<Vec<D>>>,
+    required_len: usize,
+) -> Vec<D> {
     #[cfg(test)]
     let first = regions
         .iter()
@@ -2234,15 +2140,16 @@ pub(super) fn concat_compact_factor_regions<D>(regions: Vec<Option<Vec<D>>>, req
     output
 }
 
-
-pub(super) fn concat_owned_factor_regions<D>(regions: Vec<Option<Vec<D>>>, required_len: usize) -> Vec<D> {
+pub(super) fn concat_owned_factor_regions<D>(
+    regions: Vec<Option<Vec<D>>>,
+    required_len: usize,
+) -> Vec<D> {
     let mut output = None;
     for region in regions.into_iter().flatten() {
         append_owned_factor(&mut output, region, required_len);
     }
     output.unwrap_or_default()
 }
-
 
 pub(super) fn copy_col_major_strided<D: Copy>(
     source: &[D],
@@ -2260,7 +2167,6 @@ pub(super) fn copy_col_major_strided<D: Copy>(
     }
 }
 
-
 pub(super) fn advance_outer_index(index: &mut [usize], shape: &[usize]) {
     for axis in 1..shape.len() {
         index[axis] += 1;
@@ -2270,7 +2176,6 @@ pub(super) fn advance_outer_index(index: &mut [usize], shape: &[usize]) {
         index[axis] = 0;
     }
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn copy_tensor_block_to_matrix<D: Copy>(
@@ -2322,7 +2227,6 @@ pub(super) fn copy_tensor_block_to_matrix<D: Copy>(
     }
 }
 
-
 pub(super) fn copy_mapped_to_strided_diagonal<D, V, F>(
     data: &mut [D],
     offset: usize,
@@ -2337,7 +2241,6 @@ pub(super) fn copy_mapped_to_strided_diagonal<D, V, F>(
         data[offset + position * diagonal_stride] = to_scalar(value);
     }
 }
-
 
 /// Copies a dense column-major matrix region into one fusion-tree subblock.
 ///
@@ -2412,7 +2315,6 @@ pub(super) fn scatter_matrix_block<D: Copy>(
     }
 }
 
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn scatter_identity_matrix_block<D: FactorScalar>(
     data: &mut [D],
@@ -2449,19 +2351,18 @@ pub(super) fn scatter_identity_matrix_block<D: FactorScalar>(
     Ok(())
 }
 
-
 pub(super) fn coupled_of(tree: &FusionTreeKey) -> SectorId {
     tree.coupled()
 }
 
-
-pub(super) fn matricization_map<M: SectorGeometry>(matricizations: &[M]) -> FxHashMap<SectorId, &M> {
+pub(super) fn matricization_map<M: SectorGeometry>(
+    matricizations: &[M],
+) -> FxHashMap<SectorId, &M> {
     matricizations
         .iter()
         .map(|matrix| (matrix.sector(), matrix))
         .collect()
 }
-
 
 pub(super) fn matricization_of<'a, M>(
     matricizations: &FxHashMap<SectorId, &'a M>,
@@ -2475,7 +2376,6 @@ pub(super) fn matricization_of<'a, M>(
         })
 }
 
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct PlacementIndexProbe {
@@ -2487,10 +2387,9 @@ pub(crate) struct PlacementIndexProbe {
     pub lookups: usize,
 }
 
-
 #[cfg(test)]
 thread_local! {
-    static PLACEMENT_INDEX_PROBE: Cell<PlacementIndexProbe> = Cell::default();
+    pub(super) static PLACEMENT_INDEX_PROBE: Cell<PlacementIndexProbe> = Cell::default();
 }
 
 #[cfg(test)]
@@ -2498,12 +2397,10 @@ pub(crate) fn reset_placement_index_probe() {
     PLACEMENT_INDEX_PROBE.set(PlacementIndexProbe::default());
 }
 
-
 #[cfg(test)]
 pub(crate) fn placement_index_probe() -> PlacementIndexProbe {
     PLACEMENT_INDEX_PROBE.get()
 }
-
 
 /// Call-local first-match index of source trees by `(sector, side, key)`,
 /// built once per publication call over every matricization.
@@ -2520,12 +2417,11 @@ pub(crate) fn placement_index_probe() -> PlacementIndexProbe {
 /// matricization per coupled sector and region admission rejects duplicate
 /// sectors, so the sector already identifies the matricization.
 pub(super) struct PlacementIndex<'a> {
-    by_tree: FxHashMap<(SectorId, FactorSide, &'a FusionTreeKey), (usize, &'a [usize])>,
+    pub(super) by_tree: FxHashMap<(SectorId, FactorSide, &'a FusionTreeKey), (usize, &'a [usize])>,
 }
 
-
 impl<'a> PlacementIndex<'a> {
-    fn new<M: SectorGeometry>(matricizations: &'a [M], sides: &[FactorSide]) -> Self {
+    pub(super) fn new<M: SectorGeometry>(matricizations: &'a [M], sides: &[FactorSide]) -> Self {
         debug_assert_eq!(
             matricizations
                 .iter()
@@ -2574,7 +2470,7 @@ impl<'a> PlacementIndex<'a> {
         Self { by_tree }
     }
 
-    fn placement(
+    pub(super) fn placement(
         &self,
         sector: SectorId,
         side: FactorSide,
@@ -2597,7 +2493,6 @@ impl<'a> PlacementIndex<'a> {
     }
 }
 
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ScatterVisitProbe {
@@ -2612,10 +2507,9 @@ pub(crate) struct ScatterVisitProbe {
     pub right_visits: usize,
 }
 
-
 #[cfg(test)]
 thread_local! {
-    static SCATTER_VISIT_PROBE: Cell<ScatterVisitProbe> = Cell::default();
+    pub(super) static SCATTER_VISIT_PROBE: Cell<ScatterVisitProbe> = Cell::default();
 }
 
 #[cfg(test)]
@@ -2623,12 +2517,10 @@ pub(crate) fn reset_scatter_visit_probe() {
     SCATTER_VISIT_PROBE.set(ScatterVisitProbe::default());
 }
 
-
 #[cfg(test)]
 pub(crate) fn scatter_visit_probe() -> ScatterVisitProbe {
     SCATTER_VISIT_PROBE.get()
 }
-
 
 #[cfg(test)]
 pub(super) fn record_scatter_visit(side: FactorSide) {
@@ -2641,7 +2533,6 @@ pub(super) fn record_scatter_visit(side: FactorSide) {
         probe.set(value);
     });
 }
-
 
 /// Output block indices of one factor side grouped by the coupled sector of
 /// that side's tree, in structure order within a sector. Built once per
@@ -2662,12 +2553,14 @@ pub(super) fn record_scatter_visit(side: FactorSide) {
 pub(super) struct SectorBlockGroups {
     /// `(coupled sector, block index)` sorted by sector; the stable sort keeps
     /// ascending structure order within a sector.
-    entries: Vec<(SectorId, usize)>,
+    pub(super) entries: Vec<(SectorId, usize)>,
 }
 
-
 impl SectorBlockGroups {
-    fn new(structure: &BlockStructure, side: FactorSide) -> Result<Self, OperationError> {
+    pub(super) fn new(
+        structure: &BlockStructure,
+        side: FactorSide,
+    ) -> Result<Self, OperationError> {
         let mut entries = Vec::with_capacity(structure.block_count());
         for index in 0..structure.block_count() {
             let block = structure
@@ -2701,7 +2594,7 @@ impl SectorBlockGroups {
         Ok(Self { entries })
     }
 
-    fn blocks(&self, sector: SectorId) -> impl Iterator<Item = usize> + '_ {
+    pub(super) fn blocks(&self, sector: SectorId) -> impl Iterator<Item = usize> + '_ {
         let start = self.entries.partition_point(|&(s, _)| s < sector);
         self.entries[start..]
             .iter()
@@ -2710,8 +2603,10 @@ impl SectorBlockGroups {
     }
 }
 
-
-pub(super) fn validate_dense_shape(actual: &[usize], expected: &[usize]) -> Result<(), OperationError> {
+pub(super) fn validate_dense_shape(
+    actual: &[usize],
+    expected: &[usize],
+) -> Result<(), OperationError> {
     if actual != expected {
         return Err(OperationError::ShapeMismatch {
             dst: expected.to_vec(),
@@ -2720,7 +2615,6 @@ pub(super) fn validate_dense_shape(actual: &[usize], expected: &[usize]) -> Resu
     }
     Ok(())
 }
-
 
 pub(super) fn data_region<'a, D>(
     data: &'a [D],
@@ -2733,7 +2627,6 @@ pub(super) fn data_region<'a, D>(
         })
 }
 
-
 pub(super) fn checked_sector_regions(
     structure: &BlockStructure,
     nout: usize,
@@ -2742,7 +2635,6 @@ pub(super) fn checked_sector_regions(
         .coupled_sector_regions(nout)
         .map_err(OperationError::from_core_preserving_context)
 }
-
 
 pub(super) fn generic_value_matricizations<'a, D>(
     structure: &BlockStructure,
@@ -2759,7 +2651,6 @@ where
     }
     Ok(matricizations)
 }
-
 
 pub(super) fn generic_input_matricizations<'a, D>(
     structure: &BlockStructure,
@@ -2783,7 +2674,6 @@ where
     })
 }
 
-
 /// Multiplicity-free sibling of [`generic_input_matricizations`]; the same
 /// region admission applies because both packers stack sectors and trees in
 /// first-appearance order.
@@ -2801,7 +2691,6 @@ where
     })
 }
 
-
 /// The single admission authority for lending input regions to the
 /// numerical stages instead of packing them.
 pub(super) fn input_regions(
@@ -2815,11 +2704,10 @@ pub(super) fn input_regions(
     checked_sector_regions(structure, nout)
 }
 
-
 #[cfg(test)]
 thread_local! {
-    static FORCE_INPUT_PACK: Cell<bool> = const { Cell::new(false) };
-    static INPUT_PACK_BYTES: Cell<usize> = const { Cell::new(0) };
+    pub(super) static FORCE_INPUT_PACK: Cell<bool> = const { Cell::new(false) };
+    pub(super) static INPUT_PACK_BYTES: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Runs `f` with region admission disabled, so every input packs.
@@ -2831,19 +2719,16 @@ pub(crate) fn with_forced_input_pack<T>(f: impl FnOnce() -> T) -> T {
     result
 }
 
-
 #[cfg(test)]
 pub(crate) fn reset_input_pack_bytes() {
     INPUT_PACK_BYTES.with(|bytes| bytes.set(0));
 }
-
 
 /// Bytes allocated by `sector_matricizations{,_generic}` on this thread.
 #[cfg(test)]
 pub(crate) fn input_pack_bytes() -> usize {
     INPUT_PACK_BYTES.with(Cell::get)
 }
-
 
 #[cfg(test)]
 pub(super) fn record_input_pack_bytes<D>(matricizations: &[SectorMatricization<D>]) {
@@ -2853,7 +2738,6 @@ pub(super) fn record_input_pack_bytes<D>(matricizations: &[SectorMatricization<D
         .sum::<usize>();
     INPUT_PACK_BYTES.with(|total| total.set(total.get() + bytes));
 }
-
 
 pub(super) fn value_matricizations<'a, D>(
     structure: &BlockStructure,
@@ -2870,7 +2754,6 @@ where
     }
     Ok(matricizations)
 }
-
 
 /// Packs every coupled sector of the source data into its dense column-major
 /// matricization, independent of the storage layout.
@@ -2980,7 +2863,6 @@ where
     Ok(matricizations)
 }
 
-
 // ============================================================================
 // Stage B3c-2: Generic-fusion (SU(N)) siblings.
 //
@@ -3008,7 +2890,6 @@ where
 pub(super) fn coupled_of_generic(tree: &FusionTreeKey) -> SectorId {
     tree.coupled()
 }
-
 
 /// Fallible coupled-sector reduced dimensions for checked Generic providers.
 /// This is a structural dynamic program: it never expands dense tensor data or
@@ -3053,7 +2934,6 @@ where
     Ok(dimensions)
 }
 
-
 /// Generic sibling of [`sector_matricizations`]: identical two-pass stacking
 /// (vertex-labelled trees are distinct keys, so OM trees get distinct rows /
 /// columns of the coupled block, exactly TensorKit's `block(t, c)` layout).
@@ -3067,8 +2947,8 @@ where
 {
     #[derive(Clone, Copy, Default)]
     struct TreePlacement {
-        row_offset: Option<usize>,
-        col_offset: Option<usize>,
+        pub(super) row_offset: Option<usize>,
+        pub(super) col_offset: Option<usize>,
     }
 
     let mut matricizations: Vec<SectorMatricization<D>> = Vec::new();
@@ -3171,7 +3051,6 @@ where
     Ok(matricizations)
 }
 
-
 /// Row `i` and column `i` of every sector name the same tree state (tree key
 /// including outer-multiplicity vertices, offset and shape), so the block is
 /// an endomorphism matrix in one basis and its spectrum is basis-invariant.
@@ -3196,13 +3075,12 @@ pub(super) fn endomorphism_tree_stacking_is_identical<M: SectorGeometry>(matrice
     })
 }
 
-
 #[doc(hidden)]
 pub const EIGH_FULL_STACKING: &str =
     "eigh_full requires identical endomorphism row/column fusion-tree stacking";
 
-pub(super) const EXP_STACKING: &str = "exp requires identical endomorphism row/column fusion-tree stacking";
-
+pub(super) const EXP_STACKING: &str =
+    "exp requires identical endomorphism row/column fusion-tree stacking";
 
 /// [`validate_endomorphism_tree_stacking`] over canonical coupled-sector
 /// regions, for device paths outside this crate. `message` names the
@@ -3214,7 +3092,6 @@ pub fn validate_endomorphism_region_stacking(
 ) -> Result<(), OperationError> {
     validate_endomorphism_tree_stacking(regions, message)
 }
-
 
 /// `message` names the refusing operation.
 pub(super) fn validate_endomorphism_tree_stacking<M: SectorGeometry>(
@@ -3228,7 +3105,6 @@ pub(super) fn validate_endomorphism_tree_stacking<M: SectorGeometry>(
     }
 }
 
-
 #[cfg(test)]
 pub(super) fn record_generic_pair_ordered_key_validation() {
     GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
@@ -3238,22 +3114,19 @@ pub(super) fn record_generic_pair_ordered_key_validation() {
     });
 }
 
-
 #[cfg(not(test))]
 pub(super) fn record_generic_pair_ordered_key_validation() {}
 
-
 pub(super) struct FactorTreeCursor<'a, M> {
-    matricizations: &'a [M],
-    ranks: &'a [SectorRank],
-    matrix: usize,
-    tree: usize,
-    valid: bool,
+    pub(super) matricizations: &'a [M],
+    pub(super) ranks: &'a [SectorRank],
+    pub(super) matrix: usize,
+    pub(super) tree: usize,
+    pub(super) valid: bool,
 }
 
-
 impl<'a, M: SectorGeometry> FactorTreeCursor<'a, M> {
-    fn new(matricizations: &'a [M], ranks: &'a [SectorRank]) -> Self {
+    pub(super) fn new(matricizations: &'a [M], ranks: &'a [SectorRank]) -> Self {
         let sectors_are_canonical = matricizations
             .windows(2)
             .all(|pair| pair[0].sector() < pair[1].sector());
@@ -3266,7 +3139,7 @@ impl<'a, M: SectorGeometry> FactorTreeCursor<'a, M> {
         }
     }
 
-    fn next(&mut self, side: FactorSide) -> Option<(SectorId, &'a FusionTreeKey)> {
+    pub(super) fn next(&mut self, side: FactorSide) -> Option<(SectorId, &'a FusionTreeKey)> {
         while let (Some(matrix), Some(rank)) = (
             self.matricizations.get(self.matrix),
             self.ranks.get(self.matrix),
@@ -3284,7 +3157,7 @@ impl<'a, M: SectorGeometry> FactorTreeCursor<'a, M> {
         None
     }
 
-    fn matches(&mut self, side: FactorSide, key: &FusionTreeKey) -> bool {
+    pub(super) fn matches(&mut self, side: FactorSide, key: &FusionTreeKey) -> bool {
         record_generic_pair_ordered_key_validation();
         if !self.valid {
             return false;
@@ -3293,11 +3166,10 @@ impl<'a, M: SectorGeometry> FactorTreeCursor<'a, M> {
             .is_some_and(|(sector, tree)| coupled_of_generic(key) == sector && key == tree)
     }
 
-    fn is_exhausted(&mut self, side: FactorSide) -> bool {
+    pub(super) fn is_exhausted(&mut self, side: FactorSide) -> bool {
         self.next(side).is_none() && self.valid
     }
 }
-
 
 #[cfg(test)]
 pub(super) fn record_generic_pair_fallback_lookup(side: FactorSide) {
@@ -3311,17 +3183,17 @@ pub(super) fn record_generic_pair_fallback_lookup(side: FactorSide) {
     });
 }
 
-
 #[cfg(not(test))]
 pub(super) fn record_generic_pair_fallback_lookup(_side: FactorSide) {}
-
 
 /// Staged keys of a prepared checked layout in enumeration order. The
 /// prepared structure lists its blocks exactly as the enumeration produced
 /// its keys and `commit` interns them without reordering, so this sequence
 /// is the key order of the committed space; the checked builders validate
 /// and commit from one enumeration instead of enumerating keys separately.
-pub(super) fn staged_fusion_tree_keys(sector: &SectorStructure) -> impl Iterator<Item = &FusionTreePairKey> {
+pub(super) fn staged_fusion_tree_keys(
+    sector: &SectorStructure,
+) -> impl Iterator<Item = &FusionTreePairKey> {
     sector
         .blocks()
         .iter()
@@ -3330,7 +3202,6 @@ pub(super) fn staged_fusion_tree_keys(sector: &SectorStructure) -> impl Iterator
             _ => None,
         })
 }
-
 
 pub(super) fn validate_generic_factor_keys<'a, 'k, M: SectorGeometry>(
     keys: impl IntoIterator<Item = &'k FusionTreePairKey>,
@@ -3373,13 +3244,11 @@ pub(super) fn validate_generic_factor_keys<'a, 'k, M: SectorGeometry>(
     Ok(ordered)
 }
 
-
 pub(super) fn checked_extent(shape: &[usize]) -> Option<usize> {
     shape
         .iter()
         .try_fold(1usize, |extent, &dim| extent.checked_mul(dim))
 }
-
 
 /// `keys` carries the separately enumerated key list of the unchecked paired
 /// route for the admitted-key equality against `structure`; the checked route
@@ -3425,7 +3294,6 @@ pub(super) fn factor_output_is_canonical<D, M: SectorGeometry>(
     }
     block_index == structure.block_count() && output_offset == required_len
 }
-
 
 /// Proves that one sector's selected factor (`factor_len` elements, column
 /// major with leading dimension `factor_leading`, bond extent `bond`) already
@@ -3505,7 +3373,6 @@ pub(super) fn sector_factor_output_is_canonical<M: SectorGeometry>(
     output_offset.checked_add(factor_len)
 }
 
-
 /// Proves that `block` holds the side-tree span `[tree_offset, tree_offset +
 /// |tree_shape|)` of a column-major sector factor starting at `output_offset`
 /// (left `a x bond`, right `bond x a`, `a = source_extent`).
@@ -3558,7 +3425,6 @@ pub(super) fn factor_block_is_canonical(
     Some(())
 }
 
-
 /// Identity-completed sector (bond states but no source matricization): its
 /// output blocks, in output order, must tile a column-major `bond x bond`
 /// identity at `output_offset`, with the output tree order as the side basis
@@ -3610,16 +3476,14 @@ pub(super) fn identity_sector_output_is_canonical(
     }
 }
 
-
 /// A column-major `bond x bond` identity for a sector without a source
 /// matricization (MatrixAlgebraKit `one!` on a zero-extent input block),
 /// published after the first `pairs_before` pairs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct IdentitySegment {
-    pairs_before: usize,
-    bond: usize,
+    pub(super) pairs_before: usize,
+    pub(super) bond: usize,
 }
-
 
 /// One-sided sibling of [`factor_output_is_canonical`]: walks the ascending
 /// union of source sectors and admitted bond sectors. A populated sector must
@@ -3722,7 +3586,6 @@ pub(super) fn one_sided_factor_output_plan<D, M: SectorGeometry>(
     Some(identities)
 }
 
-
 /// Publishes the plan proved by [`one_sided_factor_output_plan`]: the
 /// selected side of each pair is moved or appended and each identity is
 /// written once in place, so no output element is written twice. The
@@ -3778,7 +3641,6 @@ pub(super) fn take_one_sided_factors<D: FactorScalar>(
     data
 }
 
-
 #[cfg(test)]
 pub(super) fn record_one_sided_fallback_publication() {
     ONE_SIDED_PUBLICATION_PROBE.with(|probe| {
@@ -3788,10 +3650,8 @@ pub(super) fn record_one_sided_fallback_publication() {
     });
 }
 
-
 #[cfg(not(test))]
 pub(super) fn record_one_sided_fallback_publication() {}
-
 
 #[cfg(test)]
 pub(super) fn record_generic_pair_output_block_visit() {
@@ -3802,10 +3662,8 @@ pub(super) fn record_generic_pair_output_block_visit() {
     });
 }
 
-
 #[cfg(not(test))]
 pub(super) fn record_generic_pair_output_block_visit() {}
-
 
 #[cfg(test)]
 pub(super) fn record_generic_pair_appended(left: usize, right: usize) {
@@ -3817,10 +3675,8 @@ pub(super) fn record_generic_pair_appended(left: usize, right: usize) {
     });
 }
 
-
 #[cfg(not(test))]
 pub(super) fn record_generic_pair_appended(_left: usize, _right: usize) {}
-
 
 /// Appends `factor` to `output`, letting the first nonempty factor keep its
 /// allocation (grown once to `required_len`). Returns the element count that
@@ -3844,7 +3700,6 @@ pub(super) fn append_owned_factor<D>(
         0
     }
 }
-
 
 pub(super) fn publish_generic_factor_pairs<D>(
     pairs: Vec<FactorPair<D>>,
@@ -3884,7 +3739,6 @@ pub(super) fn publish_generic_factor_pairs<D>(
     (left_data, right_data)
 }
 
-
 /// Builds provider-bound left and right factor spaces for a generic rule.
 pub(super) fn build_left_right_bound_spaces_generic<R, M>(
     provider: &Arc<R>,
@@ -3916,7 +3770,6 @@ where
     )?;
     Ok((left, right))
 }
-
 
 pub(super) fn build_left_right_bound_spaces_and_keys_generic<R, M>(
     provider: &Arc<R>,
@@ -3957,7 +3810,6 @@ where
     })
 }
 
-
 pub(super) fn build_left_bound_space_generic<'a, R, M>(
     provider: &Arc<R>,
     homspace: &FusionTreeHomSpace,
@@ -3989,7 +3841,6 @@ where
     Ok((left, left_keys, ordered))
 }
 
-
 pub(super) fn build_right_bound_space_generic<'a, R, M>(
     provider: &Arc<R>,
     homspace: &FusionTreeHomSpace,
@@ -4020,7 +3871,6 @@ where
         BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::clone(provider), right_hom)?;
     Ok((right, right_keys, ordered))
 }
-
 
 pub(super) fn build_left_right_bound_pair_generic<R, D, M>(
     provider: &Arc<R>,
@@ -4112,7 +3962,6 @@ where
         BoundDynFactor::from_bound(spaces.right, right_data, 1, right_nin)?,
     ))
 }
-
 
 pub(super) fn build_left_right_bound_pair_generic_checked<R, D, M>(
     provider: &Arc<R>,
@@ -4261,7 +4110,6 @@ where
     ))
 }
 
-
 pub(super) fn build_checked_pair_from_input<R, D>(
     provider: &Arc<R>,
     homspace: &FusionTreeHomSpace,
@@ -4281,7 +4129,6 @@ where
         }
     }
 }
-
 
 /// Checked generic factor materialization with identity completion for sectors
 /// absent from the source matricization (the full-factor contract).
@@ -4465,7 +4312,6 @@ where
     BoundDynFactor::from_bound(space, data, nout, nin).map_err(CheckedGenericFactorPlanError::from)
 }
 
-
 /// Generic sibling of [`scatter_left_sector_blocks`].
 pub(super) fn scatter_left_sector_blocks_generic<D, M>(
     left_space: &DynamicFusionMapSpace,
@@ -4516,7 +4362,6 @@ where
     Ok(())
 }
 
-
 /// Generic sibling of [`scatter_right_sector_blocks`].
 pub(super) fn scatter_right_sector_blocks_generic<D, M>(
     right_space: &DynamicFusionMapSpace,
@@ -4566,7 +4411,6 @@ where
     }
     Ok(())
 }
-
 
 /// Why not the paired builder: its bond holds only sectors that carry a
 /// factor pair, so a side-only sector would be dropped from the full

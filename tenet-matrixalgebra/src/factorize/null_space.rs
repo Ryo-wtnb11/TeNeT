@@ -1,5 +1,5 @@
 use super::*;
-
+use crate::with_input_geometry;
 
 /// Left null space `N : codomain <- W` (MatrixAlgebraKit `left_null`).
 ///
@@ -19,7 +19,6 @@ where
     let out = left_null_dyn(dense, &input.dynamic())?;
     typed_from_bound_factor(out)
 }
-
 
 /// Provider-bound dynamic-rank [`left_null`].
 pub fn left_null_dyn<E, R, D>(
@@ -76,7 +75,6 @@ where
     ))
 }
 
-
 /// Right null space `N : W <- domain` (MatrixAlgebraKit `right_null`).
 ///
 /// Each sector uses its compact SVD and treats `sigma` as nonzero exactly when
@@ -95,7 +93,6 @@ where
     let out = right_null_dyn(dense, &input.dynamic())?;
     typed_from_bound_factor(out)
 }
-
 
 /// Provider-bound dynamic-rank [`right_null`].
 pub fn right_null_dyn<E, R, D>(
@@ -156,7 +153,6 @@ where
         FactorSide::Right,
     ))
 }
-
 
 /// Checked-Generic numerical left null space.
 ///
@@ -226,7 +222,6 @@ where
     ))
 }
 
-
 /// Checked-Generic numerical right null space; see
 /// [`left_null_dyn_checked_generic`] for the transaction boundary.
 #[doc(hidden)]
@@ -291,7 +286,6 @@ where
         FactorSide::Right,
     ))
 }
-
 
 /// Computes the requested compact singular-vector basis and the documented numerical rank.
 pub(super) fn numerical_rank_and_compact_basis<E, D>(

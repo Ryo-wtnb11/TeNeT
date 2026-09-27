@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Left polar decomposition `t = W * P` (MatrixAlgebraKit `left_polar`):
 /// `W` is the isometry `U * Vh` and `P = V * S * Vh` the positive part on
 /// the domain. Every coupled-sector matrix must have at least as many rows as
@@ -34,7 +33,6 @@ where
     })
 }
 
-
 /// Dynamic-rank [`left_polar`].
 pub fn left_polar_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
@@ -53,7 +51,6 @@ where
     left_polar_dyn_reported(dense, context, input, PolarDirection::Left)
         .map(|(w, p)| LeftPolar { w, p })
 }
-
 
 pub(super) fn left_polar_dyn_reported<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
@@ -90,7 +87,6 @@ where
     Ok((isometry, positive))
 }
 
-
 /// Right polar decomposition `t = P * W` (MatrixAlgebraKit `right_polar`):
 /// `P = U * S * U^H` is the positive part on the codomain and `W = U * Vh`.
 /// Every coupled-sector matrix must have at least as many columns as rows;
@@ -124,7 +120,6 @@ where
     })
 }
 
-
 /// Dynamic-rank [`right_polar`].
 pub fn right_polar_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
@@ -143,7 +138,6 @@ where
     right_polar_dyn_reported(dense, context, input, PolarDirection::Right)
         .map(|(p, wh)| RightPolar { p, wh })
 }
-
 
 pub(super) fn right_polar_dyn_reported<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
@@ -181,7 +175,6 @@ where
     Ok((positive, isometry))
 }
 
-
 /// Left polar factors of an adjoint view, executed on its owned parent.
 #[doc(hidden)]
 pub fn left_polar_adjoint_parent_dyn<E, RuleKey, BT, BC, R, D>(
@@ -205,7 +198,6 @@ where
         p: positive,
     })
 }
-
 
 /// Right polar factors of an adjoint view, executed on its owned parent.
 #[doc(hidden)]
@@ -231,14 +223,12 @@ where
     })
 }
 
-
 #[derive(Clone, Copy)]
 pub(super) struct PolarRegionRoute {
-    source: usize,
-    w: usize,
-    p: usize,
+    pub(super) source: usize,
+    pub(super) w: usize,
+    pub(super) p: usize,
 }
-
 
 pub(super) fn compile_polar_region_routes(
     source: &[CoupledSectorRegion],
@@ -301,7 +291,6 @@ pub(super) fn compile_polar_region_routes(
     Ok(routes)
 }
 
-
 pub(super) fn validate_checked_polar_direction<R>(
     input: &BoundDynamicTensorRef<'_, R, impl DenseBlockScalar>,
     direction: PolarDirection,
@@ -336,7 +325,6 @@ where
     Ok(())
 }
 
-
 pub(super) fn project_hermitian_col_major<D: FactorScalar>(matrix: &mut [D], n: usize) {
     let half = D::from_real(0.5);
     for col in 0..n {
@@ -348,7 +336,6 @@ pub(super) fn project_hermitian_col_major<D: FactorScalar>(matrix: &mut [D], n: 
         }
     }
 }
-
 
 /// Writes `W = U Vh` into `w` and `P` into `p`, both column-major output
 /// regions (MatrixAlgebraKit `left_polar!`/`right_polar!` via SVD): the GEMMs
@@ -460,7 +447,6 @@ where
     Ok(())
 }
 
-
 pub(super) fn polar_dyn_checked_generic_reported<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -562,7 +548,6 @@ where
     Ok((w, p))
 }
 
-
 #[doc(hidden)]
 pub fn left_polar_dyn_checked_generic<E, R, D>(
     dense: &mut E,
@@ -576,7 +561,6 @@ where
     polar_dyn_checked_generic_reported(dense, input, PolarDirection::Left, PolarDirection::Left)
         .map(|(w, p)| LeftPolar { w, p })
 }
-
 
 #[doc(hidden)]
 pub fn right_polar_dyn_checked_generic<E, R, D>(
@@ -596,7 +580,6 @@ where
     )?;
     Ok(RightPolar { p, wh })
 }
-
 
 /// Left polar of an adjoint view, as the *parent's* right polar factors: the
 /// view's left polar is `w = wh^H` and the returned `p`.
@@ -618,7 +601,6 @@ where
     )?;
     Ok(RightPolar { p, wh })
 }
-
 
 /// Right polar of an adjoint view, as the *parent's* left polar factors: the
 /// view's right polar is the returned `p` and `wh = w^H`.

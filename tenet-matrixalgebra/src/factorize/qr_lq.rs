@@ -1,5 +1,5 @@
 use super::*;
-
+use crate::with_input_geometry;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -12,18 +12,15 @@ pub(crate) struct CompactQrCopyProbe {
     pub owned_output_owner_reused: usize,
 }
 
-
 #[cfg(test)]
 pub(crate) fn reset_compact_qr_copy_probe() {
     COMPACT_QR_COPY_PROBE.with(|probe| probe.set(CompactQrCopyProbe::default()));
 }
 
-
 #[cfg(test)]
 pub(crate) fn compact_qr_copy_probe() -> CompactQrCopyProbe {
     COMPACT_QR_COPY_PROBE.with(Cell::get)
 }
-
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -41,18 +38,15 @@ pub(crate) struct CompactLqCopyProbe {
     pub output_prefill_bytes: usize,
 }
 
-
 #[cfg(test)]
 pub(crate) fn reset_compact_lq_copy_probe() {
     COMPACT_LQ_COPY_PROBE.with(|probe| probe.set(CompactLqCopyProbe::default()));
 }
 
-
 #[cfg(test)]
 pub(crate) fn compact_lq_copy_probe() -> CompactLqCopyProbe {
     COMPACT_LQ_COPY_PROBE.with(Cell::get)
 }
-
 
 #[cfg(test)]
 pub(super) fn record_compact_qr_input_pack<D>(matricizations: &[SectorMatricization<D>]) {
@@ -67,12 +61,10 @@ pub(super) fn record_compact_qr_input_pack<D>(matricizations: &[SectorMatricizat
     });
 }
 
-
 #[cfg(test)]
 pub(super) fn record_compact_qr_output_scatter<D>(elements: usize) {
     record_compact_qr_output_scatter_work::<D>(1, elements);
 }
-
 
 #[cfg(test)]
 pub(super) fn record_compact_qr_output_scatter_work<D>(calls: usize, elements: usize) {
@@ -83,7 +75,6 @@ pub(super) fn record_compact_qr_output_scatter_work<D>(calls: usize, elements: u
         probe.set(current);
     });
 }
-
 
 #[cfg(test)]
 pub(super) fn record_compact_lq_input_pack<D>(matricizations: &[SectorMatricization<D>]) {
@@ -98,12 +89,10 @@ pub(super) fn record_compact_lq_input_pack<D>(matricizations: &[SectorMatricizat
     });
 }
 
-
 #[cfg(test)]
 pub(super) fn record_compact_lq_output_scatter<D>(elements: usize) {
     record_compact_lq_output_scatter_work::<D>(1, elements);
 }
-
 
 #[cfg(test)]
 pub(super) fn record_compact_lq_output_scatter_work<D>(calls: usize, elements: usize) {
@@ -115,7 +104,6 @@ pub(super) fn record_compact_lq_output_scatter_work<D>(calls: usize, elements: u
     });
 }
 
-
 #[cfg(test)]
 pub(super) fn record_compact_lq_scratch<D>(elements: usize) {
     COMPACT_LQ_COPY_PROBE.with(|probe| {
@@ -125,7 +113,6 @@ pub(super) fn record_compact_lq_scratch<D>(elements: usize) {
         probe.set(current);
     });
 }
-
 
 #[cfg(test)]
 pub(super) fn record_compact_lq_adjoint_fill<D>(elements: usize) {
@@ -137,7 +124,6 @@ pub(super) fn record_compact_lq_adjoint_fill<D>(elements: usize) {
     });
 }
 
-
 #[cfg(test)]
 pub(super) fn record_compact_lq_output_prefill<D>(elements: usize) {
     COMPACT_LQ_COPY_PROBE.with(|probe| {
@@ -146,7 +132,6 @@ pub(super) fn record_compact_lq_output_prefill<D>(elements: usize) {
         probe.set(current);
     });
 }
-
 
 #[cfg(test)]
 pub(super) fn record_compact_lq_final_adjoint_copy<D>(elements: usize) {
@@ -157,7 +142,6 @@ pub(super) fn record_compact_lq_final_adjoint_copy<D>(elements: usize) {
         probe.set(current);
     });
 }
-
 
 pub(super) fn full_qr_numerical_stage<E, D>(
     dense: &mut E,
@@ -206,22 +190,31 @@ where
     Ok((q, r))
 }
 
-
-pub(super) fn scale_col<D: FactorScalar>(data: &mut [D], rows: usize, leading: usize, col: usize, phase: D) {
+pub(super) fn scale_col<D: FactorScalar>(
+    data: &mut [D],
+    rows: usize,
+    leading: usize,
+    col: usize,
+    phase: D,
+) {
     for row in 0..rows {
         let index = row + leading * col;
         data[index] = data[index] * phase;
     }
 }
 
-
-pub(super) fn scale_row<D: FactorScalar>(data: &mut [D], cols: usize, leading: usize, row: usize, phase: D) {
+pub(super) fn scale_row<D: FactorScalar>(
+    data: &mut [D],
+    cols: usize,
+    leading: usize,
+    row: usize,
+    phase: D,
+) {
     for col in 0..cols {
         let index = row + leading * col;
         data[index] = data[index] * phase;
     }
 }
-
 
 /// Full QR `t = Q * R` (MatrixAlgebraKit `qr_full`): per sector `Q` is the
 /// square `m x m` unitary and `R` the upper-trapezoidal `m x n`, obtained
@@ -246,7 +239,6 @@ where
         r: typed_from_bound_factor(r)?,
     })
 }
-
 
 /// Provider-bound dynamic-rank [`qr_full`].
 pub fn qr_full_dyn<E, R, D>(
@@ -300,7 +292,6 @@ where
     }))
 }
 
-
 /// Full LQ `t = L * Q` (MatrixAlgebraKit `lq_full`): per sector `L` is the
 /// lower-trapezoidal `m x n` and `Q` the square `n x n` unitary, via the full
 /// QR of the adjoint sector matrices.
@@ -324,7 +315,6 @@ where
         q: typed_from_bound_factor(q)?,
     })
 }
-
 
 /// Provider-bound dynamic-rank [`lq_full`].
 pub fn lq_full_dyn<E, R, D>(
@@ -379,7 +369,6 @@ where
     }))
 }
 
-
 /// Compact QR `t = Q * R` (MatrixAlgebraKit `qr_compact`):
 /// `Q : codomain <- W` has orthonormal columns per coupled sector and
 /// `R : W <- domain` with per-sector bond `min(rows, cols)`. The
@@ -404,7 +393,6 @@ where
         r: typed_from_bound_factor(r)?,
     })
 }
-
 
 /// Provider-bound compact QR used by authority-preserving callers.
 pub fn qr_compact_dyn<E, R, D>(
@@ -457,7 +445,6 @@ where
     build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &mut pairs)
         .map(|(q, r)| Qr { q, r })
 }
-
 
 pub(super) fn qr_compact_direct_regions<E, R, D>(
     dense: &mut E,
@@ -519,7 +506,6 @@ where
     Ok((left, right))
 }
 
-
 /// Compact LQ `t = L * Q` (MatrixAlgebraKit `lq_compact`, via the QR of the
 /// transposed sector matrices): `Q : W <- domain` has orthonormal rows per
 /// coupled sector and `L : codomain <- W`. The positive-diagonal gauge is
@@ -544,7 +530,6 @@ where
         q: typed_from_bound_factor(q)?,
     })
 }
-
 
 /// Provider-bound compact LQ used by authority-preserving callers.
 pub fn lq_compact_dyn<E, R, D>(
@@ -598,7 +583,6 @@ where
     build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &mut pairs)
         .map(|(l, q)| Lq { l, q })
 }
-
 
 pub(super) fn lq_compact_direct_regions<E, R, D>(
     dense: &mut E,
@@ -704,10 +688,9 @@ where
     Ok((left, right))
 }
 
-
 #[cfg(test)]
 thread_local! {
-    static FORCE_LQ_ZEROED_PUBLICATION: Cell<bool> = const { Cell::new(false) };
+    pub(super) static FORCE_LQ_ZEROED_PUBLICATION: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Routes compact LQ through its zero-and-overwrite publication on this
@@ -716,7 +699,6 @@ thread_local! {
 pub(crate) fn force_lq_zeroed_publication_for_test(force: bool) {
     FORCE_LQ_ZEROED_PUBLICATION.with(|cell| cell.set(force));
 }
-
 
 /// [`lq_routes_append_in_storage_order`] after replacing the plan's routes.
 #[cfg(test)]
@@ -731,7 +713,6 @@ pub(crate) fn lq_routes_append_with_routes_for_test(
         plan.right_layout.required_len()?,
     ))
 }
-
 
 /// Whether the nonzero routes of `plan` reach the left and right factor
 /// regions contiguously from offset zero, in route order, and cover
@@ -759,7 +740,6 @@ pub(super) fn lq_routes_append_in_storage_order(
     left_end == left_len && right_end == right_len
 }
 
-
 /// Appends the adjoint of the column-major `rows x cols` matrix `data` to
 /// `output` as a column-major `cols x rows` matrix.
 pub(super) fn extend_adjoint_col_major<D: FactorScalar>(
@@ -781,7 +761,6 @@ pub(super) fn extend_adjoint_col_major<D: FactorScalar>(
     }
 }
 
-
 /// Transposes a column-major `rows x cols` matrix into column-major
 /// `cols x rows`.
 /// Adjoint (conjugate transpose) of a column-major `rows x cols` matrix.
@@ -790,7 +769,6 @@ pub(super) fn adjoint_col_major<D: FactorScalar>(data: &[D], rows: usize, cols: 
     adjoint_col_major_into(data, rows, cols, &mut adjoint);
     adjoint
 }
-
 
 pub(super) fn adjoint_col_major_into<D: FactorScalar>(
     data: &[D],
@@ -806,7 +784,6 @@ pub(super) fn adjoint_col_major_into<D: FactorScalar>(
         }
     }
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn qr_into_workspace<E, D>(
@@ -847,7 +824,6 @@ where
         .map_err(OperationError::Dense)
 }
 
-
 /// Compact QR owns both dense outputs, so it can transfer the executor's host
 /// buffers directly. Full QR keeps its caller-owned workspace contract above.
 pub(super) fn compact_qr_owned<E, D>(
@@ -870,7 +846,6 @@ where
     compact_qr_outputs(outputs, rows, cols)
 }
 
-
 /// Compact QR of each column-major `(data, rows, cols)` block, submitted as one
 /// executor batch so the backend admits the whole coupled-sector loop once.
 #[expect(
@@ -892,7 +867,6 @@ where
         .collect()
 }
 
-
 pub(super) fn compact_qr_outputs<D: FactorScalar>(
     mut outputs: Vec<DenseTensor>,
     rows: usize,
@@ -910,7 +884,6 @@ pub(super) fn compact_qr_outputs<D: FactorScalar>(
     let r = compact_factor_output_owned::<D>(outputs.remove(0), &[rank, cols], "qr_into")?;
     Ok((q, r))
 }
-
 
 /// Provider-bound compact QR for a generic rule.
 pub fn qr_compact_dyn_generic<E, R, D>(
@@ -976,7 +949,6 @@ where
     result.map(|(q, r)| Qr { q, r })
 }
 
-
 /// Checked-Generic compact QR. Provider-bound output spaces are admitted
 /// through the checked staging boundary; dense QR itself performs no provider
 /// queries and therefore needs no Tenferro-specific capability.
@@ -1036,7 +1008,6 @@ where
     build_checked_pair_from_input(provider, space.homspace(), &matrices, pairs)
         .map(|(q, r)| Qr { q, r })
 }
-
 
 /// Checked-Generic compact LQ, implemented through the existing host
 /// adjoint-plus-QR boundary; no borrowed conjugated-dot capability is needed.
@@ -1102,7 +1073,6 @@ where
         .map(|(l, q)| Lq { l, q })
 }
 
-
 /// Checked-Generic full QR, augmenting only sectors that require completion.
 #[doc(hidden)]
 pub fn qr_full_dyn_checked_generic<E, R, D>(
@@ -1149,7 +1119,6 @@ where
     ))
     .map(|(q, r)| Qr { q, r })
 }
-
 
 /// Checked-Generic full LQ via the full QR of each sector's adjoint matrix.
 #[doc(hidden)]
@@ -1198,7 +1167,6 @@ where
     ))
     .map(|(l, q)| Lq { l, q })
 }
-
 
 /// Provider-bound compact LQ for a generic rule.
 pub fn lq_compact_dyn_generic<E, R, D>(

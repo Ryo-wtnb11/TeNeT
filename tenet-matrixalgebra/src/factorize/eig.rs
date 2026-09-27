@@ -1,11 +1,10 @@
 use super::*;
-
+use crate::with_input_geometry;
 
 pub(super) trait HermitianReal: Float {
     fn from_f64(value: f64) -> Self;
     fn relative_tolerance() -> Self;
 }
-
 
 impl HermitianReal for f32 {
     fn from_f64(value: f64) -> Self {
@@ -17,7 +16,6 @@ impl HermitianReal for f32 {
     }
 }
 
-
 impl HermitianReal for f64 {
     fn from_f64(value: f64) -> Self {
         value
@@ -28,7 +26,6 @@ impl HermitianReal for f64 {
     }
 }
 
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct EighCopyProbe {
@@ -38,30 +35,25 @@ pub(crate) struct EighCopyProbe {
     pub output_scatter_bytes: usize,
 }
 
-
 #[cfg(test)]
 pub(crate) fn reset_eigh_copy_probe() {
     EIGH_COPY_PROBE.with(|probe| probe.set(EighCopyProbe::default()));
 }
-
 
 #[cfg(test)]
 pub(crate) fn eigh_copy_probe() -> EighCopyProbe {
     EIGH_COPY_PROBE.with(Cell::get)
 }
 
-
 #[cfg(test)]
 pub(crate) fn reset_eigh_owned_vector_pointers() {
     EIGH_OWNED_VECTOR_POINTERS.with(|pointers| pointers.borrow_mut().clear());
 }
 
-
 #[cfg(test)]
 pub(crate) fn eigh_owned_vector_pointers() -> Vec<usize> {
     EIGH_OWNED_VECTOR_POINTERS.with(|pointers| pointers.borrow().clone())
 }
-
 
 #[cfg(test)]
 pub(super) fn record_eigh_owned_vector_before_scatter<D>(vectors: &[D]) {
@@ -70,18 +62,15 @@ pub(super) fn record_eigh_owned_vector_before_scatter<D>(vectors: &[D]) {
     });
 }
 
-
 #[cfg(test)]
 pub(crate) fn reset_checked_eigh_pair_pointers() {
     CHECKED_EIGH_PAIR_POINTERS.with(|pointers| pointers.borrow_mut().clear());
 }
 
-
 #[cfg(test)]
 pub(crate) fn checked_eigh_pair_pointers() -> Vec<usize> {
     CHECKED_EIGH_PAIR_POINTERS.with(|pointers| pointers.borrow().clone())
 }
-
 
 #[cfg(test)]
 pub(super) fn record_checked_eigh_pair_pointers<D>(pairs: &[FactorPair<D>]) {
@@ -92,7 +81,6 @@ pub(super) fn record_checked_eigh_pair_pointers<D>(pairs: &[FactorPair<D>]) {
             .collect();
     });
 }
-
 
 #[cfg(test)]
 pub(super) fn record_eigh_input_pack<D>(matricizations: &[SectorMatricization<D>]) {
@@ -107,7 +95,6 @@ pub(super) fn record_eigh_input_pack<D>(matricizations: &[SectorMatricization<D>
     });
 }
 
-
 #[cfg(test)]
 pub(super) fn record_eigh_output_scatter<D>(elements: usize) {
     EIGH_COPY_PROBE.with(|probe| {
@@ -117,7 +104,6 @@ pub(super) fn record_eigh_output_scatter<D>(elements: usize) {
         probe.set(current);
     });
 }
-
 
 /// Full (untruncated) Hermitian eigendecomposition `t = V * D * Vh`.
 ///
@@ -133,7 +119,6 @@ pub struct EighFull<R, D, const NOUT: usize, const NIN: usize> {
     pub eigenvalues: Vec<SectorSpectrum>,
 }
 
-
 /// Dynamic-rank [`EighFull`]. Carries only the eigenvector map and the O(rank)
 /// spectrum; the dense diagonal `D` is built on demand by the typed [`eigh_full`]
 /// wrapper (which returns a `TensorMap`), so callers that keep `D` diagonal
@@ -141,10 +126,9 @@ pub struct EighFull<R, D, const NOUT: usize, const NIN: usize> {
 /// materialization.
 #[derive(Clone, Debug)]
 pub struct EighFullDyn<R, D> {
-    v: BoundDynFactor<R, D>,
-    eigenvalues: Vec<SectorSpectrum>,
+    pub(super) v: BoundDynFactor<R, D>,
+    pub(super) eigenvalues: Vec<SectorSpectrum>,
 }
-
 
 impl<R, D> EighFullDyn<R, D> {
     pub fn v(&self) -> &BoundDynFactor<R, D> {
@@ -159,7 +143,6 @@ impl<R, D> EighFullDyn<R, D> {
         (self.v, self.eigenvalues)
     }
 }
-
 
 /// Full Hermitian eigendecomposition through the device boundary.
 ///
@@ -187,7 +170,6 @@ where
         eigenvalues: out.eigenvalues,
     })
 }
-
 
 /// Dynamic-rank [`eigh_full`]: the shared core, with the same fixed
 /// relative-Frobenius Hermiticity criterion.
@@ -224,7 +206,6 @@ where
         geometry
     ))
 }
-
 
 /// Eigendecomposition of an input whose tree order the positional direct
 /// path cannot prove; eigenvectors scatter by tree identity.
@@ -313,7 +294,6 @@ where
     })
 }
 
-
 pub(super) fn eigh_full_direct_regions<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -397,7 +377,6 @@ where
     })
 }
 
-
 pub(crate) fn eigenvector_gauge<D: FactorScalar>(
     vectors: &mut [D],
     rows: usize,
@@ -412,7 +391,6 @@ pub(crate) fn eigenvector_gauge<D: FactorScalar>(
     }
 }
 
-
 /// Full general eigendecomposition `t = V * D * V^-1` (MatrixAlgebraKit
 /// `eig_full`): always complex, requires an endomorphism. Bond states are
 /// stored descending by `|eigenvalue|` per sector.
@@ -423,15 +401,13 @@ pub struct EigFull<R, D: FactorScalar, const NOUT: usize, const NIN: usize> {
     pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
 }
 
-
 /// Dynamic-rank [`EigFull`]. Spectrum + eigenvectors only; the dense diagonal
 /// is materialized by the typed [`eig_full`] wrapper (see [`EighFullDyn`], #56 N).
 #[derive(Clone, Debug)]
 pub struct EigFullDyn<R, D: FactorScalar> {
-    v: BoundDynFactor<R, D::Eig>,
-    eigenvalues: Vec<SectorSpectrum<Complex64>>,
+    pub(super) v: BoundDynFactor<R, D::Eig>,
+    pub(super) eigenvalues: Vec<SectorSpectrum<Complex64>>,
 }
-
 
 impl<R, D: FactorScalar> EigFullDyn<R, D> {
     pub fn v(&self) -> &BoundDynFactor<R, D::Eig> {
@@ -446,7 +422,6 @@ impl<R, D: FactorScalar> EigFullDyn<R, D> {
         (self.v, self.eigenvalues)
     }
 }
-
 
 /// Full general eigendecomposition through the device boundary.
 pub fn eig_full<E, R, D, const NOUT: usize, const NIN: usize>(
@@ -473,7 +448,6 @@ where
         eigenvalues: out.eigenvalues,
     })
 }
-
 
 /// Dynamic-rank [`eig_full`].
 pub fn eig_full_dyn<E, R, D>(
@@ -565,7 +539,6 @@ where
     })
 }
 
-
 /// All Hermitian eigenvalues per coupled sector, descending by magnitude
 /// (MatrixAlgebraKit `eigh_vals`).
 ///
@@ -582,7 +555,6 @@ where
 {
     eigh_vals_dyn(dense, &input.dynamic())
 }
-
 
 /// Dynamic-rank [`eigh_vals`].
 pub fn eigh_vals_dyn<E, R, D>(
@@ -634,7 +606,6 @@ where
     Ok(eigenvalues)
 }
 
-
 /// All general eigenvalues per coupled sector, descending by magnitude
 /// (MatrixAlgebraKit `eig_vals`).
 pub fn eig_vals<E, R, D, const NOUT: usize, const NIN: usize>(
@@ -648,7 +619,6 @@ where
 {
     eig_vals_dyn::<E, R, D>(dense, &input.dynamic())
 }
-
 
 /// Dynamic-rank [`eig_vals`].
 pub fn eig_vals_dyn<E, R, D>(
@@ -701,7 +671,6 @@ where
     Ok(eigenvalues)
 }
 
-
 pub(super) fn compact_eigh_owned<E, D>(
     dense: &mut E,
     input: &[D],
@@ -730,7 +699,6 @@ where
     Ok((values, vectors))
 }
 
-
 pub(super) fn scaled_antihermitian_difference<D: FactorScalar, R: HermitianReal>(
     data: &[D],
     n: usize,
@@ -745,23 +713,21 @@ pub(super) fn scaled_antihermitian_difference<D: FactorScalar, R: HermitianReal>
     (residual_re, residual_im)
 }
 
-
 #[derive(Clone, Copy)]
 pub(super) struct ScaledFrobenius<R> {
-    scale: R,
-    sum_squares: R,
+    pub(super) scale: R,
+    pub(super) sum_squares: R,
 }
 
-
 impl<R: HermitianReal> ScaledFrobenius<R> {
-    fn zero() -> Self {
+    pub(super) fn zero() -> Self {
         Self {
             scale: R::zero(),
             sum_squares: R::one(),
         }
     }
 
-    fn add(&mut self, magnitude: R) -> bool {
+    pub(super) fn add(&mut self, magnitude: R) -> bool {
         if !magnitude.is_finite() {
             return false;
         }
@@ -779,11 +745,11 @@ impl<R: HermitianReal> ScaledFrobenius<R> {
         true
     }
 
-    fn add_complex(&mut self, re: R, im: R) -> bool {
+    pub(super) fn add_complex(&mut self, re: R, im: R) -> bool {
         self.add(re.abs()) && self.add(im.abs())
     }
 
-    fn scaled_norm(self, scale: R) -> R {
+    pub(super) fn scaled_norm(self, scale: R) -> R {
         if self.scale == R::zero() {
             R::zero()
         } else {
@@ -791,7 +757,6 @@ impl<R: HermitianReal> ScaledFrobenius<R> {
         }
     }
 }
-
 
 pub(super) fn hermitian_residual_norm<D: FactorScalar, R: HermitianReal>(
     data: &[D],
@@ -831,7 +796,6 @@ pub(super) fn hermitian_residual_norm<D: FactorScalar, R: HermitianReal>(
     Some(residual)
 }
 
-
 /// Tests `||(A - A†)/2||_F <= 64 * eps(R) * ||A||_F`.
 ///
 /// The scaled sums keep that relative decision stable when either norm would
@@ -860,7 +824,6 @@ pub(super) fn normwise_hermitian<D: FactorScalar, R: HermitianReal>(data: &[D], 
         <= (R::one() + R::one()) * R::relative_tolerance() * input.sum_squares.sqrt()
 }
 
-
 pub(super) fn validate_hermitian_matrix_shape<D>(
     data: &[D],
     rows: usize,
@@ -883,7 +846,6 @@ pub(super) fn validate_hermitian_matrix_shape<D>(
     Ok(())
 }
 
-
 /// Scale-invariant normwise hermiticity predicate at the working precision of `D`.
 ///
 /// Extracted from [`validate_hermitian_matrix_contents`] so the `exp` dispatch
@@ -899,7 +861,6 @@ pub(super) fn hermitian_matrix_contents<D: FactorScalar>(data: &[D], n: usize) -
     }
 }
 
-
 pub(super) fn validate_hermitian_matrix_contents<D: FactorScalar>(
     data: &[D],
     n: usize,
@@ -912,7 +873,6 @@ pub(super) fn validate_hermitian_matrix_contents<D: FactorScalar>(
     Ok(())
 }
 
-
 pub(super) fn validate_hermitian_matricizations<D: FactorScalar>(
     matricizations: &[SectorMatricization<D>],
 ) -> Result<(), OperationError> {
@@ -924,7 +884,6 @@ pub(super) fn validate_hermitian_matricizations<D: FactorScalar>(
     }
     Ok(())
 }
-
 
 #[doc(hidden)]
 pub fn validate_hermitian_regions<D: FactorScalar>(
@@ -953,7 +912,6 @@ pub fn validate_hermitian_regions<D: FactorScalar>(
     }
     Ok(())
 }
-
 
 /// Is this an endomorphism whose coupled-sector blocks are all Hermitian?
 ///
@@ -1015,13 +973,11 @@ where
         .all(|matrix| hermitian_matrix_contents(&matrix.data, matrix.rows)))
 }
 
-
 pub(super) fn invalid_eigenvalues() -> OperationError {
     OperationError::InvalidArgument {
         message: "eigenvalues must be finite",
     }
 }
-
 
 pub(super) fn validate_real_eigenvalues(values: &[f64]) -> Result<(), OperationError> {
     if values.iter().all(|value| value.is_finite()) {
@@ -1031,12 +987,10 @@ pub(super) fn validate_real_eigenvalues(values: &[f64]) -> Result<(), OperationE
     }
 }
 
-
 #[cfg(test)]
 pub(crate) fn validate_real_eigenvalues_for_test(values: &[f64]) -> Result<(), OperationError> {
     validate_real_eigenvalues(values)
 }
-
 
 pub(super) fn validate_complex_eigenvalues(values: &[Complex64]) -> Result<(), OperationError> {
     if values
@@ -1048,7 +1002,6 @@ pub(super) fn validate_complex_eigenvalues(values: &[Complex64]) -> Result<(), O
         Err(invalid_eigenvalues())
     }
 }
-
 
 /// Checked-Generic full Hermitian eigendecomposition. The exact source
 /// provider remains the authority for the eigenvector factor.
@@ -1143,13 +1096,11 @@ where
     Ok(EighFullDyn { v, eigenvalues })
 }
 
-
 pub(super) fn eig_not_numerically_diagonalizable() -> OperationError {
     OperationError::InvalidArgument {
         message: "eig requires a numerically diagonalizable coupled-sector matrix",
     }
 }
-
 
 pub(crate) fn validate_eigenvector_singular_values(
     singular_values: &[f64],
@@ -1167,7 +1118,6 @@ pub(crate) fn validate_eigenvector_singular_values(
         Err(eig_not_numerically_diagonalizable())
     }
 }
-
 
 /// Checked-Generic full general eigendecomposition. All input components and
 /// dense results are validated before the exact source provider is asked to
@@ -1329,7 +1279,6 @@ where
     Ok(EigFullDyn { v, eigenvalues })
 }
 
-
 /// Checked-Generic Hermitian eigenvalues only. No eigenvector or factor-space
 /// publication occurs.
 #[doc(hidden)]
@@ -1388,7 +1337,6 @@ where
     }
     Ok(eigenvalues)
 }
-
 
 /// Checked-Generic general eigenvalues only. No eigenvector or factor-space
 /// publication occurs.
