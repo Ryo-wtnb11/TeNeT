@@ -173,7 +173,7 @@ fn clearing_the_transform_cache_releases_the_device_executor_state() {
         after.context_scalar_operand_bytes, before.context_scalar_operand_bytes,
         "context operands are counted once and are not the executor's to drop"
     );
-    assert_eq!(runtime.tree_transform_cache_info().entries(), 0);
+    assert_eq!(runtime.tree_transform_cache_info().structures.entries(), 0);
 
     // Re-preparing after the clear still produces the same answer.
     let expected = fixture(&runtime).permute(&[2, 0], &[1, 3]).unwrap();
@@ -529,13 +529,13 @@ fn device_overwrite_into_admits_the_exact_layout_on_the_shared_runtime_store() {
     source
         .permute_overwrite_into(&mut first, &[2, 0], &[1, 3], 1.0)
         .unwrap();
-    let cold = runtime.tree_transform_cache_info();
+    let cold = runtime.tree_transform_cache_info().structures;
 
     let mut second = expected.to_cuda().unwrap();
     source
         .permute_overwrite_into(&mut second, &[2, 0], &[1, 3], 1.0)
         .unwrap();
-    let warm = runtime.tree_transform_cache_info();
+    let warm = runtime.tree_transform_cache_info().structures;
     assert_eq!(
         warm.entries(),
         cold.entries(),

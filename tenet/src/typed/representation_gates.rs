@@ -7296,12 +7296,12 @@ fn typed_tree_overwrite_covers_boundary_ranks_and_runtime_cache_reuse() {
     source
         .permute_overwrite_into(&mut first, &[1], &[2, 0], 1.0)
         .unwrap();
-    let cold = runtime.tree_transform_cache_info();
+    let cold = runtime.tree_transform_cache_info().structures;
     let mut second = expected.zeros_like();
     source
         .permute_overwrite_into(&mut second, &[1], &[2, 0], 1.0)
         .unwrap();
-    let warm = runtime.tree_transform_cache_info();
+    let warm = runtime.tree_transform_cache_info().structures;
     assert_eq!(warm.entries(), cold.entries());
     assert!(warm.hits() > cold.hits());
     assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
@@ -7938,7 +7938,7 @@ fn typed_contract_overwrite_handles_unmatched_sectors_and_reuses_runtime_cache()
             1.0,
         )
         .unwrap();
-    let cold = runtime.tree_transform_cache_info();
+    let cold = runtime.tree_transform_cache_info().structures;
     let mut second = expected.zeros_like();
     poison_destination(&mut second);
     source
@@ -7954,7 +7954,7 @@ fn typed_contract_overwrite_handles_unmatched_sectors_and_reuses_runtime_cache()
             1.0,
         )
         .unwrap();
-    let warm = runtime.tree_transform_cache_info();
+    let warm = runtime.tree_transform_cache_info().structures;
     assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
     assert_eq!(warm.entries(), cold.entries());
     assert!(warm.hits() > cold.hits());
@@ -8383,7 +8383,7 @@ fn device_contraction_leaves_the_tree_transform_cache_unchanged() {
     .to_cuda()
     .unwrap();
 
-    let before = runtime.tree_transform_cache_info();
+    let before = runtime.tree_transform_cache_info().structures;
     let product = lhs
         .contract(
             &rhs,
@@ -8396,7 +8396,7 @@ fn device_contraction_leaves_the_tree_transform_cache_unchanged() {
         )
         .unwrap();
     assert_eq!(product.placement(), Placement::Cuda(0));
-    assert_eq!(runtime.tree_transform_cache_info(), before);
+    assert_eq!(runtime.tree_transform_cache_info().structures, before);
 }
 
 /// #1337: filling the compact payload from a borrowed slice instead of

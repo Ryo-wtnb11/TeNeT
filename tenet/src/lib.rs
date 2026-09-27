@@ -92,6 +92,7 @@ pub mod prelude {
     pub use crate::runtime::CudaTreeTransformStats;
     pub use crate::runtime::{
         LinalgBackend, Runtime, RuntimeBuilder, RuntimeConfigError, RuntimeTreeTransformCacheInfo,
+        TreeTransformCacheInfo,
     };
     pub use crate::typed::{
         AdvancedLinalgScalar, ContractSpec, DecodeError, DecodeLimits, Direction, Duality, Eig,

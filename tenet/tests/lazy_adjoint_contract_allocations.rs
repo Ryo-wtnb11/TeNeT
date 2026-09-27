@@ -96,7 +96,7 @@ macro_rules! assert_warm_lazy_adjoint {
         let cold_contract = contract_conj();
         let cold_compose = compose_conj();
         contract();
-        let misses = runtime.tree_transform_cache_info().misses();
+        let misses = runtime.tree_transform_cache_info().structures.misses();
         let (contract_conj_calls, warm_contract) = allocations(contract_conj);
         let (compose_conj_calls, warm_compose) = allocations(compose_conj);
         let (contract_calls, _) = allocations(contract);
@@ -105,7 +105,10 @@ macro_rules! assert_warm_lazy_adjoint {
         assert_eq!(allocations(compose_conj).0, compose_conj_calls);
 
         // What: warm calls reuse every Runtime-owned transform plan.
-        assert_eq!(runtime.tree_transform_cache_info().misses(), misses);
+        assert_eq!(
+            runtime.tree_transform_cache_info().structures.misses(),
+            misses
+        );
         // What: warm replay is deterministic.
         assert_eq!(
             warm_contract.dense_data().unwrap(),

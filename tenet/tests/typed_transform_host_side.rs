@@ -119,11 +119,11 @@ fn a_runtime_without_a_device_reports_no_device_transform_state_and_still_clears
     let tensor: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
     let _ = tensor.permute(&[1, 0], &[3, 2]).unwrap();
-    assert!(runtime.tree_transform_cache_info().entries() > 0);
+    assert!(runtime.tree_transform_cache_info().structures.entries() > 0);
 
     runtime.clear_tree_transform_cache();
 
-    assert_eq!(runtime.tree_transform_cache_info().entries(), 0);
+    assert_eq!(runtime.tree_transform_cache_info().structures.entries(), 0);
     #[cfg(feature = "cuda")]
     assert!(runtime.cuda_tree_transform_stats().is_none());
 }

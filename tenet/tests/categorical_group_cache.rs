@@ -78,18 +78,18 @@ macro_rules! check_rule {
             let what = format!("{} {name}", $label);
             let warm = Runtime::builder().dense_threads(1).build().unwrap();
             let _ = operation(&tensor!(&warm, &a));
-            let groups_before = warm.tree_transform_group_cache_info();
+            let groups_before = warm.tree_transform_cache_info().groups;
             assert_eq!(
                 groups_before.misses(),
                 before.len(),
                 "{what}: the cold plan builds every source group once"
             );
-            let plans_before = warm.tree_transform_plan_cache_info();
+            let plans_before = warm.tree_transform_cache_info().plans;
 
             let sector_change = operation(&tensor!(&warm, &c));
-            let groups = warm.tree_transform_group_cache_info();
+            let groups = warm.tree_transform_cache_info().groups;
             assert!(
-                warm.tree_transform_plan_cache_info().misses() > plans_before.misses(),
+                warm.tree_transform_cache_info().plans.misses() > plans_before.misses(),
                 "{what}: a sector change must miss the whole-structure plan"
             );
             assert_eq!(
@@ -192,8 +192,8 @@ fn unique_fusion_never_uses_the_group_tier() {
         let _ = t.permute(&[2, 0], &[3, 1]).unwrap();
         let _ = t.adjoint().unwrap().permute(&[2, 0], &[3, 1]).unwrap();
     }
-    assert!(runtime.tree_transform_plan_cache_info().misses() > 0);
-    let info = runtime.tree_transform_group_cache_info();
+    assert!(runtime.tree_transform_cache_info().plans.misses() > 0);
+    let info = runtime.tree_transform_cache_info().groups;
     assert_eq!(
         (info.hits(), info.misses(), info.entries()),
         (0, 0, 0),
@@ -206,15 +206,15 @@ fn clear_resets_the_group_tier() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = su2_leg(&[(0, 1), (1, 1)]);
     let _ = tensor!(&runtime, &leg).permute(&[2, 0], &[3, 1]).unwrap();
-    let before = runtime.tree_transform_group_cache_info();
+    let before = runtime.tree_transform_cache_info().groups;
     assert!(before.entries() > 0 && before.charged_payload_bytes() > 0);
     assert!(before.entries() <= before.entry_capacity());
     // The group tier counts groups, not structures, so its cap is larger.
-    assert!(before.entry_capacity() > runtime.tree_transform_plan_cache_info().entry_capacity());
+    assert!(before.entry_capacity() > runtime.tree_transform_cache_info().plans.entry_capacity());
     assert!(before.charged_payload_bytes() <= before.byte_budget());
 
     runtime.clear_tree_transform_cache();
-    let after = runtime.tree_transform_group_cache_info();
+    let after = runtime.tree_transform_cache_info().groups;
     assert_eq!(after.entries(), 0);
     assert_eq!(after.charged_payload_bytes(), 0);
     assert_eq!((after.hits(), after.misses()), (0, 0));
@@ -246,11 +246,11 @@ fn shared_runtime_keeps_every_unchanged_group_across_operations() {
     for operation in operations {
         let _ = operation(&tensor!(&runtime, &a));
     }
-    let warm = runtime.tree_transform_group_cache_info();
+    let warm = runtime.tree_transform_cache_info().groups;
     for operation in operations {
         let _ = operation(&tensor!(&runtime, &c));
     }
-    let info = runtime.tree_transform_group_cache_info();
+    let info = runtime.tree_transform_cache_info().groups;
     let n = operations.len();
     assert_eq!(
         info.hits() - warm.hits(),

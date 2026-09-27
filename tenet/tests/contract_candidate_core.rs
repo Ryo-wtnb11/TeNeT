@@ -114,7 +114,7 @@ where
     call();
     call();
     let lookups = || {
-        let info = runtime.tree_transform_cache_info();
+        let info = runtime.tree_transform_cache_info().structures;
         info.hits() + info.misses()
     };
     let before = lookups();
@@ -440,7 +440,7 @@ where
 }
 
 fn transform_lookups(runtime: &Runtime) -> usize {
-    let info = runtime.tree_transform_cache_info();
+    let info = runtime.tree_transform_cache_info().structures;
     info.hits() + info.misses()
 }
 
