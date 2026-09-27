@@ -113,8 +113,13 @@ thread_local! {
     static INTERMEDIATE_PAYLOAD_SNAPSHOT_CALLS: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
 }
+// Per thread, like `tenet_dense::cuda_transfer_stats`: device steps run on the
+// caller's thread, so a concurrent device test cannot perturb the count (#1568).
 #[cfg(all(test, feature = "cuda"))]
-static CUDA_NETWORK_CONTRACT_CALLS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static CUDA_NETWORK_CONTRACT_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
 
 fn invalid(message: impl std::fmt::Display) -> Error {
     Error::InvalidArgument(message.to_string())
@@ -1620,7 +1625,7 @@ where
         output_axes: &[usize],
     ) -> Result<StepOutput<TensorMap<R, D, CudaStorage<D>>>, Error> {
         #[cfg(test)]
-        CUDA_NETWORK_CONTRACT_CALLS.fetch_add(1, Ordering::Relaxed);
+        CUDA_NETWORK_CONTRACT_CALLS.with(|calls| calls.set(calls.get() + 1));
         if let Some(destination) = destination {
             lhs.contract_overwrite_into(
                 rhs,
@@ -4685,9 +4690,9 @@ mod typed_replay_tests {
         let planned = pair
             .plan(&[&tensors[0], &tensors[1]], &GreedyDenseOptimizer)
             .unwrap();
-        CUDA_NETWORK_CONTRACT_CALLS.store(0, Ordering::Relaxed);
+        CUDA_NETWORK_CONTRACT_CALLS.with(|calls| calls.set(0));
         assert!(planned.execute_cuda(&[&tensors[0], &bad_rhs]).is_err());
-        assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.with(std::cell::Cell::get), 0);
 
         let other_runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let other_space =
@@ -4701,9 +4706,9 @@ mod typed_replay_tests {
         .unwrap()
         .to_cuda()
         .unwrap();
-        CUDA_NETWORK_CONTRACT_CALLS.store(0, Ordering::Relaxed);
+        CUDA_NETWORK_CONTRACT_CALLS.with(|calls| calls.set(0));
         assert!(planned.execute_cuda(&[&tensors[0], &foreign]).is_err());
-        assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.with(std::cell::Cell::get), 0);
     }
 
     #[test]
