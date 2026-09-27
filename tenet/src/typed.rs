@@ -22044,13 +22044,15 @@ mod representation_gates {
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
         D: CudaFactorizationPayload,
     {
+        let tensor = tensor.materialize().unwrap();
+        let data = tensor.dense_data().unwrap();
         let space = tensor.logical_space().space();
         sector_regions(space.structure(), space.nout())
             .unwrap()
             .iter()
             .filter(|region| region.rows() != 0 && region.cols() != 0)
             .map(|region| {
-                let values = tensor.data()[region.range()]
+                let values = data[region.range()]
                     .iter()
                     .map(|value| value.widen_complex())
                     .collect();
@@ -22307,7 +22309,7 @@ mod representation_gates {
             vh.to_host().unwrap(),
         );
         let half = std::f64::consts::FRAC_1_SQRT_2;
-        let u = u.data();
+        let u = u.dense_data().unwrap();
         for column in u.chunks(2) {
             let pivot = if column[1].abs() > column[0].abs() {
                 column[1]
@@ -22316,13 +22318,14 @@ mod representation_gates {
             };
             assert!(pivot > 0.0, "u = {u:?}");
         }
-        assert!((s.data()[0] - 2.0).abs() <= 1e-12 && s.data()[3].abs() <= 1e-12);
+        let s = s.dense_data().unwrap();
+        assert!((s[0] - 2.0).abs() <= 1e-12 && s[3].abs() <= 1e-12);
         // Column 0 spans [1, -1], column 1 spans [1, 1], none zeroed.
         assert!(
             (u[0] + u[1]).abs() <= 1e-12 && (u[2] - u[3]).abs() <= 1e-12,
             "u = {u:?}"
         );
-        let vh = vh.data();
+        let vh = vh.dense_data().unwrap();
         for value in u.iter().chain(vh) {
             assert!(
                 (value.abs() - half).abs() <= 1e-12,
