@@ -3381,7 +3381,7 @@ pub fn cuda_gather_elements<D: CudaScalar>(
         i64::into_tensor(vec![count, rank], coordinates).map_err(|err| cuda_error(OP, err))?;
     let indices = upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error(OP, err))?;
     record_h2d(count * rank * std::mem::size_of::<i64>());
-    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.copy_calls += 1);
     let config = tenferro_tensor::GatherConfig {
         offset_dims: vec![],
         collapsed_slice_dims: (0..rank).collect(),
