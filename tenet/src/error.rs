@@ -68,6 +68,21 @@ pub enum Error {
         /// The stack's member count.
         len: usize,
     },
+    /// The operation cannot consume this input without copying its payload,
+    /// and it does not copy silently. `alternative` names the explicit remedy.
+    Unsupported {
+        /// The explicit operation that makes the input consumable.
+        alternative: Alternative,
+    },
+}
+
+/// The explicit remedy an [`Error::Unsupported`] names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Alternative {
+    /// Copy the input into an owned dense tensor with
+    /// [`crate::prelude::TensorMap::materialize`] and pass that instead; for
+    /// an adjoint view of `t`, `&t.adjoint()?.materialize()?`.
+    Materialize,
 }
 
 impl fmt::Display for Error {
@@ -102,6 +117,12 @@ impl fmt::Display for Error {
             Self::BatchMemberOutOfRange { member, len } => {
                 write!(f, "member {member} is out of range for a stack of {len}")
             }
+            Self::Unsupported {
+                alternative: Alternative::Materialize,
+            } => write!(
+                f,
+                "the operation would have to copy a borrowed adjoint view; materialize it first"
+            ),
         }
     }
 }

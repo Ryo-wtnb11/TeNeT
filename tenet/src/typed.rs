@@ -254,7 +254,7 @@ pub type PhysicalDenseError<E> = tenet_tensors::PhysicalConversionError<E>;
 
 /// Re-exported so `use tenet::typed::*` is self-sufficient apart from the
 /// provider: every fallible method here returns this error.
-pub use crate::error::Error;
+pub use crate::error::{Alternative, Error};
 /// Re-exported for the same reason as [`Error`]: every constructor here takes
 /// a runtime. Both types are also in [`crate::prelude`]; re-exporting them
 /// here is what lets a caller glob-import this module alone. The canonical
@@ -298,6 +298,8 @@ pub use batched::{
 #[cfg(test)]
 mod contract_stacking_tests;
 mod serialization;
+#[cfg(test)]
+mod view_tests;
 pub use serialization::{
     DecodeError, DecodeLimits, EncodeError, PersistedScalar, TypedPersistenceCodec,
 };
@@ -989,7 +991,16 @@ where
     /// assert_eq!(a.solve(&b)?.data(), b.data());
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn solve(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
+    ///
+    /// An adjoint view `rhs` (`t.adjoint_view()`) returns
+    /// [`Error::Unsupported`]: this operation would copy it. Pass
+    /// `&t.adjoint()?.materialize()?` instead.
+    pub fn solve<'a>(
+        &self,
+        rhs: impl Into<TensorRef<'a, R, D>>,
+    ) -> Result<Self, TypedFacadeError<R>> {
+        let rhs = rhs.into().operand()?;
+        let rhs = &*rhs;
         <R::Mode as TypedTensorSolveDispatch<R, D>>::solve(self, rhs)
     }
 }
@@ -1210,7 +1221,12 @@ where
     /// reductions currently require dense payloads. See [`Self::norm`] for the
     /// weighting, complexity, lazy behavior, and example.
     #[doc(alias = "dot")]
-    pub fn inner(&self, other: &Self) -> Result<D, TypedFacadeError<R>> {
+    pub fn inner<'a>(
+        &self,
+        other: impl Into<TensorRef<'a, R, D>>,
+    ) -> Result<D, TypedFacadeError<R>> {
+        let other = other.into().operand()?;
+        let other = &*other;
         <R::Mode as TypedTensorReductionDispatch<R, D>>::inner(self, other)
     }
     /// Returns the quantum-dimension-weighted block trace
@@ -1262,7 +1278,14 @@ where
     ///     let _ = x.add(x, 1.0, 2.0);
     /// }
     /// ```
-    pub fn axpby(&self, alpha: D, y: &Self, beta: D) -> Result<Self, TypedFacadeError<R>> {
+    pub fn axpby<'a>(
+        &self,
+        alpha: D,
+        y: impl Into<TensorRef<'a, R, D>>,
+        beta: D,
+    ) -> Result<Self, TypedFacadeError<R>> {
+        let y = y.into().operand()?;
+        let y = &*y;
         <R::Mode as TypedTensorAddScaleDispatch<R, D>>::axpby(self, alpha, y, beta)
     }
 
@@ -1302,7 +1325,14 @@ where
     /// A uniquely owned dense receiver is updated without allocating a new
     /// payload. All other representations use [`Self::axpby`], so compact
     /// spectra remain compact and shared bodies remain copy-on-write.
-    pub fn axpby_assign(&mut self, alpha: D, y: &Self, beta: D) -> Result<(), TypedFacadeError<R>> {
+    pub fn axpby_assign<'a>(
+        &mut self,
+        alpha: D,
+        y: impl Into<TensorRef<'a, R, D>>,
+        beta: D,
+    ) -> Result<(), TypedFacadeError<R>> {
+        let y = y.into().operand()?;
+        let y = &*y;
         if !self.runtime.same_runtime(&y.runtime) {
             return Err(TypedFacadeError::<R>::from(Error::RuntimeMismatch));
         }
@@ -1671,6 +1701,18 @@ where
     /// ```
     pub fn adjoint(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorAdjointDispatch<R, D>>::adjoint(self)
+    }
+
+    /// Borrowed adjoint view: the operand [`Self::adjoint`] would give,
+    /// passed without building it. See [`TensorRef`].
+    pub fn adjoint_view(&self) -> TensorRef<'_, R, D> {
+        TensorRef {
+            base: self,
+            adjoint: Some(|tensor| {
+                <R::Mode as TypedTensorAdjointDispatch<R, D>>::adjoint(tensor)
+                    .map_err(<R::Mode as TypedTensorModeDispatch<R>>::facade_error_into_error)
+            }),
+        }
     }
 }
 
@@ -5246,6 +5288,11 @@ where
     /// Preserves a provider-side admission error.
     fn map_provider_error(error: R::Error) -> Self::FacadeError;
 
+    /// Lowers a facade error to [`Error`] for the provider-neutral
+    /// [`TensorRef`] adjoint constructor.
+    #[doc(hidden)]
+    fn facade_error_into_error(error: Self::FacadeError) -> Error;
+
     /// TensorKit `blockdim(P, c)`: the reduced dimension of coupled sector
     /// `coupled` in the product space `product`, zero when it does not occur.
     #[doc(hidden)]
@@ -6965,6 +7012,10 @@ where
         error.into()
     }
 
+    fn facade_error_into_error(error: Error) -> Error {
+        error
+    }
+
     fn coupled_block_dimension(
         provider: &R,
         product: &FusionProductSpace,
@@ -7043,6 +7094,16 @@ where
 
     fn map_provider_error(error: <R as TypedSectorAdmission>::Error) -> Self::FacadeError {
         GenericTensorError::Structure(CheckedGenericStructureError::Provider(error))
+    }
+
+    // Why lossy: `TensorRef` is provider-neutral, so its adjoint constructor
+    // returns `Error`. The only non-facade failure of a checked-Generic
+    // adjoint is a broken invariant of an admitted layout.
+    fn facade_error_into_error(error: Self::FacadeError) -> Error {
+        match error {
+            GenericTensorError::Facade(error) => error,
+            other => Error::InvalidArgument(format!("adjoint view: {other}")),
+        }
     }
 
     fn coupled_block_dimension(
@@ -10187,6 +10248,9 @@ struct TypedAdjointView<R, D, S = Vec<D>> {
     // the canonical parent payload; it is not a promise that arbitrary storage
     // can allocate a same-storage result.
     materialized: OnceLock<Arc<TypedTensorBody<R, D>>>,
+    /// Set only on the operation-local header a [`TensorRef`] resolves to:
+    /// the materialization path refuses it instead of copying.
+    borrowed: bool,
     #[cfg(test)]
     materialized_body_builds: std::sync::atomic::AtomicUsize,
 }
@@ -10213,9 +10277,114 @@ impl<R, D, S> TypedAdjointView<R, D, S> {
             parent,
             logical_space,
             materialized: OnceLock::new(),
+            borrowed: false,
             #[cfg(test)]
             materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Entries into adjoint payload materialization (the `data()` fill and
+    /// `materialized_tensor_uncached`), counted while `Some`.
+    pub(crate) static ADJOINT_MATERIALIZATIONS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_adjoint_materialization() {
+    ADJOINT_MATERIALIZATIONS.with(|observation| {
+        if let Some(entries) = observation.get() {
+            observation.set(Some(entries + 1));
+        }
+    });
+}
+
+/// Borrowed view of a [`TensorMap`], optionally as its adjoint.
+///
+/// `&t` converts into the plain view and [`TensorMap::adjoint_view`] gives
+/// the adjoint view (TensorKit `adjoint(t)`, TensorOperations' `conjA`
+/// flag). Operations take their second tensor as `impl Into<TensorRef>`, so
+/// both are passed the same way. The view copies nothing: it resolves, inside
+/// the call, to exactly the operand `&t.adjoint()?` would have been and runs
+/// the same code, so the result is the same.
+///
+/// An operation that would have to materialize the adjoint returns
+/// [`Error::Unsupported`] with [`crate::error::Alternative::Materialize`]
+/// instead of copying; pass `&t.adjoint()?.materialize()?` there.
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use tenet::core::{U1FusionRule, U1Irrep};
+/// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+///
+/// let runtime = Runtime::builder().build()?;
+/// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
+/// let a: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 1)?;
+/// let b: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 2)?;
+/// assert_eq!(a.inner(b.adjoint_view())?, a.inner(&b.adjoint()?)?);
+/// # Ok::<(), tenet::typed::Error>(())
+/// ```
+pub struct TensorRef<'a, R, D, S = Vec<D>> {
+    base: &'a TensorMap<R, D, S>,
+    /// The base's own `adjoint`, captured where it exists; `None` for the
+    /// plain view. Why a `fn` pointer and not a bound on each operation: the
+    /// multiplicity-free `adjoint` needs a real coefficient scalar, which
+    /// `contract` and `compose` do not.
+    adjoint: Option<ViewAdjoint<R, D, S>>,
+}
+
+type ViewAdjoint<R, D, S> = fn(&TensorMap<R, D, S>) -> Result<TensorMap<R, D, S>, Error>;
+
+// Why hand-written: the derives would demand `R`, `D`, `S: Clone`.
+impl<R, D, S> Clone for TensorRef<'_, R, D, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R, D, S> Copy for TensorRef<'_, R, D, S> {}
+
+impl<'a, R, D, S> From<&'a TensorMap<R, D, S>> for TensorRef<'a, R, D, S> {
+    fn from(base: &'a TensorMap<R, D, S>) -> Self {
+        Self {
+            base,
+            adjoint: None,
+        }
+    }
+}
+
+impl<'a, R, D, S> TensorRef<'a, R, D, S> {
+    /// The operand an owned-lazy-adjoint call would have received. A plain
+    /// view is its base, unchanged, so `&t` keeps today's behavior, including
+    /// the owned lazy adjoint's implicit materialization until #1548. An
+    /// adjoint view is `adjoint(base)`, marked so that the materialization
+    /// path refuses it.
+    fn operand(self) -> Result<std::borrow::Cow<'a, TensorMap<R, D, S>>, Error> {
+        let Some(adjoint) = self.adjoint else {
+            return Ok(std::borrow::Cow::Borrowed(self.base));
+        };
+        let resolved = adjoint(self.base)?;
+        Ok(std::borrow::Cow::Owned(resolved.into_borrowed_operand()))
+    }
+}
+
+impl<R, D, S> TensorMap<R, D, S> {
+    fn into_borrowed_operand(mut self) -> Self {
+        let TypedTensorRepr::Adjoint(view) = &mut self.repr else {
+            return self;
+        };
+        if let Some(unique) = Arc::get_mut(view) {
+            unique.borrowed = true;
+            return self;
+        }
+        let mut marked =
+            TypedAdjointView::new(Arc::clone(&view.parent), view.logical_space.clone());
+        marked.borrowed = true;
+        *view = Arc::new(marked);
+        self
     }
 }
 
@@ -10830,7 +10999,13 @@ where
     /// already-admitted layouts carry differing rule-identity stamps,
     /// [`Error::RuntimeMismatch`] on differing runtimes, and
     /// [`Error::InvalidArgument`] when corresponding legs differ in duality.
-    pub fn absorb(&self, source: &Self) -> Result<Self, Error> {
+    ///
+    /// An adjoint view `source` (`t.adjoint_view()`) returns
+    /// [`Error::Unsupported`]: this operation would copy it. Pass
+    /// `&t.adjoint()?.materialize()?` instead.
+    pub fn absorb<'a>(&self, source: impl Into<TensorRef<'a, R, D>>) -> Result<Self, Error> {
+        let source = source.into().operand()?;
+        let source = &*source;
         let destination_space = self.logical_space().space();
         let source_space = source.logical_space().space();
         if destination_space.nout() != source_space.nout()
@@ -12161,6 +12336,14 @@ where
         self.dense_adjoint_view()
     }
 
+    /// Borrowed adjoint view of a device tensor. See [`TensorRef`].
+    pub fn adjoint_view(&self) -> TensorRef<'_, R, D, CudaStorage<D>> {
+        TensorRef {
+            base: self,
+            adjoint: Some(Self::adjoint),
+        }
+    }
+
     /// The Host [`TensorMap::materialize`] contract on the device: an owned
     /// dense device tensor with a fresh allocation on the same device, never
     /// sharing storage with `self`, and equal to the Host result: finite
@@ -12214,6 +12397,8 @@ where
         let (source, adjoint): (_, Option<Adjoint>) = match &self.repr {
             TypedTensorRepr::Owned(_) => (self.direct_cuda_storage("materialize")?, None),
             TypedTensorRepr::Adjoint(view) => {
+                #[cfg(test)]
+                observe_adjoint_materialization();
                 let TypedData::Dense(source) = view.parent.data.as_ref() else {
                     unreachable!("TypedAdjointView::new admits only dense parents")
                 };
@@ -12514,7 +12699,14 @@ where
     ///     let _ = x.add(x, 1.0, 2.0);
     /// }
     /// ```
-    pub fn axpby(&self, alpha: D, y: &Self, beta: D) -> Result<Self, Error> {
+    pub fn axpby<'a>(
+        &self,
+        alpha: D,
+        y: impl Into<TensorRef<'a, R, D, CudaStorage<D>>>,
+        beta: D,
+    ) -> Result<Self, Error> {
+        let y = y.into().operand()?;
+        let y = &*y;
         let required_len = self.logical_space().space().required_len()?;
         if !self.runtime.same_runtime(&y.runtime) {
             return Err(Error::RuntimeMismatch);
@@ -12802,7 +12994,12 @@ where
     /// call widens each distinct operand on the device first; the cost is
     /// documented on `weighted_inner_cuda` (#1383).
     #[doc(alias = "dot")]
-    pub fn inner(&self, other: &Self) -> Result<D, Error> {
+    pub fn inner<'a>(
+        &self,
+        other: impl Into<TensorRef<'a, R, D, CudaStorage<D>>>,
+    ) -> Result<D, Error> {
+        let other = other.into().operand()?;
+        let other = &*other;
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -12920,13 +13117,15 @@ where
     /// [`Error::UnsupportedOnDevice`] for
     /// diagonal storage; the Host's own errors for malformed axes, output
     /// orders or mismatched legs; [`Error::PlacementMismatch`].
-    pub fn contract(
+    pub fn contract<'a>(
         &self,
-        other: &Self,
+        other: impl Into<TensorRef<'a, R, D, CudaStorage<D>>>,
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
     ) -> Result<Self, Error> {
+        let other = other.into().operand()?;
+        let other = &*other;
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -13047,15 +13246,17 @@ where
     /// allocates nothing on the device; scratch and coefficient payloads are
     /// as for [`Self::contract`].
     #[allow(clippy::too_many_arguments)]
-    pub fn contract_overwrite_into(
+    pub fn contract_overwrite_into<'a>(
         &self,
-        other: &Self,
+        other: impl Into<TensorRef<'a, R, D, CudaStorage<D>>>,
         destination: &mut Self,
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
         alpha: D,
     ) -> Result<(), Error> {
+        let other = other.into().operand()?;
+        let other = &*other;
         if !self.runtime.same_runtime(&other.runtime)
             || !self.runtime.same_runtime(&destination.runtime)
         {
@@ -13229,7 +13430,12 @@ where
     /// [`Self::contract`] for fermionic providers, and it admits every
     /// braiding style, as on Host, where `contract` requires a symmetric one.
     #[doc(alias = "mul")]
-    pub fn compose(&self, other: &Self) -> Result<Self, Error> {
+    pub fn compose<'a>(
+        &self,
+        other: impl Into<TensorRef<'a, R, D, CudaStorage<D>>>,
+    ) -> Result<Self, Error> {
+        let other = other.into().operand()?;
+        let other = &*other;
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -14757,6 +14963,13 @@ where
         let TypedTensorRepr::Adjoint(view) = &self.repr else {
             return Ok(self.clone());
         };
+        if view.borrowed {
+            return Err(Error::Unsupported {
+                alternative: crate::error::Alternative::Materialize,
+            });
+        }
+        #[cfg(test)]
+        observe_adjoint_materialization();
         let _host_pool = self.runtime.enter_host_pool();
         #[cfg(test)]
         UNCACHED_ADJOINT_MATERIALIZATIONS
@@ -14814,7 +15027,18 @@ where
     /// product spaces on the other side, or concatenated legs of opposite
     /// duality. Checked-Generic output-admission failures retain their typed
     /// provider error.
-    pub fn cat(&self, other: &Self, side: Side) -> Result<Self, TypedFacadeError<R>> {
+    ///
+    /// An adjoint view `other` (`t.adjoint_view()`) returns
+    /// [`Error::Unsupported`] when the concatenation plan cannot read it in
+    /// place (non-monotone oriented regions): this operation would copy it.
+    /// Pass `&t.adjoint()?.materialize()?` instead.
+    pub fn cat<'a>(
+        &self,
+        other: impl Into<TensorRef<'a, R, D>>,
+        side: Side,
+    ) -> Result<Self, TypedFacadeError<R>> {
+        let other = other.into().operand()?;
+        let other = &*other;
         let lhs_space = self.logical_space().space();
         let rhs_space = other.logical_space().space();
         if lhs_space.admission().rule_identity() != rhs_space.admission().rule_identity() {
@@ -14907,6 +15131,12 @@ where
             TypedTensorRepr::Adjoint(view) => view
                 .materialized
                 .get_or_init(|| {
+                    debug_assert!(
+                        !view.borrowed,
+                        "no operand position reads a borrowed view through data()"
+                    );
+                    #[cfg(test)]
+                    observe_adjoint_materialization();
                     let _host_pool = self.runtime.enter_host_pool();
                     let data = tenet_tensors::materialize_adjoint_data_dyn(
                         view.parent.space.space(),
@@ -16249,15 +16479,17 @@ where
     /// compilation/replay, so a later engine error may leave it zeroed or
     /// partially overwritten.
     #[allow(clippy::too_many_arguments)]
-    pub fn contract_overwrite_into(
+    pub fn contract_overwrite_into<'a>(
         &self,
-        other: &Self,
+        other: impl Into<TensorRef<'a, R, D>>,
         destination: &mut Self,
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
         alpha: D,
     ) -> Result<(), Error> {
+        let other = other.into().operand()?;
+        let other = &*other;
         if !self.runtime.same_runtime(&other.runtime)
             || !self.runtime.same_runtime(&destination.runtime)
         {
@@ -16638,7 +16870,16 @@ where
     /// }
     /// ```
     ///
-    pub fn otimes(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
+    ///
+    /// An adjoint view `other` (`t.adjoint_view()`) returns
+    /// [`Error::Unsupported`]: this operation would copy it. Pass
+    /// `&t.adjoint()?.materialize()?` instead.
+    pub fn otimes<'a>(
+        &self,
+        other: impl Into<TensorRef<'a, R, D>>,
+    ) -> Result<Self, TypedFacadeError<R>> {
+        let other = other.into().operand()?;
+        let other = &*other;
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
@@ -16897,13 +17138,15 @@ where
     /// assert_eq!(out.data(), t.data());
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn contract(
+    pub fn contract<'a>(
         &self,
-        other: &Self,
+        other: impl Into<TensorRef<'a, R, D>>,
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
     ) -> Result<Self, TypedFacadeError<R>> {
+        let other = other.into().operand()?;
+        let other = &*other;
         // The one check the expert layer cannot make: it never sees the two
         // runtimes, and mixing execution state across them is a trust-boundary
         // violation rather than an algebra error. Scalar type and placement
@@ -16944,9 +17187,13 @@ where
     /// embedded `TensorMap` or layout is published. After that transaction
     /// succeeds, the operation builds the two embedded tensors by copying
     /// their dense data (materializing a compact operand when necessary).
-    pub fn deligne_product<R2, C>(
+    ///
+    /// An adjoint view `other` (`t.adjoint_view()`) returns
+    /// [`Error::Unsupported`]: this operation would copy it. Pass
+    /// `&t.adjoint()?.materialize()?` instead.
+    pub fn deligne_product<'a, R2, C>(
         &self,
-        other: &TensorMap<R2, D>,
+        other: impl Into<TensorRef<'a, R2, D>>,
         product: Arc<ProductFusionRule<R, R2, C>>,
     ) -> Result<TensorMap<ProductFusionRule<R, R2, C>, D>, Error>
     where
@@ -16957,6 +17204,8 @@ where
             + CanonicalUnitFusionRule,
         C: ProductSectorCodec + Sync + 'static,
     {
+        let other = other.into().operand()?;
+        let other = &*other;
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -17061,7 +17310,12 @@ where
     /// }
     /// ```
     #[doc(alias = "mul")]
-    pub fn compose(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
+    pub fn compose<'a>(
+        &self,
+        other: impl Into<TensorRef<'a, R, D>>,
+    ) -> Result<Self, TypedFacadeError<R>> {
+        let other = other.into().operand()?;
+        let other = &*other;
         // Runtime first, exactly as `contract`: crossing runtimes is a
         // trust-boundary violation rather than an algebra error, and the
         // expert layer never sees the two runtimes.
