@@ -1113,9 +1113,13 @@ fn device_factorizations_cost_the_same_calls_and_half_the_bytes() {
         drop(device.eigh_full().unwrap());
         drop(device.qr_compact().unwrap());
         let after = cuda_transfer_stats();
+        // The SVD's gauge uploads one `i64` weight per row of its largest
+        // route (3 rows for this leg): the one upload whose bytes do not
+        // scale with the payload, so it is taken out before halving.
+        let gauge_weight_bytes = (3 * std::mem::size_of::<i64>()) as u64;
         (
             after.h2d_calls - before.h2d_calls,
-            after.h2d_bytes - before.h2d_bytes,
+            after.h2d_bytes - before.h2d_bytes - gauge_weight_bytes,
             after.d2h_calls - before.d2h_calls,
             after.d2h_bytes - before.d2h_bytes,
             after.device_allocs - before.device_allocs,

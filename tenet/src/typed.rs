@@ -225,7 +225,8 @@ use tenet_core::{
 use tenet_dense::{
     cuda_copy_region_into, cuda_eigh_region, cuda_gemm_region_into,
     cuda_hermitian_regions as dense_cuda_hermitian_regions, cuda_qr_region as dense_cuda_qr_region,
-    cuda_svd_region as dense_cuda_svd_region, CudaDenseContext, CudaDenseStorage,
+    cuda_svd_gauge_phases, cuda_svd_region as dense_cuda_svd_region, CudaDenseContext,
+    CudaDenseStorage, CudaSvdGaugeWeights,
 };
 use tenet_operations::scale_value;
 #[cfg(feature = "cuda")]
@@ -4536,7 +4537,7 @@ pub(crate) fn assemble_left_factor<D: CudaPayload>(
     source: &CoupledSectorRegion,
     factor: &CudaDenseStorage,
     k_full: usize,
-    selector: &CudaStorage<D>,
+    selector: &CudaDenseStorage,
     selector_offset: usize,
     kept: usize,
 ) -> Result<(), Error> {
@@ -4559,7 +4560,7 @@ pub(crate) fn assemble_left_factor<D: CudaPayload>(
             factor,
             src_row,
             source.rows(),
-            &selector.0,
+            selector,
             selector_offset,
             k_full,
             sub_rows,
@@ -4633,7 +4634,7 @@ pub(crate) fn assemble_right_factor<D: CudaPayload>(
     dst: &mut CudaStorage<D>,
     target: &CoupledSectorRegion,
     source: &CoupledSectorRegion,
-    selector: &CudaStorage<D>,
+    selector: &CudaDenseStorage,
     kept: usize,
     k_full: usize,
     factor: &CudaDenseStorage,
@@ -4654,7 +4655,7 @@ pub(crate) fn assemble_right_factor<D: CudaPayload>(
             &mut dst.0,
             target.range().start + target.rows() * target_tree.offset(),
             target.rows(),
-            &selector.0,
+            selector,
             0,
             kept,
             factor,
@@ -4987,8 +4988,10 @@ impl<D: CudaPayload> Drop for TypedCudaQrScratch<D> {
 struct TypedCudaSvdScratch<D: CudaPayload> {
     left: CudaDenseStorage,
     right: CudaDenseStorage,
-    /// `None` when both assembly routes are layout-aligned and copy instead.
-    selector: Option<CudaStorage<D>>,
+    /// `None` on a layout-aligned side, whose gauged factor is copied.
+    left_selector: Option<CudaDenseStorage>,
+    right_selector: Option<CudaDenseStorage>,
+    payload: std::marker::PhantomData<D>,
 }
 
 #[cfg(feature = "cuda")]
@@ -4996,7 +4999,8 @@ impl<D: CudaPayload> TypedCudaSvdScratch<D> {
     fn new(
         left: CudaDenseStorage,
         right: CudaDenseStorage,
-        selector: Option<CudaStorage<D>>,
+        left_selector: Option<CudaDenseStorage>,
+        right_selector: Option<CudaDenseStorage>,
     ) -> Self {
         #[cfg(test)]
         update_cuda_svd_observation(|(results, total, creations, live, peak)| {
@@ -5006,8 +5010,16 @@ impl<D: CudaPayload> TypedCudaSvdScratch<D> {
         Self {
             left,
             right,
-            selector,
+            left_selector,
+            right_selector,
+            payload: std::marker::PhantomData,
         }
+    }
+
+    fn selector(selector: &Option<CudaDenseStorage>) -> Result<&CudaDenseStorage, Error> {
+        selector.as_ref().ok_or_else(|| {
+            internal_layout_error("a non-aligned factor route has no gauge selector")
+        })
     }
 }
 
@@ -11612,8 +11624,8 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 ///
 /// The `d` and `v` of `eigh_full` are truncated the same way.
 ///
-/// `u` and `vh` keep the raw device SVD gauge for both dtypes; unlike the Host
-/// methods, these do not impose TensorKit's largest-pivot gauge. `eigh_full`
+/// `u` and `vh` follow the Host largest-pivot gauge for every payload, as
+/// TensorKit's (MatrixAlgebraKit `gaugefix!`) does. `eigh_full`
 /// admits a block only when it equals its *conjugate* transpose, so a
 /// complex-symmetric non-Hermitian block is rejected before any
 /// factorization.
@@ -11770,13 +11782,21 @@ where
     /// Transfers, exactly: host to device, one zero upload per factor
     /// (`u`, `s`, `vh`: the dense output sizes, `s` being `Σ_c k_c²`
     /// elements, since a host zero buffer is the only device allocation
-    /// path until #740) plus one identity-selector upload per route whose
-    /// assembly is not layout-aligned. Device to host, no tensor payload:
+    /// path until #740) plus one upload of `max_c rows_c` `i64` gauge weights
+    /// when any route is nonempty. Device to host, no tensor payload:
     /// the singular values never cross to the host, so the call ends
     /// without a spectrum download. The backend still reads O(1)
     /// solver-status metadata per route, a host barrier each.
-    /// `u` and `vh` retain the raw CUDA backend gauge; unlike the Host method,
-    /// this method does not impose TensorKit's largest-pivot sign gauge.
+    ///
+    /// `u` and `vh` carry the Host gauge: in every column of each sector's
+    /// `u`, the first largest-magnitude entry is real and non-negative, and
+    /// the matching `vh` row takes the inverse phase. The fix-up runs on the
+    /// device without a download (see [`tenet_dense::cuda_svd_gauge_phases`]):
+    /// 13 Tenferro ops per route for the phases, then per side either a
+    /// `k x k` diagonal selector that the non-aligned assembly GEMM
+    /// multiplies by anyway (1 op) or a scaling of the aligned factor before
+    /// its copy (2 ops), plus one `conj` for a complex left side. They are
+    /// counted in [`tenet_dense::CudaTransferStats::gauge_ops`].
     pub fn svd_compact(&self) -> Result<Svd<Self>, Error> {
         let source = self.direct_cuda_storage("svd_compact")?;
         let source_space = self.logical_space().space();
@@ -11838,6 +11858,15 @@ where
             #[cfg(test)]
             observe_cuda_svd_final_storage_creation();
 
+            let max_rows = plan
+                .routes
+                .iter()
+                .map(|route| plan.source_regions[route.source].rows())
+                .max();
+            let weights = max_rows
+                .map(|rows| CudaSvdGaugeWeights::upload(cuda, rows))
+                .transpose()
+                .map_err(dense_err)?;
             for (route, &diagonal) in plan.routes.iter().zip(&diagonals) {
                 let source_region = &plan.source_regions[route.source];
                 let left_region = &plan.left_regions[route.left];
@@ -11854,11 +11883,45 @@ where
                         "compact SVD spectrum length does not match its source route",
                     ));
                 }
-                let selector = Self::identity_selector(cuda, route)?;
+                let weights = weights.as_ref().ok_or_else(|| {
+                    internal_layout_error("a compact SVD route has no gauge weights")
+                })?;
+                // The Host gauge (first largest-|U| entry of each column real
+                // and non-negative) is folded into the selector a non-aligned
+                // side multiplies by anyway; only an aligned side, which is a
+                // plain copy, pays a separate scaling pass.
+                let phases = cuda_svd_gauge_phases::<D>(
+                    cuda,
+                    &raw_left,
+                    source_region.rows(),
+                    route.rank,
+                    weights,
+                )
+                .map_err(dense_err)?;
+                let (left, left_selector) = if route.aligned_left {
+                    let left = phases
+                        .scale_left::<D>(cuda, &raw_left, source_region.rows())
+                        .map_err(dense_err)?;
+                    (left, None)
+                } else {
+                    let selector = phases.left_selector::<D>(cuda).map_err(dense_err)?;
+                    (raw_left, Some(selector))
+                };
+                let (right, right_selector) = if route.aligned_right {
+                    let right = phases
+                        .scale_right::<D>(cuda, &raw_right, source_region.cols())
+                        .map_err(dense_err)?;
+                    (right, None)
+                } else {
+                    let selector = phases.right_selector::<D>(cuda).map_err(dense_err)?;
+                    (raw_right, Some(selector))
+                };
+                drop(phases);
                 // The scratch owns all route-local allocations. It is dropped
                 // at the end of this iteration, bounding peak raw-factor
                 // storage independently of the number of sectors.
-                let scratch = TypedCudaSvdScratch::new(raw_left, raw_right, selector);
+                let scratch =
+                    TypedCudaSvdScratch::<D>::new(left, right, left_selector, right_selector);
                 // Compact SVD keeps the full rank by construction, so the same
                 // proved layout identity applies as for QR.
                 if route.aligned_left {
@@ -11871,7 +11934,7 @@ where
                         source_region,
                         &scratch.left,
                         route.rank,
-                        Self::route_selector(&scratch.selector)?,
+                        TypedCudaSvdScratch::<D>::selector(&scratch.left_selector)?,
                         0,
                         route.rank,
                     )?;
@@ -11884,7 +11947,7 @@ where
                         &mut right_data,
                         right_region,
                         source_region,
-                        Self::route_selector(&scratch.selector)?,
+                        TypedCudaSvdScratch::<D>::selector(&scratch.right_selector)?,
                         route.rank,
                         route.rank,
                         &scratch.right,
@@ -12164,7 +12227,7 @@ where
                         &plan.source_regions[route.source],
                         &raw,
                         route.full_rank,
-                        selector,
+                        &selector.0,
                         selector_offset,
                         route.kept,
                     )?;
@@ -12307,7 +12370,7 @@ where
                         source_region,
                         &scratch.left,
                         route.rank,
-                        Self::route_selector(&scratch.selector)?,
+                        &Self::route_selector(&scratch.selector)?.0,
                         0,
                         route.rank,
                     )?;
@@ -12320,7 +12383,7 @@ where
                         &mut right_data,
                         right_region,
                         source_region,
-                        Self::route_selector(&scratch.selector)?,
+                        &Self::route_selector(&scratch.selector)?.0,
                         route.rank,
                         route.rank,
                         &scratch.right,
@@ -21843,7 +21906,7 @@ mod representation_gates {
         let plan = source_device
             .compile_cuda_qr_plan(Arc::clone(&regions))
             .unwrap();
-        let (factor_copies, selector_uploads, assembly_gemms) = cuda_route_assembly_counts(&plan);
+        let (factor_copies, _, assembly_gemms) = cuda_route_assembly_counts(&plan);
         CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
         CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
         source_device.svd_compact().unwrap();
@@ -21856,10 +21919,11 @@ mod representation_gates {
         });
         CUDA_QR_OBSERVATION.with(|observation| {
             // No device QR and no QR output upload happen here; the shared
-            // slots record only this assembly's copies, selectors and GEMMs.
+            // slots record only this assembly's copies and GEMMs. The SVD
+            // builds its gauge selectors on the device, so it uploads none.
             assert_eq!(
                 observation.get(),
-                Some((0, factor_copies, selector_uploads, 0, assembly_gemms, 0, 0))
+                Some((0, factor_copies, 0, 0, assembly_gemms, 0, 0))
             );
             observation.set(None);
         });
@@ -21911,10 +21975,11 @@ mod representation_gates {
     #[cfg(feature = "cuda")]
     #[test]
     #[ignore = "requires a real CUDA device"]
-    fn typed_cuda_svd_non_aligned_routes_upload_one_selector_each_and_the_same_diagonal() {
+    fn typed_cuda_svd_non_aligned_routes_upload_no_selector_and_the_same_diagonal() {
         // What: the rustdoc's upload count, three zero-initialized factors
-        // plus one identity selector per non-aligned route, and a diagonal
-        // that does not depend on the assembly path.
+        // and no selector upload even on non-aligned routes (the gauge
+        // selector is built on the device), and a diagonal that does not
+        // depend on the assembly path.
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let leg = GradedSpace::try_new(
             Arc::new(U1FusionRule),
@@ -21938,7 +22003,7 @@ mod representation_gates {
         .filter(|region| region.rows() != 0 && region.cols() != 0)
         .count();
         let mut diagonals = Vec::new();
-        for (treewise, selectors) in [(false, 0), (true, routes)] {
+        for (treewise, selectors) in [(false, 0), (true, 0)] {
             CUDA_SVD_TREEWISE.with(|flag| flag.set(treewise));
             CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
             CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
@@ -21967,6 +22032,396 @@ mod representation_gates {
         }
         assert!(routes > 1);
         assert_eq!(diagonals[0], diagonals[1]);
+    }
+
+    /// Each nonempty coupled sector of a host tensor as `(sector, rows, cols,
+    /// column-major widened values)`.
+    #[cfg(feature = "cuda")]
+    fn gauge_sector_matrices<R, D>(
+        tensor: &TensorMap<R, D>,
+    ) -> Vec<(SectorId, usize, usize, Vec<Complex64>)>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: CudaFactorizationPayload,
+    {
+        let tensor = tensor.materialize().unwrap();
+        let data = tensor.dense_data().unwrap();
+        let space = tensor.logical_space().space();
+        sector_regions(space.structure(), space.nout())
+            .unwrap()
+            .iter()
+            .filter(|region| region.rows() != 0 && region.cols() != 0)
+            .map(|region| {
+                let values = data[region.range()]
+                    .iter()
+                    .map(|value| value.widen_complex())
+                    .collect();
+                (region.coupled(), region.rows(), region.cols(), values)
+            })
+            .collect()
+    }
+
+    /// `A = U diag(g) Vh` from the Host SVD of `host`, with every sector's
+    /// spectrum replaced by `g(i) = 2` for `i < 2` and `1 / (2 + i)` after:
+    /// an exactly degenerate top pair in every sector of dimension >= 2.
+    #[cfg(feature = "cuda")]
+    fn with_degenerate_spectrum<R, D>(host: &TensorMap<R, D>) -> TensorMap<R, D>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: CudaFactorizationPayload,
+    {
+        let Svd { u, s, vh } = host.svd_compact().unwrap();
+        let bond = s.domain();
+        let spectrum =
+            TensorMap::<R, D>::from_subblock_fn(host.runtime(), &bond, &bond, |_, index| {
+                if index[0] != index[1] {
+                    D::zero()
+                } else if index[0] < 2 {
+                    D::from_real(2.0)
+                } else {
+                    D::from_real(1.0 / (2 + index[0]) as f64)
+                }
+            })
+            .unwrap();
+        u.compose(&spectrum).unwrap().compose(&vh).unwrap()
+    }
+
+    /// Consistency contract of #1552, Host SVD as the oracle: (1) singular
+    /// values agree; (2) a vector of a non-degenerate singular value with a
+    /// clear pivot agrees entrywise (same sign/phase gauge); (3) a degenerate
+    /// group, or a vector whose pivot is ambiguous at solver rounding, agrees
+    /// by its projector. Also: the pivot of every device `u` column is real
+    /// and non-negative. Returns how many vectors were compared entrywise.
+    #[cfg(feature = "cuda")]
+    fn assert_device_svd_gauge_matches_host<R, D>(host: &TensorMap<R, D>) -> usize
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: CudaFactorizationPayload,
+    {
+        let tolerance = 1.0e3 * D::epsilon();
+        let expected = host.svd_compact().unwrap();
+        let actual = host.to_cuda().unwrap().svd_compact().unwrap();
+        let actual = Svd {
+            u: actual.u.to_host().unwrap(),
+            s: actual.s.to_host().unwrap(),
+            vh: actual.vh.to_host().unwrap(),
+        };
+        let matrices = |svd: &Svd<TensorMap<R, D>>| {
+            (
+                gauge_sector_matrices(&svd.u),
+                gauge_sector_matrices(&svd.s),
+                gauge_sector_matrices(&svd.vh),
+            )
+        };
+        let (host_u, host_s, host_vh) = matrices(&expected);
+        let (device_u, device_s, device_vh) = matrices(&actual);
+        assert_eq!(host_u.len(), device_u.len());
+        let find = |list: &[(SectorId, usize, usize, Vec<Complex64>)], sector: SectorId| {
+            list.iter()
+                .find(|entry| entry.0 == sector)
+                .cloned()
+                .expect("every sector has all three factors")
+        };
+        let mut entrywise = 0;
+        for (sector, rows, k, u_host) in &host_u {
+            let (rows, k) = (*rows, *k);
+            let (_, _, _, u_device) = find(&device_u, *sector);
+            let (_, _, cols, vh_host) = find(&host_vh, *sector);
+            let (_, _, _, vh_device) = find(&device_vh, *sector);
+            let s_host = find(&host_s, *sector).3;
+            let s_device = find(&device_s, *sector).3;
+            let singular = |s: &[Complex64], i: usize| s[i * (k + 1)].re;
+            // (1) singular values.
+            for i in 0..k {
+                let (d, h) = (singular(&s_device, i), singular(&s_host, i));
+                assert!(
+                    (d - h).abs() <= tolerance * h.abs().max(1.0),
+                    "s: {d} vs {h}"
+                );
+            }
+            let u_col = |u: &[Complex64], j: usize| u[j * rows..(j + 1) * rows].to_vec();
+            let vh_row =
+                |vh: &[Complex64], j: usize| (0..cols).map(|c| vh[j + k * c]).collect::<Vec<_>>();
+            // Device pivot: the first largest-|u| entry is real and >= 0.
+            for j in 0..k {
+                let column = u_col(&u_device, j);
+                let top = column.iter().map(|x| x.norm()).fold(0.0, f64::max);
+                assert!(
+                    column.iter().any(|x| x.norm() >= top - tolerance
+                        && x.im.abs() <= tolerance
+                        && x.re >= 0.0),
+                    "device u column {j} of {sector:?} has no real non-negative pivot: {column:?}"
+                );
+            }
+            // Group singular values into degenerate runs.
+            let mut start = 0;
+            while start < k {
+                let mut end = start + 1;
+                while end < k
+                    && (singular(&s_host, end - 1) - singular(&s_host, end)).abs()
+                        <= 1.0e-6 * singular(&s_host, start).max(1.0)
+                {
+                    end += 1;
+                }
+                let clear_pivot = |j: usize| {
+                    let mut magnitudes: Vec<f64> =
+                        u_col(u_host, j).iter().map(|x| x.norm()).collect();
+                    magnitudes.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                    magnitudes.len() < 2 || magnitudes[0] - magnitudes[1] > 1.0e-6
+                };
+                if end - start == 1 && clear_pivot(start) {
+                    // (2) same gauge, entrywise.
+                    for (d, h) in u_col(&u_device, start).iter().zip(u_col(u_host, start)) {
+                        assert!(
+                            (d - h).norm() <= tolerance * 10.0,
+                            "u {sector:?}[{start}]: {d} vs {h}"
+                        );
+                    }
+                    for (d, h) in vh_row(&vh_device, start)
+                        .iter()
+                        .zip(vh_row(&vh_host, start))
+                    {
+                        assert!(
+                            (d - h).norm() <= tolerance * 10.0,
+                            "vh {sector:?}[{start}]: {d} vs {h}"
+                        );
+                    }
+                    entrywise += 1;
+                } else {
+                    // (3) projectors of the run.
+                    let projector = |vectors: Vec<Vec<Complex64>>| {
+                        let n = vectors[0].len();
+                        let mut p = vec![Complex64::new(0.0, 0.0); n * n];
+                        for v in &vectors {
+                            for a in 0..n {
+                                for b in 0..n {
+                                    p[a + n * b] += v[a] * v[b].conj();
+                                }
+                            }
+                        }
+                        p
+                    };
+                    let run = start..end;
+                    for (host_vectors, device_vectors) in [
+                        (
+                            run.clone().map(|j| u_col(u_host, j)).collect::<Vec<_>>(),
+                            run.clone().map(|j| u_col(&u_device, j)).collect::<Vec<_>>(),
+                        ),
+                        (
+                            run.clone().map(|j| vh_row(&vh_host, j)).collect(),
+                            run.clone().map(|j| vh_row(&vh_device, j)).collect(),
+                        ),
+                    ] {
+                        let (p, q) = (projector(host_vectors), projector(device_vectors));
+                        let difference = p
+                            .iter()
+                            .zip(&q)
+                            .map(|(a, b)| (a - b).norm_sqr())
+                            .sum::<f64>()
+                            .sqrt();
+                        assert!(
+                            difference <= tolerance * 10.0,
+                            "projector {sector:?}[{run:?}]: {difference:e}"
+                        );
+                    }
+                }
+                start = end;
+            }
+        }
+        entrywise
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_svd_follows_the_host_gauge_with_and_without_degenerate_spectra() {
+        // What: #1552's three-part consistency contract against the Host SVD
+        // over U(1) and SU(2), f64 and c64, generic and exactly degenerate
+        // spectra, and aligned as well as forced per-tree (non-aligned)
+        // assembly, where the gauge rides the selector GEMM instead.
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let u1 = GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [
+                (U1Irrep::new(-1), 2),
+                (U1Irrep::new(0), 3),
+                (U1Irrep::new(1), 2),
+            ],
+        )
+        .unwrap();
+        let su2 = GradedSpace::try_new(
+            Arc::new(SU2FusionRule),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 2),
+            ],
+        )
+        .unwrap();
+        fn cases<R>(runtime: &Runtime, leg: &GradedSpace<R>) -> usize
+        where
+            R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        {
+            let real = TensorMap::<R, f64>::rand_with_seed(runtime, [leg, leg], [leg], 21).unwrap();
+            let complex =
+                TensorMap::<R, Complex64>::rand_with_seed(runtime, [leg, leg], [leg], 22).unwrap();
+            let mut entrywise = 0;
+            for treewise in [false, true] {
+                CUDA_SVD_TREEWISE.with(|flag| flag.set(treewise));
+                entrywise += assert_device_svd_gauge_matches_host(&real);
+                entrywise += assert_device_svd_gauge_matches_host(&complex);
+                assert_device_svd_gauge_matches_host(&with_degenerate_spectrum(&real));
+                assert_device_svd_gauge_matches_host(&with_degenerate_spectrum(&complex));
+                CUDA_SVD_TREEWISE.with(|flag| flag.set(false));
+            }
+            entrywise
+        }
+        // The entrywise (sign/phase) statement must not be vacuous.
+        assert!(cases(&runtime, &u1) > 8);
+        assert!(cases(&runtime, &su2) > 8);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_svd_of_a_near_tie_follows_the_first_largest_entry() {
+        // What: A = [[1, -1], [-1, 1]] has singular vectors whose entries tie
+        // in exact arithmetic. cuSOLVER returns them 1 ulp apart
+        // (0.7071067811865475 vs ...476, observed on the A100), so the rule
+        // is checked exactly on the device's own output: in every column the
+        // first entry of largest magnitude is positive. The ±1 scaling is
+        // exact, so these magnitudes are cuSOLVER's. No column or `vh` row may
+        // be zeroed (a tie-break that summed tied entries would do that).
+        // The exact-tie contract (first row wins) is pinned on hand-built
+        // factors in `tenet-dense/tests/cuda_svd_gauge.rs`.
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+        let host = TensorMap::<U1FusionRule, f64>::from_subblock_fn(
+            &runtime,
+            [&leg],
+            [&leg],
+            |_, index| if index[0] == index[1] { 1.0 } else { -1.0 },
+        )
+        .unwrap();
+        let Svd { u, s, vh } = host.to_cuda().unwrap().svd_compact().unwrap();
+        let (u, s, vh) = (
+            u.to_host().unwrap(),
+            s.to_host().unwrap(),
+            vh.to_host().unwrap(),
+        );
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        let u = u.dense_data().unwrap();
+        for column in u.chunks(2) {
+            let pivot = if column[1].abs() > column[0].abs() {
+                column[1]
+            } else {
+                column[0]
+            };
+            assert!(pivot > 0.0, "u = {u:?}");
+        }
+        let s = s.dense_data().unwrap();
+        assert!((s[0] - 2.0).abs() <= 1e-12 && s[3].abs() <= 1e-12);
+        // Column 0 spans [1, -1], column 1 spans [1, 1], none zeroed.
+        assert!(
+            (u[0] + u[1]).abs() <= 1e-12 && (u[2] - u[3]).abs() <= 1e-12,
+            "u = {u:?}"
+        );
+        let vh = vh.dense_data().unwrap();
+        for value in u.iter().chain(vh) {
+            assert!(
+                (value.abs() - half).abs() <= 1e-12,
+                "u = {u:?}, vh = {vh:?}"
+            );
+        }
+        // vh row 0 takes u column 0's phase: A = 2 u0 vh0 with vh0 = u0.
+        assert!(
+            (vh[0] - u[0]).abs() <= 1e-12 && (vh[2] - u[1]).abs() <= 1e-12,
+            "vh = {vh:?}"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_svd_gauge_costs_the_documented_ops_and_no_download() {
+        // What: the rustdoc's cost of the gauge. Per nonempty route, 13 ops for
+        // the phases, 2 per aligned side (broadcast, mul) or 1 per non-aligned
+        // side (the selector's embed_diagonal), and 1 conj for a complex left
+        // side. Per call, one gauge-weight upload replaces the old per-route
+        // identity selectors; nothing is downloaded.
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let leg = GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [
+                (U1Irrep::new(-1), 2),
+                (U1Irrep::new(0), 1),
+                (U1Irrep::new(1), 2),
+            ],
+        )
+        .unwrap();
+        fn check<D: CudaFactorizationPayload>(
+            runtime: &Runtime,
+            leg: &GradedSpace<U1FusionRule>,
+            seed: u64,
+        ) {
+            let host =
+                TensorMap::<U1FusionRule, D>::rand_with_seed(runtime, [leg, leg], [leg], seed)
+                    .unwrap();
+            let device = host.to_cuda().unwrap();
+            let regions = sector_regions(
+                host.logical_space().space().structure(),
+                host.logical_space().space().nout(),
+            )
+            .unwrap();
+            let plan = device.compile_cuda_qr_plan(Arc::clone(&regions)).unwrap();
+            let max_rows = plan
+                .routes
+                .iter()
+                .map(|route| regions[route.source].rows())
+                .max()
+                .unwrap();
+            for treewise in [false, true] {
+                let expected_ops: u64 = plan
+                    .routes
+                    .iter()
+                    .map(|route| {
+                        let side = |aligned: bool| if aligned && !treewise { 2 } else { 1 };
+                        13 + side(route.aligned_left)
+                            + side(route.aligned_right)
+                            + u64::from(<D as tenet_dense::CudaScalar>::IS_COMPLEX)
+                    })
+                    .sum();
+                CUDA_SVD_TREEWISE.with(|flag| flag.set(treewise));
+                CUDA_QR_OBSERVATION
+                    .with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+                let before = tenet_dense::cuda_transfer_stats();
+                let Svd { u, s, vh } = device.svd_compact().unwrap();
+                let after = tenet_dense::cuda_transfer_stats();
+                CUDA_SVD_TREEWISE.with(|flag| flag.set(false));
+                let (_, _, selector_uploads, _, _, _, _) = CUDA_QR_OBSERVATION
+                    .with(|observation| observation.replace(None))
+                    .unwrap();
+                assert_eq!(selector_uploads, 0, "treewise {treewise}");
+                assert_eq!(
+                    after.gauge_ops - before.gauge_ops,
+                    expected_ops,
+                    "treewise {treewise}"
+                );
+                assert_eq!(after.d2h_calls - before.d2h_calls, 0, "treewise {treewise}");
+                assert_eq!(after.h2d_calls - before.h2d_calls, 4, "treewise {treewise}");
+                let len = |t: &TensorMap<U1FusionRule, D, CudaStorage<D>>| {
+                    t.logical_space().space().required_len().unwrap()
+                };
+                let payload = |len: usize| (len * std::mem::size_of::<D>()) as u64;
+                assert_eq!(
+                    after.h2d_bytes - before.h2d_bytes,
+                    payload(len(&u) + len(&s) + len(&vh))
+                        + (max_rows * std::mem::size_of::<i64>()) as u64,
+                    "treewise {treewise}"
+                );
+            }
+        }
+        check::<f64>(&runtime, &leg, 31);
+        check::<Complex64>(&runtime, &leg, 32);
     }
 
     /// `s` exactly as `svd_compact` built it before #1536: each nonempty

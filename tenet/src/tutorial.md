@@ -506,7 +506,7 @@ to the runtime; tensors remain on Host storage until `to_cuda()` transfers them
 explicitly. Device payloads are `f64` and `Complex64`; single precision has no
 device payload. `svd_compact` and `eigh_full` run on device for both
 payloads: EIGH admits a block only when it equals its conjugate transpose, and
-`u`/`vh` keep the raw device SVD gauge instead of the Host largest-pivot gauge.
+`u`/`vh` follow the same largest-pivot gauge as the Host SVD.
 Truncation is a global decision over quantum-dimension-weighted spectra and
 stays on the host, so a device truncated factorization is the same
 composition with one explicit transfer: `svd_compact` (or `eigh_full`) on the

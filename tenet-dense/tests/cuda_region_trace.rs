@@ -104,6 +104,7 @@ fn delta<T>(body: impl FnOnce() -> T) -> (T, CudaTransferStats) {
             gemm_calls: after.gemm_calls - before.gemm_calls,
             solver_calls: after.solver_calls - before.solver_calls,
             copy_calls: after.copy_calls - before.copy_calls,
+            gauge_ops: after.gauge_ops - before.gauge_ops,
         },
     )
 }

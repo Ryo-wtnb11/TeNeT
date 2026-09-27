@@ -31,6 +31,7 @@ fn delta(before: CudaTransferStats) -> CudaTransferStats {
         h2d_bytes: after.h2d_bytes - before.h2d_bytes,
         d2h_calls: after.d2h_calls - before.d2h_calls,
         d2h_bytes: after.d2h_bytes - before.d2h_bytes,
+        gauge_ops: after.gauge_ops - before.gauge_ops,
         ..CudaTransferStats::default()
     }
 }
@@ -62,18 +63,23 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
             vh.to_host().unwrap(),
         );
         assert_eq!((svd.d2h_calls, svd.d2h_bytes), (0, 0), "{charges} sectors");
-        // Layout-aligned routes need no selector: exactly the three zero
-        // uploads, so `s` adds nothing beyond its zero initialization.
-        assert_eq!(svd.h2d_calls, 3, "{charges} sectors");
+        // Exactly the three zero uploads plus one upload of the gauge's
+        // row weights (every route has 3 rows), so `s` adds nothing beyond
+        // its zero initialization.
+        assert_eq!(svd.h2d_calls, 4, "{charges} sectors");
         assert_eq!(
             svd.h2d_bytes,
             bytes(
                 u.materialize().unwrap().dense_data().unwrap().len()
                     + s.materialize().unwrap().dense_data().unwrap().len()
                     + vh.materialize().unwrap().dense_data().unwrap().len()
+                    + 3
             ),
             "{charges} sectors"
         );
+        // Per aligned real route: 13 phase ops, then a broadcast and a mul on
+        // each side; the gauge never downloads (checked above).
+        assert_eq!(svd.gauge_ops, 17 * charges as u64, "{charges} sectors");
         let Svd { s: expected, .. } = host.svd_compact().unwrap();
         for (device, host) in s
             .materialize()

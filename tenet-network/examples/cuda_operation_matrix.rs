@@ -288,6 +288,7 @@ mod device {
             gemm_calls: after.gemm_calls - before.gemm_calls,
             solver_calls: after.solver_calls - before.solver_calls,
             copy_calls: after.copy_calls - before.copy_calls,
+            gauge_ops: after.gauge_ops - before.gauge_ops,
         }
     }
 
@@ -346,6 +347,7 @@ mod device {
                     gemm_calls: field(|sample| sample.device.gemm_calls),
                     solver_calls: field(|sample| sample.device.solver_calls),
                     copy_calls: field(|sample| sample.device.copy_calls),
+                    gauge_ops: field(|sample| sample.device.gauge_ops),
                 },
                 barrier_d2h_calls: field(|sample| sample.barrier_d2h_calls),
                 barrier_d2h_bytes: field(|sample| sample.barrier_d2h_bytes),
