@@ -70,6 +70,12 @@ pub use tenferro_cpu::CpuBackendKind;
 
 #[cfg(feature = "cuda")]
 pub use cuda_adapter::{
+    cuda_conj, cuda_copy_strided_into, cuda_download_batched_spectra, cuda_eigh_region_batched,
+    cuda_gather_columns_batched_into, cuda_gather_elements, cuda_gather_member_elements,
+    cuda_gather_members, cuda_hermitian_regions_batched,
+};
+#[cfg(feature = "cuda")]
+pub use cuda_adapter::{
     cuda_copy_region_into, cuda_eigh_region, cuda_gemm_region_batched_into, cuda_gemm_region_into,
     cuda_gemm_region_with_ops_into, cuda_hermitian_regions, cuda_is_hermitian_region,
     cuda_matmul_region_into, cuda_qr_region, cuda_region_axpby, cuda_region_trace_accumulate,
@@ -79,12 +85,6 @@ pub use cuda_adapter::{
 };
 #[cfg(feature = "cuda")]
 pub use cuda_adapter::{cuda_copy_spectrum_into, cuda_download_spectra, CudaSpectrum};
-#[cfg(feature = "cuda")]
-pub use cuda_adapter::{
-    cuda_copy_strided_into, cuda_download_batched_spectra, cuda_eigh_region_batched,
-    cuda_gather_columns_batched_into, cuda_gather_member_elements, cuda_gather_members,
-    cuda_hermitian_regions_batched,
-};
 #[cfg(feature = "cuda")]
 pub use cuda_region::CudaRegion;
 #[cfg(feature = "cuda")]
