@@ -22281,15 +22281,16 @@ mod representation_gates {
     #[cfg(feature = "cuda")]
     #[test]
     #[ignore = "requires a real CUDA device"]
-    fn typed_cuda_svd_of_a_magnitude_tie_fixture_follows_the_first_largest_entry() {
+    fn typed_cuda_svd_of_a_near_tie_follows_the_first_largest_entry() {
         // What: A = [[1, -1], [-1, 1]] has singular vectors whose entries tie
         // in exact arithmetic. cuSOLVER returns them 1 ulp apart
         // (0.7071067811865475 vs ...476, observed on the A100), so the rule
         // is checked exactly on the device's own output: in every column the
         // first entry of largest magnitude is positive. The ±1 scaling is
         // exact, so these magnitudes are cuSOLVER's. No column or `vh` row may
-        // be zeroed (a tie-break that summed tied entries would do that);
-        // exact ties themselves are pinned in tenet-dense `cuda_svd_gauge`.
+        // be zeroed (a tie-break that summed tied entries would do that).
+        // The exact-tie contract (first row wins) is pinned on hand-built
+        // factors in `tenet-dense/tests/cuda_svd_gauge.rs`.
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
         let host = TensorMap::<U1FusionRule, f64>::from_subblock_fn(

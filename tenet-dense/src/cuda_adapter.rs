@@ -2872,9 +2872,12 @@ fn gauge_op<T>(result: tenferro_tensor::Result<T>) -> Result<T, DenseError> {
 /// arg-max index: it needs the index as an owned tensor per route, and a
 /// float-to-int `cast` validates its range with a download.
 ///
-/// Working set: each intermediate is dropped after its last use, so besides
-/// `u` at most three `rows x k` arrays of at most 8-byte elements are live
-/// (the peak is the weighted `mul`: two `i64` operands and its output).
+/// Working set: each intermediate is dropped after its last use. Besides
+/// `u`, the live `rows x k` intermediates peak at 24 bytes per element, at
+/// the weighted `mul` (two `i64` operands and its `i64` output): 3x `u` for
+/// `f64`, 1.5x for `Complex64`. Every other step holds less: `abs` output,
+/// broadcast maximum and bool mask (at most 17 B), or the bool mask and the
+/// `D`-typed one-hot mask (at most 17 B for `Complex64`).
 ///
 /// Magnitudes are compared by `abs` (`hypot`), the Host by `norm_sqr`; they
 /// can disagree only when two complex entries tie within an ulp in one
@@ -2911,12 +2914,14 @@ pub fn cuda_svd_gauge_phases<D: CudaScalar>(
     let shape = [rows, k];
     let backend = &mut ctx.backend;
     let maxima = {
-        let magnitude = gauge_op(backend.abs(&u.tensor))?;
-        let largest = gauge_op(backend.reduce_max(&magnitude, &[0]))?;
-        let largest = gauge_op(backend.broadcast_in_dim(&largest, &shape, &[1]))?;
-        gauge_op(backend.compare(&magnitude, &largest, &CompareDir::Eq))?
+        let hits = {
+            let magnitude = gauge_op(backend.abs(&u.tensor))?;
+            let largest = gauge_op(backend.reduce_max(&magnitude, &[0]))?;
+            let largest = gauge_op(backend.broadcast_in_dim(&largest, &shape, &[1]))?;
+            gauge_op(backend.compare(&magnitude, &largest, &CompareDir::Eq))?
+        };
+        gauge_op(backend.cast(&hits, tenferro_tensor::DType::I64))?
     };
-    let maxima = gauge_op(backend.cast(&maxima, tenferro_tensor::DType::I64))?;
     let score = {
         let row_weights = if rows == weights.len {
             gauge_op(backend.broadcast_in_dim(&weights.tensor, &shape, &[0]))?
@@ -2933,13 +2938,14 @@ pub fn cuda_svd_gauge_phases<D: CudaScalar>(
         gauge_op(backend.mul(&maxima, &row_weights))?
     };
     drop(maxima);
-    let first = {
+    let first_hit = {
         let best = gauge_op(backend.reduce_max(&score, &[0]))?;
         let best = gauge_op(backend.broadcast_in_dim(&best, &shape, &[1]))?;
         gauge_op(backend.compare(&score, &best, &CompareDir::Eq))?
     };
     drop(score);
-    let first = gauge_op(backend.cast(&first, D::dtype()))?;
+    let first = gauge_op(backend.cast(&first_hit, D::dtype()))?;
+    drop(first_hit);
     // Why a batched dot rather than `mul` + `reduce_sum`: Tenferro 0.7.1's
     // complex warp-plane `reduce_sum` kernel fails NVRTC compilation
     // (`__shfl_xor_sync` has no `cuDoubleComplex` overload).
