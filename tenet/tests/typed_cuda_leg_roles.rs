@@ -13,7 +13,12 @@
 
 use std::sync::Arc;
 
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use num_complex::Complex64;
+
+use tenet::core::{
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
+};
 use tenet::typed::{Eigh, GradedSpace, Qr, Runtime, Svd, TensorMap};
 
 macro_rules! same {
@@ -35,7 +40,11 @@ macro_rules! same {
 macro_rules! close {
     ($got:expr, $want:expr, $what:expr) => {{
         let (got, want) = (&$got, &$want);
-        let residual = got.axpby(1.0, want, -1.0).unwrap().norm(2.0).unwrap();
+        let residual = got
+            .axpby(1.0.into(), want, (-1.0).into())
+            .unwrap()
+            .norm(2.0)
+            .unwrap();
         assert!(
             residual <= 1e-10 * want.norm(2.0).unwrap().max(1.0),
             "{}: {residual}",
@@ -45,9 +54,9 @@ macro_rules! close {
 }
 
 macro_rules! check {
-    ($runtime:expr, $v:expr, $w:expr, $label:expr) => {{
+    ($runtime:expr, $d:ty, $v:expr, $w:expr, $label:expr) => {{
         let (v, w) = (&$v, &$w);
-        let host: TensorMap<_, f64> =
+        let host: TensorMap<_, $d> =
             TensorMap::rand_with_seed(&$runtime, [v, w], [w, v], 1553).unwrap();
         let device = host.to_cuda().unwrap();
         let (rows, cols) = ([2, 0], [3, 1]);
@@ -80,10 +89,14 @@ macro_rules! check {
         close!(rebuilt, host_permuted, $label);
 
         // Square roles on a Hermitian source: both sides swap their two legs.
-        let square: TensorMap<_, f64> =
+        let square: TensorMap<_, $d> =
             TensorMap::rand_with_seed(&$runtime, [v, w], [v, w], 1554).unwrap();
         let hermitian = square
-            .axpby(1.0, &square.adjoint().unwrap().materialize().unwrap(), 1.0)
+            .axpby(
+                1.0.into(),
+                &square.adjoint().unwrap().materialize().unwrap(),
+                1.0.into(),
+            )
             .unwrap();
         let device = hermitian.to_cuda().unwrap();
         let (rows, cols) = ([1, 0], [3, 2]);
@@ -130,9 +143,17 @@ fn device_leg_roles_equal_the_device_permute_composition() {
     };
     check!(
         runtime,
+        f64,
         u1(&[(-1, 1), (0, 2), (1, 2)]),
         u1(&[(0, 1), (1, 2), (2, 1)]).try_dual().unwrap(),
-        "u1"
+        "u1 f64"
+    );
+    check!(
+        runtime,
+        Complex64,
+        u1(&[(-1, 1), (0, 2), (1, 2)]),
+        u1(&[(0, 1), (1, 2), (2, 1)]).try_dual().unwrap(),
+        "u1 c64"
     );
     let su2 = |spins: &[(usize, usize)]| {
         GradedSpace::try_new(
@@ -145,8 +166,35 @@ fn device_leg_roles_equal_the_device_permute_composition() {
     };
     check!(
         runtime,
+        f64,
         su2(&[(0, 2), (1, 2), (2, 1)]),
         su2(&[(1, 1), (2, 2)]).try_dual().unwrap(),
-        "su2"
+        "su2 f64"
     );
+    check!(
+        runtime,
+        Complex64,
+        su2(&[(0, 2), (1, 2), (2, 1)]),
+        su2(&[(1, 1), (2, 2)]).try_dual().unwrap(),
+        "su2 c64"
+    );
+    let fz2u1 = |sectors: &[(bool, i32, usize)]| {
+        GradedSpace::try_new(
+            Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+            sectors.iter().map(|&(odd, q, n)| {
+                let parity = if odd { Z2Irrep::ODD } else { Z2Irrep::EVEN };
+                (product_sector(parity, U1Irrep::new(q)), n)
+            }),
+        )
+        .unwrap()
+    };
+    for (d, label) in [(false, "fz2u1 f64"), (true, "fz2u1 c64")] {
+        let v = fz2u1(&[(false, 0, 2), (true, 1, 2), (true, -1, 1)]);
+        let w = fz2u1(&[(false, 1, 1), (true, 0, 2)]).try_dual().unwrap();
+        if d {
+            check!(runtime, Complex64, v, w, label);
+        } else {
+            check!(runtime, f64, v, w, label);
+        }
+    }
 }

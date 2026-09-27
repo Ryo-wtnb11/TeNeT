@@ -15,12 +15,14 @@ use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 
 use num_complex::Complex64;
+use tenet::core::CoreError;
 use tenet::core::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
+use tenet::operations::OperationError;
 use tenet::typed::{
-    Eig, Eigh, GradedSpace, LeftPolar, Lq, Qr, RightPolar, Runtime, Svd, TensorMap,
+    Eig, Eigh, Error, GradedSpace, LeftPolar, Lq, Qr, RightPolar, Runtime, Svd, TensorMap,
 };
 
 struct CountingAllocator;
@@ -58,6 +60,15 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Every test here runs alone: allocations are counted per thread, but
+/// first-use interning and cache admission are process-wide, so a test on
+/// another thread could otherwise move a measured call's request count.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// `(allocations, bytes)` requested on this thread while `f` runs.
 fn measure<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
@@ -334,6 +345,7 @@ macro_rules! check_fixture {
 
 #[test]
 fn leg_roles_equal_the_permute_composition() {
+    let _serial = serial();
     let runtime = runtime();
     check_fixture!(runtime, u1_legs(), f64, 1553, "u1 f64");
     check_fixture!(runtime, u1_legs(), Complex64, 1553, "u1 c64");
@@ -346,6 +358,7 @@ fn leg_roles_equal_the_permute_composition() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_leg_roles_equal_the_permute_composition() {
+    let _serial = serial();
     use tenet::typed::SUNFusionRule;
     let runtime = runtime();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -361,6 +374,7 @@ fn checked_generic_leg_roles_equal_the_permute_composition() {
 
 #[test]
 fn lazy_adjoint_leg_roles_equal_the_permute_composition() {
+    let _serial = serial();
     let runtime = runtime();
     let (v, w) = su2_legs();
     let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &w], [&w, &v], 7).unwrap();
@@ -373,12 +387,57 @@ fn lazy_adjoint_leg_roles_equal_the_permute_composition() {
     assert_same!(vh, expected.vh, "adjoint vh");
 }
 
+/// A permutation that leaves the space unchanged (`[v, v] <- [w, w]` with
+/// both sides swapped) makes the operation on the permuted tensor
+/// structurally identical to the current-split operation, so their requested
+/// allocations and bytes must agree: the leg roles add exactly one permute.
+#[test]
+fn space_preserving_roles_cost_the_current_split_plus_one_permute() {
+    let _serial = serial();
+    let runtime = runtime();
+    let (v, w) = su2_legs();
+    let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &v], [&w, &w], 9).unwrap();
+    let (rows, cols) = ([1, 0], [3, 2]);
+    let current = ([0, 1], [2, 3]);
+    let p = t.permute(&rows, &cols).unwrap();
+    assert!(p.codomain() == t.codomain() && p.domain() == t.domain());
+    let _ = t.svd_compact(&rows, &cols).unwrap();
+    let _ = t.svd_compact(&current.0, &current.1).unwrap();
+    let _ = p.svd_compact(&current.0, &current.1).unwrap();
+
+    let before = transforms(&runtime);
+    let (_, current_allocations, current_bytes) =
+        measure(|| t.svd_compact(&current.0, &current.1).unwrap());
+    assert_eq!(
+        transforms(&runtime),
+        before,
+        "the current split ran a transform"
+    );
+    let (_, op_allocations, op_bytes) = measure(|| p.svd_compact(&current.0, &current.1).unwrap());
+    assert_eq!(transforms(&runtime), before);
+    assert_eq!(
+        (op_allocations, op_bytes),
+        (current_allocations, current_bytes)
+    );
+    let (_, fused_allocations, fused_bytes) = measure(|| t.svd_compact(&rows, &cols).unwrap());
+    let after_fused = transforms(&runtime);
+    let (_, permute_allocations, permute_bytes) = measure(|| t.permute(&rows, &cols).unwrap());
+    assert_eq!(after_fused - before, transforms(&runtime) - after_fused);
+    assert_eq!(
+        (fused_allocations, fused_bytes),
+        (
+            permute_allocations + current_allocations,
+            permute_bytes + current_bytes
+        )
+    );
+}
+
 /// The performance contract: the current split runs no transform, and any
 /// other split is exactly one transform plus the operation, the same work
 /// and requested bytes as the explicit `permute` followed by the operation.
 #[test]
 fn leg_roles_cost_exactly_the_explicit_composition() {
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let _serial = serial();
     let runtime = runtime();
     let (v, w) = su2_legs();
     let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &w], [&w, &v], 3).unwrap();
@@ -386,6 +445,11 @@ fn leg_roles_cost_exactly_the_explicit_composition() {
     // Warm the transform and dense caches once so every measured call replays.
     let _ = t.svd_compact(&rows, &cols).unwrap();
     let _ = t.svd_compact(&[0, 1], &[2, 3]).unwrap();
+    let _ = t
+        .permute(&rows, &cols)
+        .unwrap()
+        .svd_compact(&[0, 1], &[2, 3])
+        .unwrap();
 
     let before = transforms(&runtime);
     let _ = t.svd_compact(&[0, 1], &[2, 3]).unwrap();
@@ -420,16 +484,88 @@ fn leg_roles_cost_exactly_the_explicit_composition() {
 
 #[test]
 fn malformed_roles_are_rejected_before_the_operation() {
+    let _serial = serial();
     let runtime = runtime();
     let (v, w) = u1_legs();
     let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &w], [&w, &v], 1).unwrap();
+    let invalid = |error: Error| {
+        assert!(
+            matches!(
+                &error,
+                Error::Operation(operation)
+                    if matches!(
+                        &**operation,
+                        OperationError::Core(core)
+                            if matches!(core, CoreError::InvalidPermutation { .. })
+                    )
+            ),
+            "{error:?}"
+        );
+    };
+    let before = transforms(&runtime);
     for (rows, cols) in [
         (&[0, 0][..], &[2, 3][..]),
         (&[0, 1][..], &[2][..]),
         (&[0, 1][..], &[2, 4][..]),
     ] {
-        assert!(t.svd_compact(rows, cols).is_err());
-        assert!(t.qr_compact(rows, cols).is_err());
-        assert!(t.exp(rows, cols).is_err());
+        invalid(t.svd_compact(rows, cols).err().unwrap());
+        invalid(t.qr_compact(rows, cols).err().unwrap());
+        invalid(t.exp(rows, cols).err().unwrap());
     }
+    assert_eq!(
+        transforms(&runtime),
+        before,
+        "a rejected role ran a transform"
+    );
+    // Zero-length sides are not malformed: all legs on one side is the
+    // row (or column) vector view, TensorKit's `permute(t, ((), (1, 2, 3, 4)))`.
+    for (rows, cols) in [(&[][..], &[0, 1, 2, 3][..]), (&[0, 1, 2, 3][..], &[][..])] {
+        let p = t.permute(rows, cols).unwrap();
+        let nout = p.codomain_rank();
+        let (ir, ic): (Vec<usize>, Vec<usize>) = ((0..nout).collect(), (nout..4).collect());
+        let Svd { u, s, vh } = t.svd_compact(rows, cols).unwrap();
+        let expected = p.svd_compact(&ir, &ic).unwrap();
+        assert_same!(u, expected.u, "zero-length u");
+        assert_same!(s, expected.s, "zero-length s");
+        assert_same!(vh, expected.vh, "zero-length vh");
+        assert!(
+            t.exp(rows, cols).is_err(),
+            "a vector view is not an endomorphism"
+        );
+    }
+}
+
+/// A fermionic square split that crosses the codomain/domain boundary:
+/// `[0, 3] <- [2, 1]` bends one leg each way, so the permute carries the
+/// fermionic signs and dual flips into `exp`, `inv` and `eig_full`.
+#[test]
+fn fermionic_boundary_crossing_square_roles_equal_the_permute_composition() {
+    let _serial = serial();
+    let runtime = runtime();
+    let (v, w) = fz2_u1_legs();
+    let t: TensorMap<_, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&v, &w], [&v, &w], 1555).unwrap();
+    let (rows, cols) = ([0, 3], [2, 1]);
+    let p = t.permute(&rows, &cols).unwrap();
+    assert_eq!(p.codomain(), p.domain(), "the crossing split is square");
+    let (ir, ic) = ([0, 1], [2, 3]);
+    assert_same!(
+        t.exp(&rows, &cols).unwrap(),
+        p.exp(&ir, &ic).unwrap(),
+        "fz2u1 exp"
+    );
+    let inv = t.inv(&rows, &cols).unwrap();
+    assert_same!(inv, p.inv(&ir, &ic).unwrap(), "fz2u1 inv");
+    let id = TensorMap::isomorphism(p.runtime(), &p.codomain(), &p.domain()).unwrap();
+    assert_close!(p.compose(&inv).unwrap(), id, 1e-8, "fz2u1 inv");
+    let Eig { d, v: vectors } = t.eig_full(&rows, &cols).unwrap();
+    let expected = p.eig_full(&ir, &ic).unwrap();
+    assert_same!(d, expected.d, "fz2u1 eig d");
+    assert_same!(vectors, expected.v, "fz2u1 eig v");
+    assert_close!(
+        p.compose(&vectors).unwrap(),
+        vectors.compose(&d).unwrap(),
+        1e-8,
+        "fz2u1 eig"
+    );
 }
