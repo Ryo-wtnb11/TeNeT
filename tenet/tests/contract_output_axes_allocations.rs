@@ -69,9 +69,10 @@ fn allocations<T>(f: impl FnOnce() -> T) -> ((usize, usize), T) {
 
 /// Warm cost and value of `contract` onto `codomain ← domain` against the
 /// default order and split followed by `permute(codomain, domain)`.
+/// `strict` also requires fewer bytes: the route has no separate output copy.
 macro_rules! assert_no_costlier_than_permute {
     ($runtime:expr, $a:expr, $b:expr, $lhs_axes:expr, $rhs_axes:expr,
-     $codomain:expr, $domain:expr $(,)?) => {{
+     $codomain:expr, $domain:expr, $strict:expr $(,)?) => {{
         let (lhs_axes, rhs_axes): (&[usize], &[usize]) = ($lhs_axes, $rhs_axes);
         let (codomain, domain): (&[usize], &[usize]) = ($codomain, $domain);
         let identity: Vec<usize> = (0..codomain.len() + domain.len()).collect();
@@ -120,6 +121,14 @@ macro_rules! assert_no_costlier_than_permute {
             fused_cost.0 <= separate_cost.0 && fused_cost.1 <= separate_cost.1,
             "contract({lhs_axes:?}, {rhs_axes:?}; {codomain:?} <- {domain:?}) {fused_cost:?} \
              vs contract + permute {separate_cost:?}"
+        );
+        // What: the DynamicTree route's single output transform replaces the
+        // two-step route's second owned output, so it moves strictly fewer
+        // bytes. An upper bound, not an exact count.
+        assert!(
+            !$strict || fused_cost.1 < separate_cost.1,
+            "contract({lhs_axes:?}, {rhs_axes:?}; {codomain:?} <- {domain:?}) {fused_cost:?} \
+             must allocate fewer bytes than contract + permute {separate_cost:?}"
         );
     }};
 }
@@ -199,7 +208,9 @@ macro_rules! assert_output_axes_cost {
                     &[2, 3],
                     &[0, 1],
                     codomain,
-                    domain
+                    domain,
+                    // TensorKit's `copyC`: equal to the two-step route.
+                    false,
                 );
             }
             for (codomain, domain) in [
@@ -208,7 +219,16 @@ macro_rules! assert_output_axes_cost {
                 (&[0, 3][..], &[1, 2][..]),
                 (&[1, 2, 3, 0][..], &[][..]),
             ] {
-                assert_no_costlier_than_permute!(runtime, &a, &m, &[3], &[0], codomain, domain);
+                assert_no_costlier_than_permute!(
+                    runtime,
+                    &a,
+                    &m,
+                    &[3],
+                    &[0],
+                    codomain,
+                    domain,
+                    true,
+                );
             }
         }
     }};

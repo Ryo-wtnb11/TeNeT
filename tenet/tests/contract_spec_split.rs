@@ -38,7 +38,9 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
 }
 
 /// Checks every order and split of the open legs of `lhs · rhs` over the
-/// contracted `lhs_axes` / `rhs_axes`, and returns how many specs it checked.
+/// contracted `lhs_axes` / `rhs_axes`, through both `contract` and
+/// `contract_overwrite_into`, and returns how many specs it checked. A
+/// destination of another split is rejected and left bit-identical.
 fn check_every_spec<R, D>(
     what: &str,
     lhs: &TensorMap<R, D>,
@@ -83,14 +85,44 @@ where
                 terms,
                 &label,
             );
+            let mut destination = expected.scale(D::entry(7.5, 0.0));
+            lhs.contract_overwrite_into(rhs, &mut destination, &spec, D::entry(1.0, 0.0))
+                .unwrap();
+            assert_eq!(destination.codomain(), expected.codomain(), "{label}");
+            assert_close(
+                destination.dense_data().unwrap(),
+                expected.dense_data().unwrap(),
+                terms,
+                &format!("{label} overwrite"),
+            );
             checked += 1;
         }
     }
+
+    // The default-split destination under a spec that moves the split.
+    let mut mismatched = contracted.scale(D::entry(7.5, 0.0));
+    let before = mismatched.dense_data().unwrap().to_vec();
+    let moved = ContractSpec {
+        codomain: &identity[..lhs_open + 1],
+        domain: &identity[lhs_open + 1..],
+        ..default
+    };
+    assert!(
+        lhs.contract_overwrite_into(rhs, &mut mismatched, &moved, D::entry(1.0, 0.0))
+            .is_err(),
+        "{what}: a destination of another split must be rejected"
+    );
+    assert_eq!(
+        mismatched.dense_data().unwrap(),
+        before.as_slice(),
+        "{what}"
+    );
     checked
 }
 
 /// `a: v ⊗ v* ← v` and `b: v ← v* ⊗ v`, contracted on a compose-shaped pair
-/// and on a pair that bends both legs; then a lazy-adjoint left operand.
+/// and on a pair that bends both legs; then a lazy-adjoint left and a
+/// lazy-adjoint right operand.
 fn check_symmetry<R, D>(symmetry: &str, v: &GradedSpace<R>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -104,11 +136,16 @@ where
         .unwrap()
         .adjoint()
         .unwrap();
+    let lazy_rhs = TensorMap::<R, D>::from_subblock_fn(&runtime, [&dual, v], [v], fill(14))
+        .unwrap()
+        .adjoint()
+        .unwrap();
     let checked = check_every_spec(&format!("{symmetry} a[2]·b[0]"), &a, &b, &[2], &[0])
         + check_every_spec(&format!("{symmetry} a[0]·b[2]"), &a, &b, &[0], &[2])
-        + check_every_spec(&format!("{symmetry} a'[2]·b[0]"), &lazy, &b, &[2], &[0]);
-    // 4! orders times 5 split sizes, for each of the three pairings.
-    assert_eq!(checked, 3 * 24 * 5);
+        + check_every_spec(&format!("{symmetry} a'[2]·b[0]"), &lazy, &b, &[2], &[0])
+        + check_every_spec(&format!("{symmetry} a[2]·b'[0]"), &a, &lazy_rhs, &[2], &[0]);
+    // 4! orders times 5 split sizes, for each of the four pairings.
+    assert_eq!(checked, 4 * 24 * 5);
 }
 
 #[test]
