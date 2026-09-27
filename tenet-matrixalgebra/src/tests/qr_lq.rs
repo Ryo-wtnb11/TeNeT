@@ -2,7 +2,6 @@
 
 use super::*;
 
-
 #[test]
 fn compact_qr_canonical_layout_skips_input_pack_and_factor_scatter() {
     // What: canonical compact QR reads source regions and writes final factor regions directly.

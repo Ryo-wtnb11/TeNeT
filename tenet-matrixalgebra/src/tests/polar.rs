@@ -2,7 +2,6 @@
 
 use super::*;
 
-
 #[test]
 #[expect(
     clippy::arc_with_non_send_sync,

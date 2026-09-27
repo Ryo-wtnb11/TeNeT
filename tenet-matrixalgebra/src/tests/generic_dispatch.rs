@@ -4,7 +4,6 @@
 
 use super::*;
 
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ValuesOperation {
     Svd,

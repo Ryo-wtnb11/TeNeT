@@ -3207,10 +3207,10 @@ fn assert_stacking_refusal<T: fmt::Debug>(result: Result<T, OperationError>, ope
     }
 }
 
+mod eigh_eig;
+mod generic_dispatch;
+mod matrix_functions;
+mod null_space;
+mod polar;
 mod qr_lq;
 mod svd;
-mod eigh_eig;
-mod polar;
-mod null_space;
-mod matrix_functions;
-mod dispatch;

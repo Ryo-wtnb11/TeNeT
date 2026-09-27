@@ -2,7 +2,6 @@
 
 use super::*;
 
-
 fn checked_spy_null(
     left: bool,
     dense: &mut impl DenseExecutor,

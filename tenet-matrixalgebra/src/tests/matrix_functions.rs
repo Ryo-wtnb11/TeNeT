@@ -2,7 +2,6 @@
 
 use super::*;
 
-
 #[test]
 fn square_matrix_function_rejects_noncanonical_admitted_output_before_kernel() {
     let (canonical_space, canonical_data) = generic_factorization_input();

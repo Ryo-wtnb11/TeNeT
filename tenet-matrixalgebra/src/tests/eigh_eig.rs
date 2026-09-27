@@ -2,7 +2,6 @@
 
 use super::*;
 
-
 #[test]
 fn eigh_canonical_layout_skips_input_pack_and_vector_scatter() {
     // What: canonical EIGH reads source regions and writes final eigenvector regions directly.

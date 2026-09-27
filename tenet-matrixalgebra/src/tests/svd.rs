@@ -2,7 +2,6 @@
 
 use super::*;
 
-
 fn assert_compact_svd_direct_copy_probe() {
     let probe = crate::factorize::compact_svd_copy_probe();
     assert_eq!(probe.input_pack_calls, 0);
