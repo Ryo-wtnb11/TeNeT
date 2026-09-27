@@ -2352,8 +2352,8 @@ mod tests {
         let rule = Arc::clone(source_space.provider_arc());
         let source_structure = Arc::clone(source_space.space().structure());
         let destination_structure = Arc::clone(destination_space.space().structure());
-        let source_data = source_b.data().to_vec();
-        let expected_data = expected_b.data().to_vec();
+        let source_data = source_b.dense_data().unwrap().to_vec();
+        let expected_data = expected_b.dense_data().unwrap().to_vec();
         let operation = TreeTransformOperation::permute([1], [2, 0]);
         drop(source_a);
         drop(source_b);

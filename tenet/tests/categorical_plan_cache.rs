@@ -78,14 +78,19 @@ macro_rules! check_rule {
             assert_eq!(degeneracy_only.domain(), expected.domain(), "{what}");
             if $exact {
                 assert_eq!(
-                    bits(degeneracy_only.data()),
-                    bits(expected.data()),
+                    bits(degeneracy_only.materialize().unwrap().dense_data().unwrap()),
+                    bits(expected.materialize().unwrap().dense_data().unwrap()),
                     "{what}: warm plan result differs from a cold Runtime"
                 );
             } else {
                 // Terms per entry: the recoupled trees of one fusion block,
                 // bounded well below 64 for these rank-4 fixtures.
-                numerics::assert_slices_close(&what, degeneracy_only.data(), expected.data(), 64);
+                numerics::assert_slices_close(
+                    &what,
+                    degeneracy_only.dense_data().unwrap(),
+                    expected.dense_data().unwrap(),
+                    64,
+                );
             }
 
             let _ = operation(&tensor!(&warm, &c));

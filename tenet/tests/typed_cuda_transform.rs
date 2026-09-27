@@ -196,7 +196,11 @@ macro_rules! device_matches_host {
         .to_host()
         .unwrap();
         let what: &str = $what;
-        assert_payload_close(actual.data(), expected.data(), what);
+        assert_payload_close(
+            actual.dense_data().unwrap(),
+            expected.dense_data().unwrap(),
+            what,
+        );
         assert_eq!(layout(&actual), layout(&expected), "{what}: layout");
         actual
     }};
@@ -300,11 +304,18 @@ fn device_permute_braid_and_planar_match_the_host_for_u1_and_su2() {
     assert!(real.subblock_count() >= 2, "multi-block fixture");
 
     let permuted = device_matches_host!("U1/f64 permute", real, |t| t.permute(&[2, 0], &[1, 3]));
-    assert_moved(real.data(), permuted.data(), "U1/f64 permute");
+    assert_moved(
+        real.dense_data().unwrap(),
+        permuted.dense_data().unwrap(),
+        "U1/f64 permute",
+    );
     // Coefficient-1 f64 block moves are bitwise on device.
     assert_eq!(
-        permuted.data(),
-        real.permute(&[2, 0], &[1, 3]).unwrap().data(),
+        permuted.dense_data().unwrap(),
+        real.permute(&[2, 0], &[1, 3])
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         "coefficient-1 f64 permute must move bitwise"
     );
     device_matches_host!("U1/c64 permute", complex, |t| t.permute(&[2, 0], &[1, 3]));
@@ -325,12 +336,24 @@ fn device_permute_braid_and_planar_match_the_host_for_u1_and_su2() {
         TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2, &su2], complex_fill).unwrap();
     let permuted =
         device_matches_host!("SU2/f64 permute", su2_real, |t| t.permute(&[1, 2], &[3, 0]));
-    assert_not_a_reordering(su2_real.data(), permuted.data(), "SU2/f64 permute");
+    assert_not_a_reordering(
+        su2_real.dense_data().unwrap(),
+        permuted.dense_data().unwrap(),
+        "SU2/f64 permute",
+    );
     let permuted = device_matches_host!("SU2/c64 permute", su2_complex, |t| t
         .permute(&[1, 2], &[3, 0]));
-    assert_not_a_reordering(su2_complex.data(), permuted.data(), "SU2/c64 permute");
+    assert_not_a_reordering(
+        su2_complex.dense_data().unwrap(),
+        permuted.dense_data().unwrap(),
+        "SU2/c64 permute",
+    );
     let transposed = device_matches_host!("SU2/f64 transpose", su2_real, |t| full_transpose!(t));
-    assert_not_a_reordering(su2_real.data(), transposed.data(), "SU2/f64 transpose");
+    assert_not_a_reordering(
+        su2_real.dense_data().unwrap(),
+        transposed.dense_data().unwrap(),
+        "SU2/f64 transpose",
+    );
 }
 
 #[test]
@@ -357,7 +380,11 @@ fn device_permutes_match_the_dense_physical_oracle_within_one_side() {
         TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2, &su2], complex_fill).unwrap();
     let device = su2_tensor.to_cuda().unwrap();
     let moved = device.permute(&[1, 0], &[3, 2]).unwrap().to_host().unwrap();
-    assert_not_a_reordering(su2_tensor.data(), moved.data(), "SU(2) device permute");
+    assert_not_a_reordering(
+        su2_tensor.dense_data().unwrap(),
+        moved.dense_data().unwrap(),
+        "SU(2) device permute",
+    );
     let source = su2_tensor.to_physical_dense().unwrap();
     let (shape, data) = permute_dense(&source.shape, &source.data, &[1, 0, 3, 2]);
     let actual = moved.to_physical_dense().unwrap();
@@ -393,8 +420,16 @@ fn device_transform_laws_hold_on_device_tensors() {
         .unwrap()
         .to_host()
         .unwrap();
-    assert_payload_close(stepwise.data(), direct.data(), "permute composition");
-    assert_moved(host.data(), direct.data(), "permute composition");
+    assert_payload_close(
+        stepwise.dense_data().unwrap(),
+        direct.dense_data().unwrap(),
+        "permute composition",
+    );
+    assert_moved(
+        host.dense_data().unwrap(),
+        direct.dense_data().unwrap(),
+        "permute composition",
+    );
 
     // braid ∘ braid⁻¹ == id, with the levels carried along the strands.
     let axes = [2usize, 0, 3, 1];
@@ -410,20 +445,28 @@ fn device_transform_laws_hold_on_device_tensors() {
         .unwrap()
         .to_host()
         .unwrap();
-    assert_payload_close(back.data(), host.data(), "braid inverse round trip");
+    assert_payload_close(
+        back.dense_data().unwrap(),
+        host.dense_data().unwrap(),
+        "braid inverse round trip",
+    );
 
     // Bosonic provider: braid == permute for any levels.
     let permuted = device.permute(&axes[..2], &axes[2..]).unwrap();
     assert_payload_close(
-        braided.to_host().unwrap().data(),
-        permuted.to_host().unwrap().data(),
+        braided.to_host().unwrap().dense_data().unwrap(),
+        permuted.to_host().unwrap().dense_data().unwrap(),
         "bosonic braid == permute",
     );
 
     // Transpose is an involution.
     let once = full_transpose!(device).unwrap();
     let twice = full_transpose!(once).unwrap().to_host().unwrap();
-    assert_eq!(twice.data(), host.data(), "transpose involution is bitwise");
+    assert_eq!(
+        twice.dense_data().unwrap(),
+        host.dense_data().unwrap(),
+        "transpose involution is bitwise"
+    );
     assert_eq!(layout(&twice), layout(&host), "transpose involution layout");
 }
 
@@ -441,10 +484,18 @@ fn device_repartition_reaches_every_split_and_round_trips() {
         let moved = device.repartition(num_codomain).unwrap();
         let expected = host.repartition(num_codomain).unwrap();
         let actual = moved.to_host().unwrap();
-        assert_payload_close(actual.data(), expected.data(), &what);
+        assert_payload_close(
+            actual.dense_data().unwrap(),
+            expected.dense_data().unwrap(),
+            &what,
+        );
         assert_eq!(layout(&actual), layout(&expected), "{what}: layout");
         let back = moved.repartition(2).unwrap().to_host().unwrap();
-        assert_eq!(back.data(), host.data(), "{what}: round trip is bitwise");
+        assert_eq!(
+            back.dense_data().unwrap(),
+            host.dense_data().unwrap(),
+            "{what}: round trip is bitwise"
+        );
         assert_eq!(layout(&back), layout(&host), "{what}: round trip layout");
     }
 
@@ -456,7 +507,11 @@ fn device_repartition_reaches_every_split_and_round_trips() {
     for num_codomain in [0usize, 1, 3, 4] {
         let what = format!("SU(2) repartition to {num_codomain}");
         let moved = device_matches_host!(&what, su2_host, |t| t.repartition(num_codomain));
-        assert_not_a_reordering(su2_host.data(), moved.data(), &what);
+        assert_not_a_reordering(
+            su2_host.dense_data().unwrap(),
+            moved.dense_data().unwrap(),
+            &what,
+        );
     }
 }
 
@@ -468,11 +523,16 @@ fn device_fermionic_signs_match_the_hand_computed_fixture() {
     // are hand-computed there, not read off any TeNeT descriptor.
     let runtime = runtime();
     let host = fz2_rank_three(&runtime);
-    assert_eq!(host.data(), [1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(host.dense_data().unwrap(), [1.0, 2.0, 3.0, 4.0]);
     let device = host.to_cuda().unwrap();
 
     assert_eq!(
-        full_transpose!(device).unwrap().to_host().unwrap().data(),
+        full_transpose!(device)
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         [1.0, 2.0, 4.0, 3.0]
     );
     assert_eq!(
@@ -481,7 +541,8 @@ fn device_fermionic_signs_match_the_hand_computed_fixture() {
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
+            .dense_data()
+            .unwrap(),
         [1.0, 2.0, -4.0, -3.0]
     );
     assert_eq!(
@@ -490,7 +551,8 @@ fn device_fermionic_signs_match_the_hand_computed_fixture() {
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
+            .dense_data()
+            .unwrap(),
         [1.0, 4.0, 2.0, 3.0]
     );
     assert_eq!(
@@ -499,7 +561,8 @@ fn device_fermionic_signs_match_the_hand_computed_fixture() {
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
+            .dense_data()
+            .unwrap(),
         [1.0, 4.0, -2.0, -3.0]
     );
     for num_codomain in [0usize, 1, 3] {
@@ -509,21 +572,26 @@ fn device_fermionic_signs_match_the_hand_computed_fixture() {
                 .unwrap()
                 .to_host()
                 .unwrap()
-                .data(),
-            host.repartition(num_codomain).unwrap().data(),
+                .dense_data()
+                .unwrap(),
+            host.repartition(num_codomain)
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             "repartition to {num_codomain} is sign free",
         );
     }
     // Non-vacuity: the permutes above changed signs, so they are not
     // reorderings of the source payload.
     assert_not_a_reordering(
-        host.data(),
+        host.dense_data().unwrap(),
         device
             .permute(&[2], &[1, 0])
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
+            .dense_data()
+            .unwrap(),
         "fZ2 permute",
     );
 }
@@ -547,7 +615,11 @@ fn device_product_providers_match_the_host_for_signs_and_recoupling() {
     let host: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], real_fill).unwrap();
     let permuted = device_matches_host!("fZ2xU1 permute", host, |t| t.permute(&[2, 1], &[0, 3]));
-    assert_not_a_reordering(host.data(), permuted.data(), "fZ2xU1 permute");
+    assert_not_a_reordering(
+        host.dense_data().unwrap(),
+        permuted.dense_data().unwrap(),
+        "fZ2xU1 permute",
+    );
     device_matches_host!("fZ2xU1 transpose", host, |t| full_transpose!(t));
     device_matches_host!("fZ2xU1 braid", host, |t| t.braid(
         &[2, 1],
@@ -579,9 +651,17 @@ fn device_product_providers_match_the_host_for_signs_and_recoupling() {
     let host: TensorMap<_, Complex64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
     let permuted = device_matches_host!("fZ2xSU2 permute", host, |t| t.permute(&[1, 2], &[3, 0]));
-    assert_not_a_reordering(host.data(), permuted.data(), "fZ2xSU2 permute");
+    assert_not_a_reordering(
+        host.dense_data().unwrap(),
+        permuted.dense_data().unwrap(),
+        "fZ2xSU2 permute",
+    );
     let transposed = device_matches_host!("fZ2xSU2 transpose", host, |t| full_transpose!(t));
-    assert_not_a_reordering(host.data(), transposed.data(), "fZ2xSU2 transpose");
+    assert_not_a_reordering(
+        host.dense_data().unwrap(),
+        transposed.dense_data().unwrap(),
+        "fZ2xSU2 transpose",
+    );
     device_matches_host!("fZ2xSU2 repartition", host, |t| t.repartition(3));
 }
 
@@ -594,7 +674,11 @@ fn device_rank_five_transforms_match_the_host() {
         TensorMap::from_subblock_fn(&runtime, [&u1, &u1, &u1], [&u1, &u1], real_fill).unwrap();
     assert!(host.subblock_count() >= 3, "multi-block rank-5 fixture");
     let permuted = device_matches_host!("rank-5 permute", host, |t| t.permute(&[4, 1, 0], &[3, 2]));
-    assert_moved(host.data(), permuted.data(), "rank-5 permute");
+    assert_moved(
+        host.dense_data().unwrap(),
+        permuted.dense_data().unwrap(),
+        "rank-5 permute",
+    );
     device_matches_host!("rank-5 transpose", host, |t| full_transpose!(t));
     device_matches_host!("rank-5 repartition", host, |t| t.repartition(1));
 
@@ -603,7 +687,11 @@ fn device_rank_five_transforms_match_the_host() {
         TensorMap::from_subblock_fn(&runtime, [&su2, &su2, &su2], [&su2, &su2], real_fill).unwrap();
     let permuted = device_matches_host!("rank-5 SU(2) permute", su2_host, |t| t
         .permute(&[4, 1, 0], &[3, 2]));
-    assert_not_a_reordering(su2_host.data(), permuted.data(), "rank-5 SU(2) permute");
+    assert_not_a_reordering(
+        su2_host.dense_data().unwrap(),
+        permuted.dense_data().unwrap(),
+        "rank-5 SU(2) permute",
+    );
 }
 
 #[test]
@@ -656,7 +744,11 @@ fn device_complex_su2_permute_matches_the_tensorkit_fixture() {
 
     let permuted = device_matches_host!("tk SU(2) c64 permute", host, |t| t
         .permute(&[1, 0], &[3, 2]));
-    assert_not_a_reordering(host.data(), permuted.data(), "tk SU(2) c64 permute");
+    assert_not_a_reordering(
+        host.dense_data().unwrap(),
+        permuted.dense_data().unwrap(),
+        "tk SU(2) c64 permute",
+    );
     let norm = permuted.norm(2.0).unwrap();
     assert!(
         (norm - 40.741_733_994_626_32).abs() <= 1e-10 * 41.0,
@@ -767,22 +859,33 @@ fn assert_lazy_adjoint_transforms_match_host<R, D>(
                 .unwrap(),
         ),
     ];
-    let adjoint_payload = host_lazy.data().to_vec();
+    let adjoint_payload = host_lazy
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
     let mut moved = 0usize;
     let mut scaled = 0usize;
     for (operation, expected, actual) in pairs {
         let label = format!("{what} {operation}");
         let actual = actual.to_host().unwrap();
-        assert_payload_close(actual.data(), expected.data(), &label);
+        assert_payload_close(
+            actual.materialize().unwrap().dense_data().unwrap(),
+            expected.materialize().unwrap().dense_data().unwrap(),
+            &label,
+        );
         assert_eq!(layout(&actual), layout(&expected), "{label}: layout");
         if adjoint_payload
             .iter()
-            .zip(actual.data())
+            .zip(actual.materialize().unwrap().dense_data().unwrap())
             .any(|(before, after)| before != after)
         {
             moved += 1;
         }
-        if sorted_values(&adjoint_payload) != sorted_values(actual.data()) {
+        if sorted_values(&adjoint_payload)
+            != sorted_values(actual.materialize().unwrap().dense_data().unwrap())
+        {
             scaled += 1;
         }
     }
@@ -809,7 +912,7 @@ fn device_transforms_of_an_empty_tensor_produce_an_empty_tensor() {
     let host: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&codomain], [&domain], |_, _| 1.0).unwrap();
     assert_eq!(host.subblock_count(), 0);
-    assert!(host.data().is_empty());
+    assert!(host.materialize().unwrap().dense_data().unwrap().is_empty());
     let device = host.to_cuda().unwrap();
 
     for (what, actual) in [
@@ -820,7 +923,12 @@ fn device_transforms_of_an_empty_tensor_produce_an_empty_tensor() {
     ] {
         let actual = actual.to_host().unwrap();
         assert!(
-            actual.data().is_empty(),
+            actual
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+                .is_empty(),
             "{what}: expected an empty payload"
         );
         assert_eq!(actual.subblock_count(), 0, "{what}: expected no blocks");
@@ -830,7 +938,10 @@ fn device_transforms_of_an_empty_tensor_produce_an_empty_tensor() {
         .unwrap()
         .to_host()
         .unwrap()
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .is_empty());
 }
 
@@ -848,7 +959,11 @@ where
 {
     let poisoned = model.scale(D::nan());
     assert!(
-        poisoned.data().iter().all(|value| value.parts().0.is_nan()),
+        poisoned
+            .dense_data()
+            .unwrap()
+            .iter()
+            .all(|value| value.parts().0.is_nan()),
         "the poisoned destination must be all NaN"
     );
     poisoned
@@ -922,7 +1037,11 @@ macro_rules! device_overwrite_matches_host {
 
         let what: &str = $what;
         let actual = device_destination.to_host().unwrap();
-        assert_payload_matches(actual.data(), host_destination.data(), what);
+        assert_payload_matches(
+            actual.dense_data().unwrap(),
+            host_destination.dense_data().unwrap(),
+            what,
+        );
         assert_eq!(layout(&actual), layout(&host_destination), "{what}: layout");
         actual
     }};
@@ -956,7 +1075,11 @@ fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
             |t, d| t.permute_overwrite_into(d, &[2, 0], &[1, 3], alpha)
         );
         if alpha != 0.0 {
-            assert_moved(real.data(), written.data(), "U1/f64 permute_overwrite_into");
+            assert_moved(
+                real.dense_data().unwrap(),
+                written.dense_data().unwrap(),
+                "U1/f64 permute_overwrite_into",
+            );
         }
         device_overwrite_matches_host!(
             &format!("U1/f64 transpose_overwrite_into alpha={alpha}"),
@@ -993,7 +1116,8 @@ fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
         );
         assert!(
             written
-                .data()
+                .dense_data()
+                .unwrap()
                 .iter()
                 .any(|value| value.is_nan() || value.is_infinite()),
             "alpha = {alpha} must reach the moved blocks"
@@ -1056,7 +1180,11 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
             |t, d| t.permute_overwrite_into(d, &[1, 2], &[3, 0], alpha)
         );
         if alpha != 0.0 {
-            assert_not_a_reordering(su2_real.data(), written.data(), "SU2 overwrite_into");
+            assert_not_a_reordering(
+                su2_real.dense_data().unwrap(),
+                written.dense_data().unwrap(),
+                "SU2 overwrite_into",
+            );
         }
         device_overwrite_matches_host!(
             &format!("SU2/f64 transpose_overwrite_into alpha={alpha}"),
@@ -1078,7 +1206,11 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
         su2_permuted_c,
         |t, d| t.permute_overwrite_into(d, &[1, 2], &[3, 0], Complex64::new(0.75, -0.25))
     );
-    assert_not_a_reordering(su2_complex.data(), written.data(), "SU2/c64 overwrite_into");
+    assert_not_a_reordering(
+        su2_complex.dense_data().unwrap(),
+        written.dense_data().unwrap(),
+        "SU2/c64 overwrite_into",
+    );
 
     // fZ2 x U(1): fermionic signs on a charge grading.
     let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
@@ -1104,7 +1236,11 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
             |t, d| t.permute_overwrite_into(d, &[2, 1], &[0, 3], alpha)
         );
         if alpha != 0.0 {
-            assert_not_a_reordering(host.data(), written.data(), "fZ2xU1 overwrite_into");
+            assert_not_a_reordering(
+                host.dense_data().unwrap(),
+                written.dense_data().unwrap(),
+                "fZ2xU1 overwrite_into",
+            );
         }
         device_overwrite_matches_host!(
             &format!("fZ2xU1 transpose_overwrite_into alpha={alpha}"),
@@ -1159,7 +1295,11 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
             |t, d| t.permute_overwrite_into(d, &[1, 2], &[3, 0], alpha)
         );
         if alpha != Complex64::new(0.0, 0.0) {
-            assert_not_a_reordering(host.data(), written.data(), "fZ2xSU2 overwrite_into");
+            assert_not_a_reordering(
+                host.dense_data().unwrap(),
+                written.dense_data().unwrap(),
+                "fZ2xSU2 overwrite_into",
+            );
         }
         device_overwrite_matches_host!(
             &format!("fZ2xSU2 transpose_overwrite_into alpha={alpha}"),
@@ -1197,9 +1337,14 @@ fn device_overwrite_into_matches_the_hosts_nan_pattern_for_every_alpha() {
             }
         })
         .unwrap();
-    assert!(poisoned_source.data().iter().any(|value| value.is_nan()));
     assert!(poisoned_source
-        .data()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.is_nan()));
+    assert!(poisoned_source
+        .dense_data()
+        .unwrap()
         .iter()
         .any(|value| value.is_infinite()));
     let model = poisoned_source.permute(&[1, 2], &[3, 0]).unwrap();
@@ -1223,10 +1368,14 @@ fn device_overwrite_into_matches_the_hosts_nan_pattern_for_every_alpha() {
         poisoned_source
             .permute_overwrite_into(&mut host_expected, &[1, 2], &[3, 0], alpha)
             .unwrap();
-        let expected_nans = nan_positions(host_expected.data());
+        let expected_nans = nan_positions(host_expected.dense_data().unwrap());
         if alpha == 0.0 {
             assert!(
-                written.data().iter().all(|value| *value == 0.0),
+                written
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .all(|value| *value == 0.0),
                 "alpha = {alpha}: a zero scale writes zeros"
             );
             continue;
@@ -1236,7 +1385,7 @@ fn device_overwrite_into_matches_the_hosts_nan_pattern_for_every_alpha() {
             "alpha = {alpha}: the fixture must propagate at least one NaN"
         );
         assert_eq!(
-            nan_positions(written.data()),
+            nan_positions(written.dense_data().unwrap()),
             expected_nans,
             "alpha = {alpha}: the NaN set must be the Host's exactly"
         );
@@ -1257,8 +1406,8 @@ fn device_overwrite_into_has_no_identity_short_circuit() {
         device_overwrite_matches_host!("identity permute_overwrite_into", host, host, |t, d| t
             .permute_overwrite_into(d, &[0, 1], &[2, 3], -2.5));
     assert_payload_close(
-        written.data(),
-        host.scale(-2.5).data(),
+        written.dense_data().unwrap(),
+        host.scale(-2.5).dense_data().unwrap(),
         "identity permute_overwrite_into writes alpha * self",
     );
 
@@ -1271,8 +1420,8 @@ fn device_overwrite_into_has_no_identity_short_circuit() {
         |t, d| t.repartition_overwrite_into(d, 2.0)
     );
     assert_payload_close(
-        written.data(),
-        host.scale(2.0).data(),
+        written.dense_data().unwrap(),
+        host.scale(2.0).dense_data().unwrap(),
         "same-split repartition_overwrite_into writes alpha * self",
     );
 
@@ -1287,8 +1436,8 @@ fn device_overwrite_into_has_no_identity_short_circuit() {
         |t, d| full_transpose_overwrite_into!(t, d, -0.5)
     );
     assert_payload_close(
-        written.data(),
-        scalar.scale(-0.5).data(),
+        written.dense_data().unwrap(),
+        scalar.scale(-0.5).dense_data().unwrap(),
         "rank-0 transpose_overwrite_into writes alpha * self",
     );
 }
@@ -1308,5 +1457,10 @@ fn device_overwrite_into_of_an_empty_tensor_succeeds() {
     source
         .permute_overwrite_into(&mut destination, &[1], &[0], 2.0)
         .unwrap();
-    assert!(destination.to_host().unwrap().data().is_empty());
+    assert!(destination
+        .to_host()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .is_empty());
 }

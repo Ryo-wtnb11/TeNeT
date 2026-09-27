@@ -732,7 +732,11 @@ where
     for (rank, expected) in [(2, 1), (3, 2), (4, 3)] {
         let legs = vec![&tau; rank];
         let space: TensorMap<_, Complex64> = TensorMap::zeros(&runtime, legs, [&tau]).unwrap();
-        assert_eq!(space.data().len(), expected, "all-tau rank {rank}");
+        assert_eq!(
+            space.dense_data().unwrap().len(),
+            expected,
+            "all-tau rank {rank}"
+        );
     }
 
     let basis: [TensorMap<_, Complex64>; 2] = [vacuum, tau_sector].map(|channel| {
@@ -764,7 +768,7 @@ where
     let f = std::array::from_fn(|row| {
         std::array::from_fn(|column| {
             let transformed = basis[column].transpose(&[3], &[2, 1, 0]).unwrap();
-            assert_eq!(transformed.data().len(), 2);
+            assert_eq!(transformed.dense_data().unwrap().len(), 2);
             let roundtrip = transformed.transpose(&[3, 2, 1], &[0]).unwrap();
             for (slot, value) in coordinates(&roundtrip, vacuum, tau_sector)
                 .into_iter()
@@ -777,7 +781,11 @@ where
             // (tau^3 <- tau). Why not cross providers: their RuleIdentity
             // values intentionally differ, so each workflow stays bound to
             // its own provider allocation.
-            transformed.compose(&dual_basis[row]).unwrap().data()[0]
+            transformed
+                .compose(&dual_basis[row])
+                .unwrap()
+                .dense_data()
+                .unwrap()[0]
         })
     });
 

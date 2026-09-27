@@ -84,7 +84,7 @@ where
     )
     .unwrap();
 
-    let destination_before = destination.data().to_vec();
+    let destination_before = destination.dense_data().unwrap().to_vec();
     let mut expected = destination_before.clone();
     for destination_index in 0..destination.subblock_count() {
         let destination_trees = destination
@@ -100,7 +100,7 @@ where
             destination_block.offset(),
             destination_block.shape(),
             destination_block.strides(),
-            source.data(),
+            source.dense_data().unwrap(),
             source_block.offset(),
             source_block.shape(),
             source_block.strides(),
@@ -122,7 +122,7 @@ where
     );
 
     let direct = destination.absorb(&source).unwrap();
-    assert_eq!(direct.data(), expected);
+    assert_eq!(direct.dense_data().unwrap(), expected);
     assert!(std::ptr::eq(
         direct.provider(),
         destination_provider.as_ref()
@@ -135,9 +135,12 @@ where
         .absorb(&source.adjoint().unwrap())
         .unwrap();
     let expected_lazy = direct.adjoint().unwrap();
-    assert_eq!(lazy.data(), expected_lazy.data());
+    assert_eq!(
+        lazy.dense_data().unwrap(),
+        expected_lazy.materialize().unwrap().dense_data().unwrap()
+    );
 
-    assert_eq!(destination.data(), destination_before);
+    assert_eq!(destination.dense_data().unwrap(), destination_before);
 }
 
 #[test]
@@ -176,7 +179,7 @@ fn checked_generic_absorb_validation_precedence_leaves_inputs_unchanged() {
             indices.iter().sum::<usize>() as f64
         })
         .unwrap();
-    let before = destination.data().to_vec();
+    let before = destination.dense_data().unwrap().to_vec();
     let bad_rank: TensorMap<_, f64> = TensorMap::zeros(&other_runtime, [&wrong_leg], []).unwrap();
     let bad_identity: TensorMap<_, f64> =
         TensorMap::zeros(&other_runtime, [&wrong_leg, &wrong_leg, &wrong_leg], []).unwrap();
@@ -201,5 +204,5 @@ fn checked_generic_absorb_validation_precedence_leaves_inputs_unchanged() {
         destination.absorb(&bad_duality),
         Err(Error::InvalidArgument(_))
     ));
-    assert_eq!(destination.data(), before);
+    assert_eq!(destination.dense_data().unwrap(), before);
 }

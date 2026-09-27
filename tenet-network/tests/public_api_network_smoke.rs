@@ -36,6 +36,6 @@ fn planned_network_replays_through_the_current_public_api() {
 
     for _ in 0..2 {
         let actual = plan.execute(&inputs, &mut workspace).unwrap();
-        assert_close(actual.data(), expected.data());
+        assert_close(actual.dense_data().unwrap(), expected.dense_data().unwrap());
     }
 }

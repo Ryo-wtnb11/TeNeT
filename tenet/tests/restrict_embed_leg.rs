@@ -393,7 +393,10 @@ fn restrict_equals_composition_with_the_inclusion_isometry_on_both_sides() {
     let restricted = source.restrict_leg(&[(1, &selection)]).unwrap();
     assert_eq!(restricted.codomain(), expected.codomain());
     assert_eq!(restricted.domain(), expected.domain());
-    assert_close(restricted.data(), expected.data());
+    assert_close(
+        restricted.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+    );
 
     // Domain leg 2: t ∘ (ι ⊗ id).
     let inserter = iota.otimes(&spectator_id).unwrap();
@@ -401,7 +404,10 @@ fn restrict_equals_composition_with_the_inclusion_isometry_on_both_sides() {
     let restricted = source.restrict_leg(&[(2, &selection)]).unwrap();
     assert_eq!(restricted.codomain(), expected.codomain());
     assert_eq!(restricted.domain(), expected.domain());
-    assert_close(restricted.data(), expected.data());
+    assert_close(
+        restricted.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+    );
 }
 
 #[test]
@@ -438,7 +444,10 @@ fn restrict_of_a_fermionic_odd_dual_leg_equals_the_isometry_composition() {
         .unwrap();
     let restricted = source.restrict_leg(&[(0, &selection)]).unwrap();
     assert_eq!(restricted.codomain(), expected.codomain());
-    assert_close(restricted.data(), expected.data());
+    assert_close(
+        restricted.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+    );
 }
 
 #[test]
@@ -505,7 +514,10 @@ fn restrict_commutes_with_adjoint_under_the_codomain_domain_axis_map() {
         .unwrap();
     assert_eq!(left.codomain(), right.codomain());
     assert_eq!(left.domain(), right.domain());
-    assert_close_complex(left.data(), right.data());
+    assert_close_complex(
+        left.materialize().unwrap().dense_data().unwrap(),
+        right.dense_data().unwrap(),
+    );
 }
 
 #[test]
@@ -529,7 +541,10 @@ fn full_selection_is_the_identity_and_round_trips_are_exact() {
     assert_eq!(full.subspace(), &leg);
     let restricted = source.restrict_leg(&[(0, &full)]).unwrap();
     assert_eq!(restricted.codomain(), source.codomain());
-    assert_eq!(restricted.data(), source.data());
+    assert_eq!(
+        restricted.dense_data().unwrap(),
+        source.dense_data().unwrap()
+    );
 
     // restrict ∘ embed = id, bitwise.
     let partial = LegSelection::try_new(&leg, [(SU2Irrep::from_twice_spin(1), 1..2)]).unwrap();
@@ -537,8 +552,12 @@ fn full_selection_is_the_identity_and_round_trips_are_exact() {
     let embedded = small.embed_leg(0, &partial).unwrap();
     assert_eq!(embedded.codomain()[0], leg);
     assert_eq!(
-        embedded.restrict_leg(&[(0, &partial)]).unwrap().data(),
-        small.data()
+        embedded
+            .restrict_leg(&[(0, &partial)])
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        small.dense_data().unwrap()
     );
 }
 
@@ -591,7 +610,7 @@ fn embed_after_restrict_is_the_orthogonal_projector() {
         .unwrap()
         .embed_leg(0, &selection)
         .unwrap();
-    assert_eq!(twice.data(), projected.data());
+    assert_eq!(twice.dense_data().unwrap(), projected.dense_data().unwrap());
 }
 
 #[test]
@@ -606,12 +625,12 @@ fn a_valid_selection_with_no_admissible_block_returns_an_empty_tensor() {
     let selection = LegSelection::try_new(&charged, [(U1Irrep::new(1), 1..2)]).unwrap();
     let restricted = source.restrict_leg(&[(0, &selection)]).unwrap();
     assert_eq!(restricted.subblock_count(), 0);
-    assert!(restricted.data().is_empty());
+    assert!(restricted.dense_data().unwrap().is_empty());
     assert_eq!(restricted.codomain()[0].degeneracies(), &[1]);
 
     let embedded = restricted.embed_leg(0, &selection).unwrap();
     assert_eq!(embedded.codomain()[0], charged);
-    assert!(embedded.data().is_empty());
+    assert!(embedded.dense_data().unwrap().is_empty());
 
     // Leg-level validation still rejects malformed ranges there, because no
     // block would ever reach the kernel.
@@ -757,8 +776,12 @@ fn embed_scatters_a_complex_lazy_adjoint_dual_domain_leg_per_sector() {
 
     // And the restriction of that embedding is the original, bitwise.
     assert_eq!(
-        embedded.restrict_leg(&[(1, &selection)]).unwrap().data(),
-        lazy.data()
+        embedded
+            .restrict_leg(&[(1, &selection)])
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        lazy.materialize().unwrap().dense_data().unwrap()
     );
 }
 
@@ -836,7 +859,10 @@ fn restrict_and_embed_on_a_product_fz2_u1_leg_match_the_isometry_composition() {
         .compose(&source)
         .unwrap();
     assert_eq!(restricted.codomain(), expected.codomain());
-    assert_close_complex(restricted.data(), expected.data());
+    assert_close_complex(
+        restricted.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+    );
 
     let embedded = restricted.embed_leg(0, &selection).unwrap();
     let expected = iota
@@ -845,7 +871,10 @@ fn restrict_and_embed_on_a_product_fz2_u1_leg_match_the_isometry_composition() {
         .compose(&restricted)
         .unwrap();
     assert_eq!(embedded.codomain(), expected.codomain());
-    assert_close_complex(embedded.data(), expected.data());
+    assert_close_complex(
+        embedded.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+    );
 }
 
 #[test]
@@ -940,7 +969,10 @@ fn restriction_commutes_with_permute_and_with_a_contraction_over_an_untouched_le
         restrict_then_permute.codomain(),
         permute_then_restrict.codomain()
     );
-    assert_close(restrict_then_permute.data(), permute_then_restrict.data());
+    assert_close(
+        restrict_then_permute.dense_data().unwrap(),
+        permute_then_restrict.dense_data().unwrap(),
+    );
 
     // Contracting the untouched bond commutes with the restriction. Both
     // sides run the same `contract`, so the fermionic supertrace twist on the
@@ -959,7 +991,10 @@ fn restriction_commutes_with_permute_and_with_a_contraction_over_an_untouched_le
         restrict_then_contract.codomain(),
         contract_then_restrict.codomain()
     );
-    assert_close(restrict_then_contract.data(), contract_then_restrict.data());
+    assert_close(
+        restrict_then_contract.dense_data().unwrap(),
+        contract_then_restrict.dense_data().unwrap(),
+    );
 }
 
 /// A deterministic, nonzero, finite entry per `(fusion-tree pair, degeneracy
@@ -1111,7 +1146,7 @@ macro_rules! assert_exact_restrict_embed {
         let restricted = source.restrict_leg(&[(axis, &selection)]).unwrap();
         assert_eq!(restricted.codomain(), expected.codomain());
         assert_eq!(restricted.domain(), expected.domain());
-        assert_eq!(exact_bits(restricted.data()), exact_bits(expected.data()));
+        assert_eq!(exact_bits(restricted.dense_data().unwrap()), exact_bits(expected.dense_data().unwrap()));
 
         let embedded = restricted.embed_leg(axis, &selection).unwrap();
         let projected = TensorMap::<_, $dtype>::from_subblock_fn(
@@ -1127,10 +1162,10 @@ macro_rules! assert_exact_restrict_embed {
         )
         .unwrap();
         assert_eq!(embedded.codomain(), source.codomain());
-        assert_eq!(exact_bits(embedded.data()), exact_bits(projected.data()));
+        assert_eq!(exact_bits(embedded.dense_data().unwrap()), exact_bits(projected.dense_data().unwrap()));
         assert_eq!(
-            exact_bits(embedded.restrict_leg(&[(axis, &selection)]).unwrap().data()),
-            exact_bits(restricted.data())
+            exact_bits(embedded.restrict_leg(&[(axis, &selection)]).unwrap().dense_data().unwrap()),
+            exact_bits(restricted.dense_data().unwrap())
         );
     }};
 }
@@ -1272,12 +1307,12 @@ macro_rules! assert_exact_multi_restrict {
         let restricted = source.restrict_leg(&set).unwrap();
         assert_eq!(restricted.codomain(), expected.codomain());
         assert_eq!(restricted.domain(), expected.domain());
-        assert_eq!(exact_bits(restricted.data()), exact_bits(expected.data()));
+        assert_eq!(exact_bits(restricted.dense_data().unwrap()), exact_bits(expected.dense_data().unwrap()));
         for order in [set.clone(), set.iter().rev().copied().collect()] {
             let sequential = order.iter().fold(source.clone(), |tensor, &pair| {
                 tensor.restrict_leg(&[pair]).unwrap()
             });
-            assert_eq!(exact_bits(sequential.data()), exact_bits(restricted.data()));
+            assert_eq!(exact_bits(sequential.dense_data().unwrap()), exact_bits(restricted.dense_data().unwrap()));
         }
     }};
 }
@@ -1406,8 +1441,8 @@ macro_rules! assert_compact_stays_compact {
             assert_eq!(restricted.codomain(), dense.codomain());
             assert_eq!(restricted.domain(), dense.domain());
             assert_eq!(
-                exact_bits(restricted.materialize().unwrap().data()),
-                exact_bits(dense.data())
+                exact_bits(restricted.materialize().unwrap().dense_data().unwrap()),
+                exact_bits(dense.dense_data().unwrap())
             );
         }
     }};

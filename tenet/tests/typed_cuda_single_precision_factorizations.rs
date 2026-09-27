@@ -268,12 +268,18 @@ fn assert_device_svd_matches_host<R, D>(
 {
     let source = fixture::<R, D>(runtime, codomain, domain);
     let kappa = measured_kappa::<R, D>(runtime, codomain, domain, &POSITIVE);
-    let terms = source.data().len().max(1);
+    let terms = source
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .len()
+        .max(1);
     let norm = source.norm(2.0).unwrap();
     assert!(norm > 0.0, "the SVD fixture [{}] is vacuous", D::NAME);
     let bound = tolerance::<D>(terms, norm, kappa);
 
-    let source_payload = source.data().to_vec();
+    let source_payload = source.materialize().unwrap().dense_data().unwrap().to_vec();
     let Svd {
         u: host_u,
         s: host_s,
@@ -309,7 +315,12 @@ fn assert_device_svd_matches_host<R, D>(
     }
 
     // The spectrum is gauge independent, so it is a pointwise oracle.
-    assert_close(s.data(), host_s.data(), bound, "svd spectrum");
+    assert_close(
+        s.materialize().unwrap().dense_data().unwrap(),
+        host_s.materialize().unwrap().dense_data().unwrap(),
+        bound,
+        "svd spectrum",
+    );
 
     // Descending and non-negative within every coupled sector: the contract
     // the truncation composition below relies on.
@@ -362,7 +373,10 @@ fn assert_device_svd_matches_host<R, D>(
     );
 
     // The source is an input, not scratch: bit for bit unchanged.
-    assert_eq!(device.to_host().unwrap().data(), source_payload);
+    assert_eq!(
+        device.to_host().unwrap().dense_data().unwrap(),
+        source_payload
+    );
 }
 
 #[test]
@@ -406,7 +420,7 @@ fn assert_device_qr_matches_host<R, D>(
 {
     let source = fixture::<R, D>(runtime, codomain, domain);
     let kappa = measured_kappa::<R, D>(runtime, codomain, domain, &POSITIVE);
-    let terms = source.data().len().max(1);
+    let terms = source.dense_data().unwrap().len().max(1);
     let norm = source.norm(2.0).unwrap();
     let bound = tolerance::<D>(terms, norm, kappa);
 
@@ -427,8 +441,18 @@ fn assert_device_qr_matches_host<R, D>(
 
     // QR *is* gauge-fixed on device (positive diagonal), so — unlike the SVD —
     // host and device factors are the same object and compare pointwise.
-    assert_close(q.data(), host_q.data(), bound, "qr q");
-    assert_close(r.data(), host_r.data(), bound, "qr r");
+    assert_close(
+        q.dense_data().unwrap(),
+        host_q.dense_data().unwrap(),
+        bound,
+        "qr q",
+    );
+    assert_close(
+        r.dense_data().unwrap(),
+        host_r.dense_data().unwrap(),
+        bound,
+        "qr r",
+    );
 
     assert_residual(
         &q.adjoint().unwrap().compose(&q).unwrap(),
@@ -482,7 +506,7 @@ where
     D: FactorPayload,
 {
     let runtime = source.runtime();
-    let terms = source.data().len().max(1);
+    let terms = source.dense_data().unwrap().len().max(1);
     let norm = source.norm(2.0).unwrap();
     let bound = tolerance::<D>(terms, norm, 1.0);
     let Qr {
@@ -506,7 +530,8 @@ where
         let (rows, cols) = (view.shape()[0], view.shape()[1]);
         let (row_stride, col_stride) = (view.strides()[0], view.strides()[1]);
         for j in 0..rows.min(cols) {
-            let (re, im) = r.data()[view.offset() + j * (row_stride + col_stride)].parts();
+            let (re, im) =
+                r.dense_data().unwrap()[view.offset() + j * (row_stride + col_stride)].parts();
             assert!(
                 re >= -bound && im.abs() <= bound,
                 "{what} R diagonal [{}]: block {block} entry {j} is {re}+{im}i",
@@ -572,7 +597,7 @@ fn device_qr_compact_obeys_its_laws_on_rank_deficient_and_dual_multileg_blocks()
 fn device_qr_returns_the_positive_diagonal_gauge_at_every_payload() {
     fn assert_gauge<D: FactorPayload>(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) {
         let source = fixture::<U1FusionRule, D>(runtime, leg, leg);
-        let terms = source.data().len().max(1);
+        let terms = source.dense_data().unwrap().len().max(1);
         let Qr { r, .. } = source.to_cuda().unwrap().qr_compact().unwrap();
         let spectra = r.to_host().unwrap().diagview().unwrap();
         assert!(
@@ -629,7 +654,7 @@ fn device_qr_fixes_a_hand_computed_complex_phase() {
             for (row, expected_row) in expected.iter().enumerate() {
                 for (col, &(re, im)) in expected_row.iter().enumerate() {
                     let index = view.offset() + row * view.strides()[0] + col * view.strides()[1];
-                    let actual = factor.data()[index];
+                    let actual = factor.dense_data().unwrap()[index];
                     assert!(
                         actual.distance(D::entry(re, im)) <= bound,
                         "hand qr {what} [{}] ({row}, {col}): {actual:?}, expected {re}+{im}i",
@@ -659,7 +684,13 @@ fn assert_device_eigh_matches_host<R, D>(
 {
     let source = fixture_with::<R, D>(runtime, leg, leg, diagonal);
     let kappa = measured_kappa::<R, D>(runtime, leg, leg, diagonal);
-    let terms = source.data().len().max(1);
+    let terms = source
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .len()
+        .max(1);
     let norm = source.norm(2.0).unwrap();
     let bound = tolerance::<D>(terms, norm, kappa);
 
@@ -679,7 +710,12 @@ fn assert_device_eigh_matches_host<R, D>(
 
     // Eigenvalues are gauge independent up to the documented |lambda|
     // ordering, which both sides share, so they compare pointwise.
-    assert_close(d.data(), host_d.data(), bound, "eigh spectrum");
+    assert_close(
+        d.materialize().unwrap().dense_data().unwrap(),
+        host_d.materialize().unwrap().dense_data().unwrap(),
+        bound,
+        "eigh spectrum",
+    );
 
     // |lambda| descending within every coupled sector.
     for entry in &d.diagview().unwrap() {
@@ -925,7 +961,7 @@ fn assert_truncation_composition<R, D>(
 {
     let source = fixture::<R, D>(runtime, leg, leg);
     let kappa = measured_kappa::<R, D>(runtime, leg, leg, &POSITIVE);
-    let terms = source.data().len().max(1);
+    let terms = source.dense_data().unwrap().len().max(1);
     let bound = tolerance::<D>(terms, source.norm(2.0).unwrap(), kappa);
 
     let expected = {

@@ -93,7 +93,12 @@ macro_rules! assert_relation {
         let (lhs, rhs) = (&$lhs, &$rhs);
         assert_eq!(lhs.codomain(), rhs.codomain(), "{} codomain", $what);
         assert_eq!(lhs.domain(), rhs.domain(), "{} domain", $what);
-        numerics::assert_slices_close(&$what, lhs.data(), rhs.data(), $terms);
+        numerics::assert_slices_close(
+            &$what,
+            lhs.dense_data().unwrap(),
+            rhs.dense_data().unwrap(),
+            $terms,
+        );
     }};
 }
 
@@ -124,7 +129,7 @@ macro_rules! assert_svd_composition {
 
         let offers = singular_offers!(source, ClosedFormDim::closed_form_dim);
         let kept = select(&offers, &$policy);
-        let terms = source.data().len();
+        let terms = source.materialize().unwrap().dense_data().unwrap().len();
 
         let kept_bond = got_s.domain()[0].clone();
         assert_kept_bond!(kept_bond, offers, kept, case);
@@ -169,7 +174,7 @@ macro_rules! assert_svd_composition {
         );
         assert_error_close(
             case,
-            source.data(),
+            source.materialize().unwrap().dense_data().unwrap(),
             found.error,
             discarded_norm(&offers, &kept),
             terms,
@@ -203,7 +208,7 @@ macro_rules! assert_eigh_composition {
 
         let offers = singular_offers!(source, ClosedFormDim::closed_form_dim);
         let kept = select(&offers, &$policy);
-        let terms = source.data().len();
+        let terms = source.dense_data().unwrap().len();
 
         let kept_bond = got_d.domain()[0].clone();
         assert_kept_bond!(kept_bond, offers, kept, case);
@@ -232,7 +237,7 @@ macro_rules! assert_eigh_composition {
         );
         assert_error_close(
             case,
-            source.data(),
+            source.dense_data().unwrap(),
             found.error,
             discarded_norm(&offers, &kept),
             terms,
@@ -645,10 +650,16 @@ fn find_truncated_ignores_the_order_the_spectra_arrive_in() {
         assert_eq!(
             s.restrict_leg(&[(0, &got.selection), (1, &got.selection)])
                 .unwrap()
-                .data(),
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             s.restrict_leg(&[(0, &want.selection), (1, &want.selection)])
                 .unwrap()
-                .data(),
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             "rank {rank}"
         );
     }
@@ -687,7 +698,11 @@ fn a_dense_bond_map_restricted_on_both_legs_equals_two_one_axis_calls() {
             .unwrap();
         assert_eq!(once.codomain(), twice.codomain(), "{pairs:?}");
         assert_eq!(once.domain(), twice.domain(), "{pairs:?}");
-        assert_eq!(once.data(), twice.data(), "{pairs:?}");
+        assert_eq!(
+            once.dense_data().unwrap(),
+            twice.dense_data().unwrap(),
+            "{pairs:?}"
+        );
     }
 }
 
@@ -712,13 +727,26 @@ fn discarding_everything_yields_the_empty_bond_and_empty_factors() {
     let got_u = u.restrict_leg(&[(u.codomain_rank(), selection)]).unwrap();
     let got_s = s.restrict_leg(&[(0, selection), (1, selection)]).unwrap();
     let got_vh = vh.restrict_leg(&[(0, selection)]).unwrap();
-    assert!(got_u.data().is_empty() && got_s.data().is_empty() && got_vh.data().is_empty());
+    assert!(
+        got_u.dense_data().unwrap().is_empty()
+            && got_s
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+                .is_empty()
+            && got_vh.dense_data().unwrap().is_empty()
+    );
 
     // `embed_leg` with the empty selection: the adjoint of restricting to
     // nothing is the zero map back onto the parent leg.
     let embedded = got_u.embed_leg(got_u.codomain_rank(), selection).unwrap();
     assert_eq!(embedded.domain()[0], s.domain()[0]);
-    assert!(embedded.data().iter().all(|&value| value == 0.0));
+    assert!(embedded
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|&value| value == 0.0));
 }
 
 #[test]
@@ -738,8 +766,9 @@ fn a_no_op_decision_is_reported_as_full_and_copies_the_same_bits() {
     assert_eq!(
         u.restrict_leg(&[(u.codomain_rank(), &found.selection)])
             .unwrap()
-            .data(),
-        u.data(),
+            .dense_data()
+            .unwrap(),
+        u.dense_data().unwrap(),
         "a full selection copies the payload unchanged"
     );
 }
@@ -875,12 +904,13 @@ fn multi_axis_restrict_leg_rejects_everything_it_documents() {
     let lazy = dense.adjoint().unwrap();
     let both = [(0, &selection), (1, &selection)];
     assert_eq!(
-        lazy.restrict_leg(&both).unwrap().data(),
+        lazy.restrict_leg(&both).unwrap().dense_data().unwrap(),
         lazy.materialize()
             .unwrap()
             .restrict_leg(&both)
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
     );
 
     // A selection from a different *rule* cannot be spelled: `LegSelection<R>`

@@ -183,8 +183,18 @@ fn injected_dense_executor_is_used_and_preserves_results() {
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt_default, [&v, &v], [&v, &v], 99)
             .unwrap();
     let Svd { s: s_default, .. } = t_default.svd_compact().unwrap();
-    assert_eq!(s.data().len(), s_default.data().len());
-    for (a, b) in s.data().iter().zip(s_default.data()) {
+    assert_eq!(
+        s.materialize().unwrap().dense_data().unwrap().len(),
+        s_default.materialize().unwrap().dense_data().unwrap().len()
+    );
+    for (a, b) in s
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(s_default.materialize().unwrap().dense_data().unwrap())
+    {
         assert!(
             (a - b).abs() <= 1e-12 * (1.0 + a.abs()),
             "singular value differs from the default backend: {a} vs {b}"

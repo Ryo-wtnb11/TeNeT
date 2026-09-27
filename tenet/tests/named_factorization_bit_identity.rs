@@ -64,7 +64,8 @@ macro_rules! factor {
             .collect::<Vec<_>>();
         let (codomain, domain) = (legs(t.codomain()), legs(t.domain()));
         let compact = matches!(t.network_reuse_class(false), NetworkReuseClass::Compact);
-        let data = t.data();
+        let data_materialized = t.materialize().unwrap();
+        let data = data_materialized.dense_data().unwrap();
         (
             format!(
                 "{codomain:?}<-{domain:?}|{blocks:?}|compact={compact}|len={}",

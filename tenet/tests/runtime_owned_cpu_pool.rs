@@ -52,7 +52,7 @@ fn observe(rt: &Runtime, salt: usize) -> Vec<HostPoolObservation> {
     let v = space(&provider, salt);
     let t: TensorMap<_, f64> = TensorMap::rand_with_seed(rt, [&v, &v], [&v], 1531).unwrap();
     assert!(
-        t.data().len() > 1 << 15,
+        t.dense_data().unwrap().len() > 1 << 15,
         "fixture must pass the parallel gates"
     );
     take_host_pool_observations();

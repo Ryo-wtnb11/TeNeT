@@ -89,17 +89,17 @@ macro_rules! device_restrict {
                             actual.structure_signature() == expected.structure_signature(),
                             "{label}: member {i} space"
                         );
-                        fixtures::assert_bit_exact(actual.data(), expected.data(), &label);
+                        fixtures::assert_bit_exact(actual.dense_data().unwrap(), expected.dense_data().unwrap(), &label);
                         fixtures::assert_bit_exact(
-                            twice.member(i).unwrap().data(),
-                            expected.restrict_leg(&[(next, second)]).unwrap().data(),
+                            twice.member(i).unwrap().dense_data().unwrap(),
+                            expected.restrict_leg(&[(next, second)]).unwrap().dense_data().unwrap(),
                             &label,
                         );
                     }
                     for (j, &i) in picked.iter().enumerate() {
                         fixtures::assert_bit_exact(
-                            of_selected.member(j).unwrap().data(),
-                            members[i].restrict_leg(&[(axis, selection)]).unwrap().data(),
+                            of_selected.member(j).unwrap().dense_data().unwrap(),
+                            members[i].restrict_leg(&[(axis, selection)]).unwrap().dense_data().unwrap(),
                             &label,
                         );
                     }
@@ -128,7 +128,7 @@ macro_rules! device_restrict {
                         actual.structure_signature() == sequential.structure_signature(),
                         "{label}: member {i} space"
                     );
-                    fixtures::assert_bit_exact(actual.data(), sequential.data(), &label);
+                    fixtures::assert_bit_exact(actual.dense_data().unwrap(), sequential.dense_data().unwrap(), &label);
                 }
             }
 
@@ -184,7 +184,8 @@ fn device_restrict_leg_is_bit_exact_with_one_gather_per_call() {
         .unwrap()
         .member(1)
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .is_empty());
 
     // Both empty-producing paths keep the `[L, B]` shape the other consumes:
@@ -204,7 +205,12 @@ fn device_restrict_leg_is_bit_exact_with_one_gather_per_call() {
         let host = stack.to_host().unwrap();
         assert!(*host.signature() == expected.structure_signature());
         for member in 0..host.len() {
-            assert!(host.member(member).unwrap().data().is_empty());
+            assert!(host
+                .member(member)
+                .unwrap()
+                .dense_data()
+                .unwrap()
+                .is_empty());
         }
     }
 }

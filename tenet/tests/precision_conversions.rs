@@ -177,7 +177,12 @@ macro_rules! assert_same_structure {
                 $what
             );
         }
-        assert_eq!(got.data().len(), source.data().len(), "{}: length", $what);
+        assert_eq!(
+            got.materialize().unwrap().dense_data().unwrap().len(),
+            source.materialize().unwrap().dense_data().unwrap().len(),
+            "{}: length",
+            $what
+        );
         assert!(
             std::ptr::eq(got.provider(), source.provider()),
             "{}: the provider Arc must be shared, not rebuilt",
@@ -194,18 +199,24 @@ macro_rules! assert_all_conversions {
     ($what:expr, $f32:expr) => {{
         let what = $what;
         let source: TensorMap<_, f32> = $f32;
-        let values = source.data().to_vec();
+        let values = source.materialize().unwrap().dense_data().unwrap().to_vec();
 
         let wide = source.convert::<f64>();
         assert_same_structure!(what, wide, source);
         let expected: Vec<f64> = values.iter().map(|&value| f64::from(value)).collect();
         assert_eq!(
-            f64_bits(wide.data()),
+            f64_bits(wide.materialize().unwrap().dense_data().unwrap()),
             f64_bits(&expected),
             "{what}: convert::<f64>"
         );
         assert_eq!(
-            f32_bits(wide.convert::<f32>().data()),
+            f32_bits(
+                wide.convert::<f32>()
+                    .materialize()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap()
+            ),
             f32_bits(&values),
             "{what}: convert::<f32>(convert::<f64>(x)) == x"
         );
@@ -217,7 +228,7 @@ macro_rules! assert_all_conversions {
             .map(|&value| Complex32::new(value, 0.0))
             .collect();
         assert_eq!(
-            c32_bits(c32.data()),
+            c32_bits(c32.materialize().unwrap().dense_data().unwrap()),
             c32_bits(&expected),
             "{what}: convert::<Complex32>"
         );
@@ -229,29 +240,52 @@ macro_rules! assert_all_conversions {
             .map(|&value| Complex64::new(f64::from(value), 0.0))
             .collect();
         assert_eq!(
-            c64_bits(c64.data()),
+            c64_bits(c64.materialize().unwrap().dense_data().unwrap()),
             c64_bits(&expected),
             "{what}: f32 convert::<Complex64>"
         );
         assert_eq!(
-            c64_bits(wide.convert::<Complex64>().data()),
+            c64_bits(
+                wide.convert::<Complex64>()
+                    .materialize()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap()
+            ),
             c64_bits(&expected),
             "{what}: f64 convert::<Complex64>"
         );
         assert_eq!(
-            c64_bits(c32.convert::<Complex64>().data()),
+            c64_bits(
+                c32.convert::<Complex64>()
+                    .materialize()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap()
+            ),
             c64_bits(&expected),
             "{what}: Complex32 convert::<Complex64>"
         );
         assert_eq!(
-            c32_bits(c64.convert::<Complex32>().data()),
-            c32_bits(c32.data()),
+            c32_bits(
+                c64.convert::<Complex32>()
+                    .materialize()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap()
+            ),
+            c32_bits(c32.materialize().unwrap().dense_data().unwrap()),
             "{what}: convert::<Complex32>(convert::<Complex64>(x)) == x"
         );
 
         // A genuinely complex payload: both components move independently.
         let complex = c32.scale(Complex32::new(0.75, -1.5));
-        let complex_values = complex.data().to_vec();
+        let complex_values = complex
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec();
         let widened = complex.convert::<Complex64>();
         assert_same_structure!(what, widened, complex);
         let expected: Vec<Complex64> = complex_values
@@ -259,12 +293,19 @@ macro_rules! assert_all_conversions {
             .map(|value| Complex64::new(f64::from(value.re), f64::from(value.im)))
             .collect();
         assert_eq!(
-            c64_bits(widened.data()),
+            c64_bits(widened.materialize().unwrap().dense_data().unwrap()),
             c64_bits(&expected),
             "{what}: complex convert::<Complex64>"
         );
         assert_eq!(
-            c32_bits(widened.convert::<Complex32>().data()),
+            c32_bits(
+                widened
+                    .convert::<Complex32>()
+                    .materialize()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap()
+            ),
             c32_bits(&complex_values),
             "{what}: complex round trip"
         );
@@ -293,9 +334,16 @@ macro_rules! assert_adjoint_conversions {
             .unwrap();
 
         let widened_f64 = lazy32.convert::<f64>();
-        let expected: Vec<f64> = lazy32.data().iter().map(|&v| f64::from(v)).collect();
+        let expected: Vec<f64> = lazy32
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|&v| f64::from(v))
+            .collect();
         assert_eq!(
-            f64_bits(widened_f64.data()),
+            f64_bits(widened_f64.materialize().unwrap().dense_data().unwrap()),
             f64_bits(&expected),
             "{what}: f32 convert::<f64>"
         );
@@ -303,69 +351,91 @@ macro_rules! assert_adjoint_conversions {
 
         let to_c32 = lazy32.convert::<Complex32>();
         let expected: Vec<Complex32> = lazy32
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|&v| Complex32::new(v, 0.0))
             .collect();
         assert_eq!(
-            c32_bits(to_c32.data()),
+            c32_bits(to_c32.materialize().unwrap().dense_data().unwrap()),
             c32_bits(&expected),
             "{what}: f32 convert::<Complex32>"
         );
 
         let f32_to_c64 = lazy32.convert::<Complex64>();
         let expected: Vec<Complex64> = lazy32
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|&v| Complex64::new(f64::from(v), 0.0))
             .collect();
         assert_eq!(
-            c64_bits(f32_to_c64.data()),
+            c64_bits(f32_to_c64.materialize().unwrap().dense_data().unwrap()),
             c64_bits(&expected),
             "{what}: f32 convert::<Complex64>"
         );
 
         let f64_to_c64 = lazy64.convert::<Complex64>();
         let expected: Vec<Complex64> = lazy64
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|&v| Complex64::new(v, 0.0))
             .collect();
         assert_eq!(
-            c64_bits(f64_to_c64.data()),
+            c64_bits(f64_to_c64.materialize().unwrap().dense_data().unwrap()),
             c64_bits(&expected),
             "{what}: f64 convert::<Complex64>"
         );
         assert_same_structure!(what, f64_to_c64, lazy64);
 
         let narrowed = lazy64.convert::<f32>();
-        let expected: Vec<f32> = lazy64.data().iter().map(|&v| narrow(v)).collect();
+        let expected: Vec<f32> = lazy64
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|&v| narrow(v))
+            .collect();
         assert_eq!(
-            f32_bits(narrowed.data()),
+            f32_bits(narrowed.materialize().unwrap().dense_data().unwrap()),
             f32_bits(&expected),
             "{what}: convert::<f32>"
         );
 
         let c32_to_c64 = lazyc32.convert::<Complex64>();
         let expected: Vec<Complex64> = lazyc32
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|v| Complex64::new(f64::from(v.re), f64::from(v.im)))
             .collect();
         assert_eq!(
-            c64_bits(c32_to_c64.data()),
+            c64_bits(c32_to_c64.materialize().unwrap().dense_data().unwrap()),
             c64_bits(&expected),
             "{what}: Complex32 convert::<Complex64>"
         );
 
         let narrowed_c = lazyc64.convert::<Complex32>();
         let expected: Vec<Complex32> = lazyc64
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|v| Complex32::new(narrow(v.re), narrow(v.im)))
             .collect();
         assert_eq!(
-            c32_bits(narrowed_c.data()),
+            c32_bits(narrowed_c.materialize().unwrap().dense_data().unwrap()),
             c32_bits(&expected),
             "{what}: convert::<Complex32>"
         );
@@ -395,10 +465,25 @@ macro_rules! filled {
 fn u1_dense_conversions_are_exact_and_keep_structure() {
     let leg = u1_leg();
     let (source, _) = assert_all_conversions!("u1 dense", filled!([&leg, &leg], [&leg]));
-    assert!(source.data().iter().any(|value| value.is_nan()));
-    assert!(source.data().iter().any(|value| value.is_subnormal()));
     assert!(source
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.is_nan()));
+    assert!(source
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.is_subnormal()));
+    assert!(source
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
         .any(|value| *value == 0.0 && value.is_sign_negative()));
 }
@@ -433,12 +518,18 @@ fn lazy_adjoint_conversions_match_the_converted_logical_payload() {
         .scale(Complex32::new(0.5, 2.0));
     let lazy = complex.adjoint().unwrap();
     let expected: Vec<Complex64> = lazy
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
         .map(|value| Complex64::new(f64::from(value.re), f64::from(value.im)))
         .collect();
     let widened = complex.adjoint().unwrap().convert::<Complex64>();
-    assert_eq!(c64_bits(widened.data()), c64_bits(&expected));
+    assert_eq!(
+        c64_bits(widened.materialize().unwrap().dense_data().unwrap()),
+        c64_bits(&expected)
+    );
     assert_eq!(
         c32_bits(
             complex
@@ -446,9 +537,12 @@ fn lazy_adjoint_conversions_match_the_converted_logical_payload() {
                 .adjoint()
                 .unwrap()
                 .convert::<Complex32>()
-                .data()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
         ),
-        c32_bits(lazy.data())
+        c32_bits(lazy.materialize().unwrap().dense_data().unwrap())
     );
 }
 
@@ -525,12 +619,18 @@ fn narrowing_rounds_like_as_f32_per_element() {
     )
     .unwrap();
     // `from_subblock_fn` fills in the coupled layout; read the order back.
-    let values = source.data().to_vec();
+    let values = source.dense_data().unwrap().to_vec();
     assert_eq!(values.len(), cases.len());
 
     let narrowed = source.convert::<f32>();
     assert_same_structure!("convert::<f32>", narrowed, source);
-    for (index, (&got, &value)) in narrowed.data().iter().zip(&values).enumerate() {
+    for (index, (&got, &value)) in narrowed
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(&values)
+        .enumerate()
+    {
         let oracle = narrow(value);
         assert_eq!(got.to_bits(), oracle.to_bits(), "entry {index}: {value:e}");
         assert_eq!(got.is_nan(), value.is_nan(), "entry {index}: NaN stays NaN");
@@ -541,14 +641,18 @@ fn narrowing_rounds_like_as_f32_per_element() {
             .iter()
             .position(|stored| stored.to_bits() == value.to_bits())
             .unwrap();
-        let got = narrowed.data()[position];
+        let got = narrowed.dense_data().unwrap()[position];
         match expected {
             Some(expected) => assert_eq!(got.to_bits(), expected.to_bits(), "{value:e}"),
             None if value.is_nan() => assert!(got.is_nan()),
             None => assert_eq!(f64::from(got), f64::from(narrow(value))),
         }
     }
-    assert!(narrowed.data().iter().any(|value| value.is_subnormal()));
+    assert!(narrowed
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.is_subnormal()));
 
     // Complex narrowing is componentwise with the same rounding.
     let complex = source
@@ -560,14 +664,17 @@ fn narrowing_rounds_like_as_f32_per_element() {
             Complex64::new(1.0, 0.0),
         );
     let complex = complex.unwrap();
-    let complex_values = complex.data().to_vec();
+    let complex_values = complex.dense_data().unwrap().to_vec();
     let narrowed = complex.convert::<Complex32>();
     assert_same_structure!("convert::<Complex32>", narrowed, complex);
     let expected: Vec<Complex32> = complex_values
         .iter()
         .map(|value| Complex32::new(narrow(value.re), narrow(value.im)))
         .collect();
-    assert_eq!(c32_bits(narrowed.data()), c32_bits(&expected));
+    assert_eq!(
+        c32_bits(narrowed.dense_data().unwrap()),
+        c32_bits(&expected)
+    );
 }
 
 /// Measures `convert` on a small and a large source of the same structure:
@@ -611,7 +718,10 @@ fn conversion_payload_allocations() {
     let (small_leg, large_leg) = (u1_leg_with([2, 3, 2]), u1_leg_with([9, 10, 9]));
     let small = filled!([&small_leg, &small_leg], [&small_leg]);
     let large = filled!([&large_leg, &large_leg], [&large_leg]);
-    let lengths = (small.data().len(), large.data().len());
+    let lengths = (
+        small.dense_data().unwrap().len(),
+        large.dense_data().unwrap().len(),
+    );
     assert_payload_allocations(
         "f32 convert::<f64>",
         &small,
@@ -730,7 +840,10 @@ fn converted_lazy_adjoints_are_owned() {
     source
         .permute_overwrite_into(&mut destination, &[2], &[0, 1], 1.0)
         .unwrap();
-    assert_eq!(f64_bits(destination.data()), f64_bits(expected.data()));
+    assert_eq!(
+        f64_bits(destination.dense_data().unwrap()),
+        f64_bits(expected.dense_data().unwrap())
+    );
 }
 
 /// Checked-Generic provider: SU(3) with an outer-multiplicity vertex.
@@ -780,8 +893,20 @@ fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
         },
     ];
     let source: TensorMap<_, f32> = TensorMap::diagonal(&runtime(), &leg, spectra).unwrap();
-    assert!(source.data().iter().any(|value| value.is_nan()));
-    assert!(source.data().iter().any(|value| value.is_infinite()));
+    assert!(source
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.is_nan()));
+    assert!(source
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.is_infinite()));
 
     let (widened_f64, to_c64, c32_to_c64, narrowed_c) =
         assert_adjoint_conversions!("SU(3) diagonal adjoint", source.clone());
@@ -847,10 +972,16 @@ fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
     let lazy = finite.adjoint().unwrap();
     let converted = lazy.convert::<Complex64>();
     let expected: Vec<Complex64> = lazy
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
         .map(|&v| Complex64::new(v, 0.0))
         .collect();
-    assert_eq!(c64_bits(converted.data()), c64_bits(&expected));
+    assert_eq!(
+        c64_bits(converted.materialize().unwrap().dense_data().unwrap()),
+        c64_bits(&expected)
+    );
     converted.qr_compact().unwrap();
 }

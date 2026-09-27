@@ -115,8 +115,18 @@ macro_rules! assert_lazy_adjoint_reads_and_transforms_match_literal {
         let parent_snapshot = snapshot!(parent);
         let lazy_snapshot = snapshot!(lazy);
         let literal = literal_adjoint_payload(&parent_snapshot, &lazy_snapshot, $conj);
-        assert_eq!(literal.len(), lazy.data().len());
-        for (actual, expected) in lazy.data().iter().zip(&literal) {
+        assert_eq!(
+            literal.len(),
+            lazy.materialize().unwrap().dense_data().unwrap().len()
+        );
+        for (actual, expected) in lazy
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(&literal)
+        {
             assert!($close(*actual, *expected), "{actual:?} != {expected:?}");
         }
 
@@ -183,7 +193,11 @@ macro_rules! assert_lazy_adjoint_reads_and_transforms_match_literal {
 fn u1_rank4_lazy_adjoint_matches_the_literal_kernel_for_real_and_complex() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let complex = u1_rank4(&runtime);
-    assert!(complex.data().iter().any(|value| value.im != 0.0));
+    assert!(complex
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.im != 0.0));
     assert_lazy_adjoint_reads_and_transforms_match_literal!(
         complex.clone(),
         |z: Complex64| z.conj(),
@@ -196,7 +210,11 @@ fn u1_rank4_lazy_adjoint_matches_the_literal_kernel_for_real_and_complex() {
 fn su2_rank4_lazy_adjoint_matches_the_literal_kernel_for_real_and_complex() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let complex = su2_rank4(&runtime);
-    assert!(complex.data().iter().any(|value| value.im != 0.0));
+    assert!(complex
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.im != 0.0));
     assert_lazy_adjoint_reads_and_transforms_match_literal!(
         complex.clone(),
         |z: Complex64| z.conj(),
@@ -216,8 +234,15 @@ fn empty_support_lazy_adjoint_materializes_an_empty_payload() {
     assert_eq!(parent.subblock_count(), 0);
     let lazy = parent.adjoint().unwrap();
     assert_eq!(lazy.subblock_count(), 0);
-    assert!(lazy.data().is_empty());
-    assert!(lazy.transpose(&[1], &[0]).unwrap().data().is_empty());
+    assert!(lazy.materialize().unwrap().dense_data().unwrap().is_empty());
+    assert!(lazy
+        .transpose(&[1], &[0])
+        .unwrap()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .is_empty());
 }
 
 fn su2_dim(sector: &SU2Irrep) -> f64 {
@@ -312,7 +337,14 @@ fn lazy_adjoint_materialization_copies_non_finite_values_bit_exactly() {
         .iter()
         .any(|z| z.re == f64::INFINITY && z.im == 0.0 && z.im.is_sign_negative()));
     assert!(literal.iter().any(|z| z.im == f64::INFINITY));
-    for (actual, expected) in lazy.data().iter().zip(&literal) {
+    for (actual, expected) in lazy
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(&literal)
+    {
         assert_eq!(
             actual.re.to_bits(),
             expected.re.to_bits(),
@@ -336,7 +368,14 @@ fn lazy_adjoint_materialization_copies_non_finite_values_bit_exactly() {
     let lazy = real.adjoint().unwrap();
     let literal = literal_adjoint_payload(&snapshot!(real), &snapshot!(lazy), |x: f64| x);
     assert!(literal.contains(&f64::INFINITY) && literal.contains(&f64::NEG_INFINITY));
-    for (actual, expected) in lazy.data().iter().zip(&literal) {
+    for (actual, expected) in lazy
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(&literal)
+    {
         assert_eq!(actual.to_bits(), expected.to_bits());
     }
 }

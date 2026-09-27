@@ -55,7 +55,10 @@ fn scale_assign_mutates_unique_dense_payload() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let mut value = tensor(&runtime, 3, 2.0);
     value.scale_assign(3.0);
-    assert_eq!(value.data(), &[6.0, 0.0, 0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 6.0]);
+    assert_eq!(
+        value.dense_data().unwrap(),
+        &[6.0, 0.0, 0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 6.0]
+    );
 }
 
 #[test]
@@ -65,8 +68,8 @@ fn add_assign_preserves_clone_and_updates_unique_receiver() {
     let original = lhs.clone();
     let rhs = tensor(&runtime, 2, 3.0);
     lhs.axpby_assign(2.0, &rhs, -1.0).unwrap();
-    assert_eq!(lhs.data(), &[1.0, 0.0, 0.0, 1.0]);
-    assert_eq!(original.data(), &[2.0, 0.0, 0.0, 2.0]);
+    assert_eq!(lhs.dense_data().unwrap(), &[1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(original.dense_data().unwrap(), &[2.0, 0.0, 0.0, 2.0]);
 }
 
 #[test]
@@ -76,7 +79,7 @@ fn add_assign_rejects_layout_mismatch_without_mutating_destination() {
     let rhs = tensor(&runtime, 3, 3.0);
     let error = lhs.axpby_assign(1.0, &rhs, 1.0).unwrap_err();
     assert!(error.to_string().contains("different spaces"));
-    assert_eq!(lhs.data(), &[2.0, 0.0, 0.0, 2.0]);
+    assert_eq!(lhs.dense_data().unwrap(), &[2.0, 0.0, 0.0, 2.0]);
 }
 
 #[test]

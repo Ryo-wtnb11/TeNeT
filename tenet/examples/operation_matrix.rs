@@ -651,8 +651,14 @@ fn discard_public_oracles<T: OrientedScalar>(
         expected_direct,
         expected_adjoint,
     } = fixture;
-    let direct_marker = (expected_direct.data()[0], expected_direct.data().len());
-    let adjoint_marker = (expected_adjoint.data()[0], expected_adjoint.data().len());
+    let direct_marker = (
+        expected_direct.dense_data().unwrap()[0],
+        expected_direct.dense_data().unwrap().len(),
+    );
+    let adjoint_marker = (
+        expected_adjoint.dense_data().unwrap()[0],
+        expected_adjoint.dense_data().unwrap().len(),
+    );
     drop(expected_direct);
     drop(expected_adjoint);
     (
@@ -734,7 +740,7 @@ fn assert_public_fixture<T: OrientedScalar>(
             expected.subblock_fusion_trees(index)?
         );
     }
-    assert_oriented_close(actual.data(), expected.data());
+    assert_oriented_close(actual.dense_data().unwrap(), expected.dense_data().unwrap());
     Ok(())
 }
 
@@ -751,7 +757,10 @@ macro_rules! assert_same_tensor {
                 $expected.subblock_fusion_trees(index)?
             );
         }
-        assert_f64_payload_close($actual.data(), $expected.data());
+        assert_f64_payload_close(
+            $actual.dense_data().unwrap(),
+            $expected.dense_data().unwrap(),
+        );
     }};
 }
 
@@ -2095,7 +2104,7 @@ where
         for column in 0..n {
             for row in 0..n {
                 if row != column {
-                    let value = d.data()[values.offset()
+                    let value = d.dense_data().unwrap()[values.offset()
                         + row * values.strides()[0]
                         + column * values.strides()[1]];
                     assert!(value.norm() <= 1.0e-12);
@@ -2106,17 +2115,17 @@ where
             sector.charge() as usize,
             n,
             |column| {
-                d.data()
+                d.dense_data().unwrap()
                     [values.offset() + column * values.strides()[0] + column * values.strides()[1]]
             },
             |row, column| {
-                source.data()[source_block.offset()
+                source.dense_data().unwrap()[source_block.offset()
                     + row * source_block.strides()[0]
                     + column * source_block.strides()[1]]
                     .as_complex()
             },
             |row, column| {
-                v.data()
+                v.dense_data().unwrap()
                     [vectors.offset() + row * vectors.strides()[0] + column * vectors.strides()[1]]
             },
         );
@@ -2337,7 +2346,7 @@ where
             for column in 0..block.shape()[1] {
                 for row in 0..block.shape()[0] {
                     assert_eq!(
-                        selected.data()[block.offset()
+                        selected.dense_data().unwrap()[block.offset()
                             + row * block.strides()[0]
                             + column * block.strides()[1]]
                             .as_complex(),
@@ -3114,7 +3123,12 @@ fn run_checked_sun(
                         )
                     },
                 )?;
-                for (&actual, &input) in scaled.data().iter().zip(lhs.data()) {
+                for (&actual, &input) in scaled
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .zip(lhs.dense_data().unwrap())
+                {
                     assert_eq!(actual, 0.5 * input);
                 }
                 assert_same_tensor!(scaled, lhs.scale(0.5), lhs);
@@ -3130,8 +3144,12 @@ fn run_checked_sun(
                     min_time,
                     || lhs.axpby(0.75, &rhs, -0.25),
                 )?;
-                for ((&actual, &left), &right) in
-                    added.data().iter().zip(lhs.data()).zip(rhs.data())
+                for ((&actual, &left), &right) in added
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .zip(lhs.dense_data().unwrap())
+                    .zip(rhs.dense_data().unwrap())
                 {
                     assert_eq!(actual, 0.75 * left - 0.25 * right);
                 }
@@ -3346,7 +3364,11 @@ fn run_adapter_shape_cycle<T: OrientedScalar>(
 }
 
 fn observe_owned<T: OrientedScalar>(output: TensorMap<U1FusionRule, T>) -> (usize, T, usize) {
-    let marker = (0, output.data()[0], output.data().len());
+    let marker = (
+        0,
+        output.dense_data().unwrap()[0],
+        output.dense_data().unwrap().len(),
+    );
     black_box(marker);
     drop(output);
     marker

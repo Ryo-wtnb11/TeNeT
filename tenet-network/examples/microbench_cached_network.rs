@@ -85,7 +85,7 @@ mod u1 {
         let (oa, ob) = fixture(&oracle_runtime);
         let oracle = oa.contract(&ob, &[2, 3], &[0, 1], &[0, 1, 2, 3]).unwrap();
         for actual in [&cold, warm.as_ref().unwrap()] {
-            assert_eq!(actual.data(), oracle.data());
+            assert_eq!(actual.dense_data().unwrap(), oracle.dense_data().unwrap());
             assert_eq!(actual.codomain(), oracle.codomain());
             assert_eq!(actual.domain(), oracle.domain());
             assert_eq!(actual.subblock_count(), oracle.subblock_count());
@@ -181,7 +181,7 @@ mod checked_generic {
                 oracle.subblock_fusion_trees(index).unwrap()
             );
         }
-        assert_eq!(actual.data(), oracle.data());
+        assert_eq!(actual.dense_data().unwrap(), oracle.dense_data().unwrap());
     }
 
     fn print_row(

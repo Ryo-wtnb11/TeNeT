@@ -83,8 +83,8 @@ macro_rules! check_owned {
         let expected = &$expected;
         numerics::assert_slices_close(
             "owned payload against the destination path",
-            output.data(),
-            expected.data(),
+            output.dense_data().unwrap(),
+            expected.dense_data().unwrap(),
             $terms,
         );
         let lhs_coupled: HashSet<_> = $lhs
@@ -127,7 +127,7 @@ fn u1_case<D: Bits>(seed: u64) {
     let mut expected = output.zeros_like();
     lhs.contract_overwrite_into(&rhs, &mut expected, &[1], &[0], &[0, 1], D::from_real(1.0))
         .unwrap();
-    assert_eq!(output.data().len(), 4 + 9 + 4);
+    assert_eq!(output.dense_data().unwrap().len(), 4 + 9 + 4);
     assert_eq!(check_owned!(output, expected, lhs, rhs, 2), 2);
 
     // compose
@@ -225,7 +225,11 @@ fn empty_support_yields_a_zero_payload_of_the_full_destination_length() {
     let rhs: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&b], [&a], 8).unwrap();
     assert_eq!(lhs.subblock_count(), 0);
     let output = lhs.compose(&rhs).unwrap();
-    assert_eq!(output.data().len(), 4 + 9);
-    assert!(output.data().iter().all(|v| v.to_bits() == 0));
+    assert_eq!(output.dense_data().unwrap().len(), 4 + 9);
+    assert!(output
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|v| v.to_bits() == 0));
     assert_eq!(check_owned!(output, output.zeros_like(), lhs, rhs, 1), 2);
 }

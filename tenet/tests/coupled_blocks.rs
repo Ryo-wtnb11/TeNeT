@@ -400,7 +400,7 @@ where
     R::Mode: tenet::typed::TypedTensorModeDispatch<R>,
     D: Val,
 {
-    let parent = t.data().as_ptr();
+    let parent = t.dense_data().unwrap().as_ptr();
     for (sector, block) in lazy.blocks().unwrap() {
         let CoupledBlockPayload::Dense {
             storage,

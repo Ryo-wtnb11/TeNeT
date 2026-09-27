@@ -738,8 +738,12 @@ mod device {
                 Ok((first, rows)) => {
                     let check = verdict(
                         payload_close(
-                            first.to_host().expect("roundtrip download").data(),
-                            source.data(),
+                            first
+                                .to_host()
+                                .expect("roundtrip download")
+                                .dense_data()
+                                .unwrap(),
+                            source.dense_data().unwrap(),
                             0.0,
                         ),
                         "roundtrip_bit_equal",
@@ -752,7 +756,11 @@ mod device {
                 Err(reason) => skip_row(label("to_host"), &reason),
                 Ok((first, rows)) => {
                     let check = verdict(
-                        payload_close(first.data(), source.data(), 0.0),
+                        payload_close(
+                            first.dense_data().unwrap(),
+                            source.dense_data().unwrap(),
+                            0.0,
+                        ),
                         "roundtrip_bit_equal",
                     );
                     print_rows(label("to_host"), "cuda", &rows, &check);
@@ -791,8 +799,12 @@ mod device {
                     .expect("Host contract arm");
                     let check = verdict(
                         payload_close(
-                            device_first.to_host().expect("download").data(),
-                            host_first.data(),
+                            device_first
+                                .to_host()
+                                .expect("download")
+                                .dense_data()
+                                .unwrap(),
+                            host_first.dense_data().unwrap(),
                             tolerance,
                         ),
                         "host_value_equality",
@@ -839,8 +851,12 @@ mod device {
                             .expect("Host adjoint contract arm");
                             let check = verdict(
                                 payload_close(
-                                    device_first.to_host().expect("download").data(),
-                                    host_first.data(),
+                                    device_first
+                                        .to_host()
+                                        .expect("download")
+                                        .dense_data()
+                                        .unwrap(),
+                                    host_first.dense_data().unwrap(),
                                     tolerance,
                                 ),
                                 "host_value_equality",
@@ -883,8 +899,12 @@ mod device {
                     .expect("Host compose arm");
                     let check = verdict(
                         payload_close(
-                            device_first.to_host().expect("download").data(),
-                            host_first.data(),
+                            device_first
+                                .to_host()
+                                .expect("download")
+                                .dense_data()
+                                .unwrap(),
+                            host_first.dense_data().unwrap(),
                             tolerance,
                         ),
                         "host_value_equality",
@@ -934,8 +954,12 @@ mod device {
                         .expect("Host transform arm");
                         let check = verdict(
                             payload_close(
-                                device_first.to_host().expect("download").data(),
-                                host_first.data(),
+                                device_first
+                                    .to_host()
+                                    .expect("download")
+                                    .dense_data()
+                                    .unwrap(),
+                                host_first.dense_data().unwrap(),
                                 tolerance,
                             ),
                             "host_value_equality",
@@ -971,8 +995,12 @@ mod device {
                     .expect("Host scale arm");
                     let check = verdict(
                         payload_close(
-                            device_first.to_host().expect("download").data(),
-                            host_first.data(),
+                            device_first
+                                .to_host()
+                                .expect("download")
+                                .dense_data()
+                                .unwrap(),
+                            host_first.dense_data().unwrap(),
                             tolerance,
                         ),
                         "host_value_equality",
@@ -1008,8 +1036,12 @@ mod device {
                     .expect("Host add arm");
                     let check = verdict(
                         payload_close(
-                            device_first.to_host().expect("download").data(),
-                            host_first.data(),
+                            device_first
+                                .to_host()
+                                .expect("download")
+                                .dense_data()
+                                .unwrap(),
+                            host_first.dense_data().unwrap(),
                             tolerance,
                         ),
                         "host_value_equality",
@@ -1058,8 +1090,12 @@ mod device {
                             .expect("Host lazy add arm");
                             let check = verdict(
                                 payload_close(
-                                    device_first.to_host().expect("download").data(),
-                                    host_first.data(),
+                                    device_first
+                                        .to_host()
+                                        .expect("download")
+                                        .dense_data()
+                                        .unwrap(),
+                                    host_first.dense_data().unwrap(),
                                     tolerance,
                                 ),
                                 "host_value_equality",
@@ -1148,7 +1184,11 @@ mod device {
                         .to_host()
                         .expect("download");
                     let check = verdict(
-                        payload_close(rebuilt.data(), source.data(), tolerance),
+                        payload_close(
+                            rebuilt.dense_data().unwrap(),
+                            source.dense_data().unwrap(),
+                            tolerance,
+                        ),
                         "device_reconstruction",
                     );
                     print_rows(label("svd_compact"), "cuda", &device_rows, &check);
@@ -1267,7 +1307,11 @@ mod device {
                                 .to_host()
                                 .expect("download");
                             let check = verdict(
-                                payload_close(rebuilt.data(), source.data(), tolerance),
+                                payload_close(
+                                    rebuilt.dense_data().unwrap(),
+                                    source.dense_data().unwrap(),
+                                    tolerance,
+                                ),
                                 "device_reconstruction",
                             );
                             print_rows(label("eigh_full"), "cuda", &device_rows, &check);
@@ -1308,8 +1352,12 @@ mod device {
                     .expect("Host chain arm");
                     let check = verdict(
                         payload_close(
-                            device_first.to_host().expect("download").data(),
-                            host_first.data(),
+                            device_first
+                                .to_host()
+                                .expect("download")
+                                .dense_data()
+                                .unwrap(),
+                            host_first.dense_data().unwrap(),
                             tolerance,
                         ),
                         "host_value_equality",
@@ -1371,7 +1419,11 @@ mod device {
                     .to_host()
                     .expect("download");
                 let check = verdict(
-                    payload_close(rebuilt.data(), source.data(), D::CHECK_TOLERANCE),
+                    payload_close(
+                        rebuilt.dense_data().unwrap(),
+                        source.dense_data().unwrap(),
+                        D::CHECK_TOLERANCE,
+                    ),
                     "device_reconstruction",
                 );
                 print_rows(labels, "cuda", &device_rows, &check);

@@ -52,7 +52,12 @@ macro_rules! assert_same_tensor {
             $what
         );
         assert_eq!(actual.domain(), expected.domain(), "{}: domain", $what);
-        assert_eq!(actual.data(), expected.data(), "{}: payload", $what);
+        assert_eq!(
+            actual.materialize().unwrap().dense_data().unwrap(),
+            expected.materialize().unwrap().dense_data().unwrap(),
+            "{}: payload",
+            $what
+        );
     }};
 }
 
@@ -608,4 +613,52 @@ fn cat_refuses_an_adjoint_view_when_its_plan_declines() {
     );
     // The declined fallback of the owned lazy adjoint equals the plan result.
     assert_same_tensor!(a.cat(&lazy, Side::Domain).unwrap(), fast, "cat fallback");
+}
+
+/// #1547: `dense_data` borrows dense Host storage (the same slice `data()`
+/// returns) and refuses a lazy adjoint or a compact diagonal with
+/// `Unsupported { Materialize }`, entering neither adjoint materialization
+/// nor the diagonal densification, even after `data()` has cached one.
+#[test]
+#[allow(deprecated)]
+fn dense_data_borrows_dense_storage_and_never_materializes() {
+    let runtime = runtime();
+    let v = su2(&[(0, 2), (1, 1)]);
+    let t: TensorMap<_, Complex64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 3).unwrap();
+    let (dense, entries) = probe(|| t.dense_data().unwrap());
+    assert_eq!(entries, 0);
+    assert_eq!(dense.as_ptr(), t.data().as_ptr());
+    assert_eq!(dense.len(), t.data().len());
+
+    let adjoint = t.adjoint().unwrap();
+    for data_fills in [1, 0] {
+        let (refused, entries) = probe(|| adjoint.dense_data().map(<[_]>::len));
+        assert_eq!(entries, 0, "dense_data entered adjoint materialization");
+        assert!(is_unsupported(&refused.unwrap_err(), "dense_data"));
+        // Positive control: the deprecated `data()` still materializes, once.
+        let (_, entries) = probe(|| adjoint.data().len());
+        assert_eq!(entries, data_fills);
+    }
+    assert_eq!(
+        adjoint.materialize().unwrap().dense_data().unwrap(),
+        adjoint.data()
+    );
+
+    let bond = u1(&[(0, 2), (1, 1)]);
+    let spectra = bond
+        .sectors()
+        .unwrap()
+        .into_iter()
+        .map(|sector| super::SectorSpectrum {
+            values: vec![1.5; bond.degeneracy(&sector).unwrap()],
+            sector,
+        })
+        .collect::<Vec<_>>();
+    let d: TensorMap<_, f64> = TensorMap::diagonal(&runtime, &bond, spectra).unwrap();
+    let densified = |d: &TensorMap<_, f64>| d.owned_body().unwrap().dense_cache.get().is_some();
+    assert!(is_unsupported(&d.dense_data().unwrap_err(), "dense_data"));
+    assert!(!densified(&d), "dense_data densified a compact diagonal");
+    assert_eq!(d.materialize().unwrap().dense_data().unwrap(), d.data());
+    assert!(densified(&d), "positive control: data() densifies");
+    assert!(is_unsupported(&d.dense_data().unwrap_err(), "dense_data"));
 }

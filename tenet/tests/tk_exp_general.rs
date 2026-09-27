@@ -179,7 +179,13 @@ fn general_exp_balances_a_badly_scaled_block_like_julia() {
         1.0_f64.sinh() * 1e16,
         1.0_f64.cosh(),
     ];
-    for (index, (&actual, &want)) in exponential.data().iter().zip(expected.iter()).enumerate() {
+    for (index, (&actual, &want)) in exponential
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(expected.iter())
+        .enumerate()
+    {
         let relative = (actual - want).abs() / want.abs();
         assert!(
             relative <= 1e-13,

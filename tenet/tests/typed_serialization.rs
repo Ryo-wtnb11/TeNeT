@@ -469,11 +469,15 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
     for space in restored.codomain().iter().chain(restored.domain().iter()) {
         assert!(std::ptr::eq(space.provider(), provider.as_ref()));
     }
-    assert_eq!(restored.data().len(), source.data().len());
+    assert_eq!(
+        restored.dense_data().unwrap().len(),
+        source.dense_data().unwrap().len()
+    );
     assert!(restored
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(source.data())
+        .zip(source.dense_data().unwrap())
         .all(|(actual, expected)| actual.to_bits() == expected.to_bits()));
     assert_eq!(restored.subblock_count(), source.subblock_count());
     for index in 0..source.subblock_count() {
@@ -503,9 +507,10 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         NetworkReuseClass::OwnedDense
     ));
     assert!(restored_complex
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(complex.data())
+        .zip(complex.dense_data().unwrap())
         .all(|(actual, expected)| {
             (actual.re.to_bits(), actual.im.to_bits())
                 == (expected.re.to_bits(), expected.im.to_bits())
@@ -528,9 +533,12 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         NetworkReuseClass::LazyAdjoint
     ));
     assert!(restored_complex_lazy
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(complex_lazy.data())
+        .zip(complex_lazy.materialize().unwrap().dense_data().unwrap())
         .all(|(actual, expected)| {
             (actual.re.to_bits(), actual.im.to_bits())
                 == (expected.re.to_bits(), expected.im.to_bits())
@@ -559,7 +567,14 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
     assert!(
         restored_adjoint.network_reuse_class(false) == factor_adjoint.network_reuse_class(false)
     );
-    assert_eq!(restored_adjoint.data(), factor_adjoint.data());
+    assert_eq!(
+        restored_adjoint
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        factor_adjoint.materialize().unwrap().dense_data().unwrap()
+    );
     assert!(matches!(
         restored_adjoint
             .adjoint()
@@ -596,9 +611,12 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         NetworkReuseClass::Compact
     ));
     assert!(restored_complex_factor
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(complex_factor.data())
+        .zip(complex_factor.materialize().unwrap().dense_data().unwrap())
         .all(|(actual, expected)| {
             (actual.re.to_bits(), actual.im.to_bits())
                 == (expected.re.to_bits(), expected.im.to_bits())
@@ -621,9 +639,18 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         NetworkReuseClass::Compact
     ));
     assert!(restored_complex_factor_lazy
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(complex_factor_lazy.data())
+        .zip(
+            complex_factor_lazy
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+        )
         .all(|(actual, expected)| {
             (actual.re.to_bits(), actual.im.to_bits())
                 == (expected.re.to_bits(), expected.im.to_bits())
@@ -654,7 +681,7 @@ fn admitted_shape_limit_precedes_dense_payload_allocation() {
         forged[offset..offset + 8].copy_from_slice(&1024u64.to_le_bytes());
     }
 
-    let limit = source.data().len();
+    let limit = source.dense_data().unwrap().len();
     assert!(matches!(
         TensorMap::<GenericToy, f64>::from_bytes_with(
             &runtime,
@@ -780,20 +807,27 @@ fn dense_su2_f64_and_c64_roundtrip_exact_bits_and_semantic_blocks() {
     assert_eq!(complex.to_bytes_with(&codec).unwrap(), complex_bytes);
     assert_eq!(
         restored_real
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|x| x.to_bits())
             .collect::<Vec<_>>(),
-        real.data().iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        real.dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         restored_complex
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|x| (x.re.to_bits(), x.im.to_bits()))
             .collect::<Vec<_>>(),
         complex
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|x| (x.re.to_bits(), x.im.to_bits()))
             .collect::<Vec<_>>()
@@ -878,9 +912,12 @@ fn compact_and_lazy_representations_survive_roundtrip() {
         NetworkReuseClass::Compact
     ));
     assert!(restored_compact_complex
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(compact_complex.data())
+        .zip(compact_complex.materialize().unwrap().dense_data().unwrap())
         .all(|(actual, expected)| {
             (actual.re.to_bits(), actual.im.to_bits())
                 == (expected.re.to_bits(), expected.im.to_bits())
@@ -909,9 +946,18 @@ fn compact_and_lazy_representations_survive_roundtrip() {
         NetworkReuseClass::Compact
     ));
     assert!(restored_compact_adjoint
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(compact_complex_adjoint.data())
+        .zip(
+            compact_complex_adjoint
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+        )
         .all(|(actual, expected)| {
             (actual.re.to_bits(), actual.im.to_bits())
                 == (expected.re.to_bits(), expected.im.to_bits())
@@ -936,11 +982,20 @@ fn compact_and_lazy_representations_survive_roundtrip() {
     ));
     assert_eq!(
         restored_lazy
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|x| x.to_bits())
             .collect::<Vec<_>>(),
-        lazy.data().iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        lazy.materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>()
     );
 
     let dense_complex = dense.convert::<Complex64>().scale(Complex64::new(1.0, 0.5));
@@ -961,9 +1016,12 @@ fn compact_and_lazy_representations_survive_roundtrip() {
         NetworkReuseClass::LazyAdjoint
     ));
     assert!(restored_lazy_complex
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(lazy_complex.data())
+        .zip(lazy_complex.materialize().unwrap().dense_data().unwrap())
         .all(|(actual, expected)| {
             (actual.re.to_bits(), actual.im.to_bits())
                 == (expected.re.to_bits(), expected.im.to_bits())
@@ -1008,7 +1066,10 @@ fn legacy_adjoint_diagonal_records_decode_to_the_owned_conjugated_diagonal() {
     .unwrap();
     let adjoint = diagonal.adjoint().unwrap();
     assert!(decoded.network_reuse_class(false) == NetworkReuseClass::Compact);
-    assert_eq!(decoded.data().bits(), adjoint.data().bits());
+    assert_eq!(
+        decoded.materialize().unwrap().dense_data().unwrap().bits(),
+        adjoint.materialize().unwrap().dense_data().unwrap().bits()
+    );
     assert_eq!(
         decoded.to_bytes_with(&codec).unwrap(),
         adjoint.to_bytes_with(&codec).unwrap()
@@ -1040,7 +1101,10 @@ fn legacy_adjoint_diagonal_records_decode_to_the_owned_conjugated_diagonal() {
     .unwrap();
     let adjoint = diagonal.adjoint().unwrap();
     assert!(decoded.network_reuse_class(false) == NetworkReuseClass::Compact);
-    assert_eq!(decoded.data().bits(), adjoint.data().bits());
+    assert_eq!(
+        decoded.materialize().unwrap().dense_data().unwrap().bits(),
+        adjoint.materialize().unwrap().dense_data().unwrap().bits()
+    );
 }
 
 #[test]
@@ -1272,7 +1336,10 @@ fn version_one_golden_files_decode_and_reencode_byte_for_byte() {
         dense.network_reuse_class(false),
         NetworkReuseClass::OwnedDense
     ));
-    assert_eq!(dense.data().bits(), expected.data().bits());
+    assert_eq!(
+        dense.dense_data().unwrap().bits(),
+        expected.dense_data().unwrap().bits()
+    );
     assert_eq!(dense.to_bytes_with(&codec).unwrap(), dense_bytes);
     assert_eq!(expected.to_bytes_with(&codec).unwrap(), dense_bytes);
 
@@ -1283,8 +1350,15 @@ fn version_one_golden_files_decode_and_reencode_byte_for_byte() {
         NetworkReuseClass::LazyAdjoint
     ));
     assert_eq!(
-        adjoint.data().bits(),
-        expected.adjoint().unwrap().data().bits()
+        adjoint.materialize().unwrap().dense_data().unwrap().bits(),
+        expected
+            .adjoint()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .bits()
     );
     assert_eq!(adjoint.to_bytes_with(&codec).unwrap(), adjoint_bytes);
 
@@ -1301,7 +1375,10 @@ fn version_one_golden_files_decode_and_reencode_byte_for_byte() {
         diagonal.network_reuse_class(false),
         NetworkReuseClass::Compact
     ));
-    assert_eq!(diagonal.data().bits(), expected.data().bits());
+    assert_eq!(
+        diagonal.materialize().unwrap().dense_data().unwrap().bits(),
+        expected.materialize().unwrap().dense_data().unwrap().bits()
+    );
     assert_eq!(diagonal.to_bytes_with(&codec).unwrap(), diagonal_bytes);
     assert_eq!(expected.to_bytes_with(&codec).unwrap(), diagonal_bytes);
 
@@ -1417,7 +1494,10 @@ macro_rules! single_precision_roundtrip {
                 let restored = TensorMap::<R, $scalar>::decode(runtime, &bytes, codec);
                 assert!(std::ptr::eq(restored.provider(), source.provider()));
                 assert!(restored.network_reuse_class(false) == class);
-                assert_eq!(restored.data().bits(), source.data().bits());
+                assert_eq!(
+                    restored.materialize().unwrap().dense_data().unwrap().bits(),
+                    source.materialize().unwrap().dense_data().unwrap().bits()
+                );
                 // The snapshot carries every block's fusion-tree key, so equal
                 // re-encoded bytes also prove the block keys were restored.
                 assert_eq!(restored.encode(codec), bytes);

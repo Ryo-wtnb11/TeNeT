@@ -153,7 +153,8 @@ where
     let nout = tensor.codomain_rank();
     let rows: usize = block.shape()[..nout].iter().product();
     let cols: usize = block.shape()[nout..].iter().product();
-    let data = tensor.data();
+    let materialized = tensor.materialize().unwrap();
+    let data = materialized.dense_data().unwrap();
     let mut matrix = Vec::with_capacity(rows * cols);
     for_each_index(block.shape(), |index| {
         let position = block.offset()
@@ -189,7 +190,7 @@ where
         let block = block_matrix(b, index);
         b_by_rows.entry(block.0.clone()).or_default().push(block);
     }
-    let mut out = vec![zero; template.data().len()];
+    let mut out = vec![zero; template.dense_data().unwrap().len()];
     let mut unreached = 0;
     for index in 0..template.subblock_count() {
         let (x, z, rows, cols, _) = block_matrix(template, index);

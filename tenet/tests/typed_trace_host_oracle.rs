@@ -30,7 +30,12 @@ where
             "{}",
             case.name
         );
-        assert_close(host.data(), identity.data(), case.terms(), case.name);
+        assert_close(
+            host.dense_data().unwrap(),
+            identity.dense_data().unwrap(),
+            case.terms(),
+            case.name,
+        );
     }
 }
 

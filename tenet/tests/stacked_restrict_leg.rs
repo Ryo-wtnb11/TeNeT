@@ -52,7 +52,7 @@ macro_rules! restrict_members {
                             *restricted.signature() == expected.structure_signature(),
                             "{label}: stack signature"
                         );
-                        fixtures::assert_bit_exact(actual.data(), expected.data(), &label);
+                        fixtures::assert_bit_exact(actual.dense_data().unwrap(), expected.dense_data().unwrap(), &label);
                     }
                 }
             }
@@ -109,14 +109,14 @@ macro_rules! multi_axis_members {
                     eager.structure_signature() == sequential.structure_signature(),
                     "{label}: member {i} eager space"
                 );
-                fixtures::assert_bit_exact(eager.data(), sequential.data(), &label);
+                fixtures::assert_bit_exact(eager.dense_data().unwrap(), sequential.dense_data().unwrap(), &label);
 
                 // A lazy adjoint is read in place, as `materialize` then
                 // restrict would.
                 let lazy = member.adjoint().unwrap();
                 fixtures::assert_bit_exact(
-                    lazy.restrict_leg(set).unwrap().data(),
-                    lazy.materialize().unwrap().restrict_leg(set).unwrap().data(),
+                    lazy.restrict_leg(set).unwrap().dense_data().unwrap(),
+                    lazy.materialize().unwrap().restrict_leg(set).unwrap().dense_data().unwrap(),
                     &label,
                 );
 
@@ -125,7 +125,7 @@ macro_rules! multi_axis_members {
                     actual.structure_signature() == sequential.structure_signature(),
                     "{label}: member {i} stacked space"
                 );
-                fixtures::assert_bit_exact(actual.data(), sequential.data(), &label);
+                fixtures::assert_bit_exact(actual.dense_data().unwrap(), sequential.dense_data().unwrap(), &label);
             }
         }
     }};
@@ -220,5 +220,10 @@ fn restrict_leg_of_a_blockless_structure_is_empty() {
     let expected = empty.restrict_leg(&[(0, &selection)]).unwrap();
     assert_eq!(restricted.len(), 3);
     assert!(*restricted.signature() == expected.structure_signature());
-    assert!(restricted.member(2).unwrap().data().is_empty());
+    assert!(restricted
+        .member(2)
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .is_empty());
 }

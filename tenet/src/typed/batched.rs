@@ -2086,7 +2086,7 @@ mod tests {
             .unwrap();
         let crate::typed::Eigh { v: eager_v, .. } =
             members[0].to_cuda().unwrap().eigh_full().unwrap();
-        assert!(v.data() == eager_v.to_host().unwrap().data());
+        assert!(v.dense_data().unwrap() == eager_v.to_host().unwrap().dense_data().unwrap());
     }
 
     struct PlacedStorage {
@@ -2131,7 +2131,7 @@ mod tests {
             repr: owned_repr(TypedTensorBody::dense(
                 host.logical_space().clone(),
                 PlacedStorage {
-                    len: host.data().len(),
+                    len: host.dense_data().unwrap().len(),
                     placement,
                 },
             )),

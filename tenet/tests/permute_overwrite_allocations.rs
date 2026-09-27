@@ -105,7 +105,7 @@ fn cached_permute_overwrite_does_not_allocate_on_the_caller_thread() {
     source
         .permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
         .unwrap();
-    let destination_data = destination.data().as_ptr();
+    let destination_data = destination.dense_data().unwrap().as_ptr();
 
     ALLOCATIONS.set(0);
     BYTES.set(0);
@@ -114,10 +114,10 @@ fn cached_permute_overwrite_does_not_allocate_on_the_caller_thread() {
         .permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
         .unwrap();
     COUNTING.set(false);
-    black_box(destination.data());
+    black_box(destination.dense_data().unwrap());
 
     assert_eq!((ALLOCATIONS.get(), BYTES.get()), (0, 0));
-    assert_eq!(destination.data().as_ptr(), destination_data);
+    assert_eq!(destination.dense_data().unwrap().as_ptr(), destination_data);
     assert!(std::ptr::eq(destination.provider(), provider.as_ref()));
 }
 
@@ -144,7 +144,7 @@ fn cached_u1_permute_overwrite_does_not_allocate_on_the_caller_thread() {
     source
         .permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
         .unwrap();
-    let destination_data = destination.data().as_ptr();
+    let destination_data = destination.dense_data().unwrap().as_ptr();
 
     ALLOCATIONS.set(0);
     BYTES.set(0);
@@ -153,10 +153,10 @@ fn cached_u1_permute_overwrite_does_not_allocate_on_the_caller_thread() {
         .permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
         .unwrap();
     COUNTING.set(false);
-    black_box(destination.data());
+    black_box(destination.dense_data().unwrap());
 
     assert_eq!((ALLOCATIONS.get(), BYTES.get()), (0, 0));
-    assert_eq!(destination.data().as_ptr(), destination_data);
+    assert_eq!(destination.dense_data().unwrap().as_ptr(), destination_data);
     assert!(std::ptr::eq(destination.provider(), provider.as_ref()));
 }
 
@@ -228,14 +228,22 @@ fn assert_same_checked_tensor(
     expected: &TensorMap<SUNFusionRule, f64>,
 ) {
     assert_eq!(actual.subblock_count(), expected.subblock_count());
-    assert_eq!(actual.data().len(), expected.data().len());
+    assert_eq!(
+        actual.dense_data().unwrap().len(),
+        expected.dense_data().unwrap().len()
+    );
     for index in 0..actual.subblock_count() {
         assert_eq!(
             actual.subblock_fusion_trees(index).unwrap(),
             expected.subblock_fusion_trees(index).unwrap()
         );
     }
-    for (actual, expected) in actual.data().iter().zip(expected.data()) {
+    for (actual, expected) in actual
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(expected.dense_data().unwrap())
+    {
         assert!((actual - expected).abs() <= 1e-12);
     }
 }
@@ -313,7 +321,7 @@ fn checked_generic_public_transform_measurement() {
         for _ in 0..7 {
             let (repeated, allocations, bytes, ns) =
                 measure_value(|| source.permute(&[1, 0], &[2]).unwrap());
-            assert_eq!(repeated.data(), first.data());
+            assert_eq!(repeated.dense_data().unwrap(), first.dense_data().unwrap());
             repeat_ns.push(ns);
             repeat_allocations.push(allocations);
             repeat_bytes.push(bytes);

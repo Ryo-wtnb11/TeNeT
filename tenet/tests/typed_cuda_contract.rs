@@ -149,9 +149,19 @@ where
         case.name
     );
     assert_eq!(device.domain_rank(), host.domain_rank(), "{}", case.name);
-    assert_close(device.data(), host.data(), case.terms(), case.name);
+    assert_close(
+        device.dense_data().unwrap(),
+        host.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
     let oracle = blas_contract_oracle(&case);
-    assert_close(device.data(), oracle.data(), case.terms(), case.name);
+    assert_close(
+        device.dense_data().unwrap(),
+        oracle.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
 }
 
 fn every_fixture<D: DevicePayload>(runtime: &Runtime) {
@@ -281,7 +291,7 @@ fn lazy_adjoint_operands_match_the_host_at_every_dtype() {
 fn a_warm_general_contraction_uploads_only_its_output() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let case = u1_rank_five::<f64>(&runtime);
-    let output_bytes = std::mem::size_of_val(case.host().data()) as u64;
+    let output_bytes = std::mem::size_of_val(case.host().dense_data().unwrap()) as u64;
     let lhs = case.lhs.to_cuda().unwrap();
     let rhs = case.rhs.to_cuda().unwrap();
     let call = || {
@@ -371,15 +381,15 @@ fn the_scratch_grows_only_at_a_high_water_mark_and_is_released_by_the_clear_path
     assert_eq!(counters.h2d_calls, 1, "{counters:?}");
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), high_water);
     assert_close(
-        result.to_host().unwrap().data(),
-        small.host().data(),
+        result.to_host().unwrap().dense_data().unwrap(),
+        small.host().dense_data().unwrap(),
         small.terms(),
         "narrowed scratch",
     );
     // And the large one again, after the narrowing, is still right.
     assert_close(
-        run(&large).data(),
-        large.host().data(),
+        run(&large).dense_data().unwrap(),
+        large.host().dense_data().unwrap(),
         large.terms(),
         "re-widened",
     );
@@ -388,8 +398,8 @@ fn the_scratch_grows_only_at_a_high_water_mark_and_is_released_by_the_clear_path
     runtime.clear_tree_transform_cache();
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), 0);
     assert_close(
-        run(&small).data(),
-        small.host().data(),
+        run(&small).dense_data().unwrap(),
+        small.host().dense_data().unwrap(),
         small.terms(),
         "after clear",
     );
@@ -427,12 +437,17 @@ fn check_fermionic<R, D>(
         "{}",
         case.name
     );
-    assert_close(device.data(), host.data(), case.terms(), case.name);
+    assert_close(
+        device.dense_data().unwrap(),
+        host.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
     for role in [TwistRole::B, TwistRole::A] {
         let oracle = fermionic_blas_contract_oracle(&case, role, twist);
         assert_close(
-            device.data(),
-            oracle.data(),
+            device.dense_data().unwrap(),
+            oracle.dense_data().unwrap(),
             case.terms(),
             &format!("{} vs the {role:?}-role oracle", case.name),
         );
@@ -479,7 +494,7 @@ fn a_warm_fermionic_contraction_uploads_only_its_output() {
     // costs exactly what an untwisted one does — the #740 output upload.
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let case: Case<_, f64> = fermionic_general(&runtime, &fermion_su2(), true, "fZ2xSU2", 51);
-    let output_bytes = std::mem::size_of_val(case.host().data()) as u64;
+    let output_bytes = std::mem::size_of_val(case.host().dense_data().unwrap()) as u64;
     let lhs = case.lhs.to_cuda().unwrap();
     let rhs = case.rhs.to_cuda().unwrap();
     let call = || {
@@ -497,8 +512,8 @@ fn a_warm_fermionic_contraction_uploads_only_its_output() {
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), scratch);
     assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), transforms);
     assert_close(
-        result.to_host().unwrap().data(),
-        case.host().data(),
+        result.to_host().unwrap().dense_data().unwrap(),
+        case.host().dense_data().unwrap(),
         case.terms(),
         "warm",
     );
@@ -585,9 +600,19 @@ fn device_overwrite<R: DeviceRule, D: DevicePayload>(case: &Case<R, D>) -> Tenso
 
 fn check_overwrite<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
     let written = device_overwrite(&case);
-    assert_close(written.data(), case.host().data(), case.terms(), case.name);
+    assert_close(
+        written.dense_data().unwrap(),
+        case.host().dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
     let oracle = blas_contract_oracle(&case);
-    assert_close(written.data(), oracle.data(), case.terms(), case.name);
+    assert_close(
+        written.dense_data().unwrap(),
+        oracle.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
 }
 
 fn check_overwrite_fermionic<R, D>(
@@ -598,12 +623,17 @@ fn check_overwrite_fermionic<R, D>(
     D: DevicePayload,
 {
     let written = device_overwrite(&case);
-    assert_close(written.data(), case.host().data(), case.terms(), case.name);
+    assert_close(
+        written.dense_data().unwrap(),
+        case.host().dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
     for role in [TwistRole::B, TwistRole::A] {
         let oracle = fermionic_blas_contract_oracle(&case, role, twist);
         assert_close(
-            written.data(),
-            oracle.data(),
+            written.dense_data().unwrap(),
+            oracle.dense_data().unwrap(),
             case.terms(),
             &format!("{} overwrite vs the {role:?}-role oracle", case.name),
         );
@@ -720,8 +750,8 @@ fn a_warm_overwrite_transfers_and_allocates_nothing() {
         assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), scratch);
         assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), transforms);
         assert_close(
-            destination.to_host().unwrap().data(),
-            case.host().data(),
+            destination.to_host().unwrap().dense_data().unwrap(),
+            case.host().dense_data().unwrap(),
             case.terms(),
             case.name,
         );
@@ -747,7 +777,7 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
     let lhs = host_lhs.to_cuda().unwrap();
     let rhs = host_rhs.to_cuda().unwrap();
     let poison = || case.host().scale(7.5);
-    let poison_data = poison().data().to_vec();
+    let poison_data = poison().dense_data().unwrap().to_vec();
     let _ = lhs
         .contract(&rhs, &case.lhs_axes, &case.rhs_axes, &case.output_axes)
         .unwrap();
@@ -774,7 +804,7 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
         foreign(),
     )]);
     for ((lhs_axes, rhs_axes, output), host_destination) in cases {
-        let before = host_destination.data().to_vec();
+        let before = host_destination.dense_data().unwrap().to_vec();
         let mut destination = host_destination.to_cuda().unwrap();
         let mut host_destination = host_destination;
         let expected = host_lhs
@@ -795,7 +825,10 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
         });
         assert_eq!(actual, device_text(expected), "{lhs_axes:?} {output:?}");
         assert_eq!(counters, CudaTransferStats::default(), "{actual}");
-        assert_eq!(destination.to_host().unwrap().data(), before.as_slice());
+        assert_eq!(
+            destination.to_host().unwrap().dense_data().unwrap(),
+            before.as_slice()
+        );
     }
 
     // Runtime, shared ownership and alias, then the device's own alpha
@@ -856,7 +889,7 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
         "{alpha_counters:?}"
     );
     assert_eq!(
-        destination.to_host().unwrap().data(),
+        destination.to_host().unwrap().dense_data().unwrap(),
         poison_data.as_slice()
     );
     assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), transforms);

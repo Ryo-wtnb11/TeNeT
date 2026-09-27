@@ -101,8 +101,13 @@ fn a_warm_device_transform_uploads_only_its_output_and_downloads_nothing() {
     let device = fixture(&runtime).to_cuda().unwrap();
     // Sized on the Host, so the device's first call below really is its cold
     // one: measuring the output on device would have prepared the structure.
-    let output_bytes =
-        std::mem::size_of_val(fixture(&runtime).permute(&[2, 0], &[1, 3]).unwrap().data()) as u64;
+    let output_bytes = std::mem::size_of_val(
+        fixture(&runtime)
+            .permute(&[2, 0], &[1, 3])
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+    ) as u64;
 
     // Cold: the output plus exactly one coefficient payload for the structure
     // — a Single-block permute needs no pack/scatter workspace, so those two
@@ -172,7 +177,7 @@ fn clearing_the_transform_cache_releases_the_device_executor_state() {
     // Re-preparing after the clear still produces the same answer.
     let expected = fixture(&runtime).permute(&[2, 0], &[1, 3]).unwrap();
     let again = device.permute(&[2, 0], &[1, 3]).unwrap().to_host().unwrap();
-    assert_eq!(again.data(), expected.data());
+    assert_eq!(again.dense_data().unwrap(), expected.dense_data().unwrap());
 }
 
 #[test]
@@ -215,7 +220,7 @@ fn clearing_and_re_preparing_does_not_creep_the_plan_reservation() {
 fn device_transform_short_circuits_do_no_device_work() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let device = fixture(&runtime).to_cuda().unwrap();
-    let expected = fixture(&runtime).data().to_vec();
+    let expected = fixture(&runtime).dense_data().unwrap().to_vec();
 
     let (results, counters) = delta(|| {
         [
@@ -233,7 +238,7 @@ fn device_transform_short_circuits_do_no_device_work() {
         "a short-circuited transform must submit nothing: {counters:?}"
     );
     for result in results {
-        assert_eq!(result.to_host().unwrap().data(), expected);
+        assert_eq!(result.to_host().unwrap().dense_data().unwrap(), expected);
     }
 
     // A rank-0 tensor has no legs to build from, so it comes from a full Host
@@ -247,7 +252,10 @@ fn device_transform_short_circuits_do_no_device_work() {
     let device_zero = rank_zero.to_cuda().unwrap();
     let (transposed, counters) = delta(|| full_transpose!(device_zero).unwrap());
     assert_eq!(counters, CudaTransferStats::default(), "{counters:?}");
-    assert_eq!(transposed.to_host().unwrap().data(), rank_zero.data());
+    assert_eq!(
+        transposed.to_host().unwrap().dense_data().unwrap(),
+        rank_zero.dense_data().unwrap()
+    );
 }
 
 #[test]
@@ -333,7 +341,12 @@ fn a_cold_device_transform_uploads_one_coefficient_payload_per_structure() {
             indices.iter().map(|&i| i as f64 + 1.0).sum::<f64>()
         })
         .unwrap();
-    let output_bytes = std::mem::size_of_val(host.permute(&[1, 2], &[3, 0]).unwrap().data()) as u64;
+    let output_bytes = std::mem::size_of_val(
+        host.permute(&[1, 2], &[3, 0])
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+    ) as u64;
     let device = host.to_cuda().unwrap();
 
     let before = runtime.cuda_tree_transform_stats().unwrap();
@@ -396,7 +409,8 @@ where
     tensor
         .to_host()
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .map(|value| value.to_bits())
         .collect()
@@ -450,7 +464,8 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
     let destination_len = fixture(&runtime)
         .permute(&[2, 0], &[1, 3])
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .len();
     let bound = ((destination_len + 1) * std::mem::size_of::<f64>()) as u64;
     assert!(
@@ -530,8 +545,8 @@ fn device_overwrite_into_admits_the_exact_layout_on_the_shared_runtime_store() {
         "the second call must take the admitted path: {cold:?} -> {warm:?}"
     );
     assert_eq!(
-        first.to_host().unwrap().data(),
-        second.to_host().unwrap().data()
+        first.to_host().unwrap().dense_data().unwrap(),
+        second.to_host().unwrap().dense_data().unwrap()
     );
 
     // Admission is keyed on the layout pair, so a destination that is *not*
@@ -801,7 +816,7 @@ fn a_warm_device_twist_uploads_only_its_output_and_downloads_nothing() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let host = fermionic_fixture(&runtime);
     let device = host.to_cuda().unwrap();
-    let output_bytes = std::mem::size_of_val(host.data()) as u64;
+    let output_bytes = std::mem::size_of_val(host.dense_data().unwrap()) as u64;
     let blocks = host.subblock_count() as u64;
     assert!(blocks > 1, "multi-block fixture");
 
@@ -831,8 +846,11 @@ fn a_warm_device_twist_uploads_only_its_output_and_downloads_nothing() {
         "one submission per block: {warm:?}"
     );
     assert_eq!(
-        twisted.to_host().unwrap().data(),
-        host.twist(&[0, 3], Direction::Forward).unwrap().data(),
+        twisted.to_host().unwrap().dense_data().unwrap(),
+        host.twist(&[0, 3], Direction::Forward)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         "the measured call must still be the Host's answer"
     );
 
@@ -850,7 +868,7 @@ fn device_twist_short_circuits_do_no_device_work() {
     let bosonic = fixture(&runtime).to_cuda().unwrap();
     let fermionic_host = fermionic_fixture(&runtime);
     let fermionic = fermionic_host.to_cuda().unwrap();
-    let expected = fixture(&runtime).data().to_vec();
+    let expected = fixture(&runtime).dense_data().unwrap().to_vec();
 
     let (results, counters) = delta(|| {
         [
@@ -867,7 +885,7 @@ fn device_twist_short_circuits_do_no_device_work() {
         "a short-circuited twist must submit nothing: {counters:?}"
     );
     for result in results {
-        assert_eq!(result.to_host().unwrap().data(), expected);
+        assert_eq!(result.to_host().unwrap().dense_data().unwrap(), expected);
     }
 
     // Fermionic, and the identity in *value* — the factors of all legs of a
@@ -885,7 +903,10 @@ fn device_twist_short_circuits_do_no_device_work() {
         fermionic_host.subblock_count() as u64,
         "one submission per block, as for any other twist: {counters:?}"
     );
-    assert_eq!(all_legs.to_host().unwrap().data(), fermionic_host.data());
+    assert_eq!(
+        all_legs.to_host().unwrap().dense_data().unwrap(),
+        fermionic_host.dense_data().unwrap()
+    );
 }
 
 #[test]

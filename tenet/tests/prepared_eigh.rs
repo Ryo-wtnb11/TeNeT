@@ -66,17 +66,28 @@ where
             "{what}: v space"
         );
         if inputs.len() == 1 {
-            assert!(d.data() == eager_d.data(), "{what}: d bit-identical");
-            assert!(v.data() == eager_v.data(), "{what}: v bit-identical");
+            assert!(
+                d.dense_data().unwrap() == eager_d.materialize().unwrap().dense_data().unwrap(),
+                "{what}: d bit-identical"
+            );
+            assert!(
+                v.dense_data().unwrap() == eager_v.dense_data().unwrap(),
+                "{what}: v bit-identical"
+            );
         }
-        let terms = input.data().len();
+        let terms = input.dense_data().unwrap().len();
         assert_close(
-            v.data(),
-            eager_v.data(),
+            v.dense_data().unwrap(),
+            eager_v.dense_data().unwrap(),
             terms,
             &format!("{what}: gauge-fixed v"),
         );
-        assert_close(d.data(), eager_d.data(), terms, &format!("{what}: d"));
+        assert_close(
+            d.dense_data().unwrap(),
+            eager_d.materialize().unwrap().dense_data().unwrap(),
+            terms,
+            &format!("{what}: d"),
+        );
         assert!(
             output.spectra[member] == input.eigh_vals().unwrap(),
             "{what}: spectra"
@@ -281,7 +292,10 @@ fn warm_calls_reuse_the_outputs() {
     let retained = handle.retained_bytes();
     assert!(retained > 0);
     let second = handle.execute(&stack).unwrap().v.member(2).unwrap();
-    assert!(first.data() == second.data(), "deterministic replay");
+    assert!(
+        first.dense_data().unwrap() == second.dense_data().unwrap(),
+        "deterministic replay"
+    );
     assert_eq!(handle.retained_bytes(), retained, "flat on a warm call");
     let (d, v) = handle.take_output().unwrap();
     assert_eq!((d.len(), v.len()), (3, 3));
@@ -302,11 +316,12 @@ fn assert_equals_eager<R>(
     for (member, input) in inputs.iter().enumerate() {
         let Eigh { d, v } = input.eigh_full().unwrap();
         assert!(
-            output.d.member(member).unwrap().data() == d.data(),
+            output.d.member(member).unwrap().dense_data().unwrap()
+                == d.materialize().unwrap().dense_data().unwrap(),
             "{what}: d {member}"
         );
         assert!(
-            output.v.member(member).unwrap().data() == v.data(),
+            output.v.member(member).unwrap().dense_data().unwrap() == v.dense_data().unwrap(),
             "{what}: v {member}"
         );
     }

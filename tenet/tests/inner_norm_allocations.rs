@@ -147,6 +147,7 @@ fn warmed_non_abelian_trace_does_not_allocate() {
 }
 
 #[test]
+#[allow(deprecated)] // probes the deprecated `data()` cache until #1548
 fn warmed_lazy_adjoint_inner_does_not_allocate_in_mixed_or_double_orientation() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = non_abelian_space();
@@ -479,7 +480,8 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
             let (value, allocations) = measured(|| tensor.norm(2.0).unwrap());
             assert_eq!(allocations, 0, "{row} rescaled norm at {scale:e}");
             let want = scale * norm;
-            let bound = 32.0 * (lhs.data().len() as f64).sqrt() * f64::EPSILON * want;
+            let bound =
+                32.0 * (lhs.dense_data().unwrap().len() as f64).sqrt() * f64::EPSILON * want;
             assert!(
                 (value - want).abs() <= bound,
                 "{row} {scale:e}: {value:e} against {want:e}"
@@ -602,7 +604,7 @@ fn checked_generic_single_precision_norm_accumulates_wide() {
                 Complex64::new(z.re.into(), z.im.into())
             })
             .unwrap();
-        let terms = real64.data().len() as f64;
+        let terms = real64.dense_data().unwrap().len() as f64;
         for (row, got, want) in [
             ("f32", real32.norm(2.0).unwrap(), real64.norm(2.0).unwrap()),
             (

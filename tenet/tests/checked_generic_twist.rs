@@ -414,7 +414,7 @@ fn assert_values<D>(
                 marker += (axis + 1) * index;
             }
             assert_eq!(
-                tensor.data()[position],
+                tensor.dense_data().unwrap()[position],
                 value(marker) * D::from_real(factor(&trees))
             );
         }
@@ -428,7 +428,7 @@ where
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedPivotalToy::new(1, BraidingStyleKind::Anyonic, -1.0));
     let source = fixture(&runtime, &provider, value);
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     let mut saw_outer_two = false;
     let mut saw_vertex_two = false;
     for index in 0..source.subblock_count() {
@@ -455,7 +455,10 @@ where
     );
     provider.finish_observation();
     assert!(std::ptr::eq(codomain.provider(), provider.as_ref()));
-    assert_ne!(codomain.data().as_ptr(), source.data().as_ptr());
+    assert_ne!(
+        codomain.dense_data().unwrap().as_ptr(),
+        source.dense_data().unwrap().as_ptr()
+    );
     assert_eq!(codomain.codomain(), source.codomain());
     assert_eq!(codomain.domain(), source.domain());
     assert_values(&codomain, value, |trees| {
@@ -494,9 +497,12 @@ where
         .unwrap()
         .adjoint()
         .unwrap();
-    assert_eq!(lazy_twisted.data(), direct.data());
+    assert_eq!(
+        lazy_twisted.materialize().unwrap().dense_data().unwrap(),
+        direct.materialize().unwrap().dense_data().unwrap()
+    );
     assert!(std::ptr::eq(lazy_twisted.provider(), provider.as_ref()));
-    assert_eq!(source.data(), before);
+    assert_eq!(source.dense_data().unwrap(), before);
 }
 
 #[test]
@@ -516,7 +522,7 @@ fn checked_generic_twist_precedence_and_late_failure_are_typed_and_nonpublishing
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedPivotalToy::new(2, BraidingStyleKind::Anyonic, -1.0));
     let source = fixture(&runtime, &provider, |marker| marker as f64);
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
 
     provider.reset_ledger(0);
     assert!(matches!(
@@ -529,7 +535,10 @@ fn checked_generic_twist_precedence_and_late_failure_are_typed_and_nonpublishing
 
     provider.reset_ledger(0);
     let empty = source.twist(&[], Direction::Forward).unwrap();
-    assert_eq!(empty.data().as_ptr(), source.data().as_ptr());
+    assert_eq!(
+        empty.dense_data().unwrap().as_ptr(),
+        source.dense_data().unwrap().as_ptr()
+    );
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 0);
     assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 0);
     assert_eq!(provider.other_queries.load(Ordering::Relaxed), 0);
@@ -545,7 +554,7 @@ fn checked_generic_twist_precedence_and_late_failure_are_typed_and_nonpublishing
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 1);
     assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 2);
     assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
-    assert_eq!(source.data(), before);
+    assert_eq!(source.dense_data().unwrap(), before);
 }
 
 #[test]
@@ -565,13 +574,16 @@ fn checked_generic_twist_handles_nobraiding_bosonic_and_staged_identity_sharing(
         TensorMap::from_subblock_fn(&runtime, [&unit], [&unit], |_, _| 3.0).unwrap();
     no_braiding.reset_ledger(0);
     let unit_twist = unit_tensor.twist(&[0, 1], Direction::Forward).unwrap();
-    assert_eq!(unit_twist.data().as_ptr(), unit_tensor.data().as_ptr());
+    assert_eq!(
+        unit_twist.dense_data().unwrap().as_ptr(),
+        unit_tensor.dense_data().unwrap().as_ptr()
+    );
     assert_eq!(no_braiding.style_queries.load(Ordering::Relaxed), 1);
     assert_eq!(no_braiding.vacuum_queries.load(Ordering::Relaxed), 1);
     assert_eq!(no_braiding.twist_queries.load(Ordering::Relaxed), 0);
 
     let nonunit = fixture(&runtime, &no_braiding, |marker| marker as f64);
-    let before = nonunit.data().to_vec();
+    let before = nonunit.dense_data().unwrap().to_vec();
     no_braiding.reset_ledger(0);
     assert!(matches!(
         nonunit.twist(&[0], Direction::Forward),
@@ -580,15 +592,15 @@ fn checked_generic_twist_handles_nobraiding_bosonic_and_staged_identity_sharing(
     assert_eq!(no_braiding.style_queries.load(Ordering::Relaxed), 1);
     assert_eq!(no_braiding.vacuum_queries.load(Ordering::Relaxed), 1);
     assert_eq!(no_braiding.twist_queries.load(Ordering::Relaxed), 0);
-    assert_eq!(nonunit.data(), before);
+    assert_eq!(nonunit.dense_data().unwrap(), before);
 
     let bosonic = Arc::new(CheckedPivotalToy::new(4, BraidingStyleKind::Bosonic, -1.0));
     let bosonic_tensor = fixture(&runtime, &bosonic, |marker| marker as f64);
     bosonic.reset_ledger(0);
     let bosonic_twist = bosonic_tensor.twist(&[0], Direction::Forward).unwrap();
     assert_eq!(
-        bosonic_twist.data().as_ptr(),
-        bosonic_tensor.data().as_ptr()
+        bosonic_twist.dense_data().unwrap().as_ptr(),
+        bosonic_tensor.dense_data().unwrap().as_ptr()
     );
     assert_eq!(bosonic.style_queries.load(Ordering::Relaxed), 1);
     assert_eq!(bosonic.vacuum_queries.load(Ordering::Relaxed), 0);
@@ -602,8 +614,8 @@ fn checked_generic_twist_handles_nobraiding_bosonic_and_staged_identity_sharing(
     assert_eq!(identity.twist_queries.load(Ordering::Relaxed), 2);
     identity.finish_observation();
     assert_eq!(
-        identity_twist.data().as_ptr(),
-        identity_tensor.data().as_ptr()
+        identity_twist.dense_data().unwrap().as_ptr(),
+        identity_tensor.dense_data().unwrap().as_ptr()
     );
     assert!(std::ptr::eq(identity_twist.provider(), identity.as_ref()));
 }
@@ -615,7 +627,7 @@ where
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedPivotalToy::new(6, BraidingStyleKind::Anyonic, -1.0));
     let source = fixture(&runtime, &provider, value);
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     let source_codomain = source.codomain();
     let source_domain = source.domain();
 
@@ -677,12 +689,15 @@ where
         .adjoint()
         .unwrap();
     provider.finish_observation();
-    assert_eq!(lazy_flipped.data(), direct.data());
+    assert_eq!(
+        lazy_flipped.materialize().unwrap().dense_data().unwrap(),
+        direct.materialize().unwrap().dense_data().unwrap()
+    );
     assert_eq!(lazy_flipped.codomain(), direct.codomain());
     assert_eq!(lazy_flipped.domain(), direct.domain());
     assert!(std::ptr::eq(lazy_flipped.provider(), provider.as_ref()));
     assert!(lazy_flipped.runtime().shares_state_with(direct.runtime()));
-    assert_eq!(source.data(), before);
+    assert_eq!(source.dense_data().unwrap(), before);
     assert_eq!(source.codomain(), source_codomain);
     assert_eq!(source.domain(), source_domain);
 }
@@ -721,7 +736,7 @@ fn checked_generic_flip_precedence_and_staged_failures_are_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedPivotalToy::new(8, BraidingStyleKind::Anyonic, -1.0));
     let source = fixture(&runtime, &provider, |marker| marker as f64);
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
 
     provider.reset_ledger(0);
     assert!(matches!(
@@ -734,7 +749,10 @@ fn checked_generic_flip_precedence_and_staged_failures_are_nonpublishing() {
 
     provider.reset_ledger(0);
     let empty = source.flip(&[], Direction::Forward).unwrap();
-    assert_eq!(empty.data().as_ptr(), source.data().as_ptr());
+    assert_eq!(
+        empty.dense_data().unwrap().as_ptr(),
+        source.dense_data().unwrap().as_ptr()
+    );
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 0);
     assert_eq!(provider.fs_queries.load(Ordering::Relaxed), 0);
     assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 0);
@@ -747,7 +765,7 @@ fn checked_generic_flip_precedence_and_staged_failures_are_nonpublishing() {
             PivotalError::FrobeniusSchur
         )))
     ));
-    assert_eq!(source.data(), before);
+    assert_eq!(source.dense_data().unwrap(), before);
 
     provider.reset_ledger(0);
     provider.fail_twist_on.store(2, Ordering::Relaxed);
@@ -757,7 +775,7 @@ fn checked_generic_flip_precedence_and_staged_failures_are_nonpublishing() {
             PivotalError::Twist
         )))
     ));
-    assert_eq!(source.data(), before);
+    assert_eq!(source.dense_data().unwrap(), before);
 }
 
 #[test]
@@ -777,10 +795,13 @@ fn checked_generic_flip_uses_staged_nontrivial_fs_and_twist_factors() {
 
     let codomain = source.flip(&[0], Direction::Forward).unwrap();
     let domain = source.flip(&[1], Direction::Forward).unwrap();
-    assert_eq!(codomain.data(), &[-3.0]);
-    assert_eq!(domain.data(), &[-3.0]);
+    assert_eq!(codomain.dense_data().unwrap(), &[-3.0]);
+    assert_eq!(domain.dense_data().unwrap(), &[-3.0]);
     let roundtrip = codomain.flip(&[0], Direction::Inverse).unwrap();
-    assert_eq!(roundtrip.data(), source.data());
+    assert_eq!(
+        roundtrip.dense_data().unwrap(),
+        source.dense_data().unwrap()
+    );
     assert_eq!(roundtrip.codomain(), source.codomain());
     assert_eq!(roundtrip.domain(), source.domain());
 }
@@ -807,8 +828,11 @@ where
     )
     .unwrap();
     let twisted = source.twist(&[0, 1, 2], Direction::Forward).unwrap();
-    assert_eq!(twisted.data().as_ptr(), source.data().as_ptr());
-    assert_eq!(twisted.data(), source.data());
+    assert_eq!(
+        twisted.dense_data().unwrap().as_ptr(),
+        source.dense_data().unwrap().as_ptr()
+    );
+    assert_eq!(twisted.dense_data().unwrap(), source.dense_data().unwrap());
     assert!(std::ptr::eq(twisted.provider(), provider.as_ref()));
     assert_eq!(twisted.codomain(), source.codomain());
     assert_eq!(twisted.domain(), source.domain());
@@ -863,7 +887,7 @@ where
     assert!(std::ptr::eq(flipped.provider(), provider.as_ref()));
     assert!(flipped.codomain()[0].is_dual());
     assert!(flipped.codomain()[2].is_dual());
-    assert_eq!(flipped.data(), source.data());
+    assert_eq!(flipped.dense_data().unwrap(), source.dense_data().unwrap());
     let mut saw_vertex_two = false;
     for index in 0..source.subblock_count() {
         let before = source.subblock(index).unwrap();
@@ -881,7 +905,10 @@ where
     }
     assert!(saw_vertex_two);
     let roundtrip = flipped.flip(&[0, 2], Direction::Inverse).unwrap();
-    assert_eq!(roundtrip.data(), source.data());
+    assert_eq!(
+        roundtrip.dense_data().unwrap(),
+        source.dense_data().unwrap()
+    );
     assert_eq!(roundtrip.codomain(), source.codomain());
 }
 
@@ -932,7 +959,7 @@ where
                         position += (remainder % extent) * stride;
                         remainder /= extent;
                     }
-                    tensor.data()[position]
+                    tensor.dense_data().unwrap()[position]
                 })
                 .collect();
             (codomain, domain, shape, values)
@@ -1120,11 +1147,17 @@ fn checked_generic_contract_keeps_its_braiding_boundaries() {
             [[19.0, 22.0], [43.0, 50.0]][index[0]][index[1]]
         })
         .unwrap();
-        assert_eq!(lhs.compose(&rhs).unwrap().data(), expected.data());
+        assert_eq!(
+            lhs.compose(&rhs).unwrap().dense_data().unwrap(),
+            expected.dense_data().unwrap()
+        );
         let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]);
         let expected_message = match braiding {
             BraidingStyleKind::Bosonic => {
-                assert_eq!(contract.unwrap().data(), expected.data());
+                assert_eq!(
+                    contract.unwrap().dense_data().unwrap(),
+                    expected.dense_data().unwrap()
+                );
                 continue;
             }
             BraidingStyleKind::Fermionic => "checked Generic contraction requires Bosonic braiding",

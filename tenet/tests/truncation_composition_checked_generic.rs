@@ -67,7 +67,12 @@ macro_rules! assert_relation {
         let (lhs, rhs) = (&$lhs, &$rhs);
         assert_eq!(lhs.codomain(), rhs.codomain(), "{} codomain", $what);
         assert_eq!(lhs.domain(), rhs.domain(), "{} domain", $what);
-        numerics::assert_slices_close(&$what, lhs.data(), rhs.data(), $terms);
+        numerics::assert_slices_close(
+            &$what,
+            lhs.dense_data().unwrap(),
+            rhs.dense_data().unwrap(),
+            $terms,
+        );
     }};
 }
 
@@ -108,7 +113,7 @@ macro_rules! assert_su3_svd_composition {
     ($source:expr, $one:expr, $target:expr, $tag:expr) => {{
         let source = $source;
         let offers = singular_offers!(source, su3_dim);
-        let terms = source.data().len();
+        let terms = source.dense_data().unwrap().len();
         for (name, truncation, policy) in policies!($target) {
             let case = format!("{} {name}", $tag);
             let Svd { u, s, vh } = source.svd_compact().unwrap();
@@ -164,7 +169,7 @@ macro_rules! assert_su3_svd_composition {
             );
             assert_error_close(
                 &case,
-                source.data(),
+                source.dense_data().unwrap(),
                 found.error,
                 discarded_norm(&offers, &kept),
                 terms,
@@ -178,7 +183,7 @@ macro_rules! assert_su3_eigh_composition {
         let source = $source;
         // A Hermitian block's singular values are its |lambda|.
         let offers = singular_offers!(source, su3_dim);
-        let terms = source.data().len();
+        let terms = source.dense_data().unwrap().len();
         for (name, truncation, policy) in policies!($target) {
             let case = format!("{} {name}", $tag);
             let Eigh { d, v } = source.eigh_full().unwrap();
@@ -215,7 +220,7 @@ macro_rules! assert_su3_eigh_composition {
             );
             assert_error_close(
                 &case,
-                source.data(),
+                source.dense_data().unwrap(),
                 found.error,
                 discarded_norm(&offers, &kept),
                 terms,
@@ -242,7 +247,7 @@ macro_rules! assert_su3_eig_composition {
                 magnitudes: values.iter().map(|value| value.norm()).collect(),
             })
             .collect();
-        let terms = source.data().len();
+        let terms = source.dense_data().unwrap().len();
         for (name, truncation, policy) in policies!($target) {
             let case = format!("{} {name}", $tag);
             let Eig { d, v } = source.eig_full().unwrap();
@@ -281,7 +286,7 @@ macro_rules! assert_su3_eig_composition {
             );
             assert_error_close(
                 &case,
-                source.data(),
+                source.dense_data().unwrap(),
                 found.error,
                 discarded_norm(&offers, &kept),
                 terms,

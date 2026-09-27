@@ -96,7 +96,11 @@ where
     let real = TensorMap::<R, f64>::rand_with_seed(runtime, [space, &dual], [space], seed).unwrap();
     let traced = tensor!([; j] = real[i, i; j]).unwrap();
     let expected = real.trace_pairs(&[(0, 1)]).unwrap();
-    assert_close(traced.data(), expected.data(), 1e-12);
+    assert_close(
+        traced.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+        1e-12,
+    );
     assert_eq!(traced.codomain_rank(), 0);
     assert_eq!(traced.domain_rank(), 1);
 
@@ -105,7 +109,11 @@ where
             .unwrap();
     let traced = tensor!([; j] = complex[i, i; j]).unwrap();
     let expected = complex.trace_pairs(&[(0, 1)]).unwrap();
-    assert_close_c64(traced.data(), expected.data(), 1e-12);
+    assert_close_c64(
+        traced.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+        1e-12,
+    );
 }
 
 /// Macro trace and the typed categorical primitive agree for bosonic,
@@ -132,7 +140,11 @@ where
     let identity = eye(runtime, space);
     let traced = tensor!([; j] = tensor[i, i; j]).unwrap();
     let via_identity = tensor!([; j] = tensor[i, k; j] * identity[k; i]).unwrap();
-    assert_close(traced.data(), via_identity.data(), 1e-12);
+    assert_close(
+        traced.dense_data().unwrap(),
+        via_identity.dense_data().unwrap(),
+        1e-12,
+    );
 }
 
 /// For twist-free U(1) and SU(2), a partial trace equals contraction with an
@@ -208,7 +220,11 @@ where
         .unwrap()
         .contract(&rhs, &[0], &[0], &[0])
         .unwrap();
-    assert_close(combined.data(), manual.data(), 1e-12);
+    assert_close(
+        combined.dense_data().unwrap(),
+        manual.dense_data().unwrap(),
+        1e-12,
+    );
 }
 
 #[test]

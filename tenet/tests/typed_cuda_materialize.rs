@@ -99,7 +99,7 @@ where
     let lazy = device.adjoint().unwrap();
     assert!(lazy.network_reuse_class(false) == NetworkReuseClass::LazyAdjoint);
 
-    let len = host.data().len() as u64;
+    let len = host.dense_data().unwrap().len() as u64;
     // A chained input: an owned device copy (a `[len, 1]` gather output, not
     // the flat upload) and its lazy adjoint.
     let rechained = device.materialize().unwrap().adjoint().unwrap();
@@ -157,15 +157,23 @@ where
         );
         assert_eq!(back.domain(), expected.domain(), "{what} {case}: domain");
         assert_eq!(
-            bits(back.data()),
-            bits(expected.data()),
+            bits(back.dense_data().unwrap()),
+            bits(expected.dense_data().unwrap()),
             "{what} {case}: payload"
         );
     }
     // The owned copy is the input's bits.
     assert_eq!(
-        bits(device.materialize().unwrap().to_host().unwrap().data()),
-        bits(host.data()),
+        bits(
+            device
+                .materialize()
+                .unwrap()
+                .to_host()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+        ),
+        bits(host.dense_data().unwrap()),
         "{what}: owned bits"
     );
 
@@ -179,8 +187,8 @@ where
         .permute_overwrite_into(&mut destination, &codomain, &domain, D::two())
         .unwrap();
     assert_eq!(
-        bits(device.to_host().unwrap().data()),
-        bits(host.data()),
+        bits(device.to_host().unwrap().dense_data().unwrap()),
+        bits(host.dense_data().unwrap()),
         "{what}: input unchanged"
     );
     let mut alias = device.clone();
@@ -274,7 +282,8 @@ fn device_materialize_matches_host_with_one_fresh_payload() {
     // The Host oracle itself conjugates exactly.
     let host_adjoint = special.adjoint().unwrap().materialize().unwrap();
     assert!(host_adjoint
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .any(|v| v.re.is_infinite() && v.im == 0.0 && v.im.is_sign_negative()));
 
@@ -303,11 +312,13 @@ fn device_materialize_matches_host_with_one_fresh_payload() {
         .to_host()
         .unwrap();
     assert!(device_adjoint
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .any(|v| v.im.is_nan() && v.re == 1.5));
     assert!(device_adjoint
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .any(|v| v.re.is_nan() && v.im == 2.0));
 }

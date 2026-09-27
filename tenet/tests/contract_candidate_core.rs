@@ -92,8 +92,8 @@ fn check<R, D>(
     for (case, _) in probes::<R, D>(runtime, v) {
         let expected = oracle(&case);
         assert_close(
-            case.host().data(),
-            expected.data(),
+            case.host().dense_data().unwrap(),
+            expected.dense_data().unwrap(),
             case.terms(),
             &format!("{symmetry} {}", case.name),
         );
@@ -218,12 +218,18 @@ fn fermionic_values<D: Payload>() {
         };
         let host = case.host();
         let twisted = fermionic_blas_contract_oracle(&case, TwistRole::B, twist);
-        assert_close(host.data(), twisted.data(), case.terms(), name);
+        assert_close(
+            host.dense_data().unwrap(),
+            twisted.dense_data().unwrap(),
+            case.terms(),
+            name,
+        );
         let untwisted = fermionic_blas_contract_oracle(&case, TwistRole::None, twist);
         assert!(
-            host.data()
+            host.dense_data()
+                .unwrap()
                 .iter()
-                .zip(untwisted.data())
+                .zip(untwisted.dense_data().unwrap())
                 .any(|(&x, &y)| x.distance(y) > 1e-3),
             "{name}: the twist changes nothing here"
         );
@@ -328,8 +334,8 @@ where
         let what = format!("{symmetry} {} [{}]", case.name, D::NAME);
         let host = case.host();
         assert_close(
-            host.data(),
-            blas_contract_oracle(&case).data(),
+            host.dense_data().unwrap(),
+            blas_contract_oracle(&case).dense_data().unwrap(),
             case.terms(),
             &what,
         );
@@ -569,8 +575,8 @@ where
         assert!(std::ptr::eq(host.provider(), case.lhs.provider()), "{what}");
         assert_eq!(host.codomain_rank(), case.lhs.rank() - case.lhs_axes.len());
         assert_close(
-            host.data(),
-            blas_contract_oracle(&case).data(),
+            host.dense_data().unwrap(),
+            blas_contract_oracle(&case).dense_data().unwrap(),
             case.terms(),
             &what,
         );
@@ -625,8 +631,8 @@ fn fermionic_output_permute_values<D: Payload>() {
         for (case, _) in output_permute_probes::<_, D>(&runtime, &fermion_u1()) {
             let expected = fermionic_blas_contract_oracle(&case, role, twist);
             assert_close(
-                case.host().data(),
-                expected.data(),
+                case.host().dense_data().unwrap(),
+                expected.dense_data().unwrap(),
                 case.terms(),
                 &format!("fZ2xU(1) {} [{}]", case.name, D::NAME),
             );
@@ -652,7 +658,12 @@ fn fermionic_output_permute_values<D: Payload>() {
         dense: false,
     };
     let expected = fermionic_blas_contract_oracle(&case, TwistRole::B, twist);
-    assert_close(case.host().data(), expected.data(), case.terms(), case.name);
+    assert_close(
+        case.host().dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
 }
 
 #[test]
@@ -766,10 +777,10 @@ fn large_output_from_small_operands_copies_the_operands_not_c() {
     {
         let name = case.name;
         let host = case.host();
-        let output_bytes = std::mem::size_of_val(host.data()) as u64;
+        let output_bytes = std::mem::size_of_val(host.dense_data().unwrap()) as u64;
         assert_close(
-            host.data(),
-            blas_contract_oracle(&case).data(),
+            host.dense_data().unwrap(),
+            blas_contract_oracle(&case).dense_data().unwrap(),
             case.terms(),
             name,
         );
@@ -855,12 +866,12 @@ fn small_output_takes_copy_c_without_scoring() {
     for case in &cases {
         let name = case.name;
         assert_close(
-            case.host().data(),
-            blas_contract_oracle(case).data(),
+            case.host().dense_data().unwrap(),
+            blas_contract_oracle(case).dense_data().unwrap(),
             case.terms(),
             name,
         );
-        let operand_bytes = std::mem::size_of_val(case.lhs.data()) as u64;
+        let operand_bytes = std::mem::size_of_val(case.lhs.dense_data().unwrap()) as u64;
         let (calls, bytes, _) = warm(&runtime, case);
         eprintln!("U(1) {name}: {calls} calls, {bytes} B, operand {operand_bytes} B");
         // What: copyC allocates the temporary and the output, never an
@@ -890,8 +901,8 @@ fn swapped_tie_with_an_identity_output_matches_tensorkit() {
         dense: false,
     };
     assert_close(
-        case.host().data(),
-        blas_contract_oracle(&case).data(),
+        case.host().dense_data().unwrap(),
+        blas_contract_oracle(&case).dense_data().unwrap(),
         case.terms(),
         case.name,
     );

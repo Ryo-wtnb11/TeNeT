@@ -81,8 +81,8 @@ where
     let expected = a.contract(b, &[1], &[0], &[0, 1]).unwrap();
     numerics::assert_slices_close(
         "macro vs direct contract",
-        actual.data(),
-        expected.data(),
+        actual.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
         terms,
     );
 }
@@ -174,8 +174,8 @@ fn owned_operands_infer_the_typed_host_path() {
     // may round differently, so compare under the tolerance rule.
     numerics::assert_slices_close(
         "macro vs direct contract",
-        actual.data(),
-        expected.data(),
+        actual.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
         2,
     );
 }
@@ -191,8 +191,8 @@ fn borrowed_first_operand_is_normalized_once() {
     // may round differently, so compare under the tolerance rule.
     numerics::assert_slices_close(
         "macro vs direct contract",
-        actual.data(),
-        expected.data(),
+        actual.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
         2,
     );
 }
@@ -208,8 +208,8 @@ fn borrowed_later_operand_is_normalized_once() {
     // may round differently, so compare under the tolerance rule.
     numerics::assert_slices_close(
         "macro vs direct contract",
-        actual.data(),
-        expected.data(),
+        actual.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
         2,
     );
 }
@@ -233,8 +233,8 @@ fn field_operands_are_normalized_without_moving_the_owner() {
     // may round differently, so compare under the tolerance rule.
     numerics::assert_slices_close(
         "macro vs direct contract",
-        actual.data(),
-        expected.data(),
+        actual.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
         2,
     );
 }
@@ -261,8 +261,8 @@ fn operand_expressions_are_evaluated_exactly_once_in_left_to_right_order() {
     // may round differently, so compare under the tolerance rule.
     numerics::assert_slices_close(
         "macro vs direct contract",
-        actual.data(),
-        expected.data(),
+        actual.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
         2,
     );
 }
@@ -277,8 +277,8 @@ fn parenthesized_temporary_lives_through_execution() {
     // may round differently, so compare under the tolerance rule.
     numerics::assert_slices_close(
         "macro vs direct contract",
-        actual.data(),
-        expected.data(),
+        actual.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
         2,
     );
 }
@@ -297,7 +297,11 @@ where
         TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 102).unwrap();
     let actual = tensor!([i, j; m, n] = lhs[i, j; k, l] * rhs[k, l; m, n]).unwrap();
     let expected = lhs.contract(&rhs, &[2, 3], &[0, 1], &[0, 1, 2, 3]).unwrap();
-    assert_close(actual.data(), expected.data(), 1e-12);
+    assert_close(
+        actual.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+        1e-12,
+    );
     assert_eq!(actual.codomain_rank(), 2);
     assert_eq!(actual.domain_rank(), 2);
 }
@@ -323,7 +327,11 @@ where
         TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 112).unwrap();
     let actual = tensor!([j, i; m, n] = lhs[i, j; k, l] * rhs[k, l; m, n]).unwrap();
     let expected = lhs.contract(&rhs, &[2, 3], &[0, 1], &[1, 0, 2, 3]).unwrap();
-    assert_close(actual.data(), expected.data(), 1e-12);
+    assert_close(
+        actual.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+        1e-12,
+    );
 }
 
 #[test]
@@ -344,7 +352,11 @@ where
     let tensor = TensorMap::<R, f64>::rand_with_seed(runtime, [space], [space], 121).unwrap();
     let actual = tensor!([j; i] = tensor[i; j]).unwrap();
     let expected = tensor.permute(&[1], &[0]).unwrap();
-    assert_close(actual.data(), expected.data(), 1e-12);
+    assert_close(
+        actual.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+        1e-12,
+    );
 }
 
 #[test]
@@ -473,8 +485,16 @@ fn factorization_fields_and_tuple_fields_contract_without_parentheses() {
     let bare = tensor!([i, j; m] = svd.u[i, j; k] * svd.s[k; l] * svd.vh[l; m]).unwrap();
     let parenthesized =
         tensor!([i, j; m] = (svd.u)[i, j; k] * (svd.s)[k; l] * (svd.vh)[l; m]).unwrap();
-    assert_close(bare.data(), parenthesized.data(), 1e-15);
-    assert_close(bare.data(), tensor.data(), 1e-10);
+    assert_close(
+        bare.dense_data().unwrap(),
+        parenthesized.dense_data().unwrap(),
+        1e-15,
+    );
+    assert_close(
+        bare.dense_data().unwrap(),
+        tensor.dense_data().unwrap(),
+        1e-10,
+    );
 
     let norm_squared = tensor!([] = conj(svd.u)[i, j; k] * svd.u[i, j; k])
         .unwrap()
@@ -486,7 +506,11 @@ fn factorization_fields_and_tuple_fields_contract_without_parentheses() {
     let tenet::typed::Qr { q, r } = tensor.qr_compact().unwrap();
     let qr = (q, r);
     let recomposed = tensor!([i, j; m] = qr.0[i, j; k] * qr.1[k; m]).unwrap();
-    assert_close(recomposed.data(), tensor.data(), 1e-10);
+    assert_close(
+        recomposed.dense_data().unwrap(),
+        tensor.dense_data().unwrap(),
+        1e-10,
+    );
 }
 
 /// #1372: the Host `tensor!` pairwise step is the typed `contract`, so a

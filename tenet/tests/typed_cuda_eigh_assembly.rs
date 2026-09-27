@@ -26,8 +26,18 @@ fn leg(charges: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
 }
 
 fn close(got: &TensorMap<U1FusionRule, f64>, want: &TensorMap<U1FusionRule, f64>) {
-    assert_eq!(got.data().len(), want.data().len());
-    for (got, want) in got.data().iter().zip(want.data()) {
+    assert_eq!(
+        got.materialize().unwrap().dense_data().unwrap().len(),
+        want.materialize().unwrap().dense_data().unwrap().len()
+    );
+    for (got, want) in got
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(want.materialize().unwrap().dense_data().unwrap())
+    {
         assert!((got - want).abs() <= 1e-10, "{got} vs {want}");
     }
 }

@@ -165,7 +165,11 @@ fn permute_composition_law() {
                         .unwrap();
                     let composed: Vec<usize> = s2.iter().map(|&i| s1[i]).collect();
                     let direct = t.permute(&composed[..n2], &composed[n2..]).unwrap();
-                    assert_close(step2.data(), direct.data(), 1e-12);
+                    assert_close(
+                        step2.dense_data().unwrap(),
+                        direct.dense_data().unwrap(),
+                        1e-12,
+                    );
                     assert_scalar_close(step2.norm(2.0).unwrap(), t.norm(2.0).unwrap(), 1e-12);
                 }
             }
@@ -202,7 +206,7 @@ fn braid_inverse_roundtrip() {
                 let back = braided
                     .braid(&s_inv[..2], &s_inv[2..], &levels_braided)
                     .unwrap();
-                assert_close(back.data(), t.data(), 1e-12);
+                assert_close(back.dense_data().unwrap(), t.dense_data().unwrap(), 1e-12);
                 assert_scalar_close(braided.norm(2.0).unwrap(), t.norm(2.0).unwrap(), 1e-12);
             }
             let _ = ($name, $fermionic);
@@ -230,7 +234,11 @@ fn bosonic_braid_equals_permute() {
                         .collect::<Vec<_>>();
                     let braided = t.braid(&s[..2], &s[2..], &levels).unwrap();
                     let permuted = t.permute(&s[..2], &s[2..]).unwrap();
-                    assert_close(braided.data(), permuted.data(), 1e-12);
+                    assert_close(
+                        braided.dense_data().unwrap(),
+                        permuted.dense_data().unwrap(),
+                        1e-12,
+                    );
                 }
             }
             let _ = $name;
@@ -259,7 +267,7 @@ fn yang_baxter_adjacent_swaps() {
             };
             let lhs = swap(&swap(&swap(&t, 0), 1), 0);
             let rhs = swap(&swap(&swap(&t, 1), 0), 1);
-            assert_close(lhs.data(), rhs.data(), 1e-12);
+            assert_close(lhs.dense_data().unwrap(), rhs.dense_data().unwrap(), 1e-12);
             let _ = ($name, $fermionic);
         }};
     }
@@ -282,13 +290,22 @@ fn adjoint_involution_and_antihomomorphism() {
             let b: TensorMap<_, f64> =
                 TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 52).unwrap();
             assert_close(
-                a.adjoint().unwrap().adjoint().unwrap().data(),
-                a.data(),
+                a.adjoint()
+                    .unwrap()
+                    .adjoint()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
+                a.dense_data().unwrap(),
                 1e-12,
             );
             let lhs = a.compose(&b).unwrap().adjoint().unwrap();
             let rhs = b.adjoint().unwrap().compose(&a.adjoint().unwrap()).unwrap();
-            assert_close(lhs.data(), rhs.data(), 1e-12);
+            assert_close(
+                lhs.materialize().unwrap().dense_data().unwrap(),
+                rhs.dense_data().unwrap(),
+                1e-12,
+            );
             let _ = ($name, $fermionic);
         }};
     }
@@ -391,7 +408,7 @@ fn twist_squares_to_identity_and_naturality() {
                     .unwrap()
                     .twist(&[leg], Direction::Forward)
                     .unwrap();
-                assert_close(twice.data(), t.data(), 1e-12);
+                assert_close(twice.dense_data().unwrap(), t.dense_data().unwrap(), 1e-12);
                 let once = t.twist(&[leg], Direction::Forward).unwrap();
                 if $fermionic {
                     // Every leg of these fermionic fixtures carries an odd sector,
@@ -400,14 +417,14 @@ fn twist_squares_to_identity_and_naturality() {
                     // sign (θ²=id alone would not catch it — doing nothing also
                     // squares to the identity).
                     assert!(
-                        once.data() != t.data(),
+                        once.dense_data().unwrap() != t.dense_data().unwrap(),
                         "{}: fermionic twist on leg {leg} must not be a no-op",
                         $name,
                     );
                 } else {
                     // Bosonic: θ ≡ 1, so the twist is the identity and the
                     // short-circuit returns the shared buffer unchanged.
-                    assert_close(once.data(), t.data(), 1e-12);
+                    assert_close(once.dense_data().unwrap(), t.dense_data().unwrap(), 1e-12);
                 }
             }
             let s = rand_perm(&mut state, 4);
@@ -422,7 +439,7 @@ fn twist_squares_to_identity_and_naturality() {
                 .unwrap()
                 .twist(&[pos], Direction::Forward)
                 .unwrap();
-            assert_close(lhs.data(), rhs.data(), 1e-12);
+            assert_close(lhs.dense_data().unwrap(), rhs.dense_data().unwrap(), 1e-12);
         }};
     }
     for_each_space!(case);
@@ -437,14 +454,24 @@ fn isometry_and_isomorphism_are_isometric() {
             let v = GradedSpace::try_new($provider, $pairs).unwrap();
             let id: TensorMap<_, f64> = TensorMap::isomorphism(&rt, [&v], [&v]).unwrap();
             assert_close(
-                id.adjoint().unwrap().compose(&id).unwrap().data(),
-                id.data(),
+                id.adjoint()
+                    .unwrap()
+                    .compose(&id)
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
+                id.dense_data().unwrap(),
                 1e-12,
             );
             let w: TensorMap<_, f64> = TensorMap::isometry(&rt, [&v, &v], [&v]).unwrap();
             assert_close(
-                w.adjoint().unwrap().compose(&w).unwrap().data(),
-                id.data(),
+                w.adjoint()
+                    .unwrap()
+                    .compose(&w)
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
+                id.dense_data().unwrap(),
                 1e-12,
             );
             let _ = ($name, $fermionic);
@@ -497,7 +524,11 @@ fn contraction_order_independence() {
             // Open chain: both association orders agree elementwise.
             let assoc_l = x1.compose(&x2).unwrap().compose(&x3).unwrap();
             let assoc_r = x1.compose(&x2.compose(&x3).unwrap()).unwrap();
-            assert_close(assoc_l.data(), assoc_r.data(), 1e-12);
+            assert_close(
+                assoc_l.dense_data().unwrap(),
+                assoc_r.dense_data().unwrap(),
+                1e-12,
+            );
 
             // Rank-4 pair with crossed contracted legs: forces tree transforms
             // and output permutes on both routes.
@@ -517,7 +548,7 @@ fn contraction_order_independence() {
                 // default open order [q, r, p, s]
                 .permute(&[2, 0], &[1, 3])
                 .unwrap();
-            assert_close(ab.data(), ba.data(), 1e-12);
+            assert_close(ab.dense_data().unwrap(), ba.dense_data().unwrap(), 1e-12);
             let _ = ($name, $fermionic);
         }};
     }
@@ -559,7 +590,7 @@ fn su2_nonuniform_degeneracy_crossed_contract() {
         .unwrap()
         .permute(&[2, 0], &[1, 3])
         .unwrap();
-    assert_close(ab.data(), ba.data(), 1e-12);
+    assert_close(ab.dense_data().unwrap(), ba.dense_data().unwrap(), 1e-12);
 }
 
 /// Regression test for issue #12, fZ2 shape: decreasing degeneracies
@@ -582,7 +613,11 @@ fn fz2_decreasing_degeneracy_boundary_crossing_contract() {
         .unwrap()
         .compose(&b.permute(&[0], &[1, 2, 3]).unwrap())
         .unwrap();
-    assert_close(direct.data(), reference.data(), 1e-12);
+    assert_close(
+        direct.dense_data().unwrap(),
+        reference.dense_data().unwrap(),
+        1e-12,
+    );
 }
 
 /// Regression test for issue #12, triple-product shape: non-uniform
@@ -622,7 +657,7 @@ fn triple_product_nonuniform_degeneracy_crossed_contract() {
         .unwrap()
         .permute(&[2, 0], &[1, 3])
         .unwrap();
-    assert_close(ab.data(), ba.data(), 1e-12);
+    assert_close(ab.dense_data().unwrap(), ba.dense_data().unwrap(), 1e-12);
 }
 
 // ---------------------------------------------------------------------------

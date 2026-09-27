@@ -83,9 +83,19 @@ fn check<R: DeviceRule, D: DevicePayload>(case: &TraceCase<R, D>) -> TensorMap<R
         case.name
     );
     assert_eq!(actual.rank(), host.rank(), "{}", case.name);
-    assert_close(actual.data(), host.data(), case.terms(), case.name);
+    assert_close(
+        actual.dense_data().unwrap(),
+        host.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
     if let Some(identity) = &case.identity {
-        assert_close(actual.data(), identity.data(), case.terms(), case.name);
+        assert_close(
+            actual.dense_data().unwrap(),
+            identity.dense_data().unwrap(),
+            case.terms(),
+            case.name,
+        );
     }
     // The same legs through a device lazy adjoint of the device parent.
     let pairs = adjoint_pairs(&case.tensor, &case.pairs);
@@ -97,7 +107,12 @@ fn check<R: DeviceRule, D: DevicePayload>(case: &TraceCase<R, D>) -> TensorMap<R
         "{} lazy",
         case.name
     );
-    assert_close(lazy.data(), host_lazy.data(), case.terms(), case.name);
+    assert_close(
+        lazy.dense_data().unwrap(),
+        host_lazy.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
     actual
 }
 
@@ -166,7 +181,12 @@ fn device_fz2_trace_is_the_hand_valued_supertrace() {
             })
             .unwrap();
         let traced = device(&tensor.to_cuda().unwrap(), &[(0, 1)]);
-        assert_close(traced.data(), &[D::entry(-13.0, 0.0)], 8, "fZ2 supertrace");
+        assert_close(
+            traced.dense_data().unwrap(),
+            &[D::entry(-13.0, 0.0)],
+            8,
+            "fZ2 supertrace",
+        );
     }
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     at::<f64>(&runtime);
@@ -205,14 +225,15 @@ fn repeated_destinations_accumulate_every_producer() {
             restricted(Some(charge))
                 .trace_pairs(&pairs)
                 .unwrap()
-                .data()
+                .dense_data()
+                .unwrap()
                 .to_vec()
         })
         .collect();
-    let sum: Vec<f64> = (0..full.data().len())
+    let sum: Vec<f64> = (0..full.dense_data().unwrap().len())
         .map(|index| parts.iter().map(|part| part[index]).sum())
         .collect();
-    assert_close(full.data(), &sum, 64, "sum of producers");
+    assert_close(full.dense_data().unwrap(), &sum, 64, "sum of producers");
     let overlapping =
         (0..sum.len()).any(|index| parts.iter().filter(|part| part[index] != 0.0).count() >= 2);
     assert!(
@@ -226,7 +247,7 @@ fn repeated_destinations_accumulate_every_producer() {
 fn a_warm_trace_uploads_only_its_output() {
     fn warm<R: DeviceRule>(runtime: &Runtime, case: &TraceCase<R, f64>) {
         let source = case.tensor.to_cuda().unwrap();
-        let output_bytes = std::mem::size_of_val(case.host().data()) as u64;
+        let output_bytes = std::mem::size_of_val(case.host().dense_data().unwrap()) as u64;
         let call = || source.trace_pairs(&case.pairs).unwrap();
         let before = runtime.cuda_tree_transform_stats().unwrap();
         let (_, cold) = delta(call);
@@ -306,7 +327,10 @@ fn rejections_match_the_host_in_order_and_do_no_device_work() {
     // An empty pair list is the identity, with no device work either.
     let (clone, counters) = delta(|| source.trace_pairs(&[]).unwrap());
     assert_eq!(counters, CudaTransferStats::default());
-    assert_eq!(clone.to_host().unwrap().data(), case.tensor.data());
+    assert_eq!(
+        clone.to_host().unwrap().dense_data().unwrap(),
+        case.tensor.dense_data().unwrap()
+    );
 }
 
 /// A trace with more distinct term signatures than Tenferro's default bound
@@ -329,8 +353,8 @@ fn a_warm_trace_past_the_default_plan_bound_rebuilds_no_plan() {
     let source = host.to_cuda().unwrap();
     let cold = source.trace_pairs(&[(0, 2)]).unwrap();
     assert_close(
-        cold.to_host().unwrap().data(),
-        host.trace_pairs(&[(0, 2)]).unwrap().data(),
+        cold.to_host().unwrap().dense_data().unwrap(),
+        host.trace_pairs(&[(0, 2)]).unwrap().dense_data().unwrap(),
         64,
         "81-signature trace",
     );

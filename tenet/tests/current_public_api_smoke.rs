@@ -107,12 +107,19 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
         identity
             .contract(&tensor, &[1], &[0], &[0, 1])
             .unwrap()
-            .data(),
-        tensor.data(),
+            .dense_data()
+            .unwrap(),
+        tensor.dense_data().unwrap(),
     );
     assert_close(
-        tensor.adjoint().unwrap().adjoint().unwrap().data(),
-        tensor.data(),
+        tensor
+            .adjoint()
+            .unwrap()
+            .adjoint()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        tensor.dense_data().unwrap(),
     );
     assert_eq!(identity.tr().unwrap(), 2.0);
 
@@ -128,7 +135,10 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
         .unwrap()
         .permute(&[1, 0], &[2])
         .unwrap();
-    assert_eq!(roundtrip.data(), rank_three.data());
+    assert_eq!(
+        roundtrip.dense_data().unwrap(),
+        rank_three.dense_data().unwrap()
+    );
 
     let Svd { u, s, vh } = tensor.svd_compact().unwrap();
     let found = s.domain()[0]
@@ -142,7 +152,10 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
         .unwrap();
     let vh = vh.restrict_leg(&[(0, &found.selection)]).unwrap();
     let reconstructed = u.compose(&s).unwrap().compose(&vh).unwrap();
-    assert_close(reconstructed.data(), tensor.data());
+    assert_close(
+        reconstructed.dense_data().unwrap(),
+        tensor.dense_data().unwrap(),
+    );
 }
 
 // No "trivial symmetry" smoke is fabricated here: current main exposes no

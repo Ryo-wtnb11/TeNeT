@@ -115,7 +115,7 @@ macro_rules! assert_eig_composition {
         assert_canonical_layout!(got_d, format!("{case}: d"));
         assert_canonical_layout!(got_v, format!("{case}: v"));
 
-        let terms = source.data().len();
+        let terms = source.materialize().unwrap().dense_data().unwrap().len();
         for entry in got_d.diagview().unwrap() {
             let (_, reference) = references
                 .iter()
@@ -134,8 +134,8 @@ macro_rules! assert_eig_composition {
         let right = got_v.compose(&got_d).unwrap();
         numerics::assert_slices_close(
             &format!("{case}: t * v = v * d"),
-            left.data(),
-            right.data(),
+            left.dense_data().unwrap(),
+            right.dense_data().unwrap(),
             terms,
         );
         // The relation alone is met by `v = 0`. An eigenvector's scale is a

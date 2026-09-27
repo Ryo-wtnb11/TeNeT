@@ -70,13 +70,13 @@ macro_rules! device_select {
                 let (selected, again) = (selected.to_host().unwrap(), again.to_host().unwrap());
                 for (j, &i) in selection.iter().enumerate() {
                     fixtures::assert_bit_exact(
-                        selected.member(j).unwrap().data(),
-                        members[i].data(),
+                        selected.member(j).unwrap().dense_data().unwrap(),
+                        members[i].dense_data().unwrap(),
                         &label,
                     );
                     fixtures::assert_bit_exact(
-                        again.member(selection.len() - 1 - j).unwrap().data(),
-                        members[i].data(),
+                        again.member(selection.len() - 1 - j).unwrap().dense_data().unwrap(),
+                        members[i].dense_data().unwrap(),
                         &label,
                     );
                 }
@@ -122,6 +122,7 @@ fn device_select_is_bit_exact_with_one_gather_per_call() {
         .unwrap()
         .member(2)
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .is_empty());
 }

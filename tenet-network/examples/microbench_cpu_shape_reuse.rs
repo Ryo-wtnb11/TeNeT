@@ -293,7 +293,7 @@ where
         assert!(
             tensors
                 .iter()
-                .flat_map(|tensor| tensor.data())
+                .flat_map(|tensor| tensor.dense_data().unwrap())
                 .copied()
                 .any(D::has_imaginary_part),
             "complex fixture must contain a nonzero imaginary component"
@@ -308,7 +308,8 @@ where
     D: BenchScalar,
 {
     let metadata = tensor.subblock(block).unwrap();
-    tensor.data()[metadata.offset() + row * metadata.strides()[0] + column * metadata.strides()[1]]
+    tensor.dense_data().unwrap()
+        [metadata.offset() + row * metadata.strides()[0] + column * metadata.strides()[1]]
 }
 
 fn assert_indexed_chain<R, D>(tensors: &[TensorMap<R, D>; 3], actual: &TensorMap<R, D>)

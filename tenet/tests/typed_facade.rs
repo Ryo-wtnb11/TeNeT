@@ -439,7 +439,8 @@ fn fibonacci_complex_tensor_reaches_all_checked_constructors() {
 
     let zeros: TensorMap<_, Complex64> = TensorMap::zeros(&runtime, [&space], [&space]).unwrap();
     assert!(zeros
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .all(|&value| value == Complex64::new(0.0, 0.0)));
 
@@ -455,15 +456,29 @@ fn fibonacci_complex_tensor_reaches_all_checked_constructors() {
             )
         })
         .unwrap();
-    assert!(filled.data().iter().any(|value| value.im != 0.0));
+    assert!(filled
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.im != 0.0));
 
     let random: TensorMap<_, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&space], [&space], 0x9E37_79B9_7F4A_7C15).unwrap();
     let seeded: TensorMap<_, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&space], [&space], 592_301).unwrap();
-    assert_eq!(random.data().len(), zeros.data().len());
-    assert_eq!(seeded.data().len(), zeros.data().len());
-    assert!(seeded.data().iter().any(|value| value.im != 0.0));
+    assert_eq!(
+        random.dense_data().unwrap().len(),
+        zeros.dense_data().unwrap().len()
+    );
+    assert_eq!(
+        seeded.dense_data().unwrap().len(),
+        zeros.dense_data().unwrap().len()
+    );
+    assert!(seeded
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.im != 0.0));
 }
 
 fn fibonacci_tau_braid_fixture(runtime: &Runtime) -> TensorMap<FibonacciFusionRule, Complex64> {
@@ -504,7 +519,7 @@ fn fibonacci_forward_braid_matches_closed_form_and_tensorkit_fixture() {
     let cold = runtime.tree_transform_cache_info();
     assert_eq!((cold.entries(), cold.misses(), cold.hits()), (1, 1, 0));
     let warm = source.braid(&[0, 2, 1], &[3], &[0, 1, 2, 3]).unwrap();
-    assert_eq!(warm.data(), braided.data());
+    assert_eq!(warm.dense_data().unwrap(), braided.dense_data().unwrap());
     let warm_info = runtime.tree_transform_cache_info();
     assert_eq!(
         (warm_info.entries(), warm_info.misses(), warm_info.hits()),
@@ -574,7 +589,7 @@ fn fibonacci_planar_transforms_roundtrip_without_braiding() {
     // Pinned TensorKit `repartition` fixture; the same value is the
     // independent rigidity oracle sqrt(d_tau).
     assert_data_close_c64(
-        repartitioned.data(),
+        repartitioned.dense_data().unwrap(),
         &[Complex64::new(phi.sqrt(), 0.0), Complex64::new(0.0, 0.0)],
     );
     assert_eq!(
@@ -605,13 +620,16 @@ fn fibonacci_planar_transforms_roundtrip_without_braiding() {
             .collect::<Vec<_>>(),
         [false, true]
     );
-    assert_data_close_c64(repartitioned.repartition(3).unwrap().data(), source.data());
+    assert_data_close_c64(
+        repartitioned.repartition(3).unwrap().dense_data().unwrap(),
+        source.dense_data().unwrap(),
+    );
 
     let transposed = full_transpose!(source).unwrap();
     // Pinned TensorKit planar-transpose fixture and the closed-form first row
     // of the Fibonacci F matrix.
     assert_data_close_c64(
-        transposed.data(),
+        transposed.dense_data().unwrap(),
         &[
             Complex64::new(1.0 / phi, 0.0),
             Complex64::new(1.0 / phi.sqrt(), 0.0),
@@ -637,10 +655,16 @@ fn fibonacci_planar_transforms_roundtrip_without_braiding() {
             .collect::<Vec<_>>(),
         [true, true, true]
     );
-    assert_data_close_c64(full_transpose!(transposed).unwrap().data(), source.data());
+    assert_data_close_c64(
+        full_transpose!(transposed).unwrap().dense_data().unwrap(),
+        source.dense_data().unwrap(),
+    );
 
     let explicit = source.transpose(&[3], &[2, 1, 0]).unwrap();
-    assert_data_close_c64(explicit.data(), transposed.data());
+    assert_data_close_c64(
+        explicit.dense_data().unwrap(),
+        transposed.dense_data().unwrap(),
+    );
     for (trees, _) in explicit.subblocks().unwrap() {
         assert_eq!(trees.codomain_uncoupled(), &[FibonacciSector::Tau]);
         assert_eq!(trees.domain_uncoupled(), &[FibonacciSector::Tau; 3]);
@@ -790,8 +814,8 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
         })
         .unwrap();
 
-    assert_data_close_c64(cold.data(), expected.data());
-    assert_data_close_c64(warm.data(), expected.data());
+    assert_data_close_c64(cold.dense_data().unwrap(), expected.dense_data().unwrap());
+    assert_data_close_c64(warm.dense_data().unwrap(), expected.dense_data().unwrap());
     assert!(std::ptr::eq(cold.provider(), lhs.provider()));
     assert_eq!(after_cold, before);
     assert_eq!(runtime.tree_transform_cache_info(), before);
@@ -808,7 +832,7 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
 
     let left = a.compose(&b).unwrap().compose(&c).unwrap();
     let right = a.compose(&b.compose(&c).unwrap()).unwrap();
-    assert_data_close_c64(left.data(), right.data());
+    assert_data_close_c64(left.dense_data().unwrap(), right.dense_data().unwrap());
 
     runtime.clear_tree_transform_cache();
     let before = runtime.tree_transform_cache_info();
@@ -1108,8 +1132,12 @@ fn tensor_map_zeros_builds_a_multi_block_checked_layout() {
         TensorMap::zeros(&runtime, [&leg, &leg], [&dual, &dual]).unwrap();
 
     assert!(tensor.subblock_count() >= 2);
-    assert!(!tensor.data().is_empty());
-    assert!(tensor.data().iter().all(|&value| value == 0.0));
+    assert!(!tensor.dense_data().unwrap().is_empty());
+    assert!(tensor
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|&value| value == 0.0));
 }
 
 #[test]
@@ -1126,7 +1154,8 @@ fn tensor_map_zeros_carries_a_complex_payload() {
 
     assert!(tensor.subblock_count() >= 2);
     assert!(tensor
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .all(|&value| value == Complex64::new(0.0, 0.0)));
 }
@@ -1261,7 +1290,11 @@ fn from_block_fn_sees_decoded_labels_and_fills_every_allowed_element() {
         .unwrap();
 
     assert!(tensor.subblock_count() >= 1);
-    assert!(tensor.data().iter().all(|&value| value >= 100.0));
+    assert!(tensor
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|&value| value >= 100.0));
 }
 
 #[test]
@@ -1320,10 +1353,10 @@ fn tensor_map_inspection_round_trips_the_spaces_and_blocks() {
         assert_eq!(&Z3Charge(sum), sectors.coupled());
 
         let block = tensor.subblock(index).unwrap();
-        assert!(block.storage_end_exclusive().unwrap() <= tensor.data().len());
+        assert!(block.storage_end_exclusive().unwrap() <= tensor.dense_data().unwrap().len());
         elements += block.element_count().unwrap();
     }
-    assert_eq!(elements, tensor.data().len());
+    assert_eq!(elements, tensor.dense_data().unwrap().len());
 }
 
 #[test]
@@ -1355,7 +1388,7 @@ fn labelled_subblocks_borrow_u1_and_su2_values_in_canonical_order() {
         let raw = u1.subblock(index).unwrap();
         assert_eq!(values.shape(), raw.shape());
         assert_eq!(values.strides(), raw.strides());
-        assert_eq!(values.data().as_ptr(), u1.data().as_ptr());
+        assert_eq!(values.data().as_ptr(), u1.dense_data().unwrap().as_ptr());
         assert_eq!(trees.codomain_uncoupled().len(), 2);
         assert_eq!(
             trees.domain_uncoupled(),
@@ -1407,10 +1440,10 @@ fn labelled_subblocks_borrow_u1_and_su2_values_in_canonical_order() {
             .contains(&SU2FusionRule.encode_sector(trees.coupled()).unwrap()));
         assert_eq!(values.shape(), raw.shape());
         assert_eq!(values.strides(), raw.strides());
-        assert_eq!(values.data().as_ptr(), su2.data().as_ptr());
+        assert_eq!(values.data().as_ptr(), su2.dense_data().unwrap().as_ptr());
         assert_eq!(
             values.get(&vec![0; values.shape().len()]),
-            Some(&su2.data()[raw.offset()])
+            Some(&su2.dense_data().unwrap()[raw.offset()])
         );
     }
 }
@@ -1481,7 +1514,8 @@ fn simple_fusion_provider_round_trips_construction_fill_and_inspection() {
         .collect();
     assert!(coupled.contains(&0) && coupled.contains(&2));
     assert!(tensor
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .zip(0..)
         .all(|(value, _)| value.re == 0.0 || value.re == 2.0));
@@ -1549,7 +1583,10 @@ fn typed_block_fill_preserves_tree_and_storage_order() {
                     .zip(block.strides())
                     .map(|(&index, &stride)| index * stride)
                     .sum::<usize>();
-            assert_eq!(typed.data()[offset], typed_fill_value(&sectors, &indices));
+            assert_eq!(
+                typed.dense_data().unwrap()[offset],
+                typed_fill_value(&sectors, &indices)
+            );
         }
     }
 }
@@ -1622,10 +1659,13 @@ fn permute_moves_legs_of_a_multi_block_external_provider_tensor() {
     assert!(!permuted.codomain()[1].is_dual());
     assert!(permuted.domain()[0].is_dual());
     assert!(permuted.domain()[1].is_dual());
-    assert_eq!(permuted.data().len(), tensor.data().len());
-    assert_ne!(permuted.data(), tensor.data());
-    let mut moved: Vec<f64> = permuted.data().to_vec();
-    let mut original: Vec<f64> = tensor.data().to_vec();
+    assert_eq!(
+        permuted.dense_data().unwrap().len(),
+        tensor.dense_data().unwrap().len()
+    );
+    assert_ne!(permuted.dense_data().unwrap(), tensor.dense_data().unwrap());
+    let mut moved: Vec<f64> = permuted.dense_data().unwrap().to_vec();
+    let mut original: Vec<f64> = tensor.dense_data().unwrap().to_vec();
     moved.sort_by(f64::total_cmp);
     original.sort_by(f64::total_cmp);
     assert_eq!(moved, original);
@@ -1644,7 +1684,7 @@ fn permute_round_trips_back_to_the_source_layout() {
     let there = tensor.permute(&[1, 3], &[0, 2]).unwrap();
     let back = there.permute(&[2, 0], &[3, 1]).unwrap();
 
-    assert_eq!(back.data(), tensor.data());
+    assert_eq!(back.dense_data().unwrap(), tensor.dense_data().unwrap());
     assert_eq!(back.subblock_count(), tensor.subblock_count());
     for index in 0..tensor.subblock_count() {
         assert_eq!(
@@ -1677,7 +1717,8 @@ fn permute_carries_a_simple_fusion_provider_with_a_complex_payload() {
     assert_eq!(permuted.domain().len(), 2);
     assert!(permuted.subblock_count() >= 1);
     assert!(permuted
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .any(|value| *value != Complex64::new(0.0, 0.0)));
 }
@@ -1789,13 +1830,13 @@ fn contract_matches_a_hand_computed_product_with_a_reordered_output() {
     );
     let lhs = counting_z3(&runtime, &rows, &shared, 1.0);
     let rhs = counting_z3(&runtime, &shared, &columns, 7.0);
-    assert_eq!(lhs.data(), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-    assert_eq!(rhs.data().len(), 12);
+    assert_eq!(lhs.dense_data().unwrap(), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(rhs.dense_data().unwrap().len(), 12);
 
     let contracted = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
 
     assert_eq!(
-        contracted.data(),
+        contracted.dense_data().unwrap(),
         [76.0, 103.0, 130.0, 157.0, 100.0, 136.0, 172.0, 208.0]
     );
     assert_eq!(contracted.codomain().len(), 1);
@@ -1820,7 +1861,7 @@ fn contract_with_the_default_output_order_keeps_the_open_axes_in_place() {
     let contracted = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
 
     assert_eq!(
-        contracted.data(),
+        contracted.dense_data().unwrap(),
         [76.0, 100.0, 103.0, 136.0, 130.0, 172.0, 157.0, 208.0]
     );
 }
@@ -1853,7 +1894,8 @@ fn contract_carries_a_simple_fusion_provider_with_a_complex_payload() {
 
     assert_eq!(contracted.codomain().len() + contracted.domain().len(), 4);
     assert!(contracted
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .any(|value| *value != Complex64::new(0.0, 0.0)));
 }
@@ -1906,7 +1948,7 @@ fn contract_accepts_separately_allocated_equal_identity_providers() {
     let contracted = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
 
     assert_eq!(
-        contracted.data(),
+        contracted.dense_data().unwrap(),
         [76.0, 103.0, 130.0, 157.0, 100.0, 136.0, 172.0, 208.0]
     );
 }
@@ -2145,7 +2187,7 @@ fn otimes_matches_tensorkit_planar_trivial_without_requesting_braiding() {
 
     let actual = lhs.otimes(&rhs).unwrap();
 
-    assert_eq!(actual.data(), expected.data());
+    assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
     assert_eq!(
         actual
             .codomain()
@@ -2211,7 +2253,10 @@ fn otimes_fz2_complex_oracle_has_no_crossing_phase() {
         })
         .unwrap();
 
-    assert_eq!(lhs.otimes(&rhs).unwrap().data(), expected.data());
+    assert_eq!(
+        lhs.otimes(&rhs).unwrap().dense_data().unwrap(),
+        expected.dense_data().unwrap()
+    );
 }
 
 #[test]
@@ -2231,7 +2276,7 @@ fn typed_deligne_product_uses_the_explicit_component_order() {
     let result = lhs.deligne_product(&rhs, product).unwrap();
 
     assert_eq!((result.codomain_rank(), result.domain_rank()), (2, 2));
-    assert_eq!(result.data(), [6.0]);
+    assert_eq!(result.dense_data().unwrap(), [6.0]);
     let codomain = result.codomain();
     assert_eq!(
         codomain[0].sectors().unwrap(),
@@ -2388,7 +2433,7 @@ fn typed_deligne_product_preserves_duals_multiblocks_and_complex_values() {
         })
         .unwrap();
 
-    assert_eq!(actual.data(), expected.data());
+    assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
     assert!(actual.subblock_count() > 1);
     assert_eq!(
         codomain
@@ -2421,7 +2466,7 @@ fn typed_deligne_product_accepts_a_nondefault_product_codec() {
 
     let result = lhs.deligne_product(&rhs, product).unwrap();
 
-    assert_eq!(result.data(), [10.0]);
+    assert_eq!(result.dense_data().unwrap(), [10.0]);
     assert_eq!(
         result.codomain()[0].sectors().unwrap(),
         [tenet::core::product_sector(
@@ -2457,7 +2502,7 @@ fn typed_deligne_product_maps_component_innerlines_into_the_product_tree() {
     let result = lhs.deligne_product(&rhs, product).unwrap();
     let block = result.subblock_fusion_trees(0).unwrap();
 
-    assert_eq!(result.data(), [6.0]);
+    assert_eq!(result.dense_data().unwrap(), [6.0]);
     assert_eq!(
         block.codomain_innerlines(),
         [
@@ -2558,13 +2603,19 @@ fn braid_moves_legs_of_a_multi_block_external_provider_tensor() {
     let braided = tensor.braid(&[1, 2], &[3, 0], &[0, 1, 2, 3]).unwrap();
     let permuted = tensor.permute(&[1, 2], &[3, 0]).unwrap();
 
-    assert_eq!(braided.data(), permuted.data());
-    assert_ne!(braided.data(), tensor.data());
+    assert_eq!(
+        braided.dense_data().unwrap(),
+        permuted.dense_data().unwrap()
+    );
+    assert_ne!(braided.dense_data().unwrap(), tensor.dense_data().unwrap());
     assert_eq!(braided.codomain()[0].degeneracies(), &[1, 2, 4]);
     assert_eq!(braided.domain()[1].degeneracies(), &[2, 1, 3]);
     // A different level assignment is the same morphism for a bosonic rule.
     let reversed = tensor.braid(&[1, 2], &[3, 0], &[3, 2, 1, 0]).unwrap();
-    assert_eq!(reversed.data(), braided.data());
+    assert_eq!(
+        reversed.dense_data().unwrap(),
+        braided.dense_data().unwrap()
+    );
 }
 
 #[test]
@@ -2617,9 +2668,9 @@ fn transpose_twice_returns_the_source_layout() {
     let once = full_transpose!(tensor).unwrap();
     let twice = full_transpose!(once).unwrap();
 
-    assert_ne!(once.data(), tensor.data());
+    assert_ne!(once.dense_data().unwrap(), tensor.dense_data().unwrap());
     assert_eq!(typed_leg_shapes(&twice), typed_leg_shapes(&tensor));
-    assert_eq!(twice.data(), tensor.data());
+    assert_eq!(twice.dense_data().unwrap(), tensor.dense_data().unwrap());
     assert_eq!(twice.subblock_count(), tensor.subblock_count());
     for index in 0..tensor.subblock_count() {
         assert_eq!(
@@ -2663,11 +2714,14 @@ fn repartition_moves_the_boundary_and_round_trips_at_every_split() {
         let moved = tensor.repartition(num_codomain).unwrap();
         assert_eq!(moved.codomain().len(), num_codomain);
         assert_eq!(moved.domain().len(), 4 - num_codomain);
-        assert_eq!(moved.data().len(), tensor.data().len());
+        assert_eq!(
+            moved.dense_data().unwrap().len(),
+            tensor.dense_data().unwrap().len()
+        );
 
         let back = moved.repartition(2).unwrap();
         assert_eq!(typed_leg_shapes(&back), typed_leg_shapes(&tensor));
-        assert_eq!(back.data(), tensor.data());
+        assert_eq!(back.dense_data().unwrap(), tensor.dense_data().unwrap());
         for index in 0..tensor.subblock_count() {
             assert_eq!(
                 back.subblock_fusion_trees(index).unwrap(),
@@ -2783,25 +2837,29 @@ fn planar_transposes_bend_where_permute_braids_for_a_fermionic_provider() {
     let _guard = cache_lock();
     let runtime = runtime();
     let tensor = fermionic_rank_three(&runtime);
-    assert_eq!(tensor.data(), [1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(tensor.dense_data().unwrap(), [1.0, 2.0, 3.0, 4.0]);
 
     // Full transpose: same element motion either way, opposite signs.
     assert_eq!(
-        full_transpose!(tensor).unwrap().data(),
+        full_transpose!(tensor).unwrap().dense_data().unwrap(),
         [1.0, 2.0, 4.0, 3.0]
     );
     assert_eq!(
-        tensor.permute(&[2], &[1, 0]).unwrap().data(),
+        tensor.permute(&[2], &[1, 0]).unwrap().dense_data().unwrap(),
         [1.0, 2.0, -4.0, -3.0]
     );
 
     // The explicit form, on a different rotation of the planar order.
     assert_eq!(
-        tensor.transpose(&[1, 2], &[0]).unwrap().data(),
+        tensor
+            .transpose(&[1, 2], &[0])
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         [1.0, 4.0, 2.0, 3.0]
     );
     assert_eq!(
-        tensor.permute(&[1, 2], &[0]).unwrap().data(),
+        tensor.permute(&[1, 2], &[0]).unwrap().dense_data().unwrap(),
         [1.0, 4.0, -2.0, -3.0]
     );
 }
@@ -2822,12 +2880,25 @@ fn repartition_is_sign_free_even_for_a_fermionic_provider() {
     let runtime = runtime();
     let tensor = fermionic_rank_three(&runtime);
 
-    assert_eq!(tensor.repartition(0).unwrap().data(), [1.0, 4.0, 3.0, 2.0]);
-    assert_eq!(tensor.repartition(1).unwrap().data(), [1.0, 4.0, 3.0, 2.0]);
-    assert_eq!(tensor.repartition(3).unwrap().data(), [1.0, 2.0, 3.0, 4.0]);
     assert_eq!(
-        tensor.repartition(0).unwrap().data(),
-        tensor.permute(&[], &[2, 1, 0]).unwrap().data()
+        tensor.repartition(0).unwrap().dense_data().unwrap(),
+        [1.0, 4.0, 3.0, 2.0]
+    );
+    assert_eq!(
+        tensor.repartition(1).unwrap().dense_data().unwrap(),
+        [1.0, 4.0, 3.0, 2.0]
+    );
+    assert_eq!(
+        tensor.repartition(3).unwrap().dense_data().unwrap(),
+        [1.0, 2.0, 3.0, 4.0]
+    );
+    assert_eq!(
+        tensor.repartition(0).unwrap().dense_data().unwrap(),
+        tensor
+            .permute(&[], &[2, 1, 0])
+            .unwrap()
+            .dense_data()
+            .unwrap()
     );
 }
 
@@ -2869,8 +2940,16 @@ fn svd_compact_reconstructs_the_source_through_the_typed_contract() {
     let Svd { u, s, vh } = typed.svd_compact().unwrap();
     let recon = recompose(&u, &s, &vh);
 
-    assert_eq!(recon.data().len(), typed.data().len());
-    for (got, want) in recon.data().iter().zip(typed.data()) {
+    assert_eq!(
+        recon.dense_data().unwrap().len(),
+        typed.dense_data().unwrap().len()
+    );
+    for (got, want) in recon
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(typed.dense_data().unwrap())
+    {
         assert!(
             (got - want).abs() <= 1e-12 * want.abs().max(1.0),
             "{got} vs {want}"
@@ -2897,7 +2976,12 @@ fn svd_compact_reconstructs_a_complex_payload() {
         .unwrap()
         .contract(&tvh, &[2], &[0], &[0, 1, 2])
         .unwrap();
-    for (got, want) in recon.data().iter().zip(typed.data()) {
+    for (got, want) in recon
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(typed.dense_data().unwrap())
+    {
         assert!(
             (got - want).norm() <= 1e-12 * want.norm().max(1.0),
             "{got} vs {want}"
@@ -2914,7 +2998,7 @@ fn svd_full_reconstructs_with_unitary_outer_factors() {
         let Svd { u, s, vh } = typed.svd_full().unwrap();
 
         let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
-        assert_data_close_f64(recon.data(), typed.data());
+        assert_data_close_f64(recon.dense_data().unwrap(), typed.dense_data().unwrap());
         assert!(is_isometric!(u, 1e-12));
         assert!(is_isometric!(vh.adjoint().unwrap(), 1e-12));
         assert_same_legs(&u.codomain(), &typed.codomain());
@@ -2998,9 +3082,10 @@ fn truncated_svd_reconstructs_and_reports_the_discarded_weight() {
 
     let recon = recompose(&u, &s, &vh);
     let reconstruction_error = recon
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(typed.data())
+        .zip(typed.dense_data().unwrap())
         .map(|(got, want)| (got - want) * (got - want))
         .sum::<f64>()
         .sqrt();
@@ -3009,7 +3094,12 @@ fn truncated_svd_reconstructs_and_reports_the_discarded_weight() {
     // A degenerate but well-formed policy is a policy, not an error: keeping
     // nothing succeeds and discards the whole spectrum.
     let (_, empty_s, _, _) = truncated_svd!(typed, tenet::typed::Truncation::Rank(0));
-    assert!(empty_s.data().is_empty());
+    assert!(empty_s
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .is_empty());
     assert!(empty_s
         .diagview()
         .unwrap()
@@ -3125,7 +3215,10 @@ fn qr_and_lq_reconstruct_with_the_expected_isometries_and_spaces() {
         let qr_compact = typed.qr_compact().unwrap();
         let qr_full = typed.qr_full().unwrap();
         for Qr { q, r } in [&qr_compact, &qr_full] {
-            assert_data_close_f64(q.compose(r).unwrap().data(), typed.data());
+            assert_data_close_f64(
+                q.compose(r).unwrap().dense_data().unwrap(),
+                typed.dense_data().unwrap(),
+            );
             assert!(is_isometric!(q, 1e-12));
             assert_same_legs(&q.codomain(), &typed.codomain());
             assert_same_legs(&r.domain(), &typed.domain());
@@ -3135,7 +3228,10 @@ fn qr_and_lq_reconstruct_with_the_expected_isometries_and_spaces() {
         let lq_compact = typed.lq_compact().unwrap();
         let lq_full = typed.lq_full().unwrap();
         for Lq { l, q } in [&lq_compact, &lq_full] {
-            assert_data_close_f64(l.compose(q).unwrap().data(), typed.data());
+            assert_data_close_f64(
+                l.compose(q).unwrap().dense_data().unwrap(),
+                typed.dense_data().unwrap(),
+            );
             assert!(is_isometric!(q.adjoint().unwrap(), 1e-12));
             assert_same_legs(&l.codomain(), &typed.codomain());
             assert_same_legs(&q.domain(), &typed.domain());
@@ -3176,13 +3272,15 @@ fn left_and_right_null_spaces_annihilate_the_source() {
             .unwrap()
             .compose(&typed)
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .all(|value| value.abs() < 1e-12));
         assert!(typed
             .compose(&right.adjoint().unwrap())
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .all(|value| value.abs() < 1e-12));
 
@@ -3218,7 +3316,12 @@ fn decompositions_carry_a_fermionic_provider() {
         .flat_map(|entry| entry.values.iter())
         .map(|value| value * value)
         .sum();
-    let from_data: f64 = tensor.data().iter().map(|value| value * value).sum();
+    let from_data: f64 = tensor
+        .dense_data()
+        .unwrap()
+        .iter()
+        .map(|value| value * value)
+        .sum();
     assert!((from_spectrum - from_data).abs() < 1e-12);
 
     // And the seam is reachable at all for this provider, in both directions.
@@ -3276,16 +3379,21 @@ fn add_applies_each_real_coefficient_to_the_right_operand() {
     let typed_sum = typed.axpby(2.0, &typed_other, -3.0).unwrap();
 
     let expected: Vec<_> = typed
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(typed_other.data())
+        .zip(typed_other.dense_data().unwrap())
         .map(|(&lhs, &rhs)| 2.0 * lhs - 3.0 * rhs)
         .collect();
-    assert_eq!(typed_sum.data(), expected);
+    assert_eq!(typed_sum.dense_data().unwrap(), expected);
     // The asymmetry is real: the swapped combination is a different tensor.
     assert_ne!(
-        typed.axpby(-3.0, &typed_other, 2.0).unwrap().data(),
-        typed_sum.data()
+        typed
+            .axpby(-3.0, &typed_other, 2.0)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        typed_sum.dense_data().unwrap()
     );
 }
 
@@ -3302,13 +3410,14 @@ fn add_carries_complex_coefficients() {
     let other = typed.permute(&[1, 0], &[2]).unwrap();
     let typed_sum = typed.axpby(alpha, &other, beta).unwrap();
     let expected: Vec<_> = typed
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(other.data())
+        .zip(other.dense_data().unwrap())
         .map(|(&lhs, &rhs)| alpha * lhs + beta * rhs)
         .collect();
 
-    assert_eq!(typed_sum.data(), expected);
+    assert_eq!(typed_sum.dense_data().unwrap(), expected);
 }
 
 #[test]
@@ -3341,14 +3450,24 @@ fn scale_multiplies_every_real_and_complex_entry() {
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
     let scaled = typed.scale(-2.5);
-    for (&actual, &source) in scaled.data().iter().zip(typed.data()) {
+    for (&actual, &source) in scaled
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(typed.dense_data().unwrap())
+    {
         assert_eq!(actual, -2.5 * source);
     }
 
     let typed_c = z2_complex_tensor(&runtime);
     let factor = Complex64::new(0.25, 3.0);
     let scaled = typed_c.scale(factor);
-    for (&actual, &source) in scaled.data().iter().zip(typed_c.data()) {
+    for (&actual, &source) in scaled
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(typed_c.dense_data().unwrap())
+    {
         assert_eq!(actual, factor * source);
     }
 }
@@ -3409,7 +3528,12 @@ fn scaling_by_the_inverse_norm_divides_by_the_dimension_weighted_norm() {
     let typed = su2_tensor(&runtime);
     let norm = typed.norm(2.0).unwrap();
     let unit = typed.scale(1.0 / norm);
-    for (&actual, &source) in unit.data().iter().zip(typed.data()) {
+    for (&actual, &source) in unit
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(typed.dense_data().unwrap())
+    {
         assert!((actual - source / norm).abs() <= 1e-12 * source.abs().max(1.0));
     }
     assert!((unit.norm(2.0).unwrap() - 1.0).abs() < 1e-12);
@@ -3515,7 +3639,8 @@ fn tr_uses_the_nonabelian_dimension_weight() {
             let size = block.shape()[0];
             (0..size)
                 .map(|i| {
-                    typed.data()[block.offset() + i * (block.strides()[0] + block.strides()[1])]
+                    typed.dense_data().unwrap()
+                        [block.offset() + i * (block.strides()[0] + block.strides()[1])]
                 })
                 .sum::<f64>()
         })
@@ -3557,7 +3682,7 @@ fn adjoint_swaps_spaces_and_is_an_involution() {
     let roundtrip = adjoint.adjoint().unwrap();
     assert_same_legs(&roundtrip.codomain(), &typed.codomain());
     assert_same_legs(&roundtrip.domain(), &typed.domain());
-    assert_eq!(roundtrip.data(), typed.data());
+    assert_eq!(roundtrip.dense_data().unwrap(), typed.dense_data().unwrap());
 }
 
 #[test]
@@ -3573,9 +3698,19 @@ fn adjoint_conjugates_a_complex_payload() {
     let sorted = |values: &mut Vec<Complex64>| {
         values.sort_by(|a, b| a.re.total_cmp(&b.re).then(a.im.total_cmp(&b.im)));
     };
-    let mut got: Vec<Complex64> = adjoint.data().to_vec();
-    let mut conjugated: Vec<Complex64> = typed.data().iter().map(|v| v.conj()).collect();
-    let mut plain: Vec<Complex64> = typed.data().to_vec();
+    let mut got: Vec<Complex64> = adjoint
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
+    let mut conjugated: Vec<Complex64> = typed
+        .dense_data()
+        .unwrap()
+        .iter()
+        .map(|v| v.conj())
+        .collect();
+    let mut plain: Vec<Complex64> = typed.dense_data().unwrap().to_vec();
     sorted(&mut got);
     sorted(&mut conjugated);
     sorted(&mut plain);
@@ -3595,8 +3730,14 @@ fn adjoint_carries_an_external_provider() {
 
     let adjoint = tensor.adjoint().unwrap();
 
-    assert_eq!(adjoint.data().len(), tensor.data().len());
-    assert_eq!(adjoint.adjoint().unwrap().data(), tensor.data());
+    assert_eq!(
+        adjoint.materialize().unwrap().dense_data().unwrap().len(),
+        tensor.dense_data().unwrap().len()
+    );
+    assert_eq!(
+        adjoint.adjoint().unwrap().dense_data().unwrap(),
+        tensor.dense_data().unwrap()
+    );
     // A dagger preserves the dimension-weighted norm.
     assert!((adjoint.norm(2.0).unwrap() - tensor.norm(2.0).unwrap()).abs() < 1e-12);
 }
@@ -3627,7 +3768,7 @@ fn trace_pairs_preserves_partial_trace_geometry() {
 
     let typed = z2_endomorphism(&runtime);
     let full = typed.trace_pairs(&[(0, 1)]).unwrap();
-    assert_eq!(full.data().len(), 1);
+    assert_eq!(full.dense_data().unwrap().len(), 1);
     assert_eq!(full.scalar().unwrap(), typed.tr().unwrap());
 
     // `[v, v] <- [v]`: tracing axis 1 against axis 2 leaves axis 0 open, so the
@@ -3636,7 +3777,11 @@ fn trace_pairs_preserves_partial_trace_geometry() {
     let partial = typed.trace_pairs(&[(1, 2)]).unwrap();
     assert_eq!(partial.codomain().len(), 1);
     assert_eq!(partial.domain().len(), 0);
-    assert!(partial.data().iter().any(|&value| value != 0.0));
+    assert!(partial
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|&value| value != 0.0));
 
     // The two cases above leave at most one survivor, and it is codomain-side,
     // so neither can see the order of `output_axes` nor the codomain-rank
@@ -3649,7 +3794,11 @@ fn trace_pairs_preserves_partial_trace_geometry() {
     let survivor = typed.trace_pairs(&[(0, 1)]).unwrap();
     assert_eq!(survivor.codomain().len(), 0);
     assert_eq!(survivor.domain().len(), 1);
-    assert!(survivor.data().iter().any(|&value| value != 0.0));
+    assert!(survivor
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|&value| value != 0.0));
 
     // `[v, v] <- [v, v]`, tracing (0, 3): two survivors, axes 1 and 2, one on
     // each side — so their relative order in `output_axes` is observable, and
@@ -3668,7 +3817,11 @@ fn trace_pairs_preserves_partial_trace_geometry() {
     let two_survivors = typed.trace_pairs(&[(0, 3)]).unwrap();
     assert_eq!(two_survivors.codomain().len(), 1);
     assert_eq!(two_survivors.domain().len(), 1);
-    assert!(two_survivors.data().iter().any(|&value| value != 0.0));
+    assert!(two_survivors
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|&value| value != 0.0));
 }
 
 #[test]
@@ -3679,7 +3832,7 @@ fn trace_pairs_of_nothing_is_the_source() {
 
     let traced = typed.trace_pairs(&[]).unwrap();
 
-    assert_eq!(traced.data(), typed.data());
+    assert_eq!(traced.dense_data().unwrap(), typed.dense_data().unwrap());
     assert_eq!(traced.codomain().len(), 2);
 }
 
@@ -3714,7 +3867,7 @@ fn fermionic_trace_pairs_is_the_supertrace_and_tr_is_not() {
     let super_trace = typed.trace_pairs(&[(0, 1)]).unwrap();
 
     assert_ne!(
-        super_trace.data(),
+        super_trace.dense_data().unwrap(),
         [positive],
         "the fermionic supertrace must not coincide with the positive trace"
     );
@@ -3804,11 +3957,12 @@ fn fermionic_compose_is_contract_against_a_twisted_right_operand() {
         .unwrap();
 
     assert_eq!(
-        typed_a.compose(&typed_b).unwrap().data(),
+        typed_a.compose(&typed_b).unwrap().dense_data().unwrap(),
         typed_a
             .contract(&twisted_b, &[1, 2], &[0, 1], &[0, 1])
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
     );
 }
 
@@ -3821,11 +3975,12 @@ fn fermionic_compose_and_contract_disagree() {
     let (typed_a, typed_b) = fermionic_compose_pair(&runtime);
 
     assert_ne!(
-        typed_a.compose(&typed_b).unwrap().data(),
+        typed_a.compose(&typed_b).unwrap().dense_data().unwrap(),
         typed_a
             .contract(&typed_b, &[1, 2], &[0, 1], &[0, 1])
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
     );
 }
 
@@ -3840,8 +3995,12 @@ fn bosonic_compose_is_contract_with_the_identity_output_order() {
     let composed = typed.compose(&typed).unwrap();
 
     assert_eq!(
-        composed.data(),
-        typed.contract(&typed, &[1], &[0], &[0, 1]).unwrap().data()
+        composed.dense_data().unwrap(),
+        typed
+            .contract(&typed, &[1], &[0], &[0, 1])
+            .unwrap()
+            .dense_data()
+            .unwrap()
     );
 }
 
@@ -3861,10 +4020,11 @@ fn compose_contracts_the_whole_domain_against_the_whole_codomain() {
     assert_eq!(composed.codomain().len(), 2);
     assert_eq!(composed.domain().len(), 2);
     assert_eq!(
-        composed.data(),
+        composed.dense_data().unwrap(),
         tall.contract(&wide, &[2], &[0], &[0, 1, 2, 3])
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
     );
 }
 
@@ -3984,8 +4144,16 @@ fn id_writes_the_nonuniform_fused_diagonal() {
 
     // Not the zero tensor, and not the all-ones one either: a genuine diagonal.
     // 14 even + 11 odd fused states: `2*1 + 3*4` and `2*4 + 3*1`.
-    assert_eq!(typed.data().iter().filter(|&&v| v == 1.0).count(), 25);
-    assert!(typed.data().contains(&0.0));
+    assert_eq!(
+        typed
+            .dense_data()
+            .unwrap()
+            .iter()
+            .filter(|&&v| v == 1.0)
+            .count(),
+        25
+    );
+    assert!(typed.dense_data().unwrap().contains(&0.0));
 }
 
 #[test]
@@ -3999,8 +4167,14 @@ fn id_composes_as_the_identity_on_both_sides() {
     let left = TensorMap::isomorphism(&runtime, &typed.codomain(), &typed.codomain()).unwrap();
     let right = TensorMap::isomorphism(&runtime, &typed.domain(), &typed.domain()).unwrap();
 
-    assert_eq!(left.compose(&typed).unwrap().data(), typed.data());
-    assert_eq!(typed.compose(&right).unwrap().data(), typed.data());
+    assert_eq!(
+        left.compose(&typed).unwrap().dense_data().unwrap(),
+        typed.dense_data().unwrap()
+    );
+    assert_eq!(
+        typed.compose(&right).unwrap().dense_data().unwrap(),
+        typed.dense_data().unwrap()
+    );
 }
 
 #[test]
@@ -4015,8 +4189,14 @@ fn id_composes_as_the_identity_for_a_fermionic_provider() {
     let left = TensorMap::isomorphism(&runtime, &typed_a.codomain(), &typed_a.codomain()).unwrap();
     let right = TensorMap::isomorphism(&runtime, &typed_a.domain(), &typed_a.domain()).unwrap();
 
-    assert_eq!(left.compose(&typed_a).unwrap().data(), typed_a.data());
-    assert_eq!(typed_a.compose(&right).unwrap().data(), typed_a.data());
+    assert_eq!(
+        left.compose(&typed_a).unwrap().dense_data().unwrap(),
+        typed_a.dense_data().unwrap()
+    );
+    assert_eq!(
+        typed_a.compose(&right).unwrap().dense_data().unwrap(),
+        typed_a.dense_data().unwrap()
+    );
 }
 
 #[test]
@@ -4054,7 +4234,7 @@ fn compact_reductions_match_the_forced_dense_route() {
     // Two reductions of the same singular values that may sum in different
     // orders: agreement within the tolerance rule over the dense payload is
     // the contract. A maximum is order-independent, so `norm(Inf)` is exact.
-    let terms = dense.data().len();
+    let terms = dense.dense_data().unwrap().len();
     numerics::assert_close(
         "norm",
         typed.norm(2.0).unwrap(),
@@ -4088,7 +4268,7 @@ fn compact_reductions_carry_the_su2_dimension_weight() {
     let dense = forced_dense(&typed);
 
     // Compact and dense routes may sum in different orders; see above.
-    let terms = dense.data().len();
+    let terms = dense.dense_data().unwrap().len();
     numerics::assert_close(
         "norm",
         typed.norm(2.0).unwrap(),
@@ -4103,7 +4283,13 @@ fn compact_reductions_carry_the_su2_dimension_weight() {
         terms,
     );
     // The unweighted sum, for contrast: a dropped `dim(c)` would make `tr` this.
-    let unweighted: f64 = typed.data().iter().sum();
+    let unweighted: f64 = typed
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .sum();
     assert!(
         (typed.tr().unwrap() - unweighted).abs() > 1e-6,
         "the SU(2) spectrum trace is not dimension weighted"
@@ -4124,7 +4310,14 @@ fn compact_add_matches_pointwise_values_on_both_arms() {
     let typed = z2_bond(&runtime);
 
     let diagonal_sum = typed.axpby(0.75, &typed, -0.5).unwrap();
-    for (&actual, &source) in diagonal_sum.data().iter().zip(typed.data()) {
+    for (&actual, &source) in diagonal_sum
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(typed.materialize().unwrap().dense_data().unwrap())
+    {
         let expected = 0.25 * source;
         assert!((actual - expected).abs() <= 1e-12 * expected.abs().max(1.0));
     }
@@ -4139,11 +4332,12 @@ fn compact_add_matches_pointwise_values_on_both_arms() {
         let diagonal_dense = typed.axpby(alpha, &typed_dense, beta).unwrap();
         let dense_diagonal = typed_dense.axpby(alpha, &typed, beta).unwrap();
         for (((&diagonal_dense, &dense_diagonal), &diagonal), &dense) in diagonal_dense
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(dense_diagonal.data())
-            .zip(typed.data())
-            .zip(typed_dense.data())
+            .zip(dense_diagonal.dense_data().unwrap())
+            .zip(typed.materialize().unwrap().dense_data().unwrap())
+            .zip(typed_dense.dense_data().unwrap())
         {
             let expected = alpha * diagonal + beta * dense;
             assert!((diagonal_dense - expected).abs() <= 1e-12 * expected.abs().max(1.0));
@@ -4171,13 +4365,20 @@ fn compose_takes_the_compact_paths_and_reconstructs_the_source() {
     let svh = ts.compose(&tvh).unwrap();
     let squared = ts.compose(&ts).unwrap();
     // `s * s` is still a spectrum: its entries are the squares.
-    for (squared, original) in squared.data().iter().zip(ts.data()) {
+    for (squared, original) in squared
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(ts.materialize().unwrap().dense_data().unwrap())
+    {
         assert!((squared - original * original).abs() < 1e-12);
     }
 
     // Both associations reconstruct, separately pinning `t * D` and `D * t`.
     for recon in [tus.compose(&tvh).unwrap(), tu.compose(&svh).unwrap()] {
-        assert_data_close_f64(recon.data(), typed.data());
+        assert_data_close_f64(recon.dense_data().unwrap(), typed.dense_data().unwrap());
     }
 }
 
@@ -4211,8 +4412,8 @@ fn compose_declines_a_compact_arm_it_cannot_prove() {
     let narrow_s = narrow.svd_compact().unwrap().s;
 
     assert_ne!(
-        wide_s.data().len(),
-        narrow_s.data().len(),
+        wide_s.materialize().unwrap().dense_data().unwrap().len(),
+        narrow_s.materialize().unwrap().dense_data().unwrap().len(),
         "the fixture's two bond spaces must differ for this to test anything"
     );
     assert!(
@@ -4252,8 +4453,16 @@ fn eigh_full_reconstructs_the_source_through_compose() {
         .compose(&v.adjoint().unwrap())
         .unwrap();
 
-    assert_eq!(recon.data().len(), typed.data().len());
-    for (got, want) in recon.data().iter().zip(typed.data()) {
+    assert_eq!(
+        recon.dense_data().unwrap().len(),
+        typed.dense_data().unwrap().len()
+    );
+    for (got, want) in recon
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(typed.dense_data().unwrap())
+    {
         assert!(
             (got - want).abs() <= 1e-10 * want.abs().max(1.0),
             "{got} vs {want}"
@@ -4314,7 +4523,18 @@ fn truncated_eigh_reports_the_discarded_eigenvalue_norm() {
         "the fixture must discard nonzero values"
     );
     assert!((error - expected_error).abs() < 1e-12 * expected_error.max(1.0));
-    assert!(d.data().len() < typed.eigh_full().unwrap().d.data().len());
+    assert!(
+        d.materialize().unwrap().dense_data().unwrap().len()
+            < typed
+                .eigh_full()
+                .unwrap()
+                .d
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+                .len()
+    );
 }
 
 #[test]
@@ -4360,7 +4580,7 @@ fn eig_full_satisfies_the_eigen_equation_for_a_real_payload() {
     let av = typed.convert::<Complex64>().compose(&v).unwrap();
     let vd = v.compose(&d).unwrap();
 
-    assert_data_close_c64(av.data(), vd.data());
+    assert_data_close_c64(av.dense_data().unwrap(), vd.dense_data().unwrap());
 }
 
 #[test]
@@ -4373,17 +4593,29 @@ fn complex_eig_satisfies_the_eigen_equation_and_conjugates_its_spectrum() {
 
     let Eig { d, v } = typed.eig_full().unwrap();
     assert_data_close_c64(
-        typed.compose(&v).unwrap().data(),
-        v.compose(&d).unwrap().data(),
+        typed.compose(&v).unwrap().dense_data().unwrap(),
+        v.compose(&d).unwrap().dense_data().unwrap(),
     );
 
     // Genuinely complex, so a missing conjugation is observable.
     assert!(
-        d.data().iter().any(|value| value.im.abs() > 1e-6),
+        d.materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .any(|value| value.im.abs() > 1e-6),
         "the eig spectrum must be off the real axis for this to test anything"
     );
     let adjoint = d.adjoint().unwrap();
-    for (conjugated, original) in adjoint.data().iter().zip(d.data()) {
+    for (conjugated, original) in adjoint
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(d.materialize().unwrap().dense_data().unwrap())
+    {
         assert_eq!(*conjugated, original.conj());
     }
 }
@@ -4447,21 +4679,43 @@ fn hermitian_projections_satisfy_their_identities_and_predicate_truth_table() {
     let hermitian = project_hermitian!(typed).unwrap();
     let antihermitian = project_antihermitian!(typed).unwrap();
     assert_data_close_f64(
-        hermitian.axpby(1.0, &antihermitian, 1.0).unwrap().data(),
-        typed.data(),
-    );
-    assert_data_close_f64(hermitian.adjoint().unwrap().data(), hermitian.data());
-    assert_data_close_f64(
-        antihermitian.adjoint().unwrap().data(),
-        antihermitian.scale(-1.0).data(),
-    );
-    assert_data_close_f64(
-        project_hermitian!(hermitian).unwrap().data(),
-        hermitian.data(),
+        hermitian
+            .axpby(1.0, &antihermitian, 1.0)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        typed.dense_data().unwrap(),
     );
     assert_data_close_f64(
-        project_antihermitian!(antihermitian).unwrap().data(),
-        antihermitian.data(),
+        hermitian
+            .adjoint()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        hermitian.dense_data().unwrap(),
+    );
+    assert_data_close_f64(
+        antihermitian
+            .adjoint()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        antihermitian.scale(-1.0).dense_data().unwrap(),
+    );
+    assert_data_close_f64(
+        project_hermitian!(hermitian).unwrap().dense_data().unwrap(),
+        hermitian.dense_data().unwrap(),
+    );
+    assert_data_close_f64(
+        project_antihermitian!(antihermitian)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        antihermitian.dense_data().unwrap(),
     );
 
     let cases = [
@@ -4597,9 +4851,10 @@ fn inv_is_a_two_sided_inverse() {
         ("inv(t) * t", typed_inverse.compose(&typed).unwrap()),
     ] {
         let error = identity
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected.data())
+            .zip(expected.dense_data().unwrap())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f64, f64::max);
         assert!(error < 1e-9, "{name} is not the identity: {error}");
@@ -4634,9 +4889,12 @@ fn inv_of_a_compact_spectrum_is_the_elementwise_reciprocal() {
     let expected =
         TensorMap::<_, f64>::isomorphism(&runtime, &typed_s.domain(), &typed_s.domain()).unwrap();
     let error = product
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(expected.data())
+        .zip(expected.dense_data().unwrap())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
     assert!(error < 1e-9, "s * inv(s) is not the identity: {error}");
@@ -4716,9 +4974,10 @@ fn inv_accepts_isomorphic_but_unequal_codomain_and_domain() {
     let identity = tensor.compose(&inverse).unwrap();
     let expected = TensorMap::<_, f64>::isomorphism(&runtime, [&wide], [&wide]).unwrap();
     let error = identity
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(expected.data())
+        .zip(expected.dense_data().unwrap())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
     assert!(error < 1e-9, "t * inv(t) is not the identity: {error}");
@@ -4747,9 +5006,12 @@ fn pinv_satisfies_the_moore_penrose_identities() {
          actual: &TensorMap<tenet::core::Z2FusionRule, f64>,
          expected: &TensorMap<tenet::core::Z2FusionRule, f64>| {
             let error = actual
-                .data()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .zip(expected.data())
+                .zip(expected.dense_data().unwrap())
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0f64, f64::max);
             assert!(
@@ -4844,7 +5106,8 @@ fn pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff() {
     let dense_pinv = tensor.pinv(0.25).unwrap();
     // Kept: 1/4 for the surviving value. Cut: an exact 0 where 1/1 would be.
     let mut kept: Vec<f64> = dense_pinv
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .copied()
         .filter(|v| *v != 0.0)
@@ -4868,14 +5131,20 @@ fn pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff() {
         .unwrap()
         .compose(&tensor)
         .unwrap();
-    assert_eq!(triple.data(), thresholded.data());
-    assert_ne!(triple.data(), tensor.data());
+    assert_eq!(
+        triple.dense_data().unwrap(),
+        thresholded.dense_data().unwrap()
+    );
+    assert_ne!(triple.dense_data().unwrap(), tensor.dense_data().unwrap());
 
     // And on the compact arm.
     let spectrum = tensor.svd_compact().unwrap().s;
     let compact_pinv = spectrum.pinv(0.25).unwrap();
     let mut kept: Vec<f64> = compact_pinv
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
         .copied()
         .filter(|v| *v != 0.0)
@@ -4954,7 +5223,8 @@ fn pinv_uses_one_global_sigma_max_across_every_sector() {
 
     let pseudo = tensor.pinv(0.5).unwrap();
     let mut kept: Vec<f64> = pseudo
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .copied()
         .filter(|v| *v != 0.0)
@@ -4970,7 +5240,10 @@ fn pinv_uses_one_global_sigma_max_across_every_sector() {
     let kept = spectrum
         .pinv(0.5)
         .unwrap()
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
         .copied()
         .filter(|v| *v != 0.0)
@@ -4995,9 +5268,10 @@ fn exp_of_the_identity_is_e_times_the_identity() {
     let error = identity
         .exp()
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(expected.data())
+        .zip(expected.dense_data().unwrap())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
     assert!(error < 1e-12, "exp(id) != e * id: {error}");
@@ -5022,9 +5296,10 @@ fn exp_accepts_a_non_hermitian_endomorphism_and_inverts_under_negation() {
     let residual = typed_exp
         .compose(&inverse)
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(identity.data())
+        .zip(identity.dense_data().unwrap())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
     assert!(residual < 1e-11, "exp(A) exp(-A) != id: {residual}");
@@ -5045,7 +5320,15 @@ fn exp_of_a_compact_spectrum_stays_compact_and_is_elementwise() {
     let typed_exp = typed_s.exp().unwrap();
     // Every stored value is `exp` of the source's: the elementwise claim, read
     // off the materialized diagonal so it does not need a compact accessor.
-    for (index, (source, image)) in typed_s.data().iter().zip(typed_exp.data()).enumerate() {
+    for (index, (source, image)) in typed_s
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(typed_exp.materialize().unwrap().dense_data().unwrap())
+        .enumerate()
+    {
         let expected = if *source == 0.0 && !on_diagonal(&typed_s, index) {
             // Off-diagonal of the block-diagonal materialization: `exp` of a
             // diagonal is diagonal, so these stay zero rather than becoming 1.
@@ -5107,9 +5390,10 @@ fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
     assert!(!is_hermitian!(dense, 1e-9));
     let dense_exponential = dense.exp().unwrap();
     for (index, (source, value)) in dense
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(dense_exponential.data())
+        .zip(dense_exponential.dense_data().unwrap())
         .enumerate()
     {
         let expected = if on_diagonal(&dense, index) {
@@ -5126,7 +5410,15 @@ fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
     // Compact storage of the same values: accepted, elementwise.
     let spectrum = dense.eig_full().unwrap().d.scale(Complex64::new(1.0, 0.0));
     let image = spectrum.exp().unwrap();
-    for (index, (source, value)) in spectrum.data().iter().zip(image.data()).enumerate() {
+    for (index, (source, value)) in spectrum
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(image.materialize().unwrap().dense_data().unwrap())
+        .enumerate()
+    {
         let expected = if *source == Complex64::new(0.0, 0.0) && !on_diagonal(&spectrum, index) {
             Complex64::new(0.0, 0.0)
         } else {
@@ -5202,7 +5494,10 @@ fn map_diagonal_matches_hand_built_diagonals_on_a_dual_u1_bond() {
     assert_eq!(root.codomain(), vec![bond.clone()]);
     assert_eq!(root.domain(), vec![bond.clone()]);
     assert_eq!(root.diagview().unwrap(), expected.diagview().unwrap());
-    assert_eq!(bits_f64(root.data()), bits_f64(expected.data()));
+    assert_eq!(
+        bits_f64(root.materialize().unwrap().dense_data().unwrap()),
+        bits_f64(expected.materialize().unwrap().dense_data().unwrap())
+    );
 
     let reciprocal = source.map_diagonal(|value| 1.0 / value).unwrap();
     let expected: TensorMap<_, f64> = TensorMap::diagonal(
@@ -5215,7 +5510,10 @@ fn map_diagonal_matches_hand_built_diagonals_on_a_dual_u1_bond() {
         ]),
     )
     .unwrap();
-    assert_eq!(bits_f64(reciprocal.data()), bits_f64(expected.data()));
+    assert_eq!(
+        bits_f64(reciprocal.materialize().unwrap().dense_data().unwrap()),
+        bits_f64(expected.materialize().unwrap().dense_data().unwrap())
+    );
 
     // Complex payload: `f` decides the branch; `Complex64::sqrt` is principal.
     let source: TensorMap<_, Complex64> = TensorMap::diagonal(
@@ -5290,7 +5588,10 @@ fn map_diagonal_on_su2_repeats_each_value_over_its_carrier_dimension() {
     )
     .unwrap();
     assert_eq!(root.diagview().unwrap(), expected.diagview().unwrap());
-    assert_eq!(bits_f64(root.data()), bits_f64(expected.data()));
+    assert_eq!(
+        bits_f64(root.materialize().unwrap().dense_data().unwrap()),
+        bits_f64(expected.materialize().unwrap().dense_data().unwrap())
+    );
 
     let physical = root.to_physical_dense().unwrap();
     assert_eq!(physical.shape, vec![10, 10]);
@@ -5485,7 +5786,10 @@ fn compact_contract_identity_output_does_not_publish_a_transform_cache_entry() {
 
     let result = tensor.contract(&spectrum, &[2], &[0], &[0, 1, 2]).unwrap();
 
-    assert_eq!(result.data().len(), tensor.data().len());
+    assert_eq!(
+        result.dense_data().unwrap().len(),
+        tensor.dense_data().unwrap().len()
+    );
     assert_eq!(runtime.tree_transform_cache_info(), before);
 }
 
@@ -5529,7 +5833,12 @@ fn diagonal_contract_preserves_left_provider_authority_on_every_compact_arm() {
                 let (actual, expected) = (&actual[index], &expected[index]);
                 assert_same_legs(&actual.codomain(), &expected.codomain());
                 assert_same_legs(&actual.domain(), &expected.domain());
-                assert_eq!(actual.data(), expected.data(), "{} {arm} values", $name);
+                assert_eq!(
+                    actual.materialize().unwrap().dense_data().unwrap(),
+                    expected.dense_data().unwrap(),
+                    "{} {arm} values",
+                    $name
+                );
                 assert!(
                     std::ptr::eq(actual.provider(), providers[index]),
                     "{} {arm} lost left authority",
@@ -5588,14 +5897,17 @@ fn complex_diagonal_contract_matches_the_typed_dense_route() {
             .unwrap();
         assert_same_legs(&got.codomain(), &expected.codomain());
         assert_same_legs(&got.domain(), &expected.domain());
-        assert_data_close_c64(got.data(), expected.data());
+        assert_data_close_c64(got.dense_data().unwrap(), expected.dense_data().unwrap());
     }
 
     let expected = dense_s.contract(&dense_s, &[1], &[0], &[0, 1]).unwrap();
     let got = typed_s.contract(&typed_s, &[1], &[0], &[0, 1]).unwrap();
     assert_same_legs(&got.codomain(), &expected.codomain());
     assert_same_legs(&got.domain(), &expected.domain());
-    assert_data_close_c64(got.data(), expected.data());
+    assert_data_close_c64(
+        got.materialize().unwrap().dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+    );
     assert!(tenet::expert::diagonal_spectrum(&got).unwrap().is_some());
 }
 
@@ -5637,14 +5949,22 @@ fn the_diagonal_contract_arm_keeps_fermionic_signs() {
             .unwrap();
         assert_same_legs(&got.codomain(), &expected.codomain());
         assert_same_legs(&got.domain(), &expected.domain());
-        assert_eq!(got.data(), expected.data(), "fermionic {name}");
+        assert_eq!(
+            got.dense_data().unwrap(),
+            expected.dense_data().unwrap(),
+            "fermionic {name}"
+        );
     }
 
     let expected = dense_s.contract(&dense_s, &[1], &[0], &[0, 1]).unwrap();
     let got = typed_s.contract(&typed_s, &[1], &[0], &[0, 1]).unwrap();
     assert_same_legs(&got.codomain(), &expected.codomain());
     assert_same_legs(&got.domain(), &expected.domain());
-    assert_eq!(got.data(), expected.data(), "fermionic s*s");
+    assert_eq!(
+        got.materialize().unwrap().dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+        "fermionic s*s"
+    );
     assert!(tenet::expert::diagonal_spectrum(&got).unwrap().is_some());
 }
 
@@ -5793,7 +6113,11 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
                                     space_shape(&dense),
                                     "{label} space"
                                 );
-                                assert_eq!(fast.data(), dense.data(), "{label} payload");
+                                assert_eq!(
+                                    fast.dense_data().unwrap(),
+                                    dense.dense_data().unwrap(),
+                                    "{label} payload"
+                                );
                                 fired += 1;
                             }
                             (Err(_), Err(_)) => {}
@@ -5815,7 +6139,11 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
                                     space_shape(&dense),
                                     "{label} space"
                                 );
-                                assert_eq!(fast.data(), dense.data(), "{label} payload");
+                                assert_eq!(
+                                    fast.dense_data().unwrap(),
+                                    dense.dense_data().unwrap(),
+                                    "{label} payload"
+                                );
                                 fired += 1;
                             }
                             (Err(_), Err(_)) => {}
@@ -5841,7 +6169,11 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
                     match (dense, fast) {
                         (Ok(dense), Ok(fast)) => {
                             assert_eq!(space_shape(&fast), space_shape(&dense), "{label} space");
-                            assert_eq!(fast.data(), dense.data(), "{label} payload");
+                            assert_eq!(
+                                fast.materialize().unwrap().dense_data().unwrap(),
+                                dense.dense_data().unwrap(),
+                                "{label} payload"
+                            );
                         }
                         (Err(_), Err(_)) => {}
                         (dense, fast) => panic!(
@@ -5879,7 +6211,11 @@ where
     let dense = compact
         .axpby(D::from_real(1.0), &zeros, D::from_real(1.0))
         .expect("mixed add on one bond space is total");
-    assert_eq!(dense.data(), compact.data(), "the dense twin lost values");
+    assert_eq!(
+        dense.dense_data().unwrap(),
+        compact.materialize().unwrap().dense_data().unwrap(),
+        "the dense twin lost values"
+    );
     assert!(
         tenet::expert::diagonal_spectrum(&dense).unwrap().is_none(),
         "the dense twin stayed compact"
@@ -5941,7 +6277,11 @@ fn compact_rank_one_swaps_match_the_forced_dense_route() {
             typed_leg_shapes(&oracle),
             "{name} legs"
         );
-        assert_eq!(compact.data(), oracle.data(), "{name} payload");
+        assert_eq!(
+            compact.materialize().unwrap().dense_data().unwrap(),
+            oracle.dense_data().unwrap(),
+            "{name} payload"
+        );
     }
 }
 
@@ -5977,8 +6317,8 @@ fn compact_rank_one_swaps_match_the_dense_route_for_dual_and_fermionic_legs() {
                 "z3 dual={is_dual} {name} legs"
             );
             assert_eq!(
-                actual.data(),
-                expected.data(),
+                actual.materialize().unwrap().dense_data().unwrap(),
+                expected.dense_data().unwrap(),
                 "z3 dual={is_dual} {name} payload"
             );
         }
@@ -6010,8 +6350,8 @@ fn compact_rank_one_swaps_match_the_dense_route_for_dual_and_fermionic_legs() {
                 "fZ2 dual={is_dual} {name} legs"
             );
             assert_eq!(
-                actual.data(),
-                expected.data(),
+                actual.materialize().unwrap().dense_data().unwrap(),
+                expected.dense_data().unwrap(),
                 "fZ2 dual={is_dual} {name} payload"
             );
         }
@@ -6415,7 +6755,10 @@ fn compact_trace_boundary_geometries_keep_their_existing_routes() {
     let s = z2_bond(&runtime);
 
     let untouched: TensorMap<tenet::core::Z2FusionRule, f64> = s.trace_pairs(&[]).unwrap();
-    assert_eq!(untouched.data(), s.data());
+    assert_eq!(
+        untouched.materialize().unwrap().dense_data().unwrap(),
+        s.materialize().unwrap().dense_data().unwrap()
+    );
 
     for pairs in [vec![(0usize, 9usize)], vec![(0, 0)], vec![(0, 1), (1, 0)]] {
         assert!(matches!(
@@ -6498,7 +6841,7 @@ where
         },
     )
     .unwrap();
-    assert!(!typed.data().is_empty());
+    assert!(!typed.dense_data().unwrap().is_empty());
     typed
 }
 
@@ -6631,7 +6974,7 @@ fn assert_nonzero(what: &str, data: &[f64]) {
 /// recoupled fusion trees included: an entry is bilinear in the operands, so
 /// it has at most `len(lhs) * len(rhs)` distinct products.
 fn bilinear_terms<R>(lhs: &TensorMap<R, f64>, rhs: &TensorMap<R, f64>) -> usize {
-    lhs.data().len() * rhs.data().len()
+    lhs.dense_data().unwrap().len() * rhs.dense_data().unwrap().len()
 }
 
 /// Contract, compose, and compact-SVD laws shared by all three provider families.
@@ -6646,8 +6989,8 @@ fn assert_contract_compose_compact_laws_hold<R>(
     assert_ne!(shapes[0], shapes[1], "{what}: p and q must differ");
     assert!(shapes[1].0, "{what}: q must be dual");
     assert_ne!(
-        typed.0.data(),
-        typed.1.data(),
+        typed.0.dense_data().unwrap(),
+        typed.1.dense_data().unwrap(),
         "{what}: operands must differ"
     );
 
@@ -6672,23 +7015,23 @@ fn assert_contract_compose_compact_laws_hold<R>(
     let terms = bilinear_terms(typed.0, typed.1);
     numerics::assert_slices_close(
         &format!("{what}: order"),
-        ordered_contract.data(),
-        permuted_default.data(),
+        ordered_contract.dense_data().unwrap(),
+        permuted_default.dense_data().unwrap(),
         terms,
     );
     assert!(
         std::ptr::eq(ordered_contract.provider(), typed.0.provider()),
         "{what}: contract lost left provider authority"
     );
-    assert_nonzero(what, ordered_contract.data());
+    assert_nonzero(what, ordered_contract.dense_data().unwrap());
     assert_ne!(
         typed_leg_shapes(&default_contract),
         typed_leg_shapes(&ordered_contract),
         "{what}: the nonidentity output order did not move a leg"
     );
     assert_ne!(
-        default_contract.data(),
-        ordered_contract.data(),
+        default_contract.dense_data().unwrap(),
+        ordered_contract.dense_data().unwrap(),
         "{what}: the nonidentity output order left the buffer unchanged"
     );
 
@@ -6714,8 +7057,8 @@ fn assert_contract_compose_compact_laws_hold<R>(
     assert_same_legs(&composed.domain(), &typed.1.domain());
     numerics::assert_slices_close(
         &format!("{what}: compose"),
-        composed.data(),
-        twisted_contract.data(),
+        composed.dense_data().unwrap(),
+        twisted_contract.dense_data().unwrap(),
         terms,
     );
     assert!(
@@ -6725,17 +7068,19 @@ fn assert_contract_compose_compact_laws_hold<R>(
     let bound = numerics::tolerance::<f64>(
         terms,
         default_contract
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .fold(0.0, |max, v| v.abs().max(max)),
     );
     let differs = composed
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(default_contract.data())
+        .zip(default_contract.dense_data().unwrap())
         .any(|(a, b)| (a - b).abs() > bound);
     assert_eq!(differs, nontrivial_twist, "{what}: compose twist control");
-    assert_nonzero(what, composed.data());
+    assert_nonzero(what, composed.dense_data().unwrap());
 
     // Absorb the compact spectrum into U, then use the remaining Vh factor to
     // reconstruct the source. This tests the compact arm without comparing an
@@ -6755,10 +7100,10 @@ fn assert_contract_compose_compact_laws_hold<R>(
         std::ptr::eq(typed_absorbed.provider(), typed.0.provider()),
         "{what}: absorption lost left provider authority"
     );
-    assert_nonzero(what, typed_absorbed.data());
+    assert_nonzero(what, typed_absorbed.dense_data().unwrap());
     assert_ne!(
-        typed_absorbed.data(),
-        typed_u.data(),
+        typed_absorbed.dense_data().unwrap(),
+        typed_u.dense_data().unwrap(),
         "{what}: the diagonal factor was not applied"
     );
     let reconstructed = typed_absorbed
@@ -6766,7 +7111,10 @@ fn assert_contract_compose_compact_laws_hold<R>(
         .unwrap();
     assert_same_legs(&reconstructed.codomain(), &typed.0.codomain());
     assert_same_legs(&reconstructed.domain(), &typed.0.domain());
-    assert_data_close_f64(reconstructed.data(), typed.0.data());
+    assert_data_close_f64(
+        reconstructed.dense_data().unwrap(),
+        typed.0.dense_data().unwrap(),
+    );
     assert!(std::ptr::eq(reconstructed.provider(), typed.0.provider()));
 }
 
@@ -6852,11 +7200,16 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
     let terms = bilinear_terms(&fermionic_a, &fermionic_b);
     numerics::assert_slices_close(
         "fZ2 x U1 x SU2: compose is contract against the twisted right operand",
-        fermionic_a.compose(&fermionic_b).unwrap().data(),
+        fermionic_a
+            .compose(&fermionic_b)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         fermionic_a
             .contract(&twisted_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
             .unwrap()
-            .data(),
+            .dense_data()
+            .unwrap(),
         terms,
     );
     // And the twist is not vacuous: without it the two contractions differ.
@@ -6864,8 +7217,13 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
         fermionic_a
             .contract(&fermionic_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
             .unwrap()
-            .data(),
-        fermionic_a.compose(&fermionic_b).unwrap().data(),
+            .dense_data()
+            .unwrap(),
+        fermionic_a
+            .compose(&fermionic_b)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         "fZ2 x U1 x SU2: contract and compose must differ on a dual contracted leg"
     );
 
@@ -6876,8 +7234,9 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
         bosonic_a
             .contract(&bosonic_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
             .unwrap()
-            .data(),
-        bosonic_a.compose(&bosonic_b).unwrap().data(),
+            .dense_data()
+            .unwrap(),
+        bosonic_a.compose(&bosonic_b).unwrap().dense_data().unwrap(),
         bilinear_terms(&bosonic_a, &bosonic_b),
     );
 }
@@ -6901,25 +7260,36 @@ fn assert_reductions_and_factorizations_hold<R>(
     // swapping one moves the buffer.
     let typed_sum = typed.0.axpby(2.0, typed.1, -3.0).unwrap();
     for ((&actual, &left), &right) in typed_sum
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(typed.0.data())
-        .zip(typed.1.data())
+        .zip(typed.0.dense_data().unwrap())
+        .zip(typed.1.dense_data().unwrap())
     {
         assert_eq!(actual, 2.0 * left - 3.0 * right, "{what}: add");
     }
-    assert_nonzero(what, typed_sum.data());
+    assert_nonzero(what, typed_sum.dense_data().unwrap());
     assert_ne!(
-        typed.0.axpby(-3.0, typed.1, 2.0).unwrap().data(),
-        typed_sum.data(),
+        typed
+            .0
+            .axpby(-3.0, typed.1, 2.0)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        typed_sum.dense_data().unwrap(),
         "{what}: add is not symmetric in its coefficients"
     );
 
     let typed_scaled = typed.0.scale(-2.5);
-    for (&actual, &source) in typed_scaled.data().iter().zip(typed.0.data()) {
+    for (&actual, &source) in typed_scaled
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(typed.0.dense_data().unwrap())
+    {
         assert_eq!(actual, -2.5 * source, "{what}: scale");
     }
-    assert_nonzero(what, typed_scaled.data());
+    assert_nonzero(what, typed_scaled.dense_data().unwrap());
 
     let typed_inner = typed.0.inner(typed.1).unwrap();
     let reverse_inner = typed.1.inner(typed.0).unwrap();
@@ -6938,7 +7308,13 @@ fn assert_reductions_and_factorizations_hold<R>(
     );
     // And the weighting is (or is not) visible against the unweighted sum of
     // squares, per the family.
-    let unweighted: f64 = typed.0.data().iter().map(|value| value * value).sum();
+    let unweighted: f64 = typed
+        .0
+        .dense_data()
+        .unwrap()
+        .iter()
+        .map(|value| value * value)
+        .sum();
     assert_eq!(
         (self_inner - unweighted).abs() > 1e-9 * unweighted,
         dimension_weighted,
@@ -6950,19 +7326,25 @@ fn assert_reductions_and_factorizations_hold<R>(
         q: typed_q,
         r: typed_r,
     } = typed.0.qr_compact().unwrap();
-    assert_data_close_f64(typed_q.compose(&typed_r).unwrap().data(), typed.0.data());
+    assert_data_close_f64(
+        typed_q.compose(&typed_r).unwrap().dense_data().unwrap(),
+        typed.0.dense_data().unwrap(),
+    );
     assert!(is_isometric!(typed_q, 1e-12), "{what}: qr q");
     assert_same_legs(&typed_q.codomain(), &typed.0.codomain());
     assert_same_legs(&typed_r.domain(), &typed.0.domain());
     assert_same_legs(&typed_q.domain(), &typed_r.codomain());
-    assert_nonzero(what, typed_q.data());
-    assert_nonzero(what, typed_r.data());
+    assert_nonzero(what, typed_q.dense_data().unwrap());
+    assert_nonzero(what, typed_r.dense_data().unwrap());
 
     let Lq {
         l: typed_c,
         q: typed_vh,
     } = typed.0.lq_compact().unwrap();
-    assert_data_close_f64(typed_c.compose(&typed_vh).unwrap().data(), typed.0.data());
+    assert_data_close_f64(
+        typed_c.compose(&typed_vh).unwrap().dense_data().unwrap(),
+        typed.0.dense_data().unwrap(),
+    );
     assert!(
         is_isometric!(typed_vh.adjoint().unwrap(), 1e-12),
         "{what}: lq q"
@@ -6970,8 +7352,8 @@ fn assert_reductions_and_factorizations_hold<R>(
     assert_same_legs(&typed_c.codomain(), &typed.0.codomain());
     assert_same_legs(&typed_vh.domain(), &typed.0.domain());
     assert_same_legs(&typed_c.domain(), &typed_vh.codomain());
-    assert_nonzero(what, typed_c.data());
-    assert_nonzero(what, typed_vh.data());
+    assert_nonzero(what, typed_c.dense_data().unwrap());
+    assert_nonzero(what, typed_vh.dense_data().unwrap());
 
     let typed_spectrum = typed.0.svd_vals().unwrap();
     assert!(
@@ -7235,9 +7617,9 @@ fn typed_rand_with_seed_is_deterministic_f64() {
     let other: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 8).unwrap();
 
-    assert!(!first.data().is_empty());
-    assert_eq!(first.data(), replay.data());
-    assert_ne!(first.data(), other.data());
+    assert!(!first.dense_data().unwrap().is_empty());
+    assert_eq!(first.dense_data().unwrap(), replay.dense_data().unwrap());
+    assert_ne!(first.dense_data().unwrap(), other.dense_data().unwrap());
 }
 
 #[test]
@@ -7252,9 +7634,13 @@ fn typed_rand_with_seed_is_deterministic_c64() {
     let other: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 12).unwrap();
 
-    assert!(first.data().iter().any(|value| value.im != 0.0));
-    assert_eq!(first.data(), replay.data());
-    assert_ne!(first.data(), other.data());
+    assert!(first
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.im != 0.0));
+    assert_eq!(first.dense_data().unwrap(), replay.dense_data().unwrap());
+    assert_ne!(first.dense_data().unwrap(), other.dense_data().unwrap());
 }
 
 #[test]
@@ -7270,7 +7656,11 @@ fn rand_and_isomorphism_build_on_an_external_provider() {
 
     let random: TensorMap<ExternalZ3, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 0x9E37_79B9_7F4A_7C15).unwrap();
-    assert!(random.data().iter().any(|&value| value != 0.0));
+    assert!(random
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|&value| value != 0.0));
 
     // The fused non-dual isomorph of the dual leg has the same sector content.
     let f: TensorMap<ExternalZ3, f64> =
@@ -7280,7 +7670,7 @@ fn rand_and_isomorphism_build_on_an_external_provider() {
     // that makes the `assert_eq!` unable to pin `D` on its own (E0283).
     let id: TensorMap<ExternalZ3, f64> =
         TensorMap::isomorphism(&runtime, [&dual, &leg], [&dual, &leg]).unwrap();
-    assert_eq!(roundtrip.data(), id.data());
+    assert_eq!(roundtrip.dense_data().unwrap(), id.dense_data().unwrap());
 }
 
 #[test]
@@ -7302,7 +7692,7 @@ fn typed_isomorphism_satisfies_the_identity_law_on_a_builtin_rule() {
     // identity-law test above).
     let id: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::isomorphism(&runtime, [&leg, &dual], [&leg, &dual]).unwrap();
-    assert_eq!(roundtrip.data(), id.data());
+    assert_eq!(roundtrip.dense_data().unwrap(), id.dense_data().unwrap());
 }
 
 #[test]
@@ -7338,7 +7728,7 @@ fn typed_isometry_embeds_and_satisfies_the_identity_law() {
     // identity-law test above).
     let id: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::isomorphism(&runtime, [&small], [&small]).unwrap();
-    assert_eq!(roundtrip.data(), id.data());
+    assert_eq!(roundtrip.dense_data().unwrap(), id.dense_data().unwrap());
 }
 
 #[test]
@@ -7504,8 +7894,14 @@ fn typed_isomorphism_is_unitary_on_the_norm_fuser_shape() {
         TensorMap::isomorphism(&runtime, [&typed_dual, &typed_v], [&typed_dual, &typed_v]).unwrap();
 
     assert_eq!(
-        typed.adjoint().unwrap().compose(&typed).unwrap().data(),
-        identity.data()
+        typed
+            .adjoint()
+            .unwrap()
+            .compose(&typed)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        identity.dense_data().unwrap()
     );
 }
 
@@ -7521,8 +7917,14 @@ fn typed_c64_unitary_satisfies_the_identity_law() {
         TensorMap::isomorphism(&runtime, [&leg_dual, &leg], [&leg_dual, &leg]).unwrap();
 
     assert_eq!(
-        typed.adjoint().unwrap().compose(&typed).unwrap().data(),
-        identity.data()
+        typed
+            .adjoint()
+            .unwrap()
+            .compose(&typed)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        identity.dense_data().unwrap()
     );
 }
 
@@ -7557,8 +7959,14 @@ fn typed_isometry_on_a_dual_domain_satisfies_the_identity_law() {
         TensorMap::isomorphism(&runtime, [&small], [&small]).unwrap();
 
     assert_eq!(
-        typed.adjoint().unwrap().compose(&typed).unwrap().data(),
-        identity.data()
+        typed
+            .adjoint()
+            .unwrap()
+            .compose(&typed)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        identity.dense_data().unwrap()
     );
 }
 
@@ -7579,7 +7987,7 @@ fn typed_su2_isomorphism_satisfies_the_identity_law() {
     // identity-law test above).
     let id: TensorMap<ExternalSu2, f64> =
         TensorMap::isomorphism(&runtime, [&leg, &leg], [&leg, &leg]).unwrap();
-    assert_eq!(roundtrip.data(), id.data());
+    assert_eq!(roundtrip.dense_data().unwrap(), id.dense_data().unwrap());
 }
 
 // ---------------------------------------------------------------------------
@@ -7630,21 +8038,33 @@ fn typed_polar_reconstructs_the_input_f64_u1_and_c64_fz2() {
     let tall: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 3).unwrap();
     let LeftPolar { w, p } = tall.left_polar().unwrap();
-    assert_data_close_f64(w.compose(&p).unwrap().data(), tall.data());
+    assert_data_close_f64(
+        w.compose(&p).unwrap().dense_data().unwrap(),
+        tall.dense_data().unwrap(),
+    );
     let wide: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 5).unwrap();
     let RightPolar { p, wh: w } = wide.right_polar().unwrap();
-    assert_data_close_f64(p.compose(&w).unwrap().data(), wide.data());
+    assert_data_close_f64(
+        p.compose(&w).unwrap().dense_data().unwrap(),
+        wide.dense_data().unwrap(),
+    );
 
     let leg = fz2_typed_leg();
     let tall: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 7).unwrap();
     let LeftPolar { w, p } = tall.left_polar().unwrap();
-    assert_data_close_c64(w.compose(&p).unwrap().data(), tall.data());
+    assert_data_close_c64(
+        w.compose(&p).unwrap().dense_data().unwrap(),
+        tall.dense_data().unwrap(),
+    );
     let wide: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 11).unwrap();
     let RightPolar { p, wh: w } = wide.right_polar().unwrap();
-    assert_data_close_c64(p.compose(&w).unwrap().data(), wide.data());
+    assert_data_close_c64(
+        p.compose(&w).unwrap().dense_data().unwrap(),
+        wide.dense_data().unwrap(),
+    );
 }
 
 #[test]
@@ -7662,7 +8082,15 @@ fn typed_polar_factor_laws_hold() {
     let LeftPolar { w, p } = tall.left_polar().unwrap();
     let id: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::isomorphism(&runtime, [&leg], [&leg]).unwrap();
-    assert_data_close_c64(w.adjoint().unwrap().compose(&w).unwrap().data(), id.data());
+    assert_data_close_c64(
+        w.adjoint()
+            .unwrap()
+            .compose(&w)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        id.dense_data().unwrap(),
+    );
     assert!(is_hermitian!(p, 1e-12));
     for entry in p.eigh_vals().unwrap() {
         assert!(entry.values.iter().all(|&value| value >= -1e-12));
@@ -7675,7 +8103,13 @@ fn typed_polar_factor_laws_hold() {
     let RightPolar { p, wh: w } = wide.right_polar().unwrap();
     let id: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::isomorphism(&runtime, [&leg], [&leg]).unwrap();
-    assert_data_close_f64(w.compose(&w.adjoint().unwrap()).unwrap().data(), id.data());
+    assert_data_close_f64(
+        w.compose(&w.adjoint().unwrap())
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        id.dense_data().unwrap(),
+    );
     assert!(is_hermitian!(p, 1e-12));
     for entry in p.eigh_vals().unwrap() {
         assert!(entry.values.iter().all(|&value| value >= -1e-12));
@@ -7768,11 +8202,14 @@ fn typed_polar_carries_an_external_provider() {
         .unwrap();
 
     let LeftPolar { w, p } = tensor.left_polar().unwrap();
-    assert_data_close_f64(w.compose(&p).unwrap().data(), tensor.data());
+    assert_data_close_f64(
+        w.compose(&p).unwrap().dense_data().unwrap(),
+        tensor.dense_data().unwrap(),
+    );
     let gram = w.adjoint().unwrap().compose(&w).unwrap();
     let id: TensorMap<ExternalZ3, f64> =
         TensorMap::isomorphism(&runtime, [&wide, &narrow], [&wide, &narrow]).unwrap();
-    assert_data_close_f64(gram.data(), id.data());
+    assert_data_close_f64(gram.dense_data().unwrap(), id.dense_data().unwrap());
 }
 
 // ---------------------------------------------------------------------------
@@ -7881,14 +8318,27 @@ fn typed_zeros_like_keeps_the_spaces_and_zeroes_the_payload() {
     let zeros: TensorMap<tenet::core::Z2FusionRule, f64> = typed.zeros_like();
     assert_same_legs(&zeros.codomain(), &typed.codomain());
     assert_same_legs(&zeros.domain(), &typed.domain());
-    assert_eq!(zeros.data().len(), typed.data().len());
-    assert!(zeros.data().iter().all(|&value| value == 0.0));
+    assert_eq!(
+        zeros.dense_data().unwrap().len(),
+        typed.dense_data().unwrap().len()
+    );
+    assert!(zeros
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|&value| value == 0.0));
 
     // A compact spectrum factor stays on its bond space with a zero spectrum.
     let s: TensorMap<tenet::core::Z2FusionRule, f64> = typed.svd_compact().unwrap().s;
     let s_zeros: TensorMap<tenet::core::Z2FusionRule, f64> = s.zeros_like();
     assert_same_legs(&s_zeros.codomain(), &s.codomain());
-    assert!(s_zeros.data().iter().all(|&value| value == 0.0));
+    assert!(s_zeros
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|&value| value == 0.0));
 }
 
 #[test]
@@ -7901,18 +8351,22 @@ fn typed_to_c64_widens_dense_and_compact_values_exactly() {
 
     let typed_wide: TensorMap<tenet::core::Z2FusionRule, Complex64> = typed.convert::<Complex64>();
     assert!(typed_wide
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(typed.data())
+        .zip(typed.dense_data().unwrap())
         .all(|(&wide, &real)| wide == Complex64::new(real, 0.0)));
 
     let typed_s: TensorMap<tenet::core::Z2FusionRule, f64> = typed.svd_compact().unwrap().s;
     let typed_s_wide: TensorMap<tenet::core::Z2FusionRule, Complex64> =
         typed_s.convert::<Complex64>();
     assert!(typed_s_wide
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(typed_s.data())
+        .zip(typed_s.materialize().unwrap().dense_data().unwrap())
         .all(|(&wide, &real)| wide == Complex64::new(real, 0.0)));
 }
 
@@ -7936,15 +8390,24 @@ fn typed_re_im_reconstruct_the_complex_tensor_byte_exactly() {
             Complex64::new(0.0, 1.0),
         )
         .unwrap();
-    assert_eq!(rebuilt.data(), complex_typed.data());
+    assert_eq!(
+        rebuilt.dense_data().unwrap(),
+        complex_typed.dense_data().unwrap()
+    );
 
     let real_typed = z2_tensor(&runtime);
     let round_trip: TensorMap<tenet::core::Z2FusionRule, f64> =
         real_typed.convert::<Complex64>().re();
-    assert_eq!(round_trip.data(), real_typed.data());
+    assert_eq!(
+        round_trip.dense_data().unwrap(),
+        real_typed.dense_data().unwrap()
+    );
     let vanished: TensorMap<tenet::core::Z2FusionRule, f64> =
         real_typed.convert::<Complex64>().im();
-    assert_eq!(vanished.data(), real_typed.zeros_like().data());
+    assert_eq!(
+        vanished.dense_data().unwrap(),
+        real_typed.zeros_like().dense_data().unwrap()
+    );
 }
 
 #[test]
@@ -7968,7 +8431,10 @@ fn typed_re_im_keep_a_compact_spectrum_on_its_bond_space() {
             Complex64::new(0.0, 1.0),
         )
         .unwrap();
-    assert_eq!(rebuilt.data(), s.data());
+    assert_eq!(
+        rebuilt.materialize().unwrap().dense_data().unwrap(),
+        s.materialize().unwrap().dense_data().unwrap()
+    );
 }
 
 #[test]
@@ -8111,7 +8577,10 @@ fn typed_cat_preserves_a_dual_changed_leg_and_its_slabs() {
         vec![tenet::core::Z2Irrep::EVEN, tenet::core::Z2Irrep::ODD]
     );
     assert_eq!(changed.degeneracies(), &[3, 2]);
-    assert_eq!(typed_joined.data(), &[0.0, 1.0, 0.0, 10.0, 11.0]);
+    assert_eq!(
+        typed_joined.dense_data().unwrap(),
+        &[0.0, 1.0, 0.0, 10.0, 11.0]
+    );
 }
 
 #[test]
@@ -8134,7 +8603,10 @@ fn typed_cat_pins_the_slab_order_by_value() {
             .unwrap();
     let joined: TensorMap<tenet::core::U1FusionRule, f64> = a.cat(&b, Side::Domain).unwrap();
     // Column-major: lhs column [1, 2], then rhs columns [3, 4] and [5, 6].
-    assert_eq!(joined.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(
+        joined.dense_data().unwrap(),
+        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    );
 
     let at: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::from_subblock_fn(&runtime, [&v1], [&w], |_, i| (i[1] + 1) as f64).unwrap();
@@ -8143,7 +8615,10 @@ fn typed_cat_pins_the_slab_order_by_value() {
             .unwrap();
     let stacked: TensorMap<tenet::core::U1FusionRule, f64> = at.cat(&bt, Side::Codomain).unwrap();
     // Row slabs: lhs row first within each column.
-    assert_eq!(stacked.data(), &[1.0, 3.0, 4.0, 2.0, 5.0, 6.0]);
+    assert_eq!(
+        stacked.dense_data().unwrap(),
+        &[1.0, 3.0, 4.0, 2.0, 5.0, 6.0]
+    );
 }
 
 #[test]
@@ -8171,7 +8646,10 @@ fn typed_absorb_pins_the_common_prefix_by_value() {
     // destination (column-major 2x3): [11, 21, 12, 22, 13, 23]
     // source (column-major 3x2): [-11, -21, -31, -12, -22, -32]
     let absorbed: TensorMap<tenet::core::U1FusionRule, f64> = destination.absorb(&source).unwrap();
-    assert_eq!(absorbed.data(), &[-11.0, -21.0, -12.0, -22.0, 13.0, 23.0]);
+    assert_eq!(
+        absorbed.dense_data().unwrap(),
+        &[-11.0, -21.0, -12.0, -22.0, 13.0, 23.0]
+    );
 }
 
 #[test]
@@ -8187,14 +8665,19 @@ fn typed_absorb_is_total_for_disjoint_zero_extent_and_rank_zero() {
     let disjoint: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::from_subblock_fn(&runtime, [&one], [&one], |_, _| 7.0).unwrap();
     assert_eq!(
-        destination.absorb(&disjoint).unwrap().data(),
-        destination.data()
+        destination.absorb(&disjoint).unwrap().dense_data().unwrap(),
+        destination.dense_data().unwrap()
     );
 
     let zero_extent = u1_leg(&provider, &[(0, 0)]);
     let empty: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::zeros(&runtime, [&zero_extent], [&zero_extent]).unwrap();
-    assert!(empty.absorb(&destination).unwrap().data().is_empty());
+    assert!(empty
+        .absorb(&destination)
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .is_empty());
 
     let vector: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::from_subblock_fn(&runtime, [&zero], [], |_, _| 2.0).unwrap();
@@ -8407,7 +8890,7 @@ fn external_z3_cat_and_absorb_hold_by_value() {
     // Blocks in coupled-sector order: charge 0 holds only the lhs value, the
     // shared charge 1 holds the lhs column then the rhs column; charge 2 has
     // no codomain sector, so the merged leg carries it without a block.
-    assert_eq!(joined.data(), &[1.0, 2.0, 11.0]);
+    assert_eq!(joined.dense_data().unwrap(), &[1.0, 2.0, 11.0]);
     assert_eq!(
         joined.domain()[0].sectors().unwrap(),
         vec![Z3Charge(0), Z3Charge(1), Z3Charge(2)]
@@ -8426,7 +8909,7 @@ fn external_z3_cat_and_absorb_hold_by_value() {
     let absorbed: TensorMap<ExternalZ3, f64> = a.absorb(&c).unwrap();
     // a's blocks: charge 0 -> 1.0, charge 1 -> 2.0; c has only charge 1
     // (value 101.0). The non-shared charge-0 block is untouched.
-    assert_eq!(absorbed.data(), &[1.0, 101.0]);
+    assert_eq!(absorbed.dense_data().unwrap(), &[1.0, 101.0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -8541,23 +9024,41 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
     let simple = typed_fz2_two_block(&runtime, false);
     let dual = typed_fz2_two_block(&runtime, true);
     assert_eq!(
-        simple.flip(&[0], Direction::Inverse).unwrap().data(),
+        simple
+            .flip(&[0], Direction::Inverse)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         &[2.0, -3.0]
     );
     assert_eq!(
-        dual.flip(&[0], Direction::Inverse).unwrap().data(),
+        dual.flip(&[0], Direction::Inverse)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         &[2.0, 3.0]
     );
     assert_eq!(
-        simple.flip(&[1], Direction::Inverse).unwrap().data(),
+        simple
+            .flip(&[1], Direction::Inverse)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         &[2.0, 3.0]
     );
     assert_eq!(
-        dual.flip(&[1], Direction::Inverse).unwrap().data(),
+        dual.flip(&[1], Direction::Inverse)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         &[2.0, -3.0]
     );
     assert_eq!(
-        simple.twist(&[0], Direction::Inverse).unwrap().data(),
+        simple
+            .twist(&[0], Direction::Inverse)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         &[2.0, -3.0]
     );
     assert_ne!(
@@ -8566,8 +9067,9 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
             .unwrap()
             .flip(&[1], Direction::Forward)
             .unwrap()
-            .data(),
-        simple.data()
+            .dense_data()
+            .unwrap(),
+        simple.dense_data().unwrap()
     );
     for restored in [
         simple
@@ -8581,27 +9083,40 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
             .flip(&[1], Direction::Forward)
             .unwrap(),
     ] {
-        assert_eq!(restored.data(), simple.data());
+        assert_eq!(restored.dense_data().unwrap(), simple.dense_data().unwrap());
         assert_same_legs(&restored.codomain(), &simple.codomain());
         assert_same_legs(&restored.domain(), &simple.domain());
     }
     assert_eq!(
-        simple.flip(&[1, 1], Direction::Inverse).unwrap().data(),
+        simple
+            .flip(&[1, 1], Direction::Inverse)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         simple
             .flip(&[1], Direction::Inverse)
             .unwrap()
             .flip(&[1], Direction::Inverse)
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
     );
 
     let complex = simple.convert::<Complex64>();
     assert_eq!(
-        complex.flip(&[0], Direction::Inverse).unwrap().data(),
+        complex
+            .flip(&[0], Direction::Inverse)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         &[2.0.into(), (-3.0).into()]
     );
     assert_eq!(
-        complex.twist(&[0], Direction::Inverse).unwrap().data(),
+        complex
+            .twist(&[0], Direction::Inverse)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         &[2.0.into(), (-3.0).into()]
     );
 
@@ -8611,8 +9126,20 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
     let spin_half_dual = spin_half.try_dual().unwrap();
     let su2: TensorMap<SU2FusionRule, f64> =
         TensorMap::from_subblock_fn(&runtime, [&spin_half_dual], [&spin_half], |_, _| 5.0).unwrap();
-    assert_eq!(su2.flip(&[0], Direction::Inverse).unwrap().data(), &[5.0]);
-    assert_eq!(su2.flip(&[1], Direction::Inverse).unwrap().data(), &[-5.0]);
+    assert_eq!(
+        su2.flip(&[0], Direction::Inverse)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        &[5.0]
+    );
+    assert_eq!(
+        su2.flip(&[1], Direction::Inverse)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        &[-5.0]
+    );
 
     let structured = fz2_index(&runtime);
     let twisted = structured.twist(&[0, 1, 2], Direction::Inverse).unwrap();
@@ -8651,9 +9178,12 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
     let u1: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::from_subblock_fn(&runtime, [&u1_leg], [&u1_leg], |_, _| 7.0).unwrap();
     let u1_twist = u1.twist(&[0, 1], Direction::Inverse).unwrap();
-    assert_eq!(u1_twist.data().as_ptr(), u1.data().as_ptr());
+    assert_eq!(
+        u1_twist.dense_data().unwrap().as_ptr(),
+        u1.dense_data().unwrap().as_ptr()
+    );
     let u1_flip = u1.flip(&[0], Direction::Inverse).unwrap();
-    assert_eq!(u1_flip.data(), u1.data());
+    assert_eq!(u1_flip.dense_data().unwrap(), u1.dense_data().unwrap());
     assert_same_typed_block_structure!(&u1_flip, &u1);
     assert_eq!(u1_flip.codomain()[0].is_dual(), !u1.codomain()[0].is_dual());
     assert_same_legs(&u1_flip.domain(), &u1.domain());
@@ -8671,8 +9201,9 @@ fn inverse_index_ops_cover_the_fermionic_simple_product() {
                 .unwrap()
                 .twist(legs, Direction::Inverse)
                 .unwrap()
-                .data(),
-            typed.data()
+                .dense_data()
+                .unwrap(),
+            typed.dense_data().unwrap()
         );
         assert_eq!(
             typed
@@ -8680,8 +9211,9 @@ fn inverse_index_ops_cover_the_fermionic_simple_product() {
                 .unwrap()
                 .flip(legs, Direction::Inverse)
                 .unwrap()
-                .data(),
-            typed.data()
+                .dense_data()
+                .unwrap(),
+            typed.dense_data().unwrap()
         );
     }
 }
@@ -8695,15 +9227,15 @@ fn typed_flip_and_twist_pin_the_doctest_values() {
     let typed = typed_fz2_doctest(&runtime);
     let flipped: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.flip(&[1], Direction::Forward).unwrap();
-    assert_eq!(flipped.data(), &[2.0, -3.0]);
+    assert_eq!(flipped.dense_data().unwrap(), &[2.0, -3.0]);
     assert_eq!(flipped.domain()[0].is_dual(), !typed.domain()[0].is_dual());
 
     let twisted: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.twist(&[1], Direction::Forward).unwrap();
-    assert_eq!(twisted.data(), &[2.0, -3.0]);
+    assert_eq!(twisted.dense_data().unwrap(), &[2.0, -3.0]);
     let back: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         twisted.twist(&[1], Direction::Forward).unwrap();
-    assert_eq!(back.data(), typed.data());
+    assert_eq!(back.dense_data().unwrap(), typed.dense_data().unwrap());
 }
 
 #[test]
@@ -8721,16 +9253,16 @@ fn typed_multi_leg_dense_twist_is_the_per_leg_product_by_value() {
     // live at all on this fixture).
     let one: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.twist(&[0], Direction::Forward).unwrap();
-    assert_eq!(one.data(), &[2.0, -3.0]);
+    assert_eq!(one.dense_data().unwrap(), &[2.0, -3.0]);
     // Two *different* legs: the odd block scales by θ·θ = (−1)² = +1 — the
     // per-leg product, not a single factor.
     let both: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.twist(&[0, 1], Direction::Forward).unwrap();
-    assert_eq!(both.data(), &[2.0, 3.0]);
+    assert_eq!(both.dense_data().unwrap(), &[2.0, 3.0]);
     // The same leg listed twice: identity by value, for the same θ² reason.
     let twice: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.twist(&[1, 1], Direction::Forward).unwrap();
-    assert_eq!(twice.data(), &[2.0, 3.0]);
+    assert_eq!(twice.dense_data().unwrap(), &[2.0, 3.0]);
 }
 
 #[test]
@@ -8747,13 +9279,13 @@ fn typed_flip_is_a_fourth_root_of_identity_and_flip_squared_scales_odd_blocks() 
         f1.flip(&[1], Direction::Forward).unwrap();
     assert_same_legs(&f2.codomain(), &typed.codomain());
     assert_same_legs(&f2.domain(), &typed.domain());
-    assert_eq!(f2.data(), &[2.0, -3.0]);
+    assert_eq!(f2.dense_data().unwrap(), &[2.0, -3.0]);
     let f4: TensorMap<tenet::core::FermionParityFusionRule, f64> = f2
         .flip(&[1], Direction::Forward)
         .unwrap()
         .flip(&[1], Direction::Forward)
         .unwrap();
-    assert_eq!(f4.data(), typed.data());
+    assert_eq!(f4.dense_data().unwrap(), typed.dense_data().unwrap());
 }
 
 #[test]
@@ -8765,13 +9297,16 @@ fn typed_flip_repeated_leg_in_one_call_is_sequential() {
     let typed = typed_fz2_doctest(&runtime);
     let typed_twice: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.flip(&[1, 1], Direction::Forward).unwrap();
-    assert_eq!(typed_twice.data(), &[2.0, -3.0]);
+    assert_eq!(typed_twice.dense_data().unwrap(), &[2.0, -3.0]);
     let typed_stepwise: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed
         .flip(&[1], Direction::Forward)
         .unwrap()
         .flip(&[1], Direction::Forward)
         .unwrap();
-    assert_eq!(typed_twice.data(), typed_stepwise.data());
+    assert_eq!(
+        typed_twice.dense_data().unwrap(),
+        typed_stepwise.dense_data().unwrap()
+    );
     assert_same_legs(&typed_twice.domain(), &typed.domain());
 }
 
@@ -8807,8 +9342,8 @@ fn typed_insert_unit_round_trips_at_every_position_and_shares_the_payload() {
                         .unwrap()
                 };
                 assert_eq!(
-                    inserted.data().as_ptr(),
-                    typed.data().as_ptr(),
+                    inserted.dense_data().unwrap().as_ptr(),
+                    typed.dense_data().unwrap().as_ptr(),
                     "left={left} position={position} dual={dual}"
                 );
                 let legs: Vec<_> = inserted
@@ -8820,7 +9355,10 @@ fn typed_insert_unit_round_trips_at_every_position_and_shares_the_payload() {
                 assert_eq!(legs[position].degeneracies(), &[1]);
                 let removed: TensorMap<tenet::core::FermionParityFusionRule, f64> =
                     inserted.remove_unit(position).unwrap();
-                assert_eq!(removed.data().as_ptr(), typed.data().as_ptr());
+                assert_eq!(
+                    removed.dense_data().unwrap().as_ptr(),
+                    typed.dense_data().unwrap().as_ptr()
+                );
                 assert_same_legs(&removed.codomain(), &typed.codomain());
                 assert_same_legs(&removed.domain(), &typed.domain());
             }
@@ -8862,21 +9400,27 @@ fn typed_index_op_error_classes_and_empty_shortcuts_are_stable() {
     // Empty leg list: identical clone, shared buffer typed-side.
     let typed_untwisted: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.twist(&[], Direction::Forward).unwrap();
-    assert_eq!(typed_untwisted.data().as_ptr(), typed.data().as_ptr());
+    assert_eq!(
+        typed_untwisted.dense_data().unwrap().as_ptr(),
+        typed.dense_data().unwrap().as_ptr()
+    );
     let typed_unflipped: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.flip(&[], Direction::Forward).unwrap();
-    assert_eq!(typed_unflipped.data().as_ptr(), typed.data().as_ptr());
+    assert_eq!(
+        typed_unflipped.dense_data().unwrap().as_ptr(),
+        typed.dense_data().unwrap().as_ptr()
+    );
     let typed_untwisted_inverse: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.twist(&[], Direction::Inverse).unwrap();
     assert_eq!(
-        typed_untwisted_inverse.data().as_ptr(),
-        typed.data().as_ptr()
+        typed_untwisted_inverse.dense_data().unwrap().as_ptr(),
+        typed.dense_data().unwrap().as_ptr()
     );
     let typed_unflipped_inverse: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.flip(&[], Direction::Inverse).unwrap();
     assert_eq!(
-        typed_unflipped_inverse.data().as_ptr(),
-        typed.data().as_ptr()
+        typed_unflipped_inverse.dense_data().unwrap().as_ptr(),
+        typed.dense_data().unwrap().as_ptr()
     );
 
     // Insert: position past the rank.
@@ -8924,16 +9468,26 @@ fn typed_twist_on_a_compact_spectrum_matches_the_dense_route() {
     let typed_twisted: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed_s.twist(&[0], Direction::Forward).unwrap();
     assert_eq!(
-        typed_twisted.data(),
-        dense.twist(&[0], Direction::Forward).unwrap().data()
+        typed_twisted.materialize().unwrap().dense_data().unwrap(),
+        dense
+            .twist(&[0], Direction::Forward)
+            .unwrap()
+            .dense_data()
+            .unwrap()
     );
     // And the two-leg twist is the identity on the bond (θ² = 1 per sector).
     let typed_both: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed_s.twist(&[0, 1], Direction::Forward).unwrap();
-    assert_eq!(typed_both.data(), typed_s.data());
+    assert_eq!(
+        typed_both.materialize().unwrap().dense_data().unwrap(),
+        typed_s.materialize().unwrap().dense_data().unwrap()
+    );
     let typed_inverse: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed_s.twist(&[0], Direction::Inverse).unwrap();
-    assert_eq!(typed_inverse.data(), typed_twisted.data());
+    assert_eq!(
+        typed_inverse.materialize().unwrap().dense_data().unwrap(),
+        typed_twisted.materialize().unwrap().dense_data().unwrap()
+    );
 }
 
 #[test]
@@ -8956,12 +9510,15 @@ fn external_z3_twist_flip_and_units_hold_by_value() {
 
     // Twist: identity, shared buffer.
     let twisted: TensorMap<ExternalZ3, f64> = t.twist(&[0, 1], Direction::Forward).unwrap();
-    assert_eq!(twisted.data().as_ptr(), t.data().as_ptr());
+    assert_eq!(
+        twisted.dense_data().unwrap().as_ptr(),
+        t.dense_data().unwrap().as_ptr()
+    );
 
     // Flip: values unchanged, duality flags toggled, non-self-dual sector
     // sets preserved as stored (flip toggles the flag, not the labels).
     let flipped: TensorMap<ExternalZ3, f64> = t.flip(&[0, 1], Direction::Forward).unwrap();
-    assert_eq!(flipped.data(), t.data());
+    assert_eq!(flipped.dense_data().unwrap(), t.dense_data().unwrap());
     assert!(flipped.codomain()[0].is_dual());
     assert!(!flipped.domain()[0].is_dual());
     assert_eq!(
@@ -8973,10 +9530,16 @@ fn external_z3_twist_flip_and_units_hold_by_value() {
     // payload reuse observable through `data()`.
     let inserted: TensorMap<ExternalZ3, f64> =
         t.insert_unit(1, Side::Codomain, Duality::Dual).unwrap();
-    assert_eq!(inserted.data().as_ptr(), t.data().as_ptr());
+    assert_eq!(
+        inserted.dense_data().unwrap().as_ptr(),
+        t.dense_data().unwrap().as_ptr()
+    );
     assert_eq!(inserted.codomain()[1].sectors().unwrap(), vec![Z3Charge(0)]);
     let removed: TensorMap<ExternalZ3, f64> = inserted.remove_unit(1).unwrap();
-    assert_eq!(removed.data().as_ptr(), t.data().as_ptr());
+    assert_eq!(
+        removed.dense_data().unwrap().as_ptr(),
+        t.dense_data().unwrap().as_ptr()
+    );
     assert_same_legs(&removed.codomain(), &t.codomain());
     assert_same_legs(&removed.domain(), &t.domain());
 }
@@ -9170,9 +9733,15 @@ fn external_nobraiding_vacuum_only_legs_twist_passes_flip_rejects() {
         .unwrap();
 
     let twisted: TensorMap<PlanarZ2, f64> = t.twist(&[0, 1], Direction::Forward).unwrap();
-    assert_eq!(twisted.data().as_ptr(), t.data().as_ptr());
+    assert_eq!(
+        twisted.dense_data().unwrap().as_ptr(),
+        t.dense_data().unwrap().as_ptr()
+    );
     let twisted_inverse: TensorMap<PlanarZ2, f64> = t.twist(&[0, 1], Direction::Inverse).unwrap();
-    assert_eq!(twisted_inverse.data().as_ptr(), t.data().as_ptr());
+    assert_eq!(
+        twisted_inverse.dense_data().unwrap().as_ptr(),
+        t.dense_data().unwrap().as_ptr()
+    );
 
     let flip_error = t.flip(&[0], Direction::Forward).unwrap_err();
     assert!(
@@ -9189,9 +9758,15 @@ fn external_nobraiding_vacuum_only_legs_twist_passes_flip_rejects() {
     ));
 
     let unflipped: TensorMap<PlanarZ2, f64> = t.flip(&[], Direction::Forward).unwrap();
-    assert_eq!(unflipped.data().as_ptr(), t.data().as_ptr());
+    assert_eq!(
+        unflipped.dense_data().unwrap().as_ptr(),
+        t.dense_data().unwrap().as_ptr()
+    );
     let unflipped_inverse: TensorMap<PlanarZ2, f64> = t.flip(&[], Direction::Inverse).unwrap();
-    assert_eq!(unflipped_inverse.data().as_ptr(), t.data().as_ptr());
+    assert_eq!(
+        unflipped_inverse.dense_data().unwrap().as_ptr(),
+        t.dense_data().unwrap().as_ptr()
+    );
 }
 
 #[test]
@@ -9213,17 +9788,16 @@ fn cu1_typed_rank_three_permutation_pins_the_gauge_contract_and_recoupling_value
         .iter()
         .chain(tensor.domain().iter())
         .all(|space| space.degeneracies() == [1]));
-    assert_eq!(tensor.data(), [1.0, 1.0, 1.0]);
+    assert_eq!(tensor.dense_data().unwrap(), [1.0, 1.0, 1.0]);
     let permuted = tensor.permute(&[2, 0, 1], &[3]).unwrap();
     assert_eq!(permuted.codomain().len(), 3);
     assert_eq!(permuted.domain().len(), 1);
-    assert_eq!(permuted.data().len(), 3);
-    for (got, expected) in
-        permuted
-            .data()
-            .iter()
-            .zip([2.0_f64.sqrt() / 2.0, -2.0_f64.sqrt() / 2.0, 2.0_f64.sqrt()])
-    {
+    assert_eq!(permuted.dense_data().unwrap().len(), 3);
+    for (got, expected) in permuted.dense_data().unwrap().iter().zip([
+        2.0_f64.sqrt() / 2.0,
+        -2.0_f64.sqrt() / 2.0,
+        2.0_f64.sqrt(),
+    ]) {
         assert!((got - expected).abs() <= 1e-12, "{got} vs {expected}");
     }
 }
@@ -9399,7 +9973,12 @@ fn contract_ordered_delegates_with_a_nonidentity_output_order() {
         .unwrap();
     // The ordered route may run its GEMM on another layout; the contracted
     // leg has dimension 4.
-    numerics::assert_slices_close("contract", actual.data(), expected.data(), 4);
+    numerics::assert_slices_close(
+        "contract",
+        actual.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+        4,
+    );
 }
 
 #[test]
@@ -9423,7 +10002,8 @@ fn typed_contract_parallel_su2_replay_matches_serial() {
             TensorMap::rand_with_seed(runtime, [&leg, &leg], [&leg, &leg], 224_402).unwrap();
         lhs.contract(&rhs, &[3, 2], &[0, 1], &[2, 0, 3, 1])
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
             .to_vec()
     }
 
@@ -9457,12 +10037,12 @@ fn contract_on_the_external_z3_provider_matches_the_hand_product() {
 
     let transposed: TensorMap<ExternalZ3, f64> = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
     assert_eq!(
-        transposed.data(),
+        transposed.dense_data().unwrap(),
         [76.0, 103.0, 130.0, 157.0, 100.0, 136.0, 172.0, 208.0]
     );
     let identity: TensorMap<ExternalZ3, f64> = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
     assert_eq!(
-        identity.data(),
+        identity.dense_data().unwrap(),
         [76.0, 100.0, 103.0, 136.0, 130.0, 172.0, 157.0, 208.0]
     );
 }
@@ -9533,7 +10113,7 @@ fn assert_host_contract_entries_reject_but_compose_admits<const ANYONIC: bool>()
     let lhs = probe_matrix::<ANYONIC>(&runtime, 1.0);
     let rhs = probe_matrix::<ANYONIC>(&runtime, 5.0);
     let mut destination = probe_matrix::<ANYONIC>(&runtime, 9.0);
-    let before = destination.data().to_vec();
+    let before = destination.dense_data().unwrap().to_vec();
 
     let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
     assert!(is_non_symmetric_contraction(&contract), "{contract:?}");
@@ -9549,7 +10129,7 @@ fn assert_host_contract_entries_reject_but_compose_admits<const ANYONIC: bool>()
     for error in [&ordered, &overwrite, &ordered_overwrite] {
         assert!(is_non_symmetric_contraction(error), "{error:?}");
     }
-    assert_eq!(destination.data(), &before[..]);
+    assert_eq!(destination.dense_data().unwrap(), &before[..]);
 
     let composed = lhs.compose(&rhs).unwrap();
     let leg = probe_leg::<ANYONIC>();
@@ -9558,7 +10138,10 @@ fn assert_host_contract_entries_reject_but_compose_admits<const ANYONIC: bool>()
             probe_composition(index[0], index[1])
         })
         .unwrap();
-    assert_eq!(composed.data(), expected.data());
+    assert_eq!(
+        composed.dense_data().unwrap(),
+        expected.dense_data().unwrap()
+    );
 }
 
 #[test]
@@ -9594,7 +10177,10 @@ fn symmetric_canonical_contract_is_admitted_as_the_negative_control() {
     let contracted = matrix(1.0)
         .contract(&matrix(5.0), &[1], &[0], &[0, 1])
         .unwrap();
-    assert_eq!(contracted.data(), expected.data());
+    assert_eq!(
+        contracted.dense_data().unwrap(),
+        expected.dense_data().unwrap()
+    );
 }
 
 fn assert_compact_trace_rejects_like_dense_trace<const ANYONIC: bool>() {
@@ -9638,7 +10224,12 @@ fn assert_device_contract_entries_reject_but_compose_admits<const ANYONIC: bool>
     let lhs = host_lhs.to_cuda().unwrap();
     let rhs = host_rhs.to_cuda().unwrap();
     let mut destination = probe_matrix::<ANYONIC>(&runtime, 9.0).to_cuda().unwrap();
-    let before = destination.to_host().unwrap().data().to_vec();
+    let before = destination
+        .to_host()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
 
     let transfers = tenet::dense::cuda_transfer_stats();
     let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
@@ -9651,10 +10242,16 @@ fn assert_device_contract_entries_reject_but_compose_admits<const ANYONIC: bool>
     for error in [&contract, &ordered, &overwrite] {
         assert!(is_non_symmetric_contraction(error), "{error:?}");
     }
-    assert_eq!(destination.to_host().unwrap().data(), &before[..]);
+    assert_eq!(
+        destination.to_host().unwrap().dense_data().unwrap(),
+        &before[..]
+    );
 
     let composed = lhs.compose(&rhs).unwrap().to_host().unwrap();
-    assert_eq!(composed.data(), host_lhs.compose(&host_rhs).unwrap().data());
+    assert_eq!(
+        composed.dense_data().unwrap(),
+        host_lhs.compose(&host_rhs).unwrap().dense_data().unwrap()
+    );
 }
 
 #[cfg(feature = "cuda")]

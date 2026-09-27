@@ -69,12 +69,17 @@ where
         .unwrap();
     let expected = complexify(&real, &imaginary);
 
-    assert_close(x.compose(&y).unwrap().data(), expected.data(), 1.0e-12);
+    assert_close(
+        x.compose(&y).unwrap().dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+        1.0e-12,
+    );
     assert_close(
         x.contract(&y, &[2, 3], &[0, 1], &[0, 1, 2, 3])
             .unwrap()
-            .data(),
-        expected.data(),
+            .dense_data()
+            .unwrap(),
+        expected.dense_data().unwrap(),
         1.0e-12,
     );
 }

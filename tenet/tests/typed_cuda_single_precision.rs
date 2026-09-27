@@ -178,7 +178,11 @@ where
 {
     let device = host.to_cuda().unwrap();
     let back = device.to_host().unwrap();
-    assert_bit_exact(back.data(), host.data(), "round trip");
+    assert_bit_exact(
+        back.materialize().unwrap().dense_data().unwrap(),
+        host.materialize().unwrap().dense_data().unwrap(),
+        "round trip",
+    );
     assert_eq!(back.rank(), host.rank());
     assert_eq!(back.subblock_count(), host.subblock_count());
     assert_eq!(back.leg_dims().unwrap(), host.leg_dims().unwrap());
@@ -189,8 +193,13 @@ where
     let lazy = host.adjoint().unwrap();
     let lazy_back = lazy.to_cuda().unwrap().to_host().unwrap();
     assert_bit_exact(
-        lazy_back.scale(one).data(),
-        lazy.scale(one).data(),
+        lazy_back
+            .scale(one)
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        lazy.scale(one).materialize().unwrap().dense_data().unwrap(),
         "lazy adjoint round trip",
     );
 }
@@ -237,15 +246,24 @@ where
         TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(-2.25)).unwrap();
     let alpha = D::entry(2.0, -3.0);
     let beta = D::entry(-0.5, 1.25);
-    let terms = a.data().len();
+    let terms = a.materialize().unwrap().dense_data().unwrap().len();
     let tolerance = elementwise_tolerance::<D>(2, 8.0);
 
     let device_a = a.to_cuda().unwrap();
     let device_b = b.to_cuda().unwrap();
 
     let scaled = device_a.scale(alpha).unwrap().to_host().unwrap();
-    assert_close(scaled.data(), a.scale(alpha).data(), tolerance, "scale");
-    assert_moved(a.data(), scaled.data(), "scale");
+    assert_close(
+        scaled.materialize().unwrap().dense_data().unwrap(),
+        a.scale(alpha).materialize().unwrap().dense_data().unwrap(),
+        tolerance,
+        "scale",
+    );
+    assert_moved(
+        a.materialize().unwrap().dense_data().unwrap(),
+        scaled.materialize().unwrap().dense_data().unwrap(),
+        "scale",
+    );
 
     let summed = device_a
         .axpby(alpha, &device_b, beta)
@@ -253,14 +271,18 @@ where
         .to_host()
         .unwrap();
     assert_close(
-        summed.data(),
-        a.axpby(alpha, &b, beta).unwrap().data(),
+        summed.materialize().unwrap().dense_data().unwrap(),
+        a.axpby(alpha, &b, beta).unwrap().dense_data().unwrap(),
         tolerance,
         "add",
     );
 
     let zeros = device_a.zeros_like().unwrap().to_host().unwrap();
-    assert_bit_exact(zeros.data(), &vec![D::entry(0.0, 0.0); terms], "zeros_like");
+    assert_bit_exact(
+        zeros.materialize().unwrap().dense_data().unwrap(),
+        &vec![D::entry(0.0, 0.0); terms],
+        "zeros_like",
+    );
 
     // The lazy fold: `alpha A^H + beta B^H` over the device parents.
     let lazy_a = device_a.adjoint().unwrap();
@@ -276,14 +298,31 @@ where
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
-        host_fold.data(),
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        host_fold.materialize().unwrap().dense_data().unwrap(),
         tolerance,
         "lazy adjoint fold",
     );
     assert_close(
-        lazy_a.scale(alpha).unwrap().to_host().unwrap().data(),
-        a.adjoint().unwrap().scale(alpha).data(),
+        lazy_a
+            .scale(alpha)
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        a.adjoint()
+            .unwrap()
+            .scale(alpha)
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         tolerance,
         "lazy adjoint scale",
     );
@@ -323,12 +362,13 @@ where
     let a = TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(1.5)).unwrap();
     let b =
         TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(-2.25)).unwrap();
-    let terms = a.data().len();
+    let terms = a.dense_data().unwrap().len();
     // An upper bound on `sum |conj(a_i) * b_i|`, which is what the device
     // reduction's error bound is relative to.
     let peak = |tensor: &TensorMap<R, D>| {
         tensor
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|value| value.magnitude())
             .fold(0.0_f64, f64::max)
@@ -407,13 +447,14 @@ where
     let unit = D::entry(1.0, 1.0).magnitude();
     let n = TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], |_, _| D::entry(1.0, 1.0))
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .len();
     let part = magnitude(n) / unit;
     let tensor =
         TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], |_, _| D::entry(part, part))
             .unwrap();
-    let stored = tensor.data()[0].magnitude();
+    let stored = tensor.dense_data().unwrap()[0].magnitude();
     (tensor, stored)
 }
 
@@ -451,7 +492,7 @@ fn assert_norm_is_overflow_and_underflow_safe<R, D>(
     let fixtures = [(big, "big", true), (tiny, "tiny", false)];
     for (fixture, what, overflows) in fixtures {
         let (host, magnitude) = constant_magnitude::<R, D>(runtime, leg, fixture);
-        let n = host.data().len();
+        let n = host.dense_data().unwrap().len();
         let device = host.to_cuda().unwrap();
         // Both norms are f64 sums of exactly widened squares.
         let wide_tolerance = 4.0 * n as f64 * f64::EPSILON;
@@ -598,7 +639,7 @@ fn assert_inner_survives_overflowing_products<R, D>(
         &format!("device inner [{}]", D::NAME),
         device,
         hand,
-        a.data().len(),
+        a.dense_data().unwrap().len(),
     );
 }
 
@@ -748,9 +789,10 @@ fn a_zero_scale_overwrite_into_clears_a_nan_poisoned_destination() {
         let host_permuted = host.permute(&[1, 2], &[0]).unwrap();
         let poisoned = host_permuted.scale(D::entry(f64::NAN, 0.0));
         assert!(
-            !poisoned.data().is_empty()
+            !poisoned.dense_data().unwrap().is_empty()
                 && poisoned
-                    .data()
+                    .dense_data()
+                    .unwrap()
                     .iter()
                     .all(|value| value.magnitude().is_nan()),
             "the poison fixture [{}] must be entirely NaN",
@@ -762,7 +804,14 @@ fn a_zero_scale_overwrite_into_clears_a_nan_poisoned_destination() {
             device
                 .permute_overwrite_into(&mut destination, &[1, 2], &[0], alpha)
                 .unwrap();
-            for (index, &value) in destination.to_host().unwrap().data().iter().enumerate() {
+            for (index, &value) in destination
+                .to_host()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+                .iter()
+                .enumerate()
+            {
                 assert_eq!(
                     value,
                     D::entry(0.0, 0.0),
@@ -794,7 +843,7 @@ where
     let a = TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(1.5)).unwrap();
     let b =
         TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(-2.25)).unwrap();
-    let tolerance = elementwise_tolerance::<D>(a.data().len(), 64.0);
+    let tolerance = elementwise_tolerance::<D>(a.dense_data().unwrap().len(), 64.0);
 
     let device_a = a.to_cuda().unwrap();
     let device_b = b.to_cuda().unwrap();
@@ -806,8 +855,9 @@ where
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
-        host_contract.data(),
+            .dense_data()
+            .unwrap(),
+        host_contract.dense_data().unwrap(),
         tolerance,
         "contract",
     );
@@ -819,8 +869,9 @@ where
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
-        host_compose.data(),
+            .dense_data()
+            .unwrap(),
+        host_compose.dense_data().unwrap(),
         tolerance,
         "compose",
     );
@@ -835,8 +886,9 @@ where
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
-        host_lazy.data(),
+            .dense_data()
+            .unwrap(),
+        host_lazy.dense_data().unwrap(),
         tolerance,
         "lazy adjoint compose",
     );
@@ -858,8 +910,8 @@ where
         )
         .unwrap();
     assert_close(
-        destination.to_host().unwrap().data(),
-        host_contract.data(),
+        destination.to_host().unwrap().dense_data().unwrap(),
+        host_contract.dense_data().unwrap(),
         tolerance,
         "contract_overwrite_into",
     );
@@ -877,8 +929,8 @@ where
         )
         .unwrap();
     assert_close(
-        destination.to_host().unwrap().data(),
-        host_contract.data(),
+        destination.to_host().unwrap().dense_data().unwrap(),
+        host_contract.dense_data().unwrap(),
         tolerance,
         "contract_overwrite_into is idempotent",
     );
@@ -941,7 +993,8 @@ fn device_fermionic_signs_are_exact_at_every_payload() {
                 .unwrap()
                 .to_host()
                 .unwrap()
-                .data(),
+                .dense_data()
+                .unwrap(),
             &[D::entry(-6.0, 0.0)],
             "fermionic contract",
         );
@@ -951,13 +1004,17 @@ fn device_fermionic_signs_are_exact_at_every_payload() {
                 .unwrap()
                 .to_host()
                 .unwrap()
-                .data(),
+                .dense_data()
+                .unwrap(),
             &[D::entry(6.0, 0.0)],
             "fermionic compose",
         );
         // The host agrees, at this dtype, with the same hand value.
         assert_bit_exact(
-            lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap().data(),
+            lhs.contract(&rhs, &[1], &[0], &[0, 1])
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             &[D::entry(-6.0, 0.0)],
             "fermionic contract, host",
         );
@@ -988,12 +1045,16 @@ where
     let host_permuted = host.permute(&[1, 2], &[0]).unwrap();
     let device_permuted = device.permute(&[1, 2], &[0]).unwrap().to_host().unwrap();
     assert_close(
-        device_permuted.data(),
-        host_permuted.data(),
+        device_permuted.dense_data().unwrap(),
+        host_permuted.dense_data().unwrap(),
         tolerance,
         "permute",
     );
-    assert_moved(host.data(), device_permuted.data(), "permute");
+    assert_moved(
+        host.dense_data().unwrap(),
+        device_permuted.dense_data().unwrap(),
+        "permute",
+    );
 
     let levels: Vec<usize> = (0..host.rank()).collect();
     assert_close(
@@ -1002,15 +1063,25 @@ where
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
-        host.braid(&[1, 2], &[0], &levels).unwrap().data(),
+            .dense_data()
+            .unwrap(),
+        host.braid(&[1, 2], &[0], &levels)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         tolerance,
         "braid",
     );
 
     assert_close(
-        device.repartition(1).unwrap().to_host().unwrap().data(),
-        host.repartition(1).unwrap().data(),
+        device
+            .repartition(1)
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        host.repartition(1).unwrap().dense_data().unwrap(),
         tolerance,
         "repartition",
     );
@@ -1021,8 +1092,9 @@ where
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
-        host.transpose(&[2], &[1, 0]).unwrap().data(),
+            .dense_data()
+            .unwrap(),
+        host.transpose(&[2], &[1, 0]).unwrap().dense_data().unwrap(),
         tolerance,
         "transpose",
     );
@@ -1044,8 +1116,8 @@ where
             .permute_overwrite_into(&mut destination, &[1, 2], &[0], alpha)
             .unwrap();
         assert_close(
-            destination.to_host().unwrap().data(),
-            host_permuted.scale(alpha).data(),
+            destination.to_host().unwrap().dense_data().unwrap(),
+            host_permuted.scale(alpha).dense_data().unwrap(),
             tolerance,
             "permute_overwrite_into",
         );
@@ -1054,8 +1126,8 @@ where
         let mut bent = host_bent.scale(poison).to_cuda().unwrap();
         device.repartition_overwrite_into(&mut bent, alpha).unwrap();
         assert_close(
-            bent.to_host().unwrap().data(),
-            host_bent.scale(alpha).data(),
+            bent.to_host().unwrap().dense_data().unwrap(),
+            host_bent.scale(alpha).dense_data().unwrap(),
             tolerance,
             "repartition_overwrite_into",
         );
@@ -1066,8 +1138,8 @@ where
             .transpose_overwrite_into(&mut cyclic, &[2], &[1, 0], alpha)
             .unwrap();
         assert_close(
-            cyclic.to_host().unwrap().data(),
-            host_cyclic.scale(alpha).data(),
+            cyclic.to_host().unwrap().dense_data().unwrap(),
+            host_cyclic.scale(alpha).dense_data().unwrap(),
             tolerance,
             "transpose_overwrite_into",
         );
@@ -1083,8 +1155,9 @@ where
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
-        host.data(),
+            .dense_data()
+            .unwrap(),
+        host.dense_data().unwrap(),
         tolerance,
         "permute round trip",
     );
@@ -1170,7 +1243,12 @@ fn a_warm_single_precision_overwrite_into_transfers_nothing() {
             .permute_overwrite_into(&mut destination, &[1, 2], &[0], D::entry(0.0, 0.0))
             .unwrap();
         let after = cuda_transfer_stats();
-        let destination_len = host.permute(&[1, 2], &[0]).unwrap().data().len();
+        let destination_len = host
+            .permute(&[1, 2], &[0])
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .len();
         let bound = ((destination_len + 1) * std::mem::size_of::<D>()) as u64;
         assert!(
             after.h2d_calls - before.h2d_calls <= 2 && after.h2d_bytes - before.h2d_bytes <= bound,

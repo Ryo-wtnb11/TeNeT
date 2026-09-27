@@ -88,8 +88,17 @@ fn assert_same<D: OracleScalar>(
             expected.subblock(index).unwrap()
         );
     }
-    assert_eq!(actual.data().len(), expected.data().len());
-    for (index, (&lhs, &rhs)) in actual.data().iter().zip(expected.data()).enumerate() {
+    assert_eq!(
+        actual.dense_data().unwrap().len(),
+        expected.dense_data().unwrap().len()
+    );
+    for (index, (&lhs, &rhs)) in actual
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(expected.dense_data().unwrap())
+        .enumerate()
+    {
         assert!(
             lhs.distance(rhs) <= 1.0e-10 * (1.0 + lhs.distance(D::value(0))),
             "payload {index} differs: {lhs:?} vs {rhs:?}"
@@ -714,7 +723,12 @@ fn assert_injected_recovery(
     provider.reset_symbols();
     let expected = planned.execute(tensors, &mut Default::default()).unwrap();
     assert_eq!(recovered.subblock_count(), expected.subblock_count());
-    for (&actual, &want) in recovered.data().iter().zip(expected.data()) {
+    for (&actual, &want) in recovered
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(expected.dense_data().unwrap())
+    {
         assert!((actual - want).abs() <= 1.0e-12 * (1.0 + want.abs()));
     }
 }
@@ -883,7 +897,10 @@ fn checked_generic_sliced_late_provider_failure_is_typed_and_recovers() {
     let (recovered, _) = network
         .execute_symmetric_sliced(&tensors, multi, usize::MAX)
         .unwrap();
-    assert_eq!(recovered.data(), expected.data());
+    assert_eq!(
+        recovered.dense_data().unwrap(),
+        expected.dense_data().unwrap()
+    );
 }
 
 #[test]
@@ -931,8 +948,9 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
         scalar_plan
             .execute(&[&scalar], &mut Default::default())
             .unwrap()
-            .data(),
-        scalar.data()
+            .dense_data()
+            .unwrap(),
+        scalar.dense_data().unwrap()
     );
     let outer = Network::new(
         vec![labels(&["a"]), labels(&["b"])],
@@ -947,7 +965,10 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
     .execute(&[&lhs, &rhs], &mut Default::default())
     .unwrap();
     let expected_outer = lhs.contract(&rhs, &[], &[], &[0, 1]).unwrap();
-    assert_eq!(outer.data(), expected_outer.data());
+    assert_eq!(
+        outer.dense_data().unwrap(),
+        expected_outer.dense_data().unwrap()
+    );
 
     let rank_three: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
@@ -967,8 +988,12 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
     .execute(&[&rank_three], &mut Default::default())
     .unwrap();
     assert_eq!(
-        permuted.data(),
-        rank_three.permute(&[1, 0], &[2]).unwrap().data()
+        permuted.dense_data().unwrap(),
+        rank_three
+            .permute(&[1, 0], &[2])
+            .unwrap()
+            .dense_data()
+            .unwrap()
     );
 
     let empty = GradedSpace::try_new(
@@ -989,7 +1014,7 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
     .unwrap()
     .execute(&[&zero, &zero], &mut Default::default())
     .unwrap();
-    assert!(zero_outer.data().is_empty());
+    assert!(zero_outer.dense_data().unwrap().is_empty());
 }
 
 #[test]
@@ -1010,10 +1035,13 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
     let first = tensor!([i; k] = a64[i; j] * b64[j; k]).unwrap();
     let second = tensor!([i; k] = a64[i; j] * b64[j; k]).unwrap();
     let complex = tensor!([i; k] = ac[i; j] * bc[j; k]).unwrap();
-    assert_eq!(first.data(), second.data());
+    assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
     assert_eq!(
-        complex.data(),
-        ac.contract(&bc, &[1], &[0], &[0, 1]).unwrap().data()
+        complex.dense_data().unwrap(),
+        ac.contract(&bc, &[1], &[0], &[0, 1])
+            .unwrap()
+            .dense_data()
+            .unwrap()
     );
     let stats = plan_cache_stats(&runtime);
     assert!(stats.hits >= 2);
@@ -1028,7 +1056,7 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
         },
     );
     let uncached = tensor!([i; k] = a64[i; j] * b64[j; k]).unwrap();
-    assert_eq!(uncached.data(), first.data());
+    assert_eq!(uncached.dense_data().unwrap(), first.dense_data().unwrap());
 
     let lazy = a64.adjoint().unwrap();
     let network = Network::new(

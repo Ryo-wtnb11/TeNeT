@@ -74,26 +74,30 @@ where
     };
     close(
         "network vs device contract",
-        actual_host.data(),
-        manual.to_host().unwrap().data(),
+        actual_host.dense_data().unwrap(),
+        manual.to_host().unwrap().dense_data().unwrap(),
     );
-    close("network vs host", actual_host.data(), host_oracle.data());
+    close(
+        "network vs host",
+        actual_host.dense_data().unwrap(),
+        host_oracle.dense_data().unwrap(),
+    );
     close(
         "macro vs host",
-        macro_actual.to_host().unwrap().data(),
-        host_oracle.data(),
+        macro_actual.to_host().unwrap().dense_data().unwrap(),
+        host_oracle.dense_data().unwrap(),
     );
     close(
         "warm macro vs host",
-        macro_warm.to_host().unwrap().data(),
-        host_oracle.data(),
+        macro_warm.to_host().unwrap().dense_data().unwrap(),
+        host_oracle.dense_data().unwrap(),
     );
     assert_eq!(macro_actual.placement(), lhs_cuda.placement());
     // The warm device replay reproduces the returning result exactly: identical
     // submissions to the same device kernels, so f64 is bitwise equal.
     assert_eq!(
-        macro_warm.to_host().unwrap().data(),
-        actual.to_host().unwrap().data()
+        macro_warm.to_host().unwrap().dense_data().unwrap(),
+        actual.to_host().unwrap().dense_data().unwrap()
     );
     // This provider contributes exactly one device pool for `(R, f64,
     // CudaStorage<f64>)`; the second call leases that pool's idle workspace.
@@ -128,8 +132,8 @@ fn cuda_macro_full_trace_equals_host() {
     let device = tensor!([] = tensor[i; i]).unwrap();
     assert_eq!(device.placement(), tensor.placement());
     assert_close_dyn(
-        device.to_host().unwrap().data(),
-        tensor!([] = host[i; i]).unwrap().data(),
+        device.to_host().unwrap().dense_data().unwrap(),
+        tensor!([] = host[i; i]).unwrap().dense_data().unwrap(),
         f64::EPSILON,
         "full trace",
     );
@@ -156,8 +160,8 @@ fn a_noncanonical_cuda_macro_runs_and_shares_the_host_plan() {
         assert_eq!(device.codomain(), host.codomain());
         assert_eq!(device.domain(), host.domain());
         assert_close_dyn(
-            device.to_host().unwrap().data(),
-            host.data(),
+            device.to_host().unwrap().dense_data().unwrap(),
+            host.dense_data().unwrap(),
             f64::EPSILON,
             "reversed pair",
         );
@@ -254,14 +258,14 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     // tolerance rule over 2 * 2 terms.
     numerics::assert_slices_close(
         "chain vs device contract",
-        actual.to_host().unwrap().data(),
-        manual.to_host().unwrap().data(),
+        actual.to_host().unwrap().dense_data().unwrap(),
+        manual.to_host().unwrap().dense_data().unwrap(),
         4,
     );
     numerics::assert_slices_close(
         "chain macro vs device contract",
-        chain_macro.to_host().unwrap().data(),
-        manual.to_host().unwrap().data(),
+        chain_macro.to_host().unwrap().dense_data().unwrap(),
+        manual.to_host().unwrap().dense_data().unwrap(),
         4,
     );
     assert_eq!(chain_macro.placement(), tensors[0].placement());
@@ -290,14 +294,14 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     assert_eq!(conj_actual.domain(), conj_manual.domain());
     numerics::assert_slices_close(
         "conj network vs device contract",
-        conj_actual.to_host().unwrap().data(),
-        conj_manual.to_host().unwrap().data(),
+        conj_actual.to_host().unwrap().dense_data().unwrap(),
+        conj_manual.to_host().unwrap().dense_data().unwrap(),
         2,
     );
     numerics::assert_slices_close(
         "conj macro vs device contract",
-        conj_macro.to_host().unwrap().data(),
-        conj_manual.to_host().unwrap().data(),
+        conj_macro.to_host().unwrap().dense_data().unwrap(),
+        conj_manual.to_host().unwrap().dense_data().unwrap(),
         2,
     );
 
@@ -323,12 +327,36 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     assert_eq!(single_actual.codomain(), single_expected.codomain());
     assert_eq!(single_actual.domain(), single_expected.domain());
     assert_eq!(
-        single_actual.to_host().unwrap().data(),
-        single_expected.to_host().unwrap().data()
+        single_actual
+            .to_host()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        single_expected
+            .to_host()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
     );
     assert_eq!(
-        single_macro.to_host().unwrap().data(),
-        single_expected.to_host().unwrap().data()
+        single_macro
+            .to_host()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        single_expected
+            .to_host()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
     );
 
     let ket = TensorMap::<U1FusionRule, f64>::rand_with_seed(
@@ -371,8 +399,8 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     // product; they agree within the tolerance rule.
     numerics::assert_slices_close(
         "scalar macro vs scalar network",
-        scalar_macro.to_host().unwrap().data(),
-        scalar.to_host().unwrap().data(),
+        scalar_macro.to_host().unwrap().dense_data().unwrap(),
+        scalar.to_host().unwrap().dense_data().unwrap(),
         2,
     );
     let stats = plan_cache_stats(&runtime);
@@ -423,7 +451,10 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
     let executed = planned.execute_cuda(&refs).unwrap();
     let host_oracle = host[0].contract(&host[1], &[1], &[0], &[0, 1]).unwrap();
     assert_eq!(executed.placement(), device[0].placement());
-    assert_close_c64(executed.to_host().unwrap().data(), host_oracle.data());
+    assert_close_c64(
+        executed.to_host().unwrap().dense_data().unwrap(),
+        host_oracle.dense_data().unwrap(),
+    );
 
     let chain =
         tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
@@ -432,10 +463,16 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
         .unwrap()
         .contract(&host[2], &[1], &[0], &[0, 1])
         .unwrap();
-    assert_close_c64(chain.to_host().unwrap().data(), chain_oracle.data());
+    assert_close_c64(
+        chain.to_host().unwrap().dense_data().unwrap(),
+        chain_oracle.dense_data().unwrap(),
+    );
     let chain_warm =
         tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
-    assert_close_c64(chain_warm.to_host().unwrap().data(), chain_oracle.data());
+    assert_close_c64(
+        chain_warm.to_host().unwrap().dense_data().unwrap(),
+        chain_oracle.dense_data().unwrap(),
+    );
 
     let conj = tensor!([i; j] = conj((device[0]))[k; i] * (device[1])[k; j]).unwrap();
     let conj_oracle = host[0]
@@ -443,15 +480,24 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
         .unwrap()
         .contract(&host[1], &[1], &[0], &[0, 1])
         .unwrap();
-    assert_close_c64(conj.to_host().unwrap().data(), conj_oracle.data());
+    assert_close_c64(
+        conj.to_host().unwrap().dense_data().unwrap(),
+        conj_oracle.dense_data().unwrap(),
+    );
 
     let trace = tensor!([] = (device[0])[i; i]).unwrap();
     let trace_oracle = tensor!([] = (host[0])[i; i]).unwrap();
-    assert_close_c64(trace.to_host().unwrap().data(), trace_oracle.data());
+    assert_close_c64(
+        trace.to_host().unwrap().dense_data().unwrap(),
+        trace_oracle.dense_data().unwrap(),
+    );
     // G2c-3 (#1348): the reversed output the canonical predicate refused runs.
     let reversed = tensor!([k; i] = (device[0])[i; j] * (device[1])[j; k]).unwrap();
     let reversed_oracle = tensor!([k; i] = (host[0])[i; j] * (host[1])[j; k]).unwrap();
-    assert_close_c64(reversed.to_host().unwrap().data(), reversed_oracle.data());
+    assert_close_c64(
+        reversed.to_host().unwrap().dense_data().unwrap(),
+        reversed_oracle.dense_data().unwrap(),
+    );
 }
 
 fn assert_close_c64(actual: &[Complex64], expected: &[Complex64]) {
@@ -494,8 +540,8 @@ fn host_and_cuda_macros_of_one_topology_use_separate_workspace_pools() {
     let device = tensor!([i; k] = a_cuda[i; j] * b_cuda[j; k]).unwrap();
     numerics::assert_slices_close(
         "device vs host",
-        device.to_host().unwrap().data(),
-        host.data(),
+        device.to_host().unwrap().dense_data().unwrap(),
+        host.dense_data().unwrap(),
         2,
     );
 
@@ -536,8 +582,8 @@ fn a_rejected_cuda_call_leases_no_workspace_and_the_next_call_reuses_the_idle_on
 
     let rebuilt = tensor!([i; k] = a_cuda[i; j] * b_cuda[j; k]).unwrap();
     assert_eq!(
-        rebuilt.to_host().unwrap().data(),
-        warm.to_host().unwrap().data()
+        rebuilt.to_host().unwrap().dense_data().unwrap(),
+        warm.to_host().unwrap().dense_data().unwrap()
     );
     let after = plan_cache_stats(&runtime);
     assert_eq!(after.workspaces_created, after_warm.workspaces_created);
@@ -564,13 +610,19 @@ fn equal_length_block_layout_drift_discards_the_device_replay_state() {
     let (b0, b0_cuda) = u1_pair(&runtime, &charge_zero, 748_421);
     let (a3, a3_cuda) = u1_pair(&runtime, &charge_three, 748_422);
     let (b3, b3_cuda) = u1_pair(&runtime, &charge_three, 748_423);
-    assert_eq!(a0.data().len(), a3.data().len());
+    assert_eq!(
+        a0.dense_data().unwrap().len(),
+        a3.dense_data().unwrap().len()
+    );
 
     let first = tensor!([i; k] = a0_cuda[i; j] * b0_cuda[j; k]).unwrap();
     numerics::assert_slices_close(
         "device vs host",
-        first.to_host().unwrap().data(),
-        a0.contract(&b0, &[1], &[0], &[0, 1]).unwrap().data(),
+        first.to_host().unwrap().dense_data().unwrap(),
+        a0.contract(&b0, &[1], &[0], &[0, 1])
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         2,
     );
     let after_first = plan_cache_stats(&runtime);
@@ -578,8 +630,11 @@ fn equal_length_block_layout_drift_discards_the_device_replay_state() {
     let drifted = tensor!([i; k] = a3_cuda[i; j] * b3_cuda[j; k]).unwrap();
     numerics::assert_slices_close(
         "drifted device vs host",
-        drifted.to_host().unwrap().data(),
-        a3.contract(&b3, &[1], &[0], &[0, 1]).unwrap().data(),
+        drifted.to_host().unwrap().dense_data().unwrap(),
+        a3.contract(&b3, &[1], &[0], &[0, 1])
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         2,
     );
 
@@ -597,8 +652,8 @@ fn equal_length_block_layout_drift_discards_the_device_replay_state() {
     // layout must not leak into this one either.
     let restored = tensor!([i; k] = a0_cuda[i; j] * b0_cuda[j; k]).unwrap();
     assert_eq!(
-        restored.to_host().unwrap().data(),
-        first.to_host().unwrap().data()
+        restored.to_host().unwrap().dense_data().unwrap(),
+        first.to_host().unwrap().dense_data().unwrap()
     );
 }
 
@@ -650,8 +705,8 @@ where
     let terms = space.dim().unwrap().ceil() as usize;
     numerics::assert_slices_close(
         "cold device chain vs host",
-        cold.to_host().unwrap().data(),
-        host_oracle.data(),
+        cold.to_host().unwrap().dense_data().unwrap(),
+        host_oracle.dense_data().unwrap(),
         terms * terms,
     );
     // The warm replay submits the same kernels in the same order to the same
@@ -659,8 +714,8 @@ where
     // cuBLAS/cuTENSOR determinism for identical submissions, as the existing
     // device equality assertions already do.
     assert_eq!(
-        warm.to_host().unwrap().data(),
-        returning.to_host().unwrap().data()
+        warm.to_host().unwrap().dense_data().unwrap(),
+        returning.to_host().unwrap().dense_data().unwrap()
     );
 }
 
@@ -710,7 +765,10 @@ fn warm_cuda_destination_reuse_matches_the_returning_chain_for_every_provider() 
         .unwrap();
     drop(tensor!([a; d] = (cuda[0])[a; b] * (cuda[1])[b; c] * (cuda[2])[c; d]).unwrap());
     let warm = tensor!([a; d] = (cuda[0])[a; b] * (cuda[1])[b; c] * (cuda[2])[c; d]).unwrap();
-    assert_close_c64(warm.to_host().unwrap().data(), oracle.data());
+    assert_close_c64(
+        warm.to_host().unwrap().dense_data().unwrap(),
+        oracle.dense_data().unwrap(),
+    );
 }
 
 /// G3c-2 (#1276), G2c-1b (#1346): the warm device replay of an N-tensor chain
@@ -907,8 +965,17 @@ fn single_precision_device_chains_match_the_host_and_reuse_their_destinations() 
             tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
         for (label, result) in [("cold", cold), ("warm", warm)] {
             let actual = result.to_host().unwrap();
-            assert_eq!(actual.data().len(), oracle.data().len());
-            for (index, (&got, &want)) in actual.data().iter().zip(oracle.data()).enumerate() {
+            assert_eq!(
+                actual.dense_data().unwrap().len(),
+                oracle.dense_data().unwrap().len()
+            );
+            for (index, (&got, &want)) in actual
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(oracle.dense_data().unwrap())
+                .enumerate()
+            {
                 let distance = (got.widen_complex() - want.widen_complex()).norm();
                 assert!(
                     distance <= tolerance * (1.0 + want.widen_complex().norm()),
@@ -1198,8 +1265,8 @@ fn assert_general_networks_match_host<R, D>(
             assert_eq!(result.codomain(), host.codomain(), "{what} {phase}");
             assert_eq!(result.domain(), host.domain(), "{what} {phase}");
             assert_close_dyn(
-                result.to_host().unwrap().data(),
-                host.data(),
+                result.to_host().unwrap().dense_data().unwrap(),
+                host.dense_data().unwrap(),
                 epsilon,
                 &format!("{what} {phase}"),
             );
@@ -1640,7 +1707,8 @@ fn warm_general_cuda_networks_transfer_only_the_returned_output() {
             let before = device_state(runtime);
             let output = run();
             let after = device_state(runtime);
-            let output_bytes = std::mem::size_of_val(output.to_host().unwrap().data()) as u64;
+            let output_bytes =
+                std::mem::size_of_val(output.to_host().unwrap().dense_data().unwrap()) as u64;
             let what = format!("{what} {name}");
             assert_eq!(
                 (
@@ -1876,8 +1944,8 @@ fn assert_trace_networks_match_host<R, D>(
             assert_eq!(result.codomain(), host.codomain(), "{what} {phase}");
             assert_eq!(result.domain(), host.domain(), "{what} {phase}");
             assert_close_dyn(
-                result.to_host().unwrap().data(),
-                host.data(),
+                result.to_host().unwrap().dense_data().unwrap(),
+                host.dense_data().unwrap(),
                 epsilon,
                 &format!("{what} {phase}"),
             );
@@ -2111,7 +2179,7 @@ fn warm_trace_prestep_transfers_only_the_trace_and_returned_outputs() {
     where
         D: tenet::typed::CudaPayload,
     {
-        std::mem::size_of_val(tensor.data()) as u64
+        std::mem::size_of_val(tensor.dense_data().unwrap()) as u64
     }
 
     fn warm<R, D>(runtime: &Runtime, spaces: [&GradedSpace<R>; 3], seed: u64, what: &str)

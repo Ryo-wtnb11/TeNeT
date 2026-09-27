@@ -127,7 +127,7 @@ where
 
 /// Entries keyed by fusion tree and degeneracy index, independent of layout.
 fn entries<R>(tensor: &TensorMap<R, f64>) -> BTreeMap<(BlockKey, Vec<usize>), f64> {
-    let data = tensor.data();
+    let data = tensor.dense_data().unwrap();
     let mut entries = BTreeMap::new();
     for index in 0..tensor.subblock_count() {
         let block = tensor.subblock(index).unwrap();

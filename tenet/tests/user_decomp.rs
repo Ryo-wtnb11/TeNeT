@@ -49,8 +49,13 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
     let Svd { u, s, vh } = tensor.svd_compact().unwrap();
     numerics::assert_slices_close(
         "u s vh",
-        u.compose(&s).unwrap().compose(&vh).unwrap().data(),
-        tensor.data(),
+        u.compose(&s)
+            .unwrap()
+            .compose(&vh)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        tensor.dense_data().unwrap(),
         4,
     );
 
@@ -77,7 +82,7 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
     let recomposed = u.compose(&s).unwrap().compose(&vh).unwrap();
     numerics::assert_slices_close(
         "truncated u s vh",
-        recomposed.data(),
+        recomposed.dense_data().unwrap(),
         &[4.0, 0.0, 0.0, 3.0, 0.0, 2.0],
         4,
     );
@@ -120,7 +125,10 @@ fn right_solve_composes_adjoints_around_left_solve_for_real_and_complex_u1() {
         .unwrap()
         .adjoint()
         .unwrap();
-    assert_eq!(solved.compose(&rhs).unwrap().data(), lhs.data());
+    assert_eq!(
+        solved.compose(&rhs).unwrap().dense_data().unwrap(),
+        lhs.dense_data().unwrap()
+    );
 
     let lhs_c = lhs.convert::<Complex64>();
     let rhs_c = rhs.convert::<Complex64>();
@@ -134,8 +142,9 @@ fn right_solve_composes_adjoints_around_left_solve_for_real_and_complex_u1() {
     assert!(solved_c
         .compose(&rhs_c)
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(lhs_c.data())
+        .zip(lhs_c.dense_data().unwrap())
         .all(|(a, b)| (*a - *b).norm() < 1.0e-12));
 }

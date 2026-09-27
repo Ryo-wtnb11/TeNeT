@@ -96,9 +96,10 @@ macro_rules! check_dense {
         let x = tensor!(&runtime, &leg, X, $d);
         let y = tensor!(&runtime, &leg, Y, $d);
         let combine = |alpha: f64, beta: f64| -> Vec<$d> {
-            x.data()
+            x.dense_data()
+                .unwrap()
                 .iter()
-                .zip(y.data())
+                .zip(y.dense_data().unwrap())
                 .map(|(&a, &b)| scale(a, alpha) + scale(b, beta))
                 .collect()
         };
@@ -108,18 +109,22 @@ macro_rules! check_dense {
             let want = combine(alpha, beta);
             assert_same(
                 &format!("{what} add"),
-                x.axpby(a, &y, b).unwrap().data(),
+                x.axpby(a, &y, b).unwrap().dense_data().unwrap(),
                 &want,
             );
             let mut assigned = x.clone();
             assigned.axpby_assign(a, &y, b).unwrap();
-            assert_same(&format!("{what} add_assign"), assigned.data(), &want);
+            assert_same(
+                &format!("{what} add_assign"),
+                assigned.dense_data().unwrap(),
+                &want,
+            );
             // The lazy adjoint route: `(x^H)^H` reads `x` in its logical
             // orientation.
             let lazy = x.adjoint().unwrap().adjoint().unwrap();
             assert_same(
                 &format!("{what} lazy add"),
-                lazy.axpby(a, &y, b).unwrap().data(),
+                lazy.axpby(a, &y, b).unwrap().dense_data().unwrap(),
                 &want,
             );
         }
@@ -133,25 +138,42 @@ macro_rules! check_dense {
         };
         let (a, b) = (real::<$d>(2.0), real::<$d>(-1.5));
         let base: Vec<$d> = x
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(y.data())
+            .zip(y.dense_data().unwrap())
             .map(|(&u, &v)| u * a + v * b)
             .collect();
-        assert_eq!(bits(x.axpby(a, &y, b).unwrap().data()), bits(&base));
+        assert_eq!(
+            bits(x.axpby(a, &y, b).unwrap().dense_data().unwrap()),
+            bits(&base)
+        );
         let mut assigned = x.clone();
         assigned.axpby_assign(a, &y, b).unwrap();
-        assert_eq!(bits(assigned.data()), bits(&base));
-        let base: Vec<$d> = x.data().iter().map(|&u| u * a).collect();
-        assert_eq!(bits(x.scale(a).data()), bits(&base));
+        assert_eq!(bits(assigned.dense_data().unwrap()), bits(&base));
+        let base: Vec<$d> = x.dense_data().unwrap().iter().map(|&u| u * a).collect();
+        assert_eq!(bits(x.scale(a).dense_data().unwrap()), bits(&base));
         for factor in [0.0, 2.0] {
             let what = format!("{} factor = {factor}", $label);
-            let want: Vec<$d> = x.data().iter().map(|&a| scale(a, factor)).collect();
+            let want: Vec<$d> = x
+                .dense_data()
+                .unwrap()
+                .iter()
+                .map(|&a| scale(a, factor))
+                .collect();
             let f = real::<$d>(factor);
-            assert_same(&format!("{what} scale"), x.scale(f).data(), &want);
+            assert_same(
+                &format!("{what} scale"),
+                x.scale(f).dense_data().unwrap(),
+                &want,
+            );
             let mut assigned = x.clone();
             assigned.scale_assign(f);
-            assert_same(&format!("{what} scale_assign"), assigned.data(), &want);
+            assert_same(
+                &format!("{what} scale_assign"),
+                assigned.dense_data().unwrap(),
+                &want,
+            );
         }
     }};
 }
@@ -228,31 +250,45 @@ fn compact_diagonal_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
     for (alpha, beta) in [(0.0, 1.0), (1.0, 0.0), (0.0, 0.0)] {
         let what = format!("alpha = {alpha}, beta = {beta}");
         let want: Vec<f64> = x
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(y.data())
+            .zip(y.materialize().unwrap().dense_data().unwrap())
             .map(|(&a, &b)| scale(a, alpha) + scale(b, beta))
             .collect();
         assert_same(
             &format!("{what} spectra"),
-            x.axpby(alpha, &y, beta).unwrap().data(),
+            x.axpby(alpha, &y, beta)
+                .unwrap()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             &want,
         );
         let want: Vec<f64> = x
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(dense_y.data())
+            .zip(dense_y.dense_data().unwrap())
             .map(|(&a, &b)| scale(a, alpha) + scale(b, beta))
             .collect();
         assert_same(
             &format!("{what} spectrum + dense"),
-            x.axpby(alpha, &dense_y, beta).unwrap().data(),
+            x.axpby(alpha, &dense_y, beta)
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             &want,
         );
     }
     assert_same(
         "spectrum scale 0",
-        x.scale(0.0).data(),
-        &vec![0.0; x.data().len()],
+        x.scale(0.0).materialize().unwrap().dense_data().unwrap(),
+        &vec![0.0; x.materialize().unwrap().dense_data().unwrap().len()],
     );
 }
