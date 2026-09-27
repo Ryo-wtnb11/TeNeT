@@ -46,7 +46,7 @@ use contract_cases::{
 use num_complex::{Complex32, Complex64};
 use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
 use tenet::typed::Direction;
-use tenet::typed::{Runtime, TensorMap};
+use tenet::typed::{ContractSpec, Runtime, TensorMap};
 
 /// Counts Host allocations made by the thread that set `COUNTING` (device
 /// runtime threads never do), for the warm host-allocation contract.
@@ -134,12 +134,7 @@ where
         .lhs
         .to_cuda()
         .unwrap()
-        .contract(
-            &case.rhs.to_cuda().unwrap(),
-            &case.lhs_axes,
-            &case.rhs_axes,
-            &case.output_axes,
-        )
+        .contract(&case.rhs.to_cuda().unwrap(), &case.spec())
         .unwrap()
         .to_host()
         .unwrap();
@@ -200,12 +195,7 @@ fn general_axes_match_the_physical_basis_contraction() {
             .lhs
             .to_cuda()
             .unwrap()
-            .contract(
-                &case.rhs.to_cuda().unwrap(),
-                &case.lhs_axes,
-                &case.rhs_axes,
-                &case.output_axes,
-            )
+            .contract(&case.rhs.to_cuda().unwrap(), &case.spec())
             .unwrap()
             .to_host()
             .unwrap()
@@ -295,10 +285,7 @@ fn a_warm_general_contraction_uploads_only_its_output() {
     let output_bytes = std::mem::size_of_val(case.host().dense_data().unwrap()) as u64;
     let lhs = case.lhs.to_cuda().unwrap();
     let rhs = case.rhs.to_cuda().unwrap();
-    let call = || {
-        lhs.contract(&rhs, &case.lhs_axes, &case.rhs_axes, &case.output_axes)
-            .unwrap()
-    };
+    let call = || lhs.contract(&rhs, &case.spec()).unwrap();
 
     // Cold: the output, the coefficient payloads and the scratch high-water
     // zero uploads.
@@ -342,12 +329,7 @@ fn the_scratch_grows_only_at_a_high_water_mark_and_is_released_by_the_clear_path
         case.lhs
             .to_cuda()
             .unwrap()
-            .contract(
-                &case.rhs.to_cuda().unwrap(),
-                &case.lhs_axes,
-                &case.rhs_axes,
-                &case.output_axes,
-            )
+            .contract(&case.rhs.to_cuda().unwrap(), &case.spec())
             .unwrap()
             .to_host()
             .unwrap()
@@ -357,25 +339,9 @@ fn the_scratch_grows_only_at_a_high_water_mark_and_is_released_by_the_clear_path
     let small_rhs = small.rhs.to_cuda().unwrap();
     // Warm the small case's transform structures (and any buffer it needs
     // wider than the large case did) so only its output is left.
-    let _ = small_lhs
-        .contract(
-            &small_rhs,
-            &small.lhs_axes,
-            &small.rhs_axes,
-            &small.output_axes,
-        )
-        .unwrap();
+    let _ = small_lhs.contract(&small_rhs, &small.spec()).unwrap();
     let high_water = runtime.cuda_contract_scratch_bytes().unwrap();
-    let (result, counters) = delta(|| {
-        small_lhs
-            .contract(
-                &small_rhs,
-                &small.lhs_axes,
-                &small.rhs_axes,
-                &small.output_axes,
-            )
-            .unwrap()
-    });
+    let (result, counters) = delta(|| small_lhs.contract(&small_rhs, &small.spec()).unwrap());
     // What: a smaller operand narrows the retained buffers instead of
     // reallocating them — one allocation, the returned output.
     assert_eq!(counters.device_allocs, 1, "{counters:?}");
@@ -410,12 +376,7 @@ fn device_contract<R: DeviceRule, D: DevicePayload>(case: &Case<R, D>) -> Tensor
     case.lhs
         .to_cuda()
         .unwrap()
-        .contract(
-            &case.rhs.to_cuda().unwrap(),
-            &case.lhs_axes,
-            &case.rhs_axes,
-            &case.output_axes,
-        )
+        .contract(&case.rhs.to_cuda().unwrap(), &case.spec())
         .unwrap()
         .to_host()
         .unwrap()
@@ -477,7 +438,7 @@ fn fz2_loops_as_explicit_device_contracts_match_tensorkit() {
     let loops = fz2_tensorkit_loops(
         &runtime,
         |tensor| tensor.to_cuda().unwrap(),
-        |x, y, lhs, rhs, output| x.contract(y, lhs, rhs, output).unwrap(),
+        |x, y, spec| x.contract(y, spec).unwrap(),
         |tensor| tensor.to_host().unwrap().scalar().unwrap(),
     );
     for (name, value, expected) in loops {
@@ -498,10 +459,7 @@ fn a_warm_fermionic_contraction_uploads_only_its_output() {
     let output_bytes = std::mem::size_of_val(case.host().dense_data().unwrap()) as u64;
     let lhs = case.lhs.to_cuda().unwrap();
     let rhs = case.rhs.to_cuda().unwrap();
-    let call = || {
-        lhs.contract(&rhs, &case.lhs_axes, &case.rhs_axes, &case.output_axes)
-            .unwrap()
-    };
+    let call = || lhs.contract(&rhs, &case.spec()).unwrap();
     let _ = call();
     let scratch = runtime.cuda_contract_scratch_bytes().unwrap();
     let transforms = runtime.cuda_tree_transform_stats().unwrap();
@@ -532,35 +490,21 @@ fn rejections_happen_before_any_device_work_and_match_the_host() {
     let lhs = host_lhs.to_cuda().unwrap();
     let rhs = host_rhs.to_cuda().unwrap();
     let stranger = u1_rank_five::<f64>(&other).rhs.to_cuda().unwrap();
-    let _ = lhs
-        .contract(&rhs, &case.lhs_axes, &case.rhs_axes, &case.output_axes)
-        .unwrap();
+    let _ = lhs.contract(&rhs, &case.spec()).unwrap();
     let transforms = runtime.cuda_tree_transform_stats().unwrap();
     let scratch = runtime.cuda_contract_scratch_bytes().unwrap();
     // Malformed: an axis out of range, a repeated axis, an output order that
     // is not a permutation, and a pairing of two equal (not dual) legs.
     let (errors, counters) = delta(|| {
-        let malformed: [(&[usize], &[usize], &[usize]); 4] = [
-            (&[3, 7], &[0, 3], &[2, 0, 4, 1, 3]),
-            (&[3, 3], &[0, 3], &[2, 0, 4, 1, 3]),
-            (&[3, 1], &[0, 3], &[2, 0, 4, 1, 1]),
-            (&[0], &[0], &[0, 1, 2, 3, 4, 5, 6]),
-        ];
         let mut errors = Vec::new();
-        for (lhs_axes, rhs_axes, output) in malformed {
-            let expected = host_lhs
-                .contract(host_rhs, lhs_axes, rhs_axes, output)
-                .unwrap_err()
-                .to_string();
-            let actual = lhs
-                .contract(&rhs, lhs_axes, rhs_axes, output)
-                .unwrap_err()
-                .to_string();
+        for spec in malformed_rank_five_specs() {
+            let expected = host_lhs.contract(host_rhs, &spec).unwrap_err().to_string();
+            let actual = lhs.contract(&rhs, &spec).unwrap_err().to_string();
             assert_eq!(actual, expected, "device error text must be the Host's");
             errors.push(actual);
         }
         errors.push(
-            lhs.contract(&stranger, &case.lhs_axes, &case.rhs_axes, &case.output_axes)
+            lhs.contract(&stranger, &case.spec())
                 .unwrap_err()
                 .to_string(),
         );
@@ -574,6 +518,95 @@ fn rejections_happen_before_any_device_work_and_match_the_host() {
     );
     assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), transforms);
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), scratch);
+}
+
+/// Every split size of `case`'s open legs, in its own output order and
+/// reversed (#1549): the device result is the Host one, which
+/// `contract_spec_split.rs` pins against contract-then-permute. The returning
+/// and the overwrite forms both run.
+fn check_splits<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
+    let lhs = case.lhs.to_cuda().unwrap();
+    let rhs = case.rhs.to_cuda().unwrap();
+    let mut orders = vec![case.output_axes.clone()];
+    orders.push(case.output_axes.iter().rev().copied().collect());
+    for order in &orders {
+        for split in 0..=order.len() {
+            let (codomain, domain) = order.split_at(split);
+            let spec = ContractSpec {
+                codomain,
+                domain,
+                ..case.spec()
+            };
+            let label = format!("{} {codomain:?} <- {domain:?}", case.name);
+            let host = case.lhs.contract(&case.rhs, &spec).unwrap();
+            let device = lhs.contract(&rhs, &spec).unwrap().to_host().unwrap();
+            assert_eq!(device.codomain(), host.codomain(), "{label}");
+            assert_eq!(device.domain(), host.domain(), "{label}");
+            assert_close(
+                device.dense_data().unwrap(),
+                host.dense_data().unwrap(),
+                case.terms(),
+                &label,
+            );
+            let mut destination = host.scale(D::entry(7.5, 0.0)).to_cuda().unwrap();
+            lhs.contract_overwrite_into(&rhs, &mut destination, &spec, D::entry(1.0, 0.0))
+                .unwrap();
+            assert_close(
+                destination.to_host().unwrap().dense_data().unwrap(),
+                host.dense_data().unwrap(),
+                case.terms(),
+                &label,
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn every_split_matches_the_host_at_every_dtype() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    check_splits(u1_rank_five::<f64>(&runtime));
+    check_splits(su2_bent::<Complex64>(&runtime));
+    check_splits(product_general::<f32>(&runtime));
+    check_splits(fermionic_general::<_, Complex32>(
+        &runtime,
+        &fermion_su2(),
+        true,
+        "fZ2xSU2",
+        52,
+    ));
+}
+
+/// Malformed specs over `u1_rank_five` (rank 5 against rank 4): an axis out of
+/// range, a repeated axis, an output order that is not a permutation, and a
+/// pairing of two equal (not dual) legs.
+fn malformed_rank_five_specs() -> [ContractSpec<'static>; 4] {
+    [
+        ContractSpec {
+            lhs: &[3, 7],
+            rhs: &[0, 3],
+            codomain: &[2, 0, 4],
+            domain: &[1, 3],
+        },
+        ContractSpec {
+            lhs: &[3, 3],
+            rhs: &[0, 3],
+            codomain: &[2, 0, 4],
+            domain: &[1, 3],
+        },
+        ContractSpec {
+            lhs: &[3, 1],
+            rhs: &[0, 3],
+            codomain: &[2, 0, 4],
+            domain: &[1, 1],
+        },
+        ContractSpec {
+            lhs: &[0],
+            rhs: &[0],
+            codomain: &[0, 1, 2, 3],
+            domain: &[4, 5, 6],
+        },
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -590,9 +623,7 @@ fn device_overwrite<R: DeviceRule, D: DevicePayload>(case: &Case<R, D>) -> Tenso
         .contract_overwrite_into(
             &case.rhs.to_cuda().unwrap(),
             &mut destination,
-            &case.lhs_axes,
-            &case.rhs_axes,
-            &case.output_axes,
+            &case.spec(),
             D::entry(1.0, 0.0),
         )
         .unwrap();
@@ -694,15 +725,8 @@ fn a_warm_overwrite_transfers_and_allocates_nothing() {
         let rhs = case.rhs.to_cuda().unwrap();
         let mut destination = poisoned_destination(&case).to_cuda().unwrap();
         let mut call = || {
-            lhs.contract_overwrite_into(
-                &rhs,
-                &mut destination,
-                &case.lhs_axes,
-                &case.rhs_axes,
-                &case.output_axes,
-                1.0,
-            )
-            .unwrap()
+            lhs.contract_overwrite_into(&rhs, &mut destination, &case.spec(), 1.0)
+                .unwrap()
         };
         call();
         let scratch = runtime.cuda_contract_scratch_bytes().unwrap();
@@ -779,9 +803,7 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
     let rhs = host_rhs.to_cuda().unwrap();
     let poison = || case.host().scale(7.5);
     let poison_data = poison().dense_data().unwrap().to_vec();
-    let _ = lhs
-        .contract(&rhs, &case.lhs_axes, &case.rhs_axes, &case.output_axes)
-        .unwrap();
+    let _ = lhs.contract(&rhs, &case.spec()).unwrap();
     let transforms = runtime.cuda_tree_transform_stats().unwrap();
     let scratch = runtime.cuda_contract_scratch_bytes().unwrap();
     let device_text = |text: String| text.replace("host storage", "CUDA storage");
@@ -789,42 +811,25 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
     // Host-shared rejections, each against a fresh poisoned destination:
     // malformed axes, an output order that is not a permutation, a pairing
     // of two equal (not dual) legs, and a destination of another space.
-    let malformed: [(&[usize], &[usize], &[usize]); 4] = [
-        (&[3, 7], &[0, 3], &[2, 0, 4, 1, 3]),
-        (&[3, 3], &[0, 3], &[2, 0, 4, 1, 3]),
-        (&[3, 1], &[0, 3], &[2, 0, 4, 1, 1]),
-        (&[0], &[0], &[0, 1, 2, 3, 4, 5, 6]),
-    ];
     let foreign = || u1_reordered::<f64>(&runtime).host().scale(7.5);
-    let cases = malformed.into_iter().map(|axes| (axes, poison())).chain([(
-        (
-            &case.lhs_axes[..],
-            &case.rhs_axes[..],
-            &case.output_axes[..],
-        ),
-        foreign(),
-    )]);
-    for ((lhs_axes, rhs_axes, output), host_destination) in cases {
+    let cases = malformed_rank_five_specs()
+        .into_iter()
+        .map(|spec| (spec, poison()))
+        .chain([(case.spec(), foreign())]);
+    for (spec, host_destination) in cases {
         let before = host_destination.dense_data().unwrap().to_vec();
         let mut destination = host_destination.to_cuda().unwrap();
         let mut host_destination = host_destination;
         let expected = host_lhs
-            .contract_overwrite_into(
-                host_rhs,
-                &mut host_destination,
-                lhs_axes,
-                rhs_axes,
-                output,
-                1.0,
-            )
+            .contract_overwrite_into(host_rhs, &mut host_destination, &spec, 1.0)
             .unwrap_err()
             .to_string();
         let (actual, counters) = delta(|| {
-            lhs.contract_overwrite_into(&rhs, &mut destination, lhs_axes, rhs_axes, output, 1.0)
+            lhs.contract_overwrite_into(&rhs, &mut destination, &spec, 1.0)
                 .unwrap_err()
                 .to_string()
         });
-        assert_eq!(actual, device_text(expected), "{lhs_axes:?} {output:?}");
+        assert_eq!(actual, device_text(expected), "{spec:?}");
         assert_eq!(counters, CudaTransferStats::default(), "{actual}");
         assert_eq!(
             destination.to_host().unwrap().dense_data().unwrap(),
@@ -838,20 +843,16 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
     let stranger = u1_rank_five::<f64>(&other).rhs.to_cuda().unwrap();
     let shared = destination.clone();
     let (errors, counters) = delta(|| {
-        let axes = (
-            &case.lhs_axes[..],
-            &case.rhs_axes[..],
-            &case.output_axes[..],
-        );
+        let spec = case.spec();
         let mut errors = vec![
-            lhs.contract_overwrite_into(&stranger, &mut destination, axes.0, axes.1, axes.2, 1.0)
+            lhs.contract_overwrite_into(&stranger, &mut destination, &spec, 1.0)
                 .unwrap_err(),
-            lhs.contract_overwrite_into(&rhs, &mut destination, axes.0, axes.1, axes.2, 1.0)
+            lhs.contract_overwrite_into(&rhs, &mut destination, &spec, 1.0)
                 .unwrap_err(),
         ];
         let mut lhs_alias = lhs.clone();
         errors.push(
-            lhs.contract_overwrite_into(&rhs, &mut lhs_alias, axes.0, axes.1, axes.2, 1.0)
+            lhs.contract_overwrite_into(&rhs, &mut lhs_alias, &spec, 1.0)
                 .unwrap_err(),
         );
         errors
@@ -869,15 +870,8 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
     assert!(errors[2].to_string().contains("alias"), "{}", errors[2]);
     drop(shared);
     let (alpha, alpha_counters) = delta(|| {
-        lhs.contract_overwrite_into(
-            &rhs,
-            &mut destination,
-            &case.lhs_axes,
-            &case.rhs_axes,
-            &case.output_axes,
-            2.0,
-        )
-        .unwrap_err()
+        lhs.contract_overwrite_into(&rhs, &mut destination, &case.spec(), 2.0)
+            .unwrap_err()
     });
     assert!(
         matches!(alpha, tenet::prelude::Error::UnsupportedOnDevice(_)),

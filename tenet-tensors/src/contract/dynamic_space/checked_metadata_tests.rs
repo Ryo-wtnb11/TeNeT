@@ -471,6 +471,7 @@ fn lowered_metadata_routes_every_eager_result_through_the_primer() {
         &source,
         &source,
         axes,
+        None,
         counting_primer,
     )
     .unwrap();
@@ -479,6 +480,7 @@ fn lowered_metadata_routes_every_eager_result_through_the_primer() {
         &source,
         &source,
         axes,
+        None,
         counting_primer,
     )
     .unwrap();

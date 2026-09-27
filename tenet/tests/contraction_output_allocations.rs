@@ -7,6 +7,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
+use tenet::typed::ContractSpec;
 
 use num_complex::{Complex32, Complex64};
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
@@ -135,14 +136,35 @@ fn u1_contract_measurement<D: TensorScalar + std::fmt::Debug>(max_allocations: u
     let lhs: TensorMap<_, D> = TensorMap::rand_with_seed(&runtime, [&open], [&bond], seed).unwrap();
     let rhs: TensorMap<_, D> =
         TensorMap::rand_with_seed(&runtime, [&bond], [&open], seed + 1).unwrap();
-    let warm = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let warm = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let payload_len = warm.dense_data().unwrap().len();
     assert_eq!(payload_len, 2 * 2 + 3 * 3 + 2 * 2);
     assert_eq!(warm.subblock_count(), 3);
 
     let mut output = None;
     let measurement = measure(|| {
-        output = Some(black_box(lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap()));
+        output = Some(black_box(
+            lhs.contract(
+                &rhs,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
+            .unwrap(),
+        ));
     });
     let output = output.unwrap();
     assert_eq!(output.dense_data().unwrap(), warm.dense_data().unwrap());

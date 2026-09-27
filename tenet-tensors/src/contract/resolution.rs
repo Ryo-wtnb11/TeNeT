@@ -917,7 +917,9 @@ where
         )
     };
     let requested = OutputAxisOrder::from_axes(output_axes);
-    if zero_copy(lhs, rhs, lhs_axes, rhs_axes, requested, lhs_open) {
+    // The requested split is `dst`'s; only the temporaries below use the
+    // default one.
+    if zero_copy(lhs, rhs, lhs_axes, rhs_axes, requested, dst.nout()) {
         return None;
     }
     let identity = OutputAxisOrder::identity();
@@ -977,7 +979,7 @@ where
         .required_len()
         .ok()?
         .min(rhs.storage_space().required_len().ok()?);
-    let identity_output = output_axes.iter().copied().eq(0..open);
+    let identity_output = output_axes.iter().copied().eq(0..open) && dst.nout() == lhs_open;
     let copy_c = match (order, output_len.cmp(&operand_len)) {
         (FusionContractOrientation::LhsRhs, Ordering::Less | Ordering::Equal)
         | (FusionContractOrientation::RhsLhs, Ordering::Less) => Some(true),

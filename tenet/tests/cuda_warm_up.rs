@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::dense::cuda_transfer_stats;
-use tenet::typed::{GradedSpace, Runtime, TensorMap};
+use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 
 #[test]
 #[ignore = "requires a real CUDA device"]
@@ -29,7 +29,17 @@ fn a_first_contract_on_a_fresh_runtime_does_no_backend_initialization_work() {
         indices.iter().sum::<usize>() as f64 - 1.0
     })
     .unwrap();
-    let expected = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let expected = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let lhs_device = lhs.to_cuda().unwrap();
     let rhs_device = rhs.to_cuda().unwrap();
 
@@ -38,7 +48,15 @@ fn a_first_contract_on_a_fresh_runtime_does_no_backend_initialization_work() {
     // single coupled block, and no solver call at all.
     let before = cuda_transfer_stats();
     let product = lhs_device
-        .contract(&rhs_device, &[1], &[0], &[0, 1])
+        .contract(
+            &rhs_device,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
     let after = cuda_transfer_stats();
     assert_eq!(after.gemm_calls - before.gemm_calls, 1);

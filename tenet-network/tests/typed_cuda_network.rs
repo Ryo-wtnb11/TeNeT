@@ -8,7 +8,7 @@ use tenet::core::{
     SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::prelude::{Complex32, Complex64};
-use tenet::typed::{CudaStorage, GradedSpace, Runtime, TensorMap};
+use tenet::typed::{ContractSpec, CudaStorage, GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     clear_plan_cache, configure_plan_cache, plan_cache_stats, tensor, ContractionPlan,
     ContractionStep, GreedyDenseOptimizer, Network, NetworkIR, PlanCacheConfig, TemporaryLabel,
@@ -59,8 +59,28 @@ where
     let macro_actual = tensor!([a; b] = lhs_cuda[a; k] * rhs_cuda[k; b]).unwrap();
     let macro_warm = tensor!([a; b] = lhs_cuda[a; k] * rhs_cuda[k; b]).unwrap();
     let after_macro = plan_cache_stats(runtime);
-    let manual = lhs_cuda.contract(&rhs_cuda, &[1], &[0], &[0, 1]).unwrap();
-    let host_oracle = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let manual = lhs_cuda
+        .contract(
+            &rhs_cuda,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
+    let host_oracle = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     assert_eq!(actual.placement(), lhs_cuda.placement());
     assert!(std::ptr::eq(actual.provider(), lhs_cuda.provider()));
     assert_eq!(actual.codomain(), host_oracle.codomain());
@@ -245,9 +265,25 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let planned = chain.plan_with(&refs, chain_order).unwrap();
     let actual = planned.execute_cuda(&refs).unwrap();
     let manual = tensors[0]
-        .contract(&tensors[1], &[1], &[0], &[0, 1])
+        .contract(
+            &tensors[1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
-        .contract(&tensors[2], &[1], &[0], &[0, 1])
+        .contract(
+            &tensors[2],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
     let chain_macro =
         tensor!([a; d] = (tensors[0])[a; b] * (tensors[1])[b; c] * (tensors[2])[c; d]).unwrap();
@@ -287,7 +323,15 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let conj_manual = tensors[0]
         .adjoint()
         .unwrap()
-        .contract(&tensors[1], &[1], &[0], &[0, 1])
+        .contract(
+            &tensors[1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
     let conj_macro = tensor!([i; j] = conj((tensors[0]))[k; i] * (tensors[1])[k; j]).unwrap();
     assert_eq!(conj_actual.codomain(), conj_manual.codomain());
@@ -449,7 +493,17 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
         [&device[0], &device[1]];
     let planned = pair_network().plan(&refs, &GreedyDenseOptimizer).unwrap();
     let executed = planned.execute_cuda(&refs).unwrap();
-    let host_oracle = host[0].contract(&host[1], &[1], &[0], &[0, 1]).unwrap();
+    let host_oracle = host[0]
+        .contract(
+            &host[1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     assert_eq!(executed.placement(), device[0].placement());
     assert_close_c64(
         executed.to_host().unwrap().dense_data().unwrap(),
@@ -459,9 +513,25 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
     let chain =
         tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
     let chain_oracle = host[0]
-        .contract(&host[1], &[1], &[0], &[0, 1])
+        .contract(
+            &host[1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
-        .contract(&host[2], &[1], &[0], &[0, 1])
+        .contract(
+            &host[2],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
     assert_close_c64(
         chain.to_host().unwrap().dense_data().unwrap(),
@@ -478,7 +548,15 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
     let conj_oracle = host[0]
         .adjoint()
         .unwrap()
-        .contract(&host[1], &[1], &[0], &[0, 1])
+        .contract(
+            &host[1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
     assert_close_c64(
         conj.to_host().unwrap().dense_data().unwrap(),
@@ -619,10 +697,18 @@ fn equal_length_block_layout_drift_discards_the_device_replay_state() {
     numerics::assert_slices_close(
         "device vs host",
         first.to_host().unwrap().dense_data().unwrap(),
-        a0.contract(&b0, &[1], &[0], &[0, 1])
-            .unwrap()
-            .dense_data()
-            .unwrap(),
+        a0.contract(
+            &b0,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap()
+        .dense_data()
+        .unwrap(),
         2,
     );
     let after_first = plan_cache_stats(&runtime);
@@ -631,10 +717,18 @@ fn equal_length_block_layout_drift_discards_the_device_replay_state() {
     numerics::assert_slices_close(
         "drifted device vs host",
         drifted.to_host().unwrap().dense_data().unwrap(),
-        a3.contract(&b3, &[1], &[0], &[0, 1])
-            .unwrap()
-            .dense_data()
-            .unwrap(),
+        a3.contract(
+            &b3,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap()
+        .dense_data()
+        .unwrap(),
         2,
     );
 
@@ -691,14 +785,46 @@ where
 {
     let (host, device) = cuda_chain_tensors(runtime, space, seed);
     let returning = device[0]
-        .contract(&device[1], &[1], &[0], &[0, 1])
+        .contract(
+            &device[1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
-        .contract(&device[2], &[1], &[0], &[0, 1])
+        .contract(
+            &device[2],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
     let host_oracle = host[0]
-        .contract(&host[1], &[1], &[0], &[0, 1])
+        .contract(
+            &host[1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
-        .contract(&host[2], &[1], &[0], &[0, 1])
+        .contract(
+            &host[2],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
     let cold = tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
     let warm = tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
@@ -759,9 +885,25 @@ fn warm_cuda_destination_reuse_matches_the_returning_chain_for_every_provider() 
         .collect();
     let cuda: Vec<_> = device.iter().map(|t| t.to_cuda().unwrap()).collect();
     let oracle = device[0]
-        .contract(&device[1], &[1], &[0], &[0, 1])
+        .contract(
+            &device[1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
-        .contract(&device[2], &[1], &[0], &[0, 1])
+        .contract(
+            &device[2],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
     drop(tensor!([a; d] = (cuda[0])[a; b] * (cuda[1])[b; c] * (cuda[2])[c; d]).unwrap());
     let warm = tensor!([a; d] = (cuda[0])[a; b] * (cuda[1])[b; c] * (cuda[2])[c; d]).unwrap();
@@ -955,9 +1097,25 @@ fn single_precision_device_chains_match_the_host_and_reuse_their_destinations() 
     {
         let (host, device) = cuda_chain_tensors_at::<R, D>(runtime, space, seed);
         let oracle = host[0]
-            .contract(&host[1], &[1], &[0], &[0, 1])
+            .contract(
+                &host[1],
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
             .unwrap()
-            .contract(&host[2], &[1], &[0], &[0, 1])
+            .contract(
+                &host[2],
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
             .unwrap();
         let cold =
             tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();

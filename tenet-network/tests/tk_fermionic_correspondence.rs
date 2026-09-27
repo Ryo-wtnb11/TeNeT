@@ -9,6 +9,7 @@
 //! TensorKit.
 
 use std::sync::Arc;
+use tenet::typed::ContractSpec;
 use tenet::typed::Direction;
 
 use tenet::core::{FermionParityFusionRule, Z2Irrep};
@@ -134,11 +135,31 @@ fn fz2_contractions_match_tensorkit() {
     // Force the single-axis diagonal `contract` fast path explicitly (rather than
     // whatever order the macro picks): A[i;j] · S[j;k] goes through scale+permute
     // + the fermionic twist fold, and closing with B must still give TK's -6.
-    let as_ = a.contract(&s, &[1], &[0], &[0, 1]).unwrap();
+    let as_ = a
+        .contract(
+            &s,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let s3_fast = scalar(tensor!([] = as_[i; k] * b[k; i]).unwrap());
     assert!((s3_fast - (-6.0)).abs() < 1e-12, "s3_fast = {s3_fast}");
     // And the leading (D * A) order on `s`.
-    let sa = s.contract(&a, &[1], &[0], &[0, 1]).unwrap();
+    let sa = s
+        .contract(
+            &a,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let s4_fast = scalar(tensor!([] = sa[i; k] * b[k; i]).unwrap());
     assert!((s4_fast - (-6.0)).abs() < 1e-12, "s4_fast = {s4_fast}");
 }

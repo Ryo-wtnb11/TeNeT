@@ -238,19 +238,29 @@ where
 pub(super) fn contract_multiplicity_free<R, D>(
     lhs: &TensorMap<R, D>,
     rhs: &TensorMap<R, D>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_axes: &[usize],
+    spec: &ContractSpec<'_>,
 ) -> Result<TensorMap<R, D>, Error>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    if let Some(compact) = lhs.try_contract_diagonal(rhs, lhs_axes, rhs_axes, output_axes)? {
+    let (lhs_axes, rhs_axes) = (spec.lhs, spec.rhs);
+    let output_axes = &spec.output_axes()[..];
+    let codomain_rank = spec.codomain.len();
+    if let Some(compact) =
+        lhs.try_contract_diagonal(rhs, lhs_axes, rhs_axes, output_axes, codomain_rank)?
+    {
         return Ok(compact);
     }
     let output_order = OutputAxisOrder::from_axes(output_axes);
-    let destination = contract_destination(lhs, rhs, lhs_axes, rhs_axes, output_order)?;
+    let destination = contract_destination(
+        lhs,
+        rhs,
+        lhs_axes,
+        rhs_axes,
+        output_order,
+        Some(codomain_rank),
+    )?;
     let Some(order) = tenet_tensors::zero_copy_contract_order_for_output_permute(
         lhs.logical_space().provider(),
         destination.space(),
@@ -297,7 +307,7 @@ where
             axis - rhs_offset
         }
     };
-    let (codomain, domain) = output_axes.split_at(lhs_open);
+    let (codomain, domain) = output_axes.split_at(codomain_rank);
     let body = temporary
         .owned_body()
         .expect("contraction results are owned");
@@ -317,8 +327,9 @@ where
     })
 }
 
-/// The destination space of `lhs·rhs` in `output_order`, derived as the
-/// contraction route does: owned operands through the owned derivation, a
+/// The destination space of `lhs·rhs` in `output_order`, split after
+/// `codomain_rank` output axes (`None`: after every open lhs axis), derived as
+/// the contraction route does: owned operands through the owned derivation, a
 /// lazy adjoint through the oriented one.
 pub(super) fn contract_destination<R, D>(
     lhs: &TensorMap<R, D>,
@@ -326,6 +337,7 @@ pub(super) fn contract_destination<R, D>(
     lhs_axes: &[usize],
     rhs_axes: &[usize],
     output_order: OutputAxisOrder<'_>,
+    codomain_rank: Option<usize>,
 ) -> Result<BoundDynamicFusionMapSpace<R>, Error>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -335,13 +347,25 @@ where
         if let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
             (&lhs.repr, &rhs.repr)
         {
-            BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
-                &lhs_body.space,
-                &rhs_body.space,
-                lhs_axes,
-                rhs_axes,
-                output_order,
-            )?
+            match codomain_rank {
+                Some(codomain_rank) => {
+                    BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
+                        &lhs_body.space,
+                        &rhs_body.space,
+                        lhs_axes,
+                        rhs_axes,
+                        output_order,
+                        codomain_rank,
+                    )?
+                }
+                None => BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+                    &lhs_body.space,
+                    &rhs_body.space,
+                    lhs_axes,
+                    rhs_axes,
+                    output_order,
+                )?,
+            }
         } else {
             oriented_contract_destination(
                 lhs.logical_space(),
@@ -351,6 +375,7 @@ where
                 lhs_axes,
                 rhs_axes,
                 output_order,
+                codomain_rank,
             )?
         },
     )
@@ -367,7 +392,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    let destination = contract_destination(lhs, rhs, lhs_axes, rhs_axes, output_order)?;
+    let destination = contract_destination(lhs, rhs, lhs_axes, rhs_axes, output_order, None)?;
     contract_multiplicity_free_into(lhs, rhs, lhs_axes, rhs_axes, output_order, destination)
 }
 
@@ -498,11 +523,9 @@ where
     fn contract(
         lhs: &TensorMap<R, Self>,
         rhs: &TensorMap<R, Self>,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
     ) -> Result<TensorMap<R, Self>, Error> {
-        contract_multiplicity_free(lhs, rhs, lhs_axes, rhs_axes, output_axes)
+        contract_multiplicity_free(lhs, rhs, spec)
     }
 
     fn compose(
@@ -523,9 +546,7 @@ where
     fn contract(
         _lhs: &TensorMap<R, Self>,
         _rhs: &TensorMap<R, Self>,
-        _lhs_axes: &[usize],
-        _rhs_axes: &[usize],
-        _output_axes: &[usize],
+        _spec: &ContractSpec<'_>,
     ) -> Result<TensorMap<R, Self>, Error> {
         Err(
             tenet_tensors::OperationError::UnsupportedTensorContractScope {

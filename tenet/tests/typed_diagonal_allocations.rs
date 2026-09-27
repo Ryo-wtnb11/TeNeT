@@ -16,6 +16,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use tenet::typed::ContractSpec;
 
 use tenet::core::{Z2FusionRule, Z2Irrep};
 use tenet::prelude::{Complex64, Runtime};
@@ -482,7 +483,19 @@ fn contracting_a_spectrum_scales_instead_of_densifying() {
     let dense = source(0x5eed_0032);
 
     // `t · s`: the spectrum scales `t`'s contracted domain leg (`rmul!`).
-    black_box(dense.contract(&d, &[1], &[0], &[0, 1]).unwrap());
+    black_box(
+        dense
+            .contract(
+                &d,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
+            .unwrap(),
+    );
     assert!(
         measured_bytes(|| d.data().len()) >= dense_payload_bytes(),
         "t * s materialized the spectrum"
@@ -490,7 +503,18 @@ fn contracting_a_spectrum_scales_instead_of_densifying() {
 
     // `s · t`: the mirror image, scaling `t`'s leading codomain leg (`lmul!`).
     let e = spectrum(0x5eed_0033);
-    black_box(e.contract(&dense, &[1], &[0], &[0, 1]).unwrap());
+    black_box(
+        e.contract(
+            &dense,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap(),
+    );
     assert!(
         measured_bytes(|| e.data().len()) >= dense_payload_bytes(),
         "s * t materialized the spectrum"
@@ -499,7 +523,18 @@ fn contracting_a_spectrum_scales_instead_of_densifying() {
     // `s · s` stays compact end to end, so here the ceiling *is* decisive: the
     // whole contraction must cost less than a single dense payload.
     let f = spectrum(0x5eed_0034);
-    let bytes = warmed_bytes(|| f.contract(&f, &[1], &[0], &[0, 1]).unwrap());
+    let bytes = warmed_bytes(|| {
+        f.contract(
+            &f,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap()
+    });
     assert!(
         bytes < dense_payload_bytes(),
         "s * s allocated at least one dense payload: {bytes} bytes"
@@ -764,7 +799,18 @@ fn contract_keeps_the_compact_storage_outcomes() {
     // contraction costs less than one dense payload, and both the operand and
     // the result still owe their materialization afterwards.
     let d = spectrum(0x5eed_0061);
-    let bytes = warmed_bytes(|| d.contract(&d, &[1], &[0], &[0, 1]).unwrap());
+    let bytes = warmed_bytes(|| {
+        d.contract(
+            &d,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap()
+    });
     assert!(
         bytes < dense_payload_bytes(),
         "ordered s * s allocated at least one dense payload: {bytes} bytes"
@@ -773,7 +819,17 @@ fn contract_keeps_the_compact_storage_outcomes() {
         measured_bytes(|| d.data().len()) >= dense_payload_bytes(),
         "ordered s * s materialized its operand"
     );
-    let product = d.contract(&d, &[1], &[0], &[0, 1]).unwrap();
+    let product = d
+        .contract(
+            &d,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     assert!(
         measured_bytes(|| product.data().len()) >= dense_payload_bytes(),
         "ordered s * s densified its result"
@@ -784,8 +840,29 @@ fn contract_keeps_the_compact_storage_outcomes() {
     // decline: the result carries a dense payload, so its first `data()` has
     // nothing left to materialize.
     let e = spectrum(0x5eed_0062);
-    black_box(e.contract(&e, &[1], &[0], &[1, 0]).unwrap());
-    let swapped = e.contract(&e, &[1], &[0], &[1, 0]).unwrap();
+    black_box(
+        e.contract(
+            &e,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap(),
+    );
+    let swapped = e
+        .contract(
+            &e,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap();
     assert!(
         measured_bytes(|| swapped.data().len()) < dense_payload_bytes(),
         "ordered s * s with the bond-crossing order still owes a materialization, so it kept a compact payload the documented decline should have refused"
@@ -795,7 +872,19 @@ fn contract_keeps_the_compact_storage_outcomes() {
     // spectrum operand stays compact afterwards.
     let f = spectrum(0x5eed_0063);
     let dense = source(0x5eed_0064);
-    black_box(dense.contract(&f, &[1], &[0], &[1, 0]).unwrap());
+    black_box(
+        dense
+            .contract(
+                &f,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[1],
+                    domain: &[0],
+                },
+            )
+            .unwrap(),
+    );
     assert!(
         measured_bytes(|| f.data().len()) >= dense_payload_bytes(),
         "ordered t * s materialized the spectrum"

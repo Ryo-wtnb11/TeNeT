@@ -17,6 +17,7 @@
 //!    coherence equation, and nothing derives `F` or `R` from `N`.
 
 use std::collections::HashMap;
+use tenet::typed::ContractSpec;
 
 use num_complex::{Complex32, Complex64};
 use tenet::prelude::{GradedSpace, Runtime, TensorMap};
@@ -746,7 +747,15 @@ where
         .unwrap()
     });
     let ordinary = basis[0]
-        .contract(&basis[0], &[3], &[0], &[0, 1, 2, 3, 4, 5])
+        .contract(
+            &basis[0],
+            &ContractSpec {
+                lhs: &[3],
+                rhs: &[0],
+                codomain: &[0, 1, 2],
+                domain: &[3, 4, 5],
+            },
+        )
         .unwrap_err();
     assert!(matches!(
         ordinary,

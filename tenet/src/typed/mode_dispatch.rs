@@ -1903,12 +1903,10 @@ where
     fn contract(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
         reject_non_symmetric_contraction(lhs.logical_space().provider().braiding_style())?;
-        D::contract(lhs, rhs, lhs_axes, rhs_axes, output_axes)
+        D::contract(lhs, rhs, spec)
     }
 
     fn compose(
@@ -1930,15 +1928,13 @@ where
     fn contract(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
         reject_non_symmetric_contraction(CheckedGenericFusion::braiding_style(
             lhs.logical_space().provider(),
         ))
         .map_err(Error::from)?;
-        contract_checked_generic(lhs, rhs, lhs_axes, rhs_axes, output_axes)
+        contract_checked_generic(lhs, rhs, spec)
     }
 
     fn compose(
@@ -1985,9 +1981,7 @@ where
 pub(super) fn contract_checked_generic<R, D>(
     lhs: &TensorMap<R, D>,
     rhs: &TensorMap<R, D>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_axes: &[usize],
+    spec: &ContractSpec<'_>,
 ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
 where
     R: TypedSectorAdmission<
@@ -2004,7 +1998,12 @@ where
         lhs_body.materialized_dense_data(),
         &rhs_body.space,
         rhs_body.materialized_dense_data(),
-        TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::from_axes(output_axes)),
+        TensorContractSpec::new(
+            spec.lhs,
+            spec.rhs,
+            OutputAxisOrder::from_axes(&spec.output_axes()),
+        ),
+        spec.codomain.len(),
     )?;
     Ok(TensorMap {
         runtime: lhs.runtime.clone(),

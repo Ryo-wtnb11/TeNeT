@@ -4,6 +4,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard};
+use tenet::typed::ContractSpec;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{Complex32, Complex64, Runtime, TensorScalar};
@@ -480,8 +481,28 @@ fn temporary_contracted_order_worker() {
     let [x, y, z, w, p, q] = &oracle_inputs[..] else {
         unreachable!()
     };
-    let t = x.contract(y, &[2], &[0], &[0, 1, 2]).unwrap();
-    let s = p.contract(q, &[1], &[0], &[0, 1, 2]).unwrap();
+    let t = x
+        .contract(
+            y,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2],
+            },
+        )
+        .unwrap();
+    let s = p
+        .contract(
+            q,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1, 2],
+            },
+        )
+        .unwrap();
     let t_bytes = std::mem::size_of_val(t.dense_data().unwrap());
 
     let labels = |names: &[&str]| {
@@ -507,7 +528,16 @@ fn temporary_contracted_order_worker() {
             vec![2],
             labels(&["d", "a"]),
             vec![step(0, 1, 3, &["a", "b", "c"]), step(2, 3, 4, &["d", "a"])],
-            z.contract(&t, &[1, 2], &[2, 1], &[0, 1]).unwrap(),
+            z.contract(
+                &t,
+                &ContractSpec {
+                    lhs: &[1, 2],
+                    rhs: &[2, 1],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
+            .unwrap(),
         ),
         (
             "lhs temporary",
@@ -515,7 +545,16 @@ fn temporary_contracted_order_worker() {
             vec![3],
             labels(&["a", "d"]),
             vec![step(0, 1, 3, &["a", "b", "c"]), step(3, 2, 4, &["a", "d"])],
-            t.contract(w, &[1, 2], &[0, 1], &[0, 1]).unwrap(),
+            t.contract(
+                w,
+                &ContractSpec {
+                    lhs: &[1, 2],
+                    rhs: &[0, 1],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
+            .unwrap(),
         ),
         (
             "both temporaries",
@@ -527,7 +566,16 @@ fn temporary_contracted_order_worker() {
                 step(2, 3, 5, &["d", "c", "b"]),
                 step(5, 4, 6, &["d", "a"]),
             ],
-            s.contract(&t, &[1, 2], &[2, 1], &[0, 1]).unwrap(),
+            s.contract(
+                &t,
+                &ContractSpec {
+                    lhs: &[1, 2],
+                    rhs: &[2, 1],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
+            .unwrap(),
         ),
     ];
     for (name, extra_labels, extra_inputs, output, steps, oracle) in cases {
@@ -835,9 +883,25 @@ where
         drop(planned.execute(&refs, &mut workspace).unwrap());
     }
     let oracle = tensors[0]
-        .contract(&tensors[1], &[1], &[0], &[1, 0])
+        .contract(
+            &tensors[1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
         .unwrap()
-        .contract(&tensors[2], &[1], &[0], &[0, 1])
+        .contract(
+            &tensors[2],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
         .dense_data()
         .unwrap()

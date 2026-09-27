@@ -1627,9 +1627,25 @@ fn typed_crossed_schedule_reuses_the_actual_first_step_destination() {
     let mut workspace = NetworkExecutionWorkspace::default();
     let refs = [&a, &b, &c];
     let oracle = a
-        .contract(&b, &[1], &[0], &[1, 0])
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
         .unwrap()
-        .contract(&c, &[1], &[0], &[0, 1])
+        .contract(
+            &c,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
     drop(planned.execute(&refs, &mut workspace).unwrap());
     let before = workspace.intermediates[0]

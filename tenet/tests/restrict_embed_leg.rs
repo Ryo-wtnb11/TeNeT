@@ -14,6 +14,7 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use tenet::typed::ContractSpec;
 
 use num_complex::Complex64;
 use tenet::core::{
@@ -980,10 +981,26 @@ fn restriction_commutes_with_permute_and_with_a_contraction_over_an_untouched_le
     let restrict_then_contract = source
         .restrict_leg(&[(0, &selection)])
         .unwrap()
-        .contract(&partner, &[2], &[0], &[0, 1, 2])
+        .contract(
+            &partner,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2],
+            },
+        )
         .unwrap();
     let contract_then_restrict = source
-        .contract(&partner, &[2], &[0], &[0, 1, 2])
+        .contract(
+            &partner,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2],
+            },
+        )
         .unwrap()
         .restrict_leg(&[(0, &selection)])
         .unwrap();

@@ -67,10 +67,18 @@ macro_rules! warm_ops {
         });
         assert_warm_hits(concat!($label, " contract"), || {
             bits(
-                a.contract(&matrix, &[0], &[1], &[0, 1, 2, 3])
-                    .unwrap()
-                    .dense_data()
-                    .unwrap(),
+                a.contract(
+                    &matrix,
+                    &ContractSpec {
+                        lhs: &[0],
+                        rhs: &[1],
+                        codomain: &[0, 1, 2],
+                        domain: &[3],
+                    },
+                )
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             )
         });
     }};

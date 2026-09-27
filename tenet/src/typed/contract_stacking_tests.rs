@@ -305,40 +305,104 @@ where
             // Full contraction, identity and swapped output order: the
             // sorted and swapped operand candidates.
             let full = good
-                .contract(&good, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+                .contract(
+                    &good,
+                    &ContractSpec {
+                        lhs: &[2, 3],
+                        rhs: &[0, 1],
+                        codomain: &[0, 1],
+                        domain: &[2, 3],
+                    },
+                )
                 .unwrap();
             assert_same_operator(
                 &tensor
-                    .contract(other, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+                    .contract(
+                        other,
+                        &ContractSpec {
+                            lhs: &[2, 3],
+                            rhs: &[0, 1],
+                            codomain: &[0, 1],
+                            domain: &[2, 3],
+                        },
+                    )
                     .unwrap(),
                 &full,
                 &what("contract"),
             );
             assert_same_operator(
                 &tensor
-                    .contract(other, &[2, 3], &[0, 1], &[2, 3, 0, 1])
+                    .contract(
+                        other,
+                        &ContractSpec {
+                            lhs: &[2, 3],
+                            rhs: &[0, 1],
+                            codomain: &[2, 3],
+                            domain: &[0, 1],
+                        },
+                    )
                     .unwrap(),
                 &good
-                    .contract(&good, &[2, 3], &[0, 1], &[2, 3, 0, 1])
+                    .contract(
+                        &good,
+                        &ContractSpec {
+                            lhs: &[2, 3],
+                            rhs: &[0, 1],
+                            codomain: &[2, 3],
+                            domain: &[0, 1],
+                        },
+                    )
                     .unwrap(),
                 &what("contract swapped output"),
             );
             // One contracted leg: recoupled source and output transforms.
             assert_same_operator(
                 &tensor
-                    .contract(other, &[3], &[1], &[0, 1, 2, 3, 4, 5])
+                    .contract(
+                        other,
+                        &ContractSpec {
+                            lhs: &[3],
+                            rhs: &[1],
+                            codomain: &[0, 1, 2],
+                            domain: &[3, 4, 5],
+                        },
+                    )
                     .unwrap(),
                 &good
-                    .contract(&good, &[3], &[1], &[0, 1, 2, 3, 4, 5])
+                    .contract(
+                        &good,
+                        &ContractSpec {
+                            lhs: &[3],
+                            rhs: &[1],
+                            codomain: &[0, 1, 2],
+                            domain: &[3, 4, 5],
+                        },
+                    )
                     .unwrap(),
                 &what("partial contract"),
             );
             assert_same_operator(
                 &tensor
-                    .contract(other, &[2], &[0], &[3, 4, 0, 1, 2, 5])
+                    .contract(
+                        other,
+                        &ContractSpec {
+                            lhs: &[2],
+                            rhs: &[0],
+                            codomain: &[3, 4, 0],
+                            domain: &[1, 2, 5],
+                        },
+                    )
                     .unwrap(),
                 &good
-                    .contract(&good, &[2], &[0], &[3, 4, 0, 1, 2, 5])
+                    .contract(
+                        &good,
+                        &ContractSpec {
+                            lhs: &[2],
+                            rhs: &[0],
+                            codomain: &[3, 4, 0],
+                            domain: &[1, 2, 5],
+                        },
+                    )
                     .unwrap(),
                 &what("partial contract permuted"),
             );
@@ -523,10 +587,15 @@ where
                 (&[2, 3], &[0, 1], &[1, 0, 2, 3], "contract copyC"),
                 (&[3], &[1], &[0, 1, 2, 3, 4, 5], "contract one leg"),
             ] {
+                let (codomain, domain) = output_axes.split_at(tensor.rank() - lhs_axes.len());
+                let spec = ContractSpec {
+                    lhs: lhs_axes,
+                    rhs: rhs_axes,
+                    codomain,
+                    domain,
+                };
                 check(
-                    &tensor
-                        .contract(other, lhs_axes, rhs_axes, output_axes)
-                        .unwrap(),
+                    &tensor.contract(other, &spec).unwrap(),
                     &dense_contract(dense, other_dense, lhs_axes, rhs_axes, output_axes),
                     what(op),
                 );

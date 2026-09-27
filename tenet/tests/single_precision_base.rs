@@ -15,7 +15,7 @@ mod single_precision_oracle;
 use num_complex::{Complex32, Complex64};
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{LegSelection, SectorSpectrum, TensorMap};
-use tenet::typed::{Direction, Side};
+use tenet::typed::{ContractSpec, Direction, Side};
 
 use single_precision_oracle::{
     assert_payloads_agree, assert_scalars_agree, draw_parts, fermion_su2_leg, one as wide_of_one,
@@ -201,8 +201,8 @@ macro_rules! base_suite {
                 for (what, got, expected) in [
                     (
                         "contract",
-                        a.contract(&b, &[1], &[0], &[0, 1]).unwrap(),
-                        wa.contract(&wb, &[1], &[0], &[0, 1]).unwrap(),
+                        a.contract(&b, &ContractSpec { lhs: &[1], rhs: &[0], codomain: &[0], domain: &[1] }).unwrap(),
+                        wa.contract(&wb, &ContractSpec { lhs: &[1], rhs: &[0], codomain: &[0], domain: &[1] }).unwrap(),
                     ),
                     ("compose", a.compose(&b).unwrap(), wa.compose(&wb).unwrap()),
                     ("otimes", a.otimes(&b).unwrap(), wa.otimes(&wb).unwrap()),
@@ -240,10 +240,10 @@ macro_rules! base_suite {
 
                 assert_payloads_agree(
                     "rank-5 contract",
-                    a.contract(&b, &[3, 4], &[0, 1], &[0, 1, 2, 3])
+                    a.contract(&b, &ContractSpec { lhs: &[3, 4], rhs: &[0, 1], codomain: &[0, 1, 2], domain: &[3] })
                         .unwrap()
                         .dense_data().unwrap(),
-                    wa.contract(&wb, &[3, 4], &[0, 1], &[0, 1, 2, 3])
+                    wa.contract(&wb, &ContractSpec { lhs: &[3, 4], rhs: &[0, 1], codomain: &[0, 1, 2], domain: &[3] })
                         .unwrap()
                         .dense_data().unwrap(),
                     terms,

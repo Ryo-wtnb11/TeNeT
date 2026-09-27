@@ -12,6 +12,7 @@
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::Arc;
+use tenet::typed::ContractSpec;
 
 use num_complex::{Complex32, Complex64};
 
@@ -123,10 +124,30 @@ fn u1_case<D: Bits>(seed: u64) {
         TensorMap::rand_with_seed(&runtime, [&bond], [&open], seed + 1).unwrap();
 
     // contract
-    let output = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
-    let mut expected = output.zeros_like();
-    lhs.contract_overwrite_into(&rhs, &mut expected, &[1], &[0], &[0, 1], D::from_real(1.0))
+    let output = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
+    let mut expected = output.zeros_like();
+    lhs.contract_overwrite_into(
+        &rhs,
+        &mut expected,
+        &ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[0],
+            domain: &[1],
+        },
+        D::from_real(1.0),
+    )
+    .unwrap();
     assert_eq!(output.dense_data().unwrap().len(), 4 + 9 + 4);
     assert_eq!(check_owned!(output, expected, lhs, rhs, 2), 2);
 
@@ -138,10 +159,30 @@ fn u1_case<D: Bits>(seed: u64) {
     let parent: TensorMap<_, D> =
         TensorMap::rand_with_seed(&runtime, [&bond], [&open], seed + 2).unwrap();
     let lazy = parent.adjoint().unwrap();
-    let output = lazy.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
-    let mut expected = output.zeros_like();
-    lazy.contract_overwrite_into(&rhs, &mut expected, &[1], &[0], &[0, 1], D::from_real(1.0))
+    let output = lazy
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
+    let mut expected = output.zeros_like();
+    lazy.contract_overwrite_into(
+        &rhs,
+        &mut expected,
+        &ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[0],
+            domain: &[1],
+        },
+        D::from_real(1.0),
+    )
+    .unwrap();
     assert_eq!(check_owned!(output, expected, lazy, rhs, 2), 2);
     let composed = lazy.compose(&rhs).unwrap();
     assert_eq!(check_owned!(composed, expected, lazy, rhs, 2), 2);
@@ -169,14 +210,27 @@ fn su2_case<D: Bits>(seed: u64) {
     let rhs: TensorMap<_, D> =
         TensorMap::rand_with_seed(&runtime, [&b], [&a, &c], seed + 1).unwrap();
 
-    let output = lhs.contract(&rhs, &[2], &[0], &[0, 1, 2, 3]).unwrap();
+    let output = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
+        .unwrap();
     let mut expected = output.zeros_like();
     lhs.contract_overwrite_into(
         &rhs,
         &mut expected,
-        &[2],
-        &[0],
-        &[0, 1, 2, 3],
+        &ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[0, 1],
+            domain: &[2, 3],
+        },
         D::from_real(1.0),
     )
     .unwrap();
@@ -193,9 +247,12 @@ fn su2_case<D: Bits>(seed: u64) {
     lazy.contract_overwrite_into(
         &rhs,
         &mut expected,
-        &[2],
-        &[0],
-        &[0, 1, 2, 3],
+        &ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[0, 1],
+            domain: &[2, 3],
+        },
         D::from_real(1.0),
     )
     .unwrap();

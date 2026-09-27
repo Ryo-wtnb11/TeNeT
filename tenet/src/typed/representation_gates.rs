@@ -371,7 +371,17 @@ fn checked_generic_contract_reuses_one_runtime_generic_lane() {
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
 
     for _ in 0..2 {
-        let output = tensor.contract(&identity, &[2], &[0], &[0, 1, 2]).unwrap();
+        let output = tensor
+            .contract(
+                &identity,
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2],
+                },
+            )
+            .unwrap();
         assert_eq!(output.dense_data().unwrap(), tensor.dense_data().unwrap());
         assert!(std::ptr::eq(output.provider(), provider.as_ref()));
     }
@@ -531,9 +541,14 @@ where
     let lhs_axes: Vec<_> = (lhs.codomain_rank()..lhs.rank()).collect();
     let rhs_axes: Vec<_> = (0..rhs.codomain_rank()).collect();
     let output_axes: Vec<_> = (0..lhs.codomain_rank() + rhs.domain_rank()).collect();
-    let expected_contract = lhs
-        .contract(rhs, &lhs_axes, &rhs_axes, &output_axes)
-        .unwrap();
+    let (codomain, domain) = output_axes.split_at(lhs.codomain_rank());
+    let spec = ContractSpec {
+        lhs: &lhs_axes,
+        rhs: &rhs_axes,
+        codomain,
+        domain,
+    };
+    let expected_contract = lhs.contract(rhs, &spec).unwrap();
     let expected_compose = lhs.compose(rhs).unwrap();
     let provider = lhs.provider() as *const R;
     let runtime = lhs.runtime().identity();
@@ -553,7 +568,7 @@ where
         let lhs_device = device_operand(lhs, lhs_adjoint);
         let rhs_device = device_operand(rhs, rhs_adjoint);
         let contract = lhs_device
-            .contract(&rhs_device, &lhs_axes, &rhs_axes, &output_axes)
+            .contract(&rhs_device, &spec)
             .unwrap()
             .to_host()
             .unwrap();
@@ -2742,13 +2757,29 @@ fn typed_cuda_complex_payload_costs_the_same_device_calls_as_f64() {
     let untouched = ((0, 0, 0), (0, 0, 0));
     assert_eq!(
         observe(|| real_device
-            .contract(&real_device, &[1], &[0], &[0, 1])
+            .contract(
+                &real_device,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1]
+                }
+            )
             .unwrap()),
         untouched
     );
     assert_eq!(
         observe(|| complex_device
-            .contract(&complex_device, &[1], &[0], &[0, 1])
+            .contract(
+                &complex_device,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1]
+                }
+            )
             .unwrap()),
         untouched
     );
@@ -2792,7 +2823,17 @@ fn typed_cuda_lazy_adjoint_contract_and_compose_match_rectangular_host_oracles()
         (2 * indices[0] + indices[1]) as f64 + 1.0
     })
     .unwrap();
-    let expected_contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let expected_contract = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let expected_compose = lhs.compose(&rhs).unwrap();
 
     for upload_parent_first in [false, true] {
@@ -2818,7 +2859,15 @@ fn typed_cuda_lazy_adjoint_contract_and_compose_match_rectangular_host_oracles()
             let lhs_device = device_operand(&lhs, lhs_adjoint);
             let rhs_device = device_operand(&rhs, rhs_adjoint);
             let contracted = lhs_device
-                .contract(&rhs_device, &[1], &[0], &[0, 1])
+                .contract(
+                    &rhs_device,
+                    &ContractSpec {
+                        lhs: &[1],
+                        rhs: &[0],
+                        codomain: &[0],
+                        domain: &[1],
+                    },
+                )
                 .unwrap();
             let composed = lhs_device.compose(&rhs_device).unwrap();
             let contracted = contracted.to_host().unwrap();
@@ -2881,7 +2930,15 @@ fn typed_cuda_lazy_adjoint_preserves_fermionic_contract_sign() {
         let lhs_device = device_operand(&lhs, lhs_adjoint);
         let rhs_device = device_operand(&rhs, rhs_adjoint);
         let contract = lhs_device
-            .contract(&rhs_device, &[1], &[0], &[0, 1])
+            .contract(
+                &rhs_device,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
             .unwrap()
             .to_host()
             .unwrap();
@@ -5927,9 +5984,27 @@ where
         (&eager, &lazy, &eager, &eager),
         (&lazy, &lazy, &eager, &eager),
     ] {
-        let actual = lhs.contract(rhs, &[1], &[0], &[1, 0]).unwrap();
+        let actual = lhs
+            .contract(
+                rhs,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[1],
+                    domain: &[0],
+                },
+            )
+            .unwrap();
         let expected = expected_lhs
-            .contract(expected_rhs, &[1], &[0], &[1, 0])
+            .contract(
+                expected_rhs,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[1],
+                    domain: &[0],
+                },
+            )
             .unwrap();
         assert_eq!(
             actual.logical_space().space(),
@@ -5967,7 +6042,17 @@ where
                 (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
             }));
     }
-    assert!(lazy.contract(&eager, &[2], &[0], &[0, 1]).is_err());
+    assert!(lazy
+        .contract(
+            &eager,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .is_err());
     assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
 
@@ -6009,8 +6094,28 @@ where
     let lazy = source.adjoint().unwrap();
     let eager = eager_adjoint_oracle(source);
 
-    let actual = lazy.contract(source, &[2, 1], &[1, 0], &[1, 0]).unwrap();
-    let expected = eager.contract(source, &[2, 1], &[1, 0], &[1, 0]).unwrap();
+    let actual = lazy
+        .contract(
+            source,
+            &ContractSpec {
+                lhs: &[2, 1],
+                rhs: &[1, 0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap();
+    let expected = eager
+        .contract(
+            source,
+            &ContractSpec {
+                lhs: &[2, 1],
+                rhs: &[1, 0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap();
     assert!(actual.subblock_count() > 1);
     assert_eq!(
         actual.logical_space().space(),
@@ -6068,8 +6173,28 @@ fn assert_fermionic_contract_and_compose_semantics<D>(
 {
     let lazy = source.adjoint().unwrap();
     let eager = eager_adjoint_oracle(source);
-    let contract = lazy.contract(source, &[1], &[0], &[0, 1]).unwrap();
-    let expected_contract = eager.contract(source, &[1], &[0], &[0, 1]).unwrap();
+    let contract = lazy
+        .contract(
+            source,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
+    let expected_contract = eager
+        .contract(
+            source,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let compose = lazy.compose(source).unwrap();
     let expected_compose = eager.compose(source).unwrap();
     assert!(contract
@@ -6127,6 +6252,14 @@ fn fermionic_lazy_contract_keeps_the_supertrace_distinct_from_compose() {
     assert_fermionic_contract_and_compose_semantics(&complex);
 }
 
+/// A rank-(1, 1) domain leg against a rank-(1, 1) codomain leg, default split.
+const RANK_TWO_COMPOSE: ContractSpec<'static> = ContractSpec {
+    lhs: &[1],
+    rhs: &[0],
+    codomain: &[0],
+    domain: &[1],
+};
+
 fn assert_same_error(actual: Error, expected: Error) {
     assert_eq!(
         core::mem::discriminant(&actual),
@@ -6146,17 +6279,24 @@ fn lazy_contract_preserves_validation_precedence_without_materializing() {
         .unwrap()
     };
     let eager = eager_adjoint_oracle(&source);
-    for (lhs_axes, rhs_axes, output_axes) in [
-        (&[2][..], &[0][..], &[0, 1][..]),
-        (&[1, 1][..], &[0, 0][..], &[][..]),
+    for spec in [
+        ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[0],
+            domain: &[1],
+        },
+        ContractSpec {
+            lhs: &[1, 1],
+            rhs: &[0, 0],
+            codomain: &[],
+            domain: &[],
+        },
     ] {
         let lazy = source.adjoint().unwrap();
         assert_same_error(
-            lazy.contract(&eager, lhs_axes, rhs_axes, output_axes)
-                .unwrap_err(),
-            eager
-                .contract(&eager, lhs_axes, rhs_axes, output_axes)
-                .unwrap_err(),
+            lazy.contract(&eager, &spec).unwrap_err(),
+            eager.contract(&eager, &spec).unwrap_err(),
         );
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
     }
@@ -6170,8 +6310,27 @@ fn lazy_contract_preserves_validation_precedence_without_materializing() {
         TensorMap::from_subblock_fn(source.runtime(), [&bad_leg], [&bad_leg], |_, _| 1.0).unwrap();
     let lazy = source.adjoint().unwrap();
     assert_same_error(
-        lazy.contract(&bad, &[1], &[0], &[0, 0]).unwrap_err(),
-        eager.contract(&bad, &[1], &[0], &[0, 0]).unwrap_err(),
+        lazy.contract(
+            &bad,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[0],
+            },
+        )
+        .unwrap_err(),
+        eager
+            .contract(
+                &bad,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[0],
+                },
+            )
+            .unwrap_err(),
     );
     assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
@@ -6182,8 +6341,27 @@ fn lazy_contract_preserves_validation_precedence_without_materializing() {
             .unwrap();
     let lazy = source.adjoint().unwrap();
     assert_same_error(
-        lazy.contract(&other, &[1], &[0], &[0, 1]).unwrap_err(),
-        eager.contract(&other, &[1], &[0], &[0, 1]).unwrap_err(),
+        lazy.contract(
+            &other,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap_err(),
+        eager
+            .contract(
+                &other,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
+            .unwrap_err(),
     );
     assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
@@ -6199,8 +6377,8 @@ fn lazy_contract_preserves_validation_precedence_without_materializing() {
     let eager = eager_adjoint_oracle(&z2_tensor);
     let lazy = z2_tensor.adjoint().unwrap();
     assert_same_error(
-        lazy.contract(&z3_tensor, &[1], &[0], &[0, 1]).unwrap_err(),
-        eager.contract(&z3_tensor, &[1], &[0], &[0, 1]).unwrap_err(),
+        lazy.contract(&z3_tensor, &RANK_TWO_COMPOSE).unwrap_err(),
+        eager.contract(&z3_tensor, &RANK_TWO_COMPOSE).unwrap_err(),
     );
     assert_eq!(materialized_adjoint_builds(&lazy), 0);
 }
@@ -6235,8 +6413,17 @@ fn lazy_binary_outputs_keep_the_lhs_provider_allocation() {
     let rhs_eager = eager_adjoint_oracle(&rhs);
     for (actual, expected) in [
         (
-            lazy.contract(&rhs_lazy, &[1], &[0], &[0, 1]).unwrap(),
-            eager.contract(&rhs_eager, &[1], &[0], &[0, 1]).unwrap(),
+            lazy.contract(
+                &rhs_lazy,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
+            .unwrap(),
+            eager.contract(&rhs_eager, &RANK_TWO_COMPOSE).unwrap(),
         ),
         (
             lazy.compose(&rhs_lazy).unwrap(),
@@ -6296,8 +6483,28 @@ fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
         let actual = lhs.compose(rhs).unwrap();
         let expected = eager_lhs.compose(eager_rhs).unwrap();
         assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
-        let actual = lhs.contract(rhs, &[1], &[0], &[0, 1]).unwrap();
-        let expected = eager_lhs.contract(eager_rhs, &[1], &[0], &[0, 1]).unwrap();
+        let actual = lhs
+            .contract(
+                rhs,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
+            .unwrap();
+        let expected = eager_lhs
+            .contract(
+                eager_rhs,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
+            .unwrap();
         assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
     }
     assert_eq!(materialized_adjoint_builds(&lazy), 0);
@@ -6637,8 +6844,15 @@ fn assert_contract_overwrite_matches<R, D>(
         + SectorCodec,
     D: TensorScalar + core::fmt::Debug + crate::test_numerics::numerics::Numeric,
 {
+    let (codomain, domain) = output_axes.split_at(lhs.rank() - lhs_axes.len());
+    let spec = ContractSpec {
+        lhs: lhs_axes,
+        rhs: rhs_axes,
+        codomain,
+        domain,
+    };
     let expected = lhs
-        .contract(rhs, lhs_axes, rhs_axes, output_axes)
+        .contract(rhs, &spec)
         .unwrap_or_else(|error| panic!("{label} returning oracle failed: {error:?}"));
     let lhs_before = lhs.dense_data().unwrap().to_vec();
     let rhs_before = rhs.dense_data().unwrap().to_vec();
@@ -6650,25 +6864,11 @@ fn assert_contract_overwrite_matches<R, D>(
     let storage = destination.dense_data().unwrap().as_ptr();
 
     if ordered_alias {
-        lhs.contract_overwrite_into(
-            rhs,
-            &mut destination,
-            lhs_axes,
-            rhs_axes,
-            output_axes,
-            alpha,
-        )
-        .unwrap_or_else(|error| panic!("{label} ordered overwrite failed: {error:?}"));
+        lhs.contract_overwrite_into(rhs, &mut destination, &spec, alpha)
+            .unwrap_or_else(|error| panic!("{label} ordered overwrite failed: {error:?}"));
     } else {
-        lhs.contract_overwrite_into(
-            rhs,
-            &mut destination,
-            lhs_axes,
-            rhs_axes,
-            output_axes,
-            alpha,
-        )
-        .unwrap_or_else(|error| panic!("{label} overwrite failed: {error:?}"));
+        lhs.contract_overwrite_into(rhs, &mut destination, &spec, alpha)
+            .unwrap_or_else(|error| panic!("{label} overwrite failed: {error:?}"));
     }
 
     // Owned and destination routes of one contraction. An entry is
@@ -7230,7 +7430,17 @@ fn typed_contract_overwrite_matches_provider_scalar_and_order_matrix() {
     )
     .unwrap();
     let cu1 = TensorMap::from_subblock_fn(&runtime, [&q, &q, &q], [&q], |_, _| 1.0).unwrap();
-    let cu1_expected = cu1.contract(&cu1, &[3], &[0], &[5, 1, 3, 0, 4, 2]).unwrap();
+    let cu1_expected = cu1
+        .contract(
+            &cu1,
+            &ContractSpec {
+                lhs: &[3],
+                rhs: &[0],
+                codomain: &[5, 1, 3],
+                domain: &[0, 4, 2],
+            },
+        )
+        .unwrap();
     assert!(cu1_expected.dense_data().unwrap().contains(&0.0));
     assert_contract_overwrite_matches(
         "cu1",
@@ -7268,9 +7478,27 @@ fn typed_contract_overwrite_keeps_distinct_destination_provider_authority() {
     let destination_provider = Arc::new(U1FusionRule);
     let destination_lhs = build(Arc::clone(&destination_provider), 0.0);
     let destination_rhs = build(destination_provider, 0.0);
-    let expected = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let expected = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let mut destination = destination_lhs
-        .contract(&destination_rhs, &[1], &[0], &[0, 1])
+        .contract(
+            &destination_rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
         .zeros_like();
     poison_destination(&mut destination);
@@ -7288,7 +7516,7 @@ fn typed_contract_overwrite_keeps_distinct_destination_provider_authority() {
     let space = destination.logical_space().space() as *const DynamicFusionMapSpace;
     let storage = destination.dense_data().unwrap().as_ptr();
 
-    lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
+    lhs.contract_overwrite_into(&rhs, &mut destination, &RANK_TWO_COMPOSE, 1.0)
         .unwrap();
 
     assert_eq!(
@@ -7325,11 +7553,21 @@ fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjo
     .unwrap();
     let lazy_lhs = lhs.adjoint().unwrap();
     let lazy_rhs = rhs.adjoint().unwrap();
-    let expected = lazy_lhs.contract(&lazy_rhs, &[1], &[0], &[0, 1]).unwrap();
+    let expected = lazy_lhs
+        .contract(
+            &lazy_rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let mut destination = expected.zeros_like();
     poison_destination(&mut destination);
     lazy_lhs
-        .contract_overwrite_into(&lazy_rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
+        .contract_overwrite_into(&lazy_rhs, &mut destination, &RANK_TWO_COMPOSE, 1.0)
         .unwrap();
     assert_eq!(
         destination.dense_data().unwrap(),
@@ -7346,10 +7584,20 @@ fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjo
 
     let Svd { u, s, .. } = lhs.svd_compact().unwrap();
     assert!(owned(&s).dense_cache.get().is_none());
-    let expected = u.contract(&s, &[1], &[0], &[0, 1]).unwrap();
+    let expected = u
+        .contract(
+            &s,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let mut destination = expected.zeros_like();
     poison_destination(&mut destination);
-    u.contract_overwrite_into(&s, &mut destination, &[1], &[0], &[0, 1], 1.0)
+    u.contract_overwrite_into(&s, &mut destination, &RANK_TWO_COMPOSE, 1.0)
         .unwrap();
     assert_eq!(
         destination.dense_data().unwrap(),
@@ -7371,7 +7619,17 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
         (2 * indices[0] + indices[1] + 1) as f64
     })
     .unwrap();
-    let expected = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let expected = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let destination = || {
         let mut destination = expected.zeros_like();
         poison_destination(&mut destination);
@@ -7382,8 +7640,16 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
     foreign.runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let before = f64_destination_state(&foreign);
     assert_eq!(
-        lhs.contract_overwrite_into(&rhs, &mut foreign, &[9], &[0], &[0, 1], 1.0,)
-            .unwrap_err(),
+        lhs.contract_overwrite_into(
+            &rhs,
+            &mut foreign,
+            &ContractSpec {
+                lhs: &[9],
+                ..RANK_TWO_COMPOSE
+            },
+            1.0
+        )
+        .unwrap_err(),
         Error::RuntimeMismatch
     );
     assert_eq!(f64_destination_state(&foreign), before);
@@ -7396,21 +7662,40 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
     let mut rejected = destination();
     let before = f64_destination_state(&rejected);
     assert_eq!(
-        lhs.contract_overwrite_into(&foreign_rhs, &mut rejected, &[9], &[0], &[0, 1], 1.0,)
-            .unwrap_err(),
+        lhs.contract_overwrite_into(
+            &foreign_rhs,
+            &mut rejected,
+            &ContractSpec {
+                lhs: &[9],
+                ..RANK_TWO_COMPOSE
+            },
+            1.0
+        )
+        .unwrap_err(),
         Error::RuntimeMismatch
     );
     assert_eq!(f64_destination_state(&rejected), before);
 
-    for (lhs_axes, rhs_axes, output_axes) in [
-        (&[1, 1][..], &[0, 0][..], &[][..]),
-        (&[2][..], &[0][..], &[0, 1][..]),
-        (&[1][..], &[0][..], &[0, 0][..]),
+    for spec in [
+        ContractSpec {
+            lhs: &[1, 1],
+            rhs: &[0, 0],
+            codomain: &[],
+            domain: &[],
+        },
+        ContractSpec {
+            lhs: &[2],
+            ..RANK_TWO_COMPOSE
+        },
+        ContractSpec {
+            domain: &[0],
+            ..RANK_TWO_COMPOSE
+        },
     ] {
         let mut rejected = destination();
         let before = f64_destination_state(&rejected);
         assert!(lhs
-            .contract_overwrite_into(&rhs, &mut rejected, lhs_axes, rhs_axes, output_axes, 1.0,)
+            .contract_overwrite_into(&rhs, &mut rejected, &spec, 1.0)
             .is_err());
         assert_eq!(f64_destination_state(&rejected), before);
     }
@@ -7425,7 +7710,7 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
     let mut rejected = destination();
     let before = f64_destination_state(&rejected);
     assert!(lhs
-        .contract_overwrite_into(&bad_rhs, &mut rejected, &[1], &[0], &[0, 1], 1.0,)
+        .contract_overwrite_into(&bad_rhs, &mut rejected, &RANK_TWO_COMPOSE, 1.0)
         .is_err());
     assert_eq!(f64_destination_state(&rejected), before);
 
@@ -7436,7 +7721,7 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
     poison_destination(&mut wrong_layout);
     let before = f64_destination_state(&wrong_layout);
     assert!(lhs
-        .contract_overwrite_into(&rhs, &mut wrong_layout, &[1], &[0], &[0, 1], 1.0,)
+        .contract_overwrite_into(&rhs, &mut wrong_layout, &RANK_TWO_COMPOSE, 1.0)
         .is_err());
     assert_eq!(f64_destination_state(&wrong_layout), before);
 
@@ -7452,7 +7737,7 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
         }
         let before = f64_destination_state(&rejected);
         assert!(bad_lhs
-            .contract_overwrite_into(&bad_rhs, &mut rejected, &[1], &[0], &[0, 1], 1.0,)
+            .contract_overwrite_into(&bad_rhs, &mut rejected, &RANK_TWO_COMPOSE, 1.0)
             .is_err());
         assert_eq!(f64_destination_state(&rejected), before);
     }
@@ -7464,7 +7749,7 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
         .unwrap();
     let before = f64_destination_state(&lhs_alias);
     assert!(lhs
-        .contract_overwrite_into(&rhs, &mut lhs_alias, &[1], &[0], &[0, 1], 1.0,)
+        .contract_overwrite_into(&rhs, &mut lhs_alias, &RANK_TWO_COMPOSE, 1.0)
         .is_err());
     assert_eq!(f64_destination_state(&lhs_alias), before);
 
@@ -7475,7 +7760,7 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
         .unwrap();
     let before = f64_destination_state(&rhs_alias);
     assert!(lhs
-        .contract_overwrite_into(&rhs, &mut rhs_alias, &[1], &[0], &[0, 1], 1.0,)
+        .contract_overwrite_into(&rhs, &mut rhs_alias, &RANK_TWO_COMPOSE, 1.0)
         .is_err());
     assert_eq!(f64_destination_state(&rhs_alias), before);
 
@@ -7483,7 +7768,7 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
     let shared_body_handle = shared_body.clone();
     let before = f64_destination_state(&shared_body);
     assert!(lhs
-        .contract_overwrite_into(&rhs, &mut shared_body, &[1], &[0], &[0, 1], 1.0,)
+        .contract_overwrite_into(&rhs, &mut shared_body, &RANK_TWO_COMPOSE, 1.0)
         .is_err());
     assert_eq!(f64_destination_state(&shared_body), before);
     drop(shared_body_handle);
@@ -7494,7 +7779,7 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
         .unwrap();
     let before = f64_destination_state(&shared_payload);
     assert!(lhs
-        .contract_overwrite_into(&rhs, &mut shared_payload, &[1], &[0], &[0, 1], 1.0,)
+        .contract_overwrite_into(&rhs, &mut shared_payload, &RANK_TWO_COMPOSE, 1.0)
         .is_err());
     assert_eq!(f64_destination_state(&shared_payload), before);
     drop(shared_payload_handle);
@@ -7505,7 +7790,7 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
     };
     let view = Arc::as_ptr(view);
     assert!(lhs
-        .contract_overwrite_into(&rhs, &mut lazy_destination, &[1], &[0], &[0, 1], 1.0,)
+        .contract_overwrite_into(&rhs, &mut lazy_destination, &RANK_TWO_COMPOSE, 1.0)
         .is_err());
     let TypedTensorRepr::Adjoint(after) = &lazy_destination.repr else {
         unreachable!()
@@ -7517,7 +7802,7 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
     let payload = Arc::clone(&owned(&compact_destination).data);
     assert!(owned(&compact_destination).dense_cache.get().is_none());
     assert!(lhs
-        .contract_overwrite_into(&rhs, &mut compact_destination, &[1], &[0], &[0, 1], 1.0,)
+        .contract_overwrite_into(&rhs, &mut compact_destination, &RANK_TWO_COMPOSE, 1.0)
         .is_err());
     assert!(Arc::ptr_eq(&owned(&compact_destination).data, &payload));
     assert!(owned(&compact_destination).dense_cache.get().is_none());
@@ -7530,14 +7815,22 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
     let z2_rhs = TensorMap::from_subblock_fn(&runtime, [&z2_leg], [&z2_leg], |_, _| 2.0).unwrap();
     let z3_rhs = TensorMap::from_subblock_fn(&runtime, [&z3_leg], [&z3_leg], |_, _| 2.0).unwrap();
     let mut rejected = z2_lhs
-        .contract(&z2_rhs, &[1], &[0], &[0, 1])
+        .contract(
+            &z2_rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
         .zeros_like();
     poison_destination(&mut rejected);
     let before = f64_destination_state(&rejected);
     assert_eq!(
         z2_lhs
-            .contract_overwrite_into(&z3_rhs, &mut rejected, &[1], &[0], &[0, 1], 1.0,)
+            .contract_overwrite_into(&z3_rhs, &mut rejected, &RANK_TWO_COMPOSE, 1.0)
             .unwrap_err(),
         Error::RuleMismatch
     );
@@ -7545,14 +7838,22 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
 
     let z3_lhs = TensorMap::from_subblock_fn(&runtime, [&z3_leg], [&z3_leg], |_, _| 1.0).unwrap();
     let mut z3_destination = z3_lhs
-        .contract(&z3_rhs, &[1], &[0], &[0, 1])
+        .contract(
+            &z3_rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
         .zeros_like();
     poison_destination(&mut z3_destination);
     let before = f64_destination_state(&z3_destination);
     assert_eq!(
         z2_lhs
-            .contract_overwrite_into(&z2_rhs, &mut z3_destination, &[1], &[0], &[0, 1], 1.0,)
+            .contract_overwrite_into(&z2_rhs, &mut z3_destination, &RANK_TWO_COMPOSE, 1.0)
             .unwrap_err(),
         Error::RuleMismatch
     );
@@ -7600,18 +7901,48 @@ fn typed_contract_overwrite_handles_unmatched_sectors_and_reuses_runtime_cache()
     let q = GradedSpace::try_new(provider, [(CU1Irrep::from_twice_charge(1), 1)]).unwrap();
     let source = TensorMap::from_subblock_fn(&runtime, [&q, &q, &q], [&q], |_, _| 1.0).unwrap();
     let axes = [5, 1, 3, 0, 4, 2];
-    let expected = source.contract(&source, &[3], &[0], &axes).unwrap();
+    let expected = source
+        .contract(
+            &source,
+            &ContractSpec {
+                lhs: &[3],
+                rhs: &[0],
+                codomain: &axes[..3],
+                domain: &axes[3..],
+            },
+        )
+        .unwrap();
     runtime.clear_tree_transform_cache();
     let mut first = expected.zeros_like();
     poison_destination(&mut first);
     source
-        .contract_overwrite_into(&source, &mut first, &[3], &[0], &axes, 1.0)
+        .contract_overwrite_into(
+            &source,
+            &mut first,
+            &ContractSpec {
+                lhs: &[3],
+                rhs: &[0],
+                codomain: &axes[..3],
+                domain: &axes[3..],
+            },
+            1.0,
+        )
         .unwrap();
     let cold = runtime.tree_transform_cache_info();
     let mut second = expected.zeros_like();
     poison_destination(&mut second);
     source
-        .contract_overwrite_into(&source, &mut second, &[3], &[0], &axes, 1.0)
+        .contract_overwrite_into(
+            &source,
+            &mut second,
+            &ContractSpec {
+                lhs: &[3],
+                rhs: &[0],
+                codomain: &axes[..3],
+                domain: &axes[3..],
+            },
+            1.0,
+        )
         .unwrap();
     let warm = runtime.tree_transform_cache_info();
     assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
@@ -7964,9 +8295,12 @@ fn device_work_completes_while_another_thread_holds_the_runtime_state_lock() {
             indices[1] as f64 + 2.0
         })
         .unwrap(),
-        &[1],
-        &[0],
-        &[0, 1],
+        &ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[0],
+            domain: &[1],
+        },
     )
     .unwrap();
 
@@ -7991,7 +8325,17 @@ fn device_work_completes_while_another_thread_holds_the_runtime_state_lock() {
             let device = lhs
                 .to_cuda()
                 .and_then(|lhs| Ok((lhs, rhs.to_cuda()?)))
-                .and_then(|(lhs, rhs)| lhs.contract(&rhs, &[1], &[0], &[0, 1]))
+                .and_then(|(lhs, rhs)| {
+                    lhs.contract(
+                        &rhs,
+                        &ContractSpec {
+                            lhs: &[1],
+                            rhs: &[0],
+                            codomain: &[0],
+                            domain: &[1],
+                        },
+                    )
+                })
                 .and_then(|out| out.to_host());
             let _ = sender.send(device.map(|out| out.dense_data().unwrap().to_vec()));
         });
@@ -8065,7 +8409,17 @@ fn device_contraction_leaves_the_tree_transform_cache_unchanged() {
     .unwrap();
 
     let before = runtime.tree_transform_cache_info();
-    let product = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let product = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     assert_eq!(product.placement(), Placement::Cuda(0));
     assert_eq!(runtime.tree_transform_cache_info(), before);
 }

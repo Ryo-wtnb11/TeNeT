@@ -161,7 +161,7 @@ fn host_fz2_loops_as_explicit_contracts_match_tensorkit() {
     let loops = fz2_tensorkit_loops(
         &runtime,
         |tensor| tensor,
-        |x, y, lhs, rhs, output| x.contract(y, lhs, rhs, output).unwrap(),
+        |x, y, spec| x.contract(y, spec).unwrap(),
         |tensor| tensor.scalar().unwrap(),
     );
     for (name, value, expected) in loops {
@@ -182,9 +182,7 @@ where
         .contract_overwrite_into(
             &case.rhs,
             &mut destination,
-            &case.lhs_axes,
-            &case.rhs_axes,
-            &case.output_axes,
+            &case.spec(),
             D::entry(1.0, 0.0),
         )
         .unwrap();

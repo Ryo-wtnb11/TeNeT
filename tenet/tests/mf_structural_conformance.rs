@@ -4,7 +4,7 @@
 //! and matrix functions have their own #1002 gates.
 
 use std::sync::Arc;
-use tenet::typed::{Direction, Duality, Side};
+use tenet::typed::{ContractSpec, Direction, Duality, Side};
 
 use tenet::prelude::{
     product_sector, CU1FusionRule, CU1Irrep, Complex64, FermionParityFusionRule, GradedSpace,
@@ -137,7 +137,17 @@ fn fermionic_product_contract_otimes_and_reductions_keep_provider_and_signs() {
     let rhs: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 3.0).unwrap();
 
-    let contracted = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let contracted = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     assert!(std::ptr::eq(contracted.provider(), provider.as_ref()));
     assert!(std::ptr::eq(
         contracted.codomain()[0].provider(),
@@ -480,7 +490,17 @@ fn zn3_and_cu1_arithmetic_contraction_and_reductions_have_scalar_oracles() {
                 TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
             let b: TensorMap<_, f64> =
                 TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 3.0).unwrap();
-            let ordered = a.contract(&b, &[1], &[0], &[1, 0]).unwrap();
+            let ordered = a
+                .contract(
+                    &b,
+                    &ContractSpec {
+                        lhs: &[1],
+                        rhs: &[0],
+                        codomain: &[1],
+                        domain: &[0],
+                    },
+                )
+                .unwrap();
             let composed = a.compose(&b).unwrap();
             let tensor_product = a.otimes(&b).unwrap();
             let sum = a.axpby(1.0, &b, -1.0).unwrap();

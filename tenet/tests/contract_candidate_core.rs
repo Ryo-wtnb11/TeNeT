@@ -25,6 +25,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::Mutex;
+use tenet::typed::ContractSpec;
 use tenet::typed::Direction;
 
 use contract_cases::{
@@ -107,7 +108,7 @@ where
 {
     let call = || {
         black_box(&case.lhs)
-            .contract(&case.rhs, &case.lhs_axes, &case.rhs_axes, &case.output_axes)
+            .contract(&case.rhs, &case.spec())
             .unwrap()
     };
     call();
@@ -455,7 +456,15 @@ where
         let identity: Vec<usize> = (0..lhs_open + rhs_open).collect();
         (
             case.rhs
-                .contract(&case.lhs, &case.rhs_axes, &case.lhs_axes, &identity)
+                .contract(
+                    &case.lhs,
+                    &ContractSpec {
+                        lhs: &case.rhs_axes,
+                        rhs: &case.lhs_axes,
+                        codomain: &identity[..rhs_open],
+                        domain: &identity[rhs_open..],
+                    },
+                )
                 .unwrap(),
             Box::new(move |axis| {
                 if axis < lhs_open {
@@ -469,7 +478,15 @@ where
         let identity: Vec<usize> = (0..lhs_open + rhs_open).collect();
         (
             case.lhs
-                .contract(&case.rhs, &case.lhs_axes, &case.rhs_axes, &identity)
+                .contract(
+                    &case.rhs,
+                    &ContractSpec {
+                        lhs: &case.lhs_axes,
+                        rhs: &case.rhs_axes,
+                        codomain: &identity[..lhs_open],
+                        domain: &identity[lhs_open..],
+                    },
+                )
                 .unwrap(),
             Box::new(|axis| axis),
         )

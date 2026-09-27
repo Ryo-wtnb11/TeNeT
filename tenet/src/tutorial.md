@@ -131,7 +131,8 @@ assert!(a.compose(&a).is_ok());
 
 let dual = v.try_dual()?;
 let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&dual], 3)?;
-let _ = a.contract(&b, &[1], &[1], &[0, 1])?;
+let spec = ContractSpec { lhs: &[1], rhs: &[1], codomain: &[0], domain: &[1] };
+let _ = a.contract(&b, &spec)?;
 
 for (_coupled, matrix) in a.blocks()? {
     assert_eq!(matrix.rows(), matrix.cols());
@@ -198,8 +199,9 @@ code.
 
 Use methods when the contracted axes or output order are more direct than
 labels. [`prelude::TensorMap::compose`] is the categorical map composition.
-[`prelude::TensorMap::contract`] accepts arbitrary axis pairs and an explicit
-flat output order. Axes are zero-based, with codomain axes before domain axes.
+[`prelude::TensorMap::contract`] takes a [`prelude::ContractSpec`]: arbitrary
+axis pairs and the result's codomain and domain legs. Axes are zero-based, with
+codomain axes before domain axes.
 `permute`, `repartition`, `transpose`, `adjoint`, `twist`, and `flip` rearrange
 legs; their conventions are specified in [`mathematics`].
 
@@ -219,26 +221,31 @@ let v = GradedSpace::try_new(
 let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 4)?;
 let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 5)?;
 let c = a.compose(&b)?;
-let same = a.contract(&b, &[2, 3], &[0, 1], &[0, 1, 2, 3])?;
+let spec = ContractSpec { lhs: &[2, 3], rhs: &[0, 1], codomain: &[0, 1], domain: &[2, 3] };
+let same = a.contract(&b, &spec)?;
 assert_eq!(c.dense_data()?, same.dense_data()?);
 
-let reordered = c.permute(&[0, 2], &[1, 3])?;
-assert_eq!((reordered.codomain_rank(), reordered.domain_rank()), (2, 2));
+// The output order and split are part of the contraction: this is `c`
+// permuted onto `[0, 2, 3] <- [1]`, without that separate permute.
+let mixed = a.contract(&b, &ContractSpec { codomain: &[0, 2, 3], domain: &[1], ..spec })?;
+assert_eq!((mixed.codomain_rank(), mixed.domain_rank()), (3, 1));
+let reordered = c.permute(&[0, 2, 3], &[1])?;
+assert!(mixed.axpby(1.0, &reordered, -1.0)?.norm(2.0)? < 1e-12);
 assert_eq!(c.repartition(1)?.repartition(2)?.dense_data()?, c.dense_data()?);
 # Ok::<(), Error>(())
 ```
 
-`contract` always puts the open legs of `self` in the codomain and those of
-`other` in the domain; `output_axes` reorders legs within that split. An output
-whose codomain takes legs from both operands is a `contract` followed by a
-`permute`. `tensor!` does the same internally for such an output signature, so
-neither route produces that partition in one pass: both write an output-sized
-intermediate and then permute it. TensorKit's `@tensor` does the same
-(`blas_contract!` contracts into a temporary when the destination is not a
-BLAS destination, then adds it with the permutation). `tensor!` reuses the
-intermediate buffer on warm calls, so only the extra data movement remains.
-When that pass is significant, choose operand and output orientations so that
-each codomain leg comes from the left operand.
+A `ContractSpec` names the contracted legs of each operand and the result's
+`codomain ← domain` over the open legs, those of `self` first. The result is
+the contraction that puts the open legs of `self` in the codomain and those of
+`other` in the domain, followed by `permute(codomain, domain)`, computed in one
+call: as in TensorKit's `blas_contract!`, the GEMMs write the result directly
+when its layout allows, and otherwise write a pooled temporary that one
+transform moves into the result. There is never a second owned output.
+`tensor!` still contracts each pairwise step with the default split and
+permutes afterwards when its output signature moves legs across the split, so
+that route writes an output-sized intermediate first; it reuses the buffer on
+warm calls.
 
 For simple relabeling, use `permute`. Use `repartition` only to change where
 the existing ordered leg list is split between codomain and domain. `adjoint`

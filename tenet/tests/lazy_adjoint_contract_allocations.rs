@@ -83,14 +83,15 @@ macro_rules! assert_warm_lazy_adjoint {
             TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 2).unwrap();
         let matrix = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 4).unwrap();
         let lazy = a.adjoint().unwrap();
-        let open = [0, 1, 2, 3];
-        let contract_conj = || {
-            black_box(&lazy)
-                .contract(&matrix, &[0], &[1], &open)
-                .unwrap()
+        let one_leg = ContractSpec {
+            lhs: &[0],
+            rhs: &[1],
+            codomain: &[0, 1, 2],
+            domain: &[3],
         };
+        let contract_conj = || black_box(&lazy).contract(&matrix, &one_leg).unwrap();
         let compose_conj = || black_box(&lazy).compose(&a2).unwrap();
-        let contract = || black_box(&a).contract(&matrix, &[0], &[1], &open).unwrap();
+        let contract = || black_box(&a).contract(&matrix, &one_leg).unwrap();
 
         let cold_contract = contract_conj();
         let cold_compose = compose_conj();

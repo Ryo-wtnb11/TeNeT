@@ -80,7 +80,8 @@ mod device {
     use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
     use tenet::prelude::{Complex32, Complex64};
     use tenet::typed::{
-        CudaStorage, Eigh, GradedSpace, Qr, Runtime, SpectrumMagnitude, Svd, TensorMap, Truncation,
+        ContractSpec, CudaStorage, Eigh, GradedSpace, Qr, Runtime, SpectrumMagnitude, Svd,
+        TensorMap, Truncation,
     };
     use tenet_network::tensor;
 
@@ -782,7 +783,17 @@ mod device {
             match bench(
                 config,
                 "cold",
-                || lhs_device.contract(rhs_device, &[1], &[0], &[0, 1]),
+                || {
+                    lhs_device.contract(
+                        rhs_device,
+                        &ContractSpec {
+                            lhs: &[1],
+                            rhs: &[0],
+                            codomain: &[0],
+                            domain: &[1],
+                        },
+                    )
+                },
                 barrier,
             ) {
                 Err(reason) => skip_row(label("contract_direct"), &reason),
@@ -792,8 +803,16 @@ mod device {
                         "cold",
                         || {
                             Ok::<_, Never>(
-                                lhs.contract(rhs, &[1], &[0], &[0, 1])
-                                    .expect("Host contract"),
+                                lhs.contract(
+                                    rhs,
+                                    &ContractSpec {
+                                        lhs: &[1],
+                                        rhs: &[0],
+                                        codomain: &[0],
+                                        domain: &[1],
+                                    },
+                                )
+                                .expect("Host contract"),
                             )
                         },
                         || {},
@@ -833,7 +852,17 @@ mod device {
                     match bench(
                         config,
                         "cold",
-                        || lhs_adjoint.contract(rhs_device, &[1], &[0], &[0, 1]),
+                        || {
+                            lhs_adjoint.contract(
+                                rhs_device,
+                                &ContractSpec {
+                                    lhs: &[1],
+                                    rhs: &[0],
+                                    codomain: &[0],
+                                    domain: &[1],
+                                },
+                            )
+                        },
                         barrier,
                     ) {
                         Err(reason) => skip_row(label("contract_lazy_adjoint_lhs"), &reason),
@@ -844,7 +873,15 @@ mod device {
                                 || {
                                     Ok::<_, Never>(
                                         host_adjoint
-                                            .contract(rhs, &[1], &[0], &[0, 1])
+                                            .contract(
+                                                rhs,
+                                                &ContractSpec {
+                                                    lhs: &[1],
+                                                    rhs: &[0],
+                                                    codomain: &[0],
+                                                    domain: &[1],
+                                                },
+                                            )
                                             .expect("Host adjoint contract"),
                                     )
                                 },

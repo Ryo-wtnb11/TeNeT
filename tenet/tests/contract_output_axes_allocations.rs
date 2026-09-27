@@ -1,8 +1,9 @@
-//! Warm eager `contract` with a non-identity `output_axes` costs no more than
-//! `contract` in the default order followed by `permute` (#1461), and returns
-//! the same tensor. TensorKit `blas_contract!` takes the same shape of work
-//! when the output order is not the GEMM's: a temporary plus a permuting
-//! `tensoradd!` (its `copyC` path).
+//! Warm eager `contract` with a non-default output order or codomain/domain
+//! split costs no more than `contract` in the default order and split
+//! followed by `permute` (#1461, #1549), and returns the same tensor. TensorKit
+//! `blas_contract!` takes the same shape of work when the output layout is not
+//! the GEMM's: a temporary plus a permuting `tensoradd!` (its `copyC` path),
+//! inside the one call.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -66,23 +67,31 @@ fn allocations<T>(f: impl FnOnce() -> T) -> ((usize, usize), T) {
     ((CALLS.get(), BYTES.get()), value)
 }
 
-/// Warm cost and value of `contract(lhs_axes, rhs_axes, output_axes)` against
-/// the default order followed by `permute(codomain, domain)`.
+/// Warm cost and value of `contract` onto `codomain ← domain` against the
+/// default order and split followed by `permute(codomain, domain)`.
+/// `strict` also requires fewer bytes: the route has no separate output copy.
 macro_rules! assert_no_costlier_than_permute {
-    ($runtime:expr, $a:expr, $b:expr, $lhs_axes:expr, $rhs_axes:expr, $output_axes:expr,
-     $codomain:expr, $domain:expr $(,)?) => {{
-        let (lhs_axes, rhs_axes, output_axes): (&[usize], &[usize], &[usize]) =
-            ($lhs_axes, $rhs_axes, $output_axes);
+    ($runtime:expr, $a:expr, $b:expr, $lhs_axes:expr, $rhs_axes:expr,
+     $codomain:expr, $domain:expr, $strict:expr $(,)?) => {{
+        let (lhs_axes, rhs_axes): (&[usize], &[usize]) = ($lhs_axes, $rhs_axes);
         let (codomain, domain): (&[usize], &[usize]) = ($codomain, $domain);
-        let identity: Vec<usize> = (0..output_axes.len()).collect();
-        let fused = || {
-            black_box($a)
-                .contract($b, lhs_axes, rhs_axes, output_axes)
-                .unwrap()
+        let identity: Vec<usize> = (0..codomain.len() + domain.len()).collect();
+        let (default_codomain, default_domain) = identity.split_at($a.rank() - lhs_axes.len());
+        let spec = ContractSpec {
+            lhs: lhs_axes,
+            rhs: rhs_axes,
+            codomain,
+            domain,
         };
+        let default = ContractSpec {
+            codomain: default_codomain,
+            domain: default_domain,
+            ..spec
+        };
+        let fused = || black_box($a).contract($b, &spec).unwrap();
         let separate = || {
             black_box($a)
-                .contract($b, lhs_axes, rhs_axes, &identity)
+                .contract($b, &default)
                 .unwrap()
                 .permute(codomain, domain)
                 .unwrap()
@@ -101,11 +110,25 @@ macro_rules! assert_no_costlier_than_permute {
             separate_value.dense_data().unwrap()
         );
         assert_eq!(fused_value.codomain_rank(), codomain.len());
+        eprintln!(
+            "{lhs_axes:?}/{rhs_axes:?} {codomain:?} <- {domain:?}: contract {fused_cost:?}, \
+             contract + permute {separate_cost:?}"
+        );
         // What: no more allocation calls or bytes than the two-step route.
+        // Equality is TensorKit's `copyC`: a zero-copy candidate contracts
+        // into a temporary that one permute moves into the result.
         assert!(
             fused_cost.0 <= separate_cost.0 && fused_cost.1 <= separate_cost.1,
-            "contract({lhs_axes:?}, {rhs_axes:?}, {output_axes:?}) {fused_cost:?} vs \
-             contract + permute {separate_cost:?}"
+            "contract({lhs_axes:?}, {rhs_axes:?}; {codomain:?} <- {domain:?}) {fused_cost:?} \
+             vs contract + permute {separate_cost:?}"
+        );
+        // What: the DynamicTree route's single output transform replaces the
+        // two-step route's second owned output, so it moves strictly fewer
+        // bytes. An upper bound, not an exact count.
+        assert!(
+            !$strict || fused_cost.1 < separate_cost.1,
+            "contract({lhs_axes:?}, {rhs_axes:?}; {codomain:?} <- {domain:?}) {fused_cost:?} \
+             must allocate fewer bytes than contract + permute {separate_cost:?}"
         );
     }};
 }
@@ -113,8 +136,8 @@ macro_rules! assert_no_costlier_than_permute {
 /// `a: V⊗V ← W⊗W` with `W = V` or `W = V*`, `b: W⊗W ← V`, `m: V ← V`.
 /// Contracting `a`'s whole domain with `b`'s whole codomain is the core-GEMM
 /// form (dual `W` adds the fermionic supertrace twist); `a`'s last leg with
-/// `m` is not. Both output orders braid an open leg of the right operand into
-/// the codomain.
+/// `m` is not. The specs move open legs of both operands across the split and
+/// change the split's size.
 macro_rules! assert_output_axes_cost {
     ($provider:expr, $sectors:expr $(,)?) => {{
         let _guard = MEASUREMENT_LOCK
@@ -138,11 +161,29 @@ macro_rules! assert_output_axes_cost {
             // a lazy-adjoint left operand. Bound: an entry is bilinear in the
             // operands, so `len(lhs) * len(rhs)` terms.
             for lhs in [a.clone(), x.adjoint().unwrap()] {
-                let got = lhs.contract(&b, &[2, 3], &[0, 1], &[0, 2, 1]).unwrap();
+                let got = lhs
+                    .contract(
+                        &b,
+                        &ContractSpec {
+                            lhs: &[2, 3],
+                            rhs: &[0, 1],
+                            codomain: &[0, 2],
+                            domain: &[1],
+                        },
+                    )
+                    .unwrap();
                 let want = lhs
                     .permute(&[0, 2], &[1, 3])
                     .unwrap()
-                    .contract(&b, &[1, 3], &[0, 1], &[0, 2, 1])
+                    .contract(
+                        &b,
+                        &ContractSpec {
+                            lhs: &[1, 3],
+                            rhs: &[0, 1],
+                            codomain: &[0, 2],
+                            domain: &[1],
+                        },
+                    )
                     .unwrap();
                 assert_eq!(got.codomain_rank(), want.codomain_rank());
                 assert_eq!(got.leg_dims().unwrap(), want.leg_dims().unwrap());
@@ -153,26 +194,42 @@ macro_rules! assert_output_axes_cost {
                     a.dense_data().unwrap().len() * b.dense_data().unwrap().len(),
                 );
             }
-            assert_no_costlier_than_permute!(
-                runtime,
-                &a,
-                &b,
-                &[2, 3],
-                &[0, 1],
-                &[0, 2, 1],
-                &[0, 2],
-                &[1],
-            );
-            assert_no_costlier_than_permute!(
-                runtime,
-                &a,
-                &m,
-                &[3],
-                &[0],
-                &[0, 3, 1, 2],
-                &[0, 3, 1],
-                &[2],
-            );
+            // Every split size, with legs of both operands on each side.
+            for (codomain, domain) in [
+                (&[0, 2][..], &[1][..]),
+                (&[0, 2, 1][..], &[][..]),
+                (&[2][..], &[1, 0][..]),
+                (&[][..], &[1, 2, 0][..]),
+            ] {
+                assert_no_costlier_than_permute!(
+                    runtime,
+                    &a,
+                    &b,
+                    &[2, 3],
+                    &[0, 1],
+                    codomain,
+                    domain,
+                    // TensorKit's `copyC`: equal to the two-step route.
+                    false,
+                );
+            }
+            for (codomain, domain) in [
+                (&[0, 3, 1][..], &[2][..]),
+                (&[3][..], &[0, 2, 1][..]),
+                (&[0, 3][..], &[1, 2][..]),
+                (&[1, 2, 3, 0][..], &[][..]),
+            ] {
+                assert_no_costlier_than_permute!(
+                    runtime,
+                    &a,
+                    &m,
+                    &[3],
+                    &[0],
+                    codomain,
+                    domain,
+                    true,
+                );
+            }
         }
     }};
 }

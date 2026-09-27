@@ -40,7 +40,7 @@
 use std::sync::{mpsc, Arc};
 
 use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::typed::{CudaStorage, GradedSpace, Runtime, TensorMap};
+use tenet::typed::{ContractSpec, CudaStorage, GradedSpace, Runtime, TensorMap};
 
 type Host = TensorMap<U1FusionRule, f64>;
 type Device = TensorMap<U1FusionRule, f64, CudaStorage<f64>>;
@@ -102,11 +102,32 @@ fn overwrite_destination(forced: bool) -> usize {
             // B's last read has finished, so in the control B's stream was
             // last synced to A's before `D`'s bind.
             read_rx.recv().unwrap();
-            to_b.send(a.contract(&a, &[1], &[0], &[0, 1]).unwrap())
-                .unwrap();
+            to_b.send(
+                a.contract(
+                    &a,
+                    &ContractSpec {
+                        lhs: &[1],
+                        rhs: &[0],
+                        codomain: &[0],
+                        domain: &[1],
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
             let mut d = from_b.recv().unwrap();
-            b.contract_overwrite_into(&b, &mut d, &[1], &[0], &[0, 1], 1.0)
-                .unwrap();
+            b.contract_overwrite_into(
+                &b,
+                &mut d,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+                1.0,
+            )
+            .unwrap();
             to_b.send(d).unwrap();
         }
     });
@@ -152,7 +173,12 @@ fn overwrite_destination_control_without_early_sync_is_complete() {
 /// then reads it, the later ones well after the pack has run.
 const F2_SECTORS: i32 = 4;
 const F2_DEG: usize = 32;
-const F2_AXES: ([usize; 2], [usize; 2], [usize; 4]) = ([3, 2], [0, 1], [0, 1, 2, 3]);
+const F2_SPEC: ContractSpec<'static> = ContractSpec {
+    lhs: &[3, 2],
+    rhs: &[0, 1],
+    codomain: &[0, 1],
+    domain: &[2, 3],
+};
 
 /// One thread's contraction: operands and destination bound on that thread's
 /// stream, and the Host value.
@@ -169,9 +195,9 @@ impl F2 {
         let host =
             |value| Host::from_subblock_fn(runtime, [&v, &v], [&v, &v], |_, _| value).unwrap();
         let (x, y) = (host(value), host(1.0));
-        let expected = x.contract(&y, &F2_AXES.0, &F2_AXES.1, &F2_AXES.2).unwrap();
+        let expected = x.contract(&y, &F2_SPEC).unwrap();
         let (x, y) = (x.to_cuda().unwrap(), y.to_cuda().unwrap());
-        let d = x.contract(&y, &F2_AXES.0, &F2_AXES.1, &F2_AXES.2).unwrap();
+        let d = x.contract(&y, &F2_SPEC).unwrap();
         d.to_host().unwrap();
         F2 {
             x,
@@ -185,14 +211,7 @@ impl F2 {
     /// upload, so the enqueue returns while the GEMMs still run.
     fn enqueue(&mut self) {
         self.x
-            .contract_overwrite_into(
-                &self.y,
-                &mut self.d,
-                &F2_AXES.0,
-                &F2_AXES.1,
-                &F2_AXES.2,
-                1.0,
-            )
+            .contract_overwrite_into(&self.y, &mut self.d, &F2_SPEC, 1.0)
             .unwrap();
     }
 

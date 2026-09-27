@@ -15,7 +15,7 @@ use tenet_core::{
     U1FusionRule, U1Irrep, Z2Irrep,
 };
 
-use super::{GradedSpace, Side, TensorMap, ADJOINT_MATERIALIZATIONS};
+use super::{ContractSpec, GradedSpace, Side, TensorMap, ADJOINT_MATERIALIZATIONS};
 use crate::error::{Alternative, Error};
 use crate::runtime::Runtime;
 
@@ -169,8 +169,24 @@ macro_rules! mf_suite {
 
         let (view, owned) = direct!(
             "contract",
-            a.contract(b.adjoint_view(), &[2], &[0], &[0, 1, 2, 3]),
-            a.contract(&lazy, &[2], &[0], &[0, 1, 2, 3])
+            a.contract(
+                b.adjoint_view(),
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2, 3]
+                }
+            ),
+            a.contract(
+                &lazy,
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2, 3]
+                }
+            )
         );
         assert_same_tensor!(view, owned, format!("{what}: contract"));
 
@@ -180,16 +196,29 @@ macro_rules! mf_suite {
             a.contract_overwrite_into(
                 b.adjoint_view(),
                 &mut destination,
-                &[2],
-                &[0],
-                &[0, 1, 2, 3],
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2, 3],
+                },
                 $alpha,
             )
         });
         assert_eq!(entries, 0, "{what}: contract_overwrite_into");
         result.unwrap();
-        a.contract_overwrite_into(&lazy, &mut expected, &[2], &[0], &[0, 1, 2, 3], $alpha)
-            .unwrap();
+        a.contract_overwrite_into(
+            &lazy,
+            &mut expected,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+            $alpha,
+        )
+        .unwrap();
         assert_same_tensor!(
             destination,
             expected,
@@ -296,11 +325,11 @@ fn checked_generic_su3_view_matches_owned_lazy_adjoint() {
             // Checked-Generic contraction rejects any lazy operand today; the
             // view gets the same error and does not materialize.
             let lazy = b.adjoint().unwrap();
-            let (view, entries) = probe(|| a.contract(b.adjoint_view(), &[2], &[0], &[0, 1, 2, 3]));
+            let (view, entries) = probe(|| a.contract(b.adjoint_view(), &ContractSpec { lhs: &[2], rhs: &[0], codomain: &[0, 1], domain: &[2, 3] }));
             assert_eq!(entries, 0);
             assert_eq!(
                 view.err().unwrap().to_string(),
-                a.contract(&lazy, &[2], &[0], &[0, 1, 2, 3])
+                a.contract(&lazy, &ContractSpec { lhs: &[2], rhs: &[0], codomain: &[0, 1], domain: &[2, 3] })
                     .err()
                     .unwrap()
                     .to_string()
@@ -379,8 +408,24 @@ mod cuda {
 
             let (view, owned) = direct!(
                 "cuda contract",
-                a.contract(b.adjoint_view(), &[2], &[0], &[0, 1, 2, 3]),
-                a.contract(&lazy, &[2], &[0], &[0, 1, 2, 3])
+                a.contract(
+                    b.adjoint_view(),
+                    &ContractSpec {
+                        lhs: &[2],
+                        rhs: &[0],
+                        codomain: &[0, 1],
+                        domain: &[2, 3]
+                    }
+                ),
+                a.contract(
+                    &lazy,
+                    &ContractSpec {
+                        lhs: &[2],
+                        rhs: &[0],
+                        codomain: &[0, 1],
+                        domain: &[2, 3]
+                    }
+                )
             );
             assert_same_tensor!(
                 view.to_host().unwrap(),
@@ -395,16 +440,29 @@ mod cuda {
                 a.contract_overwrite_into(
                     b.adjoint_view(),
                     &mut destination,
-                    &[2],
-                    &[0],
-                    &[0, 1, 2, 3],
+                    &ContractSpec {
+                        lhs: &[2],
+                        rhs: &[0],
+                        codomain: &[0, 1],
+                        domain: &[2, 3],
+                    },
                     one,
                 )
             });
             assert_eq!(entries, 0, "{what}: contract_overwrite_into");
             result.unwrap();
-            a.contract_overwrite_into(&lazy, &mut expected, &[2], &[0], &[0, 1, 2, 3], one)
-                .unwrap();
+            a.contract_overwrite_into(
+                &lazy,
+                &mut expected,
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2, 3],
+                },
+                one,
+            )
+            .unwrap();
             assert_same_tensor!(
                 destination.to_host().unwrap(),
                 expected.to_host().unwrap(),
@@ -534,8 +592,24 @@ macro_rules! compact_suite {
         assert_same_tensor!(view, owned, format!("{what}: x.compose(D')"));
         let (view, owned) = direct!(
             "D.contract(x')",
-            d.contract(x.adjoint_view(), &[1], &[0], &[0, 1]),
-            d.contract(&x_lazy, &[1], &[0], &[0, 1])
+            d.contract(
+                x.adjoint_view(),
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1]
+                }
+            ),
+            d.contract(
+                &x_lazy,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1]
+                }
+            )
         );
         assert_same_tensor!(view, owned, format!("{what}: D.contract(x')"));
         let (view, owned) = direct!("compact solve", d.solve(x.adjoint_view()), d.solve(&x_lazy));

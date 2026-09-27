@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::sync::Arc;
+use tenet::typed::ContractSpec;
 
 use tenet::core::{
     product_sector, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
@@ -78,7 +79,17 @@ where
     // bounded by the weighted dimension of the shared leg.
     let terms = a.domain()[0].dim().unwrap().ceil() as usize;
     let actual = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
-    let expected = a.contract(b, &[1], &[0], &[0, 1]).unwrap();
+    let expected = a
+        .contract(
+            b,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     numerics::assert_slices_close(
         "macro vs direct contract",
         actual.dense_data().unwrap(),
@@ -169,7 +180,17 @@ fn owned_operands_infer_the_typed_host_path() {
     let runtime = Runtime::builder().build().unwrap();
     let (a, b) = pair::<f64>(&runtime);
     let actual = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
-    let expected = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
+    let expected = a
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     // Length-2 contraction of random payloads: the macro and the direct call
     // may round differently, so compare under the tolerance rule.
     numerics::assert_slices_close(
@@ -186,7 +207,17 @@ fn borrowed_first_operand_is_normalized_once() {
     let (a, b) = pair::<f64>(&runtime);
     let a_ref = &a;
     let actual = tensor!([i; k] = a_ref[i; j] * b[j; k]).unwrap();
-    let expected = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
+    let expected = a
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     // Length-2 contraction of random payloads: the macro and the direct call
     // may round differently, so compare under the tolerance rule.
     numerics::assert_slices_close(
@@ -203,7 +234,17 @@ fn borrowed_later_operand_is_normalized_once() {
     let (a, b) = pair::<f64>(&runtime);
     let b_ref = &b;
     let actual = tensor!([i; k] = a[i; j] * b_ref[j; k]).unwrap();
-    let expected = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
+    let expected = a
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     // Length-2 contraction of random payloads: the macro and the direct call
     // may round differently, so compare under the tolerance rule.
     numerics::assert_slices_close(
@@ -227,7 +268,15 @@ fn field_operands_are_normalized_without_moving_the_owner() {
     let actual = tensor!([i; k] = operands.lhs[i; j] * operands.rhs[j; k]).unwrap();
     let expected = operands
         .lhs
-        .contract(&operands.rhs, &[1], &[0], &[0, 1])
+        .contract(
+            &operands.rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
     // Length-2 contraction of random payloads: the macro and the direct call
     // may round differently, so compare under the tolerance rule.
@@ -256,7 +305,17 @@ fn operand_expressions_are_evaluated_exactly_once_in_left_to_right_order() {
     };
     let actual = tensor!([i; k] = (left())[i; j] * (right())[j; k]).unwrap();
     assert_eq!(order.get(), 2);
-    let expected = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
+    let expected = a
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     // Length-2 contraction of random payloads: the macro and the direct call
     // may round differently, so compare under the tolerance rule.
     numerics::assert_slices_close(
@@ -272,7 +331,17 @@ fn parenthesized_temporary_lives_through_execution() {
     let runtime = Runtime::builder().build().unwrap();
     let (a, b) = pair::<f64>(&runtime);
     let actual = tensor!([i; k] = (a.clone())[i; j] * (b.clone())[j; k]).unwrap();
-    let expected = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
+    let expected = a
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     // Length-2 contraction of random payloads: the macro and the direct call
     // may round differently, so compare under the tolerance rule.
     numerics::assert_slices_close(
@@ -296,7 +365,17 @@ where
     let rhs =
         TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 102).unwrap();
     let actual = tensor!([i, j; m, n] = lhs[i, j; k, l] * rhs[k, l; m, n]).unwrap();
-    let expected = lhs.contract(&rhs, &[2, 3], &[0, 1], &[0, 1, 2, 3]).unwrap();
+    let expected = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[2, 3],
+                rhs: &[0, 1],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
+        .unwrap();
     assert_close(
         actual.dense_data().unwrap(),
         expected.dense_data().unwrap(),
@@ -326,7 +405,17 @@ where
     let rhs =
         TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 112).unwrap();
     let actual = tensor!([j, i; m, n] = lhs[i, j; k, l] * rhs[k, l; m, n]).unwrap();
-    let expected = lhs.contract(&rhs, &[2, 3], &[0, 1], &[1, 0, 2, 3]).unwrap();
+    let expected = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[2, 3],
+                rhs: &[0, 1],
+                codomain: &[1, 0],
+                domain: &[2, 3],
+            },
+        )
+        .unwrap();
     assert_close(
         actual.dense_data().unwrap(),
         expected.dense_data().unwrap(),
@@ -405,11 +494,29 @@ where
         .unwrap()
         .scalar()
         .unwrap();
-    let h_psi = h.contract(&psi, &[1], &[0], &[0, 1, 2]).unwrap();
+    let h_psi = h
+        .contract(
+            &psi,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1, 2],
+            },
+        )
+        .unwrap();
     let manual = psi
         .adjoint()
         .unwrap()
-        .contract(&h_psi, &[2, 0, 1], &[0, 1, 2], &[])
+        .contract(
+            &h_psi,
+            &ContractSpec {
+                lhs: &[2, 0, 1],
+                rhs: &[0, 1, 2],
+                codomain: &[],
+                domain: &[],
+            },
+        )
         .unwrap()
         .scalar()
         .unwrap();
@@ -542,9 +649,17 @@ fn assert_host_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
     );
     assert_eq!(
         error.to_string(),
-        lhs.contract(&rhs, &[1], &[0], &[0, 1])
-            .unwrap_err()
-            .to_string()
+        lhs.contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .unwrap_err()
+        .to_string()
     );
     assert!(lhs.compose(&rhs).is_ok());
 }

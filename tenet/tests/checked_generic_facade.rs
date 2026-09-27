@@ -5,6 +5,7 @@ mod numerics;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use tenet::typed::ContractSpec;
 use tenet::typed::Side;
 
 use tenet::core::{
@@ -5896,7 +5897,17 @@ fn checked_only_contract_and_compose_keep_left_authority() {
     left_provider.r_queries.store(0, Ordering::Relaxed);
 
     for output in [
-        source.contract(&identity, &[1], &[0], &[0, 1]).unwrap(),
+        source
+            .contract(
+                &identity,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
+            .unwrap(),
         source.compose(&identity).unwrap(),
     ] {
         assert!(std::ptr::eq(output.provider(), left_provider.as_ref()));
@@ -5917,7 +5928,15 @@ fn checked_only_contract_and_compose_keep_left_authority() {
     left_provider.algebra_queries.store(0, Ordering::Relaxed);
     right_provider.algebra_queries.store(0, Ordering::Relaxed);
     assert!(matches!(
-        source.contract(&foreign_runtime_identity, &[1], &[0], &[0, 1]),
+        source.contract(
+            &foreign_runtime_identity,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        ),
         Err(GenericTensorError::Facade(
             tenet::prelude::Error::RuntimeMismatch
         ))
@@ -5932,14 +5951,30 @@ fn checked_only_contract_and_compose_keep_left_authority() {
     left_provider.algebra_queries.store(0, Ordering::Relaxed);
     wrong_provider.algebra_queries.store(0, Ordering::Relaxed);
     assert!(source
-        .contract(&wrong_identity, &[1], &[0], &[0, 1])
+        .contract(
+            &wrong_identity,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
         .is_err());
     assert_eq!(left_provider.algebra_queries.load(Ordering::Relaxed), 0);
     assert_eq!(wrong_provider.algebra_queries.load(Ordering::Relaxed), 0);
 
     left_provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = nontrivial
-        .contract(&identity, &[2], &[0], &[0, 1, 2])
+        .contract(
+            &identity,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2],
+            },
+        )
         .unwrap_err();
     assert!(matches!(
         error,
@@ -6718,7 +6753,17 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
         let identity: TensorMap<_, f64> =
             TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
         for output in [
-            tensor.contract(&identity, &[2], &[0], &[0, 1, 2]).unwrap(),
+            tensor
+                .contract(
+                    &identity,
+                    &ContractSpec {
+                        lhs: &[2],
+                        rhs: &[0],
+                        codomain: &[0, 1],
+                        domain: &[2],
+                    },
+                )
+                .unwrap(),
             tensor.compose(&identity).unwrap(),
         ] {
             assert!(std::ptr::eq(output.provider(), provider.as_ref()));

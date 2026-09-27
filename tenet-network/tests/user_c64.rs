@@ -2,6 +2,7 @@
 //! decomposition suites.
 
 use std::sync::Arc;
+use tenet::typed::ContractSpec;
 
 use tenet::core::{
     CheckedFusionAlgebra, FusionAlgebraError, MultiplicityFreeAdmissionMode,
@@ -75,10 +76,18 @@ where
         1.0e-12,
     );
     assert_close(
-        x.contract(&y, &[2, 3], &[0, 1], &[0, 1, 2, 3])
-            .unwrap()
-            .dense_data()
-            .unwrap(),
+        x.contract(
+            &y,
+            &ContractSpec {
+                lhs: &[2, 3],
+                rhs: &[0, 1],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
+        .unwrap()
+        .dense_data()
+        .unwrap(),
         expected.dense_data().unwrap(),
         1.0e-12,
     );

@@ -28,7 +28,7 @@ use tenet::core::{
     PhysicalFusionBasis, ProductFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     SectorCodec, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::typed::{BlockFusionTrees, GradedSpace, Runtime, TensorMap};
+use tenet::typed::{BlockFusionTrees, ContractSpec, GradedSpace, Runtime, TensorMap};
 
 pub use crate::common::Payload;
 
@@ -176,10 +176,22 @@ where
         self.lhs_axes.len().max(1) * 64
     }
 
+    /// The spec with TensorOperations' default split: every open leg of
+    /// `lhs` in the codomain.
+    pub fn spec(&self) -> ContractSpec<'_> {
+        let (codomain, domain) = self
+            .output_axes
+            .split_at(self.lhs.rank() - self.lhs_axes.len());
+        ContractSpec {
+            lhs: &self.lhs_axes,
+            rhs: &self.rhs_axes,
+            codomain,
+            domain,
+        }
+    }
+
     pub fn host(&self) -> TensorMap<R, D> {
-        self.lhs
-            .contract(&self.rhs, &self.lhs_axes, &self.rhs_axes, &self.output_axes)
-            .unwrap()
+        self.lhs.contract(&self.rhs, &self.spec()).unwrap()
     }
 }
 
@@ -810,7 +822,7 @@ pub fn fz2_map(runtime: &Runtime, even: f64, odd: f64) -> TensorMap<FermionParit
 pub fn fz2_tensorkit_loops<T>(
     runtime: &Runtime,
     lift: impl Fn(TensorMap<FermionParityFusionRule, f64>) -> T,
-    contract: impl Fn(&T, &T, &[usize], &[usize], &[usize]) -> T,
+    contract: impl Fn(&T, &T, &ContractSpec<'_>) -> T,
     scalar: impl Fn(T) -> f64,
 ) -> Vec<(&'static str, f64, f64)> {
     let a = lift(fz2_map(runtime, 1.0, 4.0));
@@ -819,8 +831,24 @@ pub fn fz2_tensorkit_loops<T>(
     let s = lift(fz2_map(runtime, 3.0, 2.0));
     // `x[i; j] y[j; i]`: x's domain against y's codomain, x's codomain
     // against y's domain.
-    let close = |x: &T, y: &T| scalar(contract(x, y, &[1, 0], &[0, 1], &[]));
-    let chain = |x: &T, y: &T| contract(x, y, &[1], &[0], &[0, 1]);
+    let close = |x: &T, y: &T| {
+        let spec = ContractSpec {
+            lhs: &[1, 0],
+            rhs: &[0, 1],
+            codomain: &[],
+            domain: &[],
+        };
+        scalar(contract(x, y, &spec))
+    };
+    let chain = |x: &T, y: &T| {
+        let spec = ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[0],
+            domain: &[1],
+        };
+        contract(x, y, &spec)
+    };
     vec![
         ("tr(A B)", close(&a, &b), -4.0),
         ("tr(A B C)", close(&chain(&a, &b), &c), -14.0),

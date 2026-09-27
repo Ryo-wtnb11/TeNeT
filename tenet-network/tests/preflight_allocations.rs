@@ -6,6 +6,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::Arc;
+use tenet::typed::ContractSpec;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::Runtime;
@@ -265,8 +266,18 @@ fn planned_and_sliced_executions_reject_non_symmetric_braiding_first() {
         .lower_symmetric_sliced_plan(&tensors, dense)
         .unwrap();
 
-    let (contract_count, contract) =
-        allocations(|| lhs.contract(&rhs, &[1], &[0], &[0, 1]).map(drop));
+    let (contract_count, contract) = allocations(|| {
+        lhs.contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .map(drop)
+    });
     let contract = contract.unwrap_err().to_string();
 
     let (count, error) =

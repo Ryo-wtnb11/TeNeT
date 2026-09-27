@@ -11,7 +11,7 @@ use tenet::core::{
     CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
     SectorId, SectorVec, TypedSectorAdmission,
 };
-use tenet::prelude::{Complex64, Error, Runtime, TensorScalar};
+use tenet::prelude::{Complex64, ContractSpec, Error, Runtime, TensorScalar};
 use tenet::typed::{
     BlockFusionTrees, CheckedGenericPlanError, GenericTensorError, GradedSpace, SUNFusionRule,
     TensorMap,
@@ -190,9 +190,25 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
     assert!(!std::ptr::eq(lhs.provider(), middle.provider()));
 
     let expected = lhs
-        .contract(&middle, &[2], &[0], &[0, 1, 2])
+        .contract(
+            &middle,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2],
+            },
+        )
         .unwrap()
-        .contract(&tail, &[2], &[0], &[0, 1, 2])
+        .contract(
+            &tail,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2],
+            },
+        )
         .unwrap()
         .permute(&[1, 0], &[2])
         .unwrap();
@@ -939,7 +955,17 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
         TensorMap::from_subblock_fn(&runtime, [&leg], [], |_, _| 2.0).unwrap();
     let rhs: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [], [&leg], |_, _| 5.0).unwrap();
-    let scalar = lhs.contract(&rhs, &[0], &[0], &[]).unwrap();
+    let scalar = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[0],
+                rhs: &[0],
+                codomain: &[],
+                domain: &[],
+            },
+        )
+        .unwrap();
     let scalar_plan = Network::new(vec![vec![]], vec![false], vec![Some(0)], vec![], Some(0))
         .unwrap()
         .plan(&[&scalar], &GreedyDenseOptimizer)
@@ -964,7 +990,17 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
     .unwrap()
     .execute(&[&lhs, &rhs], &mut Default::default())
     .unwrap();
-    let expected_outer = lhs.contract(&rhs, &[], &[], &[0, 1]).unwrap();
+    let expected_outer = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[],
+                rhs: &[],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     assert_eq!(
         outer.dense_data().unwrap(),
         expected_outer.dense_data().unwrap()
@@ -1038,10 +1074,18 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
     assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
     assert_eq!(
         complex.dense_data().unwrap(),
-        ac.contract(&bc, &[1], &[0], &[0, 1])
-            .unwrap()
-            .dense_data()
-            .unwrap()
+        ac.contract(
+            &bc,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .unwrap()
+        .dense_data()
+        .unwrap()
     );
     let stats = plan_cache_stats(&runtime);
     assert!(stats.hits >= 2);
@@ -1068,7 +1112,15 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
     )
     .unwrap();
     let planned = network.plan(&[&lazy, &b64], &GreedyDenseOptimizer).unwrap();
-    let direct = lazy.contract(&b64, &[1], &[0], &[0, 1]);
+    let direct = lazy.contract(
+        &b64,
+        &ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[0],
+            domain: &[1],
+        },
+    );
     let replay = planned.execute(&[&lazy, &b64], &mut Default::default());
     assert!(matches!(
         direct,

@@ -746,14 +746,24 @@ impl DynamicFusionMapSpace {
     where
         R: MultiplicityFreeRigidSymbols,
     {
-        Self::contracted_with_spec_and_primer(rule, lhs, rhs, axes, encoded_layout_primer::<R>)
+        Self::contracted_with_spec_and_primer(
+            rule,
+            lhs,
+            rhs,
+            axes,
+            None,
+            encoded_layout_primer::<R>,
+        )
     }
 
+    /// `codomain_rank` is the result's codomain rank, TensorOperations
+    /// `length(pAB[1])`; `None` keeps every open lhs axis in the codomain.
     fn contracted_with_spec_and_primer<R>(
         rule: &R,
         lhs: &Self,
         rhs: &Self,
         axes: TensorContractSpec<'_>,
+        codomain_rank: Option<usize>,
         primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
@@ -781,7 +791,14 @@ impl DynamicFusionMapSpace {
                 expected: axes.rhs_contracting_axes().len(),
                 actual: rhs.rank(),
             })?;
-        let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
+        let open = nout + nin;
+        let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), open, axes)?;
+        let nout = codomain_rank.unwrap_or(nout);
+        let nin = open
+            .checked_sub(nout)
+            .ok_or(OperationError::InvalidArgument {
+                message: "contraction codomain rank exceeds the open rank",
+            })?;
         Self::contracted_space_from_plan(rule, lhs, rhs, axes, &axis_plan, nout, nin, primer)
     }
 
