@@ -735,33 +735,6 @@ impl<'a, D: FactorScalar> InputMatricizations<'a, D> {
     }
 }
 
-/// Binds `$geometry` to the admitted input's per-sector geometry
-/// (`&[CoupledSectorRegion]` or `&[SectorMatricization<D>]`) for the
-/// `SectorGeometry`-generic publication helpers.
-///
-/// `macro_rules!` items cannot carry `pub(super)`/`pub(crate)` path
-/// visibility, only `pub` (equivalent to `#[macro_export]`) or none (textual
-/// scope only); `#[macro_export]` is the only way to reach this macro from
-/// sibling files under `factorize/` without hoisting the whole crate through
-/// old-style `#[macro_use]` ordering. `#[doc(hidden)]` keeps it out of the
-/// crate's public rustdoc surface, matching its original crate-private reach.
-#[macro_export]
-#[doc(hidden)]
-macro_rules! with_input_geometry {
-    ($input:expr, |$geometry:ident| $body:expr) => {
-        match $input {
-            InputMatricizations::Regions { regions, .. } => {
-                let $geometry: &[CoupledSectorRegion] = regions;
-                $body
-            }
-            InputMatricizations::Packed(matrices) => {
-                let $geometry = matrices.as_slice();
-                $body
-            }
-        }
-    };
-}
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CheckedCompactOperation {

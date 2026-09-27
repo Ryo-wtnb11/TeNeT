@@ -31,6 +31,24 @@ use crate::results::{LeftPolar, Lq, Qr, RightPolar, Svd};
 use crate::truncation::{select_truncation, Truncation, WeightedSpectrum};
 use tenet_tensors::OperationError;
 
+/// Binds `$geometry` to the admitted input's per-sector geometry
+/// (`&[CoupledSectorRegion]` or `&[SectorMatricization<D>]`) for the
+/// `SectorGeometry`-generic publication helpers.
+macro_rules! with_input_geometry {
+    ($input:expr, |$geometry:ident| $body:expr) => {
+        match $input {
+            InputMatricizations::Regions { regions, .. } => {
+                let $geometry: &[CoupledSectorRegion] = regions;
+                $body
+            }
+            InputMatricizations::Packed(matrices) => {
+                let $geometry = matrices.as_slice();
+                $body
+            }
+        }
+    };
+}
+
 mod eig;
 mod inverse;
 mod null_space;
@@ -40,9 +58,11 @@ mod region;
 mod svd;
 
 #[cfg(test)]
-mod hermitian_scale_tests;
-#[cfg(test)]
 mod numerical_null_tests;
+
+#[cfg(test)]
+mod hermitian_scale_tests;
+
 #[cfg(test)]
 mod sector_matricization_tests;
 
@@ -53,8 +73,9 @@ mod sector_matricization_tests;
 // child's `pub(super)` items (bumped from fully-private during the move)
 // become reachable here and, by re-export, throughout the crate.
 // `null_space` and `polar` have no crate-internal consumer outside the
-// explicit `pub use` blocks below (every item another file needs is already
-// named there), so a blanket glob re-export of either would be unused.
+// explicit `pub use` blocks below (every item another file needs is
+// already named there), so a blanket glob re-export of either would be
+// unused.
 pub(crate) use eig::*;
 pub(crate) use inverse::*;
 pub(crate) use qr_lq::*;
@@ -62,11 +83,12 @@ pub(crate) use region::*;
 pub(crate) use svd::*;
 
 // Explicit overrides: an item re-exported through the blanket globs above
-// resolves at `pub(crate)` (the glob's own visibility), even when the item is
-// itself `pub` inside its child module -- Rust's re-export visibility is the
-// minimum of the two. `lib.rs`'s own `pub use factorize::{...}` needs these
-// specific names to be fully `pub` here, so each one is re-imported by name;
-// an explicit import always shadows the same name brought in by a glob.
+// resolves at `pub(crate)` (the glob's own visibility), even when the item
+// is itself `pub` inside its child module -- Rust's re-export visibility is
+// the minimum of the two. `lib.rs`'s own `pub use factorize::{...}` needs
+// these specific names to be fully `pub` here, so each one is reimported by
+// name; an explicit import always shadows the same name brought in by a
+// glob.
 pub use eig::{
     eig_full, eig_full_dyn, eig_full_dyn_checked_generic, eig_vals, eig_vals_dyn,
     eig_vals_dyn_checked_generic, eigh_full, eigh_full_dyn, eigh_full_dyn_checked_generic,

@@ -1,5 +1,4 @@
 use super::*;
-use crate::with_input_geometry;
 
 /// Left null space `N : codomain <- W` (MatrixAlgebraKit `left_null`).
 ///

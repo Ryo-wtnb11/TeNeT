@@ -1,5 +1,4 @@
 use super::*;
-use crate::with_input_geometry;
 
 pub(super) trait HermitianReal: Float {
     fn from_f64(value: f64) -> Self;

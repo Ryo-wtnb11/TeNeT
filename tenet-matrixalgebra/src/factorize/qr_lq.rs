@@ -1,5 +1,4 @@
 use super::*;
-use crate::with_input_geometry;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
