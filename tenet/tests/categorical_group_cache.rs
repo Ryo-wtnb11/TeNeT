@@ -266,8 +266,11 @@ fn shared_runtime_keeps_every_unchanged_group_across_operations() {
 }
 
 /// Operations that share a source structure but differ in the permutation,
-/// the braid levels or the orientation must not share groups: each result on
-/// one shared Runtime equals a cold Runtime's bit for bit.
+/// the braid levels, or the orientation together with storage conjugation
+/// must not share groups: each result on one shared Runtime equals a cold
+/// Runtime's bit for bit. Orientation is never varied alone: every reachable
+/// adjoint-oriented caller also conjugates storage, so this covers the two
+/// key fields jointly, not orientation in isolation.
 #[test]
 fn shared_runtime_distinguishes_operations_on_the_same_groups() {
     let leg = su2_leg(&[(0, 2), (1, 2), (2, 1)]);

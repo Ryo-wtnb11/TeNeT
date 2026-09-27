@@ -225,11 +225,15 @@ fn charged_spec_bytes<T>(
     let mut bytes = 0usize;
     let mut coefficient_count = 0usize;
     // ponytail: every spec is charged as if its keys and coefficients were
-    // heap vectors (`Single` keeps them inline); over-charging is the contract.
+    // shared heap slices with three `Arc` control blocks (`Multi`: dst, src,
+    // coefficients). `Single` keeps them inline and is over-charged the same
+    // way, since spec kinds are private to `tenet-operations`; over-charging
+    // is the contract.
     for spec in specs {
         let coefficients = spec.recoupling_coefficients_dst_src().len();
         coefficient_count = coefficient_count.saturating_add(coefficients);
         bytes = bytes
+            .saturating_add(3 * ARC_CONTROL_BYTES)
             .saturating_add(
                 (spec.dst_keys().len().saturating_add(spec.src_keys().len()))
                     .saturating_mul(key_bytes),
