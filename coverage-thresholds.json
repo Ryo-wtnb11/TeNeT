@@ -3,10 +3,9 @@
   "_comment_bound_tensor": "LLVM line summaries count uncalled generic monomorphizations of BoundDynamicTensorRef methods, while the source report covers all reachable validation branches. The per-file threshold records that instrumentation artifact without exempting the file from coverage.",
   "default": 80,
   "files": {
-    "tenet-core/src/block_structure.rs": 75,
+    "tenet-core/src/block_structure/validated.rs": 68,
     "tenet-core/src/error.rs": 43,
     "tenet-core/src/fusion_rule.rs": 89,
-    "tenet-core/src/fusion_space.rs": 80,
     "tenet-core/src/fusion_tree/generic_braid.rs": 74,
     "tenet-core/src/fusion_tree/split_merge.rs": 65,
     "tenet-core/src/sector.rs": 86,
