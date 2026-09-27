@@ -1,6 +1,6 @@
 //! Independent expectation for the truncated-factorization compositions
 //! (`svd_compact` / `eigh_full` / `eig_full` → `diagview` → `find_truncated`
-//! → `restrict_leg` / `restrict_diagonal`, #1300, #1534).
+//! → `restrict_leg`, #1300, #1534).
 //!
 //! Nothing here calls a TeNeT factorization or a TeNeT truncation decision:
 //!

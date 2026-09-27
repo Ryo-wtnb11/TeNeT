@@ -46,7 +46,7 @@ use single_precision_oracle::{
 
 /// The truncated factorizations are compositions (#1534):
 /// `svd_compact`/`eigh_full`/`eig_full` → `diagview` → `find_truncated` →
-/// `restrict_leg`/`restrict_diagonal`.
+/// `restrict_leg`.
 #[allow(dead_code)] // each case reads the factors it checks
 struct SvdTruncated<T> {
     u: T,
@@ -69,9 +69,11 @@ macro_rules! svd_trunc {
             .find_truncated(&s.diagview().unwrap(), $truncation)
             .unwrap();
         SvdTruncated {
-            u: u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
-            s: s.restrict_diagonal(&found.selection).unwrap(),
-            vh: vh.restrict_leg(0, &found.selection).unwrap(),
+            u: u.restrict_leg(&[(u.codomain_rank(), &found.selection)])
+                .unwrap(),
+            s: s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+                .unwrap(),
+            vh: vh.restrict_leg(&[(0, &found.selection)]).unwrap(),
             error: found.error,
         }
     }};
@@ -86,8 +88,10 @@ macro_rules! eigen_trunc {
             .find_truncated(&d.diagview().unwrap(), $truncation)
             .unwrap();
         EigenTruncated {
-            d: d.restrict_diagonal(&found.selection).unwrap(),
-            v: v.restrict_leg(v.codomain_rank(), &found.selection).unwrap(),
+            d: d.restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+                .unwrap(),
+            v: v.restrict_leg(&[(v.codomain_rank(), &found.selection)])
+                .unwrap(),
             error: found.error,
         }
     }};

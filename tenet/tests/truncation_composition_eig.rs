@@ -1,7 +1,7 @@
 //! The general eigendecomposition truncated as a composition (#1534).
 //!
 //! The invariant: `eig_full` → `diagview` → `find_truncated` →
-//! `restrict_leg`/`restrict_diagonal` keeps the eigenpairs a hand selection
+//! `restrict_leg` keeps the eigenpairs a hand selection
 //! keeps, and nothing else. Every fixture is triangular in each coupled
 //! sector, so its eigenvalues are its diagonal (`triangular_eigenvalues`), and
 //! the kept pairs are checked through the gauge-free relation
@@ -82,8 +82,12 @@ macro_rules! assert_eig_composition {
         let bond = d.domain()[0].clone();
         let spectra = d.diagview().unwrap();
         let found = bond.find_truncated(&spectra, truncation).unwrap();
-        let got_d = d.restrict_diagonal(&found.selection).unwrap();
-        let got_v = v.restrict_leg(v.codomain_rank(), &found.selection).unwrap();
+        let got_d = d
+            .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+            .unwrap();
+        let got_v = v
+            .restrict_leg(&[(v.codomain_rank(), &found.selection)])
+            .unwrap();
 
         let blocks = sector_matrices!(source);
         let references: Vec<(_, Vec<Complex64>)> = blocks

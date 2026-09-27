@@ -58,9 +58,13 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
     let found = s.domain()[0]
         .find_truncated(&s.diagview().unwrap(), &Truncation::rank(3))
         .unwrap();
-    let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
-    let s = s.restrict_diagonal(&found.selection).unwrap();
-    let vh = vh.restrict_leg(0, &found.selection).unwrap();
+    let u = u
+        .restrict_leg(&[(u.codomain_rank(), &found.selection)])
+        .unwrap();
+    let s = s
+        .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+        .unwrap();
+    let vh = vh.restrict_leg(&[(0, &found.selection)]).unwrap();
     let kept: Vec<_> = s
         .diagview()
         .unwrap()

@@ -236,7 +236,7 @@ fn svd_compacts_s_is_built_compact_and_materializes_only_on_demand() {
 
 #[test]
 fn a_truncated_s_stays_compact_too() {
-    // What: truncation is `restrict_diagonal` on `svd_compact`'s `s`, and the
+    // What: truncation is two-leg `restrict_leg` on `svd_compact`'s `s`, and the
     // restriction keeps the compact storage. Same proof shape.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let tensor = source(0x5eed_0002);
@@ -245,7 +245,8 @@ fn a_truncated_s_stays_compact_too() {
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), &tenet::typed::Truncation::Full)
             .unwrap();
-        s.restrict_diagonal(&found.selection).unwrap()
+        s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+            .unwrap()
     };
     black_box(truncated(&tensor));
 

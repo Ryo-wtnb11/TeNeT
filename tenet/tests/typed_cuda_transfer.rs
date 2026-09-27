@@ -52,10 +52,13 @@ where
     let found = s.domain()[0]
         .find_truncated(&s.diagview().unwrap(), truncation)
         .unwrap();
-    let s = s.restrict_diagonal(&found.selection).unwrap();
+    let s = s
+        .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+        .unwrap();
     HostSvdTrunc {
-        u: u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
-        vh: vh.restrict_leg(0, &found.selection).unwrap(),
+        u: u.restrict_leg(&[(u.codomain_rank(), &found.selection)])
+            .unwrap(),
+        vh: vh.restrict_leg(&[(0, &found.selection)]).unwrap(),
         singular_values: labelled_f64(&s, to_f64),
         s,
         error: found.error,
@@ -83,9 +86,12 @@ where
     let found = d.domain()[0]
         .find_truncated(&d.diagview().unwrap(), truncation)
         .unwrap();
-    let d = d.restrict_diagonal(&found.selection).unwrap();
+    let d = d
+        .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+        .unwrap();
     HostEighTrunc {
-        v: v.restrict_leg(v.codomain_rank(), &found.selection).unwrap(),
+        v: v.restrict_leg(&[(v.codomain_rank(), &found.selection)])
+            .unwrap(),
         eigenvalues: labelled_f64(&d, to_f64),
         d,
         error: found.error,
@@ -520,9 +526,9 @@ fn assert_typed_cuda_svd_trunc_composition_matches_host<R>(
         .find_truncated(&s.diagview().unwrap(), truncation)
         .unwrap();
     let selection = &found.selection;
-    let u = u.restrict_leg(u.codomain_rank(), selection).unwrap();
-    let s = s.restrict_diagonal(selection).unwrap();
-    let vh = vh.restrict_leg(0, selection).unwrap();
+    let u = u.restrict_leg(&[(u.codomain_rank(), selection)]).unwrap();
+    let s = s.restrict_leg(&[(0, selection), (1, selection)]).unwrap();
+    let vh = vh.restrict_leg(&[(0, selection)]).unwrap();
 
     // The kept bond space is exactly Host's, including the empty bond of a
     // discard-all policy.
@@ -2539,9 +2545,9 @@ fn assert_c64_svd_trunc_composition_matches_host<R>(
         .find_truncated(&s.diagview().unwrap(), truncation)
         .unwrap();
     let selection = &found.selection;
-    let u = u.restrict_leg(u.codomain_rank(), selection).unwrap();
-    let s = s.restrict_diagonal(selection).unwrap();
-    let vh = vh.restrict_leg(0, selection).unwrap();
+    let u = u.restrict_leg(&[(u.codomain_rank(), selection)]).unwrap();
+    let s = s.restrict_leg(&[(0, selection), (1, selection)]).unwrap();
+    let vh = vh.restrict_leg(&[(0, selection)]).unwrap();
 
     assert_eq!(*selection.subspace(), expected.s.domain()[0]);
     for (actual, expected) in [(&u, &expected.u), (&s, &expected.s), (&vh, &expected.vh)] {
@@ -2626,8 +2632,8 @@ fn assert_c64_eigh_trunc_composition_matches_host<R>(
         .find_truncated(&d.diagview().unwrap(), truncation)
         .unwrap();
     let selection = &found.selection;
-    let d = d.restrict_diagonal(selection).unwrap();
-    let v = v.restrict_leg(v.codomain_rank(), selection).unwrap();
+    let d = d.restrict_leg(&[(0, selection), (1, selection)]).unwrap();
+    let v = v.restrict_leg(&[(v.codomain_rank(), selection)]).unwrap();
 
     assert_eq!(*selection.subspace(), expected.d.domain()[0]);
     assert_eq!(structural_snapshot(&d), structural_snapshot(&expected.d));

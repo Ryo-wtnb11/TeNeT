@@ -22,10 +22,10 @@ use tenet_tensors::{zeroed_payload, BoundDynamicTensorRef, FusionOperand, Operat
 #[cfg(feature = "cuda")]
 use super::{dense_err, CudaFactorizationPayload, CudaPayload, CudaStorage};
 use super::{
-    owned_repr, require_selected_leg_of, space_with_replaced_leg, BoundDynamicFusionMapSpace,
-    FactorizationScalar, LegSelection, Runtime, SectorSpectrum, TensorMap, TensorScalar, TypedData,
-    TypedFacadeError, TypedSectorAdmission, TypedTensorBody, TypedTensorRepr,
-    TypedTensorRootDispatch,
+    owned_repr, require_restriction_set, restricted_space, restriction_starts,
+    BoundDynamicFusionMapSpace, FactorizationScalar, LegSelection, Runtime, SectorSpectrum,
+    TensorMap, TensorScalar, TypedData, TypedFacadeError, TypedSectorAdmission, TypedTensorBody,
+    TypedTensorRepr, TypedTensorRootDispatch,
 };
 use crate::error::Error;
 use crate::tensor_core::internal_layout_error;
@@ -268,23 +268,6 @@ impl<R, D, S> StackedTensorMap<R, D, S> {
             .ok_or_else(|| Error::InvalidArgument("stacked payload length overflows usize".into()))
     }
 
-    /// The destination space and the start table of [`Self::restrict_leg`],
-    /// checked exactly as the eager [`TensorMap::restrict_leg`] checks them.
-    #[allow(clippy::type_complexity)]
-    fn restrict_plan(
-        &self,
-        axis: usize,
-        selection: &LegSelection<R>,
-    ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<(SectorId, usize)>), TypedFacadeError<R>>
-    where
-        R: TypedSectorAdmission,
-        R::Mode: TypedTensorRootDispatch<R>,
-    {
-        require_selected_leg_of(&self.space, axis, selection.parent(), "restrict_leg")?;
-        let destination = space_with_replaced_leg(&self.space, axis, selection.subspace().leg())?;
-        Ok((destination, selection.start_table()))
-    }
-
     /// A stack of this one's member count and Runtime over `space`, holding
     /// `storage`; the placement is read from `storage`.
     fn with_space<T: TensorStorage<D>>(
@@ -436,45 +419,45 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    /// Restricts leg `axis` of every member to the subspace `selection` names:
-    /// member `i` of the result is `self.member(i)?.restrict_leg(axis,
-    /// selection)?`, bit for bit, with the same space and signature.
+    /// Restricts the listed legs of every member: member `i` of the result
+    /// is `self.member(i)?.restrict_leg(legs)?`, bit for bit, with the same
+    /// space and signature.
     ///
-    /// One selection serves every member, which is what grouping members by
-    /// their truncated signature (then [`Self::select`]) produces.
+    /// One set of selections serves every member, which is what grouping
+    /// members by their truncated signature (then [`Self::select`])
+    /// produces.
     ///
     /// # Cost
     ///
     /// The eager block plan is built once; each destination block is then one
-    /// strided copy for all `B` members, the member axis being one more
-    /// dimension of the copy. `B · L'` elements move into one output
-    /// allocation, left unfilled when the blocks tile it (as eager), plus
-    /// `O(rank + blocks)` structural work independent of `B`.
+    /// strided copy for all `B` members and all restricted legs, the member
+    /// axis being one more dimension of the copy. `B · L'` elements move into
+    /// one output allocation, left unfilled when the blocks tile it (as
+    /// eager), plus `O(rank + blocks)` structural work independent of `B`.
     ///
     /// # Errors
     ///
-    /// Exactly the eager [`TensorMap::restrict_leg`] errors: an out-of-range
-    /// `axis` or a leg other than [`LegSelection::parent`] is an
-    /// [`Error::InvalidArgument`], a selection of another rule is
-    /// [`Error::RuleMismatch`]. Nothing is allocated before every check.
+    /// Exactly the eager [`TensorMap::restrict_leg`] errors for a dense
+    /// payload: an empty set, an out-of-range or repeated axis, or a leg
+    /// other than [`LegSelection::parent`] is an [`Error::InvalidArgument`],
+    /// a selection of another rule is [`Error::RuleMismatch`]. Nothing is
+    /// allocated before every check.
     pub fn restrict_leg(
         &self,
-        axis: usize,
-        selection: &LegSelection<R>,
+        legs: &[(usize, &LegSelection<R>)],
     ) -> Result<Self, TypedFacadeError<R>>
     where
         R::Mode: TypedTensorRootDispatch<R>,
     {
-        let (destination, table) = self.restrict_plan(axis, selection)?;
+        require_restriction_set(&self.space, legs)?;
+        let destination = restricted_space(&self.space, legs)?;
         let _host_pool = self.runtime.enter_host_pool();
-        let mut starts: Vec<tenet_tensors::SectorStartTable<'_>> = vec![None; self.rank()];
-        starts[axis] = Some(table.as_slice());
         let data = tenet_tensors::stacked_fusion_restrict_owned(
             destination.space().structure(),
             FusionOperand::direct(self.space.space()),
             &self.storage,
             self.members,
-            &starts,
+            &restriction_starts(self.rank(), legs),
         )
         .map_err(Error::from)?;
         Ok(self.with_space(destination, data)?)
@@ -1949,8 +1932,9 @@ impl<R, D: CudaPayload> StackedTensorMap<R, D, CudaStorage<D>> {
 
     /// The device form of the Host [`StackedTensorMap::restrict_leg`], with
     /// the same result space and errors: one upload of an `L'`-entry element
-    /// table and one Tenferro `gather` launch per call, whatever `B` and the
-    /// block count. Nothing is downloaded and nothing waits on the device.
+    /// table and one Tenferro `gather` launch per call, whatever `B`, the
+    /// block count and the number of restricted legs. Nothing is downloaded
+    /// and nothing waits on the device.
     ///
     /// The table maps each destination element to its source element within
     /// a member. It is the eager restriction kernel applied once, on the Host,
@@ -1959,24 +1943,23 @@ impl<R, D: CudaPayload> StackedTensorMap<R, D, CudaStorage<D>> {
     /// (its window is the member axis) and allocates the `[L', B]` result.
     pub fn restrict_leg(
         &self,
-        axis: usize,
-        selection: &LegSelection<R>,
+        legs: &[(usize, &LegSelection<R>)],
     ) -> Result<Self, TypedFacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: TypedTensorRootDispatch<R>,
     {
-        let (destination, table) = self.restrict_plan(axis, selection)?;
+        require_restriction_set(&self.space, legs)?;
+        let destination = restricted_space(&self.space, legs)?;
         // The element table is the eager kernel itself run over the payload
         // `0, 1, …, L - 1` (in `i64`, the gather's index type), so the block
         // plan keeps one implementation. Why not enumerate the destination
         // blocks here instead: that would restate the sector lookup, start
         // offsets and rectangle checks of `restrict_block`. The price is one
-        // `L`-element iota per call, host work `O(L + L')`, independent of `B`.
+        // `L`-element iota per call, host work `O(L + L')`, independent of `B`
+        // and of the number of restricted legs.
         let elements = {
             let _host_pool = self.runtime.enter_host_pool();
-            let mut starts: Vec<tenet_tensors::SectorStartTable<'_>> = vec![None; self.rank()];
-            starts[axis] = Some(table.as_slice());
             let iota = (0..self.member_len)
                 .map(i64::try_from)
                 .collect::<Result<Vec<i64>, _>>()
@@ -1985,7 +1968,7 @@ impl<R, D: CudaPayload> StackedTensorMap<R, D, CudaStorage<D>> {
                 destination.space().structure(),
                 FusionOperand::direct(self.space.space()),
                 &iota,
-                &starts,
+                &restriction_starts(self.rank(), legs),
             )
             .map_err(Error::from)?
         };

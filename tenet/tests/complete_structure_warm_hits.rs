@@ -55,7 +55,7 @@ macro_rules! warm_ops {
             bits(a.repartition(3).unwrap().data())
         });
         assert_warm_hits(concat!($label, " restrict_leg"), || {
-            bits(a.restrict_leg(0, &selection).unwrap().data())
+            bits(a.restrict_leg(&[(0, &selection)]).unwrap().data())
         });
         assert_warm_hits(concat!($label, " compose"), || {
             bits(a.compose(&square).unwrap().data())

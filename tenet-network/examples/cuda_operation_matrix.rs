@@ -1181,13 +1181,13 @@ mod device {
                     .find_truncated(&s.diagview().map_err(|e| e.to_string())?, &truncation)
                     .map_err(|e| e.to_string())?;
                 let u = u
-                    .restrict_leg(u.codomain_rank(), &found.selection)
+                    .restrict_leg(&[(u.codomain_rank(), &found.selection)])
                     .map_err(|e| e.to_string())?;
                 let s = s
-                    .restrict_diagonal(&found.selection)
+                    .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
                     .map_err(|e| e.to_string())?;
                 let vh = vh
-                    .restrict_leg(0, &found.selection)
+                    .restrict_leg(&[(0, &found.selection)])
                     .map_err(|e| e.to_string())?;
                 Ok((u, s, vh, found.error))
             };
@@ -1204,10 +1204,11 @@ mod device {
                                 .expect("Host find_truncated");
                             let restrict = "Host restriction";
                             Ok::<_, Never>((
-                                u.restrict_leg(u.codomain_rank(), &found.selection)
+                                u.restrict_leg(&[(u.codomain_rank(), &found.selection)])
                                     .expect(restrict),
-                                s.restrict_diagonal(&found.selection).expect(restrict),
-                                vh.restrict_leg(0, &found.selection).expect(restrict),
+                                s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+                                    .expect(restrict),
+                                vh.restrict_leg(&[(0, &found.selection)]).expect(restrict),
                                 found.error,
                             ))
                         },

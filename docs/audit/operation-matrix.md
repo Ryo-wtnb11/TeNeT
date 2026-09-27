@@ -327,7 +327,7 @@ are deliberately *not* device operations
 is global over quantum-dimension-weighted spectra and belongs on the host. The
 device result is composed from `svd_compact`/`eigh_full`, `to_host`,
 `diagview`, `GradedSpace::find_truncated` and
-`restrict_leg`/`restrict_diagonal`.
+`restrict_leg`.
 `qr_compact` carries both payloads in the Host positive-diagonal gauge
 (`R_jj` real and non-negative, phase 1 kept at zero;
 [#1271](https://github.com/Ryo-wtnb11/TeNeT/issues/1271)).

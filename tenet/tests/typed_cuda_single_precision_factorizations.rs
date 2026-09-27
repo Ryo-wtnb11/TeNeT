@@ -933,13 +933,16 @@ fn assert_truncation_composition<R, D>(
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), truncation)
             .unwrap();
-        let s = s.restrict_diagonal(&found.selection).unwrap();
+        let s = s
+            .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+            .unwrap();
         let mut singular_values = s.diagview().unwrap();
         singular_values.sort_by(|left, right| left.sector.cmp(&right.sector));
         (
-            u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
+            u.restrict_leg(&[(u.codomain_rank(), &found.selection)])
+                .unwrap(),
             s,
-            vh.restrict_leg(0, &found.selection).unwrap(),
+            vh.restrict_leg(&[(0, &found.selection)]).unwrap(),
             singular_values,
             found.error,
         )
@@ -959,9 +962,9 @@ fn assert_truncation_composition<R, D>(
         .find_truncated(&s.diagview().unwrap(), truncation)
         .unwrap();
     let selection = &found.selection;
-    let u = u.restrict_leg(u.codomain_rank(), selection).unwrap();
-    let s = s.restrict_diagonal(selection).unwrap();
-    let vh = vh.restrict_leg(0, selection).unwrap();
+    let u = u.restrict_leg(&[(u.codomain_rank(), selection)]).unwrap();
+    let s = s.restrict_leg(&[(0, selection), (1, selection)]).unwrap();
+    let vh = vh.restrict_leg(&[(0, selection)]).unwrap();
 
     assert_eq!(
         *selection.subspace(),

@@ -814,7 +814,7 @@ fn weighted_rank_truncation_matches_tensorkit() {
                 .unwrap();
             // `diagview` lists sectors in stored order; compare by label.
             let mut kept: Vec<_> = s
-                .restrict_diagonal(&found.selection)
+                .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
                 .unwrap()
                 .diagview()
                 .unwrap()

@@ -109,8 +109,8 @@ twice are summed; labels that remain once become output legs.
 A truncated SVD is four primitive steps: `theta.svd_compact()` returns $U$,
 $S$, $V^\dagger$; `diagview` reads the singular values off $S$;
 `find_truncated` on the bond leg decides which to keep and reports the
-discarded weight as `error`; and `restrict_leg` / `restrict_diagonal` cut
-$U$, $S$ and $V^\dagger$ to that selection.
+discarded weight as `error`; and `restrict_leg` cuts the bond leg of $U$ and
+$V^\dagger$, and both legs of $S$ in one call, to that selection.
 [`run`](../tenet-network/examples/itebd_heisenberg.rs) combines a bond budget
 `Truncation::rank(chi)` with `Truncation::relative_cutoff(rtol)`. The latter
 keeps singular values satisfying

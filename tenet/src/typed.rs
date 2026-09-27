@@ -103,8 +103,8 @@
 //! [`TensorMap::left_null`], [`TensorMap::right_null`]) and the **truncation
 //! primitives** a truncated factorization is composed from
 //! ([`TensorMap::diagview`], [`GradedSpace::find_truncated`],
-//! [`GradedSpace::truncspace`], [`TensorMap::restrict_leg`],
-//! [`TensorMap::restrict_diagonal`]; see the tutorial) and — with
+//! [`GradedSpace::truncspace`], [`TensorMap::restrict_leg`]; see the
+//! tutorial) and — with
 //! issue #570
 //! — the **eigendecompositions** ([`TensorMap::eigh_full`],
 //! [`TensorMap::eigh_vals`], [`TensorMap::eig_full`], [`TensorMap::eig_vals`])
@@ -127,7 +127,7 @@
 //!
 //! Issue #570 also gave the facade **compact diagonal storage**. For
 //! multiplicity-free providers, the `s` factor from `svd_compact` is compact
-//! (and stays compact through `restrict_diagonal`); for checked `Generic` providers, only the `d` factor
+//! (and stays compact through `restrict_leg` on both legs); for checked `Generic` providers, only the `d` factor
 //! from EIGH/EIG is compact, while checked SVD publishes its `s` factor densely.
 //! A compact factor holds `Σ_c k_c` values rather than the `Σ_c k_c²`
 //! block-diagonal buffer it would fill, which is what TensorKit's
@@ -311,7 +311,7 @@ pub use serialization::{
 /// reductions (`norm`, `inner`, `tr`),
 /// contraction/`compose`/`otimes`/`cat`, the structural transforms
 /// (`permute`, `braid`, `transpose`, `repartition`, `twist`, `flip`),
-/// `restrict_leg`/`embed_leg`/`restrict_diagonal`/`diagview`, trace, and
+/// `restrict_leg`/`embed_leg`/`diagview`, trace, and
 /// `tensor!` network execution.
 ///
 /// Factorizations need [`FactorizationScalar`]; matrix functions, inverses,
@@ -8897,8 +8897,9 @@ where
     /// every TeNeT `*_compact` / `*_full` factorization publishes them, and the
     /// result names the surviving bond states. A truncated factorization is
     /// this decision composed with an untruncated one: apply it with
-    /// [`TensorMap::restrict_leg`] to the isometric factors and
-    /// [`TensorMap::restrict_diagonal`] to the spectrum factor. The same
+    /// [`TensorMap::restrict_leg`]: on the bond leg of each isometric factor,
+    /// and on both legs of the spectrum factor, which keeps a compact one
+    /// compact. The same
     /// recipe truncates the `d` and `v` of `eigh_full` and `eig_full`.
     ///
     /// ```
@@ -8911,9 +8912,9 @@ where
     ///
     /// let Svd { u, s, vh } = t.svd_compact()?;
     /// let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(2))?;
-    /// let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
-    /// let s = s.restrict_diagonal(&found.selection)?;
-    /// let vh = vh.restrict_leg(0, &found.selection)?;
+    /// let u = u.restrict_leg(&[(u.codomain_rank(), &found.selection)])?;
+    /// let s = s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])?;
+    /// let vh = vh.restrict_leg(&[(0, &found.selection)])?;
     ///
     /// // The best rank-2 approximation, and the weight it discards.
     /// let approximation = u.compose(&s)?.compose(&vh)?;
@@ -9099,6 +9100,10 @@ pub struct LegSelection<R> {
     // Sorted by `SectorId`, parallel to `subspace`'s stored sectors: the
     // kernels look the start up by the id they read from a block's own key.
     entries: Vec<(SectorId, std::ops::Range<usize>)>,
+    // `entries`' starts, the table the restriction kernel reads per axis.
+    // Why stored: one selection is applied to several factors, and a
+    // restriction then borrows it instead of allocating it per call and axis.
+    starts: Vec<(SectorId, usize)>,
 }
 
 // Why hand-written: both fields clone through an `Arc`, exactly as
@@ -9110,6 +9115,7 @@ impl<R> Clone for LegSelection<R> {
             parent: self.parent.clone(),
             subspace: self.subspace.clone(),
             entries: self.entries.clone(),
+            starts: self.starts.clone(),
         }
     }
 }
@@ -9221,6 +9227,10 @@ where
                 provider: Arc::clone(parent.provider_arc()),
                 leg,
             },
+            starts: entries
+                .iter()
+                .map(|(sector, range)| (*sector, range.start))
+                .collect(),
             entries,
         })
     }
@@ -9262,6 +9272,10 @@ where
                 provider: Arc::clone(parent.provider_arc()),
                 leg,
             },
+            starts: entries
+                .iter()
+                .map(|(sector, range)| (*sector, range.start))
+                .collect(),
             entries,
         })
     }
@@ -9270,11 +9284,8 @@ where
 impl<R> LegSelection<R> {
     /// The source start of every selected sector, sorted by [`SectorId`]: the
     /// per-axis table the restriction kernels read.
-    fn start_table(&self) -> Vec<(SectorId, usize)> {
-        self.entries
-            .iter()
-            .map(|(sector, range)| (*sector, range.start))
-            .collect()
+    fn start_table(&self) -> &[(SectorId, usize)] {
+        &self.starts
     }
 }
 
@@ -9319,12 +9330,11 @@ where
     Ok(())
 }
 
-/// `space`'s hom-space with leg `axis` replaced, built into a root layout of
-/// the same provider.
-fn space_with_replaced_leg<R>(
+/// `space`'s hom-space with leg `axis` replaced by `replacement(axis)` where
+/// that is `Some`, built into a root layout of the same provider.
+fn space_with_replaced_legs<'a, R>(
     space: &BoundDynamicFusionMapSpace<R>,
-    axis: usize,
-    replacement: &SectorLeg,
+    replacement: impl Fn(usize) -> Option<&'a SectorLeg>,
 ) -> Result<BoundDynamicFusionMapSpace<R>, TypedFacadeError<R>>
 where
     R: TypedSectorAdmission,
@@ -9338,13 +9348,7 @@ where
                 .legs()
                 .iter()
                 .enumerate()
-                .map(|(offset, leg)| {
-                    if base + offset == axis {
-                        replacement.clone()
-                    } else {
-                        leg.clone()
-                    }
-                })
+                .map(|(offset, leg)| replacement(base + offset).unwrap_or(leg).clone())
                 .collect::<Vec<_>>(),
         )
     };
@@ -9355,13 +9359,73 @@ where
     <R::Mode as TypedTensorRootDispatch<R>>::build_root(Arc::clone(space.provider_arc()), homspace)
 }
 
+/// The kernel's per-axis start tables for a restriction set on a tensor of
+/// rank `rank`, borrowed from the selections.
+fn restriction_starts<'a, R>(
+    rank: usize,
+    legs: &[(usize, &'a LegSelection<R>)],
+) -> Vec<tenet_tensors::SectorStartTable<'a>> {
+    let mut starts = vec![None; rank];
+    for &(axis, selection) in legs {
+        starts[axis] = Some(selection.start_table());
+    }
+    starts
+}
+
+/// Checks a `restrict_leg` set against `space`. Shared by the eager and the
+/// stacked restriction, so both reject with the same errors; each pair is
+/// checked exactly as a single-axis restriction is.
+fn require_restriction_set<R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    legs: &[(usize, &LegSelection<R>)],
+) -> Result<(), TypedFacadeError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorRootDispatch<R>,
+{
+    // Why not accept an empty set as the identity: it would be a second
+    // spelling of `materialize`.
+    if legs.is_empty() {
+        return Err(Error::InvalidArgument(
+            "restrict_leg needs at least one (axis, selection) pair".to_string(),
+        )
+        .into());
+    }
+    for (index, &(axis, selection)) in legs.iter().enumerate() {
+        require_selected_leg_of(space, axis, selection.parent(), "restrict_leg")?;
+        if legs[..index].iter().any(|&(seen, _)| seen == axis) {
+            return Err(
+                Error::InvalidArgument(format!("restrict_leg: axis {axis} appears twice")).into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `space` with every leg of a checked `restrict_leg` set replaced by its
+/// selection's subspace.
+fn restricted_space<R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    legs: &[(usize, &LegSelection<R>)],
+) -> Result<BoundDynamicFusionMapSpace<R>, TypedFacadeError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorRootDispatch<R>,
+{
+    space_with_replaced_legs(space, |axis| {
+        legs.iter()
+            .find(|&&(candidate, _)| candidate == axis)
+            .map(|&(_, selection)| selection.subspace().leg())
+    })
+}
+
 /// The outcome of [`GradedSpace::find_truncated`]: what survives, and the norm
 /// of what does not.
 ///
 /// MatrixAlgebraKit returns the same pair as `ind` from `findtruncated` plus
 /// `truncation_error!`; TeNeT names the index set a [`LegSelection`] so that
-/// [`TensorMap::restrict_leg`] and [`TensorMap::restrict_diagonal`] can apply
-/// it to the three factors of one decomposition.
+/// [`TensorMap::restrict_leg`] can apply it to the three factors of one
+/// decomposition.
 pub struct TruncatedSelection<R> {
     /// The kept bond subspace. It is empty exactly when the policy discarded
     /// every state, as `Rank(0)` does.
@@ -11206,7 +11270,7 @@ where
     ///   `TypedAdjointView::new`): materialized in the source dtype,
     ///   then converted — an operation-local source-sized buffer plus the
     ///   output. Why not a lazy view over a converted parent: several
-    ///   operations (`diagview`, `restrict_diagonal`, the
+    ///   operations (`diagview`, the
     ///   `permute_overwrite_into` source, the checked-Generic factorizations,
     ///   the device path after `to_cuda`) reject lazy adjoints, so a lazy
     ///   result would accept less than the owned one `to_c64` always
@@ -11535,9 +11599,9 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// // Until a device `restrict_leg` lands, the factors move to the host once.
 /// let (u, s, vh) = (u.to_host()?, s.to_host()?, vh.to_host()?);
 /// let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(2))?;
-/// let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
-/// let s = s.restrict_diagonal(&found.selection)?;
-/// let vh = vh.restrict_leg(0, &found.selection)?;
+/// let u = u.restrict_leg(&[(u.codomain_rank(), &found.selection)])?;
+/// let s = s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])?;
+/// let vh = vh.restrict_leg(&[(0, &found.selection)])?;
 /// # let _ = (u, s, vh, found.error);
 /// # Ok(())
 /// # }
@@ -14547,19 +14611,31 @@ where
         R: TypedSectorAdmission,
         R::Mode: TypedTensorRootDispatch<R>,
     {
-        space_with_replaced_leg(self.logical_space(), axis, replacement)
+        space_with_replaced_legs(self.logical_space(), |candidate| {
+            (candidate == axis).then_some(replacement)
+        })
     }
 
-    /// Restricts leg `axis` to the subspace named by `selection`.
+    /// Restricts each listed leg to the subspace its selection names.
     ///
-    /// This is composition with the inclusion isometry `ι_σ` of
-    /// [`LegSelection`] on that leg — `ι_σ^† ∘ t` for a codomain leg, `t ∘ ι_σ`
-    /// for a domain leg. The tensor stays invariant, the leg keeps its dual
-    /// flag, and every surviving fusion tree keeps its inner lines and
-    /// vertices: `ι_σ` is the identity on irreps, so no structural
-    /// coefficient, braid or fermionic sign enters. Selecting a single
-    /// degeneracy index of sector `q` leaves a leg equal to the one-dimensional
-    /// space of `q`, so the charge stays explicit on the leg.
+    /// `legs` is a set of `(axis, selection)` pairs on distinct axes; a
+    /// single-leg restriction is `&[(axis, &selection)]`. Each pair is
+    /// composition with the inclusion isometry `ι_σ` of [`LegSelection`] on
+    /// that leg — `ι_σ^† ∘ t` for a codomain leg, `t ∘ ι_σ` for a domain leg.
+    /// Isometries on distinct legs commute, so the result equals any order of
+    /// one-pair restrictions, bit for bit. The tensor stays invariant, every
+    /// leg keeps its dual flag, and every surviving fusion tree keeps its
+    /// inner lines and vertices: `ι_σ` is the identity on irreps, so no
+    /// structural coefficient, braid or fermionic sign enters. Selecting a
+    /// single degeneracy index of sector `q` leaves a leg equal to the
+    /// one-dimensional space of `q`, so the charge stays explicit on the leg.
+    ///
+    /// A compact diagonal `bond <- bond` map (the `s` of an SVD, the `d` of
+    /// an `eigh`) stays compact when both legs get the same selection,
+    /// `&[(0, &sel), (1, &sel)]`: the result is again an endomorphism of the
+    /// kept subspace (TensorKit `truncate_diagonal!`). This is the third of
+    /// the three calls that turn a compact factorization plus a
+    /// [`GradedSpace::find_truncated`] decision into a truncated one.
     ///
     /// [`Self::embed_leg`] is the adjoint: `restrict_leg` after `embed_leg` is
     /// the identity, `embed_leg` after `restrict_leg` is the orthogonal
@@ -14567,45 +14643,85 @@ where
     ///
     /// # Cost
     ///
-    /// One strided copy per block, `O(selected payload)` data movement, no
-    /// matrix multiplication and no recoupling. One payload allocation plus
-    /// `O(rank + blocks)` structural work, independent of the degeneracy
-    /// dimensions. (TensorKit pays a contraction with an explicit isometry
-    /// tensor instead; TeNeT addresses the degeneracy axis inside each reduced
-    /// block directly.)
+    /// One strided copy per destination block for all `k` legs at once,
+    /// `O(selected payload)` data movement, no matrix multiplication and no
+    /// recoupling. One payload allocation plus `O(rank + blocks)` structural
+    /// work, independent of the degeneracy dimensions. (TensorKit pays a
+    /// contraction with an explicit isometry tensor for an arbitrary leg;
+    /// TeNeT addresses the degeneracy axes inside each reduced block
+    /// directly.) A compact input copies only the `O(sum_c k'_c)` kept
+    /// values; the discarded ones are never touched.
     ///
     /// Defined for Host payloads: device storage has no such method, so an
     /// unsupported placement is a compile-time absence rather than a runtime
-    /// error.
+    /// error. A lazy adjoint is read in place.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidArgument`] when the payload is a compact
-    /// diagonal one, `axis` is out of range, or `axis` is not the leg
-    /// `selection` was built from, and [`Error::RuleMismatch`] when the
-    /// selection belongs to a different rule. Nothing is allocated before
-    /// every check has passed.
+    /// [`Error::InvalidArgument`] when `legs` is empty, an axis is out of
+    /// range or appears twice, or an axis is not the leg its selection was
+    /// built from; [`Error::RuleMismatch`] when a selection belongs to a
+    /// different rule; [`Error::InvalidArgument`] for a compact diagonal
+    /// payload with any set other than both legs and one selection (call
+    /// [`Self::materialize`] first for a dense result). Nothing is allocated
+    /// before every check has passed.
     pub fn restrict_leg(
         &self,
-        axis: usize,
-        selection: &LegSelection<R>,
+        legs: &[(usize, &LegSelection<R>)],
     ) -> Result<Self, TypedFacadeError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: TypedTensorRootDispatch<R>,
     {
-        self.require_selected_leg(axis, selection.parent(), "restrict_leg")?;
         let _host_pool = self.runtime.enter_host_pool();
-        let destination = self.root_with_replaced_leg(axis, selection.subspace().leg())?;
-        let table = selection.start_table();
-        let mut starts: Vec<tenet_tensors::SectorStartTable<'_>> = vec![None; self.rank()];
-        starts[axis] = Some(table.as_slice());
+        require_restriction_set(self.logical_space(), legs)?;
+        let compact = self
+            .spectrum()
+            .map(|spectrum| match legs {
+                [(0, first), (1, second)] | [(1, second), (0, first)]
+                    if first.entries == second.entries =>
+                {
+                    Ok((spectrum, *first))
+                }
+                _ => Err(TypedFacadeError::<R>::from(Error::InvalidArgument(
+                    "restrict_leg: a compact diagonal stays compact only with one selection \
+                     on both legs, &[(0, sel), (1, sel)]; call materialize() first for any \
+                     other restriction"
+                        .to_string(),
+                ))),
+            })
+            .transpose()?;
+        let destination = restricted_space(self.logical_space(), legs)?;
+        if let Some((spectrum, selection)) = compact {
+            let mut kept = Vec::with_capacity(selection.entries.len());
+            for (sector, range) in &selection.entries {
+                // Both lists are in canonical `SectorId` order, so this is a
+                // lookup, not a scan. A violated order can only make the
+                // search miss, which is the typed error below — never a match
+                // on the wrong sector, because the key is compared.
+                let values = spectrum
+                    .binary_search_by_key(sector, |entry| entry.sector)
+                    .ok()
+                    .and_then(|index| spectrum[index].values.get(range.clone()))
+                    .ok_or_else(|| {
+                        TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                            "restrict_leg: the compact payload has no [{}, {}) for sector {:?}",
+                            range.start, range.end, sector
+                        )))
+                    })?;
+                kept.push(tenet_matrixalgebra::SectorSpectrum {
+                    sector: *sector,
+                    values: values.to_vec(),
+                });
+            }
+            return Ok(self.with_spectrum_on(destination, kept));
+        }
         let (source, source_data) = self.fusion_operand_and_data();
         let data = tenet_tensors::oriented_fusion_restrict_owned(
             destination.space().structure(),
             source,
             source_data,
-            &starts,
+            &restriction_starts(self.rank(), legs),
         )
         .map_err(Error::from)?;
         Ok(Self {
@@ -14633,9 +14749,11 @@ where
     ///
     /// # Errors
     ///
-    /// As [`Self::restrict_leg`], with `axis` checked against
-    /// [`LegSelection::subspace`]. Every block is preflighted before the first
-    /// destination element is written.
+    /// [`Error::InvalidArgument`] when the payload is a compact diagonal one,
+    /// `axis` is out of range, or `axis` is not [`LegSelection::subspace`];
+    /// [`Error::RuleMismatch`] when the selection belongs to a different rule.
+    /// Every block is preflighted before the first destination element is
+    /// written.
     pub fn embed_leg(
         &self,
         axis: usize,
@@ -15427,113 +15545,6 @@ where
                 })
             })
             .collect()
-    }
-
-    /// Restricts both legs of a `bond <- bond` map to `selection`.
-    ///
-    /// TensorKit's internal `truncate_diagonal!`, and the third of the three
-    /// calls that turn a compact factorization plus a
-    /// [`GradedSpace::find_truncated`] decision into a truncated one: `u` and
-    /// `vh` lose their bond with [`Self::restrict_leg`], `s` loses both of its
-    /// legs here. The result lives on `subspace <- subspace`, so a compact
-    /// payload stays compact — a single-leg restriction could not, because
-    /// `bond' <- bond` is no longer an endomorphism.
-    ///
-    /// # Cost
-    ///
-    /// Compact input: one `Vec` per kept sector, `O(sum_c k'_c)` values copied
-    /// in total, plus the destination root build; the discarded values are
-    /// never touched, and no dense block is materialized. Dense input: one
-    /// zeroed output payload and one strided copy per block — the same single
-    /// kernel call [`Self::restrict_leg`] makes, with both axes restricted at
-    /// once.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidArgument`] for a lazy adjoint, for a receiver that is
-    /// not `bond <- bond`, and when that bond is not
-    /// [`LegSelection::parent`]; [`Error::RuleMismatch`] when the selection
-    /// belongs to another rule. Nothing is allocated before every check has
-    /// passed.
-    pub fn restrict_diagonal(
-        &self,
-        selection: &LegSelection<R>,
-    ) -> Result<Self, TypedFacadeError<R>> {
-        let _host_pool = self.runtime.enter_host_pool();
-        let body = self.owned_body().ok_or_else(|| {
-            TypedFacadeError::<R>::from(Error::InvalidArgument(
-                "restrict_diagonal requires an owned tensor, not a lazy adjoint".to_string(),
-            ))
-        })?;
-        if TypedSectorAdmission::typed_rule_identity(self.provider())
-            != TypedSectorAdmission::typed_rule_identity(selection.parent().provider())
-        {
-            return Err(Error::RuleMismatch.into());
-        }
-        let bond = self.bond_endomorphism_leg("restrict_diagonal")?;
-        if bond != selection.parent().leg() {
-            return Err(Error::InvalidArgument(
-                "restrict_diagonal: this map's bond is not the leg this selection was built from"
-                    .to_string(),
-            )
-            .into());
-        }
-        let subspace = selection.subspace().leg();
-        let homspace = FusionTreeHomSpace::new(
-            FusionProductSpace::new([subspace.clone()]),
-            FusionProductSpace::new([subspace.clone()]),
-        );
-        let destination = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
-            Arc::clone(self.logical_space().provider_arc()),
-            homspace,
-        )?;
-        match body.data.as_ref() {
-            TypedData::Diagonal(spectrum) => {
-                let mut kept = Vec::with_capacity(selection.entries.len());
-                for (sector, range) in &selection.entries {
-                    // Both lists are in canonical `SectorId` order, so this is
-                    // a lookup, not a scan. A violated order can only make the
-                    // search miss, which is the typed error below — never a
-                    // match on the wrong sector, because the key is compared.
-                    let values = spectrum
-                        .binary_search_by_key(sector, |entry| entry.sector)
-                        .ok()
-                        .and_then(|index| spectrum[index].values.get(range.clone()))
-                        .ok_or_else(|| {
-                            TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
-                                "restrict_diagonal: the compact payload has no [{}, {}) for sector {:?}",
-                                range.start, range.end, sector
-                            )))
-                        })?;
-                    kept.push(tenet_matrixalgebra::SectorSpectrum {
-                        sector: *sector,
-                        values: values.to_vec(),
-                    });
-                }
-                Ok(self.with_spectrum_on(destination, kept))
-            }
-            TypedData::Dense(_) => {
-                let table: Vec<(SectorId, usize)> = selection
-                    .entries
-                    .iter()
-                    .map(|(sector, range)| (*sector, range.start))
-                    .collect();
-                let starts: Vec<tenet_tensors::SectorStartTable<'_>> =
-                    vec![Some(table.as_slice()); 2];
-                let (source, source_data) = self.fusion_operand_and_data();
-                let data = tenet_tensors::oriented_fusion_restrict_owned(
-                    destination.space().structure(),
-                    source,
-                    source_data,
-                    &starts,
-                )
-                .map_err(Error::from)?;
-                Ok(Self {
-                    runtime: self.runtime.clone(),
-                    repr: owned_repr(TypedTensorBody::dense(destination, data)),
-                })
-            }
-        }
     }
 
     /// Returns the compact diagonal spectrum without materializing dense data.
@@ -24952,9 +24963,12 @@ mod representation_gates {
             let found = s.domain()[0]
                 .find_truncated(&s.diagview().unwrap(), truncation)
                 .unwrap();
-            let s = s.restrict_diagonal(&found.selection).unwrap();
+            let s = s
+                .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+                .unwrap();
             Truncated {
-                u: u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
+                u: u.restrict_leg(&[(u.codomain_rank(), &found.selection)])
+                    .unwrap(),
                 singular_values: s
                     .diagview()
                     .unwrap()
@@ -24965,7 +24979,7 @@ mod representation_gates {
                     })
                     .collect(),
                 s,
-                vh: vh.restrict_leg(0, &found.selection).unwrap(),
+                vh: vh.restrict_leg(&[(0, &found.selection)]).unwrap(),
                 error: found.error,
             }
         }

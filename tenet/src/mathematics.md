@@ -610,8 +610,8 @@ rank budget.
 - `svd_compact`, `eigh_full`, and related decompositions operate blockwise on
   the coupled-sector matrices. Truncating one is a separate,
   quantum-dimension-weighted decision over all sectors
-  (`GradedSpace::find_truncated`), applied with `restrict_leg` and
-  `restrict_diagonal`.
+  (`GradedSpace::find_truncated`), applied with `restrict_leg` (on both
+  legs of the spectrum factor at once).
 
 The method `exp` is the sectorwise matrix exponential. For a Hermitian
 endomorphism `H`, an imaginary-time gate uses

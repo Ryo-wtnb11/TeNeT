@@ -379,7 +379,7 @@ let split = fuser.adjoint()?.compose(&fused)?;
 assert!(split.axpby(1.0, &t, -1.0)?.norm(2.0)? <= 1e-12);
 
 let keep = LegSelection::try_new(&vw, [(U1Irrep::new(0), 0..2), (U1Irrep::new(1), 0..1)])?;
-let truncated = fused.restrict_leg(0, &keep)?;
+let truncated = fused.restrict_leg(&[(0, &keep)])?;
 assert_eq!(truncated.codomain()[0].dim()?, 3.0);
 # Ok::<(), Error>(())
 ```
@@ -429,7 +429,10 @@ for real input.
 A truncated factorization is composed from primitives, each with a visible
 cost: factorize (`svd_compact`), read the spectrum (`diagview`), decide what to
 keep (`GradedSpace::find_truncated` on the bond leg), and cut the bond
-(`restrict_leg` on `u` and `vh`, `restrict_diagonal` on `s`). The decision also
+(`restrict_leg` on the bond leg of `u` and `vh`, and on both legs of `s` with
+one call, which keeps a compact `s` compact). `restrict_leg` takes a set of
+`(axis, selection)` pairs and restricts all of them in one strided pass. The
+decision also
 reports the discarded weighted Frobenius norm. `Truncation::rank(n)` bounds the
 weighted kept bond dimension; tolerance constructors and `and` combine
 additional limits. The same four steps truncate `eigh_full` and `eig_full`,
@@ -453,9 +456,9 @@ let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 
 // Truncated SVD: factorize, decide, cut.
 let Svd { u, s, vh } = t.svd_compact()?;
 let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(6))?;
-let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
-let s = s.restrict_diagonal(&found.selection)?;
-let vh = vh.restrict_leg(0, &found.selection)?;
+let u = u.restrict_leg(&[(u.codomain_rank(), &found.selection)])?;
+let s = s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])?;
+let vh = vh.restrict_leg(&[(0, &found.selection)])?;
 
 let reconstructed = u.compose(&s)?.compose(&vh)?;
 let error = reconstructed.axpby(1.0, &t, -1.0)?.norm(2.0)?;
@@ -508,8 +511,8 @@ Truncation is a global decision over quantum-dimension-weighted spectra and
 stays on the host, so a device truncated factorization is the same
 composition with one explicit transfer: `svd_compact` (or `eigh_full`) on the
 device, `to_host`, `diagview`, `GradedSpace::find_truncated`, then
-`restrict_leg` on the bond leg of `u`/`vh` (or `v`) and `restrict_diagonal` on
-`s` (or `d`); the factors move to the host once until a device `restrict_leg`
+`restrict_leg` on the bond leg of `u`/`vh` (or `v`) and on both legs of `s`
+(or `d`); the factors move to the host once until a device `restrict_leg`
 lands. `qr_compact` returns the
 positive-diagonal gauge and is device-available for every device payload.
 

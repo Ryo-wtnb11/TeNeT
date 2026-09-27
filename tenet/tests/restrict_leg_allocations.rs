@@ -133,12 +133,12 @@ fn restrict_measurement(scale: usize) -> (Measurement, usize) {
     .unwrap();
 
     // Warm every structural cache the call can hit before measuring.
-    let warm = source.restrict_leg(0, &selection).unwrap();
+    let warm = source.restrict_leg(&[(0, &selection)]).unwrap();
     let payload_bytes = std::mem::size_of_val(warm.data());
 
     let mut output = None;
     let measurement = measure(|| {
-        output = Some(black_box(source.restrict_leg(0, &selection).unwrap()));
+        output = Some(black_box(source.restrict_leg(&[(0, &selection)]).unwrap()));
     });
     assert_eq!(output.unwrap().data(), warm.data());
     (measurement, payload_bytes)
@@ -162,8 +162,8 @@ fn restrict_leg_allocates_one_unfilled_payload_and_degeneracy_independent_scratc
     }
     // The block copy's scratch is inline (#1362) and the warm layout lookup
     // builds no key (#1367), so every call is the result's structural objects
-    // or its payload.
-    assert_eq!(small.allocations, 9);
+    // or its payload. The start table is borrowed from the selection (#1561).
+    assert_eq!(small.allocations, 8);
     // Structural work does not grow with the degeneracy dimensions. The byte
     // budget pins the payload to one buffer and rules out a second
     // payload-sized buffer taken through plain `alloc`/`realloc`.
@@ -175,6 +175,96 @@ fn restrict_leg_allocates_one_unfilled_payload_and_degeneracy_independent_scratc
          {small:?} vs {large:?} bytes for payloads {small_bytes}/{large_bytes}",
         small = small.bytes,
         large = large.bytes
+    );
+}
+
+/// One restriction of all three legs of a tensor whose degeneracies are
+/// `scale` times a base shape: the measurement and the payload byte count.
+/// `sequential` restricts one leg per call instead, the negative control.
+fn three_axis_measurement(scale: usize, sequential: bool) -> (Measurement, usize) {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let leg = u1(
+        &provider,
+        &[(-1, 2 * scale), (0, 3 * scale), (1, 2 * scale)],
+    );
+    let dual = leg.try_dual().unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &dual], [&leg], 53).unwrap();
+    let on_leg = LegSelection::try_new(
+        &leg,
+        [
+            (U1Irrep::new(-1), 0..scale),
+            (U1Irrep::new(0), scale..3 * scale),
+        ],
+    )
+    .unwrap();
+    let on_dual = LegSelection::try_new(
+        &dual,
+        [
+            (U1Irrep::new(1), scale..2 * scale),
+            (U1Irrep::new(0), 0..2 * scale),
+        ],
+    )
+    .unwrap();
+    let set = [(2, &on_leg), (0, &on_leg), (1, &on_dual)];
+    let restrict = || {
+        if sequential {
+            set.iter().fold(source.clone(), |tensor, &pair| {
+                tensor.restrict_leg(&[pair]).unwrap()
+            })
+        } else {
+            source.restrict_leg(&set).unwrap()
+        }
+    };
+
+    let warm = restrict();
+    let payload_bytes = std::mem::size_of_val(warm.data());
+    let mut output = None;
+    let measurement = measure(|| {
+        output = Some(black_box(restrict()));
+    });
+    assert_eq!(output.unwrap().data(), warm.data());
+    (measurement, payload_bytes)
+}
+
+#[test]
+fn restricting_three_legs_is_one_payload_pass() {
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // What: `k` legs are restricted in one strided pass into one output
+    // payload (#1561). Sequential one-leg passes would each allocate an
+    // intermediate payload whose size grows with the degeneracies, so the
+    // non-payload bytes would not stay fixed across scales.
+    let (small, small_bytes) = three_axis_measurement(1, false);
+    let (large, large_bytes) = three_axis_measurement(8, false);
+    assert!(large_bytes > small_bytes);
+    for (measurement, bytes) in [(&small, small_bytes), (&large, large_bytes)] {
+        assert!(
+            !measurement.zeroed_sizes.contains(&bytes),
+            "no payload-sized zeroed allocation, got {:?} for {bytes} bytes",
+            measurement.zeroed_sizes
+        );
+    }
+    assert_eq!(small.allocations, large.allocations);
+    assert_eq!(
+        small.bytes - small_bytes,
+        large.bytes - large_bytes,
+        "only the output payload may grow with the degeneracies: \
+         {small:?} vs {large:?} bytes for payloads {small_bytes}/{large_bytes}",
+        small = small.bytes,
+        large = large.bytes
+    );
+
+    // Negative control: the same three legs restricted one call at a time
+    // allocate two intermediate payloads, so the assertion above would fail.
+    let (small, small_bytes) = three_axis_measurement(1, true);
+    let (large, large_bytes) = three_axis_measurement(8, true);
+    assert_ne!(
+        small.bytes - small_bytes,
+        large.bytes - large_bytes,
+        "sequential passes must show degeneracy-dependent non-payload bytes"
     );
 }
 
@@ -229,9 +319,9 @@ fn the_network_restriction_of_several_axes_fills_no_payload() {
     assert!(measurement.bytes >= payload_bytes);
 }
 
-/// One compact `restrict_diagonal` on an `s : bond <- bond` whose degeneracies
+/// One compact two-leg `restrict_leg` on an `s : bond <- bond` whose degeneracies
 /// are `scale` times a base shape, keeping a fixed prefix of each sector.
-fn restrict_diagonal_measurement(scale: usize) -> Measurement {
+fn compact_restrict_measurement(scale: usize) -> Measurement {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let leg = u1(&provider, &[(-1, 2 * scale), (0, 3 * scale)]);
@@ -242,7 +332,7 @@ fn restrict_diagonal_measurement(scale: usize) -> Measurement {
     let selection =
         LegSelection::try_new(&bond, [(U1Irrep::new(-1), 0..2), (U1Irrep::new(0), 0..3)]).unwrap();
 
-    let warm = s.restrict_diagonal(&selection).unwrap();
+    let warm = s.restrict_leg(&[(0, &selection), (1, &selection)]).unwrap();
     assert!(
         tenet::expert::diagonal_spectrum(&warm).unwrap().is_some(),
         "a compact receiver must stay compact"
@@ -250,7 +340,9 @@ fn restrict_diagonal_measurement(scale: usize) -> Measurement {
 
     let mut output = None;
     let measurement = measure(|| {
-        output = Some(black_box(s.restrict_diagonal(&selection).unwrap()));
+        output = Some(black_box(
+            s.restrict_leg(&[(0, &selection), (1, &selection)]).unwrap(),
+        ));
     });
     assert_eq!(
         tenet::expert::diagonal_spectrum(&output.unwrap()).unwrap(),
@@ -260,15 +352,15 @@ fn restrict_diagonal_measurement(scale: usize) -> Measurement {
 }
 
 #[test]
-fn compact_restrict_diagonal_costs_the_kept_values_and_nothing_per_discarded_one() {
+fn compact_restrict_leg_costs_the_kept_values_and_nothing_per_discarded_one() {
     let _guard = MEASUREMENT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // The kept prefix is the same in both; only the discarded tail grows. A
     // compact restriction must therefore cost exactly the same, which is the
     // `O(sum_c k'_c)` contract: no dense block is ever materialized.
-    let small = restrict_diagonal_measurement(1);
-    let large = restrict_diagonal_measurement(16);
+    let small = compact_restrict_measurement(1);
+    let large = compact_restrict_measurement(16);
     assert_eq!(small.allocations, large.allocations);
     assert_eq!(small.bytes, large.bytes);
 }
@@ -346,14 +438,14 @@ fn steady_multi_row_restrict(scale: usize) -> (Measurement, usize) {
         ],
     )
     .unwrap();
-    let warm = source.restrict_leg(0, &selection).unwrap();
+    let warm = source.restrict_leg(&[(0, &selection)]).unwrap();
     let expected = warm.data().to_vec();
     let payload_bytes = std::mem::size_of_val(warm.data());
     drop(warm);
-    drop(black_box(source.restrict_leg(0, &selection).unwrap()));
+    drop(black_box(source.restrict_leg(&[(0, &selection)]).unwrap()));
     let mut output = None;
     let measurement = measure(|| {
-        output = Some(black_box(source.restrict_leg(0, &selection).unwrap()));
+        output = Some(black_box(source.restrict_leg(&[(0, &selection)]).unwrap()));
     });
     assert_eq!(output.unwrap().data(), expected.as_slice());
     (measurement, payload_bytes)
@@ -402,18 +494,18 @@ fn stacked_restrict_measurement(members: usize) -> (Measurement, usize) {
     let stack = StackedTensorMap::pack(&tensors).unwrap();
     let selection =
         LegSelection::try_new(&leg, [(U1Irrep::new(-1), 0..1), (U1Irrep::new(0), 1..3)]).unwrap();
-    let warm = stack.restrict_leg(0, &selection).unwrap();
+    let warm = stack.restrict_leg(&[(0, &selection)]).unwrap();
     let payload_bytes = members * std::mem::size_of_val(warm.member(0).unwrap().data());
     drop(warm);
     let mut output = None;
     let measurement = measure(|| {
-        output = Some(black_box(stack.restrict_leg(0, &selection).unwrap()));
+        output = Some(black_box(stack.restrict_leg(&[(0, &selection)]).unwrap()));
     });
     let output = output.unwrap();
     for (index, tensor) in tensors.iter().enumerate() {
         assert_eq!(
             output.member(index).unwrap().data(),
-            tensor.restrict_leg(0, &selection).unwrap().data()
+            tensor.restrict_leg(&[(0, &selection)]).unwrap().data()
         );
     }
     (measurement, payload_bytes)

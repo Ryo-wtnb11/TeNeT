@@ -13,8 +13,8 @@
 //! Γ tensors shaped `[left_bond, phys] <- [right_bond]`, λ diagonal bond
 //! endomorphisms. One bond update contracts
 //! `θ = λ_out Γ1 λ_mid Γ2 λ_out · gate`, truncates it (`svd_compact`, then
-//! `find_truncated` on the spectrum and `restrict_leg`/`restrict_diagonal`
-//! on the factors), and
+//! `find_truncated` on the spectrum and `restrict_leg` on the factors),
+//! and
 //! restores Vidal form by multiplying the outer `λ_out^{-1}` back in
 //! (diagonal inverse via `TensorMap::pinv`).
 //!
@@ -83,9 +83,9 @@ fn bond_update(
     // restrict every factor to it.
     let Svd { u, s, vh } = theta.svd_compact()?;
     let found = s.domain()[0].find_truncated(&s.diagview()?, trunc)?;
-    let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
-    let s = s.restrict_diagonal(&found.selection)?;
-    let vh = vh.restrict_leg(0, &found.selection)?;
+    let u = u.restrict_leg(&[(u.codomain_rank(), &found.selection)])?;
+    let s = s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])?;
+    let vh = vh.restrict_leg(&[(0, &found.selection)])?;
     let l_new = s.scale(1.0 / s.norm(2.0)?);
     // Divide the outer λ back out: diagonal inverse via pinv.
     let l_out_inv = l_out.pinv(PINV_RCOND)?;

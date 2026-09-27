@@ -119,9 +119,9 @@ macro_rules! assert_su3_svd_composition {
             let bond = s.domain()[0].clone();
             let found = bond.find_truncated(&s.diagview().unwrap(), &truncation).unwrap();
             let selection = &found.selection;
-            let got_u = u.restrict_leg(u.codomain_rank(), selection).unwrap();
-            let got_s = s.restrict_diagonal(selection).unwrap();
-            let got_vh = vh.restrict_leg(0, selection).unwrap();
+            let got_u = u.restrict_leg(&[(u.codomain_rank(), selection)]).unwrap();
+            let got_s = s.restrict_leg(&[(0, selection), (1, selection)]).unwrap();
+            let got_vh = vh.restrict_leg(&[(0, selection)]).unwrap();
             let kept = select(&offers, &policy);
 
             let kept_bond = got_s.domain()[0].clone();
@@ -187,8 +187,8 @@ macro_rules! assert_su3_eigh_composition {
                 .find_truncated(&d.diagview().unwrap(), &truncation)
                 .unwrap();
             let selection = &found.selection;
-            let got_d = d.restrict_diagonal(selection).unwrap();
-            let got_v = v.restrict_leg(v.codomain_rank(), selection).unwrap();
+            let got_d = d.restrict_leg(&[(0, selection), (1, selection)]).unwrap();
+            let got_v = v.restrict_leg(&[(v.codomain_rank(), selection)]).unwrap();
             let kept = select(&offers, &policy);
 
             let kept_bond = got_d.domain()[0].clone();
@@ -251,8 +251,8 @@ macro_rules! assert_su3_eig_composition {
                 .find_truncated(&d.diagview().unwrap(), &truncation)
                 .unwrap();
             let selection = &found.selection;
-            let got_d = d.restrict_diagonal(selection).unwrap();
-            let got_v = v.restrict_leg(v.codomain_rank(), selection).unwrap();
+            let got_d = d.restrict_leg(&[(0, selection), (1, selection)]).unwrap();
+            let got_v = v.restrict_leg(&[(v.codomain_rank(), selection)]).unwrap();
             let kept = select(&offers, &policy);
 
             assert_kept_bond!(got_d.domain()[0], offers, kept, case);

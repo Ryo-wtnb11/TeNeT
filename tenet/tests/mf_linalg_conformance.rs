@@ -112,9 +112,9 @@ macro_rules! factor_conformance {
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), &Truncation::rank(1))
             .unwrap();
-        let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
-        let s = s.restrict_diagonal(&found.selection).unwrap();
-        let vh = vh.restrict_leg(0, &found.selection).unwrap();
+        let u = u.restrict_leg(&[(u.codomain_rank(), &found.selection)]).unwrap();
+        let s = s.restrict_leg(&[(0, &found.selection), (1, &found.selection)]).unwrap();
+        let vh = vh.restrict_leg(&[(0, &found.selection)]).unwrap();
         assert_provider!(provider; u, s, vh);
         let reconstructed = u.compose(&s).unwrap().compose(&vh).unwrap();
         let error = reconstructed.axpby(1.0, &tall, -1.0).unwrap().norm(2.0).unwrap();
@@ -234,8 +234,8 @@ macro_rules! factor_conformance {
         let found = d.domain()[0]
             .find_truncated(&d.diagview().unwrap(), &Truncation::rank(1))
             .unwrap();
-        let trunc_d = d.restrict_diagonal(&found.selection).unwrap();
-        let trunc_v = v.restrict_leg(v.codomain_rank(), &found.selection).unwrap();
+        let trunc_d = d.restrict_leg(&[(0, &found.selection), (1, &found.selection)]).unwrap();
+        let trunc_v = v.restrict_leg(&[(v.codomain_rank(), &found.selection)]).unwrap();
         assert_provider!(provider; trunc_d, trunc_v);
         let reconstructed = trunc_v
             .compose(&trunc_d)
@@ -265,8 +265,8 @@ macro_rules! factor_conformance {
         let found = d.domain()[0]
             .find_truncated(&d.diagview().unwrap(), &Truncation::rank(1))
             .unwrap();
-        let trunc_d = d.restrict_diagonal(&found.selection).unwrap();
-        let trunc_v = v.restrict_leg(v.codomain_rank(), &found.selection).unwrap();
+        let trunc_d = d.restrict_leg(&[(0, &found.selection), (1, &found.selection)]).unwrap();
+        let trunc_v = v.restrict_leg(&[(v.codomain_rank(), &found.selection)]).unwrap();
         assert_provider!(provider; trunc_d, trunc_v);
         assert_complex_close!(
             &g.convert::<Complex64>().compose(&trunc_v).unwrap(),

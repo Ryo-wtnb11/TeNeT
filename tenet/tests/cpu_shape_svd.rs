@@ -32,9 +32,13 @@ fn truncated_svd_runtime_reuse_tracks_data_dependent_rank() {
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), &policy)
             .unwrap();
-        let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
-        let s = s.restrict_diagonal(&found.selection).unwrap();
-        let vh = vh.restrict_leg(0, &found.selection).unwrap();
+        let u = u
+            .restrict_leg(&[(u.codomain_rank(), &found.selection)])
+            .unwrap();
+        let s = s
+            .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+            .unwrap();
+        let vh = vh.restrict_leg(&[(0, &found.selection)]).unwrap();
 
         assert_eq!(
             s.diagview()

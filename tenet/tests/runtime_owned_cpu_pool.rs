@@ -65,7 +65,7 @@ fn observe(rt: &Runtime, salt: usize) -> Vec<HostPoolObservation> {
     let block: TensorMap<_, f64> = TensorMap::rand_with_seed(rt, [&w, &w], [&w], 1532).unwrap();
     let selection = LegSelection::try_new(&w, [(U1Irrep::new(0), 0..39)]).unwrap();
     let _ = block
-        .restrict_leg(0, &selection)
+        .restrict_leg(&[(0, &selection)])
         .unwrap()
         .embed_leg(0, &selection)
         .unwrap();
