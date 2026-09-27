@@ -6,10 +6,10 @@ use tenet_core::{
     block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
     fusion_tree_layout_cache_info, reset_core_intern_tables, BlockSpec, BraidingStyleKind,
     CoupledSectorFold, FermionParityFusionRule, FusionAlgebraError, FusionProductSpace,
-    FusionTreePairKey, Fz2SectorLayout, InfallibleGeneric, PackedProductCodec,
-    ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep,
-    SectorId, SectorLeg, SectorVec, Su2SectorLayout, TensorMapSpace, U1FusionRule, U1Irrep,
-    U1SectorLayout, Z2FusionRule, Z2Irrep,
+    FusionTreePairKey, Fz2SectorLayout, InfallibleGeneric, PackedProductCodec, ProductFusionRule,
+    ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
+    SectorVec, Su2SectorLayout, TensorMapSpace, U1FusionRule, U1Irrep, U1SectorLayout,
+    Z2FusionRule, Z2Irrep,
 };
 
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
@@ -350,11 +350,9 @@ fn checked_generic_preparation_rejects_legacy_binding_before_checker_queries() {
     let source_provider = Arc::new(CheckedGenericSpy::new());
     let checker = CheckedGenericSpy::new();
     let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
-    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
-        source_provider,
-        homspace.clone(),
-    )
-    .unwrap();
+    let source =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(source_provider, homspace.clone())
+            .unwrap();
 
     let error = match source.prepare_final_homspace_generic_with_checked(&checker, homspace) {
         Ok(_) => panic!("legacy binding was accepted as checked authority"),
@@ -394,9 +392,7 @@ fn checked_generic_prepared_structure_constructor_matches_root_constructor() {
     )
     .unwrap();
     let prepared = homspace
-        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(
-            provider.as_ref(),
-        )
+        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider.as_ref())
         .unwrap();
     let committed = BoundDynamicFusionMapSpace::from_prepared_final_homspace_generic_checked(
         Arc::clone(&provider),
@@ -475,11 +471,9 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
     reset_core_intern_tables();
     let provider = Arc::new(CheckedGenericSpy::new());
     let source_hom = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
-    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
-        Arc::clone(&provider),
-        source_hom,
-    )
-    .unwrap();
+    let source =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::clone(&provider), source_hom)
+            .unwrap();
     provider.calls.set(0);
     let final_hom = || FusionTreeHomSpace::from_sector_ids([(0, 2), (0, 3)], [(0, 5)]);
     let snapshots = || {
@@ -737,8 +731,7 @@ fn complete_and_subset_spaces_are_mathematically_equal() {
     ));
 
     let bound =
-        BoundDynamicFusionMapSpace::bind_multiplicity_free(subset, Arc::new(Z2FusionRule))
-            .unwrap();
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(subset, Arc::new(Z2FusionRule)).unwrap();
     assert!(matches!(
         bound.space().admission(),
         FusionSpaceAdmission::Complete(_)
@@ -782,8 +775,8 @@ fn bind_revalidates_complete_without_replacing_layout() {
     let structure = Arc::clone(raw.structure());
     reset_scratch_publication_observations();
 
-    let bound = BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(raw, Arc::new(rule))
-        .unwrap();
+    let bound =
+        BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(raw, Arc::new(rule)).unwrap();
 
     assert!(matches!(
         bound.space().admission(),
@@ -857,11 +850,9 @@ fn lowered_bind_failure_publishes_no_layout_or_admission() {
         let mut raw = base.clone();
         raw.admission = admission.clone();
         let original = raw.clone();
-        let error = BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(
-            raw,
-            Arc::new(U1FusionRule),
-        )
-        .unwrap_err();
+        let error =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(raw, Arc::new(U1FusionRule))
+                .unwrap_err();
         assert!(matches!(
             error,
             OperationError::FusionAlgebra(cause)
@@ -1105,11 +1096,9 @@ fn direct_bound_builders_keep_coherent_split_and_rank() {
         vec![vec![2, 3, 4]; generic_key_count],
     )
     .unwrap();
-    let generic = BoundDynamicFusionMapSpace::from_final_homspace_generic(
-        generic_provider,
-        generic_homspace,
-    )
-    .unwrap();
+    let generic =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(generic_provider, generic_homspace)
+            .unwrap();
 
     assert_eq!(multiplicity_free.space().nout(), 1);
     assert_eq!(generic.space().nin(), 1);
@@ -1189,11 +1178,9 @@ fn generic_completeness_requires_every_vertex_label() {
 fn generic_adjoint_rejects_multiplicity_free_before_final_layout_build() {
     // What: a Generic adjoint rejects a multiplicity-free provider before
     // constructing its target layout.
-    let source = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        matrix_space(),
-        Arc::new(Z2FusionRule),
-    )
-    .unwrap();
+    let source =
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(matrix_space(), Arc::new(Z2FusionRule))
+            .unwrap();
     reset_final_result_layout_builds();
 
     let error = crate::adjoint::adjoint_bound_space_dyn_generic(&source).unwrap_err();

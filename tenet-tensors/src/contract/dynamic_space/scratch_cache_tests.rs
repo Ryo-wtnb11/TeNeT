@@ -112,8 +112,7 @@ fn u1_space(charge: i32, deg: usize) -> DynamicFusionMapSpace {
     let leg = || FusionProductSpace::new([SectorLeg::new([(sid, deg)], false)]);
     let hom = FusionTreeHomSpace::new(leg(), leg());
     let count = hom.fusion_tree_keys(&rule).len();
-    DynamicFusionMapSpace::from_degeneracy_shapes(&rule, hom, vec![vec![deg, deg]; count])
-        .unwrap()
+    DynamicFusionMapSpace::from_degeneracy_shapes(&rule, hom, vec![vec![deg, deg]; count]).unwrap()
 }
 
 fn reset_final_result_layout_test_state() {
@@ -155,8 +154,7 @@ fn contracted_space_is_derived_eagerly_per_call() {
     let first = DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
     assert_eq!(final_result_layout_builds(), 1);
 
-    let second =
-        DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
+    let second = DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
     assert_eq!(final_result_layout_builds(), 2);
     assert_eq!(first, second);
 }
@@ -183,8 +181,7 @@ fn ordered_contraction_eagerly_builds_only_the_final_layout() {
     .unwrap();
     reset_final_result_layout_test_state();
 
-    let first =
-        DynamicFusionMapSpace::contracted_with_spec(&rule, &source, &source, axes).unwrap();
+    let first = DynamicFusionMapSpace::contracted_with_spec(&rule, &source, &source, axes).unwrap();
     assert_eq!(final_result_layout_builds(), 1);
     assert_eq!(first.homspace(), &expected_homspace);
 
@@ -286,11 +283,9 @@ fn layout_authority_distinguishes_rules_and_reuses_semantic_spaces() {
             .unwrap();
     assert_eq!(first.validated_layout(), second.validated_layout());
 
-    let wrong = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        u1_space(0, 1),
-        Arc::new(U1FusionRule),
-    )
-    .unwrap();
+    let wrong =
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(u1_space(0, 1), Arc::new(U1FusionRule))
+            .unwrap();
     assert_ne!(first.validated_layout(), wrong.validated_layout());
     let error = first
         .rebind_validated(&wrong.validated_layout())
@@ -458,11 +453,9 @@ fn z2_matrix_space() -> DynamicFusionMapSpace {
 #[test]
 fn bound_space_rejects_wrong_and_missing_rule_identity() {
     let space = z2_matrix_space();
-    let wrong = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        space.clone(),
-        Arc::new(U1FusionRule),
-    )
-    .unwrap_err();
+    let wrong =
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(space.clone(), Arc::new(U1FusionRule))
+            .unwrap_err();
     assert!(matches!(
         wrong,
         OperationError::Core(CoreError::FusionRuleMismatch { .. })
@@ -485,18 +478,14 @@ fn bound_space_rejects_wrong_and_missing_rule_identity() {
 fn bound_space_rejects_wrong_and_missing_identity_before_provider_enumeration() {
     let source_rule = CountingRule::new();
     let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1), (0, 1)], []);
-    let space =
-        DynamicFusionMapSpace::from_degeneracy_shapes(&source_rule, homspace, [vec![1, 1]])
-            .unwrap();
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes(&source_rule, homspace, [vec![1, 1]])
+        .unwrap();
     assert!(source_rule.calls.load(Ordering::Relaxed) > 0);
 
     let wrong_rule = Arc::new(CountingRule::new());
     for error in [
-        BoundDynamicFusionMapSpace::bind_multiplicity_free(
-            space.clone(),
-            Arc::clone(&wrong_rule),
-        )
-        .unwrap_err(),
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(space.clone(), Arc::clone(&wrong_rule))
+            .unwrap_err(),
         BoundDynamicFusionMapSpace::bind_generic(space.clone(), Arc::clone(&wrong_rule))
             .unwrap_err(),
     ] {
@@ -521,8 +510,7 @@ fn bound_space_rejects_wrong_and_missing_identity_before_provider_enumeration() 
             Arc::clone(&matching_rule),
         )
         .unwrap_err(),
-        BoundDynamicFusionMapSpace::bind_generic(unbound, Arc::clone(&matching_rule))
-            .unwrap_err(),
+        BoundDynamicFusionMapSpace::bind_generic(unbound, Arc::clone(&matching_rule)).unwrap_err(),
     ] {
         assert!(matches!(
             error,
@@ -566,11 +554,9 @@ fn bound_space_requires_the_complete_tree_grid() {
 #[test]
 fn binding_mode_mismatch_is_rejected_by_provider_style() {
     let space = z2_matrix_space();
-    let multiplicity_free = BoundDynamicFusionMapSpace::bind_multiplicity_free(
-        space.clone(),
-        Arc::new(Z2FusionRule),
-    )
-    .unwrap();
+    let multiplicity_free =
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(space.clone(), Arc::new(Z2FusionRule))
+            .unwrap();
     let generic_error =
         BoundDynamicFusionMapSpace::bind_generic(space, Arc::new(Z2FusionRule)).unwrap_err();
 
@@ -603,9 +589,7 @@ fn every_generic_root_rejects_multiplicity_free_provider_before_input_validation
         ));
     };
 
-    expected(
-        BoundDynamicFusionMapSpace::bind_generic(raw, Arc::new(Z2FusionRule)).unwrap_err(),
-    );
+    expected(BoundDynamicFusionMapSpace::bind_generic(raw, Arc::new(Z2FusionRule)).unwrap_err());
     expected(
         DynamicFusionMapSpace::from_degeneracy_shapes_generic(
             &Z2FusionRule,
@@ -623,11 +607,8 @@ fn every_generic_root_rejects_multiplicity_free_provider_before_input_validation
         .unwrap_err(),
     );
     expected(
-        BoundDynamicFusionMapSpace::from_final_homspace_generic(
-            Arc::new(Z2FusionRule),
-            homspace,
-        )
-        .unwrap_err(),
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::new(Z2FusionRule), homspace)
+            .unwrap_err(),
     );
     expected(
         bound
@@ -749,17 +730,15 @@ fn bound_contract_normalizes_equal_identity_to_lhs_provider() {
     )
     .unwrap();
     let output =
-        BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lhs, &rhs, &[1], &[0])
-            .unwrap();
+        BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lhs, &rhs, &[1], &[0]).unwrap();
     assert!(Arc::ptr_eq(output.provider_arc(), &lhs_provider));
 
     let other_provider = Arc::new(CountingRule::new());
     let other =
         BoundDynamicFusionMapSpace::from_degeneracy_shapes(other_provider, hom(), [vec![1, 1]])
             .unwrap();
-    let error =
-        BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lhs, &other, &[1], &[0])
-            .unwrap_err();
+    let error = BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lhs, &other, &[1], &[0])
+        .unwrap_err();
     assert!(matches!(
         error,
         OperationError::Core(CoreError::FusionRuleMismatch { .. })

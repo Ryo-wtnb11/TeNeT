@@ -1,23 +1,37 @@
-use std::borrow::Cow;
-use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 use tenet_core::{
-    BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CheckedGenericFusion,
-    CheckedGenericStructureError, CoreError, FusionRule, FusionSpaceAdmission, FusionStyleKind,
-    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation,
-    MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace,
-    PreparedBlockStructure, PreparedFusionTreeLayout, RuleIdentity, SectorId, SectorLeg,
-    StructurallyValidatedFusionTreeSubset,
+    BlockKey, BlockStructure, CheckedGenericFusion, CheckedGenericStructureError, CoreError,
+    FusionRule, FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
+    FusionTreePairKey, MultiplicityFreeRigidSymbols, PreparedBlockStructure, RuleIdentity,
 };
 
 use crate::{OperationError, TreeTransformOperation};
-use tenet_operations::{OutputAxisOrder, TensorContractSpec};
+#[cfg(test)]
+use std::fmt;
+#[cfg(test)]
+use tenet_core::{CheckedFusionAlgebra, MultiplicityFreeFusionRule};
+#[cfg(test)]
+use tenet_operations::OutputAxisOrder;
+use tenet_operations::TensorContractSpec;
 
 mod bound;
 mod metadata;
 mod operand;
+
+use metadata::LayoutBuildCapability;
+#[cfg(test)]
+pub(crate) use metadata::{checked_layout_primer, checked_metadata_dispatcher};
+pub(crate) use metadata::{
+    dispatch_prepare, encoded_layout_primer, LayoutKeyBuilder, MetadataOutput, MetadataRequest,
+    PreparedLayoutKeys,
+};
+pub use operand::FusionOperand;
+pub(crate) use operand::FusionOperandLayout;
+#[cfg(test)]
+pub(crate) use operand::{
+    fusion_operand_projection_prepares, reset_fusion_operand_projection_prepares,
+};
 
 #[cfg(test)]
 thread_local! {

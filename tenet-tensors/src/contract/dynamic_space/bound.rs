@@ -1,17 +1,23 @@
-use std::borrow::Cow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
+#[cfg(all(test, feature = "racah-generated"))]
+use tenet_core::BlockStructure;
 use tenet_core::{
-    BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CheckedGenericFusion,
-    CheckedGenericStructureError, CoreError, FusionRule, FusionSpaceAdmission, FusionStyleKind,
-    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation,
-    MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace,
-    PreparedBlockStructure, PreparedFusionTreeLayout, RuleIdentity, SectorId, SectorLeg,
+    CheckedFusionAlgebra, CheckedGenericFusion, CheckedGenericStructureError, CoreError,
+    FusionRule, FusionSpaceAdmission, FusionStyleKind, FusionTreeHomSpace, FusionTreePairKey,
+    MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, PreparedBlockStructure, RuleIdentity,
     StructurallyValidatedFusionTreeSubset,
 };
 
+#[cfg(test)]
+use super::metadata::PreparedLayoutKeys;
+use super::metadata::{checked_metadata_operation_error, LayoutBuildCapability, LayoutKeyBuilder};
+use super::{
+    validate_generic_provider_style, BoundDynamicFusionMapSpace, DynamicFusionMapSpace,
+    PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
+};
 use crate::{OperationError, TreeTransformOperation};
 use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 

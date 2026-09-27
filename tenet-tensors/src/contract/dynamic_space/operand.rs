@@ -1,19 +1,17 @@
 use std::borrow::Cow;
-use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 use tenet_core::{
-    BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CheckedGenericFusion,
-    CheckedGenericStructureError, CoreError, FusionRule, FusionSpaceAdmission, FusionStyleKind,
-    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation,
-    MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace,
-    PreparedBlockStructure, PreparedFusionTreeLayout, RuleIdentity, SectorId, SectorLeg,
-    StructurallyValidatedFusionTreeSubset,
+    BlockKey, FusionSpaceAdmission, FusionTreeHomSpace, FusionTreePairKey,
+    FusionTreePairOrientation, MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols,
+    OrientedFusionTreeHomSpace,
 };
 
+use super::metadata::{
+    dispatch_prepare, LayoutBuildCapability, LayoutKeyBuilder, MetadataOutput, MetadataRequest,
+};
+use super::{tree_transform_operation_axes, DynamicFusionMapSpace, TransformedLayoutProbe};
 use crate::{OperationError, TreeTransformOperation};
-use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
 /// Internal contraction operand separating categorical and storage authority.
 ///

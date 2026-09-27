@@ -453,8 +453,7 @@ fn checked_bind_failure_preserves_subset_admission_and_caches() {
         )
         .unwrap();
         let mut subset = good.clone();
-        subset.admission =
-            FusionSpaceAdmission::Subset(ExternalUniqueRule::new().rule_identity());
+        subset.admission = FusionSpaceAdmission::Subset(ExternalUniqueRule::new().rule_identity());
         let original = subset.clone();
 
         reset_scratch_publication_observations();

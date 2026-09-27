@@ -1,19 +1,13 @@
-use std::borrow::Cow;
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CheckedGenericFusion,
-    CheckedGenericStructureError, CoreError, FusionRule, FusionSpaceAdmission, FusionStyleKind,
-    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation,
-    MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace,
-    PreparedBlockStructure, PreparedFusionTreeLayout, RuleIdentity, SectorId, SectorLeg,
-    StructurallyValidatedFusionTreeSubset,
+    CheckedFusionAlgebra, CheckedFusionSpaceError, FusionRule, FusionTreeHomSpace,
+    FusionTreePairKey, MultiplicityFreeFusionRule, PreparedFusionTreeLayout, SectorId, SectorLeg,
 };
 
-use crate::{OperationError, TreeTransformOperation};
-use tenet_operations::{OutputAxisOrder, TensorContractSpec};
+use super::observe_derived_homspace_build;
+use crate::OperationError;
+use tenet_operations::TensorContractSpec;
 
 #[derive(Debug)]
 pub(crate) enum PreparedLayoutKeys {
@@ -39,7 +33,7 @@ impl PreparedLayoutKeys {
         }
     }
 
-    fn commit(self) {
+    pub(super) fn commit(self) {
         let prepared = match self {
             Self::Staged(prepared) | Self::Checked(prepared) => prepared,
             Self::Encoded => return,
@@ -107,7 +101,7 @@ pub(crate) enum MetadataOutput {
 pub(crate) type LayoutKeyBuilder<R> =
     for<'a> fn(&R, MetadataRequest<'a>) -> Result<MetadataOutput, OperationError>;
 
-enum LayoutBuildCapability<R> {
+pub(super) enum LayoutBuildCapability<R> {
     Legacy(LayoutKeyBuilder<R>),
     CheckedGeneric,
 }
@@ -125,11 +119,11 @@ impl<R> LayoutBuildCapability<R>
 where
     R: FusionRule,
 {
-    const fn encoded() -> Self {
+    pub(super) const fn encoded() -> Self {
         Self::Legacy(encoded_layout_primer::<R>)
     }
 
-    fn legacy_dispatch(self) -> LayoutKeyBuilder<R> {
+    pub(super) fn legacy_dispatch(self) -> LayoutKeyBuilder<R> {
         match self {
             Self::Legacy(dispatch) => dispatch,
             Self::CheckedGeneric => {
@@ -138,13 +132,17 @@ where
         }
     }
 
-    fn prime(self, rule: &R, homspace: &FusionTreeHomSpace) -> Result<(), OperationError> {
+    pub(super) fn prime(
+        self,
+        rule: &R,
+        homspace: &FusionTreeHomSpace,
+    ) -> Result<(), OperationError> {
         let prepared = self.prepare(rule, homspace)?;
         prepared.commit();
         Ok(())
     }
 
-    fn prepare(
+    pub(super) fn prepare(
         self,
         rule: &R,
         homspace: &FusionTreeHomSpace,
@@ -155,7 +153,7 @@ where
         }
     }
 
-    fn permute(
+    pub(super) fn permute(
         self,
         rule: &R,
         homspace: &FusionTreeHomSpace,
@@ -176,7 +174,7 @@ where
         }
     }
 
-    fn contract(
+    pub(super) fn contract(
         self,
         rule: &R,
         lhs: &FusionTreeHomSpace,
@@ -249,7 +247,7 @@ impl<R> LayoutBuildCapability<R>
 where
     R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
 {
-    const fn checked() -> Self {
+    pub(super) const fn checked() -> Self {
         Self::Legacy(checked_metadata_dispatcher::<R>)
     }
 }
@@ -265,7 +263,7 @@ pub(crate) fn dispatch_prepare<R>(
     }
 }
 
-fn checked_metadata_operation_error(error: CheckedFusionSpaceError) -> OperationError {
+pub(super) fn checked_metadata_operation_error(error: CheckedFusionSpaceError) -> OperationError {
     match error {
         CheckedFusionSpaceError::Core(error) => {
             OperationError::from_core_preserving_context(*error)

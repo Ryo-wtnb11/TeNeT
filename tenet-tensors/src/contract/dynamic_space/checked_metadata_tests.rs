@@ -4,9 +4,8 @@ use std::cell::Cell;
 use tenet_core::{
     complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info,
     FermionParityFusionRule, FusionAlgebraError, FusionProductSpace, Fz2SectorLayout,
-    PackedProductCodec, ProductFusionRule, ProductSectorCodec, ProductSectorLayout,
-    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, U1FusionRule, U1Irrep,
-    U1SectorLayout, Z2Irrep,
+    PackedProductCodec, ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule,
+    SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
 };
 
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
@@ -66,8 +65,7 @@ fn source(rule: &TripleRule) -> DynamicFusionMapSpace {
     let homspace = homspace();
     checked_layout_primer(rule, &homspace).unwrap();
     let count = homspace.fusion_tree_keys(rule).len();
-    DynamicFusionMapSpace::from_degeneracy_shapes(rule, homspace, vec![vec![1; 4]; count])
-        .unwrap()
+    DynamicFusionMapSpace::from_degeneracy_shapes(rule, homspace, vec![vec![1; 4]; count]).unwrap()
 }
 
 fn shapes_from_tree_keys<R>(rule: &R, homspace: &FusionTreeHomSpace) -> Vec<Vec<usize>>
@@ -199,8 +197,7 @@ fn final_derived_layout_selects_authority_keys_once() {
     reset_primer_calls();
     let derived = authority.derive_from_final_homspace(homspace()).unwrap();
     assert_eq!(primer_calls(), 1);
-    let encoded =
-        DynamicFusionMapSpace::from_final_homspace(rule.as_ref(), homspace()).unwrap();
+    let encoded = DynamicFusionMapSpace::from_final_homspace(rule.as_ref(), homspace()).unwrap();
     assert_eq!(derived.space(), &encoded);
 }
 
@@ -354,8 +351,7 @@ fn final_and_derived_homspaces_preserve_provider_and_skip_shape_cache() {
     let (scratch_builds, scratch_admissions, _) = scratch_publication_observations();
     assert_eq!((scratch_builds, scratch_admissions), (0, 0));
     let encoded =
-        DynamicFusionMapSpace::from_final_homspace(provider.as_ref(), derived_homspace)
-            .unwrap();
+        DynamicFusionMapSpace::from_final_homspace(provider.as_ref(), derived_homspace).unwrap();
     assert_eq!(derived.space(), &encoded);
 
     let rebound = root.rebind_validated(&root.validated_layout()).unwrap();
@@ -370,12 +366,9 @@ fn final_and_derived_homspaces_preserve_provider_and_skip_shape_cache() {
     reset_legacy_shape_path_builds();
     reset_scratch_publication_observations();
     let shapes = shapes_from_tree_keys(provider.as_ref(), &root_homspace);
-    let _expert = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
-        provider,
-        root_homspace,
-        shapes,
-    )
-    .unwrap();
+    let _expert =
+        BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(provider, root_homspace, shapes)
+            .unwrap();
     assert_eq!(legacy_shape_path_builds(), 1);
     let (scratch_builds, scratch_admissions, _) = scratch_publication_observations();
     assert_eq!((scratch_builds, scratch_admissions), (0, 0));
@@ -395,12 +388,9 @@ fn lowered_final_homspace_keeps_single_pass_and_publishes_only_success() {
     reset_primer_calls();
     reset_legacy_shape_path_builds();
 
-    let lowered = DynamicFusionMapSpace::from_final_homspace_with_primer(
-        &rule,
-        homspace(),
-        counting_primer,
-    )
-    .unwrap();
+    let lowered =
+        DynamicFusionMapSpace::from_final_homspace_with_primer(&rule, homspace(), counting_primer)
+            .unwrap();
     assert_eq!(primer_calls(), 1);
     assert_eq!(legacy_shape_path_builds(), 0);
 
@@ -444,12 +434,9 @@ fn lowered_metadata_routes_every_eager_result_through_the_primer() {
     let source = source(&rule);
 
     reset_primer_calls();
-    let final_space = DynamicFusionMapSpace::from_final_homspace_with_primer(
-        &rule,
-        homspace(),
-        counting_primer,
-    )
-    .unwrap();
+    let final_space =
+        DynamicFusionMapSpace::from_final_homspace_with_primer(&rule, homspace(), counting_primer)
+            .unwrap();
     assert_eq!(primer_calls(), 1);
     crate::reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
@@ -801,9 +788,8 @@ fn encoded_existing_candidate_invalid_shape_does_not_publish_again() {
         complete_hom_space_structure_cache_info(),
     );
 
-    let error =
-        DynamicFusionMapSpace::from_degeneracy_shapes(&U1FusionRule, homspace, [vec![1]])
-            .unwrap_err();
+    let error = DynamicFusionMapSpace::from_degeneracy_shapes(&U1FusionRule, homspace, [vec![1]])
+        .unwrap_err();
 
     assert_eq!(
         error,
@@ -1100,9 +1086,7 @@ fn admission_rejects_the_excluded_u1_id_without_publication() {
 
     assert_eq!(
         error,
-        OperationError::FusionAlgebra(Box::new(FusionAlgebraError::InvalidSector {
-            sector: min,
-        }))
+        OperationError::FusionAlgebra(Box::new(FusionAlgebraError::InvalidSector { sector: min }))
     );
     assert_eq!(scratch_publication_observations(), (0, 0, 0));
 }
@@ -1118,8 +1102,7 @@ fn admission_rejects_a_product_containing_the_excluded_u1_id_without_publication
     crate::reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
     let provider = Arc::new(Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule));
-    let scalar =
-        FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+    let scalar = FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
     let lhs = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
         Arc::clone(&provider),
         scalar,
@@ -1202,8 +1185,7 @@ fn fz2_lowered_transform_contract_and_mixed_plan_match_encoded_oracle() {
         shapes.clone(),
     )
     .unwrap();
-    let hits_before_repeated_lowered =
-        tenet_core::complete_hom_space_structure_cache_info().hits();
+    let hits_before_repeated_lowered = tenet_core::complete_hom_space_structure_cache_info().hits();
     let repeated_lowered = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
         Arc::clone(&provider),
         homspace.clone(),
@@ -1215,35 +1197,23 @@ fn fz2_lowered_transform_contract_and_mixed_plan_match_encoded_oracle() {
         repeated_lowered.space().structure().content_id()
     );
     assert!(
-        tenet_core::complete_hom_space_structure_cache_info().hits()
-            > hits_before_repeated_lowered,
+        tenet_core::complete_hom_space_structure_cache_info().hits() > hits_before_repeated_lowered,
         "same-content lowered construction must reuse the complete layout"
     );
-    let encoded = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
-        Arc::clone(&provider),
-        homspace,
-        shapes,
-    )
-    .unwrap();
+    let encoded =
+        BoundDynamicFusionMapSpace::from_degeneracy_shapes(Arc::clone(&provider), homspace, shapes)
+            .unwrap();
     let operation = TreeTransformOperation::permute([1], [0]);
     let lowered_transform = lowered.transformed_multiplicity_free(&operation).unwrap();
     let encoded_transform = encoded.transformed_multiplicity_free(&operation).unwrap();
     assert_eq!(lowered_transform.space(), encoded_transform.space());
 
-    let lowered_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free(
-        &lowered,
-        &lowered,
-        &[1],
-        &[0],
-    )
-    .unwrap();
-    let encoded_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free(
-        &encoded,
-        &encoded,
-        &[1],
-        &[0],
-    )
-    .unwrap();
+    let lowered_dst =
+        BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lowered, &lowered, &[1], &[0])
+            .unwrap();
+    let encoded_dst =
+        BoundDynamicFusionMapSpace::contracted_multiplicity_free(&encoded, &encoded, &[1], &[0])
+            .unwrap();
     assert_eq!(lowered_dst.space(), encoded_dst.space());
     let axes = tenet_operations::TensorContractSpec::with_default_output_order(&[1], &[0]);
     let mixed =
