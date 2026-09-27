@@ -188,7 +188,8 @@ fn conjugated_dyn_contract_builds_adjoint_structure_once_per_space() {
 fn adjoint_memo_leaves_space_equality_and_layout_hash_unchanged() {
     let rule = Arc::new(U1FusionRule);
     let filled = bound(&rule, &u1_legs());
-    let empty = bound(&rule, &u1_legs());
+    // A separate construction can cross an intern reset and mint a different layout id.
+    let empty = filled.rebind_validated(&filled.validated_layout()).unwrap();
     let hash = |space: &BoundDynamicFusionMapSpace<U1FusionRule>| {
         rustc_hash::FxBuildHasher.hash_one(space.validated_layout())
     };
