@@ -22281,11 +22281,15 @@ mod representation_gates {
     #[cfg(feature = "cuda")]
     #[test]
     #[ignore = "requires a real CUDA device"]
-    fn typed_cuda_svd_of_an_exact_magnitude_tie_keeps_row_zero_positive() {
+    fn typed_cuda_svd_of_a_magnitude_tie_fixture_follows_the_first_largest_entry() {
         // What: A = [[1, -1], [-1, 1]] has singular vectors whose entries tie
-        // exactly in magnitude. The Host gauge takes row 0 as the pivot, so
-        // u[0, j] = +1/sqrt(2) in both columns. A broken tie-break that summed
-        // the tied entries would give a zero pivot and zero the columns.
+        // in exact arithmetic. cuSOLVER returns them 1 ulp apart
+        // (0.7071067811865475 vs ...476, observed on the A100), so the rule
+        // is checked exactly on the device's own output: in every column the
+        // first entry of largest magnitude is positive. The ±1 scaling is
+        // exact, so these magnitudes are cuSOLVER's. No column or `vh` row may
+        // be zeroed (a tie-break that summed tied entries would do that);
+        // exact ties themselves are pinned in tenet-dense `cuda_svd_gauge`.
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
         let host = TensorMap::<U1FusionRule, f64>::from_subblock_fn(
@@ -22303,19 +22307,30 @@ mod representation_gates {
         );
         let half = std::f64::consts::FRAC_1_SQRT_2;
         let u = u.data();
-        // Column 0 (s = 2): [1, -1] / sqrt(2); column 1 (s = 0): [1, 1] / sqrt(2).
-        for (actual, expected) in u.iter().zip([half, -half, half, half]) {
-            assert!((actual - expected).abs() <= 1e-12, "u = {u:?}");
+        for column in u.chunks(2) {
+            let pivot = if column[1].abs() > column[0].abs() {
+                column[1]
+            } else {
+                column[0]
+            };
+            assert!(pivot > 0.0, "u = {u:?}");
         }
         assert!((s.data()[0] - 2.0).abs() <= 1e-12 && s.data()[3].abs() <= 1e-12);
-        // vh row 0 carries the same phase: A = 2 u0 vh0 with vh0 = [1, -1] / sqrt(2).
-        let vh = vh.data();
+        // Column 0 spans [1, -1], column 1 spans [1, 1], none zeroed.
         assert!(
-            (vh[0] - half).abs() <= 1e-12 && (vh[2] + half).abs() <= 1e-12,
-            "vh = {vh:?}"
+            (u[0] + u[1]).abs() <= 1e-12 && (u[2] - u[3]).abs() <= 1e-12,
+            "u = {u:?}"
         );
+        let vh = vh.data();
+        for value in u.iter().chain(vh) {
+            assert!(
+                (value.abs() - half).abs() <= 1e-12,
+                "u = {u:?}, vh = {vh:?}"
+            );
+        }
+        // vh row 0 takes u column 0's phase: A = 2 u0 vh0 with vh0 = u0.
         assert!(
-            vh.iter().all(|value| (value.abs() - half).abs() <= 1e-12),
+            (vh[0] - u[0]).abs() <= 1e-12 && (vh[2] - u[1]).abs() <= 1e-12,
             "vh = {vh:?}"
         );
     }
