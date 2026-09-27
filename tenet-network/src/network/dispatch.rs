@@ -50,15 +50,8 @@ where
         spec: &ContractSpec<'_>,
     ) -> Result<StepOutput<TensorMap<R, D, S>>, HostNetworkError<R>>;
 
-    fn permute_step(
-        tensor: &TensorMap<R, D, S>,
-        destination: &mut Option<TensorMap<R, D, S>>,
-        codomain: &[usize],
-        domain: &[usize],
-    ) -> Result<StepOutput<TensorMap<R, D, S>>, HostNetworkError<R>>;
-
-    /// Reorients the final schedule result, which never has a reusable
-    /// destination because it leaves the workspace.
+    /// Reorients the operand of a zero-step schedule (a relabel), the one
+    /// result no contraction step writes in its output orientation.
     fn permute_final(
         tensor: &TensorMap<R, D, S>,
         codomain: &[usize],
@@ -99,12 +92,6 @@ impl<T> StepOutput<T> {
                 .expect("successful overwrite retains its destination"),
         }
     }
-
-    pub(super) fn retain(self, destination: &mut Option<T>) {
-        if let Self::Returned(value) = self {
-            *destination = Some(value);
-        }
-    }
 }
 
 impl<R, D> HostNetworkModeDispatch<R, D> for MultiplicityFreeAdmissionMode
@@ -140,26 +127,6 @@ where
             Ok(StepOutput::Overwritten)
         } else {
             Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
-        }
-    }
-
-    fn permute_step(
-        tensor: &TensorMap<R, D>,
-        destination: &mut Option<TensorMap<R, D>>,
-        codomain: &[usize],
-        domain: &[usize],
-    ) -> Result<StepOutput<TensorMap<R, D>>, Error> {
-        if let Some(destination) = destination {
-            tensor.permute_into(
-                codomain,
-                domain,
-                destination,
-                D::from_real(1.0),
-                D::from_real(0.0),
-            )?;
-            Ok(StepOutput::Overwritten)
-        } else {
-            Ok(StepOutput::Returned(tensor.permute(codomain, domain)?))
         }
     }
 
@@ -223,15 +190,6 @@ where
         Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
     }
 
-    fn permute_step(
-        tensor: &TensorMap<R, D>,
-        _destination: &mut Option<TensorMap<R, D>>,
-        codomain: &[usize],
-        domain: &[usize],
-    ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>> {
-        Ok(StepOutput::Returned(tensor.permute(codomain, domain)?))
-    }
-
     fn permute_final(
         tensor: &TensorMap<R, D>,
         codomain: &[usize],
@@ -251,10 +209,8 @@ where
 
     fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D>) {
         for buffers in &mut workspace.intermediates {
-            buffers.contracted = None;
-            buffers.oriented = None;
-            buffers.parked_contracted = None;
-            buffers.parked_oriented = None;
+            buffers.output = None;
+            buffers.parked = None;
         }
     }
 }
@@ -263,12 +219,12 @@ where
 /// retained device destinations.
 ///
 /// Each arm is the Host arm with the device twin of the same typed operation:
-/// general-axes `contract` / `contract_into` (the Host-compiled
-/// DynamicTree or core route, fermionic twist included) and `permute` /
-/// `permute_into` with `beta = 0`. Every step but the last overwrites a destination
-/// the workspace kept from the previous call (neither device overwrite needs a
-/// reset of it); the final schedule slot leaves the workspace and therefore
-/// always allocates a fresh returning output. Slots, producers, input
+/// general-axes `contract` / `contract_into` with `beta = 0` (the
+/// Host-compiled DynamicTree or core route, fermionic twist included), each
+/// writing the step's own output orientation. Every step but the last
+/// overwrites a destination the workspace kept from the previous call (the
+/// device overwrite needs no reset of it); the final schedule slot leaves the
+/// workspace and therefore always allocates a fresh returning output. Slots, producers, input
 /// snapshots and parking behave exactly as on Host, which is what lets one
 /// pool serve both placements. Admission is decided before the first step by
 /// `PlannedNetwork::validate_cuda_admission`.
@@ -310,26 +266,6 @@ where
             Ok(StepOutput::Overwritten)
         } else {
             Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
-        }
-    }
-
-    fn permute_step(
-        tensor: &TensorMap<R, D, CudaStorage<D>>,
-        destination: &mut Option<TensorMap<R, D, CudaStorage<D>>>,
-        codomain: &[usize],
-        domain: &[usize],
-    ) -> Result<StepOutput<TensorMap<R, D, CudaStorage<D>>>, Error> {
-        if let Some(destination) = destination {
-            tensor.permute_into(
-                codomain,
-                domain,
-                destination,
-                D::from_real(1.0),
-                D::from_real(0.0),
-            )?;
-            Ok(StepOutput::Overwritten)
-        } else {
-            Ok(StepOutput::Returned(tensor.permute(codomain, domain)?))
         }
     }
 

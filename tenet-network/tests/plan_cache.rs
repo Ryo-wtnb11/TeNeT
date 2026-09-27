@@ -435,3 +435,56 @@ fn dropping_warm_runtime_breaks_the_cache_workspace_cycle() {
     drop((output, a, b, space, runtime));
     assert!(!identity.is_alive());
 }
+
+#[test]
+fn output_order_and_split_key_separate_cached_step_specs() {
+    // The last step writes the requested output orientation in its own
+    // ContractSpec, so that spec is part of the cached plan. Networks that
+    // differ only in output order or split must neither share an entry nor
+    // replay each other's spec.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let (p, q, c, r) = (
+        space(Arc::clone(&provider), 2),
+        space(Arc::clone(&provider), 3),
+        space(Arc::clone(&provider), 4),
+        space(Arc::clone(&provider), 5),
+    );
+    let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&p, &q], [&c], 71).unwrap();
+    let b = TensorMap::rand_with_seed(&runtime, [&c], [&r], 72).unwrap();
+    let chain = a
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2],
+            },
+        )
+        .unwrap();
+    let run = |which: usize| match which {
+        0 => tensor!([p, q; r] = a[p, q; c] * b[c; r]).unwrap(),
+        1 => tensor!([p, r; q] = a[p, q; c] * b[c; r]).unwrap(),
+        _ => tensor!([q, p; r] = a[p, q; c] * b[c; r]).unwrap(),
+    };
+    let expected = [
+        chain.clone(),
+        chain.permute(&[0, 2], &[1]).unwrap(),
+        chain.permute(&[1, 0], &[2]).unwrap(),
+    ];
+    for round in 0..2 {
+        for (which, expected) in expected.iter().enumerate() {
+            let actual = run(which);
+            assert_eq!(actual.codomain(), expected.codomain(), "{round}/{which}");
+            assert_eq!(actual.domain(), expected.domain(), "{round}/{which}");
+            assert_eq!(
+                actual.dense_data().unwrap(),
+                expected.dense_data().unwrap(),
+                "{round}/{which}"
+            );
+        }
+    }
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!((stats.misses, stats.hits, stats.entries), (3, 3, 3));
+}

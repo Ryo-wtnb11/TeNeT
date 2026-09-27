@@ -189,7 +189,7 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
             .unwrap();
     assert!(!std::ptr::eq(lhs.provider(), middle.provider()));
 
-    let expected = lhs
+    let chain = lhs
         .contract(
             &middle,
             &ContractSpec {
@@ -209,9 +209,8 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
                 domain: &[2],
             },
         )
-        .unwrap()
-        .permute(&[1, 0], &[2])
         .unwrap();
+    let expected = chain.permute(&[1, 0], &[2]).unwrap();
     let network = Network::new(
         vec![
             labels(&["a", "b", "c"]),
@@ -296,6 +295,10 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
     );
     assert_same(&macro_first, &expected);
     assert_same(&macro_replay, &expected);
+    // An output that moves `a` across the split is the last step's own
+    // ContractSpec; it equals the chain followed by that permute.
+    let moved = tensor!([b; a, e] = lhs[a, b; c] * middle[c; d] * tail[d; e]).unwrap();
+    assert_same(&moved, &chain.permute(&[1], &[0, 2]).unwrap());
 
     let planned = Arc::new(greedy);
     let operands = [Arc::new(lhs), Arc::new(middle), Arc::new(tail)];

@@ -155,10 +155,12 @@ fn assert_rank_four_orientation_replay<D>(
         ),
         (TensorId::new(0), TensorId::new(1))
     );
-    assert!(planned.schedule.steps[0].result_output_axes.is_none());
     assert_eq!(
-        planned.schedule.steps[0].result_permutation,
-        Some((vec![2], vec![0, 1, 3]))
+        (
+            &planned.schedule.steps[0].codomain[..],
+            &planned.schedule.steps[0].domain[..]
+        ),
+        (&[2][..], &[0, 1, 3][..])
     );
 
     let execute =
@@ -1147,8 +1149,11 @@ fn crossed_plan() -> PlannedNetwork {
     .unwrap();
     let schedule = compile_schedule(&ir, &plan, Some(1), &[1, 1, 1]).unwrap();
     assert_eq!(
-        schedule.steps[0].result_output_axes.as_deref(),
-        Some(&[1, 0][..])
+        (
+            &schedule.steps[0].codomain[..],
+            &schedule.steps[0].domain[..]
+        ),
+        (&[1][..], &[0][..])
     );
     PlannedNetwork {
         owner_token: NEXT_PLAN_OWNER_TOKEN.fetch_add(1, Ordering::Relaxed),
@@ -1352,11 +1357,8 @@ fn assert_asymmetric_cuda_plan_parity<R>(
     for (host_step, cuda_step) in host.schedule.steps.iter().zip(&cuda.schedule.steps) {
         assert_eq!(host_step.lhs_contract_axes, cuda_step.lhs_contract_axes);
         assert_eq!(host_step.rhs_contract_axes, cuda_step.rhs_contract_axes);
-        assert_eq!(
-            host_step.contract_output_axes,
-            cuda_step.contract_output_axes
-        );
-        assert_eq!(host_step.result_permutation, cuda_step.result_permutation);
+        assert_eq!(host_step.codomain, cuda_step.codomain);
+        assert_eq!(host_step.domain, cuda_step.domain);
     }
     assert_eq!(
         host.schedule.final_permutation,
@@ -1514,8 +1516,8 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
     {
         assert_eq!(host.lhs_contract_axes, cuda.lhs_contract_axes);
         assert_eq!(host.rhs_contract_axes, cuda.rhs_contract_axes);
-        assert_eq!(host.contract_output_axes, cuda.contract_output_axes);
-        assert_eq!(host.result_permutation, cuda.result_permutation);
+        assert_eq!(host.codomain, cuda.codomain);
+        assert_eq!(host.domain, cuda.domain);
     }
     assert_eq!(
         host_plan.schedule.final_permutation,
@@ -1529,17 +1531,17 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
         host_tensors[0].leg_dims().unwrap(),
         tensors[0].leg_dims().unwrap()
     );
-    // A schedule the canonical predicate refused — a split-changing
-    // result permutation, a non-identity pAB, a final permutation — is an
-    // ordinary device schedule now: each edit runs the Host step sequence
-    // on the device and equals the Host run of the same edited plan.
+    // A schedule the canonical predicate refused — a split-changing step
+    // orientation, a non-identity pAB, a final permutation — is an ordinary
+    // device schedule now: each edit runs the Host step sequence on the
+    // device and equals the Host run of the same edited plan.
     type Edit = fn(&mut CompiledSchedule);
     let edits: [(&str, Edit); 3] = [
-        ("split-changing result permutation", |schedule| {
-            schedule.steps[1].result_permutation = Some((vec![0, 1], vec![]));
+        ("split-changing step orientation", |schedule| {
+            (schedule.steps[1].codomain, schedule.steps[1].domain) = (vec![0, 1], vec![]);
         }),
         ("non-identity pAB", |schedule| {
-            schedule.steps[1].contract_output_axes = vec![1, 0];
+            (schedule.steps[1].codomain, schedule.steps[1].domain) = (vec![1], vec![0]);
         }),
         ("final permutation", |schedule| {
             schedule.final_permutation = Some((vec![1], vec![0]));
@@ -1649,7 +1651,7 @@ fn typed_crossed_schedule_reuses_the_actual_first_step_destination() {
         .unwrap();
     drop(planned.execute(&refs, &mut workspace).unwrap());
     let before = workspace.intermediates[0]
-        .oriented
+        .output
         .as_ref()
         .map(|tensor| {
             (
@@ -1660,7 +1662,7 @@ fn typed_crossed_schedule_reuses_the_actual_first_step_destination() {
         .unwrap();
     let output = planned.execute(&refs, &mut workspace).unwrap();
     let after = workspace.intermediates[0]
-        .oriented
+        .output
         .as_ref()
         .map(|tensor| {
             (
@@ -1688,7 +1690,7 @@ fn typed_crossed_schedule_reuses_the_actual_first_step_destination() {
             .execute(&[&a, &rhs_drift, &c], &mut workspace)
             .unwrap(),
     );
-    let rhs_only = workspace.intermediates[0].oriented.as_ref().unwrap();
+    let rhs_only = workspace.intermediates[0].output.as_ref().unwrap();
     assert_eq!(
         (
             rhs_only.dense_data().unwrap().as_ptr(),
@@ -1702,7 +1704,7 @@ fn typed_crossed_schedule_reuses_the_actual_first_step_destination() {
     assert!(planned.execute(&refs[..2], &mut workspace).is_err());
     assert_eq!(
         workspace.intermediates[0]
-            .oriented
+            .output
             .as_ref()
             .unwrap()
             .dense_data()
@@ -1717,7 +1719,7 @@ fn typed_crossed_schedule_reuses_the_actual_first_step_destination() {
         .is_err());
     assert_eq!(
         workspace.intermediates[0]
-            .oriented
+            .output
             .as_ref()
             .unwrap()
             .dense_data()
@@ -1733,7 +1735,7 @@ fn typed_crossed_schedule_reuses_the_actual_first_step_destination() {
             .execute(&[&lhs_drift, &b, &c], &mut workspace)
             .unwrap(),
     );
-    let replaced = workspace.intermediates[0].oriented.as_ref().unwrap();
+    let replaced = workspace.intermediates[0].output.as_ref().unwrap();
     assert_ne!(
         replaced.dense_data().unwrap().as_ptr(),
         retained.dense_data().unwrap().as_ptr()
@@ -1752,7 +1754,7 @@ fn typed_crossed_schedule_reuses_the_actual_first_step_destination() {
             .execute(&[&wide_a, &rhs_drift, &wide_c], &mut workspace)
             .unwrap(),
     );
-    let widened = workspace.intermediates[0].oriented.as_ref().unwrap();
+    let widened = workspace.intermediates[0].output.as_ref().unwrap();
     assert_ne!(
         widened.dense_data().unwrap().len(),
         replaced.dense_data().unwrap().len()
@@ -1778,7 +1780,7 @@ fn typed_crossed_schedule_reuses_the_actual_first_step_destination() {
     );
     assert_ne!(
         workspace.intermediates[0]
-            .oriented
+            .output
             .as_ref()
             .unwrap()
             .dense_data()
@@ -1787,11 +1789,7 @@ fn typed_crossed_schedule_reuses_the_actual_first_step_destination() {
         widened.dense_data().unwrap().as_ptr()
     );
 
-    let previous = workspace.intermediates[0]
-        .oriented
-        .as_ref()
-        .unwrap()
-        .clone();
+    let previous = workspace.intermediates[0].output.as_ref().unwrap().clone();
     let other_plan = crossed_plan();
     drop(
         other_plan
@@ -1801,7 +1799,7 @@ fn typed_crossed_schedule_reuses_the_actual_first_step_destination() {
     assert_eq!(workspace.owner_token, Some(other_plan.owner_token));
     assert_ne!(
         workspace.intermediates[0]
-            .oriented
+            .output
             .as_ref()
             .unwrap()
             .dense_data()
@@ -1847,7 +1845,7 @@ fn typed_replay_restores_buffers_after_injected_failures() {
 }
 
 #[test]
-fn typed_natural_split_change_replays_contract_then_permute() {
+fn typed_split_moving_step_is_one_contract_equal_to_contract_then_permute() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 3)]).unwrap();
@@ -1874,22 +1872,50 @@ fn typed_natural_split_change_replays_contract_then_permute() {
             &crate::LabelOrderDenseOptimizer::new(vec![label("c"), label("b"), label("d")]),
         )
         .unwrap();
-    assert!(planned.schedule.steps[0].result_output_axes.is_none());
-    assert!(planned.schedule.steps[0].result_permutation.is_some());
-    let expected = planned.execute(&refs, &mut Default::default()).unwrap();
+    // Step 0 contracts `c` of a[a; c] and b[c; b, d] into (a | b, d); its
+    // consumer takes it as rhs against c[b, d; e], so the next-use
+    // orientation is (b, d | a) — a split move, now the contract's own spec.
+    let step = &planned.schedule.steps[0];
+    assert_eq!((step.lhs_slot, step.rhs_slot), (0, 1));
+    assert_eq!(
+        (&step.codomain[..], &step.domain[..]),
+        (&[1, 2][..], &[0][..])
+    );
+    assert!(planned.schedule.final_permutation.is_none());
+    // The pre-#1614 lowering, spelled out: default-split contract, then the
+    // orientation permute, per step.
+    let ab = a
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1, 2],
+            },
+        )
+        .unwrap()
+        .permute(&[1, 2], &[0])
+        .unwrap();
+    let oracle = c
+        .contract(
+            &ab,
+            &ContractSpec {
+                lhs: &[0, 1],
+                rhs: &[0, 1],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let mut workspace = NetworkExecutionWorkspace::default();
     for _ in 0..2 {
-        assert_eq!(
-            planned
-                .execute(&refs, &mut workspace)
-                .unwrap()
-                .dense_data()
-                .unwrap(),
-            expected.dense_data().unwrap()
-        );
+        let output = planned.execute(&refs, &mut workspace).unwrap();
+        assert_eq!(output.codomain(), oracle.codomain());
+        assert_eq!(output.domain(), oracle.domain());
+        assert_eq!(output.dense_data().unwrap(), oracle.dense_data().unwrap());
     }
-    assert!(workspace.intermediates[0].contracted.is_some());
-    assert!(workspace.intermediates[0].oriented.is_some());
+    assert!(workspace.intermediates[0].output.is_some());
 }
 
 #[test]
@@ -1909,7 +1935,7 @@ fn default_cached_macro_replays_rank_four_orientation_after_shape_drift_c64() {
 }
 
 #[test]
-fn typed_replay_restores_both_orientation_buffers_after_failure() {
+fn typed_replay_keeps_the_step_destination_after_its_contract_fails() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let space = |degeneracy| {
@@ -1924,16 +1950,23 @@ fn typed_replay_restores_both_orientation_buffers_after_failure() {
     let c = TensorMap::rand_with_seed(&runtime, [&left.try_dual().unwrap()], [&tail], 23).unwrap();
     let refs = [&a, &b, &c];
     let mut planned = crossed_plan();
-    planned.schedule.steps[0].result_output_axes = None;
-    planned.schedule.steps[0].contract_output_axes = vec![0, 1];
-    planned.schedule.steps[0].result_permutation = Some((vec![1], vec![0]));
     let mut workspace = NetworkExecutionWorkspace::default();
     drop(planned.execute(&refs, &mut workspace).unwrap());
+    let retained = |workspace: &NetworkExecutionWorkspace<U1FusionRule, f64>| {
+        workspace.intermediates[0]
+            .output
+            .as_ref()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .as_ptr()
+    };
+    let before = retained(&workspace);
 
-    planned.schedule.steps[0].result_permutation = Some((vec![usize::MAX], vec![0]));
+    let codomain = std::mem::replace(&mut planned.schedule.steps[0].codomain, vec![usize::MAX]);
     assert!(planned.execute(&refs, &mut workspace).is_err());
-    assert!(workspace.intermediates[0].contracted.is_some());
-    assert!(workspace.intermediates[0].oriented.is_some());
-    planned.schedule.steps[0].result_permutation = Some((vec![1], vec![0]));
+    assert_eq!(retained(&workspace), before);
+    planned.schedule.steps[0].codomain = codomain;
     drop(planned.execute(&refs, &mut workspace).unwrap());
+    assert_eq!(retained(&workspace), before);
 }

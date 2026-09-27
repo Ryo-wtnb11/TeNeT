@@ -86,49 +86,49 @@ pub(super) fn compile_schedule(
                 .map(|(_, label)| label.clone()),
         );
 
-        let lhs_open_count = lhs_labels.len() - lhs_contract_axes.len();
-        let result_permutation = compiled_intermediate_permutation(
-            &result_labels,
-            lhs_open_count,
-            step.result(),
-            plan.steps(),
-            &consumers,
-            &labels_by_id,
-        )?;
-        if let Some((codomain, domain)) = &result_permutation {
-            result_labels = codomain
-                .iter()
-                .chain(domain)
-                .map(|&axis| result_labels[axis].clone())
-                .collect();
-        }
-        let result_codomain_rank = result_permutation.as_ref().map_or(
-            lhs_labels.len() - lhs_contract_axes.len(),
-            |(codomain, _)| codomain.len(),
-        );
-        let result_rank = result_labels.len();
+        // The step's output orientation is its `ContractSpec` split (TensorOperations
+        // `pAB`): the next-use orientation for an intermediate, the requested
+        // output orientation for the schedule result. The engine writes it in
+        // its own output transform, so no step issues a separate permute.
+        let (codomain, domain) = match consumers.get(&step.result()) {
+            Some(&(future_index, result_is_lhs)) => {
+                let future_step = &plan.steps()[future_index];
+                let sibling_id = if result_is_lhs {
+                    future_step.rhs()
+                } else {
+                    future_step.lhs()
+                };
+                let sibling_labels = labels_by_id
+                    .get(&sibling_id)
+                    .ok_or_else(|| invalid("future sibling labels missing"))?;
+                next_use_axes(&result_labels, result_is_lhs, sibling_labels)
+            }
+            None => {
+                let output = ir.output_labels();
+                let split = output_codomain_rank.unwrap_or(output.len());
+                (
+                    label_positions(&output[..split], &result_labels)?,
+                    label_positions(&output[split..], &result_labels)?,
+                )
+            }
+        };
+        result_labels = codomain
+            .iter()
+            .chain(&domain)
+            .map(|&axis| result_labels[axis].clone())
+            .collect();
         current_labels[result_slot] = Some(result_labels);
-        current_codomain_ranks[result_slot] = Some(result_codomain_rank);
+        current_codomain_ranks[result_slot] = Some(codomain.len());
         authority_input_slots[result_slot] = Some(authority_input_slot);
         slots_by_id.insert(step.result(), result_slot);
-        let result_output_axes = result_permutation
-            .as_ref()
-            .filter(|(codomain, _)| codomain.len() == lhs_open_count)
-            .map(|(codomain, domain)| codomain.iter().chain(domain).copied().collect::<Vec<_>>());
-        let contract_output_axes = result_output_axes
-            .clone()
-            .unwrap_or_else(|| (0..result_rank).collect());
         compiled_steps.push(CompiledStep {
             lhs_slot,
             rhs_slot,
             result_slot,
             lhs_contract_axes,
             rhs_contract_axes,
-            // pAB reorders axes inside the existing split. Moving the split is
-            // a repartition and remains an explicit orientation operation.
-            result_output_axes,
-            contract_output_axes,
-            result_permutation,
+            codomain,
+            domain,
             authority_input_slot,
         });
     }
@@ -185,45 +185,6 @@ fn label_positions(
                 .ok_or_else(|| invalid(format!("label `{l}` not among available legs")))
         })
         .collect()
-}
-
-#[expect(
-    clippy::type_complexity,
-    reason = "the planner returns the two-sided axis partition as an optional tuple"
-)]
-fn compiled_intermediate_permutation(
-    labels: &[TemporaryLabel],
-    current_codomain_rank: usize,
-    result_id: TensorId,
-    steps: &[ContractionStep],
-    consumers: &HashMap<TensorId, (usize, bool)>,
-    labels_by_id: &HashMap<TensorId, Vec<TemporaryLabel>>,
-) -> Result<Option<(Vec<usize>, Vec<usize>)>, Error> {
-    let Some(&(future_index, result_is_lhs)) = consumers.get(&result_id) else {
-        return Ok(None);
-    };
-    let future_step = &steps[future_index];
-    let sibling_id = if result_is_lhs {
-        future_step.rhs()
-    } else {
-        future_step.lhs()
-    };
-    let sibling_labels = labels_by_id
-        .get(&sibling_id)
-        .ok_or_else(|| invalid("future sibling labels missing"))?;
-    let permutation = next_use_axes(labels, result_is_lhs, sibling_labels);
-    if permutation.0.len() == current_codomain_rank
-        && permutation
-            .0
-            .iter()
-            .chain(&permutation.1)
-            .copied()
-            .eq(0..labels.len())
-    {
-        Ok(None)
-    } else {
-        Ok(Some(permutation))
-    }
 }
 
 /// Leg-label order of every input and planned intermediate, mirroring the
