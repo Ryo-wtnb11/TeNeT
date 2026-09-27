@@ -2262,7 +2262,6 @@ mod tests {
     #[test]
     fn fibonacci_checked_construction_failures_publish_nothing() {
         let runtime = Runtime::builder().build().expect("runtime");
-        let control = Runtime::builder().build().expect("control runtime");
         let rule = Arc::new(CountingFibonacci {
             malformed_channels: true,
             ..CountingFibonacci::new()
@@ -2311,16 +2310,7 @@ mod tests {
             0x9E37_79B9_7F4A_7C15,
         )
         .is_err());
-        let valid_tau =
-            GradedSpace::try_new(Arc::new(FibonacciFusionRule), [(FibonacciSector::Tau, 1)])
-                .unwrap();
-        let after: TensorMap<_, Complex64> =
-            TensorMap::rand_with_seed(&runtime, [&valid_tau], [&valid_tau], 0x9E37_79B9_7F4A_7C15)
-                .unwrap();
-        let expected: TensorMap<_, Complex64> =
-            TensorMap::rand_with_seed(&control, [&valid_tau], [&valid_tau], 0x9E37_79B9_7F4A_7C15)
-                .unwrap();
-        assert_eq!(after.data(), expected.data());
+        assert_eq!(runtime.tree_transform_cache_info(), cache_before);
     }
 
     #[test]

@@ -6545,37 +6545,24 @@ fn identity_mismatch_precedes_algebra_queries_and_both_dtypes_fill() {
 }
 
 #[test]
-fn failed_checked_admission_leaves_later_construction_unchanged() {
-    let runtime_a = Runtime::builder().dense_threads(1).build().unwrap();
-    let runtime_b = Runtime::builder().dense_threads(1).build().unwrap();
+fn failed_checked_admission_leaves_the_provider_usable() {
+    // A failed admission must not leave provider-side state behind: the same
+    // provider then builds exactly what a provider that never failed builds.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(7));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
+    let fresh = GradedSpace::try_new(Arc::new(CheckedOnlyToy::new(7)), [(Label::X, 1)]).unwrap();
 
     provider.fail_algebra.store(true, Ordering::Relaxed);
-    assert!(TensorMap::<_, f64>::rand_with_seed(
-        &runtime_a,
-        [&leg, &leg],
-        [&leg],
-        0x9E37_79B9_7F4A_7C15
-    )
-    .is_err());
+    assert!(TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg], 7).is_err());
     provider.fail_algebra.store(false, Ordering::Relaxed);
 
-    let after_failure = TensorMap::<_, f64>::rand_with_seed(
-        &runtime_a,
-        [&leg, &leg],
-        [&leg],
-        0x9E37_79B9_7F4A_7C15,
-    )
-    .unwrap();
-    let control = TensorMap::<_, f64>::rand_with_seed(
-        &runtime_b,
-        [&leg, &leg],
-        [&leg],
-        0x9E37_79B9_7F4A_7C15,
-    )
-    .unwrap();
+    let after_failure =
+        TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg], 7).unwrap();
+    let control =
+        TensorMap::<_, f64>::rand_with_seed(&runtime, [&fresh, &fresh], [&fresh], 7).unwrap();
     assert_eq!(after_failure.data(), control.data());
+    assert_eq!(after_failure.codomain(), control.codomain());
 }
 
 #[test]
@@ -7848,6 +7835,14 @@ fn check_generic_structural_constructors<R>(
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericRigidSymbols<Scalar = f64>,
 {
+    // The fixture must carry a subblock whose trees differ only in their
+    // vertex labels; otherwise a vertex-blind oracle would pass unnoticed.
+    let product: TensorMap<R, f64> = TensorMap::zeros(runtime, [leg, leg], [leg, leg]).unwrap();
+    assert!(product.subblocks().unwrap().any(|(trees, _)| {
+        trees.codomain_uncoupled() == trees.domain_uncoupled()
+            && trees.codomain_innerlines() == trees.domain_innerlines()
+            && trees.codomain_vertices() != trees.domain_vertices()
+    }));
     for legs in [vec![leg], vec![leg, leg], vec![leg, leg, leg]] {
         let oracle = equal_tree_identity(runtime, &legs);
         let real: TensorMap<R, f64> =

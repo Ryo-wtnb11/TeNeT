@@ -199,11 +199,15 @@ macro_rules! assert_all_conversions {
         let wide = source.convert::<f64>();
         assert_same_structure!(what, wide, source);
         let expected: Vec<f64> = values.iter().map(|&value| f64::from(value)).collect();
-        assert_eq!(f64_bits(wide.data()), f64_bits(&expected), "{what}: to_f64");
+        assert_eq!(
+            f64_bits(wide.data()),
+            f64_bits(&expected),
+            "{what}: convert::<f64>"
+        );
         assert_eq!(
             f32_bits(wide.convert::<f32>().data()),
             f32_bits(&values),
-            "{what}: narrow_to_f32(to_f64(x)) == x"
+            "{what}: convert::<f32>(convert::<f64>(x)) == x"
         );
 
         let c32 = source.convert::<Complex32>();
@@ -212,7 +216,11 @@ macro_rules! assert_all_conversions {
             .iter()
             .map(|&value| Complex32::new(value, 0.0))
             .collect();
-        assert_eq!(c32_bits(c32.data()), c32_bits(&expected), "{what}: to_c32");
+        assert_eq!(
+            c32_bits(c32.data()),
+            c32_bits(&expected),
+            "{what}: convert::<Complex32>"
+        );
 
         let c64 = source.convert::<Complex64>();
         assert_same_structure!(what, c64, source);
@@ -223,22 +231,22 @@ macro_rules! assert_all_conversions {
         assert_eq!(
             c64_bits(c64.data()),
             c64_bits(&expected),
-            "{what}: f32 to_c64"
+            "{what}: f32 convert::<Complex64>"
         );
         assert_eq!(
             c64_bits(wide.convert::<Complex64>().data()),
             c64_bits(&expected),
-            "{what}: f64 to_c64"
+            "{what}: f64 convert::<Complex64>"
         );
         assert_eq!(
             c64_bits(c32.convert::<Complex64>().data()),
             c64_bits(&expected),
-            "{what}: Complex32 to_c64"
+            "{what}: Complex32 convert::<Complex64>"
         );
         assert_eq!(
             c32_bits(c64.convert::<Complex32>().data()),
             c32_bits(c32.data()),
-            "{what}: narrow_to_c32(to_c64(x)) == x"
+            "{what}: convert::<Complex32>(convert::<Complex64>(x)) == x"
         );
 
         // A genuinely complex payload: both components move independently.
@@ -253,7 +261,7 @@ macro_rules! assert_all_conversions {
         assert_eq!(
             c64_bits(widened.data()),
             c64_bits(&expected),
-            "{what}: complex to_c64"
+            "{what}: complex convert::<Complex64>"
         );
         assert_eq!(
             c32_bits(widened.convert::<Complex32>().data()),
@@ -284,14 +292,14 @@ macro_rules! assert_adjoint_conversions {
             .adjoint()
             .unwrap();
 
-        let to_f64 = lazy32.convert::<f64>();
+        let widened_f64 = lazy32.convert::<f64>();
         let expected: Vec<f64> = lazy32.data().iter().map(|&v| f64::from(v)).collect();
         assert_eq!(
-            f64_bits(to_f64.data()),
+            f64_bits(widened_f64.data()),
             f64_bits(&expected),
-            "{what}: f32 to_f64"
+            "{what}: f32 convert::<f64>"
         );
-        assert_same_structure!(what, to_f64, lazy32);
+        assert_same_structure!(what, widened_f64, lazy32);
 
         let to_c32 = lazy32.convert::<Complex32>();
         let expected: Vec<Complex32> = lazy32
@@ -302,7 +310,7 @@ macro_rules! assert_adjoint_conversions {
         assert_eq!(
             c32_bits(to_c32.data()),
             c32_bits(&expected),
-            "{what}: f32 to_c32"
+            "{what}: f32 convert::<Complex32>"
         );
 
         let f32_to_c64 = lazy32.convert::<Complex64>();
@@ -314,7 +322,7 @@ macro_rules! assert_adjoint_conversions {
         assert_eq!(
             c64_bits(f32_to_c64.data()),
             c64_bits(&expected),
-            "{what}: f32 to_c64"
+            "{what}: f32 convert::<Complex64>"
         );
 
         let f64_to_c64 = lazy64.convert::<Complex64>();
@@ -326,7 +334,7 @@ macro_rules! assert_adjoint_conversions {
         assert_eq!(
             c64_bits(f64_to_c64.data()),
             c64_bits(&expected),
-            "{what}: f64 to_c64"
+            "{what}: f64 convert::<Complex64>"
         );
         assert_same_structure!(what, f64_to_c64, lazy64);
 
@@ -335,7 +343,7 @@ macro_rules! assert_adjoint_conversions {
         assert_eq!(
             f32_bits(narrowed.data()),
             f32_bits(&expected),
-            "{what}: narrow_to_f32"
+            "{what}: convert::<f32>"
         );
 
         let c32_to_c64 = lazyc32.convert::<Complex64>();
@@ -347,7 +355,7 @@ macro_rules! assert_adjoint_conversions {
         assert_eq!(
             c64_bits(c32_to_c64.data()),
             c64_bits(&expected),
-            "{what}: Complex32 to_c64"
+            "{what}: Complex32 convert::<Complex64>"
         );
 
         let narrowed_c = lazyc64.convert::<Complex32>();
@@ -359,11 +367,11 @@ macro_rules! assert_adjoint_conversions {
         assert_eq!(
             c32_bits(narrowed_c.data()),
             c32_bits(&expected),
-            "{what}: narrow_to_c32"
+            "{what}: convert::<Complex32>"
         );
         assert_same_structure!(what, narrowed_c, lazyc64);
 
-        (to_f64, f64_to_c64, c32_to_c64, narrowed_c)
+        (widened_f64, f64_to_c64, c32_to_c64, narrowed_c)
     }};
 }
 
@@ -463,7 +471,7 @@ fn compact_diagonal_stays_compact() {
 
     let widened = tenet::expert::diagonal_spectrum(&wide)
         .unwrap()
-        .expect("to_f64 stays compact");
+        .expect("convert::<f64> stays compact");
     assert_eq!(widened.len(), spectra.len());
     for got in &widened {
         let expected = spectra
@@ -521,7 +529,7 @@ fn narrowing_rounds_like_as_f32_per_element() {
     assert_eq!(values.len(), cases.len());
 
     let narrowed = source.convert::<f32>();
-    assert_same_structure!("narrow_to_f32", narrowed, source);
+    assert_same_structure!("convert::<f32>", narrowed, source);
     for (index, (&got, &value)) in narrowed.data().iter().zip(&values).enumerate() {
         let oracle = narrow(value);
         assert_eq!(got.to_bits(), oracle.to_bits(), "entry {index}: {value:e}");
@@ -554,7 +562,7 @@ fn narrowing_rounds_like_as_f32_per_element() {
     let complex = complex.unwrap();
     let complex_values = complex.data().to_vec();
     let narrowed = complex.convert::<Complex32>();
-    assert_same_structure!("narrow_to_c32", narrowed, complex);
+    assert_same_structure!("convert::<Complex32>", narrowed, complex);
     let expected: Vec<Complex32> = complex_values
         .iter()
         .map(|value| Complex32::new(narrow(value.re), narrow(value.im)))
@@ -605,7 +613,7 @@ fn conversion_payload_allocations() {
     let large = filled!([&large_leg, &large_leg], [&large_leg]);
     let lengths = (small.data().len(), large.data().len());
     assert_payload_allocations(
-        "to_f64",
+        "f32 convert::<f64>",
         &small,
         &large,
         lengths,
@@ -613,7 +621,7 @@ fn conversion_payload_allocations() {
         TensorMap::convert::<f64>,
     );
     assert_payload_allocations(
-        "to_c32",
+        "f32 convert::<Complex32>",
         &small,
         &large,
         lengths,
@@ -621,7 +629,7 @@ fn conversion_payload_allocations() {
         TensorMap::convert::<Complex32>,
     );
     assert_payload_allocations(
-        "f32 to_c64",
+        "f32 convert::<Complex64>",
         &small,
         &large,
         lengths,
@@ -631,7 +639,7 @@ fn conversion_payload_allocations() {
 
     let (small_wide, large_wide) = (small.convert::<f64>(), large.convert::<f64>());
     assert_payload_allocations(
-        "narrow_to_f32",
+        "f64 convert::<f32>",
         &small_wide,
         &large_wide,
         lengths,
@@ -639,7 +647,7 @@ fn conversion_payload_allocations() {
         TensorMap::convert::<f32>,
     );
     assert_payload_allocations(
-        "f64 to_c64",
+        "f64 convert::<Complex64>",
         &small_wide,
         &large_wide,
         lengths,
@@ -648,7 +656,7 @@ fn conversion_payload_allocations() {
     );
     let (small_c32, large_c32) = (small.convert::<Complex32>(), large.convert::<Complex32>());
     assert_payload_allocations(
-        "Complex32 to_c64",
+        "Complex32 convert::<Complex64>",
         &small_c32,
         &large_c32,
         lengths,
@@ -657,7 +665,7 @@ fn conversion_payload_allocations() {
     );
     let (small_c64, large_c64) = (small.convert::<Complex64>(), large.convert::<Complex64>());
     assert_payload_allocations(
-        "narrow_to_c32",
+        "Complex64 convert::<Complex32>",
         &small_c64,
         &large_c64,
         lengths,
@@ -670,7 +678,7 @@ fn conversion_payload_allocations() {
     // two payload-sized allocations.
     let (small_lazy, large_lazy) = (small.adjoint().unwrap(), large.adjoint().unwrap());
     assert_payload_allocations(
-        "lazy adjoint to_f64",
+        "lazy adjoint convert::<f64>",
         &small_lazy,
         &large_lazy,
         lengths,
@@ -775,9 +783,9 @@ fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
     assert!(source.data().iter().any(|value| value.is_nan()));
     assert!(source.data().iter().any(|value| value.is_infinite()));
 
-    let (to_f64, to_c64, c32_to_c64, narrowed_c) =
+    let (widened_f64, to_c64, c32_to_c64, narrowed_c) =
         assert_adjoint_conversions!("SU(3) diagonal adjoint", source.clone());
-    for converted in [&to_f64.convert::<Complex64>(), &to_c64] {
+    for converted in [&widened_f64.convert::<Complex64>(), &to_c64] {
         assert!(tenet::expert::diagonal_spectrum(converted)
             .unwrap()
             .is_some());
@@ -820,7 +828,7 @@ fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
         assert_eq!(c32_bits(&entry.values), c32_bits(&expected));
     }
 
-    // The review repro: finite f64 values, `to_c64` of the adjoint.
+    // The review repro: finite f64 values, `convert::<Complex64>` of the adjoint.
     let finite: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime(),
         &leg,
