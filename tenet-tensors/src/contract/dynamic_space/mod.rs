@@ -1,0 +1,1119 @@
+use std::sync::{Arc, OnceLock};
+
+use tenet_core::{
+    BlockKey, BlockStructure, CheckedGenericFusion, CheckedGenericStructureError, CoreError,
+    FusionRule, FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
+    FusionTreePairKey, MultiplicityFreeRigidSymbols, PreparedBlockStructure, RuleIdentity,
+};
+
+use crate::{OperationError, TreeTransformOperation};
+#[cfg(test)]
+use std::fmt;
+#[cfg(test)]
+use tenet_core::{CheckedFusionAlgebra, MultiplicityFreeFusionRule};
+#[cfg(test)]
+use tenet_operations::OutputAxisOrder;
+use tenet_operations::TensorContractSpec;
+
+mod bound;
+mod metadata;
+mod operand;
+
+use metadata::LayoutBuildCapability;
+#[cfg(test)]
+pub(crate) use metadata::{checked_layout_primer, checked_metadata_dispatcher};
+pub(crate) use metadata::{
+    dispatch_prepare, encoded_layout_primer, LayoutKeyBuilder, MetadataOutput, MetadataRequest,
+    PreparedLayoutKeys,
+};
+pub use operand::FusionOperand;
+pub(crate) use operand::FusionOperandLayout;
+#[cfg(test)]
+pub(crate) use operand::{
+    fusion_operand_projection_prepares, reset_fusion_operand_projection_prepares,
+};
+
+#[cfg(test)]
+thread_local! {
+    static FINAL_RESULT_LAYOUT_BUILDS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static LEGACY_SHAPE_PATH_BUILDS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static SCRATCH_STRUCTURE_BUILDS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static SCRATCH_STRUCTURE_ADMISSIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static SCRATCH_HOMSPACE_ID_REQUESTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static LOWERED_LAYOUT_COMMITS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+thread_local! {
+    static DERIVED_HOMSPACE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts every permuted or contracted HomSpace a layout capability builds.
+#[inline]
+fn observe_derived_homspace_build() {
+    #[cfg(test)]
+    DERIVED_HOMSPACE_BUILDS.set(DERIVED_HOMSPACE_BUILDS.get() + 1);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_derived_homspace_builds() {
+    DERIVED_HOMSPACE_BUILDS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn derived_homspace_builds() -> usize {
+    DERIVED_HOMSPACE_BUILDS.get()
+}
+
+#[inline]
+fn observe_final_result_layout_build() {
+    #[cfg(test)]
+    FINAL_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(builds.get() + 1));
+}
+
+#[cfg(test)]
+fn reset_final_result_layout_builds() {
+    FINAL_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(0));
+}
+
+#[cfg(test)]
+fn final_result_layout_builds() -> usize {
+    FINAL_RESULT_LAYOUT_BUILDS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_legacy_shape_path_builds() {
+    LEGACY_SHAPE_PATH_BUILDS.with(|builds| builds.set(0));
+}
+
+#[cfg(test)]
+fn legacy_shape_path_builds() -> usize {
+    LEGACY_SHAPE_PATH_BUILDS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_scratch_publication_observations() {
+    SCRATCH_STRUCTURE_BUILDS.set(0);
+    SCRATCH_STRUCTURE_ADMISSIONS.set(0);
+    SCRATCH_HOMSPACE_ID_REQUESTS.set(0);
+    LOWERED_LAYOUT_COMMITS.set(0);
+}
+
+#[cfg(test)]
+/// `(scratch builds, scratch admissions, HomSpace ID requests, layout commits)`.
+pub(crate) fn scratch_publication_observations() -> (usize, usize, usize) {
+    (
+        SCRATCH_STRUCTURE_BUILDS.get(),
+        SCRATCH_STRUCTURE_ADMISSIONS.get(),
+        SCRATCH_HOMSPACE_ID_REQUESTS.get(),
+    )
+}
+
+/// Builds scratch structures in the coupled-sector matrix layout. Scratch
+/// spaces enumerate the full tree set of their hom spaces, so the coupled
+/// grid is always complete; there is no other layout.
+// `R: FusionRule` (not mult-free): the coupled-sector matrix layout only needs
+// fusion channels/dual, so this helper serves both the mult-free and the
+// Generic-fusion space builders. Relaxing the bound leaves the mult-free
+// callers unchanged.
+fn scratch_subblock_structure<R>(
+    rule: &R,
+    nout: usize,
+    rank: usize,
+    blocks: Vec<(BlockKey, Vec<usize>)>,
+) -> Result<BlockStructure, OperationError>
+where
+    R: FusionRule,
+{
+    #[cfg(test)]
+    SCRATCH_STRUCTURE_BUILDS.set(SCRATCH_STRUCTURE_BUILDS.get() + 1);
+    let mut tree_blocks = Vec::with_capacity(blocks.len());
+    for (index, (key, shape)) in blocks.iter().enumerate() {
+        match key {
+            BlockKey::FusionTree(tree) => tree_blocks.push((tree.clone(), shape.clone())),
+            _ => {
+                return Err(OperationError::ExpectedFusionTreeBlock {
+                    tensor: "scratch",
+                    index,
+                })
+            }
+        }
+    }
+    BlockStructure::coupled_sector_matrix_with_keys(rule, nout, rank, tree_blocks)
+        .map_err(OperationError::from_core_preserving_context)
+}
+
+use super::fusion::FusionContractPlan;
+use super::structure::TensorContractAxisPlan;
+
+pub(crate) struct TransformedLayoutProbe {
+    pub(crate) nout: usize,
+    pub(crate) homspace: FusionTreeHomSpace,
+    pub(crate) required_len: usize,
+    pub(crate) source_structure_matches: bool,
+}
+
+/// Dynamic-rank fusion space: the expert-layer space handle whose
+/// codomain/domain split is a runtime property.
+///
+/// Typed [`FusionTensorMapSpace`] facades lower to this type internally; the
+/// dynamic expert entry points (`*_dyn_into`) take it directly together with
+/// raw `f64` slices in the coupled-sector matrix layout.
+#[derive(Clone, Debug)]
+pub struct DynamicFusionMapSpace {
+    nout: usize,
+    nin: usize,
+    homspace: Arc<FusionTreeHomSpace>,
+    subblock_structure: Arc<BlockStructure>,
+    admission: FusionSpaceAdmission,
+    /// The adjoint view's hom space and block structure, each derived on
+    /// first use.
+    ///
+    /// Why not the bounded complete-structure cache or a context cache: this
+    /// is immutable data derived only from `nout`, `nin`, `homspace`, and
+    /// `subblock_structure`, none of which is reassigned after construction,
+    /// so it lives and dies with the space and needs no key, byte bound, or
+    /// invalidation. Its cost is one adjoint hom space and block structure per
+    /// space that is ever adjointed; a lazy-adjoint contraction fills only
+    /// the hom space. It stays out of `PartialEq` and the
+    /// layout hash because it is a function of the compared fields; clones
+    /// share the filled value. It sits behind an `Arc` so an unused slot adds
+    /// only one pointer and the once-state to every space.
+    ///
+    /// Hazard: a struct update (`Self { subblock_structure, ..other }`) that
+    /// replaces `nout`, `nin`, `homspace`, or `subblock_structure` must also
+    /// reset this slot with `OnceLock::new()`, or it inherits a stale adjoint.
+    adjoint: OnceLock<Arc<AdjointMemo>>,
+}
+
+#[derive(Debug)]
+struct AdjointMemo {
+    homspace: Arc<FusionTreeHomSpace>,
+    structure: OnceLock<Result<Arc<BlockStructure>, OperationError>>,
+}
+
+impl PartialEq for DynamicFusionMapSpace {
+    fn eq(&self, other: &Self) -> bool {
+        self.nout == other.nout
+            && self.nin == other.nin
+            && self.homspace == other.homspace
+            && self.subblock_structure == other.subblock_structure
+            && self.admission.rule_identity() == other.admission.rule_identity()
+    }
+}
+
+impl Eq for DynamicFusionMapSpace {}
+
+fn validate_generic_provider_style<R>(rule: &R) -> Result<(), OperationError>
+where
+    R: FusionRule,
+{
+    if rule.fusion_style().has_multiplicity() {
+        Ok(())
+    } else {
+        Err(OperationError::from_core_preserving_context(
+            CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: rule.fusion_style(),
+            },
+        ))
+    }
+}
+
+/// A complete dynamic fusion space bound to the provider that defines it.
+///
+/// Ordinary operation-output layouts are built from their final hom space with
+/// [`Self::from_final_homspace_multiplicity_free`] or
+/// [`Self::from_final_homspace_generic`]. The `bind_*` methods are expert
+/// admission boundaries for an already-constructed dynamic layout. Generic
+/// roots require the provider-owned [`FusionStyleKind::Generic`] capability;
+/// tree keys do not carry a duplicate binding-mode flag. A missing rule
+/// identity is rejected rather than inferred.
+pub struct BoundDynamicFusionMapSpace<R> {
+    space: DynamicFusionMapSpace,
+    provider: Arc<R>,
+    /// Opaque layout-key strategy selected at admission and propagated to
+    /// derived outputs; product/rule authority remains in `provider`.
+    layout_build: LayoutBuildCapability<R>,
+}
+
+#[derive(Clone, Debug)]
+/// Provider-neutral dynamic layout that has passed a bound space's full validation.
+///
+/// Why not expose the raw space, its metadata fields, or the first provider:
+/// cached consumers must preserve one validation proof without reconstructing
+/// identity or retaining an arbitrary provider allocation.
+pub struct ValidatedDynamicFusionLayout(DynamicFusionMapSpace);
+
+#[doc(hidden)]
+pub struct PreparedCheckedGenericDynamicSpace {
+    nout: usize,
+    nin: usize,
+    homspace: FusionTreeHomSpace,
+    structure: PreparedBlockStructure,
+    identity: RuleIdentity,
+}
+
+impl PreparedCheckedGenericDynamicSpace {
+    #[doc(hidden)]
+    pub fn structure(&self) -> &BlockStructure {
+        self.structure.structure()
+    }
+
+    #[doc(hidden)]
+    pub fn required_len(&self) -> usize {
+        self.structure.required_len()
+    }
+
+    pub(crate) fn homspace(&self) -> &FusionTreeHomSpace {
+        &self.homspace
+    }
+
+    pub(crate) fn nout(&self) -> usize {
+        self.nout
+    }
+
+    pub(crate) fn commit(self) -> DynamicFusionMapSpace {
+        DynamicFusionMapSpace {
+            nout: self.nout,
+            nin: self.nin,
+            homspace: Arc::new(self.homspace),
+            subblock_structure: self.structure.commit().into_shared(),
+            admission: FusionSpaceAdmission::Complete(self.identity),
+            adjoint: OnceLock::new(),
+        }
+    }
+}
+
+impl DynamicFusionMapSpace {
+    fn from_final_homspace<R>(
+        rule: &R,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        Self::from_final_homspace_with_primer(rule, homspace, encoded_layout_primer::<R>)
+    }
+
+    fn from_final_homspace_with_primer<R>(
+        rule: &R,
+        homspace: FusionTreeHomSpace,
+        primer: LayoutKeyBuilder<R>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        let prepared = dispatch_prepare(primer, rule, &homspace)?;
+        Self::from_final_homspace_with_prepared(rule, homspace, prepared)
+    }
+
+    pub(crate) fn from_final_homspace_with_prepared<R>(
+        rule: &R,
+        homspace: FusionTreeHomSpace,
+        prepared: PreparedLayoutKeys,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        observe_final_result_layout_build();
+        let staged = match prepared {
+            PreparedLayoutKeys::Checked(prepared) => Some(prepared),
+            PreparedLayoutKeys::Encoded | PreparedLayoutKeys::Staged(_) => None,
+        };
+        if let Some(prepared) = staged {
+            let nout = homspace.codomain().len();
+            let nin = homspace.domain().len();
+            let subblock_structure = prepared
+                .build_complete_from_leg_degeneracies(&homspace)
+                .map_err(OperationError::from_core_preserving_context)?;
+            // All fallible final-storage work is complete. Why not commit
+            // before building: malformed leg degeneracies or extent overflow
+            // must leave process-local layout identity untouched. The commit
+            prepared.commit();
+            return Ok(Self {
+                nout,
+                nin,
+                homspace: Arc::new(homspace),
+                subblock_structure,
+                admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
+                adjoint: OnceLock::new(),
+            });
+        }
+        let nout = homspace.codomain().len();
+        let nin = homspace.domain().len();
+        let subblock_structure = homspace
+            .coupled_subblock_structure_from_leg_degeneracies(rule)
+            .map_err(OperationError::from_core_preserving_context)?;
+        Ok(Self {
+            nout,
+            nin,
+            homspace: Arc::new(homspace),
+            subblock_structure,
+            admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
+            adjoint: OnceLock::new(),
+        })
+    }
+
+    pub(crate) fn from_final_homspace_generic<R>(
+        rule: &R,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<Self, OperationError>
+    where
+        R: FusionRule,
+    {
+        validate_generic_provider_style(rule)?;
+        observe_final_result_layout_build();
+        let nout = homspace.codomain().len();
+        let nin = homspace.domain().len();
+        let subblock_structure = homspace
+            .coupled_subblock_structure_from_leg_degeneracies_generic(rule)
+            .map_err(OperationError::from_core_preserving_context)?;
+        Ok(Self {
+            nout,
+            nin,
+            homspace: Arc::new(homspace),
+            subblock_structure,
+            admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
+            adjoint: OnceLock::new(),
+        })
+    }
+
+    fn validate_complete_tree_grid(
+        &self,
+        keys: &[FusionTreePairKey],
+    ) -> Result<(), OperationError> {
+        let structure = self.structure();
+        if structure.block_count() != keys.len() {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::BlockCountMismatch {
+                    expected: keys.len(),
+                    actual: structure.block_count(),
+                },
+            ));
+        }
+        for key in keys {
+            structure
+                .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
+                .ok_or_else(|| {
+                    OperationError::from_core_preserving_context(CoreError::MissingBlockKey {
+                        key: Box::new(BlockKey::FusionTree(key.clone())),
+                    })
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Current typed-to-dynamic bridge (shares the hom space and selected
+    /// subblock layout handles; no data copies).
+    pub fn from_typed<const NOUT: usize, const NIN: usize>(
+        space: &FusionTensorMapSpace<NOUT, NIN>,
+    ) -> Self {
+        Self {
+            nout: NOUT,
+            nin: NIN,
+            homspace: Arc::clone(space.homspace_arc()),
+            subblock_structure: Arc::clone(space.subblock_structure()),
+            admission: space.admission().clone(),
+            adjoint: OnceLock::new(),
+        }
+    }
+
+    /// Expert compatibility constructor from an untyped description: a hom
+    /// space plus one caller-supplied degeneracy shape per fusion-tree key (in
+    /// [`FusionTreeHomSpace::fusion_tree_keys`] order). The storage layout is
+    /// the TensorKit-equivalent coupled-sector matrix layout, identical to
+    /// [`FusionTensorMapSpace::from_degeneracy_shapes`]. Ordinary operation
+    /// outputs derive the layout from their final hom space instead.
+    pub fn from_degeneracy_shapes<R, Shapes>(
+        rule: &R,
+        homspace: FusionTreeHomSpace,
+        shapes: Shapes,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        Self::from_degeneracy_shapes_with_key_builder(rule, homspace, shapes, |rule, homspace| {
+            Ok(PreparedLayoutKeys::Staged(
+                homspace.prepare_fusion_tree_layout(rule),
+            ))
+        })
+    }
+
+    pub(crate) fn from_degeneracy_shapes_with_key_builder<R, Shapes, BuildKeys>(
+        rule: &R,
+        homspace: FusionTreeHomSpace,
+        shapes: Shapes,
+        build_keys: BuildKeys,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+        BuildKeys: FnOnce(&R, &FusionTreeHomSpace) -> Result<PreparedLayoutKeys, OperationError>,
+    {
+        let nout = homspace.codomain().len();
+        let nin = homspace.domain().len();
+        #[cfg(test)]
+        LEGACY_SHAPE_PATH_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        let shapes = shapes
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<Vec<usize>>>();
+        let prepared = build_keys(rule, &homspace)?;
+        let keys = prepared.keys(rule, &homspace);
+        if keys.len() != shapes.len() {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::BlockCountMismatch {
+                    expected: keys.len(),
+                    actual: shapes.len(),
+                },
+            ));
+        }
+        homspace
+            .validate_degeneracy_shapes(&keys, &shapes)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let subblock_structure = match prepared {
+            PreparedLayoutKeys::Staged(prepared) | PreparedLayoutKeys::Checked(prepared) => {
+                let structure = prepared
+                    .build_complete_from_leg_degeneracies(&homspace)
+                    .map_err(OperationError::from_core_preserving_context)?;
+                prepared.commit();
+                structure
+            }
+            PreparedLayoutKeys::Encoded => {
+                // Why not retain an explicit-shape strong cache: this path
+                // first proves every caller shape equals the HomSpace legs,
+                // so canonical layouts belong to the core owner instead.
+                homspace
+                    .coupled_subblock_structure_from_leg_degeneracies(rule)
+                    .map_err(OperationError::from_core_preserving_context)?
+            }
+        };
+        Ok(Self {
+            nout,
+            nin,
+            homspace: Arc::new(homspace),
+            subblock_structure,
+            admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
+            adjoint: OnceLock::new(),
+        })
+    }
+
+    pub(crate) fn transformed_from_typed<R, const NOUT: usize, const NIN: usize>(
+        rule: &R,
+        source: &FusionTensorMapSpace<NOUT, NIN>,
+        operation: &TreeTransformOperation,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        Self::from_typed(source).transformed(rule, operation)
+    }
+
+    /// Space of the tree-transformed (permute / braid / transpose) tensor:
+    /// the hom space is permuted and the full tree set of the result is
+    /// enumerated (trees the transform coefficients never reach stay as
+    /// structural zeros, keeping every coupled sector grid complete).
+    pub(crate) fn transformed<R>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        self.transformed_with_primer(rule, operation, encoded_layout_primer::<R>)
+    }
+
+    pub(crate) fn transformed_with_primer<R>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        primer: LayoutKeyBuilder<R>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        self.validate_rule(rule)?;
+        let source = self;
+        let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
+        let nout = codomain_axes.len();
+        let nin = domain_axes.len();
+        let capability = LayoutBuildCapability::Legacy(primer);
+        let (homspace, prepared) =
+            capability.permute(rule, source.homspace(), codomain_axes, domain_axes)?;
+        debug_assert_eq!(nout, homspace.codomain().len());
+        debug_assert_eq!(nin, homspace.domain().len());
+        // Why not rebuild external source legs and per-tree shape vectors:
+        // #256 already carried the authoritative degeneracies into the final
+        // HomSpace. The final grouped builder consumes that value directly.
+        Self::from_final_homspace_with_prepared(rule, homspace, prepared)
+    }
+
+    pub(crate) fn transformed_layout_probe<R>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+    ) -> Result<TransformedLayoutProbe, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        self.validate_rule(rule)?;
+        let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
+        let homspace = self
+            .homspace()
+            .permute(rule, codomain_axes, domain_axes)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let (required_len, source_structure_matches) = homspace
+            .coupled_subblock_layout_probe_uncached(rule, self.structure())
+            .map_err(OperationError::from_core_preserving_context)?;
+        Ok(TransformedLayoutProbe {
+            nout: codomain_axes.len(),
+            homspace,
+            required_len,
+            source_structure_matches,
+        })
+    }
+
+    /// Expert Generic-fusion sibling of [`Self::from_degeneracy_shapes`] for
+    /// caller-supplied per-tree shapes. Ordinary derived
+    /// transform/contraction results instead use the final hom space's stored
+    /// leg degeneracies directly.
+    ///
+    /// This is a Generic execution capability boundary, not an alternate
+    /// spelling for multiplicity-free construction. The provider must report
+    /// [`FusionStyleKind::Generic`].
+    pub fn from_degeneracy_shapes_generic<R, Shapes>(
+        rule: &R,
+        homspace: FusionTreeHomSpace,
+        shapes: Shapes,
+    ) -> Result<Self, OperationError>
+    where
+        R: FusionRule,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        validate_generic_provider_style(rule)?;
+        let nout = homspace.codomain().len();
+        let nin = homspace.domain().len();
+        let keys = homspace
+            .fusion_tree_keys_generic(rule)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let shapes = shapes.into_iter().map(Into::into).collect::<Vec<_>>();
+        if keys.len() != shapes.len() {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::BlockCountMismatch {
+                    expected: keys.len(),
+                    actual: shapes.len(),
+                },
+            ));
+        }
+        homspace
+            .validate_degeneracy_shapes(&keys, &shapes)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let blocks = keys
+            .iter()
+            .cloned()
+            .map(BlockKey::from)
+            .zip(shapes)
+            .collect::<Vec<_>>();
+        let subblock_structure =
+            Arc::new(scratch_subblock_structure(rule, nout, nout + nin, blocks)?);
+        Ok(Self {
+            nout,
+            nin,
+            homspace: Arc::new(homspace),
+            subblock_structure,
+            admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
+            adjoint: OnceLock::new(),
+        })
+    }
+
+    /// Generic-fusion sibling of [`Self::transformed`]: the permuted /
+    /// braided / transposed result space, enumerated with multiplicity-aware
+    /// keys. Not cached (the Generic path is not on a hot loop yet — same
+    /// non-memoized rationale as the Stage B3b cache siblings).
+    pub(crate) fn transformed_generic<R>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+    ) -> Result<Self, OperationError>
+    where
+        R: FusionRule,
+    {
+        self.validate_rule(rule)?;
+        let source = self;
+        let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
+        let nout = codomain_axes.len();
+        let nin = domain_axes.len();
+        let homspace = source
+            .homspace()
+            .permute(rule, codomain_axes, domain_axes)
+            .map_err(OperationError::from_core_preserving_context)?;
+        debug_assert_eq!(nout, homspace.codomain().len());
+        debug_assert_eq!(nin, homspace.domain().len());
+        Self::from_final_homspace_generic(rule, homspace)
+    }
+
+    pub(crate) fn validate_transformed_generic_checked_identity<R>(
+        &self,
+        rule: &R,
+    ) -> Result<RuleIdentity, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        let expected = match &self.admission {
+            FusionSpaceAdmission::Complete(identity) => identity.clone(),
+            _ => {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "checked Generic owned transform requires a Complete source layout",
+                }
+                .into())
+            }
+        };
+        let actual = rule.rule_identity();
+        if expected != actual {
+            return Err(CoreError::FusionRuleMismatch { expected, actual }.into());
+        }
+        Ok(actual)
+    }
+
+    pub(crate) fn prepare_transformed_generic_checked<R>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        identity: RuleIdentity,
+    ) -> Result<PreparedCheckedGenericDynamicSpace, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
+        let homspace =
+            self.homspace()
+                .try_permute_generic_checked(rule, codomain_axes, domain_axes)?;
+        let structure = homspace
+            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(rule)?;
+        Ok(PreparedCheckedGenericDynamicSpace {
+            nout: codomain_axes.len(),
+            nin: domain_axes.len(),
+            homspace,
+            structure,
+            identity,
+        })
+    }
+
+    /// Space of the contraction result in the default output order (`lhs`
+    /// open axes ascending on the codomain side, `rhs` open axes ascending on
+    /// the domain side). Mirrors the destination TensorKit's
+    /// `tensorcontract!` with default `pAB` writes into.
+    #[cfg(test)]
+    pub(crate) fn contracted<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        let axes = TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes);
+        Self::contracted_with_spec(rule, lhs, rhs, axes)
+    }
+
+    #[cfg(test)]
+    fn contracted_with_spec<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        Self::contracted_with_spec_and_primer(rule, lhs, rhs, axes, encoded_layout_primer::<R>)
+    }
+
+    fn contracted_with_spec_and_primer<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        axes: TensorContractSpec<'_>,
+        primer: LayoutKeyBuilder<R>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        lhs.validate_rule(rule)?;
+        rhs.validate_rule(rule)?;
+        if axes.lhs_contracting_axes().len() != axes.rhs_contracting_axes().len() {
+            return Err(OperationError::ContractAxisCountMismatch {
+                lhs: axes.lhs_contracting_axes().len(),
+                rhs: axes.rhs_contracting_axes().len(),
+            });
+        }
+        let nout = lhs
+            .rank()
+            .checked_sub(axes.lhs_contracting_axes().len())
+            .ok_or_else(|| OperationError::RankMismatch {
+                expected: axes.lhs_contracting_axes().len(),
+                actual: lhs.rank(),
+            })?;
+        let nin = rhs
+            .rank()
+            .checked_sub(axes.rhs_contracting_axes().len())
+            .ok_or_else(|| OperationError::RankMismatch {
+                expected: axes.rhs_contracting_axes().len(),
+                actual: rhs.rank(),
+            })?;
+        let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
+        Self::contracted_space_from_plan(rule, lhs, rhs, axes, &axis_plan, nout, nin, primer)
+    }
+
+    #[allow(dead_code)]
+    fn validate_contracted_homspace<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        Self::validate_contracted_homspace_with_primer(
+            rule,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            encoded_layout_primer::<R>,
+        )
+    }
+
+    fn validate_contracted_homspace_with_primer<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        primer: LayoutKeyBuilder<R>,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        lhs.validate_rule(rule)?;
+        rhs.validate_rule(rule)?;
+        let nout =
+            lhs.rank()
+                .checked_sub(lhs_axes.len())
+                .ok_or_else(|| OperationError::RankMismatch {
+                    expected: lhs_axes.len(),
+                    actual: lhs.rank(),
+                })?;
+        let nin =
+            rhs.rank()
+                .checked_sub(rhs_axes.len())
+                .ok_or_else(|| OperationError::RankMismatch {
+                    expected: rhs_axes.len(),
+                    actual: rhs.rank(),
+                })?;
+        let axes = TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes);
+        let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
+        Self::contracted_homspace_from_plan(rule, lhs, rhs, axes, &axis_plan, nout, primer)?;
+        Ok(())
+    }
+
+    pub(crate) fn core_dst<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        plan: &FusionContractPlan,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        Self::core_dst_with_primer(rule, lhs, rhs, plan, encoded_layout_primer::<R>)
+    }
+
+    pub(crate) fn core_dst_with_primer<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        plan: &FusionContractPlan,
+        primer: LayoutKeyBuilder<R>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        let nout = plan.core_dst_open_lhs_rank();
+        let nin = plan.core_dst_open_rhs_rank();
+        Self::contracted_space(
+            rule,
+            lhs,
+            rhs,
+            plan.core_axes().as_spec(),
+            nout,
+            nin,
+            primer,
+        )
+    }
+
+    fn contracted_space<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        axes: TensorContractSpec<'_>,
+        nout: usize,
+        nin: usize,
+        primer: LayoutKeyBuilder<R>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
+        Self::contracted_space_from_plan(rule, lhs, rhs, axes, &axis_plan, nout, nin, primer)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the private builder keeps source spaces, compiled axis plan, output split, and layout primer explicit"
+    )]
+    fn contracted_space_from_plan<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        axes: TensorContractSpec<'_>,
+        axis_plan: &TensorContractAxisPlan,
+        nout: usize,
+        nin: usize,
+        primer: LayoutKeyBuilder<R>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        let (homspace, prepared) =
+            Self::contracted_homspace_from_plan(rule, lhs, rhs, axes, axis_plan, nout, primer)?;
+        debug_assert_eq!(nout, homspace.codomain().len());
+        debug_assert_eq!(nin, homspace.domain().len());
+        Self::from_final_homspace_with_prepared(rule, homspace, prepared)
+    }
+
+    fn contracted_homspace_from_plan<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        axes: TensorContractSpec<'_>,
+        axis_plan: &TensorContractAxisPlan,
+        nout: usize,
+        primer: LayoutKeyBuilder<R>,
+    ) -> Result<(FusionTreeHomSpace, PreparedLayoutKeys), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        LayoutBuildCapability::Legacy(primer).contract(
+            rule,
+            lhs.homspace(),
+            rhs.homspace(),
+            axes,
+            &axis_plan.output_axes,
+            nout,
+        )
+    }
+
+    /// Generic-fusion (Stage B3c-1) sibling of [`Self::contracted`]: the
+    /// contraction result space for an outer-multiplicity rule, enumerated with
+    /// multiplicity-aware fusion-tree keys (`fusion_tree_keys_generic`). Not
+    /// cached (the Generic path is not on a hot loop yet — same non-memoized
+    /// rationale as the B3b transform siblings). The final HomSpace is consumed
+    /// directly by the multiplicity-aware single-pass layout builder.
+    pub(crate) fn contracted_generic<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<Self, OperationError>
+    where
+        R: FusionRule,
+    {
+        lhs.validate_rule(rule)?;
+        rhs.validate_rule(rule)?;
+        if lhs_axes.len() != rhs_axes.len() {
+            return Err(OperationError::ContractAxisCountMismatch {
+                lhs: lhs_axes.len(),
+                rhs: rhs_axes.len(),
+            });
+        }
+        let nout =
+            lhs.rank()
+                .checked_sub(lhs_axes.len())
+                .ok_or_else(|| OperationError::RankMismatch {
+                    expected: lhs_axes.len(),
+                    actual: lhs.rank(),
+                })?;
+        let nin =
+            rhs.rank()
+                .checked_sub(rhs_axes.len())
+                .ok_or_else(|| OperationError::RankMismatch {
+                    expected: rhs_axes.len(),
+                    actual: rhs.rank(),
+                })?;
+        let axes = TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes);
+        let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
+        let homspace = FusionTreeHomSpace::tensorcontract_homspace(
+            rule,
+            lhs.homspace(),
+            rhs.homspace(),
+            axes.lhs_contracting_axes(),
+            axes.rhs_contracting_axes(),
+            &axis_plan.output_axes,
+            nout,
+        )
+        .map_err(OperationError::from_core_preserving_context)?;
+        debug_assert_eq!(nout, homspace.codomain().len());
+        debug_assert_eq!(nin, homspace.domain().len());
+        Self::from_final_homspace_generic(rule, homspace)
+    }
+
+    /// Adjoint view: codomain and domain swap (spaces and per-block shapes),
+    /// no data movement implied. The block layout is a strided view into the
+    /// source layout, so this space is for replay bookkeeping, not for
+    /// allocating fresh coupled storage.
+    pub(crate) fn adjoint_view(&self) -> Result<Self, OperationError> {
+        let memo = self.adjoint_memo();
+        let homspace = Arc::clone(&memo.homspace);
+        let structure = memo
+            .structure
+            .get_or_init(|| {
+                crate::lowering::adjoint_block_structure_view(
+                    self.nout,
+                    self.nin,
+                    &self.subblock_structure,
+                )
+                .map(Arc::new)
+            })
+            .clone()?;
+        debug_assert_eq!(structure.rank(), self.subblock_structure.rank());
+        debug_assert_eq!(
+            structure.block_count(),
+            self.subblock_structure.block_count()
+        );
+        Ok(Self {
+            nout: self.nin,
+            nin: self.nout,
+            homspace,
+            subblock_structure: structure,
+            admission: self.admission.clone(),
+            adjoint: OnceLock::new(),
+        })
+    }
+
+    /// The memoized adjoint hom space; the block structure fills on demand.
+    fn adjoint_memo(&self) -> &AdjointMemo {
+        self.adjoint.get_or_init(|| {
+            Arc::new(AdjointMemo {
+                homspace: Arc::new(FusionTreeHomSpace::new(
+                    self.homspace.domain().clone(),
+                    self.homspace.codomain().clone(),
+                )),
+                structure: OnceLock::new(),
+            })
+        })
+    }
+
+    /// Number of codomain legs.
+    #[inline]
+    pub fn nout(&self) -> usize {
+        self.nout
+    }
+
+    /// Number of domain legs.
+    #[inline]
+    pub fn nin(&self) -> usize {
+        self.nin
+    }
+
+    /// Total number of legs.
+    #[inline]
+    pub fn rank(&self) -> usize {
+        self.nout + self.nin
+    }
+
+    pub(crate) fn validate_rule<R: FusionRule>(&self, rule: &R) -> Result<(), OperationError> {
+        match self.admission.rule_identity() {
+            Some(expected) if expected != &rule.rule_identity() => Err(
+                OperationError::from_core_preserving_context(CoreError::FusionRuleMismatch {
+                    expected: expected.clone(),
+                    actual: rule.rule_identity(),
+                }),
+            ),
+            Some(_) => Ok(()),
+            None => Err(OperationError::from_core_preserving_context(
+                CoreError::MissingFusionRuleIdentity,
+            )),
+        }
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn admission(&self) -> &FusionSpaceAdmission {
+        &self.admission
+    }
+
+    #[inline]
+    pub fn homspace(&self) -> &FusionTreeHomSpace {
+        &self.homspace
+    }
+
+    /// Shared hom-space handle for pointer-identity fast paths in replay
+    /// caches.
+    pub fn homspace_arc(&self) -> &Arc<FusionTreeHomSpace> {
+        &self.homspace
+    }
+
+    /// Subblock (fusion-tree) block structure of the coupled storage layout.
+    #[inline]
+    pub fn structure(&self) -> &Arc<BlockStructure> {
+        &self.subblock_structure
+    }
+
+    /// Flat storage length this space requires.
+    pub fn required_len(&self) -> Result<usize, CoreError> {
+        self.subblock_structure.required_len()
+    }
+}
+
+fn tree_transform_operation_axes(operation: &TreeTransformOperation) -> (&[usize], &[usize]) {
+    (
+        operation.codomain_permutation(),
+        operation.domain_permutation(),
+    )
+}
+
+#[cfg(test)]
+mod bound_invariant_tests;
+
+#[cfg(test)]
+mod checked_metadata_tests;
+
+#[cfg(test)]
+mod scratch_cache_tests;
+
+#[cfg(test)]
+mod checked_admission_tests;
