@@ -1,0 +1,998 @@
+use super::*;
+
+impl<C> FusionBlockContractPlan<C>
+where
+    C: Copy + PartialEq + One,
+{
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_raw<A, G, D>(
+        &self,
+        kernels: &mut A,
+        gemm: &mut G,
+        fusion_workspace: &mut FusionBlockContractWorkspace<D>,
+        dst_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_data: &[D],
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<D>,
+        G: Rank2Gemm<D>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    {
+        self.execute_host::<_, _, _, false>(
+            kernels,
+            gemm,
+            fusion_workspace,
+            dst_structure,
+            dst_data,
+            lhs_structure,
+            lhs_data,
+            rhs_structure,
+            rhs_data,
+            alpha,
+            ContractDestinationInit::Axpby(beta),
+            None,
+        )
+    }
+
+    /// [`Self::execute_raw`] with `beta = 0` for a destination the caller
+    /// proves is all-zero ([`ContractDestinationInit::Zeroed`]): the active
+    /// blocks are overwritten by their GEMM/scatter job and the inactive
+    /// blocks are left untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_raw_zeroed<A, G, D>(
+        &self,
+        kernels: &mut A,
+        gemm: &mut G,
+        fusion_workspace: &mut FusionBlockContractWorkspace<D>,
+        dst_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_data: &[D],
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_data: &[D],
+        alpha: D,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<D>,
+        G: Rank2Gemm<D>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    {
+        self.execute_host::<_, _, _, false>(
+            kernels,
+            gemm,
+            fusion_workspace,
+            dst_structure,
+            dst_data,
+            lhs_structure,
+            lhs_data,
+            rhs_structure,
+            rhs_data,
+            alpha,
+            ContractDestinationInit::Zeroed,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_raw_profiled<A, G, D>(
+        &self,
+        kernels: &mut A,
+        gemm: &mut G,
+        fusion_workspace: &mut FusionBlockContractWorkspace<D>,
+        dst_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_data: &[D],
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_data: &[D],
+        alpha: D,
+        beta: D,
+        profile: &mut TensorContractFusionProfile,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<D>,
+        G: Rank2Gemm<D>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    {
+        self.execute_host::<_, _, _, true>(
+            kernels,
+            gemm,
+            fusion_workspace,
+            dst_structure,
+            dst_data,
+            lhs_structure,
+            lhs_data,
+            rhs_structure,
+            rhs_data,
+            alpha,
+            ContractDestinationInit::Axpby(beta),
+            Some(profile),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_host<A, G, D, const PROFILED: bool>(
+        &self,
+        kernels: &mut A,
+        gemm: &mut G,
+        fusion_workspace: &mut FusionBlockContractWorkspace<D>,
+        dst_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_data: &[D],
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_data: &[D],
+        alpha: D,
+        init: ContractDestinationInit<D>,
+        mut profile: Option<&mut TensorContractFusionProfile>,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<D>,
+        G: Rank2Gemm<D>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    {
+        let beta = init.active_beta();
+        self.require_unit_direct_batch_alpha()?;
+        let total_start = PROFILED.then(std::time::Instant::now);
+        let start = PROFILED.then(std::time::Instant::now);
+        self.validate_replay_inputs(
+            dst_structure,
+            dst_data.len(),
+            lhs_structure,
+            lhs_data.len(),
+            rhs_structure,
+            rhs_data.len(),
+        )?;
+        if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
+            profile.core_validate += start.elapsed();
+        }
+
+        if self.max_irregular_scratch_len != 0 {
+            let start = PROFILED.then(std::time::Instant::now);
+            fusion_workspace
+                .scratch
+                .resize_filled(self.max_irregular_scratch_len, D::zero());
+            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
+                profile.core_workspace_prepare += start.elapsed();
+            }
+        } else {
+            fusion_workspace.scratch.resize_filled(0, D::zero());
+        }
+
+        let start = PROFILED.then(std::time::Instant::now);
+        self.init_inactive_blocks(kernels, &mut fusion_workspace.zero_strides, dst_data, init)?;
+        if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
+            profile.core_scale += start.elapsed();
+        }
+
+        if PROFILED {
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.core_contract_groups += self.direct_batch.len() + self.irregular.len();
+            }
+        }
+        if !self.direct_batch.is_empty() {
+            let start = PROFILED.then(std::time::Instant::now);
+            self.execute_batch(
+                gemm,
+                dst_data,
+                lhs_data,
+                rhs_data,
+                &self.direct_batch,
+                &self.direct_batch_runs,
+                alpha,
+                beta,
+            )?;
+            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
+                profile.core_matmul += start.elapsed();
+            }
+            if PROFILED {
+                if let Some(profile) = profile.as_deref_mut() {
+                    profile.core_direct_gemm_groups += self.direct_batch.len();
+                }
+            }
+        }
+
+        for execution in &self.irregular {
+            let group_profile = if PROFILED {
+                profile.as_deref_mut()
+            } else {
+                None
+            };
+            self.execute_irregular_group::<_, _, _, PROFILED>(
+                kernels,
+                gemm,
+                fusion_workspace,
+                execution,
+                dst_data,
+                lhs_data,
+                rhs_data,
+                alpha,
+                beta,
+                group_profile,
+            )?;
+        }
+
+        if let (Some(start), Some(profile)) = (total_start, profile) {
+            profile.core_contract_total += start.elapsed();
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_irregular_group<A, G, D, const PROFILED: bool>(
+        &self,
+        kernels: &mut A,
+        gemm: &mut G,
+        fusion_workspace: &mut FusionBlockContractWorkspace<D>,
+        execution: &FusionIrregularGroupExecution,
+        dst_data: &mut [D],
+        lhs_data: &[D],
+        rhs_data: &[D],
+        alpha: D,
+        beta: D,
+        mut profile: Option<&mut TensorContractFusionProfile>,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<D>,
+        G: Rank2Gemm<D>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    {
+        let group = &self.groups[execution.group_index];
+        let scratch = &mut fusion_workspace.scratch.as_mut_slice()[..execution.scratch.total_len];
+        // `execute_batch` never reads the packed operands at a zero `alpha`.
+        let forms_product = !alpha.is_zero();
+        if forms_product && execution.class.packs_lhs() {
+            let lhs = &mut scratch[..execution.scratch.lhs_len];
+            if group.lhs.needs_clear {
+                lhs.fill(D::zero());
+            }
+            let start = PROFILED.then(std::time::Instant::now);
+            pack_group(kernels, &group.lhs, lhs_data, lhs)?;
+            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
+                profile.core_pack_lhs += start.elapsed();
+            }
+        } else if PROFILED && !execution.class.packs_lhs() {
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.core_direct_pack_skips += 1;
+            }
+        }
+        if forms_product && execution.class.packs_rhs() {
+            let start_index = execution.scratch.rhs_offset;
+            let end = start_index + execution.scratch.rhs_len;
+            let rhs = &mut scratch[start_index..end];
+            if group.rhs.needs_clear {
+                rhs.fill(D::zero());
+            }
+            let start = PROFILED.then(std::time::Instant::now);
+            pack_group(kernels, &group.rhs, rhs_data, rhs)?;
+            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
+                profile.core_pack_rhs += start.elapsed();
+            }
+        } else if PROFILED && !execution.class.packs_rhs() {
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.core_direct_pack_skips += 1;
+            }
+        }
+
+        let start = PROFILED.then(std::time::Instant::now);
+        if execution.class.scatters_dst() {
+            let (inputs, destination) = scratch.split_at_mut(execution.scratch.dst_offset);
+            let destination = &mut destination[..execution.scratch.dst_len];
+            let lhs = if execution.class.packs_lhs() {
+                &inputs[..execution.scratch.lhs_len]
+            } else {
+                lhs_data
+            };
+            let rhs = if execution.class.packs_rhs() {
+                let start = execution.scratch.rhs_offset;
+                &inputs[start..start + execution.scratch.rhs_len]
+            } else {
+                rhs_data
+            };
+            self.execute_batch(
+                gemm,
+                destination,
+                lhs,
+                rhs,
+                std::slice::from_ref(&execution.job),
+                &[1],
+                alpha,
+                D::zero(),
+            )?;
+            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
+                profile.core_matmul += start.elapsed();
+            }
+            let start = PROFILED.then(std::time::Instant::now);
+            scatter_group(kernels, &group.dst, dst_data, destination, beta)?;
+            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
+                profile.core_scatter += start.elapsed();
+            }
+        } else {
+            let lhs = if execution.class.packs_lhs() {
+                &scratch[..execution.scratch.lhs_len]
+            } else {
+                lhs_data
+            };
+            let rhs = if execution.class.packs_rhs() {
+                let start = execution.scratch.rhs_offset;
+                &scratch[start..start + execution.scratch.rhs_len]
+            } else {
+                rhs_data
+            };
+            self.execute_batch(
+                gemm,
+                dst_data,
+                lhs,
+                rhs,
+                std::slice::from_ref(&execution.job),
+                &[1],
+                alpha,
+                beta,
+            )?;
+            if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
+                profile.core_matmul += start.elapsed();
+            }
+            if PROFILED {
+                if let Some(profile) = profile {
+                    profile.core_direct_gemm_groups += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_batch<G, D>(
+        &self,
+        gemm: &mut G,
+        dst: &mut [D],
+        lhs: &[D],
+        rhs: &[D],
+        jobs: &[Rank2GemmBatchJob],
+        runs: &[usize],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        G: Rank2Gemm<D>,
+        D: Copy + PartialEq + Zero + One + Mul<D, Output = D>,
+    {
+        // BLAS `gemm` at `alpha == 0` leaves `beta * C` without forming
+        // `A * B`, as TensorKit's `mul!` reaches it; a backend that multiplies
+        // through (faer) would turn `0 * Inf` into NaN (#1442).
+        if alpha.is_zero() {
+            for job in jobs {
+                let block = direct_slice_mut(dst, job.dst_offset, job.rows, job.cols)?;
+                if beta.is_zero() {
+                    block.fill(D::zero());
+                } else if !beta.is_one() {
+                    block.iter_mut().for_each(|value| *value = beta * *value);
+                }
+            }
+            return Ok(());
+        }
+        if self.lhs_op == MatrixOp::Identity && self.rhs_op == MatrixOp::Identity {
+            gemm.matmul_rank2_batch(dst, lhs, rhs, jobs, runs, alpha, beta)
+        } else {
+            gemm.matmul_rank2_batch_with_ops(
+                dst,
+                lhs,
+                rhs,
+                jobs,
+                runs,
+                self.lhs_op,
+                self.rhs_op,
+                alpha,
+                beta,
+            )
+        }
+    }
+
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_storage_workspace<
+        A,
+        G,
+        D,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+        DDst,
+        DLhs,
+        DRhs,
+    >(
+        &self,
+        kernels: &mut A,
+        gemm: &mut G,
+        fusion_workspace: &mut StorageFusionBlockContractWorkspace<
+            DLhs::Similar,
+            DRhs::Similar,
+            DDst::Similar,
+        >,
+        dst: &mut tenet_core::TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &tenet_core::TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &tenet_core::TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<D>,
+        G: Rank2Gemm<D>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+        DDst: HostWritableStorage<D> + SimilarStorage<D>,
+        DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+        DLhs: HostReadableStorage<D> + SimilarStorage<D>,
+        DLhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+        DRhs: HostReadableStorage<D> + SimilarStorage<D>,
+        DRhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+    {
+        let dst_structure = Arc::clone(dst.structure());
+        let lhs_structure = Arc::clone(lhs.structure());
+        let rhs_structure = Arc::clone(rhs.structure());
+        self.validate_replay_inputs(
+            &dst_structure,
+            dst.storage().len(),
+            &lhs_structure,
+            lhs.storage().len(),
+            &rhs_structure,
+            rhs.storage().len(),
+        )?;
+        self.require_fully_direct_storage()?;
+        self.require_identity_storage_ops()?;
+        self.require_unit_direct_batch_alpha()?;
+        self.init_inactive_blocks(
+            kernels,
+            &mut Vec::new(),
+            dst.data_mut(),
+            ContractDestinationInit::Axpby(beta),
+        )?;
+
+        let lhs_data = lhs.data();
+        let rhs_data = rhs.data();
+        let _ = fusion_workspace;
+        self.execute_batch(
+            gemm,
+            dst.data_mut(),
+            lhs_data,
+            rhs_data,
+            &self.direct_batch,
+            self.direct_batch_runs(),
+            alpha,
+            beta,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn direct_batch(&self) -> &[Rank2GemmBatchJob] {
+        &self.direct_batch
+    }
+
+    /// How many distinct `(rows, contracted, cols)` shapes the direct GEMM
+    /// jobs have: the dense plans a replay of this plan needs at one batch
+    /// extent.
+    #[doc(hidden)]
+    pub fn distinct_direct_gemm_shapes(&self) -> usize {
+        self.direct_batch
+            .iter()
+            .map(|job| (job.rows, job.contracted, job.cols))
+            .collect::<HashSet<_>>()
+            .len()
+    }
+
+    /// The per-member payload lengths `[dst, lhs, rhs]` this plan's
+    /// structures require.
+    pub(crate) fn member_lens(&self) -> Result<[usize; 3], OperationError> {
+        let len = |structure: &BlockStructure| {
+            structure
+                .required_len()
+                .map_err(OperationError::from_core_preserving_context)
+        };
+        Ok([
+            len(&self.dst_structure)?,
+            len(&self.lhs_structure)?,
+            len(&self.rhs_structure)?,
+        ])
+    }
+
+    /// The preconditions of an unscaled identity-orientation direct replay:
+    /// every group direct, both operands untransformed, every job coefficient
+    /// one.
+    #[doc(hidden)]
+    pub fn require_identity_direct_replay(&self) -> Result<(), OperationError> {
+        self.require_fully_direct_storage()?;
+        self.require_identity_storage_ops()?;
+        self.require_unit_direct_batch_alpha()
+    }
+
+    fn require_fully_direct_storage(&self) -> Result<(), OperationError> {
+        if self.is_fully_direct() {
+            Ok(())
+        } else {
+            Err(OperationError::UnsupportedTensorContractScope {
+                message: NON_COUPLED_OPERAND_MESSAGE,
+            })
+        }
+    }
+
+    fn require_identity_storage_ops(&self) -> Result<(), OperationError> {
+        if self.lhs_op == MatrixOp::Identity && self.rhs_op == MatrixOp::Identity {
+            return Ok(());
+        }
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "storage-handle core replay does not expose transpose/adjoint matrix views",
+        })
+    }
+
+    fn require_unit_direct_batch_alpha(&self) -> Result<(), OperationError> {
+        if self
+            .direct_batch_alpha
+            .iter()
+            .all(|&alpha| alpha == C::one())
+        {
+            return Ok(());
+        }
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "scaled storage plan cannot execute through unscaled host replay",
+        })
+    }
+
+    /// Plan-time run partition of [`Self::direct_batch`]; handed to the backend
+    /// alongside the jobs so it routes runs without recomputing the partition.
+    pub(super) fn direct_batch_runs(&self) -> &[usize] {
+        &self.direct_batch_runs
+    }
+
+    /// Storage-aware raw replay for callers whose operands are scratch buffers
+    /// rather than `TensorMap`s (the dynamic core route).
+    ///
+    /// Pack scratch allocation origins are passed explicitly: LHS pack scratch
+    /// from `lhs_alloc`, RHS pack scratch from `rhs_alloc`, and matmul output
+    /// scratch from `dst_alloc`, while replay itself consumes the raw slices.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_storage_raw<A, G, D, SLhs, SRhs, SDst>(
+        &self,
+        kernels: &mut A,
+        gemm: &mut G,
+        fusion_workspace: &mut StorageFusionBlockContractWorkspace<
+            SLhs::Similar,
+            SRhs::Similar,
+            SDst::Similar,
+        >,
+        _lhs_alloc: &SLhs,
+        _rhs_alloc: &SRhs,
+        _dst_alloc: &SDst,
+        dst_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_data: &[D],
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<D>,
+        G: Rank2Gemm<D>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+        SLhs: SimilarStorage<D>,
+        SLhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+        SRhs: SimilarStorage<D>,
+        SRhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+        SDst: SimilarStorage<D>,
+        SDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+    {
+        self.validate_replay_inputs(
+            dst_structure,
+            dst_data.len(),
+            lhs_structure,
+            lhs_data.len(),
+            rhs_structure,
+            rhs_data.len(),
+        )?;
+        self.require_fully_direct_storage()?;
+        self.require_identity_storage_ops()?;
+        self.require_unit_direct_batch_alpha()?;
+        self.init_inactive_blocks(
+            kernels,
+            &mut Vec::new(),
+            dst_data,
+            ContractDestinationInit::Axpby(beta),
+        )?;
+
+        let _ = fusion_workspace;
+        self.execute_batch(
+            gemm,
+            dst_data,
+            lhs_data,
+            rhs_data,
+            &self.direct_batch,
+            self.direct_batch_runs(),
+            alpha,
+            beta,
+        )?;
+        Ok(())
+    }
+
+    /// Storage-aware replay writing into a destination `TensorMap` while the
+    /// LHS/RHS operands are raw core scratch slices (the dynamic route
+    /// with an identity output transform).
+    ///
+    /// Pack scratch allocation origins: LHS pack from `lhs_alloc`, RHS pack
+    /// from `rhs_alloc`, and matmul output scratch from the destination
+    /// tensor's own storage.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_storage_raw_sources<
+        A,
+        G,
+        D,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+        DDst,
+    >(
+        &self,
+        kernels: &mut A,
+        gemm: &mut G,
+        fusion_workspace: &mut StorageFusionBlockContractWorkspace<
+            SLhs::Similar,
+            SRhs::Similar,
+            DDst::Similar,
+        >,
+        _lhs_alloc: &SLhs,
+        _rhs_alloc: &SRhs,
+        dst: &mut tenet_core::TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_data: &[D],
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<D>,
+        G: Rank2Gemm<D>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+        SLhs: SimilarStorage<D>,
+        SLhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+        SRhs: SimilarStorage<D>,
+        SRhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+        DDst: HostWritableStorage<D> + SimilarStorage<D>,
+        DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+    {
+        let dst_structure = Arc::clone(dst.structure());
+        self.validate_replay_inputs(
+            &dst_structure,
+            dst.storage().len(),
+            lhs_structure,
+            lhs_data.len(),
+            rhs_structure,
+            rhs_data.len(),
+        )?;
+        self.require_fully_direct_storage()?;
+        self.require_identity_storage_ops()?;
+        self.require_unit_direct_batch_alpha()?;
+        self.init_inactive_blocks(
+            kernels,
+            &mut Vec::new(),
+            dst.data_mut(),
+            ContractDestinationInit::Axpby(beta),
+        )?;
+
+        let _ = fusion_workspace;
+        self.execute_batch(
+            gemm,
+            dst.data_mut(),
+            lhs_data,
+            rhs_data,
+            &self.direct_batch,
+            self.direct_batch_runs(),
+            alpha,
+            beta,
+        )?;
+        Ok(())
+    }
+
+    /// Executes the contraction purely over storage handles.
+    ///
+    /// This is the device-side replay seam: the bounds require only
+    /// [`TensorStorage`], so no host-slice contract leaks into the path. It
+    /// supports exactly the fully-direct coupled-layout case with one scalar
+    /// per GEMM job, `beta = 0` and no inactive destination blocks; every other case must
+    /// use the host replay paths until the corresponding device kernels
+    /// (pack/scatter, scale, tree transforms) exist behind their own seams.
+    #[allow(dead_code)]
+    pub fn execute_direct_on_storage<G, D, DDst, DLhs, DRhs>(
+        &self,
+        gemm: &mut G,
+        dst: &mut DDst,
+        lhs: &DLhs,
+        rhs: &DRhs,
+    ) -> Result<(), OperationError>
+    where
+        G: StorageGemm<D, DDst, DLhs, DRhs>,
+        D: RecouplingCoefficientAction<C>,
+        DDst: TensorStorage<D>,
+        DLhs: TensorStorage<D>,
+        DRhs: TensorStorage<D>,
+    {
+        if !self.inactive_dst_scale_blocks.is_empty() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "storage-direct replay requires full destination coverage",
+            });
+        }
+        self.execute_direct_on_storage_prezeroed(gemm, dst, lhs, rhs)
+    }
+
+    /// [`Self::execute_direct_on_storage`] for a destination the caller
+    /// guarantees is zero-filled: destination blocks with no contributing
+    /// GEMM (the ones the host path scales by `beta = 0`) are left
+    /// untouched, which is exactly the overwrite semantics on a zeroed
+    /// buffer. The active blocks are still fully overwritten.
+    pub fn execute_direct_on_storage_prezeroed<G, D, DDst, DLhs, DRhs>(
+        &self,
+        gemm: &mut G,
+        dst: &mut DDst,
+        lhs: &DLhs,
+        rhs: &DRhs,
+    ) -> Result<(), OperationError>
+    where
+        G: StorageGemm<D, DDst, DLhs, DRhs>,
+        D: RecouplingCoefficientAction<C>,
+        DDst: TensorStorage<D>,
+        DLhs: TensorStorage<D>,
+        DRhs: TensorStorage<D>,
+    {
+        self.require_fully_direct_storage()?;
+        if self.direct_batch.len() != self.direct_batch_alpha.len() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "storage-direct plan has misaligned GEMM coefficients",
+            });
+        }
+        let needs_general_gemm = self.lhs_op != MatrixOp::Identity
+            || self.rhs_op != MatrixOp::Identity
+            || self
+                .direct_batch_alpha
+                .iter()
+                .any(|&alpha| alpha != C::one());
+        if needs_general_gemm && !gemm.supports_matmul_with_ops_scaled(self.lhs_op, self.rhs_op) {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "storage GEMM backend does not implement scaled replay",
+            });
+        }
+        for job in &self.direct_batch {
+            validate_storage_range(lhs.len(), job.lhs_offset, job.rows, job.contracted)?;
+            validate_storage_range(rhs.len(), job.rhs_offset, job.contracted, job.cols)?;
+            validate_storage_range(dst.len(), job.dst_offset, job.rows, job.cols)?;
+        }
+        for (job, &alpha) in self.direct_batch.iter().zip(&self.direct_batch_alpha) {
+            if alpha == C::one()
+                && self.lhs_op == MatrixOp::Identity
+                && self.rhs_op == MatrixOp::Identity
+            {
+                gemm.matmul_range_into(
+                    dst,
+                    job.dst_offset,
+                    lhs,
+                    job.lhs_offset,
+                    rhs,
+                    job.rhs_offset,
+                    job.rows,
+                    job.contracted,
+                    job.cols,
+                )?;
+            } else {
+                gemm.matmul_range_with_ops_scaled_into(
+                    dst,
+                    job.dst_offset,
+                    lhs,
+                    job.lhs_offset,
+                    rhs,
+                    job.rhs_offset,
+                    job.rows,
+                    job.contracted,
+                    job.cols,
+                    self.lhs_op,
+                    self.rhs_op,
+                    D::coefficient_as_data(alpha),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_replay_structures(
+        &self,
+        dst_structure: &Arc<BlockStructure>,
+        lhs_structure: &Arc<BlockStructure>,
+        rhs_structure: &Arc<BlockStructure>,
+    ) -> Result<(), OperationError> {
+        validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
+        validate_structure_identity("lhs", &self.lhs_structure, lhs_structure)?;
+        validate_structure_identity("rhs", &self.rhs_structure, rhs_structure)
+    }
+
+    fn validate_replay_inputs(
+        &self,
+        dst_structure: &Arc<BlockStructure>,
+        dst_len: usize,
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_len: usize,
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_len: usize,
+    ) -> Result<(), OperationError> {
+        self.validate_replay_structures(dst_structure, lhs_structure, rhs_structure)?;
+        validate_storage_len(dst_structure, dst_len)?;
+        validate_storage_len(lhs_structure, lhs_len)?;
+        validate_storage_len(rhs_structure, rhs_len)
+    }
+}
+
+pub(super) fn pack_group<A, T, C>(
+    kernels: &mut A,
+    group: &FusionBlockMatrixGroup<C>,
+    data: &[T],
+    packed: &mut [T],
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<T>,
+    T: Copy + One + PartialEq + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    for layout in &group.subblocks {
+        kernels.transform_strided_baked(
+            &mut Vec::new(),
+            packed,
+            data,
+            &layout.block.shape,
+            &layout.matrix_strides,
+            &layout.block.strides,
+            layout.matrix_offset,
+            layout.block.offset,
+            false,
+            TransformScale::Structural(layout.coefficient),
+            None,
+            None,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn scatter_group<A, T, C>(
+    kernels: &mut A,
+    group: &FusionBlockMatrixGroup<C>,
+    data: &mut [T],
+    packed: &[T],
+    beta: T,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<T>,
+    T: Copy + One + PartialEq + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    for layout in &group.subblocks {
+        kernels.transform_strided_baked(
+            &mut Vec::new(),
+            data,
+            packed,
+            &layout.block.shape,
+            &layout.block.strides,
+            &layout.matrix_strides,
+            layout.block.offset,
+            layout.matrix_offset,
+            false,
+            TransformScale::Structural(layout.coefficient),
+            Some(beta),
+            None,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+/// Checked mutable `rows x cols` column-major matrix slice at `base`; the
+/// bounds-checking counterpart of the batch-job offset addressing.
+pub fn direct_slice_mut<T>(
+    data: &mut [T],
+    base: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<&mut [T], OperationError> {
+    let len = direct_matrix_len(rows, cols)?;
+    let end = base
+        .checked_add(len)
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
+    let actual = data.len();
+    data.get_mut(base..end)
+        .ok_or_else(|| OperationError::ElementCountMismatch {
+            expected: end,
+            actual,
+        })
+}
+
+impl<C> FusionBlockContractPlan<C> {
+    /// Initialises the destination blocks no job writes (see
+    /// [`ContractDestinationInit`]). `zero_strides` is the caller's reusable
+    /// stride scratch for the zero-source assignment.
+    fn init_inactive_blocks<A, T>(
+        &self,
+        kernels: &mut A,
+        zero_strides: &mut Vec<isize>,
+        data: &mut [T],
+        init: ContractDestinationInit<T>,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<T>,
+        T: Copy + Zero + One + PartialEq,
+    {
+        let beta = match init {
+            ContractDestinationInit::Zeroed => return Ok(()),
+            ContractDestinationInit::Axpby(beta) if beta.is_one() => return Ok(()),
+            ContractDestinationInit::Axpby(beta) => beta,
+        };
+        if beta.is_zero() {
+            let zero = [T::zero()];
+            for layout in &self.inactive_dst_scale_blocks {
+                zero_strides.clear();
+                zero_strides.resize(layout.block.shape.len(), 0);
+                kernels.copy_scale_strided(
+                    data,
+                    &zero,
+                    &layout.block.shape,
+                    &layout.block.strides,
+                    zero_strides,
+                    layout.block.offset,
+                    0,
+                    false,
+                    T::one(),
+                )?;
+            }
+            return Ok(());
+        }
+        for layout in &self.inactive_dst_scale_blocks {
+            kernels.scale_strided(
+                data,
+                &layout.block.shape,
+                &layout.block.strides,
+                layout.block.offset,
+                beta,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Checked shared `rows x cols` column-major matrix slice at `base`; the
+/// bounds-checking counterpart of the batch-job offset addressing.
+pub fn direct_slice<T>(
+    data: &[T],
+    base: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<&[T], OperationError> {
+    let len = direct_matrix_len(rows, cols)?;
+    let end = base
+        .checked_add(len)
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
+    data.get(base..end)
+        .ok_or_else(|| OperationError::ElementCountMismatch {
+            expected: end,
+            actual: data.len(),
+        })
+}

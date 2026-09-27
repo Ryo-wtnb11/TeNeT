@@ -1,0 +1,902 @@
+use super::*;
+
+pub fn tensoradd_structure_with_strided_kernel<
+    T,
+    const NOUT: usize,
+    const NIN: usize,
+    S,
+    DDst,
+    DSrc,
+>(
+    allocator: &mut HostAllocator,
+    structure: &TensorAddStructure,
+    dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+    src: &TensorMap<T, NOUT, NIN, S, DSrc>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
+{
+    let descriptor = structure.descriptor();
+    structure.validate_replay_structures(dst.structure(), src.structure())?;
+    if dst.structure().block_count() != descriptor.terms().len() {
+        return Err(OperationError::BlockCountMismatch {
+            dst: dst.structure().block_count(),
+            src: descriptor.terms().len(),
+        });
+    }
+    if src.structure().block_count() != descriptor.terms().len() {
+        return Err(OperationError::BlockCountMismatch {
+            dst: descriptor.terms().len(),
+            src: src.structure().block_count(),
+        });
+    }
+
+    let zero_strides = &mut allocator.zero_strides;
+    let dst_data = dst.data_mut();
+    let src_data = src.data();
+    for term in descriptor.terms() {
+        tensoradd_prepared_block_with_strided_kernel(
+            zero_strides,
+            descriptor,
+            term,
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+        )?;
+    }
+    Ok(())
+}
+
+pub fn tree_transform_structure_with_strided_kernel<
+    A,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    kernels: &mut A,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let dst_structure = Arc::clone(dst.structure());
+    let src_structure = Arc::clone(src.structure());
+    tree_transform_structure_with_strided_kernel_raw(
+        kernels,
+        workspace,
+        structure,
+        &dst_structure,
+        &src_structure,
+        dst.data_mut(),
+        src.data(),
+        alpha,
+        beta,
+    )
+}
+
+pub fn tree_transform_structure_with_storage_workspace_strided_kernel<
+    A,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    kernels: &mut A,
+    workspace: &mut StorageTreeTransformWorkspace<DSrc::Similar, DDst::Similar>,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+    DDst: HostWritableStorage<D> + SimilarStorage<D>,
+    DSrc: HostReadableStorage<D> + SimilarStorage<D>,
+    DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+    DSrc::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+{
+    tree_transform_structure_with_storage_workspace_strided_kernel_mode(
+        kernels,
+        workspace,
+        structure,
+        dst,
+        src,
+        alpha,
+        DestinationMode::Axpby(beta),
+    )
+}
+
+pub fn tree_transform_structure_overwrite_with_storage_workspace_strided_kernel<
+    A,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    kernels: &mut A,
+    workspace: &mut StorageTreeTransformWorkspace<DSrc::Similar, DDst::Similar>,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+    DDst: HostWritableStorage<D> + SimilarStorage<D>,
+    DSrc: HostReadableStorage<D> + SimilarStorage<D>,
+    DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+    DSrc::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+{
+    tree_transform_structure_with_storage_workspace_strided_kernel_mode(
+        kernels,
+        workspace,
+        structure,
+        dst,
+        src,
+        alpha,
+        DestinationMode::Overwrite,
+    )
+}
+
+fn tree_transform_structure_with_storage_workspace_strided_kernel_mode<
+    A,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    kernels: &mut A,
+    workspace: &mut StorageTreeTransformWorkspace<DSrc::Similar, DDst::Similar>,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    mode: DestinationMode<D>,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+    DDst: HostWritableStorage<D> + SimilarStorage<D>,
+    DSrc: HostReadableStorage<D> + SimilarStorage<D>,
+    DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+    DSrc::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+{
+    let dst_structure = Arc::clone(dst.structure());
+    let src_structure = Arc::clone(src.structure());
+    structure.validate_replay_structures(&dst_structure, &src_structure)?;
+    validate_replay_storage_len(&dst_structure, dst.storage().len())?;
+    validate_replay_storage_len(&src_structure, src.storage().len())?;
+    let task = structure.task_view()?;
+    workspace.prepare_fused_index(structure.layouts().max_fused_rank())?;
+
+    scale_inactive_destinations(
+        kernels,
+        workspace.zero_strides_mut(),
+        task,
+        dst.data_mut(),
+        mode,
+    )?;
+
+    let src_data = src.data();
+    for block in structure.blocks() {
+        match *block {
+            TreeTransformBlock::Single {
+                dst_layout,
+                src_layout,
+                coefficient,
+            } => {
+                let (zero_strides, fused_index) = workspace.zero_strides_and_fused_index_mut();
+                tree_transform_single_with_strided_kernel(
+                    kernels,
+                    zero_strides,
+                    Some(fused_index),
+                    structure.layouts(),
+                    dst_layout,
+                    src_layout,
+                    structure.coefficient(coefficient),
+                    structure.storage_conjugate(),
+                    dst.data_mut(),
+                    src_data,
+                    alpha,
+                    mode,
+                )?;
+            }
+            TreeTransformBlock::Multi {
+                dst_layout_start,
+                dst_count,
+                src_layout_start,
+                src_count,
+                coefficient_start,
+                element_count,
+            } => {
+                let source_len = element_count
+                    .checked_mul(src_count)
+                    .ok_or_else(|| OperationError::ElementCountOverflow)?;
+                let destination_len = element_count
+                    .checked_mul(dst_count)
+                    .ok_or_else(|| OperationError::ElementCountOverflow)?;
+                workspace.prepare_from_storages(
+                    src.storage(),
+                    dst.storage(),
+                    source_len,
+                    destination_len,
+                    D::zero(),
+                );
+                let (zero_strides, fused_index, scratch) =
+                    workspace.replay_parts_with_fused_index_mut();
+                tree_transform_multi_with_scratch_buffers(
+                    kernels,
+                    zero_strides,
+                    Some(fused_index),
+                    scratch,
+                    structure.layouts(),
+                    dst_layout_start,
+                    dst_count,
+                    src_layout_start,
+                    src_count,
+                    coefficient_start,
+                    element_count,
+                    structure.recoupling_coefficients_dst_src(),
+                    structure.storage_conjugate(),
+                    dst.data_mut(),
+                    src_data,
+                    alpha,
+                    mode,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Replays a prepared tree-transform structure on host slices.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the raw kernel boundary keeps adapter, workspace, replay structures, buffers, and alpha/beta explicit"
+)]
+pub fn tree_transform_structure_with_strided_kernel_raw<A, D, C>(
+    kernels: &mut A,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    tree_transform_structure_with_strided_kernel_raw_mode(
+        kernels,
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst_data,
+        src_data,
+        alpha,
+        DestinationMode::Axpby(beta),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the overwrite kernel boundary keeps adapter, workspace, replay structures, buffers, and alpha explicit"
+)]
+pub fn tree_transform_structure_overwrite_with_strided_kernel_raw<A, D, C>(
+    kernels: &mut A,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    tree_transform_structure_with_strided_kernel_raw_mode(
+        kernels,
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst_data,
+        src_data,
+        alpha,
+        DestinationMode::Overwrite,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shared replay helper preserves the raw kernel inputs and destination update mode explicitly"
+)]
+fn tree_transform_structure_with_strided_kernel_raw_mode<A, D, C>(
+    kernels: &mut A,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    mode: DestinationMode<D>,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    structure.validate_replay_structures(dst_structure, src_structure)?;
+    validate_replay_storage_len(dst_structure, dst_data.len())?;
+    validate_replay_storage_len(src_structure, src_data.len())?;
+    let task = structure.task_view()?;
+    workspace.prepare_fused_indices(1, structure.layouts().max_fused_rank())?;
+    scale_inactive_destinations(kernels, &mut workspace.zero_strides, task, dst_data, mode)?;
+    for block in structure.blocks() {
+        match *block {
+            TreeTransformBlock::Single {
+                dst_layout,
+                src_layout,
+                coefficient,
+            } => tree_transform_single_with_strided_kernel(
+                kernels,
+                &mut workspace.zero_strides,
+                Some(workspace.fused_indices.as_mut_slice()),
+                structure.layouts(),
+                dst_layout,
+                src_layout,
+                structure.coefficient(coefficient),
+                structure.storage_conjugate(),
+                dst_data,
+                src_data,
+                alpha,
+                mode,
+            )?,
+            TreeTransformBlock::Multi {
+                dst_layout_start,
+                dst_count,
+                src_layout_start,
+                src_count,
+                coefficient_start,
+                element_count,
+            } => tree_transform_multi_with_pack_gemm_scatter(
+                kernels,
+                workspace,
+                structure.layouts(),
+                dst_layout_start,
+                dst_count,
+                src_layout_start,
+                src_count,
+                coefficient_start,
+                element_count,
+                structure.recoupling_coefficients_dst_src(),
+                structure.storage_conjugate(),
+                dst_data,
+                src_data,
+                alpha,
+                mode,
+            )?,
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tree_transform_structure_with_structural_recoupling<
+    A,
+    E,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+    threads: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let dst_structure = Arc::clone(dst.structure());
+    let src_structure = Arc::clone(src.structure());
+    tree_transform_structure_with_structural_recoupling_raw(
+        kernels,
+        dense,
+        workspace,
+        structure,
+        &dst_structure,
+        &src_structure,
+        dst.data_mut(),
+        src.data(),
+        alpha,
+        beta,
+        threads,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tree_transform_structure_overwrite_with_structural_recoupling<
+    A,
+    E,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    threads: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let dst_structure = Arc::clone(dst.structure());
+    let src_structure = Arc::clone(src.structure());
+    tree_transform_structure_overwrite_with_structural_recoupling_raw(
+        kernels,
+        dense,
+        workspace,
+        structure,
+        &dst_structure,
+        &src_structure,
+        dst.data_mut(),
+        src.data(),
+        alpha,
+        threads,
+    )
+}
+
+/// Replays a prepared structural-recoupling tree transform on host slices.
+///
+/// `threads` selects the replay parallelism (a property of the executing
+/// backend, not of the cached structure): `<= 1` reuses one pack buffer and
+/// submits each Multi group independently; `> 1` runs Single applies, Multi
+/// pack columns and Multi scatter columns as independent work items over up to
+/// `threads` work-stealing workers. Multi blocks submit bounded grouped
+/// recoupling batches between their pack and scatter phases.
+#[allow(clippy::too_many_arguments)]
+pub fn tree_transform_structure_with_structural_recoupling_raw<A, E, D, C>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+    threads: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
+    tree_transform_structure_with_structural_recoupling_raw_mode(
+        kernels,
+        dense,
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst_data,
+        src_data,
+        alpha,
+        DestinationMode::Axpby(beta),
+        threads,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tree_transform_structure_overwrite_with_structural_recoupling_raw<A, E, D, C>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    threads: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
+    tree_transform_structure_with_structural_recoupling_raw_mode(
+        kernels,
+        dense,
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst_data,
+        src_data,
+        alpha,
+        DestinationMode::Overwrite,
+        threads,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tree_transform_structure_with_structural_recoupling_raw_mode<A, E, D, C>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    mode: DestinationMode<D>,
+    threads: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
+    let task = structure.task_view()?;
+    task.validate_structures_and_lengths(
+        dst_structure,
+        src_structure,
+        dst_data.len(),
+        src_data.len(),
+    )?;
+    let schedule = structure.parallel_schedule();
+    let threads = effective_tree_transform_threads(schedule, threads);
+    let requirements = task.workspace_requirements();
+    task.validate_workspace_requirements::<D>()?;
+    checked_fused_index_len(threads, requirements.fused_index_len_per_worker)?;
+    if requirements.converted_coefficient_len != 0 {
+        // Admission converts coefficients before the first destination write.
+        // The shared serial/parallel helpers call this again, but the
+        // structure-identity check makes that call a no-work cache hit.
+        ensure_recoupling_coefficients(workspace, task, structure.identity_marker())?;
+    }
+    scale_inactive_destinations(kernels, &mut workspace.zero_strides, task, dst_data, mode)?;
+    if threads > 1 {
+        return tree_transform_blocks_with_batched_recoupling_parallel(
+            kernels,
+            dense,
+            workspace,
+            task,
+            schedule,
+            structure.identity_marker(),
+            dst_data,
+            src_data,
+            alpha,
+            mode,
+            threads,
+            None,
+        );
+    }
+    tree_transform_blocks_with_batched_recoupling(
+        kernels,
+        dense,
+        workspace,
+        task,
+        structure.identity_marker(),
+        dst_data,
+        src_data,
+        alpha,
+        mode,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tree_transform_structure_with_structural_recoupling_raw_profiled<A, E, D, C>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+    threads: usize,
+    profile: &mut TreeTransformReplayProfile,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
+    tree_transform_structure_with_structural_recoupling_raw_profiled_mode(
+        kernels,
+        dense,
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst_data,
+        src_data,
+        alpha,
+        DestinationMode::Axpby(beta),
+        threads,
+        profile,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tree_transform_structure_overwrite_with_structural_recoupling_raw_profiled<A, E, D, C>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    threads: usize,
+    profile: &mut TreeTransformReplayProfile,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
+    tree_transform_structure_with_structural_recoupling_raw_profiled_mode(
+        kernels,
+        dense,
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst_data,
+        src_data,
+        alpha,
+        DestinationMode::Overwrite,
+        threads,
+        profile,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tree_transform_structure_with_structural_recoupling_raw_profiled_mode<A, E, D, C>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    mode: DestinationMode<D>,
+    threads: usize,
+    profile: &mut TreeTransformReplayProfile,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
+    let total_start = std::time::Instant::now();
+
+    let start = std::time::Instant::now();
+    let task = structure.task_view()?;
+    task.validate_structures_and_lengths(
+        dst_structure,
+        src_structure,
+        dst_data.len(),
+        src_data.len(),
+    )?;
+
+    let schedule = structure.parallel_schedule();
+    let threads = effective_tree_transform_threads(schedule, threads);
+    let requirements = task.workspace_requirements();
+    task.validate_workspace_requirements::<D>()?;
+    checked_fused_index_len(threads, requirements.fused_index_len_per_worker)?;
+    profile.validate += start.elapsed();
+
+    if requirements.converted_coefficient_len != 0 {
+        let start = std::time::Instant::now();
+        // Attribute the admission conversion here; the replay helper's second
+        // call is the same no-work identity check as in the unprofiled path.
+        if ensure_recoupling_coefficients(workspace, task, structure.identity_marker())? {
+            profile.multi_coefficient_prepare += start.elapsed();
+        }
+    }
+
+    let start = std::time::Instant::now();
+    scale_inactive_destinations(kernels, &mut workspace.zero_strides, task, dst_data, mode)?;
+    profile.strided_kernel += start.elapsed();
+
+    if threads > 1 {
+        tree_transform_blocks_with_batched_recoupling_parallel(
+            kernels,
+            dense,
+            workspace,
+            task,
+            schedule,
+            structure.identity_marker(),
+            dst_data,
+            src_data,
+            alpha,
+            mode,
+            threads,
+            Some(profile),
+        )?;
+    } else {
+        tree_transform_blocks_with_batched_recoupling(
+            kernels,
+            dense,
+            workspace,
+            task,
+            structure.identity_marker(),
+            dst_data,
+            src_data,
+            alpha,
+            mode,
+            Some(profile),
+        )?;
+    }
+
+    profile.total += total_start.elapsed();
+    Ok(())
+}
