@@ -413,6 +413,7 @@ where
 
 /// Owned multiplicity-free contraction into a `destination` the caller
 /// already derived with `contracted_multiplicity_free_ordered`.
+#[cfg(test)]
 pub(crate) fn tensorcontract_owned_multiplicity_free_into<R, D>(
     context: &mut Ctx<D, RuleIdentity>,
     destination: &BoundDynamicFusionMapSpace<R>,
@@ -426,12 +427,42 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
     D: ScalarOps,
 {
-    #[cfg(test)]
-    observe_contract_seam_call();
     let mut data = zeroed_payload(destination.space().required_len()?);
-    context.tensorcontract_fusion_dyn_into_with_init(
+    tensorcontract_owned_multiplicity_free_into_zeroed(
+        context,
         destination,
         &mut data,
+        lhs,
+        rhs,
+        lhs_axes,
+        rhs_axes,
+        output_order,
+    )?;
+    Ok(data)
+}
+
+/// [`tensorcontract_owned_multiplicity_free_into`] writing a caller-owned,
+/// already zeroed `data` of `destination`'s required length.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_owned_multiplicity_free_into_zeroed<R, D>(
+    context: &mut Ctx<D, RuleIdentity>,
+    destination: &BoundDynamicFusionMapSpace<R>,
+    data: &mut [D],
+    lhs: BoundDynamicTensorRef<'_, R, D>,
+    rhs: BoundDynamicTensorRef<'_, R, D>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_order: OutputAxisOrder<'_>,
+) -> Result<(), tenet_tensors::OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    D: ScalarOps,
+{
+    #[cfg(test)]
+    observe_contract_seam_call();
+    context.tensorcontract_fusion_dyn_into_with_init(
+        destination,
+        data,
         lhs.space(),
         lhs.data(),
         rhs.space(),
@@ -439,8 +470,7 @@ where
         TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
         D::from_real(1.0),
         ContractDestinationInit::Zeroed,
-    )?;
-    Ok(data)
+    )
 }
 
 pub(crate) enum OrientedContractionKind {
@@ -633,10 +663,49 @@ where
     D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
 {
     let mut data = zeroed_payload(destination.space().required_len()?);
+    tensorcontract_oriented_multiplicity_free_into_zeroed(
+        context,
+        destination,
+        &mut data,
+        lhs,
+        lhs_data,
+        rhs,
+        rhs_data,
+        lhs_axes,
+        rhs_axes,
+        output_order,
+        kind,
+    )?;
+    Ok(data)
+}
+
+/// [`tensorcontract_oriented_multiplicity_free_into`] writing a caller-owned,
+/// already zeroed `data` of `destination`'s required length.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_oriented_multiplicity_free_into_zeroed<R, D>(
+    context: &mut CoefficientCtx<D, RuleIdentity, R::Scalar>,
+    destination: &BoundDynamicFusionMapSpace<R>,
+    data: &mut [D],
+    lhs: FusionOperand<'_>,
+    lhs_data: &[D],
+    rhs: FusionOperand<'_>,
+    rhs_data: &[D],
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_order: OutputAxisOrder<'_>,
+    kind: OrientedContractionKind,
+) -> Result<(), tenet_tensors::OperationError>
+where
+    R: MultiplicityFreeRigidSymbols
+        + CheckedFusionAlgebra
+        + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
+{
     match kind {
         OrientedContractionKind::Compose => context.tensorcompose_fusion_dyn_into_with_init(
             destination,
-            &mut data,
+            data,
             lhs,
             lhs_data,
             rhs,
@@ -645,11 +714,11 @@ where
             rhs_axes,
             D::from_real(1.0),
             ContractDestinationInit::Zeroed,
-        )?,
+        ),
         OrientedContractionKind::Contract => context
             .tensorcontract_fusion_dyn_prelowered_into_with_init(
                 destination,
-                &mut data,
+                data,
                 lhs,
                 lhs_data,
                 rhs,
@@ -663,9 +732,8 @@ where
                 ),
                 D::from_real(1.0),
                 ContractDestinationInit::Zeroed,
-            )?,
+            ),
     }
-    Ok(data)
 }
 
 /// TensorKit tensor product: merge codomain trees with codomain trees and

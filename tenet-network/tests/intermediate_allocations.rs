@@ -1146,9 +1146,10 @@ fn measured_typed_overwrite_witness() {
                     sample.payload_retained_live_bytes == sample.payload_size_bytes
                         && sample.payload_output_live_bytes == sample.payload_size_bytes
                         // The first step's reordered output is the default order plus
-                        // a permute (#1461, TensorKit `copyC`): its temporary, its
-                        // result, and the network output.
-                        && sample.payload_alloc_calls == 3
+                        // a permute (#1461, TensorKit `copyC`). Its temporary lives in
+                        // the warm Runtime's pooled context scratch (#1626), so only
+                        // that step's result and the network output allocate.
+                        && sample.payload_alloc_calls == 2
                         && sample.registry_overflows == 0
                 }),
                 "{diagnostics}; fresh samples={fresh:?}"

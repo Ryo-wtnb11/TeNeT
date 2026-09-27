@@ -48,6 +48,7 @@ use super::resolution::{
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
+use crate::host_scratch::HostScratchBuffer;
 use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
 
 type PreloweredPlanBuilder<R> =
@@ -493,6 +494,7 @@ pub struct TensorContractFusionExecutionContext<
     contract_workspace: BC::Workspace,
     fusion_block_workspace: FusionBlockContractWorkspace<D>,
     fusion_scratch: DynamicFusionScratchWorkspace<D>,
+    copy_c_scratch: HostScratchBuffer<D>,
     #[cfg(test)]
     last_top_level_resolution_was_core: bool,
     #[cfg(test)]
@@ -528,6 +530,7 @@ where
             contract_workspace,
             fusion_block_workspace: FusionBlockContractWorkspace::default(),
             fusion_scratch: DynamicFusionScratchWorkspace::default(),
+            copy_c_scratch: HostScratchBuffer::default(),
             #[cfg(test)]
             last_top_level_resolution_was_core: false,
             #[cfg(test)]
@@ -580,6 +583,29 @@ where
     #[inline]
     pub fn contract_workspace(&self) -> &BC::Workspace {
         &self.contract_workspace
+    }
+
+    /// Lends the grow-only Host buffer that holds TensorKit
+    /// `blas_contract!`'s `copyC` temporary: the default-output contraction
+    /// an eager caller then permutes into its own result. It lives with this
+    /// context's other execution scratch, so it is pooled and bounded the same
+    /// way (largest temporary seen, per idle context). Return it with
+    /// [`Self::restore_copy_c_scratch`]; a buffer lost to an error is simply
+    /// reallocated by the next caller.
+    #[doc(hidden)]
+    pub fn take_copy_c_scratch(&mut self) -> HostScratchBuffer<D> {
+        std::mem::take(&mut self.copy_c_scratch)
+    }
+
+    #[doc(hidden)]
+    pub fn restore_copy_c_scratch(&mut self, scratch: HostScratchBuffer<D>) {
+        self.copy_c_scratch = scratch;
+    }
+
+    /// Logical length of the retained `copyC` buffer.
+    #[doc(hidden)]
+    pub fn copy_c_scratch_len(&self) -> usize {
+        self.copy_c_scratch.len()
     }
 
     pub(crate) fn checked_generic_resources_mut(
