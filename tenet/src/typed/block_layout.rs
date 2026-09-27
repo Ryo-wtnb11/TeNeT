@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 /// One side of a tensor map `codomain <- domain`.
 ///
 /// Used where an operation acts on exactly one side, such as
@@ -27,7 +26,7 @@ pub enum Direction {
 }
 
 impl Direction {
-    fn is_inverse(self) -> bool {
+    pub(super) fn is_inverse(self) -> bool {
         self == Self::Inverse
     }
 }
@@ -43,7 +42,7 @@ pub enum Duality {
 }
 
 impl Duality {
-    fn is_dual(self) -> bool {
+    pub(super) fn is_dual(self) -> bool {
         self == Self::Dual
     }
 }
@@ -423,7 +422,10 @@ pub(crate) fn cat_logical_block_key(key: &BlockKey) -> Result<BlockKey, Error> {
     }
 }
 
-pub(super) fn cat_storage_axis(source: &CatOperandLayout<'_>, logical_axis: usize) -> Result<usize, Error> {
+pub(super) fn cat_storage_axis(
+    source: &CatOperandLayout<'_>,
+    logical_axis: usize,
+) -> Result<usize, Error> {
     if logical_axis >= source.rank {
         return Err(internal_layout_error(
             "concatenated logical axis exceeds source rank",
@@ -786,7 +788,11 @@ mod scale_strided_block_tests {
     }
 }
 
-pub(super) fn uncoupled_sector_of_leg(key: &FusionTreePairKey, nout: usize, leg: usize) -> SectorId {
+pub(super) fn uncoupled_sector_of_leg(
+    key: &FusionTreePairKey,
+    nout: usize,
+    leg: usize,
+) -> SectorId {
     if leg < nout {
         key.codomain_uncoupled()[leg]
     } else {

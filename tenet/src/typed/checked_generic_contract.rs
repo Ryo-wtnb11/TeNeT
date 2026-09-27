@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 impl<R, D> TypedTensorTraceDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -70,10 +69,10 @@ pub fn reject_non_symmetric_contraction(
 
 /// The axis lists a validated `trace_pairs` pair list stands for.
 pub(super) struct TracePairAxes {
-    output_axes: Vec<usize>,
-    destination_codomain_rank: usize,
-    trace_lhs: Vec<usize>,
-    trace_rhs: Vec<usize>,
+    pub(super) output_axes: Vec<usize>,
+    pub(super) destination_codomain_rank: usize,
+    pub(super) trace_lhs: Vec<usize>,
+    pub(super) trace_rhs: Vec<usize>,
 }
 
 /// Validates a `trace_pairs` pair list and derives the untraced output axes in
@@ -557,7 +556,9 @@ where
     write_dense_identity_blocks(Arc::get_mut(body).expect("fresh identity body"))
 }
 
-pub(super) fn write_dense_identity_blocks<R, D>(body: &mut TypedTensorBody<R, D>) -> Result<(), Error>
+pub(super) fn write_dense_identity_blocks<R, D>(
+    body: &mut TypedTensorBody<R, D>,
+) -> Result<(), Error>
 where
     D: TensorScalar,
 {

@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 /// Scalar payloads supported by [`TensorMap`], base capability.
 ///
 /// Admits the payload-dtype-independent half of the typed API: construction
@@ -1085,7 +1084,9 @@ where
     D: AdvancedLinalgScalar,
 {
     /// Checked-Generic general eigenvalues for owned host tensors.
-    fn eig_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, num_complex::Complex64> {
+    pub(super) fn eig_vals_checked_generic(
+        &self,
+    ) -> CheckedGenericSpectrumResult<R, num_complex::Complex64> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic eig_vals does not accept lazy adjoints".to_string(),
@@ -1120,7 +1121,7 @@ where
     D: FactorizationScalar,
 {
     /// Checked-Generic Hermitian eigenvalues for owned host tensors.
-    fn eigh_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, f64> {
+    pub(super) fn eigh_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, f64> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic eigh_vals does not accept lazy adjoints".to_string(),
@@ -1154,7 +1155,7 @@ where
         > + CheckedGenericFusion,
     D: FactorizationScalar,
 {
-    fn eigh_full_checked_generic(
+    pub(super) fn eigh_full_checked_generic(
         &self,
     ) -> Result<Eigh<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
@@ -1195,7 +1196,7 @@ where
         clippy::type_complexity,
         reason = "the checked eigensolver returns its diagonal and eigenvector factors together"
     )]
-    fn eig_full_checked_generic(
+    pub(super) fn eig_full_checked_generic(
         &self,
     ) -> Result<
         Eig<TensorMap<R, <D as FactorScalar>::Eig>>,
@@ -1235,7 +1236,7 @@ where
     D: FactorizationScalar,
 {
     /// Checked-Generic full QR for owned host tensors.
-    fn qr_full_checked_generic(
+    pub(super) fn qr_full_checked_generic(
         &self,
     ) -> Result<Qr<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
@@ -1263,7 +1264,7 @@ where
     D: FactorizationScalar,
 {
     /// Checked-Generic singular values only for owned host tensors.
-    fn svd_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, f64> {
+    pub(super) fn svd_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, f64> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic svd_vals does not accept lazy adjoints".to_string(),
@@ -1298,7 +1299,7 @@ where
     D: FactorizationScalar,
 {
     /// Checked-Generic compact LQ for owned host tensors.
-    fn lq_compact_checked_generic(
+    pub(super) fn lq_compact_checked_generic(
         &self,
     ) -> Result<Lq<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
@@ -1326,7 +1327,7 @@ where
         > + CheckedGenericFusion,
     D: FactorizationScalar,
 {
-    fn svd_full_checked_generic(
+    pub(super) fn svd_full_checked_generic(
         &self,
     ) -> Result<Svd<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
@@ -1347,7 +1348,7 @@ where
     }
 
     /// Checked-Generic compact SVD for owned host tensors.
-    fn svd_compact_checked_generic(
+    pub(super) fn svd_compact_checked_generic(
         &self,
     ) -> Result<Svd<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
@@ -1429,7 +1430,7 @@ where
     ///
     /// The first Generic decomposition leaf deliberately rejects lazy-adjoint
     /// inputs; no operation-local whole-payload fallback is introduced here.
-    fn qr_compact_checked_generic(
+    pub(super) fn qr_compact_checked_generic(
         &self,
     ) -> Result<Qr<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         let TypedTensorRepr::Owned(body) = &self.repr else {

@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 /// A symmetry-graded vector space bound to one fusion-rule provider.
 ///
 /// Each sector has a degeneracy, and the space owns this complete map even when
@@ -31,8 +30,8 @@ use super::*;
 /// # }
 /// ```
 pub struct GradedSpace<R> {
-    provider: Arc<R>,
-    leg: SectorLeg,
+    pub(super) provider: Arc<R>,
+    pub(super) leg: SectorLeg,
 }
 
 // Why hand-written instead of derived: the derives would demand `R: Clone` and
@@ -576,7 +575,7 @@ pub struct LegSelection<R> {
     subspace: GradedSpace<R>,
     // Sorted by `SectorId`, parallel to `subspace`'s stored sectors: the
     // kernels look the start up by the id they read from a block's own key.
-    entries: Vec<(SectorId, std::ops::Range<usize>)>,
+    pub(super) entries: Vec<(SectorId, std::ops::Range<usize>)>,
     // `entries`' starts, the table the restriction kernel reads per axis.
     // Why stored: one selection is applied to several factors, and a
     // restriction then borrows it instead of allocating it per call and axis.

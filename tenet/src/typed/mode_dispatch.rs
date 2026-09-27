@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 impl<R> TypedSpaceModeDispatch<R> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>

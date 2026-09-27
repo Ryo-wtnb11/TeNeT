@@ -1,11 +1,10 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 /// Storage shared by every clone of one typed tensor map: the admitted space
 /// and its block payload.
 pub(super) struct TypedTensorBody<R, D, S = Vec<D>> {
-    space: BoundDynamicFusionMapSpace<R>,
+    pub(super) space: BoundDynamicFusionMapSpace<R>,
     /// Why the payload carries its own reference count rather than sitting
     /// inline in the body: an operation that rewrites only the *space* and
     /// leaves every stored value where it is — inserting or removing a unit
@@ -35,7 +34,7 @@ pub(super) struct TypedTensorBody<R, D, S = Vec<D>> {
     /// writes (the unit-leg operations build new bodies over old dense
     /// payloads; every write route publishes a new payload instead of
     /// reaching through the `Arc`).
-    data: Arc<TypedData<D, S>>,
+    pub(super) data: Arc<TypedData<D, S>>,
     /// Materialization of a [`TypedData::Diagonal`] payload into the dense
     /// coupled layout, computed at most once and shared by every clone of this
     /// body. Never populated for a dense payload.
@@ -47,16 +46,16 @@ pub(super) struct TypedTensorBody<R, D, S = Vec<D>> {
     /// a `Diagonal` payload under a *different* space is not a scenario this
     /// placement serves: that reuse is forbidden outright — see the `data`
     /// field rationale on the Group 4 contract.)
-    dense_cache: std::sync::OnceLock<Vec<D>>,
+    pub(super) dense_cache: std::sync::OnceLock<Vec<D>>,
 }
 
 impl<R, D, S> TypedTensorBody<R, D, S> {
     /// A body holding an already-dense payload.
-    fn dense(space: BoundDynamicFusionMapSpace<R>, data: S) -> Self {
+    pub(super) fn dense(space: BoundDynamicFusionMapSpace<R>, data: S) -> Self {
         Self::new(space, TypedData::Dense(data))
     }
 
-    fn new(space: BoundDynamicFusionMapSpace<R>, data: TypedData<D, S>) -> Self {
+    pub(super) fn new(space: BoundDynamicFusionMapSpace<R>, data: TypedData<D, S>) -> Self {
         Self {
             space,
             data: Arc::new(data),
@@ -68,7 +67,7 @@ impl<R, D, S> TypedTensorBody<R, D, S> {
     /// rewritten) space — the unit-leg operations' O(1) dense reuse
     /// (#580 PR 5). The cache starts cold on purpose: it belongs to the
     /// body's own space/payload pairing (see the `dense_cache` rationale).
-    fn with_shared_payload(
+    pub(super) fn with_shared_payload(
         space: BoundDynamicFusionMapSpace<R>,
         data: Arc<TypedData<D, S>>,
     ) -> Self {
@@ -82,7 +81,7 @@ impl<R, D, S> TypedTensorBody<R, D, S> {
 
 impl<R, D, S> TypedTensorBody<R, D, S> {
     /// A body holding a compact spectrum payload.
-    fn diagonal(
+    pub(super) fn diagonal(
         space: BoundDynamicFusionMapSpace<R>,
         spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>,
     ) -> Self {
@@ -91,17 +90,17 @@ impl<R, D, S> TypedTensorBody<R, D, S> {
 }
 
 pub(super) struct TypedAdjointView<R, D, S = Vec<D>> {
-    parent: Arc<TypedTensorBody<R, D, S>>,
-    logical_space: BoundDynamicFusionMapSpace<R>,
+    pub(super) parent: Arc<TypedTensorBody<R, D, S>>,
+    pub(super) logical_space: BoundDynamicFusionMapSpace<R>,
     // Lazy adjoint materialization is deliberately host-allocated. `S` names
     // the canonical parent payload; it is not a promise that arbitrary storage
     // can allocate a same-storage result.
-    materialized: OnceLock<Arc<TypedTensorBody<R, D>>>,
+    pub(super) materialized: OnceLock<Arc<TypedTensorBody<R, D>>>,
     /// Set only on the operation-local header a [`TensorRef`] resolves to:
     /// the materialization path refuses it instead of copying.
-    borrowed: bool,
+    pub(super) borrowed: bool,
     #[cfg(test)]
-    materialized_body_builds: std::sync::atomic::AtomicUsize,
+    pub(super) materialized_body_builds: std::sync::atomic::AtomicUsize,
 }
 
 impl<R, D, S> TypedAdjointView<R, D, S> {
@@ -114,7 +113,7 @@ impl<R, D, S> TypedAdjointView<R, D, S> {
     /// re-wrap parents that are already dense. Why not a dense-only parent
     /// type: `parent` is the same `Arc` an owned tensor holds, which keeps
     /// adjoint-of-adjoint an `O(1)` handle swap.
-    fn new(
+    pub(super) fn new(
         parent: Arc<TypedTensorBody<R, D, S>>,
         logical_space: BoundDynamicFusionMapSpace<R>,
     ) -> Self {
@@ -177,12 +176,12 @@ pub(super) fn observe_adjoint_materialization() {
 /// # Ok::<(), tenet::typed::Error>(())
 /// ```
 pub struct TensorRef<'a, R, D, S = Vec<D>> {
-    base: &'a TensorMap<R, D, S>,
+    pub(super) base: &'a TensorMap<R, D, S>,
     /// The base's own `adjoint`, captured where it exists; `None` for the
     /// plain view. Why a `fn` pointer and not a bound on each operation: the
     /// multiplicity-free `adjoint` needs a real coefficient scalar, which
     /// `contract` and `compose` do not.
-    adjoint: Option<ViewAdjoint<R, D, S>>,
+    pub(super) adjoint: Option<ViewAdjoint<R, D, S>>,
 }
 
 pub(super) type ViewAdjoint<R, D, S> = fn(&TensorMap<R, D, S>) -> Result<TensorMap<R, D, S>, Error>;
@@ -211,7 +210,7 @@ impl<'a, R, D, S> TensorRef<'a, R, D, S> {
     /// the owned lazy adjoint's implicit materialization until #1548. An
     /// adjoint view is `adjoint(base)`, marked so that the materialization
     /// path refuses it.
-    fn operand(self) -> Result<std::borrow::Cow<'a, TensorMap<R, D, S>>, Error> {
+    pub(super) fn operand(self) -> Result<std::borrow::Cow<'a, TensorMap<R, D, S>>, Error> {
         let Some(adjoint) = self.adjoint else {
             return Ok(std::borrow::Cow::Borrowed(self.base));
         };
@@ -230,7 +229,7 @@ pub(super) fn borrowed_view_unsupported(operation: &'static str) -> Error {
 impl<R, D, S> TensorMap<R, D, S> {
     /// Refuses a resolved adjoint view before `operation` does any work,
     /// for operations whose only route for a lazy adjoint materializes it.
-    fn refuse_borrowed_view(&self, operation: &'static str) -> Result<(), Error> {
+    pub(super) fn refuse_borrowed_view(&self, operation: &'static str) -> Result<(), Error> {
         match &self.repr {
             TypedTensorRepr::Adjoint(view) if view.borrowed => {
                 Err(borrowed_view_unsupported(operation))
@@ -338,8 +337,8 @@ pub(super) fn owned_repr<R, D, S>(body: TypedTensorBody<R, D, S>) -> TypedTensor
 /// Cloning is cheap: the runtime handle and the shared body are both
 /// reference-counted, and cloning does not require `S: Clone`.
 pub struct TensorMap<R, D, S = Vec<D>> {
-    runtime: Runtime,
-    repr: TypedTensorRepr<R, D, S>,
+    pub(super) runtime: Runtime,
+    pub(super) repr: TypedTensorRepr<R, D, S>,
 }
 
 impl<R, D, S> AsRef<Self> for TensorMap<R, D, S> {
@@ -623,14 +622,14 @@ impl<R, D, S> TensorMap<R, D, S> {
         }
     }
 
-    fn storage_body(&self) -> &Arc<TypedTensorBody<R, D, S>> {
+    pub(super) fn storage_body(&self) -> &Arc<TypedTensorBody<R, D, S>> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => body,
             TypedTensorRepr::Adjoint(view) => &view.parent,
         }
     }
 
-    fn logical_space(&self) -> &BoundDynamicFusionMapSpace<R> {
+    pub(super) fn logical_space(&self) -> &BoundDynamicFusionMapSpace<R> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => &body.space,
             TypedTensorRepr::Adjoint(view) => &view.logical_space,
@@ -642,14 +641,14 @@ impl<R, D, S> TensorMap<R, D, S> {
         self.logical_space()
     }
 
-    fn owned_body(&self) -> Option<&Arc<TypedTensorBody<R, D, S>>> {
+    pub(super) fn owned_body(&self) -> Option<&Arc<TypedTensorBody<R, D, S>>> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => Some(body),
             TypedTensorRepr::Adjoint(_) => None,
         }
     }
 
-    fn dense_adjoint_view(&self) -> Result<Self, Error>
+    pub(super) fn dense_adjoint_view(&self) -> Result<Self, Error>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
@@ -705,7 +704,7 @@ impl<R, D, S> TensorMap<R, D, S> {
     /// Storage-generic so the host and device transform facades cannot drift
     /// on what "identity" means, which is what each of them short-circuits on.
     #[inline]
-    fn axes_are_identity(&self, codomain_axes: &[usize], domain_axes: &[usize]) -> bool {
+    pub(super) fn axes_are_identity(&self, codomain_axes: &[usize], domain_axes: &[usize]) -> bool {
         let codomain_rank = self.codomain_rank();
         codomain_axes.iter().copied().eq(0..codomain_rank)
             && domain_axes.iter().copied().eq(codomain_rank..self.rank())
@@ -766,7 +765,7 @@ impl<R, D, S> TensorMap<R, D, S> {
 }
 
 impl<R, D> TensorMap<R, D> {
-    fn with_data(&self, data: Vec<D>) -> Self {
+    pub(super) fn with_data(&self, data: Vec<D>) -> Self {
         Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(self.logical_space().clone(), data)),
@@ -777,7 +776,10 @@ impl<R, D> TensorMap<R, D> {
 // Generic over storage so the device `adjoint` applies the same compact rule
 // as Host (#1452) to any compact diagonal a device tensor holds.
 impl<R, D, S> TensorMap<R, D, S> {
-    fn with_spectrum(&self, spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>) -> Self {
+    pub(super) fn with_spectrum(
+        &self,
+        spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>,
+    ) -> Self {
         Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::diagonal(
@@ -787,7 +789,7 @@ impl<R, D, S> TensorMap<R, D, S> {
         }
     }
 
-    fn with_spectrum_on(
+    pub(super) fn with_spectrum_on(
         &self,
         space: BoundDynamicFusionMapSpace<R>,
         spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>,
@@ -798,7 +800,7 @@ impl<R, D, S> TensorMap<R, D, S> {
         }
     }
 
-    fn spectrum(&self) -> Option<&[tenet_matrixalgebra::SectorSpectrum<D>]> {
+    pub(super) fn spectrum(&self) -> Option<&[tenet_matrixalgebra::SectorSpectrum<D>]> {
         match self.owned_body()?.data.as_ref() {
             TypedData::Diagonal(spectrum) => Some(spectrum),
             TypedData::Dense(_) => None,
@@ -810,7 +812,7 @@ impl<R, D, S> TensorMap<R, D, S> {
     /// (`codomain == domain`), so this is `O(Σ_c k_c)` with no dense buffer
     /// and no bend, and a real payload shares the body without copying.
     /// [`None`] unless the tensor owns a compact diagonal.
-    fn compact_adjoint(&self) -> Option<Self>
+    pub(super) fn compact_adjoint(&self) -> Option<Self>
     where
         D: TensorScalar,
     {

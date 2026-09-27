@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 #[cfg(feature = "cuda")]
 impl<R, D: CudaPayload> TensorMap<R, D> {
     /// Uploads host ownership of a device-capable payload to this tensor's
@@ -275,7 +274,7 @@ where
         })
     }
 
-    fn compile_cuda_qr_plan(
+    pub(super) fn compile_cuda_qr_plan(
         &self,
         source_regions: Arc<[CoupledSectorRegion]>,
     ) -> Result<TypedCudaQrPlan<R>, Error> {
@@ -1220,7 +1219,10 @@ where
         })
     }
 
-    fn direct_cuda_storage(&self, operation: &'static str) -> Result<&CudaStorage<D>, Error> {
+    pub(super) fn direct_cuda_storage(
+        &self,
+        operation: &'static str,
+    ) -> Result<&CudaStorage<D>, Error> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => match body.data.as_ref() {
                 TypedData::Dense(storage) => Ok(storage),
@@ -1234,7 +1236,7 @@ where
         }
     }
 
-    fn validate_cuda_owned_metadata(
+    pub(super) fn validate_cuda_owned_metadata(
         expected: Placement,
         actual: Placement,
         required_len: usize,
@@ -3149,7 +3151,7 @@ impl<R, D> TensorMap<R, D>
 where
     D: TensorScalar,
 {
-    fn fusion_operand(&self) -> tenet_tensors::FusionOperand<'_> {
+    pub(super) fn fusion_operand(&self) -> tenet_tensors::FusionOperand<'_> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => {
                 tenet_tensors::FusionOperand::direct(body.space.space())
@@ -3160,7 +3162,7 @@ where
         }
     }
 
-    fn fusion_operand_and_data(&self) -> (tenet_tensors::FusionOperand<'_>, &[D]) {
+    pub(super) fn fusion_operand_and_data(&self) -> (tenet_tensors::FusionOperand<'_>, &[D]) {
         match &self.repr {
             TypedTensorRepr::Owned(body) => (
                 tenet_tensors::FusionOperand::direct(body.space.space()),
@@ -3685,7 +3687,7 @@ where
     /// Infallible for the reason [`TypedTensorBody::materialized_dense_data`]
     /// is: the diagonal fill is total on a bond space this module built from
     /// that same spectrum.
-    fn shareable_dense_payload(&self) -> Arc<TypedData<D>> {
+    pub(super) fn shareable_dense_payload(&self) -> Arc<TypedData<D>> {
         if let Some(body) = self.owned_body() {
             if matches!(body.data.as_ref(), TypedData::Dense(_)) {
                 return Arc::clone(&body.data);
@@ -3706,7 +3708,7 @@ where
     /// receiver's reusable materialization cache, but still constructs a full
     /// receiver-sized logical payload. Prefer an oriented kernel or algebraic
     /// redirect when one implements the same semantics.
-    fn materialized_tensor_uncached(&self) -> Result<Self, Error> {
+    pub(super) fn materialized_tensor_uncached(&self) -> Result<Self, Error> {
         let TypedTensorRepr::Adjoint(view) = &self.repr else {
             return Ok(self.clone());
         };
@@ -3959,7 +3961,7 @@ where
     D: TensorScalar,
     S: HostReadableStorage<D>,
 {
-    fn materialized_dense_data(&self) -> &[D] {
+    pub(super) fn materialized_dense_data(&self) -> &[D] {
         match &*self.data {
             TypedData::Dense(data) => data.as_slice(),
             TypedData::Diagonal(spectrum) => self.dense_cache.get_or_init(|| {

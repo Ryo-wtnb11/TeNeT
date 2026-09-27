@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 /// Facade error for checked Generic providers.
 #[non_exhaustive]
 #[derive(Debug)]

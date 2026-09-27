@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 #[cfg(all(test, feature = "cuda"))]
 thread_local! {
     /// `(download_calls, device_partials_len, host_partials_len)`.
@@ -46,7 +45,9 @@ pub(super) type CudaQrObservation = (usize, usize, usize, usize, usize, usize, u
 pub(super) type CudaSvdObservation = (usize, usize, usize, usize, usize);
 
 #[cfg(all(test, feature = "cuda"))]
-pub(super) fn update_cuda_svd_observation(update: impl FnOnce(CudaSvdObservation) -> CudaSvdObservation) {
+pub(super) fn update_cuda_svd_observation(
+    update: impl FnOnce(CudaSvdObservation) -> CudaSvdObservation,
+) {
     CUDA_SVD_OBSERVATION.with(|observation| {
         if let Some(current) = observation.get() {
             observation.set(Some(update(current)));
@@ -69,7 +70,11 @@ pub(super) fn observe_cuda_svd_final_storage_creation() {
 }
 
 #[cfg(all(test, feature = "cuda"))]
-pub(super) fn observe_cuda_arithmetic(zero_uploads: usize, coefficient_uploads: usize, kernels: usize) {
+pub(super) fn observe_cuda_arithmetic(
+    zero_uploads: usize,
+    coefficient_uploads: usize,
+    kernels: usize,
+) {
     CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
         if let Some((zeros, coefficients, calls)) = observation.get() {
             observation.set(Some((
@@ -82,7 +87,9 @@ pub(super) fn observe_cuda_arithmetic(zero_uploads: usize, coefficient_uploads: 
 }
 
 #[cfg(all(test, feature = "cuda"))]
-pub(super) fn update_cuda_qr_observation(update: impl FnOnce(CudaQrObservation) -> CudaQrObservation) {
+pub(super) fn update_cuda_qr_observation(
+    update: impl FnOnce(CudaQrObservation) -> CudaQrObservation,
+) {
     CUDA_QR_OBSERVATION.with(|observation| {
         if let Some(current) = observation.get() {
             observation.set(Some(update(current)));
@@ -647,15 +654,15 @@ where
 
 #[cfg(feature = "cuda")]
 pub(super) struct TypedCudaQrScratch<D: CudaPayload> {
-    left: CudaDenseStorage,
-    right: CudaDenseStorage,
+    pub(super) left: CudaDenseStorage,
+    pub(super) right: CudaDenseStorage,
     /// `None` when both assembly routes are layout-aligned and copy instead.
-    selector: Option<CudaStorage<D>>,
+    pub(super) selector: Option<CudaStorage<D>>,
 }
 
 #[cfg(feature = "cuda")]
 impl<D: CudaPayload> TypedCudaQrScratch<D> {
-    fn new(
+    pub(super) fn new(
         left: CudaDenseStorage,
         right: CudaDenseStorage,
         selector: Option<CudaStorage<D>>,
@@ -684,17 +691,17 @@ impl<D: CudaPayload> Drop for TypedCudaQrScratch<D> {
 
 #[cfg(feature = "cuda")]
 pub(super) struct TypedCudaSvdScratch<D: CudaPayload> {
-    left: CudaDenseStorage,
-    right: CudaDenseStorage,
+    pub(super) left: CudaDenseStorage,
+    pub(super) right: CudaDenseStorage,
     /// `None` on a layout-aligned side, whose gauged factor is copied.
-    left_selector: Option<CudaDenseStorage>,
-    right_selector: Option<CudaDenseStorage>,
+    pub(super) left_selector: Option<CudaDenseStorage>,
+    pub(super) right_selector: Option<CudaDenseStorage>,
     payload: std::marker::PhantomData<D>,
 }
 
 #[cfg(feature = "cuda")]
 impl<D: CudaPayload> TypedCudaSvdScratch<D> {
-    fn new(
+    pub(super) fn new(
         left: CudaDenseStorage,
         right: CudaDenseStorage,
         left_selector: Option<CudaDenseStorage>,
@@ -714,7 +721,9 @@ impl<D: CudaPayload> TypedCudaSvdScratch<D> {
         }
     }
 
-    fn selector(selector: &Option<CudaDenseStorage>) -> Result<&CudaDenseStorage, Error> {
+    pub(super) fn selector(
+        selector: &Option<CudaDenseStorage>,
+    ) -> Result<&CudaDenseStorage, Error> {
         selector.as_ref().ok_or_else(|| {
             internal_layout_error("a non-aligned factor route has no gauge selector")
         })
@@ -733,49 +742,49 @@ impl<D: CudaPayload> Drop for TypedCudaSvdScratch<D> {
 #[cfg(feature = "cuda")]
 #[derive(Clone, Copy)]
 pub(super) struct TypedCudaQrRoute {
-    source: usize,
-    left: usize,
-    right: usize,
-    rank: usize,
+    pub(super) source: usize,
+    pub(super) left: usize,
+    pub(super) right: usize,
+    pub(super) rank: usize,
     /// The left factor's target region has the source's codomain tree layout,
     /// so it can be written by one whole-factor copy instead of a per-tree
     /// identity-selector GEMM. Proved at plan time, never a size heuristic.
-    aligned_left: bool,
+    pub(super) aligned_left: bool,
     /// The same proof for the right factor's domain tree layout.
-    aligned_right: bool,
+    pub(super) aligned_right: bool,
 }
 
 #[cfg(feature = "cuda")]
 pub(super) struct TypedCudaQrPlan<R> {
-    left_space: BoundDynamicFusionMapSpace<R>,
-    right_space: BoundDynamicFusionMapSpace<R>,
-    source_regions: Arc<[CoupledSectorRegion]>,
-    left_regions: Arc<[CoupledSectorRegion]>,
-    right_regions: Arc<[CoupledSectorRegion]>,
-    routes: Vec<TypedCudaQrRoute>,
+    pub(super) left_space: BoundDynamicFusionMapSpace<R>,
+    pub(super) right_space: BoundDynamicFusionMapSpace<R>,
+    pub(super) source_regions: Arc<[CoupledSectorRegion]>,
+    pub(super) left_regions: Arc<[CoupledSectorRegion]>,
+    pub(super) right_regions: Arc<[CoupledSectorRegion]>,
+    pub(super) routes: Vec<TypedCudaQrRoute>,
 }
 
 #[cfg(feature = "cuda")]
 #[derive(Clone, Copy)]
 pub(super) struct TypedCudaEighRoute {
-    source: usize,
-    left: usize,
-    full_rank: usize,
-    kept: usize,
+    pub(super) source: usize,
+    pub(super) left: usize,
+    pub(super) full_rank: usize,
+    pub(super) kept: usize,
     /// The eigenvector region has the source's codomain tree layout, so its
     /// column permutation is one whole-region GEMM instead of one per tree.
-    aligned: bool,
+    pub(super) aligned: bool,
 }
 
 /// The eigenvector (`left`) and diagonal (`middle`) factor spaces and routes
 /// of a device EIGH, for a bond of the given per-sector rank.
 #[cfg(feature = "cuda")]
 pub(super) struct TypedCudaEighPlan<R> {
-    left_space: BoundDynamicFusionMapSpace<R>,
-    middle_space: BoundDynamicFusionMapSpace<R>,
-    source_regions: Arc<[CoupledSectorRegion]>,
-    left_regions: Arc<[CoupledSectorRegion]>,
-    routes: Vec<TypedCudaEighRoute>,
+    pub(super) left_space: BoundDynamicFusionMapSpace<R>,
+    pub(super) middle_space: BoundDynamicFusionMapSpace<R>,
+    pub(super) source_regions: Arc<[CoupledSectorRegion]>,
+    pub(super) left_regions: Arc<[CoupledSectorRegion]>,
+    pub(super) routes: Vec<TypedCudaEighRoute>,
 }
 
 /// Whether a factor region reproduces its source's tree layout exactly: the

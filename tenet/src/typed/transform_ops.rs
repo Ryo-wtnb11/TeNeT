@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 pub(super) fn tree_operation_matches_axes(
     operation: &TreeTransformOperation,
     kind: TreeTransformOperationKind,
@@ -1175,7 +1174,7 @@ where
     /// operand's would silently produce a tensor on the wrong space, so the
     /// arm declines and the expert layer decides — including by rejecting a
     /// composition that is not one at all.
-    fn compose_compact(&self, other: &Self) -> Result<Option<Self>, Error> {
+    pub(super) fn compose_compact(&self, other: &Self) -> Result<Option<Self>, Error> {
         if !self.same_rule(other) {
             return Ok(None);
         }
@@ -1274,7 +1273,7 @@ where
     /// because the first constructor of a compact payload on a dual bond leg —
     /// or of an arm pairing a domain leg of `other` — should decline rather
     /// than silently return a wrong sign.
-    fn try_contract_diagonal(
+    pub(super) fn try_contract_diagonal(
         &self,
         other: &Self,
         lhs_axes: &[usize],
@@ -1563,7 +1562,7 @@ where
     /// assert!(max_err < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    fn svd_compact_multiplicity_free(&self) -> Result<Svd<Self>, Error>
+    pub(super) fn svd_compact_multiplicity_free(&self) -> Result<Svd<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -1609,7 +1608,7 @@ where
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
-    fn svd_full_multiplicity_free(&self) -> Result<Svd<Self>, Error>
+    pub(super) fn svd_full_multiplicity_free(&self) -> Result<Svd<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -1645,7 +1644,9 @@ where
     /// [`Error::Operation`] / [`Error::Core`] from the seam, plus
     /// [`Error::FusionAlgebra`] when the provider cannot decode a coupled
     /// sector its own algebra produced.
-    fn svd_vals_multiplicity_free(&self) -> Result<Vec<SectorSpectrum<R::Sector, f64>>, Error>
+    pub(super) fn svd_vals_multiplicity_free(
+        &self,
+    ) -> Result<Vec<SectorSpectrum<R::Sector, f64>>, Error>
     where
         D: FactorizationScalar,
     {
@@ -1687,7 +1688,7 @@ where
     /// (MatrixAlgebraKit's `DiagonalAlgorithm`); that fast path is not adopted
     /// here — the issue #613 Group 4 contract requires every compact fast path
     /// to be re-proven individually, the same deferral the polars record.
-    fn qr_compact_multiplicity_free(&self) -> Result<Qr<Self>, Error>
+    pub(super) fn qr_compact_multiplicity_free(&self) -> Result<Qr<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -1718,7 +1719,7 @@ where
     /// it in the receiver cache. A compact-diagonal payload is materialized
     /// dense first (TensorKit's `DiagonalAlgorithm` covers `qr_full!` too —
     /// same non-adoption, same #613 Group 4 deferral).
-    fn qr_full_multiplicity_free(&self) -> Result<Qr<Self>, Error>
+    pub(super) fn qr_full_multiplicity_free(&self) -> Result<Qr<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -1748,7 +1749,7 @@ where
     /// neither parent factor buffer. A compact-diagonal payload is materialized
     /// dense first (TensorKit's `DiagonalAlgorithm` covers the LQ pair as well
     /// — same non-adoption, same #613 Group 4 deferral).
-    fn lq_compact_multiplicity_free(&self) -> Result<Lq<Self>, Error>
+    pub(super) fn lq_compact_multiplicity_free(&self) -> Result<Lq<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -1782,7 +1783,7 @@ where
     /// additional costs. A lazy adjoint uses the parent full-QR route and two
     /// detached owned output payloads. A compact-diagonal payload is
     /// materialized dense first.
-    fn lq_full_multiplicity_free(&self) -> Result<Lq<Self>, Error>
+    pub(super) fn lq_full_multiplicity_free(&self) -> Result<Lq<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -1830,7 +1831,7 @@ where
     /// [`Self::qr_compact`]. A lazy adjoint runs the owned parent's
     /// [`Self::right_null`] and returns its detached adjoint, without
     /// materializing the receiver.
-    fn left_null_multiplicity_free(&self) -> Result<Self, Error>
+    pub(super) fn left_null_multiplicity_free(&self) -> Result<Self, Error>
     where
         D: FactorizationScalar,
     {
@@ -1866,7 +1867,7 @@ where
     /// As [`Self::left_null`]: sectorwise cubic, compact-diagonal payload
     /// materialized dense first. A lazy adjoint mirrors the parent redirect
     /// described there.
-    fn right_null_multiplicity_free(&self) -> Result<Self, Error>
+    pub(super) fn right_null_multiplicity_free(&self) -> Result<Self, Error>
     where
         D: FactorizationScalar,
     {
@@ -1912,7 +1913,7 @@ where
     /// it dispatches dense per block), and the
     /// issue #613 Group 4 contract requires any compact fast path to be
     /// individually re-proven — out of scope here.
-    fn left_polar_multiplicity_free(&self) -> Result<LeftPolar<Self>, Error>
+    pub(super) fn left_polar_multiplicity_free(&self) -> Result<LeftPolar<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -1968,7 +1969,7 @@ where
     ///
     /// As [`Self::left_polar`]: `O(Σ_c n_c³)`, sectorwise, with a
     /// compact-diagonal payload materialized first.
-    fn right_polar_multiplicity_free(&self) -> Result<RightPolar<Self>, Error>
+    pub(super) fn right_polar_multiplicity_free(&self) -> Result<RightPolar<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -2019,7 +2020,7 @@ where
     /// coupled blocks are not Hermitian, and otherwise
     /// [`Error::Core`] / [`Error::FusionAlgebra`] from the seam — which owns
     /// those rules, so they are not re-checked here.
-    fn eigh_full_multiplicity_free(&self) -> Result<Eigh<Self>, Error>
+    pub(super) fn eigh_full_multiplicity_free(&self) -> Result<Eigh<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -2047,7 +2048,9 @@ where
     ///
     /// [`Self::eigh_full`]'s, plus [`Error::FusionAlgebra`] when the provider
     /// cannot decode a coupled sector its own algebra produced.
-    fn eigh_vals_multiplicity_free(&self) -> Result<Vec<SectorSpectrum<R::Sector>>, Error>
+    pub(super) fn eigh_vals_multiplicity_free(
+        &self,
+    ) -> Result<Vec<SectorSpectrum<R::Sector>>, Error>
     where
         D: FactorizationScalar,
     {
@@ -2086,7 +2089,7 @@ where
     /// [`Error::Operation`] when the tensor is not an endomorphism, and
     /// otherwise [`Error::Core`] / [`Error::FusionAlgebra`] from the seam.
     #[allow(clippy::type_complexity)]
-    fn eig_full_multiplicity_free(
+    pub(super) fn eig_full_multiplicity_free(
         &self,
     ) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, Error>
     where
@@ -2119,7 +2122,7 @@ where
     ///
     /// [`Self::eig_full`]'s, plus [`Error::FusionAlgebra`] when the provider
     /// cannot decode a coupled sector its own algebra produced.
-    fn eig_vals_multiplicity_free(
+    pub(super) fn eig_vals_multiplicity_free(
         &self,
     ) -> Result<Vec<SectorSpectrum<R::Sector, num_complex::Complex64>>, Error>
     where
@@ -2140,7 +2143,7 @@ where
     }
 
     /// Multiplicity-free implementation of the public mode-dispatched exponential.
-    fn exp_multiplicity_free(&self) -> Result<Self, Error>
+    pub(super) fn exp_multiplicity_free(&self) -> Result<Self, Error>
     where
         D: AdvancedLinalgScalar,
     {
@@ -2170,7 +2173,7 @@ where
     }
 
     /// Multiplicity-free implementation of the public mode-dispatched inverse.
-    fn inv_multiplicity_free(&self) -> Result<Self, Error>
+    pub(super) fn inv_multiplicity_free(&self) -> Result<Self, Error>
     where
         D: AdvancedLinalgScalar,
     {
@@ -2211,7 +2214,7 @@ where
     /// keeps `self`'s exact provider allocation. Dense blocks are written
     /// directly into the final output; compact diagonal divisors reuse the
     /// elementwise reciprocal and bond-scaling path.
-    fn solve_multiplicity_free(&self, rhs: &Self) -> Result<Self, Error>
+    pub(super) fn solve_multiplicity_free(&self, rhs: &Self) -> Result<Self, Error>
     where
         D: AdvancedLinalgScalar,
     {
@@ -2304,7 +2307,7 @@ where
     }
 
     /// Multiplicity-free implementation of [`Self::pinv`].
-    fn pinv_multiplicity_free(&self, rcond: f64) -> Result<Self, Error>
+    pub(super) fn pinv_multiplicity_free(&self, rcond: f64) -> Result<Self, Error>
     where
         D: AdvancedLinalgScalar,
     {
@@ -2443,7 +2446,12 @@ where
     /// assert!((doubled.norm(2.0)? - 2.0 * t.norm(2.0)?).abs() < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    fn add_multiplicity_free(&self, other: &Self, alpha: D, beta: D) -> Result<Self, Error> {
+    pub(super) fn add_multiplicity_free(
+        &self,
+        other: &Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<Self, Error> {
         // Runtime first, exactly as `contract` does: crossing runtimes is a
         // trust-boundary violation rather than an algebra error.
         if !self.runtime.same_runtime(&other.runtime) {
@@ -2580,7 +2588,7 @@ where
     ///
     /// Compact diagonal storage is preserved: scaling a spectrum factor stays
     /// `Σ_c k_c` values rather than densifying.
-    fn scale_multiplicity_free(&self, factor: D) -> Self {
+    pub(super) fn scale_multiplicity_free(&self, factor: D) -> Self {
         if let Some(spectrum) = self.spectrum() {
             return self.with_spectrum(
                 spectrum
@@ -2651,7 +2659,10 @@ where
     /// Otherwise [`Error::Operation`] / [`Error::Core`] /
     /// [`Error::FusionAlgebra`] from the seam, which owns the rest of the
     /// validation (legs that are not mutually dual, above all).
-    fn trace_pairs_multiplicity_free(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
+    pub(super) fn trace_pairs_multiplicity_free(
+        &self,
+        pairs: &[(usize, usize)],
+    ) -> Result<Self, Error> {
         let _host_pool = self.runtime.enter_host_pool();
         let rank = self.rank();
         let Some(TracePairAxes {
@@ -2803,7 +2814,7 @@ where
     ///
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
     /// straight from the seam, which owns the bend the dagger performs.
-    fn adjoint_multiplicity_free(&self) -> Result<Self, Error> {
+    pub(super) fn adjoint_multiplicity_free(&self) -> Result<Self, Error> {
         if let Some(adjoint) = self.compact_adjoint() {
             return Ok(adjoint);
         }
@@ -2912,7 +2923,7 @@ where
 
     /// [`Self::norm`]'s exponent dispatch. `p == 2` and `p == Inf` take the
     /// Frobenius and maximum arms, so no exponent has two reductions.
-    fn norm_p_multiplicity_free(&self, p: f64) -> Result<f64, Error> {
+    pub(super) fn norm_p_multiplicity_free(&self, p: f64) -> Result<f64, Error> {
         // Checked before any dispatch so an invalid `p` is rejected the same
         // way on compact and dense storage.
         validate_norm_p(p)?;
@@ -2990,7 +3001,7 @@ where
     /// Exactly [`Self::axpby`]'s — the operands must share a runtime and a space
     /// — plus [`Error::Core`] from the block-structure walk, as for
     /// [`Self::norm`].
-    fn inner_multiplicity_free(&self, other: &Self) -> Result<D, Error> {
+    pub(super) fn inner_multiplicity_free(&self, other: &Self) -> Result<D, Error> {
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -3064,7 +3075,7 @@ where
     ///
     /// [`Error::InvalidArgument`] when the tensor is not an endomorphism, and
     /// [`Error::Core`] when the block structure cannot be walked.
-    fn tr_multiplicity_free(&self) -> Result<D, Error> {
+    pub(super) fn tr_multiplicity_free(&self) -> Result<D, Error> {
         let hom = self.logical_space().space().homspace();
         // The weighted trace below indexes codomain axis `i` together with
         // domain axis `nout + i` and would be meaningless without this check.
@@ -3132,7 +3143,7 @@ where
             .fold(D::from_real(0.0), |acc, &value| acc + value))
     }
 
-    fn twist_with_inverse(&self, legs: &[usize], inverse: bool) -> Result<Self, Error> {
+    pub(super) fn twist_with_inverse(&self, legs: &[usize], inverse: bool) -> Result<Self, Error> {
         let rank = self.rank();
         let name = if inverse { "inverse twist" } else { "twist" };
         if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
@@ -3216,7 +3227,7 @@ where
         })
     }
 
-    fn flip_multiplicity_free_with_inverse(
+    pub(super) fn flip_multiplicity_free_with_inverse(
         &self,
         legs: &[usize],
         inverse: bool,

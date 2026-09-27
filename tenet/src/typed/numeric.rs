@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 impl ScalarOps for f64 {
     const CONJUGATION_IS_IDENTITY: bool = true;
 

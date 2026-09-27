@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 /// The provider-labelled identity of one stored block: the fusion tree on each
 /// side of the tensor map, decoded through the codec — the labelled
 /// counterpart of [`tenet_core::FusionTreePairKey`], named after TensorKit's
@@ -21,13 +20,13 @@ use super::*;
 /// can have identical sector labels and differ only by outer multiplicity.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BlockFusionTrees<S> {
-    coupled: S,
-    codomain_uncoupled: Vec<S>,
-    codomain_innerlines: Vec<S>,
-    codomain_vertices: Vec<MultiplicityIndex>,
-    domain_uncoupled: Vec<S>,
-    domain_innerlines: Vec<S>,
-    domain_vertices: Vec<MultiplicityIndex>,
+    pub(super) coupled: S,
+    pub(super) codomain_uncoupled: Vec<S>,
+    pub(super) codomain_innerlines: Vec<S>,
+    pub(super) codomain_vertices: Vec<MultiplicityIndex>,
+    pub(super) domain_uncoupled: Vec<S>,
+    pub(super) domain_innerlines: Vec<S>,
+    pub(super) domain_vertices: Vec<MultiplicityIndex>,
 }
 
 impl<S> BlockFusionTrees<S> {
@@ -90,13 +89,13 @@ impl<S> BlockFusionTrees<S> {
 /// `docs/sector_id_compatibility.md`); presenting TensorKit's order would copy.
 #[derive(Debug)]
 pub struct CoupledBlock<'a, R, D, S = Vec<D>> {
-    rows: usize,
-    cols: usize,
-    payload: CoupledBlockPayload<'a, D, S>,
-    provider: &'a R,
+    pub(super) rows: usize,
+    pub(super) cols: usize,
+    pub(super) payload: CoupledBlockPayload<'a, D, S>,
+    pub(super) provider: &'a R,
     /// The stored region and whether rows and columns are swapped relative
     /// to it (a lazy adjoint); `None` for an absent sector's empty view.
-    region: Option<(Arc<[CoupledSectorRegion]>, usize, bool)>,
+    pub(super) region: Option<(Arc<[CoupledSectorRegion]>, usize, bool)>,
 }
 
 /// Where the entries of a [`CoupledBlock`] live.
@@ -457,7 +456,7 @@ where
         + CanonicalUnitFusionRule,
     D: TensorScalar,
 {
-    fn commit(self) -> Result<TensorMap<P, D>, Error> {
+    pub(super) fn commit(self) -> Result<TensorMap<P, D>, Error> {
         let source = self.source;
         let materialized = source.materialized_tensor_uncached()?;
         let data = materialized
@@ -645,7 +644,10 @@ where
 
 /// [`TensorMap::wrap_bound_factor`]'s body, free for the same reason as
 /// [`diagonal_factor_on`].
-pub(super) fn wrap_factor_on<R, E>(runtime: &Runtime, factor: BoundDynFactor<R, E>) -> TensorMap<R, E> {
+pub(super) fn wrap_factor_on<R, E>(
+    runtime: &Runtime,
+    factor: BoundDynFactor<R, E>,
+) -> TensorMap<R, E> {
     let (space, data) = factor.into_parts();
     TensorMap {
         runtime: runtime.clone(),

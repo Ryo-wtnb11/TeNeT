@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-
 /// Tensor-side layout admission selected by a provider-owned mode.
 #[doc(hidden)]
 pub trait TypedTensorModeDispatch<R>: typed_admission_private::Sealed
@@ -105,7 +104,9 @@ pub(super) trait MultiplicityFreeTransformExecution<R, C>: TensorScalar {
         R: TypedSectorAdmission;
 }
 
-pub(super) trait MultiplicityFreeContractExecution<R: TypedSectorAdmission, C>: TensorScalar {
+pub(super) trait MultiplicityFreeContractExecution<R: TypedSectorAdmission, C>:
+    TensorScalar
+{
     fn contract(
         lhs: &TensorMap<R, Self>,
         rhs: &TensorMap<R, Self>,
