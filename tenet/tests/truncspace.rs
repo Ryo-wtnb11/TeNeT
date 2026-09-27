@@ -59,7 +59,7 @@ where
     let Svd { u, s, .. } = source.svd_compact()?;
     let found = s.domain()[0].find_truncated(&s.diagview()?, truncation)?;
     Ok((
-        u.restrict_leg(u.codomain_rank(), &found.selection)?,
+        u.restrict_leg(&[(u.codomain_rank(), &found.selection)])?,
         found.error,
     ))
 }

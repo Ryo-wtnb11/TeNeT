@@ -61,7 +61,7 @@ macro_rules! device_restrict {
                         stringify!($d)
                     );
                     let before = cuda_transfer_stats();
-                    let restricted = device.restrict_leg(axis, selection).unwrap();
+                    let restricted = device.restrict_leg(&[(axis, selection)]).unwrap();
                     assert_eq!(delta(before), ONE_GATHER, "{label}: submissions");
                     assert_eq!(restricted.len(), count, "{label}");
 
@@ -70,20 +70,20 @@ macro_rules! device_restrict {
                     let next = (axis + 2) % 4;
                     let second = &selections([$a, $dual][next % 2])[1];
                     let before = cuda_transfer_stats();
-                    let twice = restricted.restrict_leg(next, second).unwrap();
+                    let twice = restricted.restrict_leg(&[(next, second)]).unwrap();
                     assert_eq!(delta(before), ONE_GATHER, "{label}: chained submissions");
                     let picked = [count - 1, 0, 1];
                     let of_selected = device
                         .select(&picked)
                         .unwrap()
-                        .restrict_leg(axis, selection)
+                        .restrict_leg(&[(axis, selection)])
                         .unwrap();
 
                     let restricted = restricted.to_host().unwrap();
                     let twice = twice.to_host().unwrap();
                     let of_selected = of_selected.to_host().unwrap();
                     for (i, member) in members.iter().enumerate() {
-                        let expected = member.restrict_leg(axis, selection).unwrap();
+                        let expected = member.restrict_leg(&[(axis, selection)]).unwrap();
                         let actual = restricted.member(i).unwrap();
                         assert!(
                             actual.structure_signature() == expected.structure_signature(),
@@ -92,17 +92,43 @@ macro_rules! device_restrict {
                         fixtures::assert_bit_exact(actual.data(), expected.data(), &label);
                         fixtures::assert_bit_exact(
                             twice.member(i).unwrap().data(),
-                            expected.restrict_leg(next, second).unwrap().data(),
+                            expected.restrict_leg(&[(next, second)]).unwrap().data(),
                             &label,
                         );
                     }
                     for (j, &i) in picked.iter().enumerate() {
                         fixtures::assert_bit_exact(
                             of_selected.member(j).unwrap().data(),
-                            members[i].restrict_leg(axis, selection).unwrap().data(),
+                            members[i].restrict_leg(&[(axis, selection)]).unwrap().data(),
                             &label,
                         );
                     }
+                }
+            }
+
+            // A multi-axis set is one upload and one gather too (#1561),
+            // bit-exact to one-axis restrictions applied in turn.
+            let (on_a, on_dual) = (selections($a), selections($dual));
+            let sets: [Vec<(usize, &LegSelection<_>)>; 2] = [
+                vec![(2, &on_a[1]), (0, &on_a[0]), (3, &on_dual[0]), (1, &on_dual[1])],
+                vec![(3, &on_dual[1]), (0, &on_a[0])],
+            ];
+            for (choice, set) in sets.iter().enumerate() {
+                let label = format!("{} {} B={count} set {choice}", $label, stringify!($d));
+                let before = cuda_transfer_stats();
+                let restricted = device.restrict_leg(set).unwrap();
+                assert_eq!(delta(before), ONE_GATHER, "{label}: submissions");
+                let restricted = restricted.to_host().unwrap();
+                for (i, member) in members.iter().enumerate() {
+                    let sequential = set.iter().fold(member.clone(), |tensor, &pair| {
+                        tensor.restrict_leg(&[pair]).unwrap()
+                    });
+                    let actual = restricted.member(i).unwrap();
+                    assert!(
+                        actual.structure_signature() == sequential.structure_signature(),
+                        "{label}: member {i} space"
+                    );
+                    fixtures::assert_bit_exact(actual.data(), sequential.data(), &label);
                 }
             }
 
@@ -112,9 +138,14 @@ macro_rules! device_restrict {
             let on_other = &selections($other)[0];
             let before = cuda_transfer_stats();
             for (axis, selection) in [(4, on_a), (0, on_dual), (1, on_a), (2, on_other)] {
-                let expected = members[0].restrict_leg(axis, selection).err().unwrap();
-                let actual = device.restrict_leg(axis, selection).err().unwrap();
+                let expected = members[0].restrict_leg(&[(axis, selection)]).err().unwrap();
+                let actual = device.restrict_leg(&[(axis, selection)]).err().unwrap();
                 assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "axis {axis}");
+            }
+            for set in [vec![], vec![(0, on_a), (0, on_a)]] {
+                let expected = members[0].restrict_leg(&set).err().unwrap();
+                let actual = device.restrict_leg(&set).err().unwrap();
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "set {set:?}");
             }
             assert_eq!(delta(before), (0, 0, 0, 0, 0), "rejections submit nothing");
         }
@@ -141,7 +172,7 @@ fn device_restrict_leg_is_bit_exact_with_one_gather_per_call() {
         .unwrap();
     let selection = LegSelection::try_new(&charged, [(q(1), 1..2)]).unwrap();
     let before = cuda_transfer_stats();
-    let restricted = device.restrict_leg(0, &selection).unwrap();
+    let restricted = device.restrict_leg(&[(0, &selection)]).unwrap();
     assert_eq!(
         delta(before).2,
         0,
@@ -159,12 +190,12 @@ fn device_restrict_leg_is_bit_exact_with_one_gather_per_call() {
     // Both empty-producing paths keep the `[L, B]` shape the other consumes:
     // a restriction of a blockless selection, and a selection of a blockless
     // restriction, succeed as eager does and launch nothing.
-    let expected = empty.restrict_leg(0, &selection).unwrap();
+    let expected = empty.restrict_leg(&[(0, &selection)]).unwrap();
     let before = cuda_transfer_stats();
     let of_selected = device
         .select(&[1, 0, 1])
         .unwrap()
-        .restrict_leg(0, &selection)
+        .restrict_leg(&[(0, &selection)])
         .unwrap();
     let of_restricted = restricted.select(&[0]).unwrap();
     assert_eq!(delta(before).2, 0, "blockless chains launch no gather");

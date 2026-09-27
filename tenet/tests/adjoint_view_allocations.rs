@@ -286,9 +286,11 @@ fn typed_truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
             .find_truncated(&s.diagview().unwrap(), &truncation)
             .unwrap();
         (
-            u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
-            s.restrict_diagonal(&found.selection).unwrap(),
-            vh.restrict_leg(0, &found.selection).unwrap(),
+            u.restrict_leg(&[(u.codomain_rank(), &found.selection)])
+                .unwrap(),
+            s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+                .unwrap(),
+            vh.restrict_leg(&[(0, &found.selection)]).unwrap(),
         )
     };
     black_box(truncated_svd(&parent));

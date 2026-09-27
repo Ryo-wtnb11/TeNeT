@@ -266,8 +266,8 @@ macro_rules! base_suite {
                 let selection =
                     LegSelection::try_new(&leg, [(U1Irrep::new(0), 0..2), (U1Irrep::new(1), 0..1)])
                         .unwrap();
-                let restricted = a.restrict_leg(1, &selection).unwrap();
-                let wide_restricted = wa.restrict_leg(1, &selection).unwrap();
+                let restricted = a.restrict_leg(&[(1, &selection)]).unwrap();
+                let wide_restricted = wa.restrict_leg(&[(1, &selection)]).unwrap();
                 assert_payloads_agree(
                     "restrict_leg",
                     restricted.data(),
@@ -312,9 +312,9 @@ macro_rules! base_suite {
                     terms,
                 );
                 assert_payloads_agree(
-                    "restrict_diagonal",
-                    compact.restrict_diagonal(&selection).unwrap().data(),
-                    wide_compact.restrict_diagonal(&selection).unwrap().data(),
+                    "compact restrict_leg",
+                    compact.restrict_leg(&[(0, &selection), (1, &selection)]).unwrap().data(),
+                    wide_compact.restrict_leg(&[(0, &selection), (1, &selection)]).unwrap().data(),
                     1,
                 );
                 assert_payloads_agree(

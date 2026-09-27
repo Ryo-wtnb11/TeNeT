@@ -1,7 +1,7 @@
 //! Truncation as a composition (#1300, #1534).
 //!
 //! The invariant: `svd_compact` → `diagview` → `find_truncated` →
-//! `restrict_leg`/`restrict_diagonal` is a truncated SVD, and `eigh_full` → …
+//! `restrict_leg` is a truncated SVD, and `eigh_full` → …
 //! a truncated Hermitian eigendecomposition, under every policy. These
 //! compositions are the only truncated factorizations the API offers, so the
 //! expectation is independent of TeNeT (`truncation_oracle`): each coupled
@@ -118,9 +118,9 @@ macro_rules! assert_svd_composition {
         let spectra = s.diagview().unwrap();
         let found = bond.find_truncated(&spectra, truncation).unwrap();
         let selection = &found.selection;
-        let got_u = u.restrict_leg(u.codomain_rank(), selection).unwrap();
-        let got_s = s.restrict_diagonal(selection).unwrap();
-        let got_vh = vh.restrict_leg(0, selection).unwrap();
+        let got_u = u.restrict_leg(&[(u.codomain_rank(), selection)]).unwrap();
+        let got_s = s.restrict_leg(&[(0, selection), (1, selection)]).unwrap();
+        let got_vh = vh.restrict_leg(&[(0, selection)]).unwrap();
 
         let offers = singular_offers!(source, ClosedFormDim::closed_form_dim);
         let kept = select(&offers, &$policy);
@@ -198,8 +198,8 @@ macro_rules! assert_eigh_composition {
         let spectra = d.diagview().unwrap();
         let found = bond.find_truncated(&spectra, truncation).unwrap();
         let selection = &found.selection;
-        let got_d = d.restrict_diagonal(selection).unwrap();
-        let got_v = v.restrict_leg(v.codomain_rank(), selection).unwrap();
+        let got_d = d.restrict_leg(&[(0, selection), (1, selection)]).unwrap();
+        let got_v = v.restrict_leg(&[(v.codomain_rank(), selection)]).unwrap();
 
         let offers = singular_offers!(source, ClosedFormDim::closed_form_dim);
         let kept = select(&offers, &$policy);
@@ -643,18 +643,21 @@ fn find_truncated_ignores_the_order_the_spectra_arrive_in() {
         );
         assert_eq!(got.error.to_bits(), want.error.to_bits(), "rank {rank}");
         assert_eq!(
-            s.restrict_diagonal(&got.selection).unwrap().data(),
-            s.restrict_diagonal(&want.selection).unwrap().data(),
+            s.restrict_leg(&[(0, &got.selection), (1, &got.selection)])
+                .unwrap()
+                .data(),
+            s.restrict_leg(&[(0, &want.selection), (1, &want.selection)])
+                .unwrap()
+                .data(),
             "rank {rank}"
         );
     }
 }
 
 #[test]
-fn dense_restrict_diagonal_equals_two_restrict_leg_calls() {
-    // `restrict_diagonal`'s dense arm restricts both axes in one kernel call.
-    // Its oracle is the already-merged single-axis primitive applied twice,
-    // which shares no code path with the two-axis start table.
+fn a_dense_bond_map_restricted_on_both_legs_equals_two_one_axis_calls() {
+    // The two-axis set restricts both axes in one kernel call. Its oracle is
+    // the one-axis restriction applied twice.
     let leg = u1_leg(&[(0, 4), (1, 3)]);
     let runtime = runtime();
     let mut state = 0x1357_9bdfu64;
@@ -668,17 +671,19 @@ fn dense_restrict_diagonal_equals_two_restrict_leg_calls() {
     for pairs in [
         vec![(U1Irrep::new(0), 0..2), (U1Irrep::new(1), 0..1)],
         // A non-prefix range: `find_truncated` never produces one, but
-        // `restrict_diagonal` must not assume a leading prefix.
+        // the compact-preserving form must not assume a leading prefix.
         vec![(U1Irrep::new(0), 1..4), (U1Irrep::new(1), 2..3)],
         // A sector dropped entirely.
         vec![(U1Irrep::new(1), 1..3)],
     ] {
         let selection = LegSelection::try_new(&leg, pairs.clone()).unwrap();
-        let once = dense.restrict_diagonal(&selection).unwrap();
+        let once = dense
+            .restrict_leg(&[(0, &selection), (1, &selection)])
+            .unwrap();
         let twice = dense
-            .restrict_leg(0, &selection)
+            .restrict_leg(&[(0, &selection)])
             .unwrap()
-            .restrict_leg(1, &selection)
+            .restrict_leg(&[(1, &selection)])
             .unwrap();
         assert_eq!(once.codomain(), twice.codomain(), "{pairs:?}");
         assert_eq!(once.domain(), twice.domain(), "{pairs:?}");
@@ -704,9 +709,9 @@ fn discarding_everything_yields_the_empty_bond_and_empty_factors() {
     assert!(!selection.is_full(), "an empty selection of a nonempty leg");
 
     let Svd { u, s, vh } = source.svd_compact().unwrap();
-    let got_u = u.restrict_leg(u.codomain_rank(), selection).unwrap();
-    let got_s = s.restrict_diagonal(selection).unwrap();
-    let got_vh = vh.restrict_leg(0, selection).unwrap();
+    let got_u = u.restrict_leg(&[(u.codomain_rank(), selection)]).unwrap();
+    let got_s = s.restrict_leg(&[(0, selection), (1, selection)]).unwrap();
+    let got_vh = vh.restrict_leg(&[(0, selection)]).unwrap();
     assert!(got_u.data().is_empty() && got_s.data().is_empty() && got_vh.data().is_empty());
 
     // `embed_leg` with the empty selection: the adjoint of restricting to
@@ -731,7 +736,7 @@ fn a_no_op_decision_is_reported_as_full_and_copies_the_same_bits() {
     assert!(found.selection.is_full());
     assert_eq!(found.error.to_bits(), 0.0_f64.to_bits());
     assert_eq!(
-        u.restrict_leg(u.codomain_rank(), &found.selection)
+        u.restrict_leg(&[(u.codomain_rank(), &found.selection)])
             .unwrap()
             .data(),
         u.data(),
@@ -824,49 +829,68 @@ fn diagview_rejects_a_non_bond_map_and_a_lazy_adjoint() {
 }
 
 // ---------------------------------------------------------------------------
-// restrict_diagonal preconditions
+// multi-axis restrict_leg preconditions
 // ---------------------------------------------------------------------------
 
 #[test]
-fn restrict_diagonal_rejects_everything_it_documents() {
+fn multi_axis_restrict_leg_rejects_everything_it_documents() {
     let leg = u1_leg(&[(0, 3), (1, 2)]);
     let runtime = runtime();
     let selection = LegSelection::try_new(&leg, [(U1Irrep::new(0), 0..2)]).unwrap();
 
-    let rank_three: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg, &leg], [&leg]).unwrap();
-    assert!(matches!(
-        rank_three.restrict_diagonal(&selection),
-        Err(Error::InvalidArgument(message)) if message.contains("rank-(1,1)")
-    ));
-
-    let other = u1_leg(&[(0, 3), (1, 1)]);
-    let rectangular: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&other]).unwrap();
-    assert!(matches!(
-        rectangular.restrict_diagonal(&selection),
-        Err(Error::InvalidArgument(message)) if message.contains("equal codomain and domain legs")
-    ));
-
-    let foreign: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&other], [&other]).unwrap();
-    assert!(matches!(
-        foreign.restrict_diagonal(&selection),
-        Err(Error::InvalidArgument(message))
-            if message.contains("not the leg this selection was built from")
-    ));
-
     let square: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
     assert!(matches!(
-        square.adjoint().unwrap().restrict_diagonal(&selection),
-        Err(Error::InvalidArgument(message)) if message.contains("lazy adjoint")
+        square.restrict_leg(&[]),
+        Err(Error::InvalidArgument(message)) if message.contains("at least one")
+    ));
+    assert!(matches!(
+        square.restrict_leg(&[(1, &selection), (0, &selection), (1, &selection)]),
+        Err(Error::InvalidArgument(message)) if message.contains("axis 1 appears twice")
+    ));
+    assert!(matches!(
+        square.restrict_leg(&[(0, &selection), (2, &selection)]),
+        Err(Error::InvalidArgument(message)) if message.contains("axis 2 is out of range")
     ));
 
+    // Each pair keeps its one-axis error, whichever position it has.
+    let other = u1_leg(&[(0, 3), (1, 1)]);
+    let rectangular: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&other]).unwrap();
+    let alone = rectangular.restrict_leg(&[(1, &selection)]).err().unwrap();
+    let in_set = rectangular
+        .restrict_leg(&[(0, &selection), (1, &selection)])
+        .err()
+        .unwrap();
+    assert!(matches!(
+        &alone,
+        Error::InvalidArgument(message) if message.contains("not the leg this selection was built from")
+    ));
+    assert_eq!(format!("{alone:?}"), format!("{in_set:?}"));
+
+    // A dense lazy adjoint is read in place: equal to restricting its
+    // materialization, bit for bit.
+    let mut state = 0x2468_ace0u64;
+    let dense: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], move |_, _| fill(&mut state))
+            .unwrap();
+    let lazy = dense.adjoint().unwrap();
+    let both = [(0, &selection), (1, &selection)];
+    assert_eq!(
+        lazy.restrict_leg(&both).unwrap().data(),
+        lazy.materialize()
+            .unwrap()
+            .restrict_leg(&both)
+            .unwrap()
+            .data()
+    );
+
     // A selection from a different *rule* cannot be spelled: `LegSelection<R>`
-    // is typed by the provider, so `restrict_diagonal`'s `RuleMismatch` guard
-    // only fires for two providers of the same type with different identities,
-    // which is `restrict_leg`'s already-tested case.
+    // is typed by the provider, so the `RuleMismatch` guard only fires for
+    // two providers of the same type with different identities, which is the
+    // one-axis case already tested.
 }
 
 #[test]
-fn restrict_diagonal_keeps_a_compact_payload_compact() {
+fn one_selection_on_both_legs_keeps_a_compact_payload_compact() {
     let leg = u1_leg(&[(0, 4), (1, 3)]);
     let mut state = 0xeeee_ffffu64;
     let source: TensorMap<_, f64> =
@@ -875,7 +899,7 @@ fn restrict_diagonal_keeps_a_compact_payload_compact() {
     let Svd { s, .. } = source.svd_compact().unwrap();
     let bond = s.domain()[0].clone();
     let selection = LegSelection::try_new(&bond, [(U1Irrep::new(0), 0..2)]).unwrap();
-    let restricted = s.restrict_diagonal(&selection).unwrap();
+    let restricted = s.restrict_leg(&[(0, &selection), (1, &selection)]).unwrap();
     let spectrum = tenet::expert::diagonal_spectrum(&restricted)
         .unwrap()
         .expect("a compact input must stay compact");
@@ -959,8 +983,10 @@ fn a_selection_from_another_leg_is_rejected_by_both_appliers() {
     let runtime = runtime();
     let selection = LegSelection::try_new(&other, [(U1Irrep::new(0), 0..2)]).unwrap();
     let tensor: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
-    assert!(tensor.restrict_diagonal(&selection).is_err());
-    assert!(tensor.restrict_leg(0, &selection).is_err());
+    assert!(tensor
+        .restrict_leg(&[(0, &selection), (1, &selection)])
+        .is_err());
+    assert!(tensor.restrict_leg(&[(0, &selection)]).is_err());
 }
 
 /// A caller generic over the payload can name every bound `find_truncated`

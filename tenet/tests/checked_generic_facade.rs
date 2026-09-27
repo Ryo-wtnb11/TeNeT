@@ -2668,8 +2668,12 @@ fn assert_checked_generic_eigh_factors<D>(
     let found = d.domain()[0]
         .find_truncated(&d.diagview().unwrap(), &Truncation::rank(5))
         .unwrap();
-    let truncated_d = d.restrict_diagonal(&found.selection).unwrap();
-    let truncated_v = v.restrict_leg(v.codomain_rank(), &found.selection).unwrap();
+    let truncated_d = d
+        .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+        .unwrap();
+    let truncated_v = v
+        .restrict_leg(&[(v.codomain_rank(), &found.selection)])
+        .unwrap();
     assert!(std::ptr::eq(truncated_d.provider(), source.provider()));
     assert!(std::ptr::eq(truncated_v.provider(), source.provider()));
     // The kept values carry the same values in the same order, exactly — no
@@ -3279,8 +3283,12 @@ fn checked_generic_eig_truncation_reports_discarded_spectrum_norm_only() {
     let found = d.domain()[0]
         .find_truncated(&d.diagview().unwrap(), &Truncation::rank(5))
         .unwrap();
-    let truncated_d = d.restrict_diagonal(&found.selection).unwrap();
-    let truncated_v = v.restrict_leg(v.codomain_rank(), &found.selection).unwrap();
+    let truncated_d = d
+        .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+        .unwrap();
+    let truncated_v = v
+        .restrict_leg(&[(v.codomain_rank(), &found.selection)])
+        .unwrap();
     assert!(std::ptr::eq(truncated_d.provider(), provider.as_ref()));
     assert!(std::ptr::eq(truncated_v.provider(), provider.as_ref()));
     let kept = truncated_d.diagview().unwrap();
@@ -3354,9 +3362,13 @@ fn checked_generic_svd_truncation_reconstructs_and_preserves_provider() {
     let found = s.domain()[0]
         .find_truncated(&s.diagview().unwrap(), &Truncation::rank(1))
         .unwrap();
-    let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
-    let s = s.restrict_diagonal(&found.selection).unwrap();
-    let vh = vh.restrict_leg(0, &found.selection).unwrap();
+    let u = u
+        .restrict_leg(&[(u.codomain_rank(), &found.selection)])
+        .unwrap();
+    let s = s
+        .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+        .unwrap();
+    let vh = vh.restrict_leg(&[(0, &found.selection)]).unwrap();
     assert!(std::ptr::eq(u.provider(), provider.as_ref()));
     assert!(std::ptr::eq(s.provider(), provider.as_ref()));
     assert!(std::ptr::eq(vh.provider(), provider.as_ref()));

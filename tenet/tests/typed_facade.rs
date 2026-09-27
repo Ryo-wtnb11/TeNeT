@@ -2925,7 +2925,7 @@ fn svd_full_reconstructs_with_unitary_outer_factors() {
 }
 
 /// The truncated SVD, composed: `svd_compact` -> `diagview` ->
-/// `find_truncated` -> `restrict_leg` / `restrict_diagonal`.
+/// `find_truncated` -> `restrict_leg`.
 /// Evaluates to `(u, s, vh, error)`.
 macro_rules! truncated_svd {
     ($tensor:expr, $truncation:expr) => {{
@@ -2934,9 +2934,11 @@ macro_rules! truncated_svd {
             .find_truncated(&s.diagview().unwrap(), &$truncation)
             .unwrap();
         (
-            u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
-            s.restrict_diagonal(&found.selection).unwrap(),
-            vh.restrict_leg(0, &found.selection).unwrap(),
+            u.restrict_leg(&[(u.codomain_rank(), &found.selection)])
+                .unwrap(),
+            s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+                .unwrap(),
+            vh.restrict_leg(&[(0, &found.selection)]).unwrap(),
             found.error,
         )
     }};
@@ -2953,8 +2955,10 @@ macro_rules! truncated_eigen {
             .find_truncated(&d.diagview().unwrap(), &$truncation)
             .unwrap();
         (
-            d.restrict_diagonal(&found.selection).unwrap(),
-            v.restrict_leg(v.codomain_rank(), &found.selection).unwrap(),
+            d.restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+                .unwrap(),
+            v.restrict_leg(&[(v.codomain_rank(), &found.selection)])
+                .unwrap(),
             found.error,
         )
     }};

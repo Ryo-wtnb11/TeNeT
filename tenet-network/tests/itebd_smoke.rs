@@ -57,9 +57,13 @@ fn bond_update(
     let found = s.domain()[0]
         .find_truncated(&s.diagview().unwrap(), trunc)
         .unwrap();
-    let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
-    let s = s.restrict_diagonal(&found.selection).unwrap();
-    let vh = vh.restrict_leg(0, &found.selection).unwrap();
+    let u = u
+        .restrict_leg(&[(u.codomain_rank(), &found.selection)])
+        .unwrap();
+    let s = s
+        .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+        .unwrap();
+    let vh = vh.restrict_leg(&[(0, &found.selection)]).unwrap();
     let l_new = s.scale(1.0 / s.norm(2.0).unwrap());
     let l_out_inv = l_out.pinv(1e-12).unwrap();
     let g1_new = tensor!([l, pa; m] = l_out_inv[l; x] * u[x, pa; m]).unwrap();

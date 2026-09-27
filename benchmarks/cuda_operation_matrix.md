@@ -110,7 +110,7 @@ uses `Truncation::rank(degeneracy)`; `network_chain3` is the canonical three-ten
 revisions (#1297). The truncated SVD is no longer an operation of its own
 (#1534); both arms measure the composition. The `cuda` arm runs device
 `svd_compact`, a D2H of all three factors, then the Host `diagview` /
-`find_truncated` / `restrict_leg` / `restrict_diagonal` chain; the `host` arm
+`find_truncated` / `restrict_leg` chain; the `host` arm
 runs the same chain on Host `svd_compact`. The two arms are therefore not the
 same work, and rows named `svd_trunc_rank` in the pinned baselines under
 `benchmarks/history/` measure the removed fused device path, not this one.

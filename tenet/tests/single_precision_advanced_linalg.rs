@@ -327,12 +327,16 @@ macro_rules! advanced_checks {
             kappa_v
         );
         // The truncated eigendecomposition is `eig_full` → `diagview` →
-        // `find_truncated` → `restrict_diagonal` (#1534).
+        // `find_truncated` → two-leg `restrict_leg` (#1534).
         let (kept, error) = {
             let found = d.domain()[0]
                 .find_truncated(&d.diagview().unwrap(), &Truncation::rank(2))
                 .unwrap();
-            (d.restrict_diagonal(&found.selection).unwrap(), found.error)
+            (
+                d.restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+                    .unwrap(),
+                found.error,
+            )
         };
         let (wide_kept, wide_error) = {
             let Eig { d: wide_d, .. } = wide_a.eig_full().unwrap();
@@ -340,7 +344,9 @@ macro_rules! advanced_checks {
                 .find_truncated(&wide_d.diagview().unwrap(), &Truncation::rank(2))
                 .unwrap();
             (
-                wide_d.restrict_diagonal(&found.selection).unwrap(),
+                wide_d
+                    .restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+                    .unwrap(),
                 found.error,
             )
         };

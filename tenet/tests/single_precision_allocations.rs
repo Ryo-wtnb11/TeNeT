@@ -248,9 +248,11 @@ macro_rules! measure_factorizations {
                 .find_truncated(&s.diagview().unwrap(), &Truncation::rank(4))
                 .unwrap();
             let truncated = (
-                u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
-                s.restrict_diagonal(&found.selection).unwrap(),
-                vh.restrict_leg(0, &found.selection).unwrap(),
+                u.restrict_leg(&[(u.codomain_rank(), &found.selection)])
+                    .unwrap(),
+                s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])
+                    .unwrap(),
+                vh.restrict_leg(&[(0, &found.selection)]).unwrap(),
             );
             (tensor, q, r, u, s, vh, truncated)
         };
