@@ -2806,9 +2806,12 @@ pub fn cuda_svd_region<D: CudaScalar>(
     Ok((u, s, vt))
 }
 
-/// Row weights `N - i` (`i < N`) that make "first row among equal maxima"
-/// a device reduction for [`cuda_svd_gauge_phases`]. One upload per
-/// `svd_compact` call, shared by every route with at most `N` rows.
+/// Row weights `N - i` (`i < N`, `i64`) that make "first row among equal
+/// maxima" a device reduction for [`cuda_svd_gauge_phases`]. One upload of
+/// `N` `i64`s per `svd_compact` call, shared by every route with at most `N`
+/// rows. Integer weights are exact at any row count and independent of the
+/// payload lane; every op on them is native for `i64` in Tenferro 0.7.1.
+#[doc(hidden)]
 pub struct CudaSvdGaugeWeights {
     tensor: Tensor,
     len: usize,
@@ -2816,31 +2819,18 @@ pub struct CudaSvdGaugeWeights {
 }
 
 impl CudaSvdGaugeWeights {
-    /// Uploads `max_rows` weights in the real lane of `D`: one H2D of
-    /// `max_rows` reals.
-    ///
-    /// A lane that cannot hold every weight exactly (`f32` above `2^24`
-    /// rows) is rejected: a rounded weight would break the first-row
-    /// tie-break silently.
-    pub fn upload<D: CudaScalar>(
-        ctx: &CudaDenseContext,
-        max_rows: usize,
-    ) -> Result<Self, DenseError> {
+    /// Uploads the `max_rows` weights: one H2D of `8 * max_rows` bytes.
+    pub fn upload(ctx: &CudaDenseContext, max_rows: usize) -> Result<Self, DenseError> {
         const OP: &str = "cuda_svd_gauge";
-        if max_rows as f64 > 2.0 / <D::Real as CudaRealScalar>::EPSILON {
-            return Err(DenseError::Unsupported {
-                op: OP,
-                message: format!("{max_rows} rows exceed the exact integer range of the real lane"),
-            });
-        }
         let data = (0..max_rows)
-            .map(|row| <D::Real as CudaRealScalar>::narrow((max_rows - row) as f64))
-            .collect();
-        let host = <D::Real as TenferroScalar>::into_tensor(vec![max_rows], data)
-            .map_err(|err| cuda_error(OP, err))?;
+            .map(|row| i64::try_from(max_rows - row))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| cuda_error(OP, "row count does not fit in i64"))?;
+        let host =
+            Tensor::from_vec_col_major(vec![max_rows], data).map_err(|err| cuda_error(OP, err))?;
         let tensor =
             upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error(OP, err))?;
-        record_h2d(max_rows * std::mem::size_of::<D::Real>());
+        record_h2d(max_rows * std::mem::size_of::<i64>());
         Ok(Self {
             tensor,
             len: max_rows,
@@ -2875,14 +2865,25 @@ fn gauge_op<T>(result: tenferro_tensor::Result<T>) -> Result<T, DenseError> {
 ///
 /// Tenferro 0.7.1 has no arg-max reduction, so the pivot is composed from 13
 /// ops (each counted in `gauge_ops`): `abs`, column `reduce_max`, broadcast,
-/// `compare` (every maximum), `cast`, weight broadcast, `mul`, column
+/// `compare` (every maximum), `cast` to `i64`, weight broadcast, `mul`, column
 /// `reduce_max`, broadcast, `compare` (the first maximum: the weights are
-/// distinct and decreasing), `cast`, a column-batched `dot_general` of `u`
-/// with that one-hot mask (the pivot) and `sign`. Why not `gather` of an arg-max index: an integer index needs a
-/// float-to-int `cast`, which validates its range with a download.
+/// distinct and decreasing), `cast` to `D`, a column-batched `dot_general` of
+/// `u` with that one-hot mask (the pivot) and `sign`. Why not `gather` of an
+/// arg-max index: it needs the index as an owned tensor per route, and a
+/// float-to-int `cast` validates its range with a download.
 ///
-/// A non-finite column has no maximum under `compare`; its pivot then sums
-/// the whole column and stays non-finite rather than being zeroed.
+/// Working set: each intermediate is dropped after its last use, so besides
+/// `u` at most three `rows x k` arrays of at most 8-byte elements are live
+/// (the peak is the weighted `mul`: two `i64` operands and its output).
+///
+/// Magnitudes are compared by `abs` (`hypot`), the Host by `norm_sqr`; they
+/// can disagree only when two complex entries tie within an ulp in one
+/// metric, where the pivot row is ill-conditioned anyway.
+///
+/// Non-finite input differs from the Host: a NaN anywhere in a column makes
+/// its maximum NaN, no entry compares equal to it, the pivot mask is then all
+/// rows, and the column's `u` and the matching `vh` row become NaN. The Host
+/// skips NaN entries when it picks the pivot.
 pub fn cuda_svd_gauge_phases<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     u: &CudaDenseStorage,
@@ -2909,27 +2910,35 @@ pub fn cuda_svd_gauge_phases<D: CudaScalar>(
     }
     let shape = [rows, k];
     let backend = &mut ctx.backend;
-    let magnitude = gauge_op(backend.abs(&u.tensor))?;
-    let largest = gauge_op(backend.reduce_max(&magnitude, &[0]))?;
-    let largest = gauge_op(backend.broadcast_in_dim(&largest, &shape, &[1]))?;
-    let maxima = gauge_op(backend.compare(&magnitude, &largest, &CompareDir::Eq))?;
-    let maxima = gauge_op(backend.cast(&maxima, <D::Real as TenferroScalar>::dtype()))?;
-    let row_weights = if rows == weights.len {
-        gauge_op(backend.broadcast_in_dim(&weights.tensor, &shape, &[0]))?
-    } else {
-        let prefix = weights
-            .tensor
-            .as_typed::<D::Real>()
-            .ok_or_else(|| cuda_error(OP, "gauge weights are not in the real lane"))?
-            .backend_region_view(vec![rows], vec![1], 0)
-            .map(<D::Real as TenferroScalar>::tensor_view)
-            .map_err(|err| cuda_error(OP, err))?;
-        gauge_op(backend.broadcast_in_dim_read(TensorRead::from_view(prefix), &shape, &[0]))?
+    let maxima = {
+        let magnitude = gauge_op(backend.abs(&u.tensor))?;
+        let largest = gauge_op(backend.reduce_max(&magnitude, &[0]))?;
+        let largest = gauge_op(backend.broadcast_in_dim(&largest, &shape, &[1]))?;
+        gauge_op(backend.compare(&magnitude, &largest, &CompareDir::Eq))?
     };
-    let score = gauge_op(backend.mul(&maxima, &row_weights))?;
-    let best = gauge_op(backend.reduce_max(&score, &[0]))?;
-    let best = gauge_op(backend.broadcast_in_dim(&best, &shape, &[1]))?;
-    let first = gauge_op(backend.compare(&score, &best, &CompareDir::Eq))?;
+    let maxima = gauge_op(backend.cast(&maxima, tenferro_tensor::DType::I64))?;
+    let score = {
+        let row_weights = if rows == weights.len {
+            gauge_op(backend.broadcast_in_dim(&weights.tensor, &shape, &[0]))?
+        } else {
+            let prefix = weights
+                .tensor
+                .as_typed::<i64>()
+                .ok_or_else(|| cuda_error(OP, "gauge weights are not i64"))?
+                .backend_region_view(vec![rows], vec![1], 0)
+                .map(<i64 as TenferroScalar>::tensor_view)
+                .map_err(|err| cuda_error(OP, err))?;
+            gauge_op(backend.broadcast_in_dim_read(TensorRead::from_view(prefix), &shape, &[0]))?
+        };
+        gauge_op(backend.mul(&maxima, &row_weights))?
+    };
+    drop(maxima);
+    let first = {
+        let best = gauge_op(backend.reduce_max(&score, &[0]))?;
+        let best = gauge_op(backend.broadcast_in_dim(&best, &shape, &[1]))?;
+        gauge_op(backend.compare(&score, &best, &CompareDir::Eq))?
+    };
+    drop(score);
     let first = gauge_op(backend.cast(&first, D::dtype()))?;
     // Why a batched dot rather than `mul` + `reduce_sum`: Tenferro 0.7.1's
     // complex warp-plane `reduce_sum` kernel fails NVRTC compilation
@@ -2941,6 +2950,7 @@ pub fn cuda_svd_gauge_phases<D: CudaScalar>(
         rhs_batch_dims: vec![1],
     };
     let pivot = gauge_op(backend.dot_general(&u.tensor, &first, &column_dot))?;
+    drop(first);
     let phase = gauge_op(backend.sign(&pivot))?;
     Ok(CudaSvdPhases {
         phase,
@@ -2990,6 +3000,7 @@ impl CudaSvdPhases {
         u: &CudaDenseStorage,
         rows: usize,
     ) -> Result<CudaDenseStorage, DenseError> {
+        ensure_cuda_device(ctx.device, SVD_GAUGE_OP, &[("u", u.device)])?;
         self.checked_factor::<D>(u, [rows, self.k])?;
         let k = self.k;
         self.with_left_phase::<D, _>(ctx, |ctx, phase| {
@@ -3006,7 +3017,11 @@ impl CudaSvdPhases {
         vh: &CudaDenseStorage,
         cols: usize,
     ) -> Result<CudaDenseStorage, DenseError> {
-        ensure_cuda_device(ctx.device, SVD_GAUGE_OP, &[("phases", self.device)])?;
+        ensure_cuda_device(
+            ctx.device,
+            SVD_GAUGE_OP,
+            &[("phases", self.device), ("vh", vh.device)],
+        )?;
         self.checked_factor::<D>(vh, [self.k, cols])?;
         let phase = gauge_op(
             ctx.backend

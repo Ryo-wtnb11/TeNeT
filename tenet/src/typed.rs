@@ -11782,7 +11782,7 @@ where
     /// Transfers, exactly: host to device, one zero upload per factor
     /// (`u`, `s`, `vh`: the dense output sizes, `s` being `Σ_c k_c²`
     /// elements, since a host zero buffer is the only device allocation
-    /// path until #740) plus one upload of `max_c rows_c` real gauge weights
+    /// path until #740) plus one upload of `max_c rows_c` `i64` gauge weights
     /// when any route is nonempty. Device to host, no tensor payload:
     /// the singular values never cross to the host, so the call ends
     /// without a spectrum download. The backend still reads O(1)
@@ -11864,7 +11864,7 @@ where
                 .map(|route| plan.source_regions[route.source].rows())
                 .max();
             let weights = max_rows
-                .map(|rows| CudaSvdGaugeWeights::upload::<D>(cuda, rows))
+                .map(|rows| CudaSvdGaugeWeights::upload(cuda, rows))
                 .transpose()
                 .map_err(dense_err)?;
             for (route, &diagonal) in plan.routes.iter().zip(&diagonals) {
@@ -22281,6 +22281,48 @@ mod representation_gates {
     #[cfg(feature = "cuda")]
     #[test]
     #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_svd_of_an_exact_magnitude_tie_keeps_row_zero_positive() {
+        // What: A = [[1, -1], [-1, 1]] has singular vectors whose entries tie
+        // exactly in magnitude. The Host gauge takes row 0 as the pivot, so
+        // u[0, j] = +1/sqrt(2) in both columns. A broken tie-break that summed
+        // the tied entries would give a zero pivot and zero the columns.
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+        let host = TensorMap::<U1FusionRule, f64>::from_subblock_fn(
+            &runtime,
+            [&leg],
+            [&leg],
+            |_, index| if index[0] == index[1] { 1.0 } else { -1.0 },
+        )
+        .unwrap();
+        let Svd { u, s, vh } = host.to_cuda().unwrap().svd_compact().unwrap();
+        let (u, s, vh) = (
+            u.to_host().unwrap(),
+            s.to_host().unwrap(),
+            vh.to_host().unwrap(),
+        );
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        let u = u.data();
+        // Column 0 (s = 2): [1, -1] / sqrt(2); column 1 (s = 0): [1, 1] / sqrt(2).
+        for (actual, expected) in u.iter().zip([half, -half, half, half]) {
+            assert!((actual - expected).abs() <= 1e-12, "u = {u:?}");
+        }
+        assert!((s.data()[0] - 2.0).abs() <= 1e-12 && s.data()[3].abs() <= 1e-12);
+        // vh row 0 carries the same phase: A = 2 u0 vh0 with vh0 = [1, -1] / sqrt(2).
+        let vh = vh.data();
+        assert!(
+            (vh[0] - half).abs() <= 1e-12 && (vh[2] + half).abs() <= 1e-12,
+            "vh = {vh:?}"
+        );
+        assert!(
+            vh.iter().all(|value| (value.abs() - half).abs() <= 1e-12),
+            "vh = {vh:?}"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
     fn typed_cuda_svd_gauge_costs_the_documented_ops_and_no_download() {
         // What: the rustdoc's cost of the gauge. Per nonempty route, 13 ops for
         // the phases, 2 per aligned side (broadcast, mul) or 1 per non-aligned
@@ -22351,15 +22393,10 @@ mod representation_gates {
                     t.logical_space().space().required_len().unwrap()
                 };
                 let payload = |len: usize| (len * std::mem::size_of::<D>()) as u64;
-                let real = std::mem::size_of::<D>()
-                    / if <D as tenet_dense::CudaScalar>::IS_COMPLEX {
-                        2
-                    } else {
-                        1
-                    };
                 assert_eq!(
                     after.h2d_bytes - before.h2d_bytes,
-                    payload(len(&u) + len(&s) + len(&vh)) + (max_rows * real) as u64,
+                    payload(len(&u) + len(&s) + len(&vh))
+                        + (max_rows * std::mem::size_of::<i64>()) as u64,
                     "treewise {treewise}"
                 );
             }
