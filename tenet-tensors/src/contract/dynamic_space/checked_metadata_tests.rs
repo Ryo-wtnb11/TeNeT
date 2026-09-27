@@ -729,6 +729,15 @@ fn lowered_count_failure_builds_and_admits_no_scratch() {
 
 #[test]
 fn encoded_cold_invalid_count_does_not_publish_layouts() {
+    // Isolated like #649/#650's checked_bind_failure test: this asserts an
+    // absolute process-global cache snapshot, which CACHE_TEST_LOCK does not
+    // protect from the crate's many ordinary, unlocked encoded constructions.
+    if crate::test_support::run_isolated_or_return(
+        "TENET_ENCODED_COLD_INVALID_COUNT_ISOLATED",
+        "contract::dynamic_space::checked_metadata_tests::encoded_cold_invalid_count_does_not_publish_layouts",
+    ) {
+        return;
+    }
     // What: an invalid explicit encoded U1 shape count leaves both staged
     // process-global cache snapshots unchanged before any layout commit.
     let _guard = CACHE_TEST_LOCK
@@ -768,6 +777,15 @@ fn encoded_cold_invalid_count_does_not_publish_layouts() {
 
 #[test]
 fn encoded_existing_candidate_invalid_shape_does_not_publish_again() {
+    // Isolated like #649/#650's checked_bind_failure test: this asserts an
+    // absolute process-global cache snapshot, which CACHE_TEST_LOCK does not
+    // protect from the crate's many ordinary, unlocked encoded constructions.
+    if crate::test_support::run_isolated_or_return(
+        "TENET_ENCODED_EXISTING_CANDIDATE_INVALID_SHAPE_ISOLATED",
+        "contract::dynamic_space::checked_metadata_tests::encoded_existing_candidate_invalid_shape_does_not_publish_again",
+    ) {
+        return;
+    }
     // What: an already committed encoded U1 candidate remains
     // observationally unchanged when a later explicit shape is invalid.
     let _guard = CACHE_TEST_LOCK
@@ -809,6 +827,15 @@ fn encoded_existing_candidate_invalid_shape_does_not_publish_again() {
 
 #[test]
 fn encoded_cold_extent_overflow_does_not_publish_layouts() {
+    // Isolated like #649/#650's checked_bind_failure test: this asserts an
+    // absolute process-global cache snapshot, which CACHE_TEST_LOCK does not
+    // protect from the crate's many ordinary, unlocked encoded constructions.
+    if crate::test_support::run_isolated_or_return(
+        "TENET_ENCODED_COLD_EXTENT_OVERFLOW_ISOLATED",
+        "contract::dynamic_space::checked_metadata_tests::encoded_cold_extent_overflow_does_not_publish_layouts",
+    ) {
+        return;
+    }
     // What: a valid explicit U1 shape whose final extent overflows leaves
     // both staged cache snapshots unchanged before any layout commit.
     let _guard = CACHE_TEST_LOCK
@@ -845,6 +872,21 @@ fn encoded_cold_extent_overflow_does_not_publish_layouts() {
 
 #[test]
 fn encoded_and_lowered_explicit_layouts_share_checked_frozen_content() {
+    // Isolated like #649/#650's checked_bind_failure test: this asserts
+    // absolute process-global cache counts (entries()==1, misses()==1,
+    // admissions()==1 from a fresh reset), which CACHE_TEST_LOCK does not
+    // protect from the crate's many ordinary, unlocked encoded
+    // constructions landing between the reset and this test's own build.
+    // Found flaking during #1598/#1606 verification (566 passed, 1 failed
+    // at this file's entries()==1 assertion, actual 2, under
+    // `cargo test -p tenet-tensors --lib`); same class as the four named
+    // instances in that pair of issues, so it gets the same fix.
+    if crate::test_support::run_isolated_or_return(
+        "TENET_ENCODED_AND_LOWERED_SHARE_FROZEN_CONTENT_ISOLATED",
+        "contract::dynamic_space::checked_metadata_tests::encoded_and_lowered_explicit_layouts_share_checked_frozen_content",
+    ) {
+        return;
+    }
     // What: checked encoded and lowered explicit constructors retain exact
     // block order, shape, stride, offset, and storage length while one
     // encoded transaction publishes the canonical frozen content once.
