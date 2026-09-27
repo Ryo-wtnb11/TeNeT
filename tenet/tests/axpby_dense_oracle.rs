@@ -40,7 +40,7 @@ impl Sample for Complex64 {
 macro_rules! filled {
     ($rt:expr, $codomain:expr, $domain:expr, $d:ty, $salt:expr) => {{
         let mut k = 0usize;
-        TensorMap::<_, $d>::from_block_fn($rt, $codomain, $domain, |_, _| {
+        TensorMap::<_, $d>::from_subblock_fn($rt, $codomain, $domain, |_, _| {
             k += 1;
             <$d as Sample>::sample(k, $salt)
         })
@@ -98,7 +98,7 @@ macro_rules! block_case {
 
 fn u1_legs() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
     let v = GradedSpace::try_new(
-        U1FusionRule,
+        std::sync::Arc::new(U1FusionRule),
         [(-1, 2), (0, 1), (1, 3)].map(|(q, n)| (U1Irrep::new(q), n)),
     )
     .unwrap();
@@ -108,7 +108,7 @@ fn u1_legs() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
 
 fn su2_legs() -> (GradedSpace<SU2FusionRule>, GradedSpace<SU2FusionRule>) {
     let v = GradedSpace::try_new(
-        SU2FusionRule,
+        std::sync::Arc::new(SU2FusionRule),
         [(0, 2), (1, 2), (2, 1)].map(|(s, n)| (SU2Irrep::from_twice_spin(s), n)),
     )
     .unwrap();
@@ -128,7 +128,7 @@ fn fz2u1_legs() -> (GradedSpace<Fz2U1>, GradedSpace<Fz2U1>) {
         ProductSector::new(parity, U1Irrep::new(q))
     };
     let v = GradedSpace::try_new(
-        Fz2U1::new(FermionParityFusionRule, U1FusionRule),
+        std::sync::Arc::new(Fz2U1::new(FermionParityFusionRule, U1FusionRule)),
         [(-1, 2), (0, 1), (1, 2), (2, 1)].map(|(q, n)| (sector(q), n)),
     )
     .unwrap();

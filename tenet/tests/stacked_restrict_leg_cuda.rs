@@ -130,8 +130,10 @@ fn device_restrict_leg_is_bit_exact_with_one_gather_per_call() {
 
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let q = fixtures::U1Irrep::new;
-    let charged = GradedSpace::try_new(fixtures::U1FusionRule, [(q(1), 2)]).unwrap();
-    let neutral = GradedSpace::try_new(fixtures::U1FusionRule, [(q(0), 2)]).unwrap();
+    let charged =
+        GradedSpace::try_new(std::sync::Arc::new(fixtures::U1FusionRule), [(q(1), 2)]).unwrap();
+    let neutral =
+        GradedSpace::try_new(std::sync::Arc::new(fixtures::U1FusionRule), [(q(0), 2)]).unwrap();
     let empty = TensorMap::<_, f64>::zeros(&runtime, [&charged], [&neutral]).unwrap();
     let device = StackedTensorMap::pack(&[&empty, &empty])
         .unwrap()

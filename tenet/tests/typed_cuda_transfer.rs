@@ -142,7 +142,7 @@ struct ProbeSector;
 /// Tiny device operation for the canary below: `to_cuda` takes the Runtime's
 /// device lease, on a provider that never calls back into the Runtime.
 fn device_lease_probe(runtime: &Runtime) {
-    let leg = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 1)]).unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
     let probe: TensorMap<_, f64> = TensorMap::zeros(runtime, [&leg], [&leg]).unwrap();
     probe.to_cuda().unwrap();
 }
@@ -587,31 +587,31 @@ fn builtin_and_simple_product_providers_share_one_transfer_path() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
 
     let u1_rule = Arc::new(U1FusionRule);
-    let u1 = GradedSpace::try_new_with_arc(
+    let u1 = GradedSpace::try_new(
         Arc::clone(&u1_rule),
         [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2)],
     )
     .unwrap();
     assert_roundtrip(
-        TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, indices| indices[0] as f64 + 1.0)
+        TensorMap::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| indices[0] as f64 + 1.0)
             .unwrap(),
     );
 
     let fz2_rule = Arc::new(FermionParityFusionRule);
-    let fz2 = GradedSpace::try_new_with_arc(
+    let fz2 = GradedSpace::try_new(
         Arc::clone(&fz2_rule),
         [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 2)],
     )
     .unwrap();
     assert_roundtrip(
-        TensorMap::from_block_fn(&runtime, [&fz2], [&fz2], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&fz2], [&fz2], |_, indices| {
             indices[0] as f64 + 2.0
         })
         .unwrap(),
     );
 
     let su2_rule = Arc::new(SU2FusionRule);
-    let su2 = GradedSpace::try_new_with_arc(
+    let su2 = GradedSpace::try_new(
         Arc::clone(&su2_rule),
         [
             (SU2Irrep::from_twice_spin(0), 1),
@@ -620,14 +620,14 @@ fn builtin_and_simple_product_providers_share_one_transfer_path() {
     )
     .unwrap();
     assert_roundtrip(
-        TensorMap::from_block_fn(&runtime, [&su2], [&su2], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&su2], [&su2], |_, indices| {
             indices[0] as f64 + 3.0
         })
         .unwrap(),
     );
 
     let product_rule = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-    let product = GradedSpace::try_new_with_arc(
+    let product = GradedSpace::try_new(
         Arc::clone(&product_rule),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 1),
@@ -636,7 +636,7 @@ fn builtin_and_simple_product_providers_share_one_transfer_path() {
     )
     .unwrap();
     assert_roundtrip(
-        TensorMap::from_block_fn(&runtime, [&product], [&product], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&product], [&product], |_, indices| {
             indices[0] as f64 + 4.0
         })
         .unwrap(),
@@ -649,23 +649,23 @@ fn typed_cuda_direct_execution_matches_host_providers_and_structure() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
 
     let u1_rule = Arc::new(U1FusionRule);
-    let u1 = GradedSpace::try_new_with_arc(
+    let u1 = GradedSpace::try_new(
         Arc::clone(&u1_rule),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )
     .unwrap();
-    let u1_lhs = TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+    let u1_lhs = TensorMap::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
         indices.iter().sum::<usize>() as f64 + 1.0
     })
     .unwrap();
-    let u1_rhs = TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+    let u1_rhs = TensorMap::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
         indices.iter().sum::<usize>() as f64 + 2.0
     })
     .unwrap();
     assert_direct_contract_and_compose(&u1_lhs, &u1_rhs);
 
     let su2_rule = Arc::new(SU2FusionRule);
-    let su2 = GradedSpace::try_new_with_arc(
+    let su2 = GradedSpace::try_new(
         Arc::clone(&su2_rule),
         [
             (SU2Irrep::from_twice_spin(0), 1),
@@ -674,19 +674,19 @@ fn typed_cuda_direct_execution_matches_host_providers_and_structure() {
     )
     .unwrap();
     let su2_lhs =
-        TensorMap::from_block_fn(&runtime, [&su2, &su2, &su2], [&su2, &su2], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2, &su2], [&su2, &su2], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 1.0
         })
         .unwrap();
     let su2_rhs =
-        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2, &su2], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2, &su2, &su2], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 3.0
         })
         .unwrap();
     assert_direct_contract_and_compose(&su2_lhs, &su2_rhs);
 
     let product_rule = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-    let product = GradedSpace::try_new_with_arc(
+    let product = GradedSpace::try_new(
         Arc::clone(&product_rule),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
@@ -694,17 +694,19 @@ fn typed_cuda_direct_execution_matches_host_providers_and_structure() {
         ],
     )
     .unwrap();
-    let product_lhs = TensorMap::from_block_fn(&runtime, [&product], [&product], |_, indices| {
-        indices.iter().sum::<usize>() as f64 + 1.0
-    })
-    .unwrap();
-    let product_rhs = TensorMap::from_block_fn(&runtime, [&product], [&product], |_, indices| {
-        indices.iter().sum::<usize>() as f64 + 4.0
-    })
-    .unwrap();
+    let product_lhs =
+        TensorMap::from_subblock_fn(&runtime, [&product], [&product], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+    let product_rhs =
+        TensorMap::from_subblock_fn(&runtime, [&product], [&product], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 4.0
+        })
+        .unwrap();
     assert_direct_contract_and_compose(&product_lhs, &product_rhs);
 
-    let product_dual = GradedSpace::try_new_with_arc(
+    let product_dual = GradedSpace::try_new(
         Arc::clone(&product_rule),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
@@ -713,14 +715,14 @@ fn typed_cuda_direct_execution_matches_host_providers_and_structure() {
     )
     .and_then(|space| space.try_dual())
     .unwrap();
-    let product_multileg_lhs = TensorMap::from_block_fn(
+    let product_multileg_lhs = TensorMap::from_subblock_fn(
         &runtime,
         [&product],
         [&product_dual, &product_dual],
         |_, indices| indices.iter().sum::<usize>() as f64 + 1.0,
     )
     .unwrap();
-    let product_multileg_rhs = TensorMap::from_block_fn(
+    let product_multileg_rhs = TensorMap::from_subblock_fn(
         &runtime,
         [&product_dual, &product_dual],
         [&product],
@@ -736,13 +738,13 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
 
     let u1_provider = Arc::new(U1FusionRule);
-    let u1_leg = GradedSpace::try_new_with_arc(
+    let u1_leg = GradedSpace::try_new(
         Arc::clone(&u1_provider),
         [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
     )
     .unwrap();
     let u1_lhs: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1_leg], [&u1_leg], |trees, _| {
+        TensorMap::from_subblock_fn(&runtime, [&u1_leg], [&u1_leg], |trees, _| {
             if trees.coupled() == &U1Irrep::new(0) {
                 1.0
             } else {
@@ -751,7 +753,7 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
         })
         .unwrap();
     let u1_rhs: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1_leg], [&u1_leg], |trees, _| {
+        TensorMap::from_subblock_fn(&runtime, [&u1_leg], [&u1_leg], |trees, _| {
             if trees.coupled() == &U1Irrep::new(0) {
                 3.0
             } else {
@@ -788,10 +790,9 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     let spin0 = SU2Irrep::from_twice_spin(0);
     let spin_half = SU2Irrep::from_twice_spin(1);
     let su2_leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&su2_provider), [(spin0, 1), (spin_half, 1)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&su2_provider), [(spin0, 1), (spin_half, 1)]).unwrap();
     let su2_lhs: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |trees, _| {
+        TensorMap::from_subblock_fn(&runtime, [&su2_leg], [&su2_leg], |trees, _| {
             if trees.coupled() == &spin0 {
                 1.0
             } else {
@@ -800,7 +801,7 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
         })
         .unwrap();
     let su2_rhs: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |trees, _| {
+        TensorMap::from_subblock_fn(&runtime, [&su2_leg], [&su2_leg], |trees, _| {
             if trees.coupled() == &spin0 {
                 3.0
             } else {
@@ -812,14 +813,14 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     assert_eq!(su2_lhs.inner(&su2_rhs).unwrap(), 19.0);
     assert_reduction_parity(&su2_lhs, &su2_rhs);
 
-    let su2_rank5_lhs = TensorMap::from_block_fn(
+    let su2_rank5_lhs = TensorMap::from_subblock_fn(
         &runtime,
         [&su2_leg, &su2_leg, &su2_leg],
         [&su2_leg, &su2_leg],
         |_, indices| indices.iter().sum::<usize>() as f64 + 1.0,
     )
     .unwrap();
-    let su2_rank5_rhs = TensorMap::from_block_fn(
+    let su2_rank5_rhs = TensorMap::from_subblock_fn(
         &runtime,
         [&su2_leg, &su2_leg, &su2_leg],
         [&su2_leg, &su2_leg],
@@ -829,23 +830,23 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     assert_reduction_parity(&su2_rank5_lhs, &su2_rank5_rhs);
 
     let fz2_provider = Arc::new(FermionParityFusionRule);
-    let fz2_leg = GradedSpace::try_new_with_arc(
+    let fz2_leg = GradedSpace::try_new(
         Arc::clone(&fz2_provider),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
     )
     .unwrap();
-    let fz2_lhs = TensorMap::from_block_fn(&runtime, [&fz2_leg], [&fz2_leg], |_, indices| {
+    let fz2_lhs = TensorMap::from_subblock_fn(&runtime, [&fz2_leg], [&fz2_leg], |_, indices| {
         indices.iter().sum::<usize>() as f64 + 1.0
     })
     .unwrap();
-    let fz2_rhs = TensorMap::from_block_fn(&runtime, [&fz2_leg], [&fz2_leg], |_, indices| {
+    let fz2_rhs = TensorMap::from_subblock_fn(&runtime, [&fz2_leg], [&fz2_leg], |_, indices| {
         indices.iter().sum::<usize>() as f64 + 3.0
     })
     .unwrap();
     assert_reduction_parity(&fz2_lhs, &fz2_rhs);
 
     let product_provider = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-    let product_leg = GradedSpace::try_new_with_arc(
+    let product_leg = GradedSpace::try_new(
         Arc::clone(&product_provider),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
@@ -854,12 +855,12 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     )
     .unwrap();
     let product_lhs =
-        TensorMap::from_block_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 2.0
         })
         .unwrap();
     let product_rhs =
-        TensorMap::from_block_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 5.0
         })
         .unwrap();
@@ -870,12 +871,11 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
         runtime: runtime.clone(),
         calls: Arc::clone(&callback_count),
     });
-    let probe_leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&probe_provider), [(ProbeSector, 1)]).unwrap();
+    let probe_leg = GradedSpace::try_new(Arc::clone(&probe_provider), [(ProbeSector, 1)]).unwrap();
     let probe_lhs: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&probe_leg], [&probe_leg], |_, _| 2.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&probe_leg], [&probe_leg], |_, _| 2.0).unwrap();
     let probe_rhs: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&probe_leg], [&probe_leg], |_, _| 3.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&probe_leg], [&probe_leg], |_, _| 3.0).unwrap();
     let calls_before_reduction = callback_count.load(Ordering::SeqCst);
     assert_eq!(
         probe_lhs
@@ -906,7 +906,7 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     );
 
     let other_runtime = Runtime::builder().cuda(0).build().unwrap();
-    let foreign = TensorMap::from_block_fn(&other_runtime, [&u1_leg], [&u1_leg], |_, _| 1.0)
+    let foreign = TensorMap::from_subblock_fn(&other_runtime, [&u1_leg], [&u1_leg], |_, _| 1.0)
         .unwrap()
         .to_cuda()
         .unwrap();
@@ -915,12 +915,12 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
         tenet::typed::Error::RuntimeMismatch
     );
 
-    let wider = GradedSpace::try_new_with_arc(
+    let wider = GradedSpace::try_new(
         Arc::clone(&u1_provider),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )
     .unwrap();
-    let mismatched = TensorMap::from_block_fn(&runtime, [&wider], [&wider], |_, _| 1.0)
+    let mismatched = TensorMap::from_subblock_fn(&runtime, [&wider], [&wider], |_, _| 1.0)
         .unwrap()
         .to_cuda()
         .unwrap();
@@ -931,10 +931,10 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     assert_eq!(u1_device.to_host().unwrap().data(), u1_lhs.data());
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
-    let charge0 = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
-    let charge1 = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
+    let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
+    let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
     let empty: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
     assert!(empty.data().is_empty());
     let empty_device = empty.to_cuda().unwrap();
     assert_eq!(empty_device.norm(2.0).unwrap(), 0.0);
@@ -947,17 +947,17 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
 
     let u1 = Arc::new(U1FusionRule);
-    let tall = GradedSpace::try_new_with_arc(
+    let tall = GradedSpace::try_new(
         Arc::clone(&u1),
         [(U1Irrep::new(0), 3), (U1Irrep::new(1), 1)],
     )
     .unwrap();
-    let wide = GradedSpace::try_new_with_arc(
+    let wide = GradedSpace::try_new(
         Arc::clone(&u1),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
     )
     .unwrap();
-    let mixed = TensorMap::from_block_fn(&runtime, [&tall], [&wide], |_, indices| {
+    let mixed = TensorMap::from_subblock_fn(&runtime, [&tall], [&wide], |_, indices| {
         if indices[0] == indices[1] {
             6.0 + indices[0] as f64
         } else {
@@ -967,10 +967,9 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     .unwrap();
     assert_typed_cuda_qr_matches_host(&mixed);
 
-    let charge_zero_only =
-        GradedSpace::try_new_with_arc(Arc::clone(&u1), [(U1Irrep::new(0), 2)]).unwrap();
+    let charge_zero_only = GradedSpace::try_new(Arc::clone(&u1), [(U1Irrep::new(0), 2)]).unwrap();
     let unmatched =
-        TensorMap::from_block_fn(&runtime, [&tall], [&charge_zero_only], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&tall], [&charge_zero_only], |_, indices| {
             if indices[0] == indices[1] {
                 4.0 + indices[0] as f64
             } else {
@@ -980,7 +979,7 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
         .unwrap();
     assert_typed_cuda_qr_matches_host(&unmatched);
 
-    let square = TensorMap::from_block_fn(&runtime, [&wide], [&wide], |_, indices| {
+    let square = TensorMap::from_subblock_fn(&runtime, [&wide], [&wide], |_, indices| {
         if indices[0] == indices[1] {
             8.0 + indices[0] as f64
         } else {
@@ -991,7 +990,7 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     assert_typed_cuda_qr_matches_host(&square);
 
     let su2 = Arc::new(SU2FusionRule);
-    let su2_leg = GradedSpace::try_new_with_arc(
+    let su2_leg = GradedSpace::try_new(
         Arc::clone(&su2),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -999,7 +998,7 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
         ],
     )
     .unwrap();
-    let su2_tensor = TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |_, indices| {
+    let su2_tensor = TensorMap::from_subblock_fn(&runtime, [&su2_leg], [&su2_leg], |_, indices| {
         if indices[0] == indices[1] {
             7.0 + indices[0] as f64
         } else {
@@ -1010,7 +1009,7 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     assert_typed_cuda_qr_matches_host(&su2_tensor);
 
     let product = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-    let product_leg = GradedSpace::try_new_with_arc(
+    let product_leg = GradedSpace::try_new(
         Arc::clone(&product),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
@@ -1019,7 +1018,7 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     )
     .unwrap();
     let product_tensor =
-        TensorMap::from_block_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
             if indices[0] == indices[1] {
                 5.0 + indices[0] as f64
             } else {
@@ -1030,7 +1029,7 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     assert_typed_cuda_qr_matches_host(&product_tensor);
 
     let multi_tree =
-        TensorMap::from_block_fn(&runtime, [&su2_leg, &su2_leg], [&su2_leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&su2_leg, &su2_leg], [&su2_leg], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 1.0
         })
         .unwrap();
@@ -1053,7 +1052,7 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let rebuilt = left.compose(&right).unwrap();
     assert_close(rebuilt.data(), multi_tree.data(), 1e-10);
 
-    let zero = TensorMap::from_block_fn(&runtime, [&wide], [&wide], |_, _| 0.0).unwrap();
+    let zero = TensorMap::from_subblock_fn(&runtime, [&wide], [&wide], |_, _| 0.0).unwrap();
     let zero_device = zero.to_cuda().unwrap();
     let Qr {
         q: zero_left,
@@ -1065,9 +1064,8 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     assert_close(zero_rebuilt.data(), zero.data(), 1e-10);
     assert_finite_r_diagonal_nonnegative(&zero_right);
 
-    let rank_deficient_leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&u1), [(U1Irrep::new(0), 3)]).unwrap();
-    let rank_deficient = TensorMap::from_block_fn(
+    let rank_deficient_leg = GradedSpace::try_new(Arc::clone(&u1), [(U1Irrep::new(0), 3)]).unwrap();
+    let rank_deficient = TensorMap::from_subblock_fn(
         &runtime,
         [&rank_deficient_leg],
         [&rank_deficient_leg],
@@ -1088,7 +1086,7 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     );
     assert_finite_r_diagonal_nonnegative(&rank_right);
 
-    let tiny_negative = TensorMap::from_block_fn(
+    let tiny_negative = TensorMap::from_subblock_fn(
         &runtime,
         [&charge_zero_only],
         [&charge_zero_only],
@@ -1115,10 +1113,10 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     assert_finite_r_diagonal_nonnegative(&tiny_right);
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
-    let charge0 = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(0), 2)]).unwrap();
-    let charge1 = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(1), 3)]).unwrap();
+    let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 2)]).unwrap();
+    let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 3)]).unwrap();
     let empty: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
     assert!(empty.data().is_empty());
     assert_typed_cuda_qr_matches_host(&empty);
 
@@ -1169,17 +1167,17 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
 fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let u1 = Arc::new(U1FusionRule);
-    let tall = GradedSpace::try_new_with_arc(
+    let tall = GradedSpace::try_new(
         Arc::clone(&u1),
         [(U1Irrep::new(0), 3), (U1Irrep::new(1), 1)],
     )
     .unwrap();
-    let wide = GradedSpace::try_new_with_arc(
+    let wide = GradedSpace::try_new(
         Arc::clone(&u1),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
     )
     .unwrap();
-    let rectangular = TensorMap::from_block_fn(&runtime, [&tall], [&wide], |_, indices| {
+    let rectangular = TensorMap::from_subblock_fn(&runtime, [&tall], [&wide], |_, indices| {
         if indices[0] == indices[1] {
             6.0 + indices[0] as f64
         } else {
@@ -1189,14 +1187,14 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
     .unwrap();
     assert_typed_cuda_svd_matches_host(&rectangular);
 
-    let rank_deficient = TensorMap::from_block_fn(&runtime, [&tall], [&tall], |_, indices| {
+    let rank_deficient = TensorMap::from_subblock_fn(&runtime, [&tall], [&tall], |_, indices| {
         (indices[0] + 1) as f64 * (indices[1] + 1) as f64
     })
     .unwrap();
     assert_typed_cuda_svd_matches_host(&rank_deficient);
 
     let su2 = Arc::new(SU2FusionRule);
-    let su2_leg = GradedSpace::try_new_with_arc(
+    let su2_leg = GradedSpace::try_new(
         Arc::clone(&su2),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -1205,7 +1203,7 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
     )
     .unwrap();
     let multi_tree =
-        TensorMap::from_block_fn(&runtime, [&su2_leg, &su2_leg], [&su2_leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&su2_leg, &su2_leg], [&su2_leg], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 1.0
         })
         .unwrap();
@@ -1227,20 +1225,20 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
     assert_typed_cuda_svd_matches_host(&all_zero);
 
     let fermion = Arc::new(FermionParityFusionRule);
-    let fermion_leg = GradedSpace::try_new_with_arc(
+    let fermion_leg = GradedSpace::try_new(
         Arc::clone(&fermion),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
     )
     .unwrap();
     let fermion_tensor =
-        TensorMap::from_block_fn(&runtime, [&fermion_leg], [&fermion_leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&fermion_leg], [&fermion_leg], |_, indices| {
             (1 + indices[0] + 3 * indices[1]) as f64
         })
         .unwrap();
     assert_typed_cuda_svd_matches_host(&fermion_tensor);
 
     let product = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-    let product_leg = GradedSpace::try_new_with_arc(
+    let product_leg = GradedSpace::try_new(
         Arc::clone(&product),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
@@ -1249,17 +1247,17 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
     )
     .unwrap();
     let product_tensor =
-        TensorMap::from_block_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
             (2 + indices[0] + indices[1]) as f64
         })
         .unwrap();
     assert_typed_cuda_svd_matches_host(&product_tensor);
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
-    let charge0 = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(0), 2)]).unwrap();
-    let charge1 = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(1), 3)]).unwrap();
+    let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 2)]).unwrap();
+    let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 3)]).unwrap();
     let empty: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
     assert_typed_cuda_svd_matches_host(&empty);
 
     let device = rectangular.to_cuda().unwrap();
@@ -1303,11 +1301,9 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
 fn typed_cuda_svd_compact_handles_large_wide_sector() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let rows =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 8)]).unwrap();
-    let cols =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 1025)]).unwrap();
-    let source = TensorMap::from_block_fn(&runtime, [&rows], [&cols], |_, indices| {
+    let rows = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 8)]).unwrap();
+    let cols = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 1025)]).unwrap();
+    let source = TensorMap::from_subblock_fn(&runtime, [&rows], [&cols], |_, indices| {
         let row = indices[0];
         let col = indices[1];
         ((row * 17 + col * 13 + 3) % 31) as f64 / 31.0 - 0.5 + if row == col { 2.0 } else { 0.0 }
@@ -1323,11 +1319,9 @@ fn typed_cuda_svd_trunc_composition_handles_large_wide_sector() {
     // What: the 8 x 1025 cuSOLVER path composes with a kept prefix on the Host.
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let rows =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 8)]).unwrap();
-    let cols =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 1025)]).unwrap();
-    let source = TensorMap::from_block_fn(&runtime, [&rows], [&cols], |_, indices| {
+    let rows = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 8)]).unwrap();
+    let cols = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 1025)]).unwrap();
+    let source = TensorMap::from_subblock_fn(&runtime, [&rows], [&cols], |_, indices| {
         let row = indices[0];
         let col = indices[1];
         ((row * 17 + col * 13 + 3) % 31) as f64 / 31.0 - 0.5 + if row == col { 2.0 } else { 0.0 }
@@ -1344,17 +1338,17 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
     // Host semantic oracle without comparing backend-dependent U/Vh gauges.
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let rows = GradedSpace::try_new_with_arc(
+    let rows = GradedSpace::try_new(
         Arc::clone(&provider),
         [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
     )
     .unwrap();
-    let cols = GradedSpace::try_new_with_arc(
+    let cols = GradedSpace::try_new(
         Arc::clone(&provider),
         [(U1Irrep::new(0), 2), (U1Irrep::new(2), 1)],
     )
     .unwrap();
-    let mixed = TensorMap::from_block_fn(&runtime, [&rows], [&cols], |_, indices| {
+    let mixed = TensorMap::from_subblock_fn(&runtime, [&rows], [&cols], |_, indices| {
         if indices[0] == indices[1] {
             5.0 + indices[0] as f64
         } else {
@@ -1362,7 +1356,7 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
         }
     })
     .unwrap();
-    let same_identity_space = GradedSpace::try_new_with_arc(
+    let same_identity_space = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
     )
@@ -1387,9 +1381,8 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
         runtime: runtime.clone(),
         calls: Arc::clone(&dimension_calls),
     });
-    let reentrant_leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&reentrant), [(ProbeSector, 2)]).unwrap();
-    let reentrant_source = TensorMap::from_block_fn(
+    let reentrant_leg = GradedSpace::try_new(Arc::clone(&reentrant), [(ProbeSector, 2)]).unwrap();
+    let reentrant_source = TensorMap::from_subblock_fn(
         &runtime,
         [&reentrant_leg],
         [&reentrant_leg],
@@ -1402,7 +1395,7 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
     // `[3, 2] <- [3, 2]` factors put a 2x2 block at element offset 9, the
     // unaligned destination that used to fault the device factor copy
     // (#1320); these two fixtures cover that layout through the composition.
-    let rank_deficient = TensorMap::from_block_fn(&runtime, [&rows], [&rows], |_, indices| {
+    let rank_deficient = TensorMap::from_subblock_fn(&runtime, [&rows], [&rows], |_, indices| {
         (indices[0] + 1) as f64 * (indices[1] + 1) as f64
     })
     .unwrap();
@@ -1414,14 +1407,15 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
     );
 
     let no_intersection_rows =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(4), 2)]).unwrap();
+        GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(4), 2)]).unwrap();
     let no_intersection: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&no_intersection_rows], [&cols], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&no_intersection_rows], [&cols], |_, _| 1.0)
+            .unwrap();
     assert!(no_intersection.data().is_empty());
     assert_typed_cuda_svd_trunc_composition_matches_host(&no_intersection, &Truncation::Full);
 
     let su2 = Arc::new(SU2FusionRule);
-    let su2_leg = GradedSpace::try_new_with_arc(
+    let su2_leg = GradedSpace::try_new(
         Arc::clone(&su2),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -1430,27 +1424,27 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
     )
     .unwrap();
     let multi_tree =
-        TensorMap::from_block_fn(&runtime, [&su2_leg, &su2_leg], [&su2_leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&su2_leg, &su2_leg], [&su2_leg], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 1.0
         })
         .unwrap();
     assert_typed_cuda_svd_trunc_composition_matches_host(&multi_tree, &Truncation::rank(3));
 
     let fermion = Arc::new(FermionParityFusionRule);
-    let fermion_leg = GradedSpace::try_new_with_arc(
+    let fermion_leg = GradedSpace::try_new(
         Arc::clone(&fermion),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
     )
     .unwrap();
     let fermion_tensor =
-        TensorMap::from_block_fn(&runtime, [&fermion_leg], [&fermion_leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&fermion_leg], [&fermion_leg], |_, indices| {
             (1 + indices[0] + 3 * indices[1]) as f64
         })
         .unwrap();
     assert_typed_cuda_svd_trunc_composition_matches_host(&fermion_tensor, &Truncation::rank(2));
 
     let product = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-    let product_leg = GradedSpace::try_new_with_arc(
+    let product_leg = GradedSpace::try_new(
         Arc::clone(&product),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
@@ -1459,7 +1453,7 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
     )
     .unwrap();
     let product_tensor =
-        TensorMap::from_block_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
             (2 + indices[0] + indices[1]) as f64
         })
         .unwrap();
@@ -1492,24 +1486,24 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
 fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )
     .unwrap();
     let lhs: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 1.0
         })
         .unwrap();
     let rhs_provider = Arc::new(U1FusionRule);
-    let rhs_leg = GradedSpace::try_new_with_arc(
+    let rhs_leg = GradedSpace::try_new(
         Arc::clone(&rhs_provider),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )
     .unwrap();
     let rhs: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&rhs_leg], [&rhs_leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&rhs_leg], [&rhs_leg], |_, indices| {
             2.0 * indices.iter().sum::<usize>() as f64 - 1.0
         })
         .unwrap();
@@ -1558,7 +1552,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
 
     let nonfinite_values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0];
     let nonfinite_index = std::cell::Cell::new(0usize);
-    let nonfinite = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+    let nonfinite = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| {
         let index = nonfinite_index.get();
         nonfinite_index.set(index + 1);
         nonfinite_values[index % nonfinite_values.len()]
@@ -1575,7 +1569,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
 
     let finite_values = [0.0, -0.0, 2.0, -3.0, 1.0];
     let finite_index = std::cell::Cell::new(0usize);
-    let finite = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+    let finite = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| {
         let index = finite_index.get();
         finite_index.set(index + 1);
         finite_values[index % finite_values.len()]
@@ -1683,7 +1677,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     });
 
     let su2_provider = Arc::new(SU2FusionRule);
-    let su2_leg = GradedSpace::try_new_with_arc(
+    let su2_leg = GradedSpace::try_new(
         Arc::clone(&su2_provider),
         [
             (SU2Irrep::from_twice_spin(0), 1),
@@ -1692,7 +1686,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     )
     .unwrap();
     let su2: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |trees, _| {
+        TensorMap::from_subblock_fn(&runtime, [&su2_leg], [&su2_leg], |trees, _| {
             if trees.coupled() == &SU2Irrep::from_twice_spin(0) {
                 1.0
             } else {
@@ -1704,10 +1698,10 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     assert!((su2.to_cuda().unwrap().norm(2.0).unwrap() - su2.norm(2.0).unwrap()).abs() < 1e-12);
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
-    let charge0 = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
-    let charge1 = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
+    let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
+    let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
     let empty: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| f64::NAN).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&charge0], [&charge1], |_, _| f64::NAN).unwrap();
     let empty_device = empty.to_cuda().unwrap();
     assert!(empty_device
         .scale(2.0)
@@ -1732,17 +1726,17 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         .is_empty());
 
     let other_runtime = Runtime::builder().cuda(0).build().unwrap();
-    let other_leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 1)]).unwrap();
-    let foreign = TensorMap::from_block_fn(&other_runtime, [&other_leg], [&other_leg], |_, _| 1.0)
-        .unwrap()
-        .to_cuda()
-        .unwrap();
+    let other_leg = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 1)]).unwrap();
+    let foreign =
+        TensorMap::from_subblock_fn(&other_runtime, [&other_leg], [&other_leg], |_, _| 1.0)
+            .unwrap()
+            .to_cuda()
+            .unwrap();
     assert_eq!(
         lhs_device.axpby(alpha, &foreign, beta).unwrap_err(),
         tenet::typed::Error::RuntimeMismatch
     );
-    let mismatched = TensorMap::from_block_fn(&runtime, [&other_leg], [&other_leg], |_, _| 1.0)
+    let mismatched = TensorMap::from_subblock_fn(&runtime, [&other_leg], [&other_leg], |_, _| 1.0)
         .unwrap()
         .to_cuda()
         .unwrap();
@@ -1758,20 +1752,18 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
 fn typed_cuda_fermionic_contract_is_minus_six_and_compose_stays_plus_six() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let provider = Arc::new(FermionParityFusionRule);
-    let lhs_codomain =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::ODD, 1)]).unwrap();
-    let lhs_domain = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::ODD, 1)])
+    let lhs_codomain = GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)]).unwrap();
+    let lhs_domain = GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)])
         .and_then(|space| space.try_dual())
         .unwrap();
-    let rhs_codomain = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::ODD, 1)])
+    let rhs_codomain = GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)])
         .and_then(|space| space.try_dual())
         .unwrap();
-    let rhs_domain =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::ODD, 1)]).unwrap();
+    let rhs_domain = GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)]).unwrap();
     let lhs =
-        TensorMap::from_block_fn(&runtime, [&lhs_codomain], [&lhs_domain], |_, _| 2.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&lhs_codomain], [&lhs_domain], |_, _| 2.0).unwrap();
     let rhs =
-        TensorMap::from_block_fn(&runtime, [&rhs_codomain], [&rhs_domain], |_, _| 3.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&rhs_codomain], [&rhs_domain], |_, _| 3.0).unwrap();
     assert_eq!(
         lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap().data(),
         [-6.0]
@@ -1806,12 +1798,13 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let other_runtime = Runtime::builder().cuda(0).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
-    let host = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
+    let host = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
         indices.iter().sum::<usize>() as f64 + 1.0
     })
     .unwrap();
-    let other_host = TensorMap::from_block_fn(&other_runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
+    let other_host =
+        TensorMap::from_subblock_fn(&other_runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
     let expected = host.data().to_vec();
     let device = host.to_cuda().unwrap();
     let other_device = other_host.to_cuda().unwrap();
@@ -1867,25 +1860,25 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
     let zn4 = Arc::new(ZNFusionRule::new(4).unwrap());
-    let zn3_leg = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
-    let zn4_leg = GradedSpace::try_new_with_arc(Arc::clone(&zn4), [(zn4.irrep(0), 1)]).unwrap();
+    let zn3_leg = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
+    let zn4_leg = GradedSpace::try_new(Arc::clone(&zn4), [(zn4.irrep(0), 1)]).unwrap();
     let zn3_tensor: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&zn3_leg], [&zn3_leg], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&zn3_leg], [&zn3_leg], |_, _| 1.0).unwrap();
     let zn4_tensor: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&zn4_leg], [&zn4_leg], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&zn4_leg], [&zn4_leg], |_, _| 1.0).unwrap();
     let zn3_device = zn3_tensor.to_cuda().unwrap();
     let zn4_device = zn4_tensor.to_cuda().unwrap();
     assert!(zn3_device.compose(&zn4_device).is_err());
     assert_eq!(zn3_device.to_host().unwrap().data(), [1.0]);
     assert_eq!(zn4_device.to_host().unwrap().data(), [1.0]);
 
-    let left_open = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
-    let seam = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
-    let right_open = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(2), 1)]).unwrap();
+    let left_open = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
+    let seam = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
+    let right_open = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(2), 1)]).unwrap();
     let zero_lhs: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&left_open], [&seam], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&left_open], [&seam], |_, _| 1.0).unwrap();
     let zero_rhs: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&seam], [&right_open], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&seam], [&right_open], |_, _| 1.0).unwrap();
     assert_eq!(zero_lhs.subblock_count(), 0);
     assert_eq!(zero_rhs.subblock_count(), 0);
     let zero_output = zero_lhs
@@ -1949,31 +1942,31 @@ where
 fn typed_cuda_c64_roundtrip_is_bit_exact_across_providers() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
 
-    let u1 = GradedSpace::try_new_with_arc(
+    let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2)],
     )
     .unwrap();
     assert_c64_roundtrip(
-        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
             complex_entry(indices, 1.0)
         })
         .unwrap(),
     );
 
-    let fz2 = GradedSpace::try_new_with_arc(
+    let fz2 = GradedSpace::try_new(
         Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 2)],
     )
     .unwrap();
     assert_c64_roundtrip(
-        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&fz2], [&fz2], |_, indices| {
+        TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&fz2], [&fz2], |_, indices| {
             complex_entry(indices, 2.0)
         })
         .unwrap(),
     );
 
-    let su2 = GradedSpace::try_new_with_arc(
+    let su2 = GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 1),
@@ -1982,7 +1975,7 @@ fn typed_cuda_c64_roundtrip_is_bit_exact_across_providers() {
     )
     .unwrap();
     assert_c64_roundtrip(
-        TensorMap::<_, Complex64>::from_block_fn(
+        TensorMap::<_, Complex64>::from_subblock_fn(
             &runtime,
             [&su2, &su2, &su2],
             [&su2, &su2],
@@ -1991,7 +1984,7 @@ fn typed_cuda_c64_roundtrip_is_bit_exact_across_providers() {
         .unwrap(),
     );
 
-    let product = GradedSpace::try_new_with_arc(
+    let product = GradedSpace::try_new(
         Arc::new(U1FusionRule.product(FermionParityFusionRule)),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 1),
@@ -2000,15 +1993,18 @@ fn typed_cuda_c64_roundtrip_is_bit_exact_across_providers() {
     )
     .unwrap();
     assert_c64_roundtrip(
-        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&product], [&product], |_, indices| {
-            complex_entry(indices, 4.0)
-        })
+        TensorMap::<_, Complex64>::from_subblock_fn(
+            &runtime,
+            [&product],
+            [&product],
+            |_, indices| complex_entry(indices, 4.0),
+        )
         .unwrap(),
     );
 
     // The real path is unchanged by the generic payload.
     assert_roundtrip(
-        TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, indices| indices[0] as f64 + 1.0)
+        TensorMap::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| indices[0] as f64 + 1.0)
             .unwrap(),
     );
 }
@@ -2067,23 +2063,23 @@ where
 fn typed_cuda_c64_contract_and_compose_match_host() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
 
-    let u1 = GradedSpace::try_new_with_arc(
+    let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )
     .unwrap();
     assert_c64_contract_and_compose(
-        &TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        &TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
             complex_entry(indices, 1.0)
         })
         .unwrap(),
-        &TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        &TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
             complex_entry(indices, 2.0)
         })
         .unwrap(),
     );
 
-    let su2 = GradedSpace::try_new_with_arc(
+    let su2 = GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 1),
@@ -2092,14 +2088,14 @@ fn typed_cuda_c64_contract_and_compose_match_host() {
     )
     .unwrap();
     assert_c64_contract_and_compose(
-        &TensorMap::<_, Complex64>::from_block_fn(
+        &TensorMap::<_, Complex64>::from_subblock_fn(
             &runtime,
             [&su2, &su2, &su2],
             [&su2, &su2],
             |_, indices| complex_entry(indices, 1.0),
         )
         .unwrap(),
-        &TensorMap::<_, Complex64>::from_block_fn(
+        &TensorMap::<_, Complex64>::from_subblock_fn(
             &runtime,
             [&su2, &su2],
             [&su2, &su2, &su2],
@@ -2110,26 +2106,26 @@ fn typed_cuda_c64_contract_and_compose_match_host() {
 
     // Fermionic provider: contract carries the twist, compose does not, so
     // the two results stay distinct for complex payloads too.
-    let fz2 = GradedSpace::try_new_with_arc(
+    let fz2 = GradedSpace::try_new(
         Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
     )
     .unwrap();
-    let fz2_dual = GradedSpace::try_new_with_arc(
+    let fz2_dual = GradedSpace::try_new(
         Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
     )
     .and_then(|space| space.try_dual())
     .unwrap();
     assert_c64_contract_and_compose(
-        &TensorMap::<_, Complex64>::from_block_fn(
+        &TensorMap::<_, Complex64>::from_subblock_fn(
             &runtime,
             [&fz2],
             [&fz2_dual, &fz2_dual],
             |_, indices| complex_entry(indices, 1.0),
         )
         .unwrap(),
-        &TensorMap::<_, Complex64>::from_block_fn(
+        &TensorMap::<_, Complex64>::from_subblock_fn(
             &runtime,
             [&fz2_dual, &fz2_dual],
             [&fz2],
@@ -2141,12 +2137,12 @@ fn typed_cuda_c64_contract_and_compose_match_host() {
     // General axes are admitted since G2c-1a (#1345): the formerly rejected
     // scopes now agree with the Host.
     let host_lhs =
-        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
             complex_entry(indices, 5.0)
         })
         .unwrap();
     let host_rhs =
-        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
             complex_entry(indices, 6.0)
         })
         .unwrap();
@@ -2175,7 +2171,7 @@ fn typed_cuda_c64_inner_is_conjugate_linear_in_the_first_argument() {
     let i = Complex64::new(0.0, 1.0);
 
     for (sectors, seed) in [(0_usize, 1.0_f64), (1, 7.0)] {
-        let su2 = GradedSpace::try_new_with_arc(
+        let su2 = GradedSpace::try_new(
             Arc::new(SU2FusionRule),
             [
                 (SU2Irrep::from_twice_spin(0), 1 + sectors),
@@ -2183,14 +2179,16 @@ fn typed_cuda_c64_inner_is_conjugate_linear_in_the_first_argument() {
             ],
         )
         .unwrap();
-        let a = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&su2], [&su2], |_, indices| {
-            complex_entry(indices, seed)
-        })
-        .unwrap();
-        let b = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&su2], [&su2], |_, indices| {
-            complex_entry(indices, seed + 2.0)
-        })
-        .unwrap();
+        let a =
+            TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&su2], [&su2], |_, indices| {
+                complex_entry(indices, seed)
+            })
+            .unwrap();
+        let b =
+            TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&su2], [&su2], |_, indices| {
+                complex_entry(indices, seed + 2.0)
+            })
+            .unwrap();
         let host_inner = a.inner(&b).unwrap();
         let host_norm = a.norm(2.0).unwrap();
         assert!(
@@ -2223,7 +2221,7 @@ fn typed_cuda_c64_inner_is_conjugate_linear_in_the_first_argument() {
 #[ignore = "requires a real CUDA device"]
 fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 = GradedSpace::try_new_with_arc(
+    let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )
@@ -2231,11 +2229,11 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
     let alpha = Complex64::new(2.0, -3.0);
     let beta = Complex64::new(-0.5, 1.25);
 
-    let a = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+    let a = TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
         complex_entry(indices, 1.0)
     })
     .unwrap();
-    let b = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+    let b = TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
         complex_entry(indices, 4.0)
     })
     .unwrap();
@@ -2305,12 +2303,12 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
 #[ignore = "requires a real CUDA device"]
 fn typed_cuda_c64_lazy_adjoint_contract_matches_a_hand_expansion() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
-    let a = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+    let u1 = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let a = TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
         complex_entry(indices, 1.0) * Complex64::new(1.0, indices[1] as f64 + 1.0)
     })
     .unwrap();
-    let b = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+    let b = TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
         complex_entry(indices, 3.0) * Complex64::new(indices[0] as f64 + 1.0, -1.0)
     })
     .unwrap();
@@ -2666,22 +2664,26 @@ fn assert_c64_eigh_trunc_composition_matches_host<R>(
 fn typed_cuda_c64_svd_matches_host_spectra_and_truncation_policies() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let u1 = Arc::new(U1FusionRule);
-    let rows = GradedSpace::try_new_with_arc(
+    let rows = GradedSpace::try_new(
         Arc::clone(&u1),
         [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
     )
     .unwrap();
-    let cols = GradedSpace::try_new_with_arc(
+    let cols = GradedSpace::try_new(
         Arc::clone(&u1),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
     )
     .unwrap();
-    let rectangular =
-        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&rows], [&cols], distinct_c64_fill())
-            .unwrap();
+    let rectangular = TensorMap::<_, Complex64>::from_subblock_fn(
+        &runtime,
+        [&rows],
+        [&cols],
+        distinct_c64_fill(),
+    )
+    .unwrap();
     assert_c64_svd_matches_host(&rectangular);
 
-    let su2 = GradedSpace::try_new_with_arc(
+    let su2 = GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -2689,7 +2691,7 @@ fn typed_cuda_c64_svd_matches_host_spectra_and_truncation_policies() {
         ],
     )
     .unwrap();
-    let su2_tensor = TensorMap::<_, Complex64>::from_block_fn(
+    let su2_tensor = TensorMap::<_, Complex64>::from_subblock_fn(
         &runtime,
         [&su2, &su2, &su2],
         [&su2, &su2],
@@ -2698,7 +2700,7 @@ fn typed_cuda_c64_svd_matches_host_spectra_and_truncation_policies() {
     .unwrap();
     assert_c64_svd_matches_host(&su2_tensor);
 
-    let unmatched_space = GradedSpace::try_new_with_arc(
+    let unmatched_space = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
     )
@@ -2725,13 +2727,13 @@ fn typed_cuda_c64_svd_matches_host_spectra_and_truncation_policies() {
 #[ignore = "requires a real CUDA device"]
 fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 = GradedSpace::try_new_with_arc(
+    let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
     )
     .unwrap();
     let hermitian = hermitian_c64(
-        &TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], distinct_c64_fill())
+        &TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&u1], [&u1], distinct_c64_fill())
             .unwrap(),
     );
     assert_c64_eigh_trunc_composition_matches_host(&hermitian, &Truncation::Full);
@@ -2751,7 +2753,7 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
         1e-9,
     );
 
-    let su2 = GradedSpace::try_new_with_arc(
+    let su2 = GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -2760,7 +2762,7 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
     )
     .unwrap();
     let su2_hermitian = hermitian_c64(
-        &TensorMap::<_, Complex64>::from_block_fn(
+        &TensorMap::<_, Complex64>::from_subblock_fn(
             &runtime,
             [&su2, &su2],
             [&su2, &su2],
@@ -2772,7 +2774,7 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
 
     // `a^T = a` but `a^H != a`: a transpose-only admission rule would accept.
     let complex_symmetric =
-        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
             let (row, col) = (indices[0].min(indices[1]), indices[0].max(indices[1]));
             Complex64::new(1.0 + row as f64, 1.0 + col as f64)
         })
@@ -2800,15 +2802,14 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
 
     // A 2x2 hand case: `[[1, i], [-i, 1]]` is Hermitian, `[[1, i], [i, 1]]` is
     // complex-symmetric and must be rejected.
-    let leg =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let hand_hermitian =
-        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
-            match (indices[0], indices[1]) {
-                (0, 1) => Complex64::new(0.0, 1.0),
-                (1, 0) => Complex64::new(0.0, -1.0),
-                _ => Complex64::new(1.0, 0.0),
-            }
+        TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| match (
+            indices[0], indices[1],
+        ) {
+            (0, 1) => Complex64::new(0.0, 1.0),
+            (1, 0) => Complex64::new(0.0, -1.0),
+            _ => Complex64::new(1.0, 0.0),
         })
         .unwrap();
     let Eigh { d, .. } = hand_hermitian.to_cuda().unwrap().eigh_full().unwrap();
@@ -2817,7 +2818,7 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
     assert_close(&values, &[0.0, 0.0, 0.0, 2.0], 1e-10);
 
     let hand_symmetric =
-        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+        TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
             if indices[0] == indices[1] {
                 Complex64::new(1.0, 0.0)
             } else {
@@ -2839,13 +2840,12 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     // `k` carries only charge 0, so the destination's charge-1 block has no
     // contributing GEMM and must come out as exactly `+0.0` from the zeroing
     // of the plan's inactive blocks.
-    let outer = GradedSpace::try_new_with_arc(
+    let outer = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
     )
     .unwrap();
-    let inner =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let inner = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let lhs = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&outer], [&inner], 761_000)
         .unwrap()
         .to_cuda()
@@ -2863,7 +2863,7 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     );
 
     let poisoned = || {
-        TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&outer], [&outer], |_, _| 7.5)
+        TensorMap::<U1FusionRule, f64>::from_subblock_fn(&runtime, [&outer], [&outer], |_, _| 7.5)
             .unwrap()
             .to_cuda()
             .unwrap()
@@ -2927,16 +2927,20 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
 
     // Same required length, different block charges: the space check must
     // catch what the length check cannot.
-    let drifted = GradedSpace::try_new_with_arc(
+    let drifted = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 2), (U1Irrep::new(4), 3)],
     )
     .unwrap();
-    let mut wrong_space =
-        TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&drifted], [&drifted], |_, _| 7.5)
-            .unwrap()
-            .to_cuda()
-            .unwrap();
+    let mut wrong_space = TensorMap::<U1FusionRule, f64>::from_subblock_fn(
+        &runtime,
+        [&drifted],
+        [&drifted],
+        |_, _| 7.5,
+    )
+    .unwrap()
+    .to_cuda()
+    .unwrap();
     let wrong_space_before = wrong_space.to_host().unwrap().data().to_vec();
     assert_eq!(
         wrong_space_before.len(),
@@ -2954,7 +2958,7 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     );
 
     let mut short =
-        TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&inner], [&inner], |_, _| 7.5)
+        TensorMap::<U1FusionRule, f64>::from_subblock_fn(&runtime, [&inner], [&inner], |_, _| 7.5)
             .unwrap()
             .to_cuda()
             .unwrap();
@@ -2982,8 +2986,7 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
 
     // A destination whose blocks all exist but none of which any GEMM reaches:
     // the inactive-block zeroing alone produces the whole result.
-    let disjoint =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(7), 2)]).unwrap();
+    let disjoint = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(7), 2)]).unwrap();
     let empty_lhs =
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&outer], [&disjoint], 761_002)
             .unwrap()
@@ -3006,8 +3009,7 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
 
     // A destination space with no coupled sector at all: `required_len` is 0,
     // so the replay writes nothing.
-    let single =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let single = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let zero_lhs =
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&single], [&single], 761_004)
             .unwrap()
@@ -3018,11 +3020,15 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
             .unwrap()
             .to_cuda()
             .unwrap();
-    let mut zero_destination =
-        TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&single], [&disjoint], |_, _| 7.5)
-            .unwrap()
-            .to_cuda()
-            .unwrap();
+    let mut zero_destination = TensorMap::<U1FusionRule, f64>::from_subblock_fn(
+        &runtime,
+        [&single],
+        [&disjoint],
+        |_, _| 7.5,
+    )
+    .unwrap()
+    .to_cuda()
+    .unwrap();
     assert!(
         zero_destination.to_host().unwrap().data().is_empty(),
         "the fixture must have a zero-length destination"
@@ -3060,12 +3066,12 @@ fn typed_cuda_factorizations_handle_blocks_at_unaligned_offsets() {
     let u1 = Arc::new(U1FusionRule);
 
     for (d0, d1) in [(3usize, 2usize), (5, 2), (3, 3), (4, 2), (2, 2)] {
-        let leg = GradedSpace::try_new_with_arc(
+        let leg = GradedSpace::try_new(
             Arc::clone(&u1),
             [(U1Irrep::new(0), d0), (U1Irrep::new(1), d1)],
         )
         .unwrap();
-        let square = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+        let square = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
             if indices[0] == indices[1] {
                 4.0 + indices[0] as f64
             } else {
@@ -3078,9 +3084,13 @@ fn typed_cuda_factorizations_handle_blocks_at_unaligned_offsets() {
 
         // Complex64 doubles the element size, so the same block offsets are a
         // different multiple of 256.
-        let complex =
-            TensorMap::<_, Complex64>::from_block_fn(&runtime, [&leg], [&leg], distinct_c64_fill())
-                .unwrap();
+        let complex = TensorMap::<_, Complex64>::from_subblock_fn(
+            &runtime,
+            [&leg],
+            [&leg],
+            distinct_c64_fill(),
+        )
+        .unwrap();
         assert_c64_svd_matches_host(&complex);
         assert_c64_qr_matches_host(&complex);
     }

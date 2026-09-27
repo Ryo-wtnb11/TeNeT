@@ -124,7 +124,7 @@ fn fill<D: DevicePayload, S>(seed: f64) -> impl FnMut(&BlockFusionTrees<S>, &[us
 }
 
 fn u1_leg() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 2),
@@ -136,7 +136,7 @@ fn u1_leg() -> GradedSpace<U1FusionRule> {
 }
 
 fn su2_leg() -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -151,7 +151,7 @@ type FermionSu2 = ProductFusionRule<FermionParityFusionRule, SU2FusionRule>;
 /// `fZ2 ⊠ SU(2)`: fermionic signs *and* non-Abelian recoupling in one provider.
 fn fz2_su2_leg() -> GradedSpace<FermionSu2> {
     let rule = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         rule,
         [
             (
@@ -204,8 +204,9 @@ fn device_transfer_round_trips_bit_exactly_at_every_payload() {
     let fz2su2 = fz2_su2_leg();
 
     fn run<R: DeviceRule, D: DevicePayload>(runtime: &Runtime, leg: &GradedSpace<R>) {
-        let host = TensorMap::<R, D>::from_block_fn(runtime, [leg, leg], [leg], fill::<D, _>(1.5))
-            .unwrap();
+        let host =
+            TensorMap::<R, D>::from_subblock_fn(runtime, [leg, leg], [leg], fill::<D, _>(1.5))
+                .unwrap();
         assert_round_trip_is_bit_exact(&host);
     }
 
@@ -231,8 +232,9 @@ where
     R: DeviceRule,
     D: DevicePayload,
 {
-    let a = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(1.5)).unwrap();
-    let b = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(-2.25)).unwrap();
+    let a = TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(1.5)).unwrap();
+    let b =
+        TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(-2.25)).unwrap();
     let alpha = D::entry(2.0, -3.0);
     let beta = D::entry(-0.5, 1.25);
     let terms = a.data().len();
@@ -318,8 +320,9 @@ where
     R: DeviceRule,
     D: DevicePayload + numerics::Numeric,
 {
-    let a = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(1.5)).unwrap();
-    let b = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(-2.25)).unwrap();
+    let a = TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(1.5)).unwrap();
+    let b =
+        TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(-2.25)).unwrap();
     let terms = a.data().len();
     // An upper bound on `sum |conj(a_i) * b_i|`, which is what the device
     // reduction's error bound is relative to.
@@ -402,13 +405,13 @@ where
     D: DevicePayload,
 {
     let unit = D::entry(1.0, 1.0).magnitude();
-    let n = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], |_, _| D::entry(1.0, 1.0))
+    let n = TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], |_, _| D::entry(1.0, 1.0))
         .unwrap()
         .data()
         .len();
     let part = magnitude(n) / unit;
     let tensor =
-        TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], |_, _| D::entry(part, part))
+        TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], |_, _| D::entry(part, part))
             .unwrap();
     let stored = tensor.data()[0].magnitude();
     (tensor, stored)
@@ -494,7 +497,7 @@ type FermionU1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
 
 /// `fZ2 ⊠ U(1)`: fermionic grading on top of an abelian charge.
 fn fz2_u1_leg() -> GradedSpace<FermionU1> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(FermionParityFusionRule.product(U1FusionRule)),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
@@ -552,8 +555,9 @@ fn assert_inner_survives_overflowing_products<R, D>(
     D: DevicePayload + numerics::Numeric,
 {
     let x = 2.0_f64.powi(64);
-    let a = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], |_, _| D::entry(x, x)).unwrap();
-    let b = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], |_, indices| {
+    let a =
+        TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], |_, _| D::entry(x, x)).unwrap();
+    let b = TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], |_, indices| {
         let sign = if (indices[0] + indices[1]) % 2 == 0 {
             1.0
         } else {
@@ -602,7 +606,7 @@ fn assert_inner_survives_overflowing_products<R, D>(
 #[ignore = "requires a real CUDA device"]
 fn device_inner_matches_the_host_where_single_precision_products_overflow() {
     let runtime = runtime();
-    let u1 = GradedSpace::try_new_with_arc(
+    let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 2),
@@ -611,7 +615,7 @@ fn device_inner_matches_the_host_where_single_precision_products_overflow() {
         ],
     )
     .unwrap();
-    let su2 = GradedSpace::try_new_with_arc(
+    let su2 = GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -643,10 +647,15 @@ fn a_warm_single_precision_reduction_costs_one_extra_device_allocation_per_opera
     type Stats = (u64, u64, u64, u64, u64, u64);
     fn measure<D: DevicePayload>(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) -> [Stats; 3] {
         let tensor = |seed| {
-            TensorMap::<U1FusionRule, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(seed))
-                .unwrap()
-                .to_cuda()
-                .unwrap()
+            TensorMap::<U1FusionRule, D>::from_subblock_fn(
+                runtime,
+                [leg],
+                [leg],
+                fill::<D, _>(seed),
+            )
+            .unwrap()
+            .to_cuda()
+            .unwrap()
         };
         let (a, b) = (tensor(1.5), tensor(-2.25));
         let warm = |op: &dyn Fn()| {
@@ -732,8 +741,9 @@ fn a_zero_scale_overwrite_into_clears_a_nan_poisoned_destination() {
         R: DeviceRule,
         D: DevicePayload,
     {
-        let host = TensorMap::<R, D>::from_block_fn(runtime, [leg, leg], [leg], fill::<D, _>(1.5))
-            .unwrap();
+        let host =
+            TensorMap::<R, D>::from_subblock_fn(runtime, [leg, leg], [leg], fill::<D, _>(1.5))
+                .unwrap();
         let device = host.to_cuda().unwrap();
         let host_permuted = host.permute(&[1, 2], &[0]).unwrap();
         let poisoned = host_permuted.scale(D::entry(f64::NAN, 0.0));
@@ -781,8 +791,9 @@ where
     R: DeviceRule,
     D: DevicePayload,
 {
-    let a = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(1.5)).unwrap();
-    let b = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(-2.25)).unwrap();
+    let a = TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(1.5)).unwrap();
+    let b =
+        TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(-2.25)).unwrap();
     let tolerance = elementwise_tolerance::<D>(a.data().len(), 64.0);
 
     let device_a = a.to_cuda().unwrap();
@@ -901,7 +912,7 @@ fn device_contract_and_compose_match_the_host_at_every_payload() {
 fn device_fermionic_signs_are_exact_at_every_payload() {
     let runtime = runtime();
     let provider = Arc::new(FermionParityFusionRule);
-    let odd = || GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::ODD, 1)]).unwrap();
+    let odd = || GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)]).unwrap();
     let odd_dual = || odd().try_dual().unwrap();
 
     fn run<D: DevicePayload>(
@@ -912,12 +923,12 @@ fn device_fermionic_signs_are_exact_at_every_payload() {
         rhs_domain: &GradedSpace<FermionParityFusionRule>,
     ) {
         let lhs =
-            TensorMap::<_, D>::from_block_fn(runtime, [lhs_codomain], [lhs_domain], |_, _| {
+            TensorMap::<_, D>::from_subblock_fn(runtime, [lhs_codomain], [lhs_domain], |_, _| {
                 D::entry(2.0, 0.0)
             })
             .unwrap();
         let rhs =
-            TensorMap::<_, D>::from_block_fn(runtime, [rhs_codomain], [rhs_domain], |_, _| {
+            TensorMap::<_, D>::from_subblock_fn(runtime, [rhs_codomain], [rhs_domain], |_, _| {
                 D::entry(3.0, 0.0)
             })
             .unwrap();
@@ -968,7 +979,7 @@ where
     D: DevicePayload,
 {
     let host =
-        TensorMap::<R, D>::from_block_fn(runtime, [leg, leg], [leg], fill::<D, _>(1.5)).unwrap();
+        TensorMap::<R, D>::from_subblock_fn(runtime, [leg, leg], [leg], fill::<D, _>(1.5)).unwrap();
     let device = host.to_cuda().unwrap();
     // A recoupling combines at most the tree cardinality of one block; three
     // legs over these fixtures keeps that small, so `16` is generous.
@@ -1118,7 +1129,7 @@ fn a_warm_single_precision_overwrite_into_transfers_nothing() {
     let leg = u1_leg();
 
     fn run<D: DevicePayload>(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) {
-        let host = TensorMap::<U1FusionRule, D>::from_block_fn(
+        let host = TensorMap::<U1FusionRule, D>::from_subblock_fn(
             runtime,
             [leg, leg],
             [leg],
@@ -1217,12 +1228,20 @@ fn single_precision_costs_the_same_device_calls_and_half_the_bytes() {
         runtime: &Runtime,
         leg: &GradedSpace<U1FusionRule>,
     ) -> (u64, u64, u64, u64, u64, u64) {
-        let a =
-            TensorMap::<U1FusionRule, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(1.5))
-                .unwrap();
-        let b =
-            TensorMap::<U1FusionRule, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(-2.25))
-                .unwrap();
+        let a = TensorMap::<U1FusionRule, D>::from_subblock_fn(
+            runtime,
+            [leg],
+            [leg],
+            fill::<D, _>(1.5),
+        )
+        .unwrap();
+        let b = TensorMap::<U1FusionRule, D>::from_subblock_fn(
+            runtime,
+            [leg],
+            [leg],
+            fill::<D, _>(-2.25),
+        )
+        .unwrap();
         let before = cuda_transfer_stats();
         let device_a = a.to_cuda().unwrap();
         let device_b = b.to_cuda().unwrap();
@@ -1303,9 +1322,13 @@ fn a_device_less_runtime_rejects_every_payload_the_same_way() {
     let leg = u1_leg();
 
     fn reject<D: DevicePayload>(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) -> String {
-        let host =
-            TensorMap::<U1FusionRule, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(1.5))
-                .unwrap();
+        let host = TensorMap::<U1FusionRule, D>::from_subblock_fn(
+            runtime,
+            [leg],
+            [leg],
+            fill::<D, _>(1.5),
+        )
+        .unwrap();
         match host.to_cuda() {
             Ok(_) => panic!("a device-less runtime must not upload [{}]", D::NAME),
             Err(error) => format!("{error}"),

@@ -121,8 +121,7 @@ where
 #[ignore = "requires a real CUDA device"]
 fn cuda_macro_full_trace_equals_host() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
-    let space =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let space = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let host = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_090).unwrap();
     let tensor = host.to_cuda().unwrap();
     let device = tensor!([] = tensor[i; i]).unwrap();
@@ -142,8 +141,7 @@ fn cuda_macro_full_trace_equals_host() {
 #[ignore = "requires a real CUDA device"]
 fn a_noncanonical_cuda_macro_runs_and_shares_the_host_plan() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
-    let space =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let space = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_091).unwrap();
     let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_092).unwrap();
     let a_cuda = a.to_cuda().unwrap();
@@ -175,16 +173,14 @@ fn a_noncanonical_cuda_macro_runs_and_shares_the_host_plan() {
 #[ignore = "requires a real CUDA device"]
 fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let u1 = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     cuda_pair(&runtime, &u1, 748_100);
     let su2 =
-        GradedSpace::try_new_with_arc(Arc::new(SU2FusionRule), [(SU2Irrep::from_twice_spin(0), 2)])
-            .unwrap();
+        GradedSpace::try_new(Arc::new(SU2FusionRule), [(SU2Irrep::from_twice_spin(0), 2)]).unwrap();
     cuda_pair(&runtime, &su2, 748_110);
-    let fz2 = GradedSpace::try_new_with_arc(Arc::new(FermionParityFusionRule), [(Z2Irrep::ODD, 2)])
-        .unwrap();
+    let fz2 = GradedSpace::try_new(Arc::new(FermionParityFusionRule), [(Z2Irrep::ODD, 2)]).unwrap();
     cuda_pair(&runtime, &fz2, 748_120);
-    let product = GradedSpace::try_new_with_arc(
+    let product = GradedSpace::try_new(
         Arc::new(FermionParityFusionRule.product(U1FusionRule)),
         [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 2)],
     )
@@ -390,7 +386,7 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
 #[ignore = "requires a real CUDA device"]
 fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 = GradedSpace::try_new_with_arc(
+    let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )
@@ -401,7 +397,7 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
     };
     let host: Vec<TensorMap<U1FusionRule, Complex64>> = (0..3)
         .map(|index| {
-            TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+            TensorMap::from_subblock_fn(&runtime, [&u1], [&u1], |_, indices| {
                 complex_entry(indices, 1.0 + index as f64)
             })
             .unwrap()
@@ -481,7 +477,7 @@ fn u1_pair(
 #[ignore = "requires a real CUDA device"]
 fn host_and_cuda_macros_of_one_topology_use_separate_workspace_pools() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let u1 = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let (a, a_cuda) = u1_pair(&runtime, &u1, 748_400);
     let (b, b_cuda) = u1_pair(&runtime, &u1, 748_401);
 
@@ -511,9 +507,8 @@ fn host_and_cuda_macros_of_one_topology_use_separate_workspace_pools() {
 #[ignore = "requires a real CUDA device"]
 fn a_rejected_cuda_call_leases_no_workspace_and_the_next_call_reuses_the_idle_one() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
-    let wrong =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
+    let u1 = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let wrong = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
     let (_, a_cuda) = u1_pair(&runtime, &u1, 748_410);
     let (_, b_cuda) = u1_pair(&runtime, &u1, 748_411);
     let (_, mismatched) = u1_pair(&runtime, &wrong, 748_412);
@@ -553,10 +548,9 @@ fn equal_length_block_layout_drift_discards_the_device_replay_state() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     // Both spaces carry one sector of degeneracy 2, so `[v; v]` has a single
     // 2x2 coupled block and exactly the same `required_len` either way.
-    let charge_zero =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let charge_zero = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let charge_three =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(3), 2)]).unwrap();
+        GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(3), 2)]).unwrap();
     let (a0, a0_cuda) = u1_pair(&runtime, &charge_zero, 748_420);
     let (b0, b0_cuda) = u1_pair(&runtime, &charge_zero, 748_421);
     let (a3, a3_cuda) = u1_pair(&runtime, &charge_three, 748_422);
@@ -668,20 +662,18 @@ where
 #[ignore = "requires a real CUDA device"]
 fn warm_cuda_destination_reuse_matches_the_returning_chain_for_every_provider() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 = GradedSpace::try_new_with_arc(
+    let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
     )
     .unwrap();
     cuda_chain_reuse_matches_returning(&runtime, &u1, 761_100);
     let su2 =
-        GradedSpace::try_new_with_arc(Arc::new(SU2FusionRule), [(SU2Irrep::from_twice_spin(0), 2)])
-            .unwrap();
+        GradedSpace::try_new(Arc::new(SU2FusionRule), [(SU2Irrep::from_twice_spin(0), 2)]).unwrap();
     cuda_chain_reuse_matches_returning(&runtime, &su2, 761_110);
-    let fz2 = GradedSpace::try_new_with_arc(Arc::new(FermionParityFusionRule), [(Z2Irrep::ODD, 2)])
-        .unwrap();
+    let fz2 = GradedSpace::try_new(Arc::new(FermionParityFusionRule), [(Z2Irrep::ODD, 2)]).unwrap();
     cuda_chain_reuse_matches_returning(&runtime, &fz2, 761_120);
-    let product = GradedSpace::try_new_with_arc(
+    let product = GradedSpace::try_new(
         Arc::new(FermionParityFusionRule.product(U1FusionRule)),
         [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 2)],
     )
@@ -726,7 +718,7 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
     use tenet::dense::cuda_transfer_stats;
 
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 = GradedSpace::try_new_with_arc(
+    let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 4), (U1Irrep::new(1), 2)],
     )
@@ -787,7 +779,7 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
 #[ignore = "requires a real CUDA device"]
 fn the_device_workspace_is_charged_to_the_workspace_budget() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 8)]).unwrap();
+    let u1 = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 8)]).unwrap();
     let (_, device) = cuda_chain_tensors(&runtime, &u1, 761_400);
 
     drop(tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap());
@@ -865,14 +857,14 @@ where
 #[ignore = "requires a real CUDA device"]
 fn single_precision_device_chains_match_the_host_and_reuse_their_destinations() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 = GradedSpace::try_new_with_arc(
+    let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 4), (U1Irrep::new(1), 2)],
     )
     .unwrap();
     // SU(2): several coupled sectors carrying different quantum dimensions, so
     // the chain's recoupling — not only its GEMMs — runs at single precision.
-    let su2 = GradedSpace::try_new_with_arc(
+    let su2 = GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 3),
@@ -946,7 +938,7 @@ fn a_warm_single_precision_chain_costs_the_same_calls_and_half_the_bytes() {
     use tenet::dense::cuda_transfer_stats;
 
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 = GradedSpace::try_new_with_arc(
+    let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 4), (U1Irrep::new(1), 2)],
     )
@@ -1389,7 +1381,7 @@ fn assert_dense_oracle<R>(
 }
 
 fn u1_space(sectors: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         sectors
             .iter()
@@ -1399,7 +1391,7 @@ fn u1_space(sectors: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
 }
 
 fn su2_space(sectors: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         sectors
             .iter()
@@ -1476,7 +1468,7 @@ fn general_cuda_networks_match_host_and_dense_oracles() {
 
     let u1_su2 = Arc::new(U1FusionRule.product(SU2FusionRule));
     let product = |sectors: &[(i32, usize, usize)]| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&u1_su2),
             sectors.iter().map(|&(charge, twice, degeneracy)| {
                 (
@@ -1512,7 +1504,7 @@ fn general_cuda_networks_match_host_and_dense_oracles() {
 
     let fz2_u1 = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let fermion_u1 = |sectors: &[(bool, i32, usize)]| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&fz2_u1),
             sectors.iter().map(|&(odd, charge, degeneracy)| {
                 (
@@ -1548,7 +1540,7 @@ fn general_cuda_networks_match_host_and_dense_oracles() {
 
     let fz2_su2 = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
     let fermion_su2 = |sectors: &[(bool, usize, usize)]| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&fz2_su2),
             sectors.iter().map(|&(odd, twice, degeneracy)| {
                 (
@@ -1684,7 +1676,7 @@ fn warm_general_cuda_networks_transfer_only_the_returned_output() {
     warm::<_, Complex64>(&runtime, [&v, &w, &p], 795_100, "U(1) c64");
     let fz2_u1 = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let space = |sectors: &[(bool, i32, usize)]| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&fz2_u1),
             sectors.iter().map(|&(odd, charge, degeneracy)| {
                 (
@@ -1984,7 +1976,7 @@ fn fermion_u1_trace_spaces(
 ) -> [GradedSpace<tenet::core::ProductFusionRule<FermionParityFusionRule, U1FusionRule>>; 3] {
     let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let space = |sectors: &[(bool, i32, usize)]| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&rule),
             sectors.iter().map(|&(odd, charge, degeneracy)| {
                 (
@@ -2010,7 +2002,7 @@ fn fermion_su2_trace_spaces(
 ) -> [GradedSpace<tenet::core::ProductFusionRule<FermionParityFusionRule, SU2FusionRule>>; 3] {
     let rule = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
     let space = |sectors: &[(bool, usize, usize)]| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&rule),
             sectors.iter().map(|&(odd, twice, degeneracy)| {
                 (
@@ -2288,7 +2280,8 @@ use braiding_probe::{ProbeSector, RealBraidingProbe};
 #[ignore = "requires a real CUDA device"]
 fn anyonic_cuda_trace_prestep_rejects_like_host_before_device_work() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new(RealBraidingProbe::<true>, [(ProbeSector, 2)]).unwrap();
+    let leg =
+        GradedSpace::try_new(Arc::new(RealBraidingProbe::<true>), [(ProbeSector, 2)]).unwrap();
     let host = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_356_000).unwrap();
     let device = host.to_cuda().unwrap();
     let host_error = tensor!([] = host[i; i]).unwrap_err();
@@ -2315,7 +2308,8 @@ fn anyonic_cuda_trace_prestep_rejects_like_host_before_device_work() {
 /// network, before any device work or plan publication.
 fn assert_cuda_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new(RealBraidingProbe::<ANYONIC>, [(ProbeSector, 2)]).unwrap();
+    let leg =
+        GradedSpace::try_new(Arc::new(RealBraidingProbe::<ANYONIC>), [(ProbeSector, 2)]).unwrap();
     let host_lhs =
         TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_372_100).unwrap();
     let host_rhs =

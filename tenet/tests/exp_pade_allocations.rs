@@ -112,7 +112,7 @@ fn measure<T>(operation: impl FnOnce() -> T) -> Sample {
 }
 
 fn u1_space(sectors: i32, order: usize) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         (0..sectors).map(|charge| (U1Irrep::new(charge), order)),
     )
@@ -122,7 +122,7 @@ fn u1_space(sectors: i32, order: usize) -> GradedSpace<U1FusionRule> {
 fn fixture_f64(sectors: i32, order: usize, scale: f64) -> TensorMap<U1FusionRule, f64> {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = u1_space(sectors, order);
-    TensorMap::from_block_fn(&runtime, [&space], [&space], |_, indices| {
+    TensorMap::from_subblock_fn(&runtime, [&space], [&space], |_, indices| {
         scale * (1.0 + indices[0] as f64 - 0.5 * indices[1] as f64)
     })
     .unwrap()
@@ -131,7 +131,7 @@ fn fixture_f64(sectors: i32, order: usize, scale: f64) -> TensorMap<U1FusionRule
 fn fixture_c64(sectors: i32, order: usize, scale: f64) -> TensorMap<U1FusionRule, Complex64> {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = u1_space(sectors, order);
-    TensorMap::from_block_fn(&runtime, [&space], [&space], |_, indices| {
+    TensorMap::from_subblock_fn(&runtime, [&space], [&space], |_, indices| {
         scale
             * Complex64::new(
                 1.0 + indices[0] as f64 - 0.5 * indices[1] as f64,
@@ -235,12 +235,12 @@ fn typed_u1_general_exp_matches_the_upper_triangular_oracle() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::clone(&provider),
         (0..3).map(|charge| (U1Irrep::new(charge), 2)),
     )
     .unwrap();
-    let source = TensorMap::from_block_fn(&runtime, [&space], [&space], |_, indices| {
+    let source = TensorMap::from_subblock_fn(&runtime, [&space], [&space], |_, indices| {
         match (indices[0], indices[1]) {
             (0, 0) => 1.0,
             (0, 1) => 2.0,

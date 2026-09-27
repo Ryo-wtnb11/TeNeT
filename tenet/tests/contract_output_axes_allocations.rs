@@ -118,7 +118,11 @@ macro_rules! assert_output_axes_cost {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let v = GradedSpace::try_new($provider, $sectors.into_iter().map(|s| (s, 3))).unwrap();
+        let v = GradedSpace::try_new(
+            std::sync::Arc::new($provider),
+            $sectors.into_iter().map(|s| (s, 3)),
+        )
+        .unwrap();
         for w in [v.clone(), v.try_dual().unwrap()] {
             let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&w, &w], 1).unwrap();
             let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&w, &w], [&v], 2).unwrap();

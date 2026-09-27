@@ -217,7 +217,7 @@ fn device<R: DeviceRule>(
 fn wide_permute_source(runtime: &Runtime) -> TensorMap<U1FusionRule, f64> {
     let u1 = |charges: Vec<(i32, usize)>| {
         GradedSpace::try_new(
-            U1FusionRule,
+            std::sync::Arc::new(U1FusionRule),
             charges
                 .into_iter()
                 .map(|(charge, degeneracy)| (tenet::core::U1Irrep::new(charge), degeneracy)),

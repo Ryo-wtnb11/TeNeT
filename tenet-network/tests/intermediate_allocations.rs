@@ -21,11 +21,9 @@ fn warm_macro_pool_reuses_receiver_sized_dense_payloads() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let bond =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 7)]).unwrap();
-    let left =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 5)]).unwrap();
-    let right = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), 11)]).unwrap();
+    let bond = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 7)]).unwrap();
+    let left = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 5)]).unwrap();
+    let right = GradedSpace::try_new(provider, [(U1Irrep::new(0), 11)]).unwrap();
     let left_dual = left.try_dual().unwrap();
     let a =
         TypedTensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&left], [&bond], 750_001)
@@ -436,7 +434,7 @@ type U1Legs<'a> = &'a [&'a GradedSpace<U1FusionRule>];
 fn temporary_order_fixture(runtime: &Runtime) -> (Vec<U1Tensor>, usize) {
     let provider = Arc::new(U1FusionRule);
     let space = |degeneracy: usize| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&provider),
             (-1..=1).map(|charge| (U1Irrep::new(charge), degeneracy)),
         )
@@ -766,11 +764,9 @@ where
 {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let bond =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), chi)]).unwrap();
-    let left =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), chi + 1)]).unwrap();
-    let right = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), chi + 1)]).unwrap();
+    let bond = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), chi)]).unwrap();
+    let left = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), chi + 1)]).unwrap();
+    let right = GradedSpace::try_new(provider, [(U1Irrep::new(0), chi + 1)]).unwrap();
     let left_dual = left.try_dual().unwrap();
     let tensors: [TypedTensorMap<U1FusionRule, D>; 3] = std::array::from_fn(|index| {
         let (codomain, domain) = match index {
@@ -922,8 +918,7 @@ fn lazy_conj_worker() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let space = |degeneracy| {
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), degeneracy)])
-            .unwrap()
+        GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), degeneracy)]).unwrap()
     };
     let (left, bond, right) = (space(5), space(7), space(11));
     let lhs =

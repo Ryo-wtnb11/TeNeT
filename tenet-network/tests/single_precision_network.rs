@@ -99,11 +99,11 @@ macro_rules! twin {
     ($rt:expr, $narrow:ty, $wide:ty, $codomain:expr, $domain:expr, $seed:expr) => {{
         let mut state = $seed;
         let narrow: TensorMap<_, $narrow> =
-            TensorMap::from_block_fn($rt, $codomain, $domain, |_, _| draw_parts(&mut state))
+            TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, _| draw_parts(&mut state))
                 .unwrap();
         let mut state = $seed;
         let wide: TensorMap<_, $wide> =
-            TensorMap::from_block_fn($rt, $codomain, $domain, |_, _| draw_parts(&mut state))
+            TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, _| draw_parts(&mut state))
                 .unwrap();
         (narrow, wide)
     }};
@@ -117,7 +117,7 @@ macro_rules! network_suite {
             #[test]
             fn u1_chain_matches_the_widened_oracle() {
                 let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-                let leg = GradedSpace::try_new_with_arc(
+                let leg = GradedSpace::try_new(
                     Arc::new(U1FusionRule),
                     [
                         (U1Irrep::new(-1), 2),
@@ -157,7 +157,7 @@ macro_rules! network_suite {
             #[test]
             fn su2_recoupled_network_matches_the_widened_oracle() {
                 let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-                let leg = GradedSpace::try_new_with_arc(
+                let leg = GradedSpace::try_new(
                     Arc::new(SU2FusionRule),
                     [
                         (SU2Irrep::from_twice_spin(0), 2),

@@ -64,7 +64,7 @@ fn main() {
         "U1",
         U1FusionRule,
         GradedSpace::try_new(
-            U1FusionRule,
+            std::sync::Arc::new(U1FusionRule),
             [
                 (U1Irrep::new(-2), 4),
                 (U1Irrep::new(-1), 8),
@@ -81,7 +81,7 @@ fn main() {
         "SU2",
         SU2FusionRule,
         GradedSpace::try_new(
-            SU2FusionRule,
+            std::sync::Arc::new(SU2FusionRule),
             [
                 (SU2Irrep::from_twice_spin(0), 6),
                 (SU2Irrep::from_twice_spin(1), 6),

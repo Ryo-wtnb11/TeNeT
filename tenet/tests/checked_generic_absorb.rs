@@ -52,17 +52,16 @@ where
     let destination_provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let source_provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let destination_legs = [3, 4, 2].map(|degeneracy| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&destination_provider),
             [(label.clone(), degeneracy)],
         )
         .unwrap()
     });
     let source_legs = [2, 1, 3].map(|degeneracy| {
-        GradedSpace::try_new_with_arc(Arc::clone(&source_provider), [(label.clone(), degeneracy)])
-            .unwrap()
+        GradedSpace::try_new(Arc::clone(&source_provider), [(label.clone(), degeneracy)]).unwrap()
     });
-    let destination: TensorMap<_, D> = TensorMap::from_block_fn(
+    let destination: TensorMap<_, D> = TensorMap::from_subblock_fn(
         &runtime,
         [
             &destination_legs[0],
@@ -75,7 +74,7 @@ where
         },
     )
     .unwrap();
-    let source: TensorMap<_, D> = TensorMap::from_block_fn(
+    let source: TensorMap<_, D> = TensorMap::from_subblock_fn(
         &runtime,
         [&source_legs[0], &source_legs[1], &source_legs[2]],
         [],
@@ -165,16 +164,15 @@ fn checked_generic_absorb_validation_precedence_leaves_inputs_unchanged() {
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let equal_identity = Arc::new(SUNFusionRule::new(3).unwrap());
     let wrong_identity = Arc::new(SUNFusionRule::new(4).unwrap());
-    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1, 1], 2)]).unwrap();
-    let equal_leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&equal_identity), [(vec![1, 1], 2)]).unwrap();
-    let dual_leg = GradedSpace::try_new_with_arc(Arc::clone(&equal_identity), [(vec![1, 1], 2)])
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 2)]).unwrap();
+    let equal_leg = GradedSpace::try_new(Arc::clone(&equal_identity), [(vec![1, 1], 2)]).unwrap();
+    let dual_leg = GradedSpace::try_new(Arc::clone(&equal_identity), [(vec![1, 1], 2)])
         .and_then(|space| space.try_dual())
         .unwrap();
     let wrong_leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&wrong_identity), [(vec![1, 0, 1], 2)]).unwrap();
+        GradedSpace::try_new(Arc::clone(&wrong_identity), [(vec![1, 0, 1], 2)]).unwrap();
     let destination: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg, &leg], [], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg, &leg], [], |_, indices| {
             indices.iter().sum::<usize>() as f64
         })
         .unwrap();

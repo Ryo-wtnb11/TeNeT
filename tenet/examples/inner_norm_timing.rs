@@ -23,7 +23,7 @@ fn main() -> Result<(), Error> {
         )
     };
     let space = GradedSpace::try_new(
-        provider,
+        std::sync::Arc::new(provider),
         [
             (label(Z2Irrep::EVEN, -2, 0), 4),
             (label(Z2Irrep::EVEN, 1, 2), 3),

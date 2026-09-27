@@ -5,6 +5,7 @@
 //! the same inputs with the same errors.
 
 use num_complex::Complex64;
+use std::sync::Arc;
 
 use tenet::prelude::Runtime;
 use tenet::typed::{GradedSpace, LegSelection, StackedTensorMap, TensorMap};
@@ -98,15 +99,16 @@ fn restrict_leg_rejects_what_eager_rejects() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn a_selection_of_another_rule_instance_is_a_rule_mismatch() {
-    use std::sync::Arc;
     let runtime = runtime();
     let leg = |rank: usize, trivial: Vec<i64>| {
         let rule = Arc::new(tenet::typed::SUNFusionRule::new(rank).unwrap());
-        GradedSpace::try_new_with_arc(rule, [(trivial, 2)]).unwrap()
+        GradedSpace::try_new(rule, [(trivial, 2)]).unwrap()
     };
     let su3 = leg(3, vec![0, 0]);
     let su4 = leg(4, vec![0, 0, 0]);
-    let member = TensorMap::<_, f64>::rand(&runtime, [&su3], [&su3]).unwrap();
+    let member =
+        TensorMap::<_, f64>::rand_with_seed(&runtime, [&su3], [&su3], 0x9E37_79B9_7F4A_7C15)
+            .unwrap();
     let stack = StackedTensorMap::pack(&[&member, &member]).unwrap();
     let foreign = LegSelection::try_new(&su4, [(vec![0i64, 0, 0], 0..1)]).unwrap();
     let expected = member.restrict_leg(0, &foreign).err().unwrap();
@@ -122,8 +124,8 @@ fn a_selection_of_another_rule_instance_is_a_rule_mismatch() {
 fn restrict_leg_of_a_blockless_structure_is_empty() {
     let runtime = runtime();
     let q = fixtures::U1Irrep::new;
-    let charged = GradedSpace::try_new(fixtures::U1FusionRule, [(q(1), 2)]).unwrap();
-    let neutral = GradedSpace::try_new(fixtures::U1FusionRule, [(q(0), 2)]).unwrap();
+    let charged = GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(1), 2)]).unwrap();
+    let neutral = GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(0), 2)]).unwrap();
     let empty = TensorMap::<_, f64>::zeros(&runtime, [&charged], [&neutral]).unwrap();
     let stack = StackedTensorMap::pack(&[&empty, &empty, &empty]).unwrap();
     let selection = LegSelection::try_new(&charged, [(q(1), 1..2)]).unwrap();

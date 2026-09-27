@@ -73,7 +73,7 @@ fn measured_allocations<T>(payload_bytes: usize, operation: impl FnOnce() -> T) 
 const STRUCTURAL_TOLERANCE: u64 = 128 * 1024;
 
 fn u1_leg(provider: &Arc<U1FusionRule>, pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         pairs
             .iter()
@@ -109,13 +109,13 @@ fn typed_cat_uses_one_output_allocation_without_scratch() {
     let right = u1_leg(&provider, &[(0, 263)]);
     let mut state = 0x5eed_0580u64;
     let lhs: TensorMap<U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&codomain], [&left], |_, _| {
+        TensorMap::from_subblock_fn(&runtime, [&codomain], [&left], |_, _| {
             pseudo_random(&mut state)
         })
         .unwrap();
     let mut state = 0x5eed_0581u64;
     let rhs: TensorMap<U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&codomain], [&right], |_, _| {
+        TensorMap::from_subblock_fn(&runtime, [&codomain], [&right], |_, _| {
             pseudo_random(&mut state)
         })
         .unwrap();
@@ -139,7 +139,7 @@ fn typed_absorb_clones_the_destination_once() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let mut state = 0x5eed_0582u64;
-    let destination: TensorMap<U1FusionRule, f64> = TensorMap::from_block_fn(
+    let destination: TensorMap<U1FusionRule, f64> = TensorMap::from_subblock_fn(
         &runtime,
         [&u1_leg(&provider, &[(0, 251)])],
         [&u1_leg(&provider, &[(0, 127)])],
@@ -147,7 +147,7 @@ fn typed_absorb_clones_the_destination_once() {
     )
     .unwrap();
     let mut state = 0x5eed_0583u64;
-    let source: TensorMap<U1FusionRule, f64> = TensorMap::from_block_fn(
+    let source: TensorMap<U1FusionRule, f64> = TensorMap::from_subblock_fn(
         &runtime,
         [&u1_leg(&provider, &[(0, 263)])],
         [&u1_leg(&provider, &[(0, 101)])],
@@ -175,11 +175,10 @@ fn typed_cat_materializes_a_compact_operand_exactly_once() {
     // output.
     const DEGENERACY: usize = 128;
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new_with_arc(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, DEGENERACY)])
-        .unwrap();
+    let leg = GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, DEGENERACY)]).unwrap();
     let mut state = 0x5eed_0584u64;
     let tensor: TensorMap<Z2FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| pseudo_random(&mut state))
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| pseudo_random(&mut state))
             .unwrap();
     // Warm every layout cache with a throwaway spectrum factor, so the
     // measured handle below starts with warm layouts but a cold body cache.

@@ -929,12 +929,11 @@ where
         }
     }
 
-    // Past the rank guard the per-axis `leg_dim` scan is dead work for the
+    // Past the rank guard the per-axis leg-dimension scan is dead work for the
     // policies whose result never depends on it: `AlwaysReuse` never replans on
     // drift, and a non-degenerate `BakeOnce` snapshot is frozen for any real
-    // dims. Skipping the scan drops `leg_dim(axis)?`, but that call errors only
-    // on `axis >= rank` (see `TensorMap::leg_dim`), which the guard above already
-    // precludes — so no error side effect is lost. `DriftFactor` (and a
+    // dims. Skipping the scan loses no error side effect: an axis lookup could
+    // only fail on `axis >= rank`, which the guard above already precludes. `DriftFactor` (and a
     // degenerate `BakeOnce` seed) still need the full comparison.
     match policy {
         ReplanPolicy::AlwaysReuse => return Ok(false),
@@ -1540,29 +1539,28 @@ mod tests {
         use crate::braiding_probe::{ProbeSector, RealBraidingProbe};
         use tenet::core::U1Irrep;
         let provider = Arc::new(U1FusionRule);
-        let v = GradedSpace::try_new_with_arc(
+        let v = GradedSpace::try_new(
             Arc::clone(&provider),
             [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
         )
         .unwrap();
-        let w =
-            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
+        let w = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
         let v_dual = v.try_dual().unwrap();
-        let x = GradedSpace::try_new_with_arc(
+        let x = GradedSpace::try_new(
             Arc::clone(&provider),
             [(U1Irrep::new(0), 1), (U1Irrep::new(1), 2)],
         )
         .unwrap();
         // The sectors of `x*` with the degeneracies swapped, and the sectors
         // and degeneracies of `x*` on a leg that is not dual.
-        let x_degeneracy = GradedSpace::try_new_with_arc(
+        let x_degeneracy = GradedSpace::try_new(
             Arc::clone(&provider),
             [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
         )
         .unwrap()
         .try_dual()
         .unwrap();
-        let x_flag = GradedSpace::try_new_with_arc(
+        let x_flag = GradedSpace::try_new(
             Arc::clone(&provider),
             [(U1Irrep::new(0), 1), (U1Irrep::new(-1), 2)],
         )
@@ -1572,7 +1570,8 @@ mod tests {
         assert!(x_degeneracy != x_dual && x_flag != x_dual);
         assert_eq!(x_degeneracy.dim().unwrap(), x_dual.dim().unwrap());
         assert_eq!(x_flag.dim().unwrap(), x_dual.dim().unwrap());
-        let p = GradedSpace::try_new(RealBraidingProbe::<true>, [(ProbeSector, 2)]).unwrap();
+        let p =
+            GradedSpace::try_new(Arc::new(RealBraidingProbe::<true>), [(ProbeSector, 2)]).unwrap();
         let u1 = |codomain: &[&GradedSpace<U1FusionRule>],
                   domain: &[&GradedSpace<U1FusionRule>],
                   seed| {

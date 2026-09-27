@@ -201,7 +201,7 @@ fn complex_fill(
 }
 
 fn u1_leg(charges: &[(i32, usize)], dual: bool) -> GradedSpace<U1FusionRule> {
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         charges
             .iter()
@@ -216,7 +216,7 @@ fn u1_leg(charges: &[(i32, usize)], dual: bool) -> GradedSpace<U1FusionRule> {
 }
 
 fn su2_leg() -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -228,7 +228,7 @@ fn su2_leg() -> GradedSpace<SU2FusionRule> {
 }
 
 fn fz2_leg() -> GradedSpace<FermionParityFusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
     )
@@ -241,7 +241,7 @@ fn fz2_leg() -> GradedSpace<FermionParityFusionRule> {
 fn fz2_rank_three(runtime: &Runtime) -> TensorMap<FermionParityFusionRule, f64> {
     let leg = fz2_leg();
     let mut next = 0.0;
-    TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], |_, _| {
+    TensorMap::from_subblock_fn(runtime, [&leg, &leg], [&leg], |_, _| {
         next += 1.0;
         next
     })
@@ -266,9 +266,9 @@ fn device_permute_braid_and_planar_match_the_host_for_u1_and_su2() {
 
     // U(1) with a dual leg and several coupled sectors, both dtypes.
     let real: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], real_fill).unwrap();
     let complex: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], complex_fill).unwrap();
     assert!(real.subblock_count() >= 2, "multi-block fixture");
 
     let permuted = device_matches_host!("U1/f64 permute", real, |t| t.permute(&[2, 0], &[1, 3]));
@@ -292,9 +292,9 @@ fn device_permute_braid_and_planar_match_the_host_for_u1_and_su2() {
 
     // SU(2): recoupling, so Multi blocks and coefficients other than 1.
     let su2_real: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2, &su2], real_fill).unwrap();
     let su2_complex: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2, &su2], complex_fill).unwrap();
     let permuted =
         device_matches_host!("SU2/f64 permute", su2_real, |t| t.permute(&[1, 2], &[3, 0]));
     assert_not_a_reordering(su2_real.data(), permuted.data(), "SU2/f64 permute");
@@ -315,7 +315,7 @@ fn device_permutes_match_the_dense_physical_oracle_within_one_side() {
     let runtime = runtime();
     let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
     let u1_tensor: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
     let device = u1_tensor.to_cuda().unwrap();
     let moved = device.permute(&[1, 0], &[3, 2]).unwrap().to_host().unwrap();
     let source = u1_tensor.to_physical_dense().unwrap();
@@ -326,7 +326,7 @@ fn device_permutes_match_the_dense_physical_oracle_within_one_side() {
 
     let su2 = su2_leg();
     let su2_tensor: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2, &su2], complex_fill).unwrap();
     let device = su2_tensor.to_cuda().unwrap();
     let moved = device.permute(&[1, 0], &[3, 2]).unwrap().to_host().unwrap();
     assert_not_a_reordering(su2_tensor.data(), moved.data(), "SU(2) device permute");
@@ -346,7 +346,7 @@ fn device_transform_laws_hold_on_device_tensors() {
     let runtime = runtime();
     let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
     let device = host.to_cuda().unwrap();
 
     // permute ∘ permute == permute(composition)
@@ -411,7 +411,7 @@ fn device_repartition_reaches_every_split_and_round_trips() {
     let runtime = runtime();
     let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
     let device = host.to_cuda().unwrap();
     for num_codomain in 0..=4 {
         let what = format!("U(1) repartition to {num_codomain}");
@@ -429,7 +429,7 @@ fn device_repartition_reaches_every_split_and_round_trips() {
     // is not a reordering of the source.
     let su2 = su2_leg();
     let su2_host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2, &su2], real_fill).unwrap();
     for num_codomain in [0usize, 1, 3, 4] {
         let what = format!("SU(2) repartition to {num_codomain}");
         let moved = device_matches_host!(&what, su2_host, |t| t.repartition(num_codomain));
@@ -512,7 +512,7 @@ fn device_product_providers_match_the_host_for_signs_and_recoupling() {
 
     // fZ2 x U(1): fermionic signs on top of a charge grading.
     let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
@@ -522,7 +522,7 @@ fn device_product_providers_match_the_host_for_signs_and_recoupling() {
     )
     .unwrap();
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], real_fill).unwrap();
     let permuted = device_matches_host!("fZ2xU1 permute", host, |t| t.permute(&[2, 1], &[0, 3]));
     assert_not_a_reordering(host.data(), permuted.data(), "fZ2xU1 permute");
     device_matches_host!("fZ2xU1 transpose", host, |t| t.transpose());
@@ -535,7 +535,7 @@ fn device_product_providers_match_the_host_for_signs_and_recoupling() {
 
     // fZ2 (x) SU(2): fermionic signs *and* recoupling in one provider.
     let rule = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (
@@ -554,7 +554,7 @@ fn device_product_providers_match_the_host_for_signs_and_recoupling() {
     )
     .unwrap();
     let host: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
     let permuted = device_matches_host!("fZ2xSU2 permute", host, |t| t.permute(&[1, 2], &[3, 0]));
     assert_not_a_reordering(host.data(), permuted.data(), "fZ2xSU2 permute");
     let transposed = device_matches_host!("fZ2xSU2 transpose", host, |t| t.transpose());
@@ -568,7 +568,7 @@ fn device_rank_five_transforms_match_the_host() {
     let runtime = runtime();
     let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 1)], false);
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1, &u1], [&u1, &u1], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1, &u1, &u1], [&u1, &u1], real_fill).unwrap();
     assert!(host.subblock_count() >= 3, "multi-block rank-5 fixture");
     let permuted = device_matches_host!("rank-5 permute", host, |t| t.permute(&[4, 1, 0], &[3, 2]));
     assert_moved(host.data(), permuted.data(), "rank-5 permute");
@@ -577,7 +577,7 @@ fn device_rank_five_transforms_match_the_host() {
 
     let su2 = su2_leg();
     let su2_host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&su2, &su2, &su2], [&su2, &su2], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2, &su2], [&su2, &su2], real_fill).unwrap();
     let permuted = device_matches_host!("rank-5 SU(2) permute", su2_host, |t| t
         .permute(&[4, 1, 0], &[3, 2]));
     assert_not_a_reordering(su2_host.data(), permuted.data(), "rank-5 SU(2) permute");
@@ -589,7 +589,7 @@ fn device_complex_su2_permute_matches_the_tensorkit_fixture() {
     // Device twin of `tk_complex_su2.rs`: the norm is TensorKit's own value,
     // so this is a value oracle outside TeNeT entirely.
     let runtime = runtime();
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 1),
@@ -611,7 +611,7 @@ fn device_complex_su2_permute_matches_the_tensorkit_fixture() {
             + 37 * (idx[3] as i64 + 1);
         (value.rem_euclid(41) - 20) as f64
     };
-    let host: TensorMap<_, Complex64> = TensorMap::from_block_fn(
+    let host: TensorMap<_, Complex64> = TensorMap::from_subblock_fn(
         &runtime,
         [&space, &space],
         [&space, &space],
@@ -657,7 +657,7 @@ fn device_lazy_adjoint_transforms_lower_onto_the_parent_like_the_host() {
     let c = u1_leg(&[(-1, 1), (1, 2)], false);
     let d = u1_leg(&[(-2, 2), (-1, 3), (0, 1), (1, 2), (2, 1)], false);
     let u1_parent: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&a, &b, &c], [&d], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&a, &b, &c], [&d], complex_fill).unwrap();
     assert!(u1_parent.subblock_count() >= 4, "multi-block lazy fixture");
     assert_lazy_adjoint_transforms_match_host(&u1_parent, "U(1) c64 lazy", false);
 
@@ -665,13 +665,13 @@ fn device_lazy_adjoint_transforms_lower_onto_the_parent_like_the_host() {
     // not a reordering of the adjoint itself.
     let su2 = su2_leg();
     let su2_parent: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2], complex_fill).unwrap();
     assert_lazy_adjoint_transforms_match_host(&su2_parent, "SU(2) c64 lazy", true);
 
     // fZ2: fermionic signs under a lazy adjoint, real payload.
     let fz2 = fz2_leg();
     let fz2_parent: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&fz2, &fz2], [&fz2], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&fz2, &fz2], [&fz2], real_fill).unwrap();
     assert_lazy_adjoint_transforms_match_host(&fz2_parent, "fZ2 f64 lazy", true);
 }
 
@@ -784,7 +784,7 @@ fn device_transforms_of_an_empty_tensor_produce_an_empty_tensor() {
     let codomain = u1_leg(&[(1, 2)], false);
     let domain = u1_leg(&[(0, 3)], false);
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&codomain], [&domain], |_, _| 1.0).unwrap();
     assert_eq!(host.subblock_count(), 0);
     assert!(host.data().is_empty());
     let device = host.to_cuda().unwrap();
@@ -919,10 +919,10 @@ fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
     let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
     let u1_dual = u1_leg(&[(-1, 1), (0, 2), (1, 1)], true);
     let real: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], real_fill).unwrap();
     assert!(real.subblock_count() >= 2, "multi-block fixture");
     let complex: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], complex_fill).unwrap();
 
     let permuted = real.permute(&[2, 0], &[1, 3]).unwrap();
     let transposed = real.transpose().unwrap();
@@ -1022,9 +1022,9 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
     // a Single move, and the coefficients are not 1.
     let su2 = su2_leg();
     let su2_real: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2, &su2], real_fill).unwrap();
     let su2_complex: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2, &su2], complex_fill).unwrap();
     let permuted = su2_real.permute(&[1, 2], &[3, 0]).unwrap();
     let transposed = su2_real.transpose().unwrap();
     let bent = su2_real.repartition(3).unwrap();
@@ -1062,7 +1062,7 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
 
     // fZ2 x U(1): fermionic signs on a charge grading.
     let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
@@ -1072,7 +1072,7 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
     )
     .unwrap();
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], real_fill).unwrap();
     let permuted = host.permute(&[2, 1], &[0, 3]).unwrap();
     let cyclic = host.transpose_axes(&[1, 3], &[0, 2]).unwrap();
     let bent = host.repartition(1).unwrap();
@@ -1102,7 +1102,7 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
 
     // fZ2 (x) SU(2): fermionic signs *and* recoupling, complex payload.
     let rule = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (
@@ -1121,7 +1121,7 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
     )
     .unwrap();
     let host: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
     let permuted = host.permute(&[1, 2], &[3, 0]).unwrap();
     let transposed = host.transpose().unwrap();
     let bent = host.repartition(3).unwrap();
@@ -1167,7 +1167,7 @@ fn device_overwrite_into_matches_the_hosts_nan_pattern_for_every_alpha() {
     let runtime = runtime();
     let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
     let poisoned_source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1], [&u1, &u1], |trees, idx| {
+        TensorMap::from_subblock_fn(&runtime, [&u1, &u1], [&u1, &u1], |trees, idx| {
             if idx.iter().sum::<usize>() % 3 == 0 {
                 f64::NAN
             } else if idx[0] == 1 {
@@ -1232,7 +1232,7 @@ fn device_overwrite_into_has_no_identity_short_circuit() {
     let runtime = runtime();
     let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
     let written =
         device_overwrite_matches_host!("identity permute_overwrite_into", host, host, |t, d| t
             .permute_overwrite_into(d, &[0, 1], &[2, 3], -2.5));
@@ -1257,7 +1257,7 @@ fn device_overwrite_into_has_no_identity_short_circuit() {
     );
 
     let square: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1], [&u1], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1], [&u1], real_fill).unwrap();
     let scalar = square.trace_pairs(&[(0, 1)]).unwrap();
     assert_eq!(scalar.rank(), 0);
     let written = device_overwrite_matches_host!(
@@ -1280,7 +1280,7 @@ fn device_overwrite_into_of_an_empty_tensor_succeeds() {
     let codomain = u1_leg(&[(1, 2)], false);
     let domain = u1_leg(&[(0, 3)], false);
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&codomain], [&domain], |_, _| 1.0).unwrap();
     assert_eq!(host.subblock_count(), 0);
     let model = host.permute(&[1], &[0]).unwrap();
     let source = host.to_cuda().unwrap();

@@ -157,7 +157,7 @@ macro_rules! assert_lq {
 }
 
 fn u1_leg() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 2),
@@ -169,7 +169,7 @@ fn u1_leg() -> GradedSpace<U1FusionRule> {
 }
 
 fn su2_leg() -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -233,7 +233,7 @@ mod checked_generic {
         provider: &Arc<SUNFusionRule>,
         irreps: &[(Vec<i64>, usize)],
     ) -> GradedSpace<SUNFusionRule> {
-        GradedSpace::try_new_with_arc(Arc::clone(provider), irreps.to_vec()).unwrap()
+        GradedSpace::try_new(Arc::clone(provider), irreps.to_vec()).unwrap()
     }
 
     /// Four coupled sectors, rows >= columns in each; every degeneracy is

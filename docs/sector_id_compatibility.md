@@ -29,7 +29,7 @@ The migration can change:
 
 `rand_with_seed` fills internal storage order. It is reproducible within a
 fixed TeNeT version and layout, not a cross-version semantic fixture. Use
-`TensorMap::from_block_fn` and inspect provider-labelled fusion trees plus local indices when an input
+`TensorMap::from_subblock_fn` and inspect provider-labelled fusion trees plus local indices when an input
 must remain identical across codec or layout changes.
 
 `GradedSpace::sectors()` is likewise ordered by current internal IDs. Consumers

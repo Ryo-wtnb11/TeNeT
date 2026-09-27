@@ -17,7 +17,7 @@ use tenet::prelude::{
 use tenet::typed::{Error, Svd};
 
 fn u1_space(entries: [(i32, usize); 3]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         entries.map(|(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
     )

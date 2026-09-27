@@ -1782,7 +1782,7 @@ mod tests {
         crate::typed::TensorMap<Z2FusionRule, f64>,
     ) {
         let runtime = crate::typed::Runtime::builder().build().unwrap();
-        let leg = crate::typed::GradedSpace::try_new_with_arc(
+        let leg = crate::typed::GradedSpace::try_new(
             Arc::new(Z2FusionRule),
             [
                 (tenet_core::Z2Irrep::EVEN, 2),
@@ -1790,11 +1790,13 @@ mod tests {
             ],
         )
         .unwrap();
-        let tensor =
-            crate::typed::TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
-                (indices[0] * 7 + indices[1] * 3 + indices[2]) as f64 + 1.0
-            })
-            .unwrap();
+        let tensor = crate::typed::TensorMap::from_subblock_fn(
+            &runtime,
+            [&leg, &leg],
+            [&leg],
+            |_, indices| (indices[0] * 7 + indices[1] * 3 + indices[2]) as f64 + 1.0,
+        )
+        .unwrap();
         (runtime, tensor)
     }
 

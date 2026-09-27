@@ -390,11 +390,8 @@ mod checked_generic {
                     let runtime = runtime();
                     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
                     let adjoint = vec![2i64, 2];
-                    let leg = GradedSpace::try_new_with_arc(
-                        Arc::clone(&provider),
-                        [(adjoint.clone(), 2)],
-                    )
-                    .unwrap();
+                    let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 2)])
+                        .unwrap();
                     let (a, wa) =
                         twin!(&runtime, $narrow, $wide, [&leg, &leg], [&leg, &leg], 9_601);
                     assert!(

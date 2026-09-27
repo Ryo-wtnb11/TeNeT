@@ -102,7 +102,7 @@ fn measure(operation: impl FnOnce()) -> Measurement {
 }
 
 fn u1(provider: &Arc<U1FusionRule>, pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         pairs
             .iter()

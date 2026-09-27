@@ -11,7 +11,7 @@ fn runtime() -> Runtime {
 #[test]
 fn typed_diagonal_preserves_canonical_positions_and_dual_leg() {
     let runtime = runtime();
-    let bond = GradedSpace::try_new_with_arc(
+    let bond = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(-1), 2), (U1Irrep::new(1), 1)],
     )
@@ -45,9 +45,9 @@ fn typed_diagonal_preserves_canonical_positions_and_dual_leg() {
 #[test]
 fn typed_real_c64_eigenvalue_readback_stays_compact() {
     let runtime = runtime();
-    let v = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let source =
-        TensorMap::<U1FusionRule, Complex64>::from_block_fn(&runtime, [&v], [&v], |_, index| {
+        TensorMap::<U1FusionRule, Complex64>::from_subblock_fn(&runtime, [&v], [&v], |_, index| {
             Complex64::new(
                 if index[0] == index[1] {
                     (index[0] + 1) as f64
@@ -72,7 +72,7 @@ fn typed_real_c64_eigenvalue_readback_stays_compact() {
 fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_offdiag() {
     let runtime = runtime();
     let rule = Arc::new(SU2FusionRule);
-    let bond = GradedSpace::try_new_with_arc(
+    let bond = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (SU2Irrep::from_twice_spin(2), 1),
@@ -155,31 +155,33 @@ fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_off
     )
     .is_err());
 
-    let v = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
-    let dense = TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&v], [&v], |_, index| {
-        if index == [0, 1] {
-            f64::NAN
-        } else {
-            0.0
-        }
-    })
-    .unwrap();
+    let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let dense =
+        TensorMap::<U1FusionRule, f64>::from_subblock_fn(&runtime, [&v], [&v], |_, index| {
+            if index == [0, 1] {
+                f64::NAN
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
     assert!(!tenet::expert::is_diagonal(&dense, 1.0).unwrap());
-    let finite = TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&v], [&v], |_, index| {
-        if index[0] == index[1] {
-            4.0
-        } else if index == [0, 1] {
-            0.25
-        } else {
-            0.0
-        }
-    })
-    .unwrap();
+    let finite =
+        TensorMap::<U1FusionRule, f64>::from_subblock_fn(&runtime, [&v], [&v], |_, index| {
+            if index[0] == index[1] {
+                4.0
+            } else if index == [0, 1] {
+                0.25
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
     assert!(!tenet::expert::is_diagonal(&finite, 0.05).unwrap());
     assert!(tenet::expert::is_diagonal(&finite, 0.1).unwrap());
-    let exact = TensorMap::<U1FusionRule, f64>::id(&runtime, [&v]).unwrap();
+    let exact = TensorMap::<U1FusionRule, f64>::isomorphism(&runtime, [&v], [&v]).unwrap();
     assert!(tenet::expert::is_diagonal(&exact, 0.0).unwrap());
-    let inf = TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&v], [&v], |_, index| {
+    let inf = TensorMap::<U1FusionRule, f64>::from_subblock_fn(&runtime, [&v], [&v], |_, index| {
         if index == [1, 0] {
             f64::INFINITY
         } else {

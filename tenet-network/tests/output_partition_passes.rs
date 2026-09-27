@@ -52,7 +52,9 @@ type Map = TensorMap<U1FusionRule, f64>;
 /// Distinct prime degeneracies keep the output payload size unique.
 fn operands() -> (Map, Map) {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = |n| GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), n)]).unwrap();
+    let space = |n| {
+        GradedSpace::try_new(std::sync::Arc::new(U1FusionRule), [(U1Irrep::new(0), n)]).unwrap()
+    };
     let (p, q, c, r) = (space(13), space(17), space(19), space(23));
     (
         Map::rand_with_seed(&runtime, [&p, &q], [&c], 1).unwrap(),

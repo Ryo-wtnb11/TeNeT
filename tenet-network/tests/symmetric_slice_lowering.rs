@@ -16,12 +16,12 @@ fn label(name: &str) -> TemporaryLabel {
 fn common_lowering_is_atomic_and_reconstructs_after_dense_roundtrip() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let two = GradedSpace::try_new_with_arc(
+    let two = GradedSpace::try_new(
         Arc::clone(&provider),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )
     .unwrap();
-    let vacuum = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), 1)]).unwrap();
+    let vacuum = GradedSpace::try_new(provider, [(U1Irrep::new(0), 1)]).unwrap();
     let tensor = TensorMap::<U1FusionRule, f64>::rand_with_seed(
         &runtime,
         [&two, &two, &vacuum],
@@ -77,8 +77,7 @@ fn common_lowering_is_atomic_and_reconstructs_after_dense_roundtrip() {
 #[test]
 fn reconstruction_preserves_two_step_order_and_output_metadata() {
     let runtime = Runtime::builder().build().unwrap();
-    let space =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let space = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let tensors = (0..3)
         .map(|seed| {
             TensorMap::<U1FusionRule, f64>::rand_with_seed(

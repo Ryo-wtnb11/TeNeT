@@ -22,7 +22,7 @@ use tenet::prelude::Error;
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 fn leg() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 2),
@@ -35,7 +35,7 @@ fn leg() -> GradedSpace<U1FusionRule> {
 
 fn fixture(runtime: &Runtime) -> TensorMap<U1FusionRule, f64> {
     let v = leg();
-    TensorMap::from_block_fn(runtime, [&v, &v], [&v, &v], |_, indices| {
+    TensorMap::from_subblock_fn(runtime, [&v, &v], [&v, &v], |_, indices| {
         indices.iter().map(|&i| i as f64 + 1.0).sum::<f64>()
     })
     .unwrap()
@@ -211,7 +211,7 @@ fn device_transform_short_circuits_do_no_device_work() {
     // trace (device `trace` is a separate leaf) and is then uploaded.
     let v = leg();
     let endomorphism: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&v], [&v], |_, indices| indices[0] as f64 + 1.0)
+        TensorMap::from_subblock_fn(&runtime, [&v], [&v], |_, indices| indices[0] as f64 + 1.0)
             .unwrap();
     let rank_zero = endomorphism.trace_pairs(&[(0, 1)]).unwrap();
     assert_eq!(rank_zero.rank(), 0);
@@ -290,7 +290,7 @@ fn a_cold_device_transform_uploads_one_coefficient_payload_per_structure() {
     // pack/scatter workspace. Both are uploaded once, on the first replay of
     // that structure, and never again while the Host store admits it.
     let runtime = Runtime::builder().cuda(0).build().unwrap();
-    let v = GradedSpace::try_new_with_arc(
+    let v = GradedSpace::try_new(
         Arc::new(tenet::core::SU2FusionRule),
         [
             (tenet::core::SU2Irrep::from_twice_spin(0), 2),
@@ -300,7 +300,7 @@ fn a_cold_device_transform_uploads_one_coefficient_payload_per_structure() {
     )
     .unwrap();
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&v, &v], [&v, &v], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v, &v], |_, indices| {
             indices.iter().map(|&i| i as f64 + 1.0).sum::<f64>()
         })
         .unwrap();
@@ -576,17 +576,17 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
     // Z3, exactly as the Host unit test builds it.
     let z2 = Arc::new(tenet::core::ZNFusionRule::new(2).unwrap());
     let z3 = Arc::new(tenet::core::ZNFusionRule::new(3).unwrap());
-    let z2_leg = GradedSpace::try_new_with_arc(Arc::clone(&z2), [(z2.irrep(0), 2)]).unwrap();
-    let z3_leg = GradedSpace::try_new_with_arc(Arc::clone(&z3), [(z3.irrep(0), 2)]).unwrap();
+    let z2_leg = GradedSpace::try_new(Arc::clone(&z2), [(z2.irrep(0), 2)]).unwrap();
+    let z3_leg = GradedSpace::try_new(Arc::clone(&z3), [(z3.irrep(0), 2)]).unwrap();
     let zn_fill = |_: &_, indices: &[usize]| indices.iter().map(|&i| i as f64 + 1.0).sum::<f64>();
-    let z2_host = TensorMap::from_block_fn(&runtime, [&z2_leg], [&z2_leg], zn_fill).unwrap();
+    let z2_host = TensorMap::from_subblock_fn(&runtime, [&z2_leg], [&z2_leg], zn_fill).unwrap();
     let z2_source = z2_host.to_cuda().unwrap();
 
     // 1. Runtime mismatch wins over a rule mismatch: a Z3 destination on
     //    another Runtime.
     let other = Runtime::builder().cuda(0).build().unwrap();
     let mut host_foreign =
-        TensorMap::from_block_fn(&other, [&z3_leg], [&z3_leg], |_, _| f64::NAN).unwrap();
+        TensorMap::from_subblock_fn(&other, [&z3_leg], [&z3_leg], |_, _| f64::NAN).unwrap();
     let mut foreign = host_foreign.to_cuda().unwrap();
     {
         let witness = foreign.clone();
@@ -601,7 +601,7 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
 
     // 2. Rule mismatch wins over a lazy-adjoint source.
     let mut host_z3 =
-        TensorMap::from_block_fn(&runtime, [&z3_leg], [&z3_leg], |_, _| f64::NAN).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&z3_leg], [&z3_leg], |_, _| f64::NAN).unwrap();
     let mut z3_destination = host_z3.to_cuda().unwrap();
     let lazy_source = source.adjoint().unwrap();
     let host_lazy_source = host.adjoint().unwrap();
@@ -726,7 +726,7 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
 
     let v = leg();
     let mut host_rank_three =
-        TensorMap::from_block_fn(&runtime, [&v, &v], [&v], |_, _| f64::NAN).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v], |_, _| f64::NAN).unwrap();
     let mut rank_three = host_rank_three.to_cuda().unwrap();
     {
         let witness = rank_three.clone();
@@ -755,7 +755,7 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
 
 /// fZ2 with both parities on every leg, so a twist really scales blocks.
 fn fermionic_fixture(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::FermionParityFusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -763,7 +763,7 @@ fn fermionic_fixture(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityF
         ],
     )
     .unwrap();
-    TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg, &leg], |_, indices| {
+    TensorMap::from_subblock_fn(runtime, [&leg, &leg], [&leg, &leg], |_, indices| {
         indices.iter().map(|&i| i as f64 + 1.0).sum::<f64>()
     })
     .unwrap()

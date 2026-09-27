@@ -74,7 +74,7 @@ fn allocations<T>(run: impl FnOnce() -> T) -> (u64, T) {
 fn u1_operands(runtime: &Runtime) -> [TensorMap<U1FusionRule, f64>; 3] {
     let provider = Arc::new(U1FusionRule);
     let space = |shift: i32| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&provider),
             (0..8).map(|charge| (U1Irrep::new(charge - 4 + shift), 2)),
         )
@@ -225,7 +225,8 @@ fn the_warm_preflight_allocates_nothing() {
 #[test]
 fn planned_and_sliced_executions_reject_non_symmetric_braiding_first() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new(RealBraidingProbe::<true>, [(ProbeSector, 2)]).unwrap();
+    let leg =
+        GradedSpace::try_new(Arc::new(RealBraidingProbe::<true>), [(ProbeSector, 2)]).unwrap();
     let lhs = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_371_200).unwrap();
     let rhs = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_371_201).unwrap();
     let tensors = [&lhs, &rhs];

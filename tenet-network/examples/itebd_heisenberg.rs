@@ -39,7 +39,7 @@ type Map = TensorMap<U1FusionRule, f64>;
 
 fn space<const N: usize>(sectors: [(i32, usize); N]) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
-        U1FusionRule,
+        std::sync::Arc::new(U1FusionRule),
         sectors.map(|(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
     )
     .expect("valid U(1) fixture")
@@ -51,7 +51,7 @@ fn space<const N: usize>(sectors: [(i32, usize); N]) -> GradedSpace<U1FusionRule
 /// conserved, so only same-charge tree pairs appear:
 /// `<s1 s2| h |s1 s2> = ±1/4` (Sz Sz), `<up dn| h |dn up> = 1/2` (flip-flop).
 fn heisenberg_two_site(rt: &Runtime, p: &GradedSpace<U1FusionRule>) -> Result<Map, Error> {
-    TensorMap::from_block_fn(rt, [p, p], [p, p], |trees, _| {
+    TensorMap::from_subblock_fn(rt, [p, p], [p, p], |trees, _| {
         let cod = trees.codomain_uncoupled();
         let dom = trees.domain_uncoupled();
         if cod == dom {
@@ -128,10 +128,10 @@ impl State {
         let vb = space([(0, 1)]);
         let va = space([(1, 1), (-1, 1)]);
         Ok(Self {
-            ga: TensorMap::from_block_fn(rt, [&vb, p], [&va], |_, _| 1.0)?,
-            la: TensorMap::from_block_fn(rt, [&va], [&va], |_, _| 1.0)?,
-            gb: TensorMap::from_block_fn(rt, [&va, p], [&vb], |_, _| 1.0)?,
-            lb: TensorMap::from_block_fn(rt, [&vb], [&vb], |_, _| 1.0)?,
+            ga: TensorMap::from_subblock_fn(rt, [&vb, p], [&va], |_, _| 1.0)?,
+            la: TensorMap::from_subblock_fn(rt, [&va], [&va], |_, _| 1.0)?,
+            gb: TensorMap::from_subblock_fn(rt, [&va, p], [&vb], |_, _| 1.0)?,
+            lb: TensorMap::from_subblock_fn(rt, [&vb], [&vb], |_, _| 1.0)?,
         })
     }
 

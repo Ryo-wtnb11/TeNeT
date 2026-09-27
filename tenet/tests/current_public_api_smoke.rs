@@ -45,8 +45,11 @@ where
 fn constructs_u1_su2_and_product_tensors_from_provider_labels() {
     let runtime = Runtime::builder().build().unwrap();
 
-    let u1 =
-        GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2)]).unwrap();
+    let u1 = GradedSpace::try_new(
+        std::sync::Arc::new(U1FusionRule),
+        [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2)],
+    )
+    .unwrap();
     let u1_tensor = TensorMap::<U1FusionRule, f64>::zeros(&runtime, [&u1], [&u1]).unwrap();
     inspect_with_the_existing_root_bound(&u1_tensor);
     let generic_u1: TensorMap<U1FusionRule, f64> =
@@ -59,7 +62,7 @@ fn constructs_u1_su2_and_product_tensors_from_provider_labels() {
     assert!(coupled.contains(&U1Irrep::new(0)));
 
     let su2 = GradedSpace::try_new(
-        SU2FusionRule,
+        std::sync::Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 1),
             (SU2Irrep::from_twice_spin(1), 2),
@@ -70,7 +73,7 @@ fn constructs_u1_su2_and_product_tensors_from_provider_labels() {
     assert!(su2_tensor.subblock_count() >= 2);
 
     let product = GradedSpace::try_new(
-        FermionParityFusionRule.product(U1FusionRule),
+        std::sync::Arc::new(FermionParityFusionRule.product(U1FusionRule)),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 1),
             (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 1),
@@ -84,18 +87,22 @@ fn constructs_u1_su2_and_product_tensors_from_provider_labels() {
 #[test]
 fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
     let runtime = Runtime::builder().build().unwrap();
-    let space = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)]).unwrap();
-    let tensor =
-        TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&space], [&space], |_, index| {
-            match index {
-                [0, 0] => 3.0,
-                [1, 1] => 2.0,
-                _ => 1.0,
-            }
-        })
-        .unwrap();
+    let space =
+        GradedSpace::try_new(std::sync::Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let tensor = TensorMap::<U1FusionRule, f64>::from_subblock_fn(
+        &runtime,
+        [&space],
+        [&space],
+        |_, index| match index {
+            [0, 0] => 3.0,
+            [1, 1] => 2.0,
+            _ => 1.0,
+        },
+    )
+    .unwrap();
 
-    let identity = TensorMap::<U1FusionRule, f64>::id(&runtime, [&space]).unwrap();
+    let identity =
+        TensorMap::<U1FusionRule, f64>::isomorphism(&runtime, [&space], [&space]).unwrap();
     assert_close(
         identity
             .contract(&tensor, &[1], &[0], &[0, 1])
@@ -109,7 +116,7 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
     );
     assert_eq!(identity.tr().unwrap(), 2.0);
 
-    let rank_three = TensorMap::<U1FusionRule, f64>::from_block_fn(
+    let rank_three = TensorMap::<U1FusionRule, f64>::from_subblock_fn(
         &runtime,
         [&space, &space],
         [&space],

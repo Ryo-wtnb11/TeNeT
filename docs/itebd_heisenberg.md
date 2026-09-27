@@ -57,7 +57,7 @@ $$
 
 The diagonal terms come from $S_i^zS_{i+1}^z$ and the off-diagonal $1/2$
 terms flip the two spins. [`heisenberg_two_site`](../tenet-network/examples/itebd_heisenberg.rs)
-builds exactly these allowed blocks with `TensorMap::from_block_fn`.
+builds exactly these allowed blocks with `TensorMap::from_subblock_fn`.
 
 ## 4. The two-site Vidal state
 

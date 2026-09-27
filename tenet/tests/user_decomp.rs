@@ -17,7 +17,7 @@ mod numerics;
 #[test]
 fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
     let runtime = Runtime::builder().build().unwrap();
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(0), 2),
@@ -29,7 +29,7 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
 
     // Spectra: charge 0 -> {4, 3}, charge 1 -> {1}, charge 2 -> {2}.
     let tensor =
-        TensorMap::<_, f64>::from_block_fn(&runtime, [&space], [&space], |trees, indices| {
+        TensorMap::<_, f64>::from_subblock_fn(&runtime, [&space], [&space], |trees, indices| {
             if *trees.coupled() == U1Irrep::new(0) {
                 match indices {
                     [0, 0] => 4.0,
@@ -88,12 +88,12 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
 #[test]
 fn solve_right_reuses_left_solve_for_real_complex_and_nonselfdual_u1() {
     let runtime = Runtime::builder().build().unwrap();
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
     )
     .unwrap();
-    let lhs = TensorMap::<_, f64>::from_block_fn(&runtime, [&space], [&space], |trees, _| {
+    let lhs = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&space], [&space], |trees, _| {
         if *trees.coupled() == U1Irrep::new(0) {
             6.0
         } else {
@@ -101,7 +101,7 @@ fn solve_right_reuses_left_solve_for_real_complex_and_nonselfdual_u1() {
         }
     })
     .unwrap();
-    let rhs = TensorMap::<_, f64>::from_block_fn(&runtime, [&space], [&space], |trees, _| {
+    let rhs = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&space], [&space], |trees, _| {
         if *trees.coupled() == U1Irrep::new(0) {
             2.0
         } else {
@@ -112,8 +112,8 @@ fn solve_right_reuses_left_solve_for_real_complex_and_nonselfdual_u1() {
     let solved = lhs.solve_right(&rhs).unwrap();
     assert_eq!(solved.compose(&rhs).unwrap().data(), lhs.data());
 
-    let lhs_c = lhs.to_c64();
-    let rhs_c = rhs.to_c64();
+    let lhs_c = lhs.convert::<Complex64>();
+    let rhs_c = rhs.convert::<Complex64>();
     let solved_c = lhs_c.solve_right(&rhs_c).unwrap();
     assert!(solved_c
         .compose(&rhs_c)

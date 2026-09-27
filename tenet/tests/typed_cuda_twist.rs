@@ -124,7 +124,7 @@ fn complex_fill(
 }
 
 fn fz2_leg(dual: bool) -> GradedSpace<FermionParityFusionRule> {
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
     )
@@ -137,7 +137,7 @@ fn fz2_leg(dual: bool) -> GradedSpace<FermionParityFusionRule> {
 }
 
 fn u1_leg() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 2),
@@ -157,9 +157,9 @@ fn device_twist_matches_the_host_on_fermion_parity() {
     // A dual leg in the codomain and a plain one in the domain, so the leg
     // indices below reach both sides and both dualities.
     let real: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &dual], [&leg, &leg], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &dual], [&leg, &leg], real_fill).unwrap();
     let complex: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &dual], [&leg, &leg], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &dual], [&leg, &leg], complex_fill).unwrap();
     assert!(real.subblock_count() >= 2, "multi-block fixture");
 
     // Single codomain leg, single dual codomain leg, single domain leg.
@@ -192,7 +192,7 @@ fn device_twist_matches_the_host_for_product_providers() {
 
     // fZ2 x U(1): fermionic signs on top of a charge grading.
     let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
@@ -202,7 +202,7 @@ fn device_twist_matches_the_host_for_product_providers() {
     )
     .unwrap();
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], real_fill).unwrap();
     for legs in [&[1usize][..], &[2][..], &[0, 2][..]] {
         let what = format!("fZ2xU1 twist {legs:?}");
         let twisted = device_matches_host!(&what, host, |t| t.twist(legs));
@@ -211,7 +211,7 @@ fn device_twist_matches_the_host_for_product_providers() {
 
     // fZ2 (x) SU(2): fermionic signs with non-Abelian degeneracies.
     let rule = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (
@@ -230,7 +230,7 @@ fn device_twist_matches_the_host_for_product_providers() {
     )
     .unwrap();
     let host: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
     for legs in [&[0usize][..], &[3][..], &[1, 3][..]] {
         let what = format!("fZ2xSU2 twist {legs:?}");
         let twisted = device_matches_host!(&what, host, |t| t.twist(legs));
@@ -247,7 +247,7 @@ fn device_twist_round_trips_bitwise_and_short_circuits() {
     let runtime = runtime();
     let leg = fz2_leg(false);
     let host: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
     let device = host.to_cuda().unwrap();
 
     // twist ∘ twist_inverse == id, bitwise: both factors are exactly ±1.
@@ -269,7 +269,7 @@ fn device_twist_round_trips_bitwise_and_short_circuits() {
     // A bosonic provider twists by 1 on every block: a clone, never a scale.
     let u1 = u1_leg();
     let bosonic: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
     let bosonic_device = bosonic.to_cuda().unwrap();
     for legs in [&[0usize][..], &[1, 3][..]] {
         assert_eq!(
@@ -302,7 +302,7 @@ fn device_twist_on_a_lazy_adjoint_matches_the_host() {
     let leg = fz2_leg(false);
     let dual = fz2_leg(true);
     let host: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &dual], [&leg], complex_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &dual], [&leg], complex_fill).unwrap();
     let device = host.to_cuda().unwrap();
 
     for legs in [&[0usize][..], &[2][..], &[0, 1, 2][..]] {
@@ -345,12 +345,10 @@ fn device_twist_handles_a_space_with_no_coupled_sector_and_rejects_a_leg_past_th
     // rather than reaching the zero-length upload — it proves the degenerate
     // space is handled, not that path.
     let even =
-        GradedSpace::try_new_with_arc(Arc::new(FermionParityFusionRule), [(Z2Irrep::EVEN, 2)])
-            .unwrap();
-    let odd = GradedSpace::try_new_with_arc(Arc::new(FermionParityFusionRule), [(Z2Irrep::ODD, 1)])
-        .unwrap();
+        GradedSpace::try_new(Arc::new(FermionParityFusionRule), [(Z2Irrep::EVEN, 2)]).unwrap();
+    let odd = GradedSpace::try_new(Arc::new(FermionParityFusionRule), [(Z2Irrep::ODD, 1)]).unwrap();
     let empty: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&even], [&odd], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&even], [&odd], real_fill).unwrap();
     assert!(empty.data().is_empty(), "empty fixture");
     let device = empty.to_cuda().unwrap();
     assert!(device
@@ -364,7 +362,7 @@ fn device_twist_handles_a_space_with_no_coupled_sector_and_rejects_a_leg_past_th
     // The range check precedes everything, on both sides, with the Host text.
     let leg = fz2_leg(false);
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], real_fill).unwrap();
     let device = host.to_cuda().unwrap();
     assert_eq!(
         device.twist(&[2]).unwrap_err().to_string(),

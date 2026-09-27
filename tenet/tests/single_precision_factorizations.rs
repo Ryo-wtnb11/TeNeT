@@ -172,7 +172,9 @@ macro_rules! assert_reconstruction {
 macro_rules! assert_isometry {
     ($what:expr, $rt:expr, $q:expr, $terms:expr, $narrow:ty) => {{
         let q = $q;
-        let identity = TensorMap::<_, $narrow>::id($rt, q.domain().iter()).unwrap();
+        let identity =
+            TensorMap::<_, $narrow>::isomorphism($rt, q.domain().iter(), q.domain().iter())
+                .unwrap();
         assert_reconstruction!(
             $what,
             &q.adjoint().unwrap().compose(q).unwrap(),
@@ -187,7 +189,9 @@ macro_rules! assert_isometry {
 macro_rules! assert_coisometry {
     ($what:expr, $rt:expr, $q:expr, $terms:expr, $narrow:ty) => {{
         let q = $q;
-        let identity = TensorMap::<_, $narrow>::id($rt, q.codomain().iter()).unwrap();
+        let identity =
+            TensorMap::<_, $narrow>::isomorphism($rt, q.codomain().iter(), q.codomain().iter())
+                .unwrap();
         assert_reconstruction!(
             $what,
             &q.compose(&q.adjoint().unwrap()).unwrap(),
@@ -767,7 +771,7 @@ factorization_suite!(complex32_payload, Complex32, Complex64);
 /// factor plans) rather than the multiplicity-free one.
 ///
 /// A separate, smaller body rather than an instantiation of `factor_checks!`:
-/// `TensorMap::id` is multiplicity-free-only, so the isometry laws are expressed here as "the Gram factor is the identity"
+/// the isometry laws are expressed here as "the Gram factor is the identity"
 /// read through `diagview` plus a pointwise comparison against the widened
 /// oracle, which is gauge-independent because the factor's own gauge cancels in
 /// `q† ∘ q`.
@@ -779,7 +783,7 @@ mod checked_generic {
     use tenet::typed::SUNFusionRule;
 
     fn su3_leg(degeneracy: usize) -> GradedSpace<SUNFusionRule> {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::new(SUNFusionRule::new(3).unwrap()),
             [(vec![2i64, 2], degeneracy)],
         )
@@ -1234,12 +1238,12 @@ fn a_rank_tie_the_single_precision_payload_cannot_resolve_keeps_the_other_sector
         }
     };
     let wide: TensorMap<U1FusionRule, f64> =
-        TensorMap::from_block_fn(&rt, [&leg], [&leg], |trees, index| {
+        TensorMap::from_subblock_fn(&rt, [&leg], [&leg], |trees, index| {
             entry(trees.coupled().charge(), index)
         })
         .unwrap();
     let narrow: TensorMap<U1FusionRule, f32> =
-        TensorMap::from_block_fn(&rt, [&leg], [&leg], |trees, index| {
+        TensorMap::from_subblock_fn(&rt, [&leg], [&leg], |trees, index| {
             entry(trees.coupled().charge(), index) as f32
         })
         .unwrap();

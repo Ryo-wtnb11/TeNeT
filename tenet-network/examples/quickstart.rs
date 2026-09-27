@@ -4,7 +4,7 @@ use tenet_network::tensor;
 fn main() -> Result<(), Error> {
     let runtime = Runtime::builder().build()?;
     let space = GradedSpace::try_new(
-        U1FusionRule,
+        std::sync::Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 1),
             (U1Irrep::new(0), 2),
@@ -15,7 +15,7 @@ fn main() -> Result<(), Error> {
     // Fill each allowed charge block. Unequal indices stay zero, so both maps
     // are diagonal.
     let a: TensorMap<U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&space], [&space], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&space], [&space], |trees, indices| {
             if indices[0] == indices[1] {
                 f64::from(2 + trees.coupled().charge())
             } else {
@@ -23,7 +23,7 @@ fn main() -> Result<(), Error> {
             }
         })?;
     let b: TensorMap<U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&space], [&space], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&space], [&space], |trees, indices| {
             if indices[0] == indices[1] {
                 f64::from(2 - trees.coupled().charge())
             } else {

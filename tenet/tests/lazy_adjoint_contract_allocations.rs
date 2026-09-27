@@ -72,7 +72,11 @@ macro_rules! assert_warm_lazy_adjoint {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let leg = GradedSpace::try_new($provider, $sectors.into_iter().map(|s| (s, 4))).unwrap();
+        let leg = GradedSpace::try_new(
+            std::sync::Arc::new($provider),
+            $sectors.into_iter().map(|s| (s, 4)),
+        )
+        .unwrap();
         let a =
             TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1).unwrap();
         let a2 =

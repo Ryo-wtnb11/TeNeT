@@ -39,23 +39,26 @@ macro_rules! side_only_case {
     ($rule:expr, $left:expr, $phys:expr, $right:expr, $scalar:ty, $value:expr) => {{
         let rt = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new($rule);
-        let left = GradedSpace::try_new_with_arc(Arc::clone(&provider), $left).unwrap();
-        let phys = GradedSpace::try_new_with_arc(Arc::clone(&provider), $phys).unwrap();
-        let right = GradedSpace::try_new_with_arc(Arc::clone(&provider), $right).unwrap();
+        let left = GradedSpace::try_new(Arc::clone(&provider), $left).unwrap();
+        let phys = GradedSpace::try_new(Arc::clone(&provider), $phys).unwrap();
+        let right = GradedSpace::try_new(Arc::clone(&provider), $right).unwrap();
         let mut counter = 0usize;
         let value = $value;
         let t: TensorMap<_, $scalar> =
-            TensorMap::from_block_fn(&rt, [&left, &phys], [&right], |_, _| {
+            TensorMap::from_subblock_fn(&rt, [&left, &phys], [&right], |_, _| {
                 counter += 1;
                 value(counter)
             })
             .unwrap();
-        let codomain_id: TensorMap<_, $scalar> = TensorMap::id(&rt, [&left, &phys]).unwrap();
-        let domain_id: TensorMap<_, $scalar> = TensorMap::id(&rt, [&right]).unwrap();
+        let codomain_id: TensorMap<_, $scalar> =
+            TensorMap::isomorphism(&rt, [&left, &phys], [&left, &phys]).unwrap();
+        let domain_id: TensorMap<_, $scalar> =
+            TensorMap::isomorphism(&rt, [&right], [&right]).unwrap();
         let unitary = |u: &TensorMap<_, $scalar>| {
             let adjoint = u.adjoint().unwrap();
-            let inner = TensorMap::id(&rt, u.domain().iter()).unwrap();
-            let outer = TensorMap::id(&rt, u.codomain().iter()).unwrap();
+            let inner = TensorMap::isomorphism(&rt, u.domain().iter(), u.domain().iter()).unwrap();
+            let outer =
+                TensorMap::isomorphism(&rt, u.codomain().iter(), u.codomain().iter()).unwrap();
             assert_close!(&adjoint.compose(u).unwrap(), &inner);
             assert_close!(&u.compose(&adjoint).unwrap(), &outer);
         };
@@ -77,7 +80,7 @@ macro_rules! side_only_case {
         assert!(null_adjoint.compose(&t).unwrap().norm(2.0).unwrap() <= 1e-10);
         assert_close!(
             &null_adjoint.compose(&null).unwrap(),
-            &TensorMap::id(&rt, null.domain().iter()).unwrap()
+            &TensorMap::isomorphism(&rt, null.domain().iter(), null.domain().iter()).unwrap()
         );
         assert_close!(
             &null
@@ -92,7 +95,7 @@ macro_rules! side_only_case {
         assert!(t.compose(&null_adjoint).unwrap().norm(2.0).unwrap() <= 1e-10);
         assert_close!(
             &null.compose(&null_adjoint).unwrap(),
-            &TensorMap::id(&rt, null.codomain().iter()).unwrap()
+            &TensorMap::isomorphism(&rt, null.codomain().iter(), null.codomain().iter()).unwrap()
         );
         assert_close!(
             &null_adjoint
@@ -239,7 +242,7 @@ macro_rules! multiplicity_free_full_qr_lq_bonds {
         let provider = Arc::new(U1FusionRule);
         let q = U1Irrep::new;
         let space = |irreps: Vec<(U1Irrep, usize)>| {
-            GradedSpace::try_new_with_arc(Arc::clone(&provider), irreps).unwrap()
+            GradedSpace::try_new(Arc::clone(&provider), irreps).unwrap()
         };
         let left = space(vec![(q(0), 2), (q(1), 2)]);
         let phys = space(vec![(q(0), 1), (q(1), 1)]);
@@ -263,7 +266,7 @@ mod checked_generic {
             let rt = Runtime::builder().dense_threads(1).build().unwrap();
             let provider = Arc::new(SUNFusionRule::new(3).unwrap());
             let space = |irreps: Vec<(Vec<i64>, usize)>| {
-                GradedSpace::try_new_with_arc(Arc::clone(&provider), irreps).unwrap()
+                GradedSpace::try_new(Arc::clone(&provider), irreps).unwrap()
             };
             let a = space(vec![(vec![1, 1], 2), (vec![0, 0], 1)]);
             let b = space(vec![(vec![1, 1], 2), (vec![0, 0], 1), (vec![2, 0], 2)]);
@@ -426,7 +429,7 @@ mod checked_generic {
             let rt = Runtime::builder().dense_threads(1).build().unwrap();
             let provider = Arc::new(SUNFusionRule::new(3).unwrap());
             let space = |irreps: Vec<(Vec<i64>, usize)>| {
-                GradedSpace::try_new_with_arc(Arc::clone(&provider), irreps).unwrap()
+                GradedSpace::try_new(Arc::clone(&provider), irreps).unwrap()
             };
             let a = space(vec![(vec![1, 1], 2), (vec![0, 0], 1), (vec![1, 0], 1)]);
             let fused = a.fuse(&a).unwrap();

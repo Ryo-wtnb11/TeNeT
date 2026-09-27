@@ -369,7 +369,7 @@ fn runtime() -> Runtime {
 }
 
 fn su2_leg(provider: &Arc<SU2FusionRule>, dual: bool) -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         [
             (SU2Irrep::from_twice_spin(0), 1),
@@ -417,9 +417,9 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
     let codec = GenericCodec {
         provider: Arc::clone(&provider),
     };
-    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(GenericLabel::X, 1)]).unwrap();
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(GenericLabel::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
             let coupled = usize::from(*trees.coupled() == GenericLabel::X);
             let codomain_mu = trees.codomain_vertices()[0].get();
             let domain_mu = trees.domain_vertices()[0].get();
@@ -487,7 +487,9 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         );
     }
 
-    let complex = source.to_c64().scale(Complex64::new(1.0, -0.25));
+    let complex = source
+        .convert::<Complex64>()
+        .scale(Complex64::new(1.0, -0.25));
     let restored_complex = TensorMap::<GenericToy, Complex64>::from_bytes_with(
         &runtime,
         &complex.to_bytes_with(&codec).unwrap(),
@@ -642,9 +644,9 @@ fn admitted_shape_limit_precedes_dense_payload_allocation() {
     let codec = GenericCodec {
         provider: Arc::clone(&provider),
     };
-    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(GenericLabel::X, 1)]).unwrap();
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(GenericLabel::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |_, _| 1.0).unwrap();
     let mut forged = source.to_bytes_with(&codec).unwrap();
     let offsets = dense_leg_degeneracy_offsets(&forged);
     assert_eq!(offsets.len(), 4);
@@ -695,7 +697,7 @@ fn non_self_dual_u1_space_roundtrip_does_not_dualize_twice() {
     let codec = U1Codec {
         provider: Arc::clone(&provider),
     };
-    let source = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(3), 7)])
+    let source = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(3), 7)])
         .and_then(|space| space.try_dual())
         .unwrap();
     assert_eq!(source.sectors().unwrap(), [U1Irrep::new(-3)]);
@@ -725,7 +727,7 @@ fn dense_su2_f64_and_c64_roundtrip_exact_bits_and_semantic_blocks() {
         0x3ff0_0000_0000_0001,
         0x7ff8_0000_0000_0042,
     ];
-    let real: TensorMap<_, f64> = TensorMap::from_block_fn(
+    let real: TensorMap<_, f64> = TensorMap::from_subblock_fn(
         &runtime,
         [&codomain, &codomain, &codomain],
         [&domain],
@@ -736,7 +738,7 @@ fn dense_su2_f64_and_c64_roundtrip_exact_bits_and_semantic_blocks() {
         },
     )
     .unwrap();
-    let complex: TensorMap<_, Complex64> = TensorMap::from_block_fn(
+    let complex: TensorMap<_, Complex64> = TensorMap::from_subblock_fn(
         &runtime,
         [&codomain, &codomain, &codomain],
         [&domain],
@@ -916,7 +918,7 @@ fn compact_and_lazy_representations_survive_roundtrip() {
         }));
 
     let dense: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
             (1 + indices.iter().sum::<usize>()) as f64
         })
         .unwrap();
@@ -941,7 +943,7 @@ fn compact_and_lazy_representations_survive_roundtrip() {
         lazy.data().iter().map(|x| x.to_bits()).collect::<Vec<_>>()
     );
 
-    let dense_complex = dense.to_c64().scale(Complex64::new(1.0, 0.5));
+    let dense_complex = dense.convert::<Complex64>().scale(Complex64::new(1.0, 0.5));
     let lazy_complex = dense_complex.adjoint().unwrap();
     let restored_lazy_complex = TensorMap::<SU2FusionRule, Complex64>::from_bytes_with(
         &runtime,
@@ -987,7 +989,7 @@ fn legacy_adjoint_diagonal_records_decode_to_the_owned_conjugated_diagonal() {
     let codec = GenericCodec {
         provider: Arc::clone(&provider),
     };
-    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(GenericLabel::X, 2)]).unwrap();
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(GenericLabel::X, 2)]).unwrap();
     let diagonal = TensorMap::<_, Complex64>::diagonal(
         &runtime,
         &leg,
@@ -1124,10 +1126,9 @@ fn malformed_tensor_tags_and_duplicate_or_missing_blocks_are_rejected() {
     let provider = Arc::new(SU2FusionRule);
     let codec = Su2Codec::new(Arc::clone(&provider));
     let leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(SU2Irrep::from_twice_spin(0), 1)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&provider), [(SU2Irrep::from_twice_spin(0), 1)]).unwrap();
     let tensor: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [], |_, _| 3.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg], [], |_, _| 3.0).unwrap();
     let bytes = tensor.to_bytes_with(&codec).unwrap();
     let decode = |input: &[u8]| {
         TensorMap::<SU2FusionRule, f64>::from_bytes_with(
@@ -1212,7 +1213,7 @@ fn golden_dense_f64(
 ) -> TensorMap<SU2FusionRule, f64> {
     let codomain = su2_leg(provider, false);
     let domain = su2_leg(provider, true);
-    TensorMap::from_block_fn(
+    TensorMap::from_subblock_fn(
         runtime,
         [&codomain, &codomain],
         [&domain],
@@ -1427,7 +1428,7 @@ macro_rules! single_precision_roundtrip {
             let codec = U1Codec {
                 provider: Arc::clone(&provider),
             };
-            let leg = GradedSpace::try_new_with_arc(
+            let leg = GradedSpace::try_new(
                 Arc::clone(&provider),
                 [
                     (U1Irrep::new(-1), 2),
@@ -1438,7 +1439,7 @@ macro_rules! single_precision_roundtrip {
             .unwrap();
             let dual = leg.try_dual().unwrap();
             let dense: TensorMap<_, $scalar> =
-                TensorMap::from_block_fn(&runtime, [&leg, &dual], [&leg], |trees, indices| {
+                TensorMap::from_subblock_fn(&runtime, [&leg, &dual], [&leg], |trees, indices| {
                     value(
                         trees.coupled().charge().unsigned_abs() as usize
                             + indices.iter().sum::<usize>(),
@@ -1485,7 +1486,7 @@ macro_rules! single_precision_roundtrip {
             let codec = Su2Codec::new(Arc::clone(&provider));
             let codomain = su2_leg(&provider, false);
             let domain = su2_leg(&provider, true);
-            let dense: TensorMap<_, $scalar> = TensorMap::from_block_fn(
+            let dense: TensorMap<_, $scalar> = TensorMap::from_subblock_fn(
                 &runtime,
                 [&codomain, &codomain, &codomain],
                 [&domain],
@@ -1536,14 +1537,14 @@ macro_rules! single_precision_roundtrip {
             let codec = FermionCodec {
                 provider: Arc::clone(&provider),
             };
-            let leg = GradedSpace::try_new_with_arc(
+            let leg = GradedSpace::try_new(
                 Arc::clone(&provider),
                 [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)],
             )
             .unwrap();
             let dual = leg.try_dual().unwrap();
             let dense: TensorMap<_, $scalar> =
-                TensorMap::from_block_fn(&runtime, [&leg, &dual], [&leg], |trees, indices| {
+                TensorMap::from_subblock_fn(&runtime, [&leg, &dual], [&leg], |trees, indices| {
                     value(usize::from(trees.coupled().parity()) + indices.iter().sum::<usize>())
                 })
                 .unwrap();
@@ -1583,17 +1584,20 @@ macro_rules! single_precision_roundtrip {
             let codec = GenericCodec {
                 provider: Arc::clone(&provider),
             };
-            let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(GenericLabel::X, 2)])
-                .unwrap();
-            let dense: TensorMap<_, $scalar> =
-                TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+            let leg = GradedSpace::try_new(Arc::clone(&provider), [(GenericLabel::X, 2)]).unwrap();
+            let dense: TensorMap<_, $scalar> = TensorMap::from_subblock_fn(
+                &runtime,
+                [&leg, &leg],
+                [&leg, &leg],
+                |trees, indices| {
                     value(
                         trees.codomain_vertices()[0].get()
                             + trees.domain_vertices()[0].get()
                             + indices.iter().sum::<usize>(),
                     )
-                })
-                .unwrap();
+                },
+            )
+            .unwrap();
             assert!((0..dense.subblock_count()).any(|index| {
                 dense
                     .subblock_fusion_trees(index)
@@ -1742,27 +1746,29 @@ fn every_scalar_mismatch_direction_is_typed_and_precedes_provider_resolution() {
     let codec = U1Codec {
         provider: Arc::clone(&provider),
     };
-    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
-    let f64_bytes = TensorMap::<_, f64>::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0)
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
+    let f64_bytes = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 1.0)
         .unwrap()
         .to_bytes_with(&codec)
         .unwrap();
-    let c64_bytes = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
-        Complex64::new(1.0, -0.0)
-    })
-    .unwrap()
-    .to_bytes_with(&codec)
-    .unwrap();
-    let f32_bytes = TensorMap::<_, f32>::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0)
+    let c64_bytes =
+        TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| {
+            Complex64::new(1.0, -0.0)
+        })
         .unwrap()
         .to_bytes_with(&codec)
         .unwrap();
-    let c32_bytes = TensorMap::<_, Complex32>::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
-        Complex32::new(1.0, -0.0)
-    })
-    .unwrap()
-    .to_bytes_with(&codec)
-    .unwrap();
+    let f32_bytes = TensorMap::<_, f32>::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 1.0)
+        .unwrap()
+        .to_bytes_with(&codec)
+        .unwrap();
+    let c32_bytes =
+        TensorMap::<_, Complex32>::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| {
+            Complex32::new(1.0, -0.0)
+        })
+        .unwrap()
+        .to_bytes_with(&codec)
+        .unwrap();
 
     assert_only_decodes_as!(&runtime, &codec, &f64_bytes, f64);
     assert_only_decodes_as!(&runtime, &codec, &c64_bytes, Complex64);
@@ -1773,7 +1779,7 @@ fn every_scalar_mismatch_direction_is_typed_and_precedes_provider_resolution() {
     let missing = Su2Codec::missing(Arc::new(SU2FusionRule));
     let su2_leg = su2_leg(&Arc::new(SU2FusionRule), false);
     let su2: TensorMap<_, f32> =
-        TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&su2_leg], [&su2_leg], |_, _| 1.0).unwrap();
     let su2_bytes = su2
         .to_bytes_with(&Su2Codec::new(Arc::new(SU2FusionRule)))
         .unwrap();

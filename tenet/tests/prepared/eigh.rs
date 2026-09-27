@@ -158,7 +158,7 @@ where
 {
     (0..count)
         .map(|member| {
-            TensorMap::from_block_fn(runtime, [leg], [leg], |_, index| {
+            TensorMap::from_subblock_fn(runtime, [leg], [leg], |_, index| {
                 entry(member, index[0], index[1])
             })
             .unwrap()

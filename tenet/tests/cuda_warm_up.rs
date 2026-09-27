@@ -20,12 +20,12 @@ use tenet::typed::{GradedSpace, Runtime, TensorMap};
 fn a_first_contract_on_a_fresh_runtime_does_no_backend_initialization_work() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
-    let lhs = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
+    let lhs = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
         indices.iter().sum::<usize>() as f64 + 1.0
     })
     .unwrap();
-    let rhs = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+    let rhs = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
         indices.iter().sum::<usize>() as f64 - 1.0
     })
     .unwrap();

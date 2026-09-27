@@ -108,7 +108,7 @@ type U1Su2 = tenet::core::ProductFusionRule<U1FusionRule, SU2FusionRule>;
 /// groups) and the degeneracies put the payload past the backend's parallel
 /// size gate.
 fn u1_su2_space(provider: &Arc<U1Su2>) -> GradedSpace<U1Su2> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         [
             (
@@ -133,7 +133,7 @@ fn u1_su2_space(provider: &Arc<U1Su2>) -> GradedSpace<U1Su2> {
 }
 
 fn u1_space(provider: &Arc<U1FusionRule>) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         [
             (U1Irrep::new(-1), 36),

@@ -38,7 +38,11 @@ fn warm_working_sets_never_evict() {
 
     // E1-style ledger: several ops back to back without a reset, as the E1
     // rows run, so their structures share the cache.
-    let leg = GradedSpace::try_new(U1FusionRule, (-1..=1).map(|q| (u1(q), 2))).unwrap();
+    let leg = GradedSpace::try_new(
+        std::sync::Arc::new(U1FusionRule),
+        (-1..=1).map(|q| (u1(q), 2)),
+    )
+    .unwrap();
     let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1).unwrap();
     let square =
         TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 2).unwrap();
@@ -62,11 +66,12 @@ fn warm_working_sets_never_evict() {
     // Sweep-like loop: an open chain `[vL, p] <- [vR]` with a distinct space
     // on every bond, contracted pairwise and repartitioned left to right.
     // One sweep touches more structures than the old 5-entry cap held.
-    let physical = GradedSpace::try_new(U1FusionRule, [(u1(-1), 1), (u1(1), 1)]).unwrap();
+    let physical =
+        GradedSpace::try_new(std::sync::Arc::new(U1FusionRule), [(u1(-1), 1), (u1(1), 1)]).unwrap();
     let bonds: Vec<_> = (0..9)
         .map(|b| {
             GradedSpace::try_new(
-                U1FusionRule,
+                std::sync::Arc::new(U1FusionRule),
                 [(u1(-1), b + 1), (u1(0), b + 2), (u1(1), b + 1)],
             )
             .unwrap()

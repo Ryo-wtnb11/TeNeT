@@ -52,12 +52,12 @@ type Host = TensorMap<U1FusionRule, f64>;
 type Device = TensorMap<U1FusionRule, f64, CudaStorage<f64>>;
 
 fn ones(runtime: &Runtime, sectors: i32, deg: usize) -> Host {
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         (0..sectors).map(|q| (U1Irrep::new(q), deg)),
     )
     .unwrap();
-    TensorMap::from_block_fn(runtime, [&space], [&space], |_, _| 1.0).unwrap()
+    TensorMap::from_subblock_fn(runtime, [&space], [&space], |_, _| 1.0).unwrap()
 }
 
 /// Host wall time of one warm `compose`, which B's delay sweep spans.
@@ -140,12 +140,12 @@ const ROUNDS: usize = 20;
 const SMALL: usize = 48;
 
 fn graded(runtime: &Runtime, seed: usize) -> Host {
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         (0..3).map(|q| (U1Irrep::new(q), SMALL)),
     )
     .unwrap();
-    TensorMap::from_block_fn(runtime, [&space], [&space], |_, index| {
+    TensorMap::from_subblock_fn(runtime, [&space], [&space], |_, index| {
         ((index[0] * 7 + index[1] * 3 + seed) % 11) as f64 - 5.0
     })
     .unwrap()

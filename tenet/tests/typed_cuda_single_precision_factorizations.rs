@@ -168,7 +168,7 @@ where
     R: DeviceRule,
     D: FactorPayload,
 {
-    TensorMap::<R, D>::from_block_fn(runtime, [codomain], [domain], |_, index| {
+    TensorMap::<R, D>::from_subblock_fn(runtime, [codomain], [domain], |_, index| {
         let (re, im) = fixture_parts(diagonal, index[0], index[1]);
         D::entry(re, im)
     })
@@ -203,7 +203,7 @@ where
     D: FactorPayload,
 {
     let wide =
-        TensorMap::<R, Complex64>::from_block_fn(runtime, [codomain], [domain], |_, index| {
+        TensorMap::<R, Complex64>::from_subblock_fn(runtime, [codomain], [domain], |_, index| {
             let (re, im) = fixture_parts(diagonal, index[0], index[1]);
             Complex64::new(
                 re,
@@ -231,7 +231,7 @@ where
 }
 
 fn u1_leg(degeneracies: [usize; 3]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), degeneracies[0]),
@@ -244,7 +244,7 @@ fn u1_leg(degeneracies: [usize; 3]) -> GradedSpace<U1FusionRule> {
 
 /// SU(2): non-Abelian, `dim(c) != 1`, several coupled sectors.
 fn su2_leg() -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -343,13 +343,14 @@ fn assert_device_svd_matches_host<R, D>(
     let identity_bound = tolerance::<D>(terms, 1.0, kappa);
     assert_residual(
         &u.adjoint().unwrap().compose(&u).unwrap(),
-        &TensorMap::<R, D>::id(runtime, u.domain().iter()).unwrap(),
+        &TensorMap::<R, D>::isomorphism(runtime, u.domain().iter(), u.domain().iter()).unwrap(),
         identity_bound,
         "svd u isometry",
     );
     assert_residual(
         &vh.compose(&vh.adjoint().unwrap()).unwrap(),
-        &TensorMap::<R, D>::id(runtime, vh.codomain().iter()).unwrap(),
+        &TensorMap::<R, D>::isomorphism(runtime, vh.codomain().iter(), vh.codomain().iter())
+            .unwrap(),
         identity_bound,
         "svd vh coisometry",
     );
@@ -431,7 +432,7 @@ fn assert_device_qr_matches_host<R, D>(
 
     assert_residual(
         &q.adjoint().unwrap().compose(&q).unwrap(),
-        &TensorMap::<R, D>::id(runtime, q.domain().iter()).unwrap(),
+        &TensorMap::<R, D>::isomorphism(runtime, q.domain().iter(), q.domain().iter()).unwrap(),
         tolerance::<D>(terms, 1.0, kappa),
         "qr q isometry",
     );
@@ -496,7 +497,7 @@ where
     assert_residual(&q.compose(&r).unwrap(), source, bound, what);
     assert_residual(
         &q.adjoint().unwrap().compose(&q).unwrap(),
-        &TensorMap::<R, D>::id(runtime, q.domain().iter()).unwrap(),
+        &TensorMap::<R, D>::isomorphism(runtime, q.domain().iter(), q.domain().iter()).unwrap(),
         tolerance::<D>(terms, 1.0, 1.0),
         what,
     );
@@ -526,7 +527,7 @@ fn device_qr_compact_obeys_its_laws_on_rank_deficient_and_dual_multileg_blocks()
         // block has rank one at every payload: a real `D` drops the imaginary
         // part of `u` and `v` before the product, not of the product.
         let rank_one =
-            TensorMap::<U1FusionRule, D>::from_block_fn(runtime, [&leg], [&leg], |_, index| {
+            TensorMap::<U1FusionRule, D>::from_subblock_fn(runtime, [&leg], [&leg], |_, index| {
                 let (i, j) = (index[0] as f64, index[1] as f64);
                 let u = D::entry(1.0 + 0.5 * i, 0.25 * i);
                 let v = D::entry(1.0 + 0.25 * j, -0.125 * j);
@@ -537,7 +538,7 @@ fn device_qr_compact_obeys_its_laws_on_rank_deficient_and_dual_multileg_blocks()
 
         let small = u1_leg([1, 2, 1]);
         let dual = small.try_dual().unwrap();
-        let multileg = TensorMap::<U1FusionRule, D>::from_block_fn(
+        let multileg = TensorMap::<U1FusionRule, D>::from_subblock_fn(
             runtime,
             [&small, &dual],
             [&small],
@@ -610,13 +611,12 @@ fn device_qr_returns_the_positive_diagonal_gauge_at_every_payload() {
 #[ignore = "requires a real CUDA device"]
 fn device_qr_fixes_a_hand_computed_complex_phase() {
     fn case<D: FactorPayload>(runtime: &Runtime) {
-        let leg =
-            GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+        let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
         let a = [[(0.0, -2.0), (1.0, 1.0)], [(0.0, 0.0), (0.0, 3.0)]];
         let q_expected = [[(0.0, -1.0), (0.0, 0.0)], [(0.0, 0.0), (0.0, 1.0)]];
         let r_expected = [[(2.0, 0.0), (-1.0, 1.0)], [(0.0, 0.0), (3.0, 0.0)]];
         let source =
-            TensorMap::<U1FusionRule, D>::from_block_fn(runtime, [&leg], [&leg], |_, x| {
+            TensorMap::<U1FusionRule, D>::from_subblock_fn(runtime, [&leg], [&leg], |_, x| {
                 let (re, im) = a[x[0]][x[1]];
                 D::entry(re, im)
             })
@@ -698,7 +698,7 @@ fn assert_device_eigh_matches_host<R, D>(
 
     assert_residual(
         &v.adjoint().unwrap().compose(&v).unwrap(),
-        &TensorMap::<R, D>::id(runtime, v.domain().iter()).unwrap(),
+        &TensorMap::<R, D>::isomorphism(runtime, v.domain().iter(), v.domain().iter()).unwrap(),
         tolerance::<D>(terms, 1.0, kappa),
         "eigh v isometry",
     );
@@ -755,7 +755,7 @@ fn device_eigh_admits_a_nearly_hermitian_single_precision_block() {
         leg: &GradedSpace<U1FusionRule>,
         skew: f64,
     ) -> TensorMap<U1FusionRule, D, CudaStorage<D>> {
-        TensorMap::<U1FusionRule, D>::from_block_fn(runtime, [leg], [leg], |_, index| {
+        TensorMap::<U1FusionRule, D>::from_subblock_fn(runtime, [leg], [leg], |_, index| {
             let (re, im) = fixture_parts(&POSITIVE, index[0], index[1]);
             if index[0] > index[1] {
                 D::entry(re + skew, im)
@@ -887,7 +887,7 @@ fn device_factorizations_handle_blocks_at_unaligned_offsets_at_every_payload() {
     let u1 = Arc::new(U1FusionRule);
 
     for (d0, d1) in [(3usize, 2usize), (5, 2), (3, 3), (4, 2), (2, 2)] {
-        let leg = GradedSpace::try_new_with_arc(
+        let leg = GradedSpace::try_new(
             Arc::clone(&u1),
             [(U1Irrep::new(0), d0), (U1Irrep::new(1), d1)],
         )

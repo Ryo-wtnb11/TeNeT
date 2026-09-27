@@ -42,11 +42,8 @@ fn mf_optimizers_fall_back_on_all_dim1_gram_topology() {
             })
             .build()
             .unwrap();
-        let v = GradedSpace::try_new_with_arc(
-            Arc::new(SU2FusionRule),
-            [(SU2Irrep::from_twice_spin(0), 1)],
-        )
-        .unwrap();
+        let v = GradedSpace::try_new(Arc::new(SU2FusionRule), [(SU2Irrep::from_twice_spin(0), 1)])
+            .unwrap();
         let cne = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &v], [&v], 1).unwrap();
         let sne = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &v], [&v], 2).unwrap();
         let ev = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 3).unwrap();

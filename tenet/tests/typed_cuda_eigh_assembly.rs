@@ -16,7 +16,7 @@ use tenet::dense::cuda_transfer_stats;
 use tenet::typed::{Eigh, GradedSpace, Runtime, TensorMap};
 
 fn leg(charges: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         charges
             .iter()

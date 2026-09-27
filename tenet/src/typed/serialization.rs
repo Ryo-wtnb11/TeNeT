@@ -1774,7 +1774,7 @@ where
     /// let runtime = Runtime::builder().dense_threads(1).build()?;
     /// let provider = Arc::new(U1FusionRule);
     /// let codec = U1Codec(Arc::clone(&provider));
-    /// let space = GradedSpace::try_new_with_arc(
+    /// let space = GradedSpace::try_new(
     ///     Arc::clone(&provider),
     ///     [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     /// )?;
@@ -1788,7 +1788,7 @@ where
     /// assert_eq!(restored_space.sectors()?, space.sectors()?);
     /// assert!(std::ptr::eq(restored_space.provider(), provider.as_ref()));
     ///
-    /// let tensor = TensorMap::<U1FusionRule, f64>::from_block_fn(
+    /// let tensor = TensorMap::<U1FusionRule, f64>::from_subblock_fn(
     ///     &runtime,
     ///     [&space],
     ///     [&space],

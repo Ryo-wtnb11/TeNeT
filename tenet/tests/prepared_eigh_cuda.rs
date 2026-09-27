@@ -158,7 +158,8 @@ fn plus_minus_lambda_and_degenerate_groups_compare_by_value() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let leg = u1_legs().0;
     let j = SU2Irrep::from_twice_spin;
-    let su2 = GradedSpace::try_new(SU2FusionRule, [(j(0), 3), (j(1), 4)]).unwrap();
+    let su2 =
+        GradedSpace::try_new(std::sync::Arc::new(SU2FusionRule), [(j(0), 3), (j(1), 4)]).unwrap();
     for count in [1, 17] {
         let pm = single_leg(&runtime, &leg, count, plus_minus_entry);
         assert!(has_plus_minus_tie(&pm[0].eigh_full().unwrap().d));

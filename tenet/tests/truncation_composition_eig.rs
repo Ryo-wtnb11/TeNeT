@@ -41,7 +41,7 @@ fn fill(state: &mut u64) -> f64 {
 }
 
 fn u1_leg(pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         pairs
             .iter()
@@ -51,7 +51,7 @@ fn u1_leg(pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
 }
 
 fn su2_leg(pairs: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         pairs
             .iter()
@@ -61,7 +61,7 @@ fn su2_leg(pairs: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
 }
 
 fn fz2_leg(pairs: &[(bool, usize)]) -> GradedSpace<FermionParityFusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(FermionParityFusionRule),
         pairs
             .iter()
@@ -187,7 +187,7 @@ where
         + tenet::typed::SectorCodec,
     D: tenet::prelude::TensorScalar,
 {
-    TensorMap::from_block_fn(&runtime(), [leg], [leg], |_, indices| {
+    TensorMap::from_subblock_fn(&runtime(), [leg], [leg], |_, indices| {
         match indices[0].cmp(&indices[1]) {
             std::cmp::Ordering::Equal => diagonal(),
             std::cmp::Ordering::Less => upper(),
@@ -240,7 +240,7 @@ fn u1_eig_composition_matches_the_hand_selection_for_every_policy() {
     let source = real_triangular(&leg, 0x0e19_0001);
     eig_policy_sweep!(
         source,
-        source.to_c64(),
+        source.convert::<Complex64>(),
         u1_leg(&[(-1, 1), (0, 2)]),
         "u1 eig f64"
     );
@@ -259,7 +259,7 @@ fn su2_eig_composition_matches_the_hand_selection_for_every_policy() {
     let leg = su2_leg(&[(0, 3), (1, 2), (2, 2)]);
     let target = su2_leg(&[(0, 2), (2, 1)]);
     let source = real_triangular(&leg, 0x0e19_0003);
-    eig_policy_sweep!(source, source.to_c64(), target, "su2 eig f64");
+    eig_policy_sweep!(source, source.convert::<Complex64>(), target, "su2 eig f64");
     let source = complex_triangular(&leg, 0x0e19_0004);
     eig_policy_sweep!(source, source.clone(), target, "su2 eig c64");
 }
@@ -269,7 +269,7 @@ fn fermionic_eig_composition_matches_the_hand_selection_for_every_policy() {
     let leg = fz2_leg(&[(false, 3), (true, 3)]);
     let target = fz2_leg(&[(false, 2), (true, 1)]);
     let source = real_triangular(&leg, 0x0e19_0005);
-    eig_policy_sweep!(source, source.to_c64(), target, "fz2 eig f64");
+    eig_policy_sweep!(source, source.convert::<Complex64>(), target, "fz2 eig f64");
     let source = complex_triangular(&leg, 0x0e19_0006);
     eig_policy_sweep!(source, source.clone(), target, "fz2 eig c64");
 }
@@ -292,7 +292,7 @@ fn lazy_adjoint_eig_composition_matches_the_hand_selection() {
 fn a_whole_sector_is_dropped_from_the_eig_bond() {
     let leg = u1_leg(&[(0, 3), (1, 2)]);
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], |trees, indices| {
             let scale = if trees.coupled() == &U1Irrep::new(0) {
                 1.0
             } else {
@@ -307,7 +307,7 @@ fn a_whole_sector_is_dropped_from_the_eig_bond() {
         .unwrap();
     let found = assert_eig_composition!(
         source,
-        source.to_c64(),
+        source.convert::<Complex64>(),
         tenet::prelude::Truncation::relative_cutoff(1e-3).unwrap(),
         truncation_oracle::Policy::RelativeCutoff(1e-3),
         "drop"
@@ -333,7 +333,7 @@ where
     R::Sector: Ord + Clone,
 {
     let mut state = seed;
-    TensorMap::from_block_fn(&runtime(), codomain, codomain, |trees, indices| {
+    TensorMap::from_subblock_fn(&runtime(), codomain, codomain, |trees, indices| {
         let row = (
             trees.codomain_uncoupled().to_vec(),
             trees.codomain_innerlines().to_vec(),

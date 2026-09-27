@@ -672,7 +672,7 @@ fn public_fixture<T: OrientedScalar>(
     degeneracy: usize,
 ) -> Result<PublicFixture<T>, Error> {
     let provider = Arc::new(U1FusionRule);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         provider,
         (0..sectors).map(|charge| (U1Irrep::new(charge as i32), degeneracy)),
     )?;
@@ -682,32 +682,35 @@ fn public_fixture<T: OrientedScalar>(
     let rhs_value = |charge: i32, indices: &[usize]| {
         T::sample(charge as usize * 1013 + 2 * indices[0] + 5 * indices[1] + 401)
     };
-    let lhs = TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
+    let lhs = TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |trees, indices| {
         lhs_value(trees.coupled().charge(), indices)
     })?;
     let lhs_adjoint = lhs.adjoint()?;
-    let rhs = TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
+    let rhs = TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |trees, indices| {
         rhs_value(trees.coupled().charge(), indices)
     })?;
-    let expected_direct = TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
-        let charge = trees.coupled().charge();
-        let mut sum = T::zero();
-        for inner in 0..degeneracy {
-            sum = sum
-                + lhs_value(charge, &[indices[0], inner]) * rhs_value(charge, &[inner, indices[1]]);
-        }
-        sum
-    })?;
-    let expected_adjoint = TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
-        let charge = trees.coupled().charge();
-        let mut sum = T::zero();
-        for inner in 0..degeneracy {
-            sum = sum
-                + lhs_value(charge, &[inner, indices[0]]).maybe_conj(true)
-                    * rhs_value(charge, &[inner, indices[1]]);
-        }
-        sum
-    })?;
+    let expected_direct =
+        TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |trees, indices| {
+            let charge = trees.coupled().charge();
+            let mut sum = T::zero();
+            for inner in 0..degeneracy {
+                sum = sum
+                    + lhs_value(charge, &[indices[0], inner])
+                        * rhs_value(charge, &[inner, indices[1]]);
+            }
+            sum
+        })?;
+    let expected_adjoint =
+        TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |trees, indices| {
+            let charge = trees.coupled().charge();
+            let mut sum = T::zero();
+            for inner in 0..degeneracy {
+                sum = sum
+                    + lhs_value(charge, &[inner, indices[0]]).maybe_conj(true)
+                        * rhs_value(charge, &[inner, indices[1]]);
+            }
+            sum
+        })?;
     Ok(PublicFixture {
         lhs,
         lhs_adjoint,
@@ -2264,10 +2267,10 @@ where
     let runtime = benchmark_runtime()?;
     let make = |d| -> Result<_, Box<dyn std::error::Error>> {
         let space = GradedSpace::try_new(
-            U1FusionRule,
+            Arc::new(U1FusionRule),
             (0..sector_count).map(|sector| (U1Irrep::new(sector as i32), d)),
         )?;
-        Ok(TensorMap::<U1FusionRule, D>::from_block_fn(
+        Ok(TensorMap::<U1FusionRule, D>::from_subblock_fn(
             &runtime,
             [&space],
             [&space],
@@ -2984,7 +2987,7 @@ fn run_checked_sun(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tenet::typed::SUNFusionRule;
 
-    let space = GradedSpace::try_new_with_arc(provider, [(label, degeneracy)])?;
+    let space = GradedSpace::try_new(provider, [(label, degeneracy)])?;
     if form_enabled("destination") {
         println!("# {symmetry}: destination rows excluded: the public destination methods retain multiplicity-free dispatch bounds, so the exact SUN fixtures cannot call them");
     }
@@ -3683,7 +3686,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "U1",
         U1FusionRule,
         GradedSpace::try_new(
-            U1FusionRule,
+            Arc::new(U1FusionRule),
             [
                 (U1Irrep::new(-1), degeneracy),
                 (U1Irrep::new(0), degeneracy),
@@ -3696,7 +3699,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "SU2",
         SU2FusionRule,
         GradedSpace::try_new(
-            SU2FusionRule,
+            Arc::new(SU2FusionRule),
             [
                 (SU2Irrep::from_twice_spin(0), degeneracy),
                 (SU2Irrep::from_twice_spin(1), degeneracy),

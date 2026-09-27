@@ -2045,7 +2045,8 @@ mod tests {
 
         let runtime = Runtime::builder().cuda(0).build().unwrap();
         let j = SU2Irrep::from_twice_spin;
-        let leg = GradedSpace::try_new(SU2FusionRule, [(j(0), 2), (j(1), 2), (j(2), 1)]).unwrap();
+        let leg = GradedSpace::try_new(Arc::new(SU2FusionRule), [(j(0), 2), (j(1), 2), (j(2), 1)])
+            .unwrap();
         let members: Vec<_> = (0..3)
             .map(|seed| {
                 let x =
@@ -2133,7 +2134,7 @@ mod tests {
         // gives equal signatures and equal hashes.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let leg = GradedSpace::try_new(
-            U1FusionRule,
+            Arc::new(U1FusionRule),
             [
                 (U1Irrep::new(-1), 2),
                 (U1Irrep::new(0), 1),
@@ -2174,8 +2175,8 @@ mod tests {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let q = U1Irrep::new;
-        let leg = GradedSpace::try_new(U1FusionRule, [(q(0), 2), (q(1), 1)]).unwrap();
-        let wide = GradedSpace::try_new(U1FusionRule, [(q(0), 3), (q(1), 1)]).unwrap();
+        let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(q(0), 2), (q(1), 1)]).unwrap();
+        let wide = GradedSpace::try_new(Arc::new(U1FusionRule), [(q(0), 3), (q(1), 1)]).unwrap();
         let signature = |runtime: &Runtime, leg: &GradedSpace<U1FusionRule>| {
             TensorMap::<_, f64>::zeros(runtime, [leg, leg], [leg])
                 .unwrap()
@@ -2218,7 +2219,7 @@ mod tests {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let signature = |rank: usize, trivial: Vec<i64>| {
             let rule = Arc::new(SUNFusionRule::new(rank).unwrap());
-            let leg = GradedSpace::try_new_with_arc(rule, [(trivial, 2)]).unwrap();
+            let leg = GradedSpace::try_new(rule, [(trivial, 2)]).unwrap();
             TensorMap::<_, f64>::zeros(&runtime, [&leg], [&leg])
                 .unwrap()
                 .structure_signature()

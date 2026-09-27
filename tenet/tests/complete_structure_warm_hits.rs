@@ -36,7 +36,11 @@ fn bits(data: &[f64]) -> Vec<u64> {
 macro_rules! warm_ops {
     ($runtime:expr, $label:literal, $provider:expr, $sectors:expr) => {{
         let sectors: Vec<_> = $sectors;
-        let leg = GradedSpace::try_new($provider, sectors.iter().map(|s| (s.clone(), 2))).unwrap();
+        let leg = GradedSpace::try_new(
+            std::sync::Arc::new($provider),
+            sectors.iter().map(|s| (s.clone(), 2)),
+        )
+        .unwrap();
         let a =
             TensorMap::<_, f64>::rand_with_seed($runtime, [&leg, &leg], [&leg, &leg], 1).unwrap();
         let square =

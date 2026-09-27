@@ -29,7 +29,11 @@ fn sessions_during<T>(call: impl FnOnce() -> T) -> (u64, T) {
 macro_rules! assert_one_session_per_factorization {
     ($runtime:expr, $provider:expr, $dtype:ty, $sectors:expr, $nc:expr, $nd:expr) => {{
         let _guard = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let leg = GradedSpace::try_new($provider, $sectors.into_iter().map(|s| (s, 2))).unwrap();
+        let leg = GradedSpace::try_new(
+            std::sync::Arc::new($provider),
+            $sectors.into_iter().map(|s| (s, 2)),
+        )
+        .unwrap();
         let tensor =
             TensorMap::<_, $dtype>::rand_with_seed($runtime, vec![&leg; $nc], vec![&leg; $nd], 7)
                 .unwrap();
@@ -114,8 +118,11 @@ fn fz2_u1_compact_factorizations_open_one_session() {
 fn streaming_factorizations_from_rayon_workers_and_threads_match_serial_results() {
     let _guard = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let runtime = Runtime::builder().build().unwrap();
-    let leg =
-        GradedSpace::try_new(U1FusionRule, centered(5).map(|q| (U1Irrep::new(q), 2))).unwrap();
+    let leg = GradedSpace::try_new(
+        std::sync::Arc::new(U1FusionRule),
+        centered(5).map(|q| (U1Irrep::new(q), 2)),
+    )
+    .unwrap();
     let tensors = (0..6)
         .map(|seed| TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg], seed))
         .collect::<Result<Vec<_>, _>>()

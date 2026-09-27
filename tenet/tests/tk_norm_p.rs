@@ -101,7 +101,7 @@ const POWERS: [f64; 4] = [1.0, 2.0, 3.0, f64::INFINITY];
 fn typed_u1() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
     let rule = Arc::new(U1FusionRule);
     let pairs = |entries: [(i32, usize); 3]| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&rule),
             entries.map(|(charge, deg)| (U1Irrep::new(charge), deg)),
         )
@@ -116,7 +116,7 @@ fn typed_u1() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
 fn typed_su2() -> (GradedSpace<SU2FusionRule>, GradedSpace<SU2FusionRule>) {
     let rule = Arc::new(SU2FusionRule);
     let pairs = |entries: [(usize, usize); 3]| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&rule),
             entries.map(|(twice_spin, deg)| (SU2Irrep::from_twice_spin(twice_spin), deg)),
         )
@@ -135,14 +135,16 @@ fn the_fixtures_are_the_tensors_tensorkit_measured() {
     let (su2_v, su2_w) = typed_su2();
 
     let u1_f64: TensorMap<U1FusionRule, f64> =
-        TensorMap::from_block_fn(&rt, [&u1_v], [&u1_w], |_, indices| real_fill(indices)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&u1_v], [&u1_w], |_, indices| real_fill(indices))
+            .unwrap();
     let u1_c64: TensorMap<U1FusionRule, Complex64> =
-        TensorMap::from_block_fn(&rt, [&u1_v], [&u1_w], |_, indices| complex_fill(indices))
+        TensorMap::from_subblock_fn(&rt, [&u1_v], [&u1_w], |_, indices| complex_fill(indices))
             .unwrap();
     let su2_f64: TensorMap<SU2FusionRule, f64> =
-        TensorMap::from_block_fn(&rt, [&su2_v], [&su2_w], |_, indices| real_fill(indices)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&su2_v], [&su2_w], |_, indices| real_fill(indices))
+            .unwrap();
     let su2_c64: TensorMap<SU2FusionRule, Complex64> =
-        TensorMap::from_block_fn(&rt, [&su2_v], [&su2_w], |_, indices| complex_fill(indices))
+        TensorMap::from_subblock_fn(&rt, [&su2_v], [&su2_w], |_, indices| complex_fill(indices))
             .unwrap();
 
     assert_close(u1_f64.norm(2.0).unwrap(), U1_F64[1], "typed u1 f64 norm()");
@@ -186,14 +188,16 @@ fn typed_norm_p_matches_tensorkit() {
     let (su2_v, su2_w) = typed_su2();
 
     let u1_f64: TensorMap<U1FusionRule, f64> =
-        TensorMap::from_block_fn(&rt, [&u1_v], [&u1_w], |_, indices| real_fill(indices)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&u1_v], [&u1_w], |_, indices| real_fill(indices))
+            .unwrap();
     let u1_c64: TensorMap<U1FusionRule, Complex64> =
-        TensorMap::from_block_fn(&rt, [&u1_v], [&u1_w], |_, indices| complex_fill(indices))
+        TensorMap::from_subblock_fn(&rt, [&u1_v], [&u1_w], |_, indices| complex_fill(indices))
             .unwrap();
     let su2_f64: TensorMap<SU2FusionRule, f64> =
-        TensorMap::from_block_fn(&rt, [&su2_v], [&su2_w], |_, indices| real_fill(indices)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&su2_v], [&su2_w], |_, indices| real_fill(indices))
+            .unwrap();
     let su2_c64: TensorMap<SU2FusionRule, Complex64> =
-        TensorMap::from_block_fn(&rt, [&su2_v], [&su2_w], |_, indices| complex_fill(indices))
+        TensorMap::from_subblock_fn(&rt, [&su2_v], [&su2_w], |_, indices| complex_fill(indices))
             .unwrap();
 
     for (&p, &expected) in POWERS.iter().zip(&U1_F64) {
@@ -223,7 +227,7 @@ fn typed_norm_p_rejects_non_positive_and_non_finite_p() {
     let rt = runtime();
     let (v, w) = typed_u1();
     let tensor: TensorMap<U1FusionRule, f64> =
-        TensorMap::from_block_fn(&rt, [&v], [&w], |_, indices| real_fill(indices)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&v], [&w], |_, indices| real_fill(indices)).unwrap();
     for p in [f64::NAN, f64::NEG_INFINITY, 0.0, -1.0, -0.5] {
         assert!(
             matches!(tensor.norm(p), Err(Error::InvalidArgument(_))),
@@ -241,13 +245,13 @@ fn compact_norm_p_equals_the_dense_answer() {
     let rt = runtime();
     let (v, w) = typed_su2();
     let dense: TensorMap<SU2FusionRule, f64> =
-        TensorMap::from_block_fn(&rt, [&v], [&w], |_, indices| real_fill(indices)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&v], [&w], |_, indices| real_fill(indices)).unwrap();
     let s = dense.svd_compact().unwrap().s;
 
     // `0 * id + 1 * s` is a value-identical *dense* twin of `s`: `id` on the
     // bond space is dense, so the sum takes the dense route without disturbing
     // `s`'s own storage.
-    let twin = TensorMap::id(&rt, &s.domain())
+    let twin = TensorMap::isomorphism(&rt, &s.domain(), &s.domain())
         .unwrap()
         .axpby(0.0, &s, 1.0)
         .unwrap();
@@ -282,7 +286,7 @@ fn poisoned(trees: &tenet::typed::BlockFusionTrees<U1Irrep>) -> bool {
 fn u1_real_with(value: f64) -> TensorMap<U1FusionRule, f64> {
     let rt = runtime();
     let (v, w) = typed_u1();
-    TensorMap::from_block_fn(&rt, [&v], [&w], |trees, indices| {
+    TensorMap::from_subblock_fn(&rt, [&v], [&w], |trees, indices| {
         if poisoned(trees) && indices == [0, 0] {
             value
         } else {
@@ -317,7 +321,7 @@ fn norm_inf_propagates_nan_hidden_in_the_imaginary_part() {
     let rt = runtime();
     let (v, w) = typed_u1();
     let tensor: TensorMap<U1FusionRule, Complex64> =
-        TensorMap::from_block_fn(&rt, [&v], [&w], |trees, indices| {
+        TensorMap::from_subblock_fn(&rt, [&v], [&w], |trees, indices| {
             if poisoned(trees) && indices == [0, 0] {
                 // Finite real part: only |z| = hypot(re, im) sees the NaN.
                 Complex64::new(1.0, f64::NAN)
@@ -387,9 +391,8 @@ fn norm_inf_reports_infinity_and_zero_payloads() {
     // No coupled sector is shared, so there is no stored entry at all and the
     // fold returns its identity rather than `-inf` or a panic.
     let rule = Arc::new(U1FusionRule);
-    let only_zero =
-        GradedSpace::try_new_with_arc(Arc::clone(&rule), [(U1Irrep::new(0), 2)]).unwrap();
-    let only_one = GradedSpace::try_new_with_arc(rule, [(U1Irrep::new(1), 3)]).unwrap();
+    let only_zero = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)]).unwrap();
+    let only_one = GradedSpace::try_new(rule, [(U1Irrep::new(1), 3)]).unwrap();
     let empty: TensorMap<U1FusionRule, f64> =
         TensorMap::zeros(&rt, [&only_zero], [&only_one]).unwrap();
     assert_eq!(empty.norm(f64::INFINITY).unwrap(), 0.0, "no stored entries");

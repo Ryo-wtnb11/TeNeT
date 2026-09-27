@@ -2,7 +2,7 @@
 //! exact block copies and per-element `alpha`/`beta` updates (#1399).
 //!
 //! The oracle is independent of every strided kernel: each entry is filled
-//! with `from_block_fn` from a hash of its own fusion-tree pair and degeneracy
+//! with `from_subblock_fn` from a hash of its own fusion-tree pair and degeneracy
 //! index, and the adjoint entry is TensorKit's `block(t', c) = block(t, c)'`
 //! written per element: the codomain and domain trees swap, the index moves
 //! the domain axes first, and the value is conjugated. The `add` oracle spells
@@ -212,7 +212,7 @@ macro_rules! assert_exact_adjoint {
         let codomain = vec![$($codomain),+];
         let domain = vec![$($domain),+];
         let parent = |salt| {
-            TensorMap::<_, $dtype>::from_block_fn(
+            TensorMap::<_, $dtype>::from_subblock_fn(
                 &runtime,
                 codomain.iter().copied(),
                 domain.iter().copied(),
@@ -221,7 +221,7 @@ macro_rules! assert_exact_adjoint {
             .unwrap()
         };
         let on_adjoint_space = |fill: &dyn Fn(&_, &[usize]) -> $dtype| {
-            TensorMap::<_, $dtype>::from_block_fn(
+            TensorMap::<_, $dtype>::from_subblock_fn(
                 &runtime,
                 domain.iter().copied(),
                 codomain.iter().copied(),
@@ -299,7 +299,7 @@ macro_rules! assert_exact_adjoint {
 }
 
 fn u1(provider: &Arc<U1FusionRule>, pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         pairs
             .iter()
@@ -309,7 +309,7 @@ fn u1(provider: &Arc<U1FusionRule>, pairs: &[(i32, usize)]) -> GradedSpace<U1Fus
 }
 
 fn su2(provider: &Arc<SU2FusionRule>, pairs: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         pairs
             .iter()
@@ -349,7 +349,7 @@ fn lazy_adjoint_materialization_and_add_are_exact_on_fz2_u1_legs() {
             U1Irrep::new(charge),
         )
     };
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (label(false, 0), 3),
@@ -359,7 +359,7 @@ fn lazy_adjoint_materialization_and_add_are_exact_on_fz2_u1_legs() {
     )
     .unwrap();
     let dual = leg.try_dual().unwrap();
-    let other = GradedSpace::try_new_with_arc(
+    let other = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (label(false, 0), 2),
@@ -385,12 +385,11 @@ fn lazy_adjoint_materialization_and_add_are_exact_on_su3_multiplicity_legs() {
     let adjoint = vec![2i64, 2];
     let trivial = vec![0i64, 0];
     let leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(adjoint.clone(), 2), (trivial, 1)])
-            .unwrap();
-    let other = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(adjoint, 3)]).unwrap();
+        GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 2), (trivial, 1)]).unwrap();
+    let other = GradedSpace::try_new(Arc::clone(&provider), [(adjoint, 3)]).unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let probe =
-        TensorMap::<_, f64>::from_block_fn(&runtime, [&leg, &other], [&leg], |_, _| 0.0).unwrap();
+    let probe = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&leg, &other], [&leg], |_, _| 0.0)
+        .unwrap();
     assert!(
         (0..probe.subblock_count()).any(|index| probe
             .subblock_fusion_trees(index)
