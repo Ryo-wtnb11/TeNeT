@@ -22,14 +22,14 @@ use tenet::core::{
 #[cfg(test)]
 use tenet::operations::OperationError;
 use tenet::prelude::{Error, Runtime, TensorScalar};
+use tenet::typed::{
+    ContractSpec, GradedSpace, NetworkDegeneracyRestriction, NetworkPayloadStorage,
+    NetworkReuseClass, RuntimeDetachedTensorMap, TensorMap, TypedSpaceModeDispatch,
+    TypedTensorAdjointDispatch, TypedTensorContractDispatch, TypedTensorModeDispatch,
+    TypedTensorRootDispatch, TypedTensorTraceDispatch, TypedTensorTransformDispatch,
+};
 #[cfg(feature = "cuda")]
 use tenet::typed::{CudaPayload, CudaStorage};
-use tenet::typed::{
-    GradedSpace, NetworkDegeneracyRestriction, NetworkPayloadStorage, NetworkReuseClass,
-    RuntimeDetachedTensorMap, TensorMap, TypedSpaceModeDispatch, TypedTensorAdjointDispatch,
-    TypedTensorContractDispatch, TypedTensorModeDispatch, TypedTensorRootDispatch,
-    TypedTensorTraceDispatch, TypedTensorTransformDispatch,
-};
 use tenet::RuntimeIdentity;
 
 use crate::cost::{DenseCostModel, DenseTensorInfo};

@@ -452,6 +452,8 @@ pub(crate) enum OrientedContractionKind {
 /// Host's validation order: rule identity, axis counts, axis sets, output
 /// permutation, then the oriented homspace. Shared by the Host contraction
 /// and the device one, so both derive one destination from one authority.
+/// The result is split after `codomain_rank` output axes, or after every open
+/// lhs axis for `None`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn oriented_contract_destination<R>(
     lhs_authority: &BoundDynamicFusionMapSpace<R>,
@@ -461,6 +463,7 @@ pub(crate) fn oriented_contract_destination<R>(
     lhs_axes: &[usize],
     rhs_axes: &[usize],
     output_order: OutputAxisOrder<'_>,
+    codomain_rank: Option<usize>,
 ) -> Result<BoundDynamicFusionMapSpace<R>, tenet_tensors::OperationError>
 where
     R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
@@ -545,7 +548,7 @@ where
         lhs_axes,
         rhs_axes,
         output_axes,
-        lhs_open_rank,
+        codomain_rank.unwrap_or(lhs_open_rank),
     )
     .map_err(|error| match error {
         tenet_core::CheckedFusionSpaceError::Core(error) => {
@@ -590,6 +593,7 @@ where
         lhs_axes,
         rhs_axes,
         output_order,
+        None,
     )?;
     let data = tensorcontract_oriented_multiplicity_free_into(
         context,
@@ -1255,6 +1259,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    use crate::typed::ContractSpec;
+
     use tenet_core::{
         BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CheckedGenericFusion,
         CheckedGenericRigidSymbols, CoreError, FusionProductSpace, FusionRule, FusionStyleKind,
@@ -1776,9 +1782,15 @@ mod tests {
         // A contract followed by a public permute is one fused call plus one
         // transform, which is what a regressed contract-then-permute alias
         // would look like.
+        let default = ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[0, 1],
+            domain: &[2, 3],
+        };
         let (fused, transforms) = seam_calls(|| {
             tensor
-                .contract(&tensor, &[2], &[0], &[0, 1, 2, 3])
+                .contract(&tensor, &default)
                 .unwrap()
                 .permute(&[1, 0], &[3, 2])
                 .unwrap()
@@ -1786,12 +1798,56 @@ mod tests {
         assert_eq!((fused, transforms), (1, 1));
 
         // The gate: the non-identity order is folded into the one fused call.
-        let (fused, transforms) =
-            seam_calls(|| tensor.contract(&tensor, &[2], &[0], &[1, 0, 3, 2]).unwrap());
+        let ordered = ContractSpec {
+            codomain: &[1, 0],
+            domain: &[3, 2],
+            ..default
+        };
+        let (fused, transforms) = seam_calls(|| tensor.contract(&tensor, &ordered).unwrap());
         assert_eq!(
             (fused, transforms),
             (1, 0),
             "ordered contract must be one fused contraction, not contract-then-permute"
         );
+    }
+
+    #[test]
+    fn typed_split_moving_contract_is_one_fused_seam_call_and_no_permute_transform() {
+        // What (#1549 gate b): a `ContractSpec` that moves open legs across
+        // the codomain/domain split runs the fused contraction seam once and
+        // no separate permute transform, where the composition it is defined
+        // by (default-split contract, then permute) runs one of each.
+        let (_runtime, tensor) = typed_z2_facade_tensor();
+        let default = ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[0, 1],
+            domain: &[2, 3],
+        };
+        for (codomain, domain) in [
+            (&[0, 2, 1][..], &[3][..]),
+            (&[3][..], &[1, 0, 2][..]),
+            (&[][..], &[2, 0, 3, 1][..]),
+        ] {
+            let (fused, transforms) = seam_calls(|| {
+                tensor
+                    .contract(&tensor, &default)
+                    .unwrap()
+                    .permute(codomain, domain)
+                    .unwrap()
+            });
+            assert_eq!((fused, transforms), (1, 1), "{codomain:?} <- {domain:?}");
+            let spec = ContractSpec {
+                codomain,
+                domain,
+                ..default
+            };
+            let (fused, transforms) = seam_calls(|| tensor.contract(&tensor, &spec).unwrap());
+            assert_eq!(
+                (fused, transforms),
+                (1, 0),
+                "{codomain:?} <- {domain:?}: split-moving contract must not permute afterwards"
+            );
+        }
     }
 }

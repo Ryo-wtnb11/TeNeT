@@ -4,6 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
+use tenet::typed::ContractSpec;
 
 use num_complex::Complex64;
 use tenet::core::{U1FusionRule, U1Irrep};
@@ -104,19 +105,43 @@ fn adjoint_view_operand_costs_the_owned_lazy_adjoint_header() {
         view_costs.push(view);
 
         black_box(
-            a.contract(b.adjoint_view(), &[2], &[0], &[0, 1, 2, 3])
-                .unwrap(),
+            a.contract(
+                b.adjoint_view(),
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2, 3],
+                },
+            )
+            .unwrap(),
         );
         let contract_view = measure(|| {
             black_box(
-                a.contract(b.adjoint_view(), &[2], &[0], &[0, 1, 2, 3])
-                    .unwrap(),
+                a.contract(
+                    b.adjoint_view(),
+                    &ContractSpec {
+                        lhs: &[2],
+                        rhs: &[0],
+                        codomain: &[0, 1],
+                        domain: &[2, 3],
+                    },
+                )
+                .unwrap(),
             );
         });
         let contract_owned = measure(|| {
             black_box(
-                a.contract(&b.adjoint().unwrap(), &[2], &[0], &[0, 1, 2, 3])
-                    .unwrap(),
+                a.contract(
+                    &b.adjoint().unwrap(),
+                    &ContractSpec {
+                        lhs: &[2],
+                        rhs: &[0],
+                        codomain: &[0, 1],
+                        domain: &[2, 3],
+                    },
+                )
+                .unwrap(),
             );
         });
         assert_eq!(

@@ -68,16 +68,34 @@ fn mixed_output_partition_costs_one_extra_output_sized_pass() {
 
     let (a, b) = operands();
     assert_eq!(
-        output_sized_allocs(|| a.contract(&b, &[2], &[0], &[0, 1, 2]).unwrap()),
+        output_sized_allocs(|| a
+            .contract(
+                &b,
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2]
+                }
+            )
+            .unwrap()),
         1
     );
     let (a, b) = operands();
     assert_eq!(
         output_sized_allocs(|| {
-            a.contract(&b, &[2], &[0], &[0, 1, 2])
-                .unwrap()
-                .permute(&[0, 2], &[1])
-                .unwrap()
+            a.contract(
+                &b,
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2],
+                },
+            )
+            .unwrap()
+            .permute(&[0, 2], &[1])
+            .unwrap()
         }),
         2
     );

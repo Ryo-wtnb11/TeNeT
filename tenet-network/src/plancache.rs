@@ -1378,7 +1378,7 @@ mod tests {
     use std::time::Duration;
     use tenet::core::{SU2FusionRule, U1FusionRule};
     use tenet::prelude::Complex64;
-    use tenet::typed::{GradedSpace, TensorMap};
+    use tenet::typed::{ContractSpec, GradedSpace, TensorMap};
 
     #[cfg(feature = "cotengra-python")]
     #[test]
@@ -1710,7 +1710,15 @@ mod tests {
 
         let contract_error = o
             .probe_a
-            .contract(&o.probe_b, &[1], &[0], &[0, 1])
+            .contract(
+                &o.probe_b,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
             .unwrap_err()
             .to_string();
         for (what, accept, reject) in [

@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 use std::sync::Arc;
+use tenet::typed::ContractSpec;
 
 use tenet::core::{
     product_sector, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
@@ -63,7 +64,17 @@ where
     let planned = pair_network()
         .plan(&tensors, &GreedyDenseOptimizer)
         .unwrap();
-    let expected = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let expected = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let mut workspace = NetworkExecutionWorkspace::default();
     for _ in 0..2 {
         let actual = planned.execute(&tensors, &mut workspace).unwrap();
@@ -457,10 +468,30 @@ fn assert_reordered_overwrite<R, D>(
 {
     let old_lhs = matrix::<_, D>(runtime, space, space, 11.0, sector_tag);
     let old_rhs = matrix::<_, D>(runtime, space, space, 12.0, sector_tag);
-    let mut destination = old_lhs.contract(&old_rhs, &[1], &[0], &[1, 0]).unwrap();
+    let mut destination = old_lhs
+        .contract(
+            &old_rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap();
     let lhs = matrix::<_, D>(runtime, space, space, 111.0, sector_tag);
     let rhs = matrix::<_, D>(runtime, space, space, 112.0, sector_tag);
-    let expected = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
+    let expected = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap();
     let assert_oracle = |actual: &TensorMap<R, D>| {
         assert_eq!(actual.subblock_count(), space.sectors().unwrap().len());
         let lhs_blocks = lhs.subblocks().unwrap().collect::<Vec<_>>();
@@ -505,9 +536,12 @@ fn assert_reordered_overwrite<R, D>(
     lhs.contract_overwrite_into(
         &rhs,
         &mut destination,
-        &[1],
-        &[0],
-        &[1, 0],
+        &ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[1],
+            domain: &[0],
+        },
         D::from_real(1.0),
     )
     .unwrap();
@@ -635,7 +669,17 @@ fn planning_conjugation_uses_checked_effective_duals_without_reading_storage() {
             .unwrap()
             .execute(&refs, &mut Default::default())
             .unwrap();
-        let expected = adjoint.contract(&b, &[2], &[0], &[0, 1, 2, 3]).unwrap();
+        let expected = adjoint
+            .contract(
+                &b,
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2, 3],
+                },
+            )
+            .unwrap();
         assert_eq!(actual.codomain(), vec![y.clone(), x0.try_dual().unwrap()]);
         assert_eq!(actual.domain(), vec![z0.clone(), z1.clone()]);
         assert_same(&actual, &expected);
@@ -770,7 +814,15 @@ fn single_scalar_split_and_heterogeneous_final_permutation() {
     let refs = [&lhs, &rhs];
     let plan = crossed.plan(&refs, &GreedyDenseOptimizer).unwrap();
     let expected = lhs
-        .contract(&rhs, &[2], &[0], &[0, 1, 2, 3])
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
         .unwrap()
         .permute(&[3, 0], &[1, 2])
         .unwrap();
@@ -871,7 +923,15 @@ fn workspace_drift_and_provider_allocation_changes_do_not_leave_stale_results() 
     ] {
         let actual = plan.execute(&operands, &mut workspace).unwrap();
         let expected = operands[0]
-            .contract(operands[1], &[1], &[0], &[0, 1])
+            .contract(
+                operands[1],
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
             .unwrap();
         assert_same(&actual, &expected);
     }
@@ -879,7 +939,16 @@ fn workspace_drift_and_provider_allocation_changes_do_not_leave_stale_results() 
     assert!(plan.execute(&[&a1, &foreign_b], &mut workspace).is_err());
     assert_same(
         &plan.execute(&[&a1, &b1], &mut workspace).unwrap(),
-        &a1.contract(&b1, &[1], &[0], &[0, 1]).unwrap(),
+        &a1.contract(
+            &b1,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap(),
     );
 
     let incompatible = u1_space(&provider1, 4);
@@ -890,7 +959,16 @@ fn workspace_drift_and_provider_allocation_changes_do_not_leave_stale_results() 
     let second_plan = network.plan(&[&a2, &b2], &GreedyDenseOptimizer).unwrap();
     assert_same(
         &second_plan.execute(&[&a2, &b2], &mut workspace).unwrap(),
-        &a2.contract(&b2, &[1], &[0], &[0, 1]).unwrap(),
+        &a2.contract(
+            &b2,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap(),
     );
 }
 
@@ -904,7 +982,17 @@ fn one_plan_replays_concurrently_with_distinct_workspaces() {
     let plan = pair_network()
         .plan(&[&lhs, &rhs], &GreedyDenseOptimizer)
         .unwrap();
-    let expected = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let expected = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     std::thread::scope(|scope| {
         let handles = (0..4)
             .map(|_| {
@@ -959,9 +1047,25 @@ fn fermionic_greedy_chain_keeps_intermediate_on_the_expression_left() {
     );
 
     let manual = tensors[0]
-        .contract(&tensors[1], &[1], &[0], &[0, 1])
+        .contract(
+            &tensors[1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
-        .contract(&tensors[2], &[1], &[0], &[0, 1])
+        .contract(
+            &tensors[2],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
     assert_same(
         &planned.execute(&refs, &mut Default::default()).unwrap(),
@@ -1009,9 +1113,39 @@ fn fermionic_interleaved_subtrees_keep_expression_order_and_signs() {
     );
     assert_eq!(steps[2].result_labels(), labels(&["a", "b", "c", "d"]));
 
-    let ac = a.contract(&c, &[1], &[0], &[0, 1]).unwrap();
-    let bd = b.contract(&d, &[1], &[0], &[0, 1]).unwrap();
-    let manual = ac.contract(&bd, &[], &[], &[0, 2, 1, 3]).unwrap();
+    let ac = a
+        .contract(
+            &c,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
+    let bd = b
+        .contract(
+            &d,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
+    let manual = ac
+        .contract(
+            &bd,
+            &ContractSpec {
+                lhs: &[],
+                rhs: &[],
+                codomain: &[0, 2],
+                domain: &[1, 3],
+            },
+        )
+        .unwrap();
     assert_same(
         &planned.execute(&refs, &mut Default::default()).unwrap(),
         &manual,
@@ -1097,11 +1231,35 @@ fn greedy_order_and_four_site_ring_match_manual_typed_oracles() {
         .plan(&ring_refs, &GreedyDenseOptimizer)
         .unwrap();
     let manual = ring[0]
-        .contract(&ring[1], &[1], &[0], &[0, 1])
+        .contract(
+            &ring[1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
-        .contract(&ring[2], &[1], &[0], &[0, 1])
+        .contract(
+            &ring[2],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
-        .contract(&ring[3], &[1, 0], &[0, 1], &[])
+        .contract(
+            &ring[3],
+            &ContractSpec {
+                lhs: &[1, 0],
+                rhs: &[0, 1],
+                codomain: &[],
+                domain: &[],
+            },
+        )
         .unwrap();
     let actual = planned
         .execute(&ring_refs, &mut Default::default())

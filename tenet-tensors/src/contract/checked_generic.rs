@@ -317,6 +317,7 @@ where
         rhs_space,
         rhs_data,
         axes,
+        None,
         &mut transform_backend,
         &mut transform_workspace,
         &mut BackendRank2Gemm::<_, _, f64>::new(&mut contract_backend, &mut contract_workspace),
@@ -324,7 +325,9 @@ where
     )
 }
 
-/// Runtime-context variant of [`tensorcontract_owned_checked_generic`].
+/// Runtime-context variant of [`tensorcontract_owned_checked_generic`], with
+/// the result split after its first `codomain_rank` output axes
+/// (TensorOperations `pAB`).
 #[doc(hidden)]
 pub fn tensorcontract_owned_checked_generic_in_context<P, D>(
     context: &mut TensorContractFusionExecutionContext<D, RuleIdentity>,
@@ -333,6 +336,7 @@ pub fn tensorcontract_owned_checked_generic_in_context<P, D>(
     rhs_space: &BoundDynamicFusionMapSpace<P>,
     rhs_data: &[D],
     axes: TensorContractSpec<'_>,
+    codomain_rank: usize,
 ) -> CheckedContractResult<P, D>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
@@ -356,6 +360,7 @@ where
         rhs_space,
         rhs_data,
         axes,
+        Some(codomain_rank),
         transform_backend,
         transform_workspace,
         &mut BackendRank2Gemm::<_, _, f64>::new(contract_backend, contract_workspace),
@@ -370,6 +375,7 @@ fn tensorcontract_owned_checked_generic_with_resources<P, D, G, B>(
     rhs_space: &BoundDynamicFusionMapSpace<P>,
     rhs_data: &[D],
     axes: TensorContractSpec<'_>,
+    codomain_rank: Option<usize>,
     transform_backend: &mut B,
     transform_workspace: &mut B::Workspace,
     core_gemm: &mut G,
@@ -386,11 +392,14 @@ where
     G: Rank2Gemm<D>,
     B: TreeTransformBackend<D, f64>,
 {
-    let dst_nout = lhs_space
-        .space()
-        .rank()
-        .checked_sub(axes.lhs_contracting_axes().len())
-        .ok_or(OperationError::ElementCountOverflow)?;
+    let dst_nout = match codomain_rank {
+        Some(rank) => rank,
+        None => lhs_space
+            .space()
+            .rank()
+            .checked_sub(axes.lhs_contracting_axes().len())
+            .ok_or(OperationError::ElementCountOverflow)?,
+    };
     let CheckedContractLocal {
         output_rank,
         axis_plan,

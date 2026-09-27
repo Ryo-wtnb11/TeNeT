@@ -462,11 +462,11 @@ mod cuda_ops;
 #[cfg(feature = "cuda")]
 pub use cuda_ops::CudaTracePairs;
 mod transform_ops;
-pub use transform_ops::TypedTensorUnitDispatch;
 #[allow(unused_imports)]
 use transform_ops::{
     generic_insert_unit, generic_remove_unit, map_spectrum_dtype, tree_operation_matches_axes,
 };
+pub use transform_ops::{ContractSpec, TypedTensorUnitDispatch};
 
 /// Representation gates for [`TypedTensorBody`] (#580 PR 0).
 ///

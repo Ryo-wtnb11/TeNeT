@@ -22,7 +22,8 @@ use tenet::core::{
 };
 use tenet::prelude::TensorScalar;
 use tenet::typed::{
-    BlockFusionTrees, CudaStorage, Eigh, GradedSpace, Qr, Runtime, Svd, TensorMap, Truncation,
+    BlockFusionTrees, ContractSpec, CudaStorage, Eigh, GradedSpace, Qr, Runtime, Svd, TensorMap,
+    Truncation,
 };
 
 #[path = "../../tests/support/numerics.rs"]
@@ -329,9 +330,14 @@ where
     let lhs_axes: Vec<_> = (lhs.codomain_rank()..lhs.rank()).collect();
     let rhs_axes: Vec<_> = (0..rhs.codomain_rank()).collect();
     let output_axes: Vec<_> = (0..lhs.codomain_rank() + rhs.domain_rank()).collect();
-    let expected_contract = lhs
-        .contract(rhs, &lhs_axes, &rhs_axes, &output_axes)
-        .unwrap();
+    let (codomain, domain) = output_axes.split_at(lhs.codomain_rank());
+    let spec = ContractSpec {
+        lhs: &lhs_axes,
+        rhs: &rhs_axes,
+        codomain,
+        domain,
+    };
+    let expected_contract = lhs.contract(rhs, &spec).unwrap();
     let expected_compose = lhs.compose(rhs).unwrap();
     let provider = lhs.provider() as *const R;
     let runtime = lhs.runtime().identity();
@@ -339,7 +345,7 @@ where
     let rhs_device = rhs.to_cuda().unwrap();
 
     let contract = lhs_device
-        .contract(&rhs_device, &lhs_axes, &rhs_axes, &output_axes)
+        .contract(&rhs_device, &spec)
         .unwrap()
         .to_host()
         .unwrap();
@@ -1949,10 +1955,18 @@ fn typed_cuda_fermionic_contract_is_minus_six_and_compose_stays_plus_six() {
     let rhs =
         TensorMap::from_subblock_fn(&runtime, [&rhs_codomain], [&rhs_domain], |_, _| 3.0).unwrap();
     assert_eq!(
-        lhs.contract(&rhs, &[1], &[0], &[0, 1])
-            .unwrap()
-            .dense_data()
-            .unwrap(),
+        lhs.contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .unwrap()
+        .dense_data()
+        .unwrap(),
         [-6.0]
     );
     assert_eq!(lhs.compose(&rhs).unwrap().dense_data().unwrap(), [6.0]);
@@ -1971,7 +1985,15 @@ fn typed_cuda_fermionic_contract_is_minus_six_and_compose_stays_plus_six() {
     );
     assert_eq!(
         lhs_device
-            .contract(&rhs_device, &[1], &[0], &[0, 1])
+            .contract(
+                &rhs_device,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1]
+                }
+            )
             .unwrap()
             .to_host()
             .unwrap()
@@ -2006,12 +2028,28 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
     // the Host's own error, and a permuted output is the Host's result.
     assert_eq!(
         device
-            .contract(&device, &[0], &[0], &[0, 1])
+            .contract(
+                &device,
+                &ContractSpec {
+                    lhs: &[0],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1]
+                }
+            )
             .unwrap_err()
             .to_string(),
-        host.contract(&host, &[0], &[0], &[0, 1])
-            .unwrap_err()
-            .to_string()
+        host.contract(
+            &host,
+            &ContractSpec {
+                lhs: &[0],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .unwrap_err()
+        .to_string()
     );
     let close = |actual: &[f64], expected: &[f64]| {
         assert_eq!(actual.len(), expected.len());
@@ -2021,16 +2059,32 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
     };
     close(
         device
-            .contract(&device, &[1], &[0], &[1, 0])
+            .contract(
+                &device,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[1],
+                    domain: &[0],
+                },
+            )
             .unwrap()
             .to_host()
             .unwrap()
             .dense_data()
             .unwrap(),
-        host.contract(&host, &[1], &[0], &[1, 0])
-            .unwrap()
-            .dense_data()
-            .unwrap(),
+        host.contract(
+            &host,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap()
+        .dense_data()
+        .unwrap(),
     );
     let lazy_host = host.adjoint().unwrap();
     let expected_lazy_compose = lazy_host.compose(&host).unwrap();
@@ -2046,8 +2100,28 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
         structural_snapshot(&lazy_compose),
         structural_snapshot(&expected_lazy_compose)
     );
-    let lazy_general = lazy.contract(&device, &[1], &[0], &[1, 0]).unwrap();
-    let expected_lazy_general = lazy_host.contract(&host, &[1], &[0], &[1, 0]).unwrap();
+    let lazy_general = lazy
+        .contract(
+            &device,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap();
+    let expected_lazy_general = lazy_host
+        .contract(
+            &host,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap();
     close(
         lazy_general.to_host().unwrap().dense_data().unwrap(),
         expected_lazy_general.dense_data().unwrap(),
@@ -2212,15 +2286,20 @@ where
     let lhs_axes: Vec<_> = (lhs.codomain_rank()..lhs.rank()).collect();
     let rhs_axes: Vec<_> = (0..rhs.codomain_rank()).collect();
     let output_axes: Vec<_> = (0..lhs.codomain_rank() + rhs.domain_rank()).collect();
-    let expected_contract = lhs
-        .contract(rhs, &lhs_axes, &rhs_axes, &output_axes)
-        .unwrap();
+    let (codomain, domain) = output_axes.split_at(lhs.codomain_rank());
+    let spec = ContractSpec {
+        lhs: &lhs_axes,
+        rhs: &rhs_axes,
+        codomain,
+        domain,
+    };
+    let expected_contract = lhs.contract(rhs, &spec).unwrap();
     let expected_compose = lhs.compose(rhs).unwrap();
     let lhs_device = lhs.to_cuda().unwrap();
     let rhs_device = rhs.to_cuda().unwrap();
 
     let contract = lhs_device
-        .contract(&rhs_device, &lhs_axes, &rhs_axes, &output_axes)
+        .contract(&rhs_device, &spec)
         .unwrap()
         .to_host()
         .unwrap();
@@ -2356,15 +2435,22 @@ fn typed_cuda_c64_contract_and_compose_match_host() {
         .unwrap();
     let lhs = host_lhs.to_cuda().unwrap();
     let rhs = host_rhs.to_cuda().unwrap();
-    for (lhs_axes, rhs_axes, output) in [(&[0], &[1], &[0, 1]), (&[1], &[0], &[1, 0])] {
-        let expected = host_lhs
-            .contract(&host_rhs, lhs_axes, rhs_axes, output)
-            .unwrap();
-        let actual = lhs
-            .contract(&rhs, lhs_axes, rhs_axes, output)
-            .unwrap()
-            .to_host()
-            .unwrap();
+    for spec in [
+        ContractSpec {
+            lhs: &[0],
+            rhs: &[1],
+            codomain: &[0],
+            domain: &[1],
+        },
+        ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[1],
+            domain: &[0],
+        },
+    ] {
+        let expected = host_lhs.contract(&host_rhs, &spec).unwrap();
+        let actual = lhs.contract(&rhs, &spec).unwrap().to_host().unwrap();
         assert_eq!(
             actual.dense_data().unwrap().len(),
             expected.dense_data().unwrap().len()
@@ -2615,12 +2701,28 @@ fn typed_cuda_c64_lazy_adjoint_contract_matches_a_hand_expansion() {
             "contract",
             a.adjoint()
                 .unwrap()
-                .contract(&b, &[1], &[0], &[0, 1])
+                .contract(
+                    &b,
+                    &ContractSpec {
+                        lhs: &[1],
+                        rhs: &[0],
+                        codomain: &[0],
+                        domain: &[1],
+                    },
+                )
                 .unwrap(),
             a_device
                 .adjoint()
                 .unwrap()
-                .contract(&b_device, &[1], &[0], &[0, 1])
+                .contract(
+                    &b_device,
+                    &ContractSpec {
+                        lhs: &[1],
+                        rhs: &[0],
+                        codomain: &[0],
+                        domain: &[1],
+                    },
+                )
                 .unwrap()
                 .to_host()
                 .unwrap(),
@@ -3151,7 +3253,17 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
         .to_cuda()
         .unwrap();
 
-    let expected = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let expected = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let expected_data = expected.to_host().unwrap().dense_data().unwrap().to_vec();
     assert!(
         expected_data.contains(&0.0),
@@ -3165,8 +3277,18 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
             .unwrap()
     };
     let mut destination = poisoned();
-    lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
-        .unwrap();
+    lhs.contract_overwrite_into(
+        &rhs,
+        &mut destination,
+        &ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[0],
+            domain: &[1],
+        },
+        1.0,
+    )
+    .unwrap();
     let written = destination
         .to_host()
         .unwrap()
@@ -3213,8 +3335,18 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     let lhs_data = lhs.to_host().unwrap().dense_data().unwrap().to_vec();
     let mut lhs_alias = lhs.clone();
     assert!(
-        lhs.contract_overwrite_into(&rhs, &mut lhs_alias, &[1], &[0], &[0, 1], 1.0)
-            .is_err(),
+        lhs.contract_overwrite_into(
+            &rhs,
+            &mut lhs_alias,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            },
+            1.0
+        )
+        .is_err(),
         "an lhs alias must be rejected"
     );
     assert_eq!(
@@ -3225,7 +3357,17 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     assert!(lhs
         .adjoint()
         .unwrap()
-        .contract_overwrite_into(&rhs, &mut adjoint_alias, &[0], &[0], &[0, 1], 1.0)
+        .contract_overwrite_into(
+            &rhs,
+            &mut adjoint_alias,
+            &ContractSpec {
+                lhs: &[0],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            },
+            1.0
+        )
         .is_err());
     assert_eq!(
         adjoint_alias.to_host().unwrap().dense_data().unwrap(),
@@ -3260,8 +3402,18 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
         "the drifted destination must have the same required length"
     );
     assert!(
-        lhs.contract_overwrite_into(&rhs, &mut wrong_space, &[1], &[0], &[0, 1], 1.0)
-            .is_err(),
+        lhs.contract_overwrite_into(
+            &rhs,
+            &mut wrong_space,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            },
+            1.0
+        )
+        .is_err(),
         "a destination whose block layout differs must be rejected"
     );
     assert_eq!(
@@ -3276,8 +3428,18 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
             .unwrap();
     let short_before = short.to_host().unwrap().dense_data().unwrap().to_vec();
     assert!(
-        lhs.contract_overwrite_into(&rhs, &mut short, &[1], &[0], &[0, 1], 1.0)
-            .is_err(),
+        lhs.contract_overwrite_into(
+            &rhs,
+            &mut short,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            },
+            1.0
+        )
+        .is_err(),
         "a destination of the wrong length must be rejected"
     );
     assert_eq!(
@@ -3289,13 +3451,33 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     let shared = destination.clone();
     assert_rejected(
         "shared ownership",
-        lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0),
+        lhs.contract_overwrite_into(
+            &rhs,
+            &mut destination,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+            1.0,
+        ),
         &destination,
     );
     drop(shared);
     assert_rejected(
         "alpha other than one",
-        lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 2.0),
+        lhs.contract_overwrite_into(
+            &rhs,
+            &mut destination,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+            2.0,
+        ),
         &destination,
     );
 
@@ -3312,10 +3494,30 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
             .unwrap()
             .to_cuda()
             .unwrap();
-    let empty_expected = empty_lhs.contract(&empty_rhs, &[1], &[0], &[0, 1]).unwrap();
+    let empty_expected = empty_lhs
+        .contract(
+            &empty_rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let mut empty_destination = poisoned();
     empty_lhs
-        .contract_overwrite_into(&empty_rhs, &mut empty_destination, &[1], &[0], &[0, 1], 1.0)
+        .contract_overwrite_into(
+            &empty_rhs,
+            &mut empty_destination,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+            1.0,
+        )
         .unwrap();
     assert_eq!(
         empty_destination.to_host().unwrap().dense_data().unwrap(),
@@ -3354,12 +3556,30 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
         "the fixture must have a zero-length destination"
     );
     zero_lhs
-        .contract_overwrite_into(&zero_rhs, &mut zero_destination, &[1], &[0], &[0, 1], 1.0)
+        .contract_overwrite_into(
+            &zero_rhs,
+            &mut zero_destination,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+            1.0,
+        )
         .unwrap();
     assert_eq!(
         zero_destination.to_host().unwrap().dense_data().unwrap(),
         zero_lhs
-            .contract(&zero_rhs, &[1], &[0], &[0, 1])
+            .contract(
+                &zero_rhs,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1]
+                }
+            )
             .unwrap()
             .to_host()
             .unwrap()

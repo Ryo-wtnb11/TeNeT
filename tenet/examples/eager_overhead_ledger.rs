@@ -288,6 +288,13 @@ macro_rules! ledger {
                 case.nc - 1
             };
             let open: Vec<usize> = (0..rank).collect();
+            let (open_codomain, open_domain) = open.split_at(rank - 1);
+            let one_leg = ContractSpec {
+                lhs: &[0],
+                rhs: &[1],
+                codomain: open_codomain,
+                domain: open_domain,
+            };
             let mut coupled: Vec<_> = (0..a.subblock_count())
                 .map(|i| a.subblock_fusion_trees(i).map(|t| t.coupled().clone()))
                 .collect::<Result<_, _>>()?;
@@ -311,7 +318,7 @@ macro_rules! ledger {
                 black_box(&a).compose(&square).unwrap()
             });
             run_op(config, &prefix, "contract", || {
-                black_box(&a).contract(&matrix, &[0], &[1], &open).unwrap()
+                black_box(&a).contract(&matrix, &one_leg).unwrap()
             });
             run_op(config, &prefix, "permute", || {
                 black_box(&a).permute(perm_codomain, perm_domain).unwrap()
@@ -356,9 +363,7 @@ macro_rules! ledger {
                     .len()
             });
             run_op(config, &prefix, "contract_conj", || {
-                black_box(&lazy)
-                    .contract(&matrix, &[0], &[1], &open)
-                    .unwrap()
+                black_box(&lazy).contract(&matrix, &one_leg).unwrap()
             });
             run_op(config, &prefix, "compose_conj", || {
                 black_box(&lazy).compose(&a2).unwrap()

@@ -557,6 +557,7 @@ where
             &lhs.space,
             &rhs.space,
             axes,
+            None,
             lhs.layout_build.legacy_dispatch(),
         )?;
         Self::from_derived_like(lhs, space)
@@ -578,6 +579,46 @@ where
     where
         R: MultiplicityFreeRigidSymbols,
     {
+        Self::contracted_multiplicity_free_space(lhs, rhs, lhs_axes, rhs_axes, output_order, None)
+    }
+
+    /// [`Self::contracted_multiplicity_free_ordered`] with the result split
+    /// after its first `codomain_rank` output axes: TensorOperations
+    /// `pAB = (output[..codomain_rank], output[codomain_rank..])`. The space is
+    /// the one `permute` gives the default-split result, so a leg moved across
+    /// the split is dualized as there.
+    pub fn contracted_multiplicity_free_partitioned(
+        lhs: &Self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+        codomain_rank: usize,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        Self::contracted_multiplicity_free_space(
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_order,
+            Some(codomain_rank),
+        )
+    }
+
+    fn contracted_multiplicity_free_space(
+        lhs: &Self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+        codomain_rank: Option<usize>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
         Self::validate_shared_provider(lhs, rhs)?;
         let axes = TensorContractSpec::new(lhs_axes, rhs_axes, output_order);
         let space = DynamicFusionMapSpace::contracted_with_spec_and_primer(
@@ -585,6 +626,7 @@ where
             &lhs.space,
             &rhs.space,
             axes,
+            codomain_rank,
             lhs.layout_build.legacy_dispatch(),
         )?;
         Self::from_derived_like(lhs, space)

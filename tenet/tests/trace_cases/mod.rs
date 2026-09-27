@@ -22,7 +22,7 @@
 #![allow(dead_code)]
 
 use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
-use tenet::typed::{GradedSpace, Runtime, TensorMap};
+use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 
 use crate::contract_cases::{fermion_su2, fermion_u1, fill, su2, u1, u1_su2, Payload};
 
@@ -94,22 +94,25 @@ where
 {
     let identity: TensorMap<R, D> = TensorMap::isomorphism(runtime, [space], [space]).unwrap();
     let open = tensor.rank() - 2;
+    let axes: Vec<usize> = (0..open).collect();
+    // The default split puts every open leg of `T` in the codomain; the
+    // trace keeps each leg on its side, so bend the result to that split.
     let joint = tensor
         .contract(
             &identity,
-            &lhs_axes,
-            &rhs_axes,
-            &(0..open).collect::<Vec<_>>(),
+            &ContractSpec {
+                lhs: &lhs_axes,
+                rhs: &rhs_axes,
+                codomain: &axes,
+                domain: &[],
+            },
         )
         .unwrap();
-    // `contract` puts every open leg of `T` in its codomain; the trace keeps
-    // each leg on its side, so bend the result to that split.
     let codomain = tensor.codomain_rank()
         - lhs_axes
             .iter()
             .filter(|&&axis| axis < tensor.codomain_rank())
             .count();
-    let axes: Vec<usize> = (0..open).collect();
     joint.permute(&axes[..codomain], &axes[codomain..]).unwrap()
 }
 

@@ -5,6 +5,7 @@ use tenet::prelude::{
     product_sector, FermionParityFusionRule, GradedSpace, ProductFusionRuleExt, Runtime,
     SU2FusionRule, SU2Irrep, TensorMap, Truncation, U1FusionRule, U1Irrep, Z2Irrep,
 };
+use tenet::typed::ContractSpec;
 use tenet::typed::{
     Svd, TensorScalar, TypedTensorConstructionDispatch, TypedTensorModeDispatch,
     TypedTensorRootDispatch,
@@ -105,7 +106,15 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
         TensorMap::<U1FusionRule, f64>::isomorphism(&runtime, [&space], [&space]).unwrap();
     assert_close(
         identity
-            .contract(&tensor, &[1], &[0], &[0, 1])
+            .contract(
+                &tensor,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
             .unwrap()
             .dense_data()
             .unwrap(),

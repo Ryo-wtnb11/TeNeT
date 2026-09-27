@@ -2903,7 +2903,15 @@ macro_rules! run_provider {
                 $min_time,
                 || lhs.compose(&rhs),
             )?;
-            let contracted = lhs.contract(&rhs, &[2, 3], &[0, 1], &[0, 1, 2, 3])?;
+            let contracted = lhs.contract(
+                &rhs,
+                &ContractSpec {
+                    lhs: &[2, 3],
+                    rhs: &[0, 1],
+                    codomain: &[0, 1],
+                    domain: &[2, 3],
+                },
+            )?;
             assert_same_tensor!(composed, contracted, lhs);
         }
 
@@ -2930,6 +2938,14 @@ macro_rules! run_provider {
             if !operation_enabled(operation) {
                 continue;
             }
+            // Both operands are rank (2, 2) and contract two legs.
+            let (codomain, domain) = output_axes.split_at(2);
+            let spec = ContractSpec {
+                lhs: lhs_axes,
+                rhs: rhs_axes,
+                codomain,
+                domain,
+            };
             for form in ["owned", "destination"] {
                 if !form_enabled(form) {
                     continue;
@@ -2956,13 +2972,13 @@ macro_rules! run_provider {
                         "cold",
                         "warm",
                         $min_time,
-                        || lhs.contract(&rhs, lhs_axes, rhs_axes, output_axes),
+                        || lhs.contract(&rhs, &spec),
                     )?;
                     assert!(cold.norm(2.0)?.is_finite());
-                    let expected = lhs.contract(&rhs, lhs_axes, rhs_axes, output_axes)?;
+                    let expected = lhs.contract(&rhs, &spec)?;
                     assert_same_tensor!(cold, expected, lhs);
                 } else {
-                    let expected = lhs.contract(&rhs, lhs_axes, rhs_axes, output_axes)?;
+                    let expected = lhs.contract(&rhs, &spec)?;
                     let mut destination = expected.zeros_like();
                     bench(
                         &runtime,
@@ -2972,16 +2988,7 @@ macro_rules! run_provider {
                         "first_after_setup",
                         "warm_after_setup",
                         $min_time,
-                        || {
-                            lhs.contract_overwrite_into(
-                                &rhs,
-                                &mut destination,
-                                lhs_axes,
-                                rhs_axes,
-                                output_axes,
-                                1.0,
-                            )
-                        },
+                        || lhs.contract_overwrite_into(&rhs, &mut destination, &spec, 1.0),
                     )?;
                     assert_same_tensor!(destination, expected, lhs);
                 }
@@ -3199,7 +3206,15 @@ fn run_checked_sun(
                 )?;
                 assert_same_tensor!(
                     composed,
-                    lhs.contract(&rhs, &[2, 3], &[0, 1], &[0, 1, 2, 3])?,
+                    lhs.contract(
+                        &rhs,
+                        &ContractSpec {
+                            lhs: &[2, 3],
+                            rhs: &[0, 1],
+                            codomain: &[0, 1],
+                            domain: &[2, 3]
+                        }
+                    )?,
                     lhs
                 );
             }
@@ -3223,6 +3238,13 @@ fn run_checked_sun(
                     7 => (&[3, 2][..], &[1, 0, 2, 3][..]),
                     _ => unreachable!(),
                 };
+                let (codomain, domain) = output_axes.split_at(2);
+                let spec = ContractSpec {
+                    lhs: lhs_axes,
+                    rhs: &[0, 1],
+                    codomain,
+                    domain,
+                };
                 let output = bench(
                     &runtime,
                     symmetry,
@@ -3231,13 +3253,9 @@ fn run_checked_sun(
                     "cold",
                     "warm",
                     min_time,
-                    || lhs.contract(&rhs, lhs_axes, &[0, 1], output_axes),
+                    || lhs.contract(&rhs, &spec),
                 )?;
-                assert_same_tensor!(
-                    output,
-                    lhs.contract(&rhs, lhs_axes, &[0, 1], output_axes)?,
-                    lhs
-                );
+                assert_same_tensor!(output, lhs.contract(&rhs, &spec)?, lhs);
             }
         }
     }
@@ -3380,9 +3398,15 @@ macro_rules! preflight_public {
         assert_public_fixture(&direct, &$fixture.expected_direct)?;
         let composed = $fixture.lhs_adjoint.compose(&$fixture.rhs)?;
         assert_public_fixture(&composed, &$fixture.expected_adjoint)?;
-        let contracted = $fixture
-            .lhs_adjoint
-            .contract(&$fixture.rhs, &[1], &[0], &[0, 1])?;
+        let contracted = $fixture.lhs_adjoint.contract(
+            &$fixture.rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )?;
         assert_public_fixture(&contracted, &$fixture.expected_adjoint)?;
     }};
 }
@@ -3437,9 +3461,12 @@ macro_rules! run_public_dtype {
                     || {
                         Ok::<_, Error>(observe_owned(fixture.lhs_adjoint.contract(
                             &fixture.rhs,
-                            &[1],
-                            &[0],
-                            &[0, 1],
+                            &ContractSpec {
+                                lhs: &[1],
+                                rhs: &[0],
+                                codomain: &[0],
+                                domain: &[1],
+                            },
                         )?))
                     },
                 )?,

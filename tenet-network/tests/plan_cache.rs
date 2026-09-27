@@ -1,4 +1,5 @@
 use std::sync::{Arc, Barrier};
+use tenet::typed::ContractSpec;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{Complex32, Complex64};
@@ -185,7 +186,17 @@ fn concurrent_macro_calls_share_one_plan_and_bound_idle_pool() {
     let runtime = Runtime::builder().build().unwrap();
     let space = space(Arc::new(U1FusionRule), 8);
     let (a, b) = pair(&runtime, &space, 90);
-    let expected = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
+    let expected = a
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     let barrier = Arc::new(Barrier::new(8));
     std::thread::scope(|scope| {
         let mut handles = Vec::new();

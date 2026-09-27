@@ -5,6 +5,7 @@
 //! payload, including a static intra-operand trace.
 
 use std::sync::Arc;
+use tenet::typed::ContractSpec;
 
 use tenet::core::{
     product_sector, CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule,
@@ -73,7 +74,15 @@ where
     let rhs = TensorMap::<R, f64>::rand_with_seed(runtime, [space], [space], seed + 1).unwrap();
     let terms = space.dim().unwrap().ceil() as usize;
     let expected = lhs
-        .contract(&rhs, &[1], &[0], &[0, 1])
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
         .permute(&[1], &[0])
         .unwrap();

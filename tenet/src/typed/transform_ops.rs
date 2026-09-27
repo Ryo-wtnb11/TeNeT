@@ -285,10 +285,10 @@ where
         Ok(())
     }
 
-    /// Overwrites `destination` with
-    /// `alpha * self.contract(other, lhs_axes, rhs_axes, output_axes)` while
+    /// Overwrites `destination` with `alpha * self.contract(other, spec)` while
     /// preserving the destination's provider, space, body, and dense Host
-    /// allocation.
+    /// allocation. `destination` must have the space of that result, including
+    /// its codomain/domain split.
     ///
     /// # Errors
     ///
@@ -299,16 +299,15 @@ where
     /// before shared-engine
     /// compilation/replay, so a later engine error may leave it zeroed or
     /// partially overwritten.
-    #[allow(clippy::too_many_arguments)]
     pub fn contract_overwrite_into<'a>(
         &self,
         other: impl Into<TensorRef<'a, R, D>>,
         destination: &mut Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
         alpha: D,
     ) -> Result<(), Error> {
+        let (lhs_axes, rhs_axes) = (spec.lhs, spec.rhs);
+        let output_axes = &spec.output_axes()[..];
         let other = other.into().operand()?;
         let other = &*other;
         if !self.runtime.same_runtime(&other.runtime)
@@ -343,12 +342,13 @@ where
         }
 
         let output_order = OutputAxisOrder::from_axes(output_axes);
-        let expected = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+        let expected = BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
             self.logical_space(),
             other.logical_space(),
             lhs_axes,
             rhs_axes,
             output_order,
+            spec.codomain.len(),
         )?;
         if destination_body.space.space() != expected.space() {
             return Err(Error::InvalidArgument(
@@ -845,24 +845,60 @@ where
     }
 }
 
+/// The leg roles of a pairwise contraction (TensorOperations
+/// `tensorcontract!`'s `pA[2]`, `pB[1]` and `pAB`): which legs are contracted,
+/// and how the open legs are ordered and split into the result's codomain and
+/// domain.
+///
+/// Open legs are numbered `0..open_rank`, the open legs of the left operand in
+/// ascending axis order first, then those of the right operand.
+/// `codomain ++ domain` must be a permutation of `0..open_rank`.
+///
+/// The result is defined as the contraction that puts every open leg of the
+/// left operand in the codomain and every open leg of the right one in the
+/// domain, followed by [`TensorMap::permute`] onto `(codomain, domain)`; the
+/// operation performs it without that separate permute.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContractSpec<'a> {
+    /// Contracted axes of the left operand, paired in order with `rhs`.
+    pub lhs: &'a [usize],
+    /// Contracted axes of the right operand.
+    pub rhs: &'a [usize],
+    /// Open legs forming the result's codomain, in order.
+    pub codomain: &'a [usize],
+    /// Open legs forming the result's domain, in order.
+    pub domain: &'a [usize],
+}
+
+impl ContractSpec<'_> {
+    /// `codomain ++ domain`, the single output order the engine takes with
+    /// [`Self::codomain`]'s length as the split.
+    pub(super) fn output_axes(&self) -> SmallVec<[usize; 8]> {
+        self.codomain.iter().chain(self.domain).copied().collect()
+    }
+}
+
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorContractDispatch<R, D>,
     D: TensorScalar,
 {
-    /// Contracts `lhs_axes` of `self` with `rhs_axes` of `other` (pairwise, in
-    /// list order) and lays the open axes out in `output_axes`.
+    /// Contracts `spec.lhs` of `self` with `spec.rhs` of `other` (pairwise, in
+    /// list order) and returns the open legs as `spec.codomain ← spec.domain`
+    /// (TensorKit `tensorcontract!` with `pAB = (codomain, domain)`).
     ///
-    /// `output_axes` is a permutation of `0..open_rank` over the open axes,
-    /// `self`'s ascending first and `other`'s after; passing `0..open_rank`
-    /// gives the default order (TensorKit `tensorcontract!` with default
-    /// `pAB`). The codomain/domain split of the result follows the
-    /// TensorOperations convention the engine implements: **every** open axis
-    /// of `self` becomes the result's codomain
-    /// (`self.rank() - lhs_axes.len()` axes) and every open axis of `other`
-    /// becomes its domain (`other.rank() - rhs_axes.len()` axes), regardless
-    /// of which side of either operand those axes came from.
+    /// The result equals the contraction whose codomain is every open axis of
+    /// `self` and whose domain is every open axis of `other`, followed by
+    /// [`Self::permute`] onto `(spec.codomain, spec.domain)` — see
+    /// [`ContractSpec`]. A leg moved across the split is dualized exactly as
+    /// that permute dualizes it.
+    ///
+    /// **Cost.** No permute pass follows the contraction. As in TensorKit's
+    /// `blas_contract!`, the GEMMs write the result directly when its layout
+    /// allows, and otherwise write a Runtime-pooled temporary that one tree
+    /// transform moves into the result, inside this call — never slower than
+    /// the contraction followed by the explicit permute.
     ///
     /// **Braiding scope**: ordinary contraction is available only for
     /// symmetric braiding (Bosonic, Fermionic), as TensorKit `blas_contract!`.
@@ -932,8 +968,8 @@ where
     ///   [`tenet_tensors::OperationError::UnsupportedTensorContractScope`] for
     ///   non-symmetric (anyonic or `NoBraiding`) providers, whatever the axes.
     /// - [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] for
-    ///   malformed axis lists, an output order that is not a permutation of
-    ///   the open axes, mismatched contracted legs, or operands whose
+    ///   malformed axis lists, a `codomain ++ domain` that is not a
+    ///   permutation of the open axes, mismatched contracted legs, or operands whose
     ///   providers report different rule identities. Those all come back from
     ///   the expert layer, which owns the rules; re-checking them here would
     ///   be a second copy free to drift.
@@ -944,7 +980,7 @@ where
     /// use std::sync::Arc;
     ///
     /// use tenet::core::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    /// use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(
@@ -955,17 +991,20 @@ where
     /// let id = TensorMap::isomorphism(&runtime, [&v], [&v])?;
     ///
     /// // Contracting the domain leg with the identity's codomain leg is a
-    /// // no-op on the payload; `[0, 1]` keeps the open axes in place.
-    /// let out = t.contract(&id, &[1], &[0], &[0, 1])?;
+    /// // no-op on the payload; `[0] ← [1]` keeps the open axes in place.
+    /// let spec = ContractSpec { lhs: &[1], rhs: &[0], codomain: &[0], domain: &[1] };
+    /// let out = t.contract(&id, &spec)?;
     /// assert_eq!(out.dense_data()?, t.dense_data()?);
+    ///
+    /// // Both open legs in the codomain: the same as permuting afterwards.
+    /// let spec = ContractSpec { lhs: &[1], rhs: &[0], codomain: &[0, 1], domain: &[] };
+    /// assert_eq!(out.permute(&[0, 1], &[])?.dense_data()?, t.contract(&id, &spec)?.dense_data()?);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn contract<'a>(
         &self,
         other: impl Into<TensorRef<'a, R, D>>,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
     ) -> Result<Self, TypedFacadeError<R>> {
         let other = other.into().operand()?;
         let other = &*other;
@@ -976,13 +1015,7 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
-        <R::Mode as TypedTensorContractDispatch<R, D>>::contract(
-            self,
-            other,
-            lhs_axes,
-            rhs_axes,
-            output_axes,
-        )
+        <R::Mode as TypedTensorContractDispatch<R, D>>::contract(self, other, spec)
     }
 }
 
@@ -1279,6 +1312,7 @@ where
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
+        codomain_rank: usize,
     ) -> Result<Option<Self>, Error> {
         if lhs_axes.len() != 1 || rhs_axes.len() != 1 || !self.same_rule(other) {
             return Ok(None);
@@ -1307,7 +1341,11 @@ where
             // `D · D`: the same product as `D * D`, which already knows how to
             // stay compact and which destinations may hold the result.
             (Some(_), Some(_)) => {
-                if lhs_axis != 1 || rhs_axis != 0 || output_axes.iter().copied().ne(0..2) {
+                if lhs_axis != 1
+                    || rhs_axis != 0
+                    || codomain_rank != 1
+                    || output_axes.iter().copied().ne(0..2)
+                {
                     // Why not a reordered output: `pAB` can move the surviving
                     // bond across the codomain/domain split, and rebinding the
                     // product spectrum there is not equivalent to a permute
@@ -1330,7 +1368,7 @@ where
                 let mut source: Vec<usize> = (0..self.rank()).filter(|&a| a != lhs_axis).collect();
                 source.push(lhs_axis);
                 self.scaled_axis(Some(lhs_axis), spectrum)?
-                    .permuted_to_output(&source, output_axes, self.rank() - 1)
+                    .permuted_to_output(&source, output_axes, codomain_rank)
             }
             // `D · t` (TensorKit `lmul!`): the mirror image, scaling the
             // contracted codomain leg of `t` at whatever position it sits.
@@ -1345,10 +1383,7 @@ where
                 source.extend((0..other.rank()).filter(|&a| a != rhs_axis));
                 let Some(completed) = other
                     .scaled_axis(Some(rhs_axis), spectrum)?
-                    // One open axis of `self` survives, so the destination's
-                    // codomain rank is one — the contraction convention puts
-                    // every open axis of the left operand there.
-                    .permuted_to_output(&source, output_axes, 1)?
+                    .permuted_to_output(&source, output_axes, codomain_rank)?
                 else {
                     return Ok(None);
                 };

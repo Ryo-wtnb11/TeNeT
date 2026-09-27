@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 use std::thread;
+use tenet::typed::ContractSpec;
 
 use tenet::prelude::{GradedSpace, Runtime, SU2FusionRule, SU2Irrep, TensorMap};
 
@@ -36,7 +37,17 @@ fn work(rt: &Runtime, seed: u64) -> (f64, f64) {
     let v = space();
     let a: TensorMap<_, f64> = TensorMap::rand_with_seed(rt, [&v, &v], [&v, &v], seed).unwrap();
     let b: TensorMap<_, f64> = TensorMap::rand_with_seed(rt, [&v, &v], [&v, &v], seed + 1).unwrap();
-    let c = a.contract(&b, &[2, 3], &[0, 1], &[0, 1, 2, 3]).unwrap(); // ContextPool
+    let c = a
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[2, 3],
+                rhs: &[0, 1],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
+        .unwrap(); // ContextPool
     let p = c.permute(&[1, 0], &[3, 2]).unwrap(); // ContextPool
     let s = p.svd_vals().unwrap(); // ExecutorPool
     let first = s

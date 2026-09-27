@@ -54,7 +54,16 @@ fn warm_working_sets_never_evict() {
         a.compose(&square).unwrap();
     });
     assert_warm("contract", 3, || {
-        a.contract(&matrix, &[0], &[1], &[0, 1, 2, 3]).unwrap();
+        a.contract(
+            &matrix,
+            &ContractSpec {
+                lhs: &[0],
+                rhs: &[1],
+                codomain: &[0, 1, 2],
+                domain: &[3],
+            },
+        )
+        .unwrap();
     });
     assert_warm("qr_compact", 2, || {
         a.qr_compact().unwrap();
@@ -91,7 +100,15 @@ fn warm_working_sets_never_evict() {
     let sweep = || {
         for pair in sites.windows(2) {
             let theta = pair[0]
-                .contract(&pair[1], &[2], &[0], &[0, 1, 2, 3])
+                .contract(
+                    &pair[1],
+                    &ContractSpec {
+                        lhs: &[2],
+                        rhs: &[0],
+                        codomain: &[0, 1],
+                        domain: &[2, 3],
+                    },
+                )
                 .unwrap();
             theta.repartition(2).unwrap();
         }

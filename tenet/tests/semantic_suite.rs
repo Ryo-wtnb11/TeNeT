@@ -9,6 +9,7 @@
 //! suite when those land.
 
 use std::sync::Arc;
+use tenet::typed::ContractSpec;
 use tenet::typed::Direction;
 
 use tenet::core::{
@@ -537,13 +538,29 @@ fn contraction_order_independence() {
             let b: TensorMap<_, f64> =
                 TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 86).unwrap();
             let ab = a
-                .contract(&b, &[1, 2], &[2, 1], &[0, 1, 2, 3])
+                .contract(
+                    &b,
+                    &ContractSpec {
+                        lhs: &[1, 2],
+                        rhs: &[2, 1],
+                        codomain: &[0, 1],
+                        domain: &[2, 3],
+                    },
+                )
                 .unwrap()
                 // default open order [p, s, q, r] with codomain split after 2
                 .permute(&[0, 2], &[3, 1])
                 .unwrap();
             let ba = b
-                .contract(&a, &[2, 1], &[1, 2], &[0, 1, 2, 3])
+                .contract(
+                    &a,
+                    &ContractSpec {
+                        lhs: &[2, 1],
+                        rhs: &[1, 2],
+                        codomain: &[0, 1],
+                        domain: &[2, 3],
+                    },
+                )
                 .unwrap()
                 // default open order [q, r, p, s]
                 .permute(&[2, 0], &[1, 3])
@@ -581,12 +598,28 @@ fn su2_nonuniform_degeneracy_crossed_contract() {
     let a: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 85).unwrap();
     let b: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 86).unwrap();
     let ab = a
-        .contract(&b, &[1, 2], &[2, 1], &[0, 1, 2, 3])
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[1, 2],
+                rhs: &[2, 1],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
         .unwrap()
         .permute(&[0, 2], &[3, 1])
         .unwrap();
     let ba = b
-        .contract(&a, &[2, 1], &[1, 2], &[0, 1, 2, 3])
+        .contract(
+            &a,
+            &ContractSpec {
+                lhs: &[2, 1],
+                rhs: &[1, 2],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
         .unwrap()
         .permute(&[2, 0], &[1, 3])
         .unwrap();
@@ -607,7 +640,17 @@ fn fz2_decreasing_degeneracy_boundary_crossing_contract() {
     let b: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 6).unwrap();
     // Open legs cross the split: a's domain axis 3 stays open, b's axes
     // 1..3 stay open. Default output order matches the permuted compose.
-    let direct = a.contract(&b, &[2], &[0], &[0, 1, 2, 3, 4, 5]).unwrap();
+    let direct = a
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1, 2],
+                domain: &[3, 4, 5],
+            },
+        )
+        .unwrap();
     let reference = a
         .permute(&[0, 1, 3], &[2])
         .unwrap()
@@ -648,12 +691,28 @@ fn triple_product_nonuniform_degeneracy_crossed_contract() {
     let a: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 87).unwrap();
     let b: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 88).unwrap();
     let ab = a
-        .contract(&b, &[1, 2], &[2, 1], &[0, 1, 2, 3])
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[1, 2],
+                rhs: &[2, 1],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
         .unwrap()
         .permute(&[0, 2], &[3, 1])
         .unwrap();
     let ba = b
-        .contract(&a, &[2, 1], &[1, 2], &[0, 1, 2, 3])
+        .contract(
+            &a,
+            &ContractSpec {
+                lhs: &[2, 1],
+                rhs: &[1, 2],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
         .unwrap()
         .permute(&[2, 0], &[1, 3])
         .unwrap();

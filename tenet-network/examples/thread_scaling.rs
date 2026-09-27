@@ -32,6 +32,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+use tenet::typed::ContractSpec;
 
 use tenet::prelude::{GradedSpace, Runtime, SU2FusionRule, SU2Irrep, TensorMap};
 use tenet_network::tensor;
@@ -84,8 +85,16 @@ fn contract_once(
     a: &TensorMap<SU2FusionRule, f64>,
     b: &TensorMap<SU2FusionRule, f64>,
 ) -> TensorMap<SU2FusionRule, f64> {
-    a.contract(b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
-        .expect("contract")
+    a.contract(
+        b,
+        &ContractSpec {
+            lhs: &[2, 3],
+            rhs: &[0, 1],
+            codomain: &[0, 1],
+            domain: &[2, 3],
+        },
+    )
+    .expect("contract")
 }
 
 fn build_runtime() -> Runtime {

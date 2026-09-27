@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tenet::typed::ContractSpec;
 use tenet::typed::Direction;
 
 use tenet::core::{
@@ -1151,7 +1152,15 @@ fn checked_generic_contract_keeps_its_braiding_boundaries() {
             lhs.compose(&rhs).unwrap().dense_data().unwrap(),
             expected.dense_data().unwrap()
         );
-        let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]);
+        let contract = lhs.contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        );
         let expected_message = match braiding {
             BraidingStyleKind::Bosonic => {
                 assert_eq!(

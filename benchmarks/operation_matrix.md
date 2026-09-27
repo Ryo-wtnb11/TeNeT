@@ -159,7 +159,7 @@ cycle. This does not claim that the backend retains three compiled plans.
 The public U1 layer uses 32 sectors of degeneracy 4 (`many_small`) or four
 sectors of degeneracy 32 (`few_large`). For f64 and genuinely complex
 complex64 it measures direct compose, lazy-lhs-adjoint compose, and the same
-lazy lhs through `contract(..., &[1], &[0], &[0,1])`. Shape-cycle compose rows
+lazy lhs through `contract` with `ContractSpec { lhs: &[1], rhs: &[0], codomain: &[0], domain: &[1] }`. Shape-cycle compose rows
 use degeneracies `4,5,3` or `32,33,31` on one `Runtime`. These public rows make
 no backend submission-count claim; correctness seam counts belong to #1179's
 tests.

@@ -1,7 +1,7 @@
 mod u1 {
     use std::{hint::black_box, sync::Arc, time::Instant};
     use tenet::core::{U1FusionRule, U1Irrep};
-    use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
     use tenet_network::{configure_plan_cache, plan_cache_stats, tensor, PlanCacheConfig};
 
     fn fixture(runtime: &Runtime) -> (TensorMap<U1FusionRule, f64>, TensorMap<U1FusionRule, f64>) {
@@ -83,7 +83,17 @@ mod u1 {
         }
         let oracle_runtime = Runtime::builder().build().unwrap();
         let (oa, ob) = fixture(&oracle_runtime);
-        let oracle = oa.contract(&ob, &[2, 3], &[0, 1], &[0, 1, 2, 3]).unwrap();
+        let oracle = oa
+            .contract(
+                &ob,
+                &ContractSpec {
+                    lhs: &[2, 3],
+                    rhs: &[0, 1],
+                    codomain: &[0, 1],
+                    domain: &[2, 3],
+                },
+            )
+            .unwrap();
         for actual in [&cold, warm.as_ref().unwrap()] {
             assert_eq!(actual.dense_data().unwrap(), oracle.dense_data().unwrap());
             assert_eq!(actual.codomain(), oracle.codomain());
@@ -143,7 +153,7 @@ mod checked_generic {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use tenet::typed::{GradedSpace, Runtime, SUNFusionRule, TensorMap};
+    use tenet::typed::{ContractSpec, GradedSpace, Runtime, SUNFusionRule, TensorMap};
     use tenet_network::{configure_plan_cache, plan_cache_stats, tensor, PlanCacheConfig};
 
     const ITERATIONS: usize = 20;
@@ -268,7 +278,15 @@ mod checked_generic {
         let oracle_runtime = Runtime::builder().build().expect("oracle runtime");
         let (oracle_a, oracle_b) = fixture(&oracle_runtime, provider, label);
         let oracle = oracle_a
-            .contract(&oracle_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+            .contract(
+                &oracle_b,
+                &ContractSpec {
+                    lhs: &[2, 3],
+                    rhs: &[0, 1],
+                    codomain: &[0, 1],
+                    domain: &[2, 3],
+                },
+            )
             .expect("ordinary-contract oracle");
         assert_matches_oracle(&cold, &oracle, &a);
         assert_matches_oracle(warm_output.as_ref().expect("warm output"), &oracle, &a);

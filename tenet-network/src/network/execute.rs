@@ -759,13 +759,28 @@ impl PlannedNetwork {
             } else {
                 &mut *contracted_buffer
             };
+            // The step keeps TensorOperations' split, every open lhs leg in
+            // the codomain; `result_permutation` moves it afterwards.
+            let (codomain, domain) = lhs
+                .rank()
+                .checked_sub(step.lhs_contract_axes.len())
+                .and_then(|lhs_open| step.contract_output_axes.split_at_checked(lhs_open))
+                .ok_or_else(|| {
+                    HostNetworkError::<R>::from(invalid(
+                        "contraction step axes exceed its lhs rank",
+                    ))
+                })?;
+            let spec = ContractSpec {
+                lhs: &step.lhs_contract_axes,
+                rhs: &step.rhs_contract_axes,
+                codomain,
+                domain,
+            };
             let contracted = <R::Mode as HostNetworkModeDispatch<R, D, S>>::contract_step(
                 lhs,
                 rhs,
                 contract_buffer,
-                &step.lhs_contract_axes,
-                &step.rhs_contract_axes,
-                &step.contract_output_axes,
+                &spec,
             )?;
             if let Some(meter) = meter.as_deref_mut() {
                 let payload = contracted.get(contract_buffer).network_owned_payload();

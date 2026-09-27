@@ -47,9 +47,7 @@ where
         lhs: &TensorMap<R, D, S>,
         rhs: &TensorMap<R, D, S>,
         destination: &mut Option<TensorMap<R, D, S>>,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
     ) -> Result<StepOutput<TensorMap<R, D, S>>, HostNetworkError<R>>;
 
     fn permute_step(
@@ -135,27 +133,13 @@ where
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
         destination: &mut Option<TensorMap<R, D>>,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
     ) -> Result<StepOutput<TensorMap<R, D>>, Error> {
         if let Some(destination) = destination {
-            lhs.contract_overwrite_into(
-                rhs,
-                destination,
-                lhs_axes,
-                rhs_axes,
-                output_axes,
-                D::from_real(1.0),
-            )?;
+            lhs.contract_overwrite_into(rhs, destination, spec, D::from_real(1.0))?;
             Ok(StepOutput::Overwritten)
         } else {
-            Ok(StepOutput::Returned(lhs.contract(
-                rhs,
-                lhs_axes,
-                rhs_axes,
-                output_axes,
-            )?))
+            Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
         }
     }
 
@@ -228,16 +212,9 @@ where
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
         _destination: &mut Option<TensorMap<R, D>>,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
     ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>> {
-        Ok(StepOutput::Returned(lhs.contract(
-            rhs,
-            lhs_axes,
-            rhs_axes,
-            output_axes,
-        )?))
+        Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
     }
 
     fn permute_step(
@@ -318,29 +295,15 @@ where
         lhs: &TensorMap<R, D, CudaStorage<D>>,
         rhs: &TensorMap<R, D, CudaStorage<D>>,
         destination: &mut Option<TensorMap<R, D, CudaStorage<D>>>,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
     ) -> Result<StepOutput<TensorMap<R, D, CudaStorage<D>>>, Error> {
         #[cfg(test)]
         CUDA_NETWORK_CONTRACT_CALLS.with(|calls| calls.set(calls.get() + 1));
         if let Some(destination) = destination {
-            lhs.contract_overwrite_into(
-                rhs,
-                destination,
-                lhs_axes,
-                rhs_axes,
-                output_axes,
-                D::from_real(1.0),
-            )?;
+            lhs.contract_overwrite_into(rhs, destination, spec, D::from_real(1.0))?;
             Ok(StepOutput::Overwritten)
         } else {
-            Ok(StepOutput::Returned(lhs.contract(
-                rhs,
-                lhs_axes,
-                rhs_axes,
-                output_axes,
-            )?))
+            Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
         }
     }
 

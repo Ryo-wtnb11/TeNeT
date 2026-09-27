@@ -110,9 +110,7 @@ pub(super) trait MultiplicityFreeContractExecution<R: TypedSectorAdmission, C>:
     fn contract(
         lhs: &TensorMap<R, Self>,
         rhs: &TensorMap<R, Self>,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
     ) -> Result<TensorMap<R, Self>, Error>;
 
     fn compose(
@@ -247,9 +245,7 @@ where
     fn contract(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 
     fn compose(

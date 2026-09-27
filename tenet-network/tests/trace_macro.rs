@@ -5,6 +5,7 @@
 //! supertrace sign, lazy-adjoint trace axes, and compact full-trace storage.
 
 use std::sync::Arc;
+use tenet::typed::ContractSpec;
 
 use tenet::core::{
     CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
@@ -218,7 +219,15 @@ where
     let manual = traced_input
         .trace_pairs(&[(0, 1)])
         .unwrap()
-        .contract(&rhs, &[0], &[0], &[0])
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[0],
+                rhs: &[0],
+                codomain: &[],
+                domain: &[0],
+            },
+        )
         .unwrap();
     assert_close(
         combined.dense_data().unwrap(),

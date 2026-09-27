@@ -41,7 +41,7 @@ use tenet::core::{
     SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::dense::cuda_transfer_stats;
-use tenet::typed::{BlockFusionTrees, Error, GradedSpace, Runtime, TensorMap};
+use tenet::typed::{BlockFusionTrees, ContractSpec, Error, GradedSpace, Runtime, TensorMap};
 
 mod common;
 
@@ -848,10 +848,28 @@ where
     let device_a = a.to_cuda().unwrap();
     let device_b = b.to_cuda().unwrap();
 
-    let host_contract = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
+    let host_contract = a
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     assert_close(
         device_a
-            .contract(&device_b, &[1], &[0], &[0, 1])
+            .contract(
+                &device_b,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
             .unwrap()
             .to_host()
             .unwrap()
@@ -895,7 +913,15 @@ where
 
     // `contract_overwrite_into` writes the same values the returning form does.
     let mut destination = device_a
-        .contract(&device_b, &[1], &[0], &[0, 1])
+        .contract(
+            &device_b,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap()
         .zeros_like()
         .unwrap();
@@ -903,9 +929,12 @@ where
         .contract_overwrite_into(
             &device_b,
             &mut destination,
-            &[1],
-            &[0],
-            &[0, 1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
             D::entry(1.0, 0.0),
         )
         .unwrap();
@@ -922,9 +951,12 @@ where
         .contract_overwrite_into(
             &device_b,
             &mut destination,
-            &[1],
-            &[0],
-            &[0, 1],
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
             D::entry(1.0, 0.0),
         )
         .unwrap();
@@ -989,7 +1021,15 @@ fn device_fermionic_signs_are_exact_at_every_payload() {
 
         assert_bit_exact(
             device_lhs
-                .contract(&device_rhs, &[1], &[0], &[0, 1])
+                .contract(
+                    &device_rhs,
+                    &ContractSpec {
+                        lhs: &[1],
+                        rhs: &[0],
+                        codomain: &[0],
+                        domain: &[1],
+                    },
+                )
                 .unwrap()
                 .to_host()
                 .unwrap()
@@ -1011,10 +1051,18 @@ fn device_fermionic_signs_are_exact_at_every_payload() {
         );
         // The host agrees, at this dtype, with the same hand value.
         assert_bit_exact(
-            lhs.contract(&rhs, &[1], &[0], &[0, 1])
-                .unwrap()
-                .dense_data()
-                .unwrap(),
+            lhs.contract(
+                &rhs,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
+            .unwrap()
+            .dense_data()
+            .unwrap(),
             &[D::entry(-6.0, 0.0)],
             "fermionic contract, host",
         );
@@ -1316,7 +1364,17 @@ fn single_precision_costs_the_same_device_calls_and_half_the_bytes() {
         let before = cuda_transfer_stats();
         let device_a = a.to_cuda().unwrap();
         let device_b = b.to_cuda().unwrap();
-        let product = device_a.contract(&device_b, &[1], &[0], &[0, 1]).unwrap();
+        let product = device_a
+            .contract(
+                &device_b,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1],
+                },
+            )
+            .unwrap();
         let _ = product.to_host().unwrap();
         let after = cuda_transfer_stats();
         (

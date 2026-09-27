@@ -21,7 +21,7 @@ include!("common/predicate_chains.rs");
 include!("common/predicate_chain_coefficients.rs");
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use tenet::typed::{Direction, Duality, Side};
+use tenet::typed::{ContractSpec, Direction, Duality, Side};
 
 use tenet::core::{
     complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BraidingStyleKind,
@@ -871,7 +871,17 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
 
     runtime.clear_tree_transform_cache();
     let before = runtime.tree_transform_cache_info();
-    let error = a.contract(&b, &[1], &[0], &[0, 1]).unwrap_err();
+    let error = a
+        .contract(
+            &b,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap_err();
     assert!(matches!(
         error,
         tenet::prelude::Error::Operation(operation)
@@ -890,7 +900,16 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
         tenet::prelude::Error::RuntimeMismatch
     ));
     assert!(matches!(
-        a.contract(&other, &[1], &[0], &[0, 1]).unwrap_err(),
+        a.contract(
+            &other,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .unwrap_err(),
         tenet::prelude::Error::RuntimeMismatch
     ));
 }
@@ -1868,7 +1887,17 @@ fn contract_matches_a_hand_computed_product_with_a_reordered_output() {
     assert_eq!(lhs.dense_data().unwrap(), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     assert_eq!(rhs.dense_data().unwrap().len(), 12);
 
-    let contracted = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
+    let contracted = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap();
 
     assert_eq!(
         contracted.dense_data().unwrap(),
@@ -1893,7 +1922,17 @@ fn contract_with_the_default_output_order_keeps_the_open_axes_in_place() {
     let lhs = counting_z3(&runtime, &rows, &shared, 1.0);
     let rhs = counting_z3(&runtime, &shared, &columns, 7.0);
 
-    let contracted = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let contracted = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
 
     assert_eq!(
         contracted.dense_data().unwrap(),
@@ -1925,7 +1964,17 @@ fn contract_carries_a_simple_fusion_provider_with_a_complex_payload() {
 
     // Two spin-1/2 legs on each side, so both operands carry the spin-0 and
     // spin-1 blocks; the pair of contracted legs makes the result rank 4.
-    let contracted = lhs.contract(&rhs, &[2, 3], &[0, 1], &[2, 0, 3, 1]).unwrap();
+    let contracted = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[2, 3],
+                rhs: &[0, 1],
+                codomain: &[2, 0],
+                domain: &[3, 1],
+            },
+        )
+        .unwrap();
 
     assert_eq!(contracted.codomain().len() + contracted.domain().len(), 4);
     assert!(contracted
@@ -1951,7 +2000,17 @@ fn contract_rejects_operands_from_different_runtimes() {
     let lhs = counting_z3(&first, &rows, &shared, 1.0);
     let rhs = counting_z3(&second, &shared, &columns, 1.0);
 
-    let error = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    let error = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap_err();
 
     assert!(matches!(error, tenet::prelude::Error::RuntimeMismatch));
 }
@@ -1980,7 +2039,17 @@ fn contract_accepts_separately_allocated_equal_identity_providers() {
         7.0,
     );
 
-    let contracted = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
+    let contracted = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap();
 
     assert_eq!(
         contracted.dense_data().unwrap(),
@@ -2010,7 +2079,17 @@ fn contract_rejects_operands_with_distinct_rule_identities() {
         1.0,
     );
 
-    assert!(lhs.contract(&rhs, &[1], &[0], &[0, 1]).is_err());
+    assert!(lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .is_err());
 }
 
 #[test]
@@ -2028,10 +2107,50 @@ fn contract_rejects_malformed_axes_without_panicking() {
     let lhs = counting_z3(&runtime, &rows, &shared, 1.0);
     let rhs = counting_z3(&runtime, &shared, &columns, 1.0);
 
-    assert!(lhs.contract(&rhs, &[1], &[], &[0, 1]).is_err());
-    assert!(lhs.contract(&rhs, &[9], &[0], &[0, 1]).is_err());
-    assert!(lhs.contract(&rhs, &[1], &[9], &[0, 1]).is_err());
-    assert!(lhs.contract(&rhs, &[1], &[0], &[0]).is_err());
+    assert!(lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .is_err());
+    assert!(lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[9],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .is_err());
+    assert!(lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[9],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .is_err());
+    assert!(lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[]
+            }
+        )
+        .is_err());
 }
 
 #[test]
@@ -2218,7 +2337,17 @@ fn otimes_matches_tensorkit_planar_trivial_without_requesting_braiding() {
     // The pre-#595 lowering encoded the same operation as empty-axis
     // contraction plus this interleaving output permutation. NoBraiding still
     // rejects that braid-requiring route.
-    assert!(lhs.contract(&rhs, &[], &[], &[0, 2, 1, 3]).is_err());
+    assert!(lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[],
+                rhs: &[],
+                codomain: &[0, 2],
+                domain: &[1, 3]
+            }
+        )
+        .is_err());
 
     let actual = lhs.otimes(&rhs).unwrap();
 
@@ -2621,7 +2750,15 @@ fn a_failing_typed_operation_publishes_no_cache_state() {
 
     assert!(tensor.permute(&[0, 0], &[2, 3]).is_err());
     assert!(tensor
-        .contract(&tensor, &[3], &[9], &[0, 1, 2, 3, 4, 5])
+        .contract(
+            &tensor,
+            &ContractSpec {
+                lhs: &[3],
+                rhs: &[9],
+                codomain: &[0, 1, 2],
+                domain: &[3, 4, 5]
+            }
+        )
         .is_err());
 
     assert_eq!(
@@ -2974,8 +3111,27 @@ fn recompose(
     s: &TensorMap<tenet::core::Z2FusionRule, f64>,
     vh: &TensorMap<tenet::core::Z2FusionRule, f64>,
 ) -> TensorMap<tenet::core::Z2FusionRule, f64> {
-    let us = u.contract(s, &[2], &[0], &[0, 1, 2]).unwrap();
-    us.contract(vh, &[2], &[0], &[0, 1, 2]).unwrap()
+    let us = u
+        .contract(
+            s,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2],
+            },
+        )
+        .unwrap();
+    us.contract(
+        vh,
+        &ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[0, 1],
+            domain: &[2],
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -3022,9 +3178,25 @@ fn svd_compact_reconstructs_a_complex_payload() {
     } = typed.svd_compact().unwrap();
 
     let recon = tu
-        .contract(&ts, &[2], &[0], &[0, 1, 2])
+        .contract(
+            &ts,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2],
+            },
+        )
         .unwrap()
-        .contract(&tvh, &[2], &[0], &[0, 1, 2])
+        .contract(
+            &tvh,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2],
+            },
+        )
         .unwrap();
     for (got, want) in recon
         .dense_data()
@@ -4009,7 +4181,15 @@ fn fermionic_compose_is_contract_against_a_twisted_right_operand() {
     assert_eq!(
         typed_a.compose(&typed_b).unwrap().dense_data().unwrap(),
         typed_a
-            .contract(&twisted_b, &[1, 2], &[0, 1], &[0, 1])
+            .contract(
+                &twisted_b,
+                &ContractSpec {
+                    lhs: &[1, 2],
+                    rhs: &[0, 1],
+                    codomain: &[0],
+                    domain: &[1]
+                }
+            )
             .unwrap()
             .dense_data()
             .unwrap()
@@ -4027,7 +4207,15 @@ fn fermionic_compose_and_contract_disagree() {
     assert_ne!(
         typed_a.compose(&typed_b).unwrap().dense_data().unwrap(),
         typed_a
-            .contract(&typed_b, &[1, 2], &[0, 1], &[0, 1])
+            .contract(
+                &typed_b,
+                &ContractSpec {
+                    lhs: &[1, 2],
+                    rhs: &[0, 1],
+                    codomain: &[0],
+                    domain: &[1]
+                }
+            )
             .unwrap()
             .dense_data()
             .unwrap()
@@ -4047,7 +4235,15 @@ fn bosonic_compose_is_contract_with_the_identity_output_order() {
     assert_eq!(
         composed.dense_data().unwrap(),
         typed
-            .contract(&typed, &[1], &[0], &[0, 1])
+            .contract(
+                &typed,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &[0],
+                    domain: &[1]
+                }
+            )
             .unwrap()
             .dense_data()
             .unwrap()
@@ -4071,10 +4267,18 @@ fn compose_contracts_the_whole_domain_against_the_whole_codomain() {
     assert_eq!(composed.domain().len(), 2);
     assert_eq!(
         composed.dense_data().unwrap(),
-        tall.contract(&wide, &[2], &[0], &[0, 1, 2, 3])
-            .unwrap()
-            .dense_data()
-            .unwrap()
+        tall.contract(
+            &wide,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2, 3]
+            }
+        )
+        .unwrap()
+        .dense_data()
+        .unwrap()
     );
 }
 
@@ -4146,7 +4350,7 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
     // `contract` reports the axes the caller named.
     let tall = z2_tensor_split(&runtime, 2);
     assert!(tall
-        .contract(&dual_endo, &[2], &[0], &[0, 1, 2])
+        .contract(&dual_endo, &ContractSpec { lhs: &[2], rhs: &[0], codomain: &[0, 1], domain: &[2] })
         .unwrap_err()
         .to_string()
         .ends_with("lhs axis 2 (is_dual = true) and rhs axis 0 (is_dual = true) must have opposite duality flags"));
@@ -5790,32 +5994,104 @@ fn c64_compact_inv_and_pinv_are_elementwise_reciprocals() {
 // ---------------------------------------------------------------------------
 
 /// The three axis patterns the diagonal `contract` arm claims, plus one it must
-/// decline, as `(name, lhs_axes, rhs_axes, output_axes)` on a `[v, v] <- [v]`
+/// decline, as `(name, spectrum on the right, spec)` on a `[v, v] <- [v]`
 /// tensor `t` and its own SVD spectrum `s`.
 ///
 /// `t · s` contracts `t`'s domain axis against `s`'s codomain axis (the
 /// compose-shaped pairing, which is the only one the engine admits: contracted
 /// legs must agree on their duality flag), and `s · t` the mirror.
-#[expect(
-    clippy::type_complexity,
-    reason = "the test table records each contraction geometry in one fixture row"
-)]
-const DIAGONAL_CONTRACT_CASES: &[(&str, bool, &[usize], &[usize], &[usize])] = &[
+const DIAGONAL_CONTRACT_CASES: &[(&str, bool, ContractSpec<'static>)] = &[
     // `t · s`, identity output order: the scaled leg stays last.
-    ("t*s", true, &[2], &[0], &[0, 1, 2]),
+    (
+        "t*s",
+        true,
+        ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[0, 1],
+            domain: &[2],
+        },
+    ),
     // The same, with the output order moving the scaled leg across the split.
-    ("t*s reordered", true, &[2], &[0], &[2, 0, 1]),
+    (
+        "t*s reordered",
+        true,
+        ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[2, 0],
+            domain: &[1],
+        },
+    ),
+    // A split of another size: one codomain leg (#1549).
+    (
+        "t*s resplit",
+        true,
+        ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[1],
+            domain: &[2, 0],
+        },
+    ),
     // `s · t`: `s`'s domain axis against `t`'s leading codomain axis, so the
     // scaled leg comes first and the destination is `[v] <- [v, v]`.
-    ("s*t", false, &[1], &[0], &[0, 1, 2]),
-    ("s*t reordered", false, &[1], &[0], &[1, 2, 0]),
+    (
+        "s*t",
+        false,
+        ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[0],
+            domain: &[1, 2],
+        },
+    ),
+    (
+        "s*t reordered",
+        false,
+        ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[1],
+            domain: &[2, 0],
+        },
+    ),
+    // Every open leg in the codomain (#1549).
+    (
+        "s*t resplit",
+        false,
+        ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[2, 0, 1],
+            domain: &[],
+        },
+    ),
     // `s · t` on `t`'s second codomain axis: the arm's leg position is free
     // within the preserved side.
-    ("s*t inner leg", false, &[1], &[1], &[0, 1, 2]),
+    (
+        "s*t inner leg",
+        false,
+        ContractSpec {
+            lhs: &[1],
+            rhs: &[1],
+            codomain: &[0],
+            domain: &[1, 2],
+        },
+    ),
     // Declined by the arm — `s`'s *codomain* axis against `t`'s domain axis is
     // admissible but is not one of the two proved geometries — and computed
     // densely. The expected bytes are pinned below.
-    ("s*t dense fallback", false, &[0], &[2], &[0, 1, 2]),
+    (
+        "s*t dense fallback",
+        false,
+        ContractSpec {
+            lhs: &[0],
+            rhs: &[2],
+            codomain: &[0],
+            domain: &[1, 2],
+        },
+    ),
 ];
 
 #[test]
@@ -5834,7 +6110,17 @@ fn compact_contract_identity_output_does_not_publish_a_transform_cache_entry() {
     runtime.clear_tree_transform_cache();
     let before = runtime.tree_transform_cache_info();
 
-    let result = tensor.contract(&spectrum, &[2], &[0], &[0, 1, 2]).unwrap();
+    let result = tensor
+        .contract(
+            &spectrum,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2],
+            },
+        )
+        .unwrap();
 
     assert_eq!(
         result.dense_data().unwrap().len(),
@@ -5866,15 +6152,71 @@ fn diagonal_contract_preserves_left_provider_authority_on_every_compact_arm() {
             let right_dense = forced_dense(&right_d);
 
             let actual = [
-                left.contract(&right_d, &[1], &[0], &[0, 1]).unwrap(),
-                right_d.contract(&left, &[1], &[0], &[0, 1]).unwrap(),
-                right_d.contract(&left_d, &[1], &[0], &[0, 1]).unwrap(),
+                left.contract(
+                    &right_d,
+                    &ContractSpec {
+                        lhs: &[1],
+                        rhs: &[0],
+                        codomain: &[0],
+                        domain: &[1],
+                    },
+                )
+                .unwrap(),
+                right_d
+                    .contract(
+                        &left,
+                        &ContractSpec {
+                            lhs: &[1],
+                            rhs: &[0],
+                            codomain: &[0],
+                            domain: &[1],
+                        },
+                    )
+                    .unwrap(),
+                right_d
+                    .contract(
+                        &left_d,
+                        &ContractSpec {
+                            lhs: &[1],
+                            rhs: &[0],
+                            codomain: &[0],
+                            domain: &[1],
+                        },
+                    )
+                    .unwrap(),
             ];
             let expected = [
-                left.contract(&right_dense, &[1], &[0], &[0, 1]).unwrap(),
-                right_dense.contract(&left, &[1], &[0], &[0, 1]).unwrap(),
+                left.contract(
+                    &right_dense,
+                    &ContractSpec {
+                        lhs: &[1],
+                        rhs: &[0],
+                        codomain: &[0],
+                        domain: &[1],
+                    },
+                )
+                .unwrap(),
                 right_dense
-                    .contract(&left_dense, &[1], &[0], &[0, 1])
+                    .contract(
+                        &left,
+                        &ContractSpec {
+                            lhs: &[1],
+                            rhs: &[0],
+                            codomain: &[0],
+                            domain: &[1],
+                        },
+                    )
+                    .unwrap(),
+                right_dense
+                    .contract(
+                        &left_dense,
+                        &ContractSpec {
+                            lhs: &[1],
+                            rhs: &[0],
+                            codomain: &[0],
+                            domain: &[1],
+                        },
+                    )
                     .unwrap(),
             ];
             let providers = [left.provider(), right_d.provider(), right_d.provider()];
@@ -5932,26 +6274,41 @@ fn complex_diagonal_contract_matches_the_typed_dense_route() {
     let typed_s = typed.svd_compact().unwrap().s;
     let dense_s = forced_dense(&typed_s);
 
-    for &(_name, spectrum_on_the_right, lhs_axes, rhs_axes, output_axes) in DIAGONAL_CONTRACT_CASES
-    {
+    for &(_name, spectrum_on_the_right, spec) in DIAGONAL_CONTRACT_CASES {
         let (fast_lhs, fast_rhs, dense_lhs, dense_rhs) = if spectrum_on_the_right {
             (&typed, &typed_s, &typed, &dense_s)
         } else {
             (&typed_s, &typed, &dense_s, &typed)
         };
-        let expected = dense_lhs
-            .contract(dense_rhs, lhs_axes, rhs_axes, output_axes)
-            .unwrap();
-        let got = fast_lhs
-            .contract(fast_rhs, lhs_axes, rhs_axes, output_axes)
-            .unwrap();
+        let expected = dense_lhs.contract(dense_rhs, &spec).unwrap();
+        let got = fast_lhs.contract(fast_rhs, &spec).unwrap();
         assert_same_legs(&got.codomain(), &expected.codomain());
         assert_same_legs(&got.domain(), &expected.domain());
         assert_data_close_c64(got.dense_data().unwrap(), expected.dense_data().unwrap());
     }
 
-    let expected = dense_s.contract(&dense_s, &[1], &[0], &[0, 1]).unwrap();
-    let got = typed_s.contract(&typed_s, &[1], &[0], &[0, 1]).unwrap();
+    let expected = dense_s
+        .contract(
+            &dense_s,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
+    let got = typed_s
+        .contract(
+            &typed_s,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     assert_same_legs(&got.codomain(), &expected.codomain());
     assert_same_legs(&got.domain(), &expected.domain());
     assert_data_close_c64(
@@ -5992,10 +6349,26 @@ fn the_diagonal_contract_arm_keeps_fermionic_signs() {
             (&typed_s, &typed, &dense_s, &typed)
         };
         let expected = dense_lhs
-            .contract(dense_rhs, &[1], &[0], output_axes)
+            .contract(
+                dense_rhs,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &output_axes[..1],
+                    domain: &output_axes[1..],
+                },
+            )
             .unwrap();
         let got = fast_lhs
-            .contract(fast_rhs, &[1], &[0], output_axes)
+            .contract(
+                fast_rhs,
+                &ContractSpec {
+                    lhs: &[1],
+                    rhs: &[0],
+                    codomain: &output_axes[..1],
+                    domain: &output_axes[1..],
+                },
+            )
             .unwrap();
         assert_same_legs(&got.codomain(), &expected.codomain());
         assert_same_legs(&got.domain(), &expected.domain());
@@ -6006,8 +6379,28 @@ fn the_diagonal_contract_arm_keeps_fermionic_signs() {
         );
     }
 
-    let expected = dense_s.contract(&dense_s, &[1], &[0], &[0, 1]).unwrap();
-    let got = typed_s.contract(&typed_s, &[1], &[0], &[0, 1]).unwrap();
+    let expected = dense_s
+        .contract(
+            &dense_s,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
+    let got = typed_s
+        .contract(
+            &typed_s,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     assert_same_legs(&got.codomain(), &expected.codomain());
     assert_same_legs(&got.domain(), &expected.domain());
     assert_eq!(
@@ -6043,14 +6436,34 @@ fn the_diagonal_contract_arm_declines_an_illegal_contraction() {
         .s;
 
     // `s`'s domain leg is non-dual, `typed`'s leading codomain leg is dual.
-    assert!(s.contract(&typed, &[1], &[0], &[0, 1]).is_err());
+    assert!(s
+        .contract(
+            &typed,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .is_err());
     // The mirror direction needs its own case, because it is the `t · D` arm's
     // own leg comparison that has to reject it: `leg <- dual` contracted on its
     // domain axis against `s`, whose bond leg is non-dual by construction, so
     // the two raw flags differ and the engine refuses the pair.
     let dual_domain =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&dual], typed_fill_value).unwrap();
-    assert!(dual_domain.contract(&s, &[1], &[0], &[0, 1]).is_err());
+    assert!(dual_domain
+        .contract(
+            &s,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .is_err());
     // A degeneracy mismatch on an otherwise well-oriented pair is the other way
     // the comparison earns its keep: nothing about the axis pattern is wrong, so
     // only the legs themselves say this is not a contraction.
@@ -6068,16 +6481,76 @@ fn the_diagonal_contract_arm_declines_an_illegal_contraction() {
         .unwrap()
         .s;
     let wide = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], typed_fill_value).unwrap();
-    assert!(wide.contract(&narrow_bond, &[1], &[0], &[0, 1]).is_err());
-    assert!(narrow_bond.contract(&wide, &[1], &[0], &[0, 1]).is_err());
+    assert!(wide
+        .contract(
+            &narrow_bond,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .is_err());
+    assert!(narrow_bond
+        .contract(
+            &wide,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .is_err());
     // And a wrong-length axis list or a non-permutation output order is still
     // the expert layer's error rather than a fast-path answer. `[0, 2]` is the
     // out-of-range case, which the arm has to reject *before* indexing its own
     // source order with it.
-    assert!(typed.contract(&s, &[1], &[0], &[0]).is_err());
-    assert!(typed.contract(&s, &[1], &[0], &[1, 1]).is_err());
-    assert!(wide.contract(&s, &[1], &[0], &[0, 2]).is_err());
-    assert!(typed.contract(&s, &[9], &[0], &[0, 1]).is_err());
+    assert!(typed
+        .contract(
+            &s,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[]
+            }
+        )
+        .is_err());
+    assert!(typed
+        .contract(
+            &s,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[1]
+            }
+        )
+        .is_err());
+    assert!(wide
+        .contract(
+            &s,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[2]
+            }
+        )
+        .is_err());
+    assert!(typed
+        .contract(
+            &s,
+            &ContractSpec {
+                lhs: &[9],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1]
+            }
+        )
+        .is_err());
 }
 
 /// The codomain/domain split plus every leg's sectors, degeneracies and dual
@@ -6152,8 +6625,24 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
                 for lhs_axis in 0..3 {
                     for rhs_axis in 0..2 {
                         // `t · s`
-                        let dense = t.contract(&s_dense, &[lhs_axis], &[rhs_axis], output_axes);
-                        let fast = t.contract(&s, &[lhs_axis], &[rhs_axis], output_axes);
+                        let dense = t.contract(
+                            &s_dense,
+                            &ContractSpec {
+                                lhs: &[lhs_axis],
+                                rhs: &[rhs_axis],
+                                codomain: &output_axes[..2],
+                                domain: &output_axes[2..],
+                            },
+                        );
+                        let fast = t.contract(
+                            &s,
+                            &ContractSpec {
+                                lhs: &[lhs_axis],
+                                rhs: &[rhs_axis],
+                                codomain: &output_axes[..2],
+                                domain: &output_axes[2..],
+                            },
+                        );
                         let label =
                             format!("t*s split={split} {lhs_axis}/{rhs_axis} {output_axes:?}");
                         match (dense, fast) {
@@ -6178,8 +6667,24 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
                             ),
                         }
                         // `s · t`
-                        let dense = s_dense.contract(&t, &[rhs_axis], &[lhs_axis], output_axes);
-                        let fast = s.contract(&t, &[rhs_axis], &[lhs_axis], output_axes);
+                        let dense = s_dense.contract(
+                            &t,
+                            &ContractSpec {
+                                lhs: &[rhs_axis],
+                                rhs: &[lhs_axis],
+                                codomain: &output_axes[..1],
+                                domain: &output_axes[1..],
+                            },
+                        );
+                        let fast = s.contract(
+                            &t,
+                            &ContractSpec {
+                                lhs: &[rhs_axis],
+                                rhs: &[lhs_axis],
+                                codomain: &output_axes[..1],
+                                domain: &output_axes[1..],
+                            },
+                        );
                         let label =
                             format!("s*t split={split} {rhs_axis}/{lhs_axis} {output_axes:?}");
                         match (dense, fast) {
@@ -6213,8 +6718,24 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
         for output_axes in all_output_orders(2) {
             for lhs_axis in 0..2 {
                 for rhs_axis in 0..2 {
-                    let dense = s_dense.contract(&s_dense, &[lhs_axis], &[rhs_axis], &output_axes);
-                    let fast = s.contract(&s, &[lhs_axis], &[rhs_axis], &output_axes);
+                    let dense = s_dense.contract(
+                        &s_dense,
+                        &ContractSpec {
+                            lhs: &[lhs_axis],
+                            rhs: &[rhs_axis],
+                            codomain: &output_axes[..1],
+                            domain: &output_axes[1..],
+                        },
+                    );
+                    let fast = s.contract(
+                        &s,
+                        &ContractSpec {
+                            lhs: &[lhs_axis],
+                            rhs: &[rhs_axis],
+                            codomain: &output_axes[..1],
+                            domain: &output_axes[1..],
+                        },
+                    );
                     let label = format!("s*s {lhs_axis}/{rhs_axis} {output_axes:?}");
                     match (dense, fast) {
                         (Ok(dense), Ok(fast)) => {
@@ -6485,7 +7006,15 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
     let runtime = runtime();
     let real = z2_complex_tensor(&runtime);
     let square = real
-        .contract(&real.adjoint().unwrap(), &[2], &[0], &[0, 1, 2, 3])
+        .contract(
+            &real.adjoint().unwrap(),
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
         .unwrap();
     let hermitian = square.repartition(2).unwrap();
     assert!(is_hermitian!(hermitian, 1e-10));
@@ -7051,11 +7580,27 @@ fn assert_contract_compose_compact_laws_hold<R>(
     let output_axes = [1, 3, 0, 2];
     let default_contract = typed
         .0
-        .contract(typed.1, &lhs_axes, &rhs_axes, &[0, 1, 2, 3])
+        .contract(
+            typed.1,
+            &ContractSpec {
+                lhs: &lhs_axes,
+                rhs: &rhs_axes,
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
         .unwrap();
     let ordered_contract = typed
         .0
-        .contract(typed.1, &lhs_axes, &rhs_axes, &output_axes)
+        .contract(
+            typed.1,
+            &ContractSpec {
+                lhs: &lhs_axes,
+                rhs: &rhs_axes,
+                codomain: &output_axes[..2],
+                domain: &output_axes[2..],
+            },
+        )
         .unwrap();
     let permuted_default = default_contract.permute(&[1, 3], &[0, 2]).unwrap();
     assert_same_legs(&ordered_contract.codomain(), &permuted_default.codomain());
@@ -7101,7 +7646,15 @@ fn assert_contract_compose_compact_laws_hold<R>(
     let composed = typed.0.compose(typed.1).unwrap();
     let twisted_contract = typed
         .0
-        .contract(&twisted_right, &lhs_axes, &rhs_axes, &[0, 1, 2, 3])
+        .contract(
+            &twisted_right,
+            &ContractSpec {
+                lhs: &lhs_axes,
+                rhs: &rhs_axes,
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
         .unwrap();
     assert_same_legs(&composed.codomain(), &typed.0.codomain());
     assert_same_legs(&composed.domain(), &typed.1.domain());
@@ -7143,7 +7696,17 @@ fn assert_contract_compose_compact_laws_hold<R>(
         .0
         .svd_compact()
         .unwrap_or_else(|error| panic!("{what}: svd_compact failed: {error}"));
-    let typed_absorbed = typed_u.contract(&typed_s, &[2], &[0], &[0, 1, 2]).unwrap();
+    let typed_absorbed = typed_u
+        .contract(
+            &typed_s,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2],
+            },
+        )
+        .unwrap();
     assert_same_legs(&typed_absorbed.codomain(), &typed_u.codomain());
     assert_same_legs(&typed_absorbed.domain(), &typed_s.domain());
     assert!(
@@ -7157,7 +7720,15 @@ fn assert_contract_compose_compact_laws_hold<R>(
         "{what}: the diagonal factor was not applied"
     );
     let reconstructed = typed_absorbed
-        .contract(&typed_vh, &[2], &[0], &[0, 1, 2, 3])
+        .contract(
+            &typed_vh,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
         .unwrap();
     assert_same_legs(&reconstructed.codomain(), &typed.0.codomain());
     assert_same_legs(&reconstructed.domain(), &typed.0.domain());
@@ -7256,7 +7827,15 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
             .dense_data()
             .unwrap(),
         fermionic_a
-            .contract(&twisted_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+            .contract(
+                &twisted_b,
+                &ContractSpec {
+                    lhs: &[2, 3],
+                    rhs: &[0, 1],
+                    codomain: &[0, 1],
+                    domain: &[2, 3],
+                },
+            )
             .unwrap()
             .dense_data()
             .unwrap(),
@@ -7265,7 +7844,15 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
     // And the twist is not vacuous: without it the two contractions differ.
     assert_ne!(
         fermionic_a
-            .contract(&fermionic_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+            .contract(
+                &fermionic_b,
+                &ContractSpec {
+                    lhs: &[2, 3],
+                    rhs: &[0, 1],
+                    codomain: &[0, 1],
+                    domain: &[2, 3]
+                }
+            )
             .unwrap()
             .dense_data()
             .unwrap(),
@@ -7282,7 +7869,15 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
     numerics::assert_slices_close(
         "U1: a bosonic rule has no twist, so the two agree",
         bosonic_a
-            .contract(&bosonic_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+            .contract(
+                &bosonic_b,
+                &ContractSpec {
+                    lhs: &[2, 3],
+                    rhs: &[0, 1],
+                    codomain: &[0, 1],
+                    domain: &[2, 3],
+                },
+            )
             .unwrap()
             .dense_data()
             .unwrap(),
@@ -9925,9 +10520,16 @@ fn contract_error_classes_and_their_both_defect_precedence() {
         ),
     ];
     for &(name, lhs_axes, rhs_axes, output_axes, class) in cases {
-        let typed_error = typed
-            .contract(&typed, lhs_axes, rhs_axes, output_axes)
-            .unwrap_err();
+        // `typed` is rank (2, 1) and every case contracts one of its legs, so
+        // two open legs of it form the default codomain.
+        let (codomain, domain) = output_axes.split_at(2.min(output_axes.len()));
+        let spec = ContractSpec {
+            lhs: lhs_axes,
+            rhs: rhs_axes,
+            codomain,
+            domain,
+        };
+        let typed_error = typed.contract(&typed, &spec).unwrap_err();
         assert!(
             matches!(typed_error, tenet::typed::Error::Operation(_)),
             "{name}: {typed_error:?}"
@@ -9955,7 +10557,15 @@ fn contract_error_classes_and_their_both_defect_precedence() {
     )
     .unwrap();
     let typed_error = typed
-        .contract(&typed_narrow, &[2], &[0], &[0, 1, 2, 3])
+        .contract(
+            &typed_narrow,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 1],
+                domain: &[2, 3],
+            },
+        )
         .unwrap_err();
     assert!(
         format!("{typed_error:?}").contains("LegDegeneracyMismatch"),
@@ -9964,7 +10574,15 @@ fn contract_error_classes_and_their_both_defect_precedence() {
 
     // Both defects at once: mismatched legs AND a non-permutation output order.
     let typed_both = typed
-        .contract(&typed_narrow, &[2], &[0], &[0, 0, 1, 2])
+        .contract(
+            &typed_narrow,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 0],
+                domain: &[1, 2],
+            },
+        )
         .unwrap_err();
     assert!(
         format!("{typed_both:?}").contains("InvalidPermutation"),
@@ -9975,7 +10593,15 @@ fn contract_error_classes_and_their_both_defect_precedence() {
     let typed_second: TensorMap<tenet::core::Z2FusionRule, f64> = typed_fixture(&second);
     assert!(matches!(
         typed
-            .contract(&typed_second, &[2], &[0], &[0, 1, 2, 3])
+            .contract(
+                &typed_second,
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2, 3]
+                }
+            )
             .unwrap_err(),
         tenet::typed::Error::RuntimeMismatch
     ));
@@ -9996,7 +10622,17 @@ fn contract_error_classes_and_their_both_defect_precedence() {
         &z3_dense_leg(&second_rule, 4),
         1.0,
     );
-    let identity_error = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    let identity_error = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap_err();
     assert!(
         format!("{identity_error:?}").contains("FusionRuleMismatch"),
         "{identity_error:?}"
@@ -10015,9 +10651,27 @@ fn contract_ordered_delegates_with_a_nonidentity_output_order() {
     let rhs: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 224_304).unwrap();
 
-    let actual = lhs.contract(&rhs, &[0], &[0], &[1, 0]).unwrap();
+    let actual = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[0],
+                rhs: &[0],
+                codomain: &[],
+                domain: &[1, 0],
+            },
+        )
+        .unwrap();
     let expected = lhs
-        .contract(&rhs, &[0], &[0], &[0, 1])
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[0],
+                rhs: &[0],
+                codomain: &[],
+                domain: &[0, 1],
+            },
+        )
         .unwrap()
         .permute(&[], &[1, 0])
         .unwrap();
@@ -10050,11 +10704,19 @@ fn typed_contract_parallel_su2_replay_matches_serial() {
             TensorMap::rand_with_seed(runtime, [&leg, &leg], [&leg, &leg], 224_401).unwrap();
         let rhs: TensorMap<SU2FusionRule, f64> =
             TensorMap::rand_with_seed(runtime, [&leg, &leg], [&leg, &leg], 224_402).unwrap();
-        lhs.contract(&rhs, &[3, 2], &[0, 1], &[2, 0, 3, 1])
-            .unwrap()
-            .dense_data()
-            .unwrap()
-            .to_vec()
+        lhs.contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[3, 2],
+                rhs: &[0, 1],
+                codomain: &[2, 0],
+                domain: &[3, 1],
+            },
+        )
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec()
     }
 
     let serial = Runtime::builder().recoupling_threads(1).build().unwrap();
@@ -10085,12 +10747,32 @@ fn contract_on_the_external_z3_provider_matches_the_hand_product() {
     let lhs = counting_z3(&runtime, &rows, &shared, 1.0);
     let rhs = counting_z3(&runtime, &shared, &columns, 7.0);
 
-    let transposed: TensorMap<ExternalZ3, f64> = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
+    let transposed: TensorMap<ExternalZ3, f64> = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[1],
+                domain: &[0],
+            },
+        )
+        .unwrap();
     assert_eq!(
         transposed.dense_data().unwrap(),
         [76.0, 103.0, 130.0, 157.0, 100.0, 136.0, 172.0, 208.0]
     );
-    let identity: TensorMap<ExternalZ3, f64> = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let identity: TensorMap<ExternalZ3, f64> = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap();
     assert_eq!(
         identity.dense_data().unwrap(),
         [76.0, 100.0, 103.0, 136.0, 130.0, 172.0, 157.0, 208.0]
@@ -10165,16 +10847,56 @@ fn assert_host_contract_entries_reject_but_compose_admits<const ANYONIC: bool>()
     let mut destination = probe_matrix::<ANYONIC>(&runtime, 9.0);
     let before = destination.dense_data().unwrap().to_vec();
 
-    let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    let contract = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap_err();
     assert!(is_non_symmetric_contraction(&contract), "{contract:?}");
     #[allow(deprecated)]
-    let ordered = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    let ordered = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap_err();
     let overwrite = lhs
-        .contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
+        .contract_overwrite_into(
+            &rhs,
+            &mut destination,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+            1.0,
+        )
         .unwrap_err();
     #[allow(deprecated)]
     let ordered_overwrite = lhs
-        .contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
+        .contract_overwrite_into(
+            &rhs,
+            &mut destination,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+            1.0,
+        )
         .unwrap_err();
     for error in [&ordered, &overwrite, &ordered_overwrite] {
         assert!(is_non_symmetric_contraction(error), "{error:?}");
@@ -10225,7 +10947,15 @@ fn symmetric_canonical_contract_is_admitted_as_the_negative_control() {
         })
         .unwrap();
     let contracted = matrix(1.0)
-        .contract(&matrix(5.0), &[1], &[0], &[0, 1])
+        .contract(
+            &matrix(5.0),
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
         .unwrap();
     assert_eq!(
         contracted.dense_data().unwrap(),
@@ -10282,11 +11012,41 @@ fn assert_device_contract_entries_reject_but_compose_admits<const ANYONIC: bool>
         .to_vec();
 
     let transfers = tenet::dense::cuda_transfer_stats();
-    let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    let contract = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap_err();
     #[allow(deprecated)]
-    let ordered = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    let ordered = lhs
+        .contract(
+            &rhs,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+        )
+        .unwrap_err();
     let overwrite = lhs
-        .contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
+        .contract_overwrite_into(
+            &rhs,
+            &mut destination,
+            &ContractSpec {
+                lhs: &[1],
+                rhs: &[0],
+                codomain: &[0],
+                domain: &[1],
+            },
+            1.0,
+        )
         .unwrap_err();
     assert_eq!(tenet::dense::cuda_transfer_stats(), transfers);
     for error in [&contract, &ordered, &overwrite] {

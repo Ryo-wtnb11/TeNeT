@@ -1744,8 +1744,9 @@ where
     }
 
     /// TensorKit `tensorcontract` on device tensors: the Host
-    /// [`TensorMap::contract`] semantics for arbitrary contracted and output
-    /// axes, on owned or lazy-adjoint operands, executed on the device.
+    /// [`TensorMap::contract`] semantics for arbitrary contracted legs, output
+    /// order and codomain/domain split, on owned or lazy-adjoint operands,
+    /// executed on the device.
     ///
     /// # One planning authority
     ///
@@ -1815,10 +1816,10 @@ where
     pub fn contract<'a>(
         &self,
         other: impl Into<TensorRef<'a, R, D, CudaStorage<D>>>,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
     ) -> Result<Self, Error> {
+        let (lhs_axes, rhs_axes) = (spec.lhs, spec.rhs);
+        let output_axes = &spec.output_axes()[..];
         let other = other.into().operand()?;
         let other = &*other;
         if !self.runtime.same_runtime(&other.runtime) {
@@ -1840,14 +1841,16 @@ where
                 lhs_axes,
                 rhs_axes,
                 output_order,
+                Some(spec.codomain.len()),
             )?
         } else {
-            BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
                 lhs_space,
                 rhs_space,
                 lhs_axes,
                 rhs_axes,
                 output_order,
+                spec.codomain.len(),
             )?
         };
         let axes = tenet_tensors::TensorContractSpec::new_with_conjugation(
@@ -1910,8 +1913,7 @@ where
         })
     }
 
-    /// Overwrites `destination` with
-    /// `alpha * self.contract(other, lhs_axes, rhs_axes, output_axes)` while
+    /// Overwrites `destination` with `alpha * self.contract(other, spec)` while
     /// preserving the destination's provider, space, body, and device
     /// allocation: arbitrary contracted and output axes, owned or lazy-adjoint
     /// operands, through the same resolution as the returning [`Self::contract`].
@@ -1940,16 +1942,15 @@ where
     /// whole destination). A warm call therefore transfers nothing and
     /// allocates nothing on the device; scratch and coefficient payloads are
     /// as for [`Self::contract`].
-    #[allow(clippy::too_many_arguments)]
     pub fn contract_overwrite_into<'a>(
         &self,
         other: impl Into<TensorRef<'a, R, D, CudaStorage<D>>>,
         destination: &mut Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        spec: &ContractSpec<'_>,
         alpha: D,
     ) -> Result<(), Error> {
+        let (lhs_axes, rhs_axes) = (spec.lhs, spec.rhs);
+        let output_axes = &spec.output_axes()[..];
         let other = other.into().operand()?;
         let other = &*other;
         if !self.runtime.same_runtime(&other.runtime)
@@ -1994,12 +1995,13 @@ where
         let (lhs_space, lhs_operand, lhs_storage) = self.cuda_fusion_operand("contract")?;
         let (rhs_space, rhs_operand, rhs_storage) = other.cuda_fusion_operand("contract")?;
         let output_order = OutputAxisOrder::from_axes(output_axes);
-        let expected = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+        let expected = BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
             lhs_space,
             rhs_space,
             lhs_axes,
             rhs_axes,
             output_order,
+            spec.codomain.len(),
         )?;
         if destination_body.space.space() != expected.space() {
             return Err(Error::InvalidArgument(
