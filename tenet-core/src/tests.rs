@@ -16,6 +16,38 @@
 /// failures onto every other test sharing the lock.
 pub(crate) mod test_support {
     pub(crate) static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Re-executes exactly one test, alone, in a child process, for a test
+    /// whose assertion cannot be phrased as a delta CACHE_TEST_LOCK-holding
+    /// siblings cannot move: an absolute snapshot of a process-global cache
+    /// counter (for example `admissions() == 1` read right after a reset).
+    /// `CACHE_TEST_LOCK` only serializes the small set of tests that take
+    /// it; any ordinary, unlocked construction elsewhere in the same
+    /// binary's cached path can still move that same counter between this
+    /// test's own reads (tenet-tensors #649/#650 first used this technique
+    /// for `checked_bind_failure_preserves_subset_admission_and_caches`).
+    ///
+    /// Call at the top of the `#[test]` fn with a name-unique env var and
+    /// the test's libtest path; when it returns `true`, the child already
+    /// ran the real body and the caller must return immediately.
+    pub(crate) fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> bool {
+        if std::env::var_os(isolated_env).is_some() {
+            return false;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_path])
+            .env(isolated_env, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+            "isolated test did not execute exactly once: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status
+        );
+        true
+    }
 }
 
 mod tests {

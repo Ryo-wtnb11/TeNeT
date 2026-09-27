@@ -1865,6 +1865,17 @@ mod fusion_space {
 
         #[test]
         fn prepared_complete_structure_hits_without_rebuilding_layout() {
+            // Isolated like tenet-tensors #649/#650's checked_bind_failure
+            // test: this asserts an absolute process-global cache admission
+            // count right after a reset, which CACHE_TEST_LOCK does not
+            // protect from the crate's many ordinary, unlocked complete-
+            // structure builds landing in the same narrow window.
+            if test_support::run_isolated_or_return(
+                "TENET_CORE_PREPARED_COMPLETE_STRUCTURE_HITS_ISOLATED",
+                "tests::fusion_space::prepared_complete_structure_hits_without_rebuilding_layout",
+            ) {
+                return;
+            }
             // What: a repeated valid finalization validates its target
             // locally, then reuses the retained complete content without another
             // tree enumeration or cache admission.
@@ -2838,6 +2849,19 @@ mod fusion_space {
 
         #[test]
         fn complete_homspace_layout_cache_concurrent_hits_share_one_canonical_arc() {
+            // Isolated like tenet-tensors #649/#650's checked_bind_failure
+            // test: this asserts absolute process-global admissions()/
+            // misses()/hits() counts, which CACHE_TEST_LOCK does not protect
+            // from the crate's many ordinary, unlocked complete-structure
+            // builds landing in the same narrow window. Found flaking
+            // (left: 3/2, right: 1 at line 2898-ish) during #1598/#1606
+            // verification; same class as that pair's four named instances.
+            if test_support::run_isolated_or_return(
+                "TENET_CORE_COMPLETE_HOMSPACE_CONCURRENT_HITS_ISOLATED",
+                "tests::fusion_space::complete_homspace_layout_cache_concurrent_hits_share_one_canonical_arc",
+            ) {
+                return;
+            }
             // What: threads looking up one key concurrently, with and without a
             // live wrapper between rounds, all receive the same canonical Arc from
             // a single admission.
@@ -2892,6 +2916,19 @@ mod fusion_space {
 
         #[test]
         fn complete_homspace_layout_cache_keys_semantics_and_preserves_direct_layout() {
+            // Isolated like tenet-tensors #649/#650's checked_bind_failure
+            // test: this asserts an absolute process-global entries() count,
+            // which CACHE_TEST_LOCK does not protect from the crate's many
+            // ordinary, unlocked complete-structure builds landing in the
+            // same narrow window. Found flaking (left: 5, right: 4 at line
+            // 2960-ish) during #1598/#1606 verification; same class as that
+            // pair's four named instances.
+            if test_support::run_isolated_or_return(
+                "TENET_CORE_COMPLETE_HOMSPACE_KEYS_SEMANTICS_ISOLATED",
+                "tests::fusion_space::complete_homspace_layout_cache_keys_semantics_and_preserves_direct_layout",
+            ) {
+                return;
+            }
             // What: rule identity, degeneracies, and dual flags are distinct
             // complete-layout keys, while cache admission preserves the direct
             // builder's ordered block tuples and required storage length.

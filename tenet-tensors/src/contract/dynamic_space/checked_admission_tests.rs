@@ -309,6 +309,16 @@ fn separately_allocated_equal_identity_providers_build_equivalent_structures() {
 
 #[test]
 fn checked_final_root_stage_failures_publish_no_layout_or_admission() {
+    // Isolated like the neighboring checked_bind_failure test (#649/#650):
+    // this asserts an absolute process-global cache snapshot, which
+    // CACHE_TEST_LOCK does not protect from the crate's many ordinary,
+    // unlocked encoded constructions.
+    if crate::test_support::run_isolated_or_return(
+        "TENET_CHECKED_FINAL_ROOT_STAGE_FAILURES_ISOLATED",
+        "contract::dynamic_space::checked_admission_tests::checked_final_root_stage_failures_publish_no_layout_or_admission",
+    ) {
+        return;
+    }
     // What: an injected failure in dual, channels, or nsymbol returns the
     // exact typed error and leaves both process-global cache snapshots and
     // scratch publication observations unchanged.
