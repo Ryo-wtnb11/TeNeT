@@ -80,7 +80,7 @@ fn complex_su2_structural_invariants_match_tensorkit() {
     }
 
     let mut singular_values: Vec<_> = permuted
-        .svd_vals()
+        .svd_vals(&[0, 1], &[2, 3])
         .unwrap()
         .iter()
         .flat_map(|spectrum| spectrum.values.iter().copied())

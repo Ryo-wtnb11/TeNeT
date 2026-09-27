@@ -14,6 +14,18 @@ use tenet::core::{
 use tenet::prelude::{GradedSpace, Runtime, TensorMap};
 use tenet::typed::{Lq, Qr, Svd};
 
+/// The receiver's own split as leg roles: `rows = 0..nout`.
+#[cfg(feature = "racah-generated")]
+fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (0..t.codomain_rank()).collect()
+}
+
+/// The receiver's own split as leg roles: `cols = nout..rank`.
+#[cfg(feature = "racah-generated")]
+fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (t.codomain_rank()..t.rank()).collect()
+}
+
 type Fz2U1Codec = PackedProductCodec<tenet::core::Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
 
@@ -63,19 +75,19 @@ macro_rules! side_only_case {
             assert_close!(&u.compose(&adjoint).unwrap(), &outer);
         };
 
-        let Qr { q, r } = t.qr_full().unwrap();
+        let Qr { q, r } = t.qr_full(&[0, 1], &[2]).unwrap();
         assert_close!(&q.compose(&r).unwrap(), &t);
         unitary(&q);
-        let Lq { l, q } = t.lq_full().unwrap();
+        let Lq { l, q } = t.lq_full(&[0, 1], &[2]).unwrap();
         assert_close!(&l.compose(&q).unwrap(), &t);
         unitary(&q);
-        let Svd { u, s, vh } = t.svd_full().unwrap();
+        let Svd { u, s, vh } = t.svd_full(&[0, 1], &[2]).unwrap();
         assert_close!(&u.compose(&s).unwrap().compose(&vh).unwrap(), &t);
         unitary(&u);
         unitary(&vh);
 
-        let pseudo = t.pinv(1e-12).unwrap();
-        let null = t.left_null().unwrap();
+        let pseudo = t.pinv(&[0, 1], &[2], 1e-12).unwrap();
+        let null = t.left_null(&[0, 1], &[2]).unwrap();
         let null_adjoint = null.adjoint().unwrap();
         assert!(null_adjoint.compose(&t).unwrap().norm(2.0).unwrap() <= 1e-10);
         assert_close!(
@@ -90,7 +102,7 @@ macro_rules! side_only_case {
                 .unwrap(),
             &codomain_id
         );
-        let null = t.right_null().unwrap();
+        let null = t.right_null(&[0, 1], &[2]).unwrap();
         let null_adjoint = null.adjoint().unwrap();
         assert!(t.compose(&null_adjoint).unwrap().norm(2.0).unwrap() <= 1e-10);
         assert_close!(
@@ -184,7 +196,7 @@ macro_rules! full_qr_lq_bond_case {
         // dimension rules out an unstored (zero) side-only block.
         let identity = |gram: TensorMap<_, $scalar>, reduced: usize| {
             let values = gram
-                .eigh_vals()
+                .eigh_vals(&codomain_axes(&gram), &domain_axes(&gram))
                 .unwrap()
                 .into_iter()
                 .flat_map(|spectrum| spectrum.values)
@@ -203,12 +215,12 @@ macro_rules! full_qr_lq_bond_case {
         };
         let t: TensorMap<_, $scalar> =
             TensorMap::rand_with_seed(rt, $codomain, $domain, $seed).unwrap();
-        let Qr { q, r } = t.qr_full().unwrap();
+        let Qr { q, r } = t.qr_full(&codomain_axes(&t), &domain_axes(&t)).unwrap();
         assert_eq!(q.domain(), std::slice::from_ref($qr_bond));
         assert_eq!(r.codomain(), q.domain());
         assert_close!(&q.compose(&r).unwrap(), &t);
         unitary(&q, $qr_bond);
-        let Lq { l, q } = t.lq_full().unwrap();
+        let Lq { l, q } = t.lq_full(&codomain_axes(&t), &domain_axes(&t)).unwrap();
         assert_eq!(q.codomain(), std::slice::from_ref($lq_bond));
         assert_eq!(l.domain(), q.codomain());
         assert_close!(&l.compose(&q).unwrap(), &t);
@@ -216,17 +228,17 @@ macro_rules! full_qr_lq_bond_case {
         // Null spaces already use the side-aware builder: a side-only sector
         // is wholly null, so rank + null dimension is the fused dimension.
         let rank = t
-            .svd_vals()
+            .svd_vals(&codomain_axes(&t), &domain_axes(&t))
             .unwrap()
             .into_iter()
             .flat_map(|spectrum| spectrum.values)
             .filter(|&value| value > 1e-10)
             .count();
-        let n = t.left_null().unwrap();
+        let n = t.left_null(&codomain_axes(&t), &domain_axes(&t)).unwrap();
         let n_adjoint = owned_adjoint(&n);
         assert!(n_adjoint.compose(&t).unwrap().norm(2.0).unwrap() <= 1e-10);
         identity(n_adjoint.compose(&n).unwrap(), reduced($qr_bond) - rank);
-        let n = t.right_null().unwrap();
+        let n = t.right_null(&codomain_axes(&t), &domain_axes(&t)).unwrap();
         let n_adjoint = owned_adjoint(&n);
         assert!(t.compose(&n_adjoint).unwrap().norm(2.0).unwrap() <= 1e-10);
         identity(n.compose(&n_adjoint).unwrap(), reduced($lq_bond) - rank);
@@ -393,7 +405,7 @@ mod checked_generic {
             let reduced = |space: &GradedSpace<_>| space.degeneracies().iter().sum::<usize>();
             let t: TensorMap<_, $scalar> =
                 TensorMap::rand_with_seed(rt, $codomain, $domain, $seed).unwrap();
-            let Qr { q, r } = t.qr_full().unwrap();
+            let Qr { q, r } = t.qr_full(&codomain_axes(&t), &domain_axes(&t)).unwrap();
             let qh = owned_adjoint(&q);
             assert_eq!(
                 assert_literal_identity!(qh.compose(&q).unwrap()),
@@ -404,7 +416,7 @@ mod checked_generic {
                 reduced($qr_bond)
             );
             let qr_trees = assert_side_only_identity_slices!($scalar, &t, &q, &r, $qr_bond, false);
-            let Lq { l, q } = t.lq_full().unwrap();
+            let Lq { l, q } = t.lq_full(&codomain_axes(&t), &domain_axes(&t)).unwrap();
             let qh = owned_adjoint(&q);
             assert_eq!(
                 assert_literal_identity!(qh.compose(&q).unwrap()),

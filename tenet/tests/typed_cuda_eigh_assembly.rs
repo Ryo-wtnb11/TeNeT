@@ -15,6 +15,16 @@ use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::dense::cuda_transfer_stats;
 use tenet::typed::{Eigh, GradedSpace, Runtime, TensorMap};
 
+/// The receiver's own split as leg roles: `rows = 0..nout`.
+fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (0..t.codomain_rank()).collect()
+}
+
+/// The receiver's own split as leg roles: `cols = nout..rank`.
+fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (t.codomain_rank()..t.rank()).collect()
+}
+
 fn leg(charges: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
         Arc::new(U1FusionRule),
@@ -61,7 +71,9 @@ fn eigh_assembly_gemms_and_uploads_do_not_depend_on_the_tree_count() {
         let device = source.to_cuda().unwrap();
 
         let before = cuda_transfer_stats();
-        let Eigh { d, v } = device.eigh_full().unwrap();
+        let Eigh { d, v } = device
+            .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+            .unwrap();
         let after = cuda_transfer_stats();
         let gemms = after.gemm_calls - before.gemm_calls;
         // One GEMM per coupled sector, not per tree.
@@ -73,7 +85,9 @@ fn eigh_assembly_gemms_and_uploads_do_not_depend_on_the_tree_count() {
 
         // Device vs host: the same descending-|λ| spectrum, and the device
         // eigenvectors (raw cuSOLVER gauge) satisfy the eigen equation.
-        let Eigh { d: host_d, .. } = source.eigh_full().unwrap();
+        let Eigh { d: host_d, .. } = source
+            .eigh_full(&codomain_axes(&source), &domain_axes(&source))
+            .unwrap();
         let d = d.to_host().unwrap();
         let v = v.to_host().unwrap();
         close(&d, &host_d);

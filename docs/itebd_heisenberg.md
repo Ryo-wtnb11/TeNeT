@@ -83,7 +83,7 @@ G(dt)=\exp(-dt\,h).
 $$
 
 [`run`](../tenet-network/examples/itebd_heisenberg.rs) constructs this gate
-with `h.scale(-dt).exp()`. [`State::step`](../tenet-network/examples/itebd_heisenberg.rs)
+with `h.scale(-dt).exp(&[0, 1], &[2, 3])`. [`State::step`](../tenet-network/examples/itebd_heisenberg.rs)
 first updates the A-B bond and then the B-A bond. Repeating these two updates
 projects the initial state toward low-energy states while preserving the
 two-site unit cell.
@@ -106,7 +106,7 @@ twice are summed; labels that remain once become output legs.
 
 ## 7. Truncate the new bond
 
-A truncated SVD is four primitive steps: `theta.svd_compact()` returns $U$,
+A truncated SVD is four primitive steps: `theta.svd_compact(&[0, 1], &[2, 3])` returns $U$,
 $S$, $V^\dagger$; `diagview` reads the singular values off $S$;
 `find_truncated` on the bond leg decides which to keep and reports the
 discarded weight as `error`; and `restrict_leg` cuts the bond leg of $U$ and

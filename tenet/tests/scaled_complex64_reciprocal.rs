@@ -51,7 +51,7 @@ fn bits32(z: Complex32) -> (u32, u32) {
 }
 
 /// Builds a rank-`(1,1)` compact diagonal tensor holding exactly `value` and
-/// returns the single stored entry of `t.inv()`.
+/// returns the single stored entry of `t.inv(&[0], &[1])`.
 fn compact_inv(value: Complex64) -> Complex64 {
     let rt = runtime();
     let space = leg(1);
@@ -64,10 +64,10 @@ fn compact_inv(value: Complex64) -> Complex64 {
         }],
     )
     .unwrap();
-    diagonal.inv().unwrap().diagview().unwrap()[0].values[0]
+    diagonal.inv(&[0], &[1]).unwrap().diagview().unwrap()[0].values[0]
 }
 
-/// As [`compact_inv`], but also returns `t.pinv(0.0)`'s entry (`rcond = 0`
+/// As [`compact_inv`], but also returns `t.pinv(&[0], &[1], 0.0)`'s entry (`rcond = 0`
 /// never discards a nonzero entry). Only valid for a finite `value`: `pinv`'s
 /// own preflight requires every stored magnitude to be finite (unrelated to
 /// this issue), so it is never asked to invert an infinite entry.
@@ -83,8 +83,8 @@ fn compact_inv_and_pinv(value: Complex64) -> (Complex64, Complex64) {
         }],
     )
     .unwrap();
-    let inv = diagonal.inv().unwrap().diagview().unwrap()[0].values[0];
-    let pinv = diagonal.pinv(0.0).unwrap().diagview().unwrap()[0].values[0];
+    let inv = diagonal.inv(&[0], &[1]).unwrap().diagview().unwrap()[0].values[0];
+    let pinv = diagonal.pinv(&[0], &[1], 0.0).unwrap().diagview().unwrap()[0].values[0];
     (inv, pinv)
 }
 
@@ -101,7 +101,7 @@ fn compact_inv32(value: Complex32) -> Complex32 {
         }],
     )
     .unwrap();
-    diagonal.inv().unwrap().diagview().unwrap()[0].values[0]
+    diagonal.inv(&[0], &[1]).unwrap().diagview().unwrap()[0].values[0]
 }
 
 /// One oracle-checked `(z, 1/z)` pair, bits taken verbatim from
@@ -1388,5 +1388,5 @@ fn zero_entry_is_still_reported_as_a_singular_diagonal() {
         }],
     )
     .unwrap();
-    assert!(diagonal.inv().is_err());
+    assert!(diagonal.inv(&[0], &[1]).is_err());
 }

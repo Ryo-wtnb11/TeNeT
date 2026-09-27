@@ -40,26 +40,26 @@ fn base_family<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
 
 /// Factorization family: needs [`FactorizationScalar`], not more.
 fn factorization_family<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-    let _ = tensor.qr_compact();
-    let _ = tensor.qr_full();
-    let _ = tensor.lq_compact();
-    let _ = tensor.lq_full();
-    let _ = tensor.svd_compact();
-    let _ = tensor.svd_full();
-    let _ = tensor.svd_vals();
-    let _ = tensor.eigh_full();
-    let _ = tensor.eigh_vals();
-    let _ = tensor.left_null();
-    let _ = tensor.right_null();
-    let _ = tensor.left_polar();
-    let _ = tensor.right_polar();
+    let _ = tensor.qr_compact(&[0], &[1]);
+    let _ = tensor.qr_full(&[0], &[1]);
+    let _ = tensor.lq_compact(&[0], &[1]);
+    let _ = tensor.lq_full(&[0], &[1]);
+    let _ = tensor.svd_compact(&[0], &[1]);
+    let _ = tensor.svd_full(&[0], &[1]);
+    let _ = tensor.svd_vals(&[0], &[1]);
+    let _ = tensor.eigh_full(&[0], &[1]);
+    let _ = tensor.eigh_vals(&[0], &[1]);
+    let _ = tensor.left_null(&[0], &[1]);
+    let _ = tensor.right_null(&[0], &[1]);
+    let _ = tensor.left_polar(&[0], &[1]);
+    let _ = tensor.right_polar(&[0], &[1]);
 }
 
 /// Advanced linear algebra: needs [`AdvancedLinalgScalar`].
 fn advanced_family<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-    let _ = tensor.exp();
-    let _ = tensor.inv();
-    let _ = tensor.pinv(0.0);
+    let _ = tensor.exp(&[0], &[1]);
+    let _ = tensor.inv(&[0], &[1]);
+    let _ = tensor.pinv(&[0], &[1], 0.0);
     let _ = tensor.solve(tensor);
 }
 
@@ -71,8 +71,8 @@ where
     D: AdvancedLinalgScalar,
     <D as FactorScalar>::Eig: TensorScalar,
 {
-    let _ = tensor.eig_full();
-    let _ = tensor.eig_vals();
+    let _ = tensor.eig_full(&[0], &[1]);
+    let _ = tensor.eig_vals(&[0], &[1]);
 }
 
 /// Instantiating the helpers for every admitted payload dtype is the

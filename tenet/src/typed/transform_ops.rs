@@ -499,6 +499,24 @@ where
         )
     }
 
+    /// Runs `op` on the matrix view `permute(self, rows, cols)`: the leg roles
+    /// of every factorization and matrix function.
+    ///
+    /// The current split borrows `self`, so it costs no transform and no
+    /// clone. Any other split is one [`Self::permute`], whose typed errors
+    /// (malformed axes, non-symmetric braiding) are returned before `op` runs.
+    pub(super) fn with_leg_roles<T>(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+        op: impl FnOnce(&Self) -> Result<T, TypedFacadeError<R>>,
+    ) -> Result<T, TypedFacadeError<R>> {
+        if self.axes_are_identity(rows, cols) {
+            return op(self);
+        }
+        op(&self.permute(rows, cols)?)
+    }
+
     /// TensorKit `braid`: re-arranges legs with an explicit braid, one level
     /// per source axis.
     ///
@@ -694,7 +712,7 @@ where
     /// use tenet::prelude::{Complex64, FibonacciFusionRule};
     /// use tenet::typed::TensorMap;
     /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, Complex64>) {
-    ///     let _ = tensor.svd_full();
+    ///     let _ = tensor.svd_full(&[0], &[1]);
     /// }
     /// ```
     ///
@@ -1595,7 +1613,7 @@ where
     /// )?;
     /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 9)?;
     ///
-    /// let Svd { u, s, vh } = t.svd_compact()?;
+    /// let Svd { u, s, vh } = t.svd_compact(&[0], &[1])?;
     /// // `u` is an isometry: `u† ∘ u` is the identity on its domain.
     /// let gram = u.adjoint()?.compose(&u)?;
     /// let identity = TensorMap::isomorphism(&runtime, &u.domain(), &u.domain())?;
@@ -1743,7 +1761,9 @@ where
         D: FactorizationScalar,
     {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            return self.materialized_tensor_uncached()?.qr_compact();
+            return self
+                .materialized_tensor_uncached()?
+                .qr_compact_multiplicity_free();
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
@@ -1778,7 +1798,9 @@ where
         D: FactorizationScalar,
     {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            return self.materialized_tensor_uncached()?.qr_full();
+            return self
+                .materialized_tensor_uncached()?
+                .qr_full_multiplicity_free();
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
@@ -1812,7 +1834,7 @@ where
         D: FactorizationScalar,
     {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            let Qr { q, r } = self.adjoint()?.qr_compact()?;
+            let Qr { q, r } = self.adjoint()?.qr_compact_multiplicity_free()?;
             return Ok(Lq {
                 l: r.adjoint()?.materialized_tensor_uncached()?,
                 q: q.adjoint()?.materialized_tensor_uncached()?,
@@ -1850,7 +1872,7 @@ where
         D: FactorizationScalar,
     {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            let Qr { q, r } = self.adjoint()?.qr_full()?;
+            let Qr { q, r } = self.adjoint()?.qr_full_multiplicity_free()?;
             return Ok(Lq {
                 l: r.adjoint()?.materialized_tensor_uncached()?,
                 q: q.adjoint()?.materialized_tensor_uncached()?,
@@ -1904,7 +1926,7 @@ where
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .adjoint()?
-                .right_null()?
+                .right_null_multiplicity_free()?
                 .adjoint()?
                 .materialized_tensor_uncached();
         }
@@ -1944,7 +1966,7 @@ where
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .adjoint()?
-                .left_null()?
+                .left_null_multiplicity_free()?
                 .adjoint()?
                 .materialized_tensor_uncached();
         }
@@ -2284,7 +2306,7 @@ where
             // result retains neither the parent inverse nor its payload.
             return self
                 .adjoint()?
-                .inv()?
+                .inv_multiplicity_free()?
                 .adjoint()?
                 .materialized_tensor_uncached();
         }
@@ -2348,7 +2370,7 @@ where
                     },
                 )));
             }
-            let solved = self.inv()?.compose(rhs)?;
+            let solved = self.inv_multiplicity_free()?.compose(rhs)?;
             let TypedTensorRepr::Owned(body) = solved.repr else {
                 return Err(internal_layout_error(
                     "compact solve must produce an owned result",
@@ -3428,7 +3450,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorNullDispatch<R, D>,
+    R::Mode: TypedTensorNullDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns an orthonormal basis `n : codomain(self) <- W` for the numerical
@@ -3459,12 +3481,20 @@ where
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
     /// let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&v], [&v])?;
-    /// let n = zero.left_null()?;
+    /// let n = zero.left_null(&[0], &[1])?;
     /// assert!(n.adjoint()?.compose(&zero)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn left_null(&self) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorNullDispatch<R, D>>::left_null(self)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn left_null(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorNullDispatch<R, D>>::left_null,
+        )
     }
 
     /// Returns an orthonormal-row basis `n : W <- domain(self)` for the
@@ -3476,15 +3506,23 @@ where
     /// adjoint uses the left null space of its owned parent without
     /// materializing the receiver. Checked results use the source provider instance, and a
     /// failure returns no tensor.
-    pub fn right_null(&self) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorNullDispatch<R, D>>::right_null(self)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn right_null(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorNullDispatch<R, D>>::right_null,
+        )
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorPolarDispatch<R, D>,
+    R::Mode: TypedTensorPolarDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the left polar decomposition `self = w * p` as a [`LeftPolar`].
@@ -3510,12 +3548,24 @@ where
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?.scale(2.0);
-    /// let LeftPolar { w, p } = a.left_polar()?;
+    /// let LeftPolar { w, p } = a.left_polar(&[0], &[1])?;
     /// assert!(w.compose(&p)?.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn left_polar(&self) -> Result<LeftPolar<Self>, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorPolarDispatch<R, D>>::left_polar(self)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn left_polar(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+    ) -> Result<LeftPolar<Self>, TypedFacadeError<R>> {
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorPolarDispatch<R, D>>::left_polar,
+        )
     }
 
     /// Returns the right polar decomposition `self = p * wh` as a
@@ -3528,8 +3578,20 @@ where
     /// [`Self::left_polar`] describes the corresponding storage routes, lazy
     /// input handling, and cost. Checked factors use the source provider
     /// instance, and a failure returns no factors.
-    pub fn right_polar(&self) -> Result<RightPolar<Self>, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorPolarDispatch<R, D>>::right_polar(self)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn right_polar(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+    ) -> Result<RightPolar<Self>, TypedFacadeError<R>> {
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorPolarDispatch<R, D>>::right_polar,
+        )
     }
 }
 

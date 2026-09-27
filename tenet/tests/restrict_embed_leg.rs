@@ -679,7 +679,7 @@ fn a_compact_diagonal_restriction_other_than_one_selection_on_both_legs_is_rejec
     let leg = u1(&provider, &[(0, 3), (1, 2)]);
     let source: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 31).unwrap();
-    let diagonal = source.svd_compact().unwrap().s;
+    let diagonal = source.svd_compact(&[0], &[1]).unwrap().s;
     let bond = diagonal.domain()[0].clone();
     let selection = LegSelection::try_new(&bond, [(U1Irrep::new(0), 0..1)]).unwrap();
     let different = LegSelection::try_new(&bond, [(U1Irrep::new(0), 1..2)]).unwrap();
@@ -1413,7 +1413,7 @@ macro_rules! assert_compact_stays_compact {
                 <$dtype as ExactEntry>::entry(trees, indices)
             })
             .unwrap();
-        let s = source.svd_compact().unwrap().s;
+        let s = source.svd_compact(&[0], &[1]).unwrap().s;
         let bond = s.domain()[0].clone();
         let kept: Vec<_> = bond
             .sectors()

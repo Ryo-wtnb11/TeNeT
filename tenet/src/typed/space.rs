@@ -386,7 +386,7 @@ where
     /// let v = GradedSpace::try_new(std::sync::Arc::new(U1FusionRule), [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)])?;
     /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &v], [&v], 6)?;
     ///
-    /// let Svd { u, s, vh } = t.svd_compact()?;
+    /// let Svd { u, s, vh } = t.svd_compact(&[0, 1], &[2])?;
     /// let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(2))?;
     /// let u = u.restrict_leg(&[(u.codomain_rank(), &found.selection)])?;
     /// let s = s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])?;

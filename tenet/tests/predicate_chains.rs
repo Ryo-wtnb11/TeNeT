@@ -185,19 +185,19 @@ macro_rules! pin_family {
         let negative = positive.scale(ChainCoefficient::real(-1.0));
         // A polar factor, not a QR `q`: a 2x2 Householder `q` is a symmetric
         // reflector, which would also be Hermitian.
-        let LeftPolar { w: unitary, .. } = x.left_polar().unwrap();
+        let LeftPolar { w: unitary, .. } = x.left_polar(&[0], &[1]).unwrap();
         let tall: TensorMap<_, $d> =
             TensorMap::from_subblock_fn(rt, [&leg, &leg], [&leg], |_, ij: &[usize]| value(ij))
                 .unwrap();
-        let Qr { q: isometry, .. } = tall.qr_compact().unwrap();
+        let Qr { q: isometry, .. } = tall.qr_compact(&[0, 1], &[2]).unwrap();
         let Eigh {
             d: compact_positive,
             ..
-        } = positive.eigh_full().unwrap();
+        } = positive.eigh_full(&[0], &[1]).unwrap();
         let Eigh {
             d: compact_negative,
             ..
-        } = negative.eigh_full().unwrap();
+        } = negative.eigh_full(&[0], &[1]).unwrap();
 
         let tol: f64 = $tol;
         let dense = [
@@ -357,10 +357,10 @@ fn checked_generic_su3_chains_decide_true_and_false_cases() {
         .axpby(1.0, &identity_like(&x), 1.0)
         .unwrap();
     let negative = positive.scale(-1.0);
-    let Qr { q: unitary, .. } = x.qr_compact().unwrap();
+    let Qr { q: unitary, .. } = x.qr_compact(&[0, 1], &[2, 3]).unwrap();
     let tall: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&rt, [&leg, &leg], [&leg], |_, ij: &[usize]| fill(ij)).unwrap();
-    let Qr { q: isometry, .. } = tall.qr_compact().unwrap();
+    let Qr { q: isometry, .. } = tall.qr_compact(&[0, 1], &[2]).unwrap();
     assert!(project_hermitian!(isometry).is_err());
 
     let tol = 1e-10;

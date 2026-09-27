@@ -487,9 +487,7 @@ where
         tensor: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_)) {
-            return tensor
-                .adjoint()?
-                .inv()?
+            return Self::inv(&tensor.adjoint()?)?
                 .adjoint()?
                 .materialized_tensor_uncached()
                 .map_err(GenericTensorError::from);
@@ -656,9 +654,7 @@ where
             .into());
         }
         if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_)) {
-            return tensor
-                .adjoint()?
-                .pinv(rcond)?
+            return Self::pinv(&tensor.adjoint()?, rcond)?
                 .adjoint()?
                 .materialized_tensor_uncached()
                 .map_err(GenericTensorError::from);
@@ -699,9 +695,7 @@ where
         tensor: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_)) {
-            return tensor
-                .adjoint()?
-                .right_null()?
+            return Self::right_null(&tensor.adjoint()?)?
                 .adjoint()?
                 .materialized_tensor_uncached()
                 .map_err(GenericTensorError::from);
@@ -720,9 +714,7 @@ where
         tensor: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_)) {
-            return tensor
-                .adjoint()?
-                .left_null()?
+            return Self::left_null(&tensor.adjoint()?)?
                 .adjoint()?
                 .materialized_tensor_uncached()
                 .map_err(GenericTensorError::from);

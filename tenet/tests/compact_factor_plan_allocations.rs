@@ -75,8 +75,8 @@ fn tensor(runtime: &Runtime) -> TensorMap<U1FusionRule, f64> {
 fn second_compact_factorization_builds_the_plan_with_a_bounded_constant() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let a = tensor(&runtime);
-    let warm_svd = a.svd_compact().unwrap();
-    let (Svd { u, s, vh }, svd_calls) = measured(|| a.svd_compact().unwrap());
+    let warm_svd = a.svd_compact(&[0, 1], &[2, 3]).unwrap();
+    let (Svd { u, s, vh }, svd_calls) = measured(|| a.svd_compact(&[0, 1], &[2, 3]).unwrap());
     black_box((&u, &s, &vh));
     assert!(
         svd_calls <= 144,
@@ -84,8 +84,8 @@ fn second_compact_factorization_builds_the_plan_with_a_bounded_constant() {
     );
     drop(warm_svd);
 
-    let warm_qr = a.qr_compact().unwrap();
-    let (Qr { q, r }, qr_calls) = measured(|| a.qr_compact().unwrap());
+    let warm_qr = a.qr_compact(&[0, 1], &[2, 3]).unwrap();
+    let (Qr { q, r }, qr_calls) = measured(|| a.qr_compact(&[0, 1], &[2, 3]).unwrap());
     black_box((&q, &r));
     assert!(
         qr_calls <= 111,
@@ -94,8 +94,8 @@ fn second_compact_factorization_builds_the_plan_with_a_bounded_constant() {
     drop(warm_qr);
 
     let hermitian = a.adjoint().unwrap().compose(&a).unwrap();
-    let warm_eigh = hermitian.eigh_full().unwrap();
-    let (Eigh { d, v }, eigh_calls) = measured(|| hermitian.eigh_full().unwrap());
+    let warm_eigh = hermitian.eigh_full(&[0, 1], &[2, 3]).unwrap();
+    let (Eigh { d, v }, eigh_calls) = measured(|| hermitian.eigh_full(&[0, 1], &[2, 3]).unwrap());
     black_box((&d, &v));
     assert!(
         eigh_calls <= 120,

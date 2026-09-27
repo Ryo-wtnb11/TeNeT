@@ -167,7 +167,7 @@ where
 {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let t = TensorMap::<R, f64>::from_subblock_fn(&runtime, [v, v], [v], fill(21)).unwrap();
-    let s = t.svd_compact().unwrap().s;
+    let s = t.svd_compact(&[0, 1], &[2]).unwrap().s;
     // A mixed compact + dense sum yields dense storage (as `forced_dense` in
     // `typed_facade.rs` pins); the dense route then runs no compact arm.
     let zeros = TensorMap::<R, f64>::zeros(&runtime, &s.codomain(), &s.domain()).unwrap();

@@ -20,6 +20,16 @@ use tenet::core::{
 use tenet::prelude::{Complex64, Runtime};
 use tenet::typed::{GradedSpace, Qr, Svd, TensorMap, Truncation};
 
+/// The receiver's own split as leg roles: `rows = 0..nout`.
+fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (0..t.codomain_rank()).collect()
+}
+
+/// The receiver's own split as leg roles: `cols = nout..rank`.
+fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (t.codomain_rank()..t.rank()).collect()
+}
+
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Su2Codec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
@@ -750,7 +760,7 @@ fn svd_qr_reconstruction_random_spaces() {
                 continue;
             }
 
-            let Svd { u, s, vh } = t.svd_compact().unwrap();
+            let Svd { u, s, vh } = t.svd_compact(&[0, 1], &[2, 3]).unwrap();
             let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
             let diff = recon.axpby(1.0, &t, -1.0).unwrap().norm(2.0).unwrap();
             assert!(
@@ -769,7 +779,7 @@ fn svd_qr_reconstruction_random_spaces() {
                 $name,
             );
 
-            let Qr { q, r } = t.qr_compact().unwrap();
+            let Qr { q, r } = t.qr_compact(&[0, 1], &[2, 3]).unwrap();
             let recon = q.compose(&r).unwrap();
             let diff = recon.axpby(1.0, &t, -1.0).unwrap().norm(2.0).unwrap();
             assert!(
@@ -902,7 +912,7 @@ fn weighted_rank_truncation_matches_tensorkit() {
                 .unwrap()
                 .compose(&a.compose(&b).unwrap())
                 .unwrap();
-            let Svd { s, .. } = e.svd_compact().unwrap();
+            let Svd { s, .. } = e.svd_compact(&[0, 1], &[2, 3]).unwrap();
             let found = s.domain()[0]
                 .find_truncated(&s.diagview().unwrap(), &Truncation::rank(5))
                 .unwrap();
@@ -999,7 +1009,7 @@ macro_rules! invariant_stream_case {
         }
 
         let mut values: Vec<f64> = e
-            .svd_vals()
+            .svd_vals(&codomain_axes(&e), &domain_axes(&e))
             .unwrap()
             .iter()
             .flat_map(|spectrum| spectrum.values.iter().copied())

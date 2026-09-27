@@ -568,9 +568,9 @@ mod checked_generic {
             assert!(lazy.network_reuse_class(false) == NetworkReuseClass::LazyAdjoint);
             // The #1545 consumer: checked-Generic factorizations reject a lazy
             // adjoint, and materialize is the remedy.
-            assert!(lazy.qr_compact().is_err());
+            assert!(lazy.qr_compact(&[0], &[1, 2]).is_err());
             let owned = lazy.materialize().unwrap();
-            owned.qr_compact().unwrap();
+            owned.qr_compact(&[0], &[1, 2]).unwrap();
             let (unconjugated, entries, multiplicity) =
                 assert_swapped_tree_dagger!(tensor, owned, what);
             assert!(

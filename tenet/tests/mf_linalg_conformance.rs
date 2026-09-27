@@ -109,14 +109,14 @@ macro_rules! factor_conformance {
             })
             .unwrap();
 
-        let Svd { u, s, vh } = tall.svd_compact().unwrap();
+        let Svd { u, s, vh } = tall.svd_compact(&[0], &[1]).unwrap();
         assert_provider!(provider; u, s, vh);
         assert_close!(&u.compose(&s).unwrap().compose(&vh).unwrap(), &tall);
-        let Svd { u, s, vh } = tall.svd_full().unwrap();
+        let Svd { u, s, vh } = tall.svd_full(&[0], &[1]).unwrap();
         assert_provider!(provider; u, s, vh);
         assert_close!(&u.compose(&s).unwrap().compose(&vh).unwrap(), &tall);
         // Truncated SVD: svd_compact -> diagview -> find_truncated -> restrict.
-        let Svd { u, s, vh } = tall.svd_compact().unwrap();
+        let Svd { u, s, vh } = tall.svd_compact(&[0], &[1]).unwrap();
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), &Truncation::rank(1))
             .unwrap();
@@ -128,7 +128,7 @@ macro_rules! factor_conformance {
         let error = reconstructed.axpby(1.0, &tall, -1.0).unwrap().norm(2.0).unwrap();
         assert!((error - found.error).abs() <= 1e-9 * (1.0 + found.error));
         assert!(found.error > 0.0, $name);
-        let singular_values = tall.svd_vals().unwrap();
+        let singular_values = tall.svd_vals(&[0], &[1]).unwrap();
         assert!(singular_values
             .iter()
             .all(|entry| entry.values == [4.0, 2.0]));
@@ -143,29 +143,29 @@ macro_rules! factor_conformance {
             .sum();
         assert!((tall.norm(2.0).unwrap().powi(2) - weighted_norm_squared).abs() <= 1e-9);
 
-        let Qr { q, r } = tall.qr_compact().unwrap();
+        let Qr { q, r } = tall.qr_compact(&[0], &[1]).unwrap();
         assert_provider!(provider; q, r);
         assert_close!(&q.compose(&r).unwrap(), &tall);
         let id = TensorMap::isomorphism(&rt, q.domain().iter(), q.domain().iter()).unwrap();
         assert_close!(&q.adjoint().unwrap().compose(&q).unwrap(), &id);
-        let Qr { q, r } = tall.qr_full().unwrap();
+        let Qr { q, r } = tall.qr_full(&[0], &[1]).unwrap();
         assert_provider!(provider; q, r);
         assert_close!(&q.compose(&r).unwrap(), &tall);
         let id = TensorMap::isomorphism(&rt, q.domain().iter(), q.domain().iter()).unwrap();
         assert_close!(&q.adjoint().unwrap().compose(&q).unwrap(), &id);
 
-        let Lq { l, q } = wide.lq_compact().unwrap();
+        let Lq { l, q } = wide.lq_compact(&[0], &[1]).unwrap();
         assert_provider!(provider; l, q);
         assert_close!(&l.compose(&q).unwrap(), &wide);
         let id = TensorMap::isomorphism(&rt, q.codomain().iter(), q.codomain().iter()).unwrap();
         assert_close!(&q.compose(&q.adjoint().unwrap()).unwrap(), &id);
-        let Lq { l, q } = wide.lq_full().unwrap();
+        let Lq { l, q } = wide.lq_full(&[0], &[1]).unwrap();
         assert_provider!(provider; l, q);
         assert_close!(&l.compose(&q).unwrap(), &wide);
         let id = TensorMap::isomorphism(&rt, q.codomain().iter(), q.codomain().iter()).unwrap();
         assert_close!(&q.compose(&q.adjoint().unwrap()).unwrap(), &id);
 
-        let left = tall.left_null().unwrap();
+        let left = tall.left_null(&[0], &[1]).unwrap();
         assert_provider!(provider; left);
         assert!(
             left.adjoint()
@@ -179,7 +179,7 @@ macro_rules! factor_conformance {
         );
         let left_id = TensorMap::isomorphism(&rt, left.domain().iter(), left.domain().iter()).unwrap();
         assert_close!(&left.adjoint().unwrap().compose(&left).unwrap(), &left_id);
-        let right = wide.right_null().unwrap();
+        let right = wide.right_null(&[0], &[1]).unwrap();
         assert_provider!(provider; right);
         assert!(
             wide.compose(&right.adjoint().unwrap())
@@ -195,26 +195,26 @@ macro_rules! factor_conformance {
             &right_id
         );
 
-        let LeftPolar { w, p } = tall.left_polar().unwrap();
+        let LeftPolar { w, p } = tall.left_polar(&[0], &[1]).unwrap();
         assert_provider!(provider; w, p);
         assert_close!(&w.compose(&p).unwrap(), &tall);
         let id = TensorMap::isomorphism(&rt, w.domain().iter(), w.domain().iter()).unwrap();
         assert_close!(&w.adjoint().unwrap().compose(&w).unwrap(), &id);
         assert!(is_hermitian!(p, 1e-10));
         assert!(p
-            .eigh_vals()
+            .eigh_vals(&[0], &[1])
             .unwrap()
             .iter()
             .flat_map(|s| &s.values)
             .all(|&x| x >= -1e-10));
-        let RightPolar { p, wh: w } = wide.right_polar().unwrap();
+        let RightPolar { p, wh: w } = wide.right_polar(&[0], &[1]).unwrap();
         assert_provider!(provider; p, w);
         assert_close!(&p.compose(&w).unwrap(), &wide);
         let id = TensorMap::isomorphism(&rt, w.codomain().iter(), w.codomain().iter()).unwrap();
         assert_close!(&w.compose(&w.adjoint().unwrap()).unwrap(), &id);
         assert!(is_hermitian!(p, 1e-10));
         assert!(p
-            .eigh_vals()
+            .eigh_vals(&[0], &[1])
             .unwrap()
             .iter()
             .flat_map(|s| &s.values)
@@ -225,7 +225,7 @@ macro_rules! factor_conformance {
                 [[3.0, 1.0], [1.0, 3.0]][index[0]][index[1]]
             })
             .unwrap();
-        let Eigh { d, v } = h.eigh_full().unwrap();
+        let Eigh { d, v } = h.eigh_full(&[0], &[1]).unwrap();
         assert_provider!(provider; d, v);
         assert_close!(
             &v.compose(&d)
@@ -235,7 +235,7 @@ macro_rules! factor_conformance {
             &h
         );
         assert!(h
-            .eigh_vals()
+            .eigh_vals(&[0], &[1])
             .unwrap()
             .iter()
             .all(|entry| entry.values == [4.0, 2.0]));
@@ -259,14 +259,14 @@ macro_rules! factor_conformance {
                 [[3.0, 1.0], [0.0, 1.0]][index[0]][index[1]]
             })
             .unwrap();
-        let Eig { d, v } = g.eig_full().unwrap();
+        let Eig { d, v } = g.eig_full(&[0], &[1]).unwrap();
         assert_provider!(provider; d, v);
         assert_complex_close!(
-            &v.compose(&d).unwrap().compose(&v.inv().unwrap()).unwrap(),
+            &v.compose(&d).unwrap().compose(&v.inv(&[0], &[1]).unwrap()).unwrap(),
             &g.convert::<Complex64>()
         );
         assert!(g
-            .eig_vals()
+            .eig_vals(&[0], &[1])
             .unwrap()
             .iter()
             .all(|entry| entry.values == [3.0.into(), 1.0.into()]));
@@ -283,14 +283,14 @@ macro_rules! factor_conformance {
         assert!(found.error > 0.0, $name);
 
         let id = TensorMap::isomorphism(&rt, h.domain().iter(), h.domain().iter()).unwrap();
-        let inverse = h.inv().unwrap();
+        let inverse = h.inv(&[0], &[1]).unwrap();
         assert_provider!(provider; inverse);
         assert_close!(&h.compose(&inverse).unwrap(), &id);
-        let exponential = h.exp().unwrap();
+        let exponential = h.exp(&[0], &[1]).unwrap();
         assert_provider!(provider; exponential);
         assert_close!(
             &h.scale(-1.0)
-                .exp()
+                .exp(&[0], &[1])
                 .unwrap()
                 .compose(&exponential)
                 .unwrap(),
@@ -308,7 +308,7 @@ macro_rules! factor_conformance {
             .unwrap();
         assert_provider!(provider; solved_right);
         assert_close!(&solved_right, &inverse);
-        let pseudo = tall.pinv(1e-12).unwrap();
+        let pseudo = tall.pinv(&[0], &[1], 1e-12).unwrap();
         assert_provider!(provider; pseudo);
         assert_close!(
             &tall.compose(&pseudo).unwrap().compose(&tall).unwrap(),
@@ -344,7 +344,7 @@ macro_rules! factor_conformance {
             .all(|&value| value == 0.0 || value == 2.0 || value == 3.0));
         assert_close!(&root.compose(&root).unwrap(), &diagonal);
         let before = tall.dense_data().unwrap().to_vec();
-        assert!(tall.pinv(-1.0).is_err());
+        assert!(tall.pinv(&[0], &[1], -1.0).is_err());
         assert_eq!(tall.dense_data().unwrap(), before.as_slice());
     }};
 }

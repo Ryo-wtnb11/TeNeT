@@ -54,7 +54,10 @@ macro_rules! assert_nan_spectrum_is_rejected {
         let diagonal = TensorMap::diagonal(&runtime(), leg, spectra).unwrap();
         for rcond in [0.0, 0.1] {
             assert!(
-                matches!(diagonal.pinv(rcond), Err(Error::InvalidArgument(_))),
+                matches!(
+                    diagonal.pinv(&[0], &[1], rcond),
+                    Err(Error::InvalidArgument(_))
+                ),
                 "compact pinv hid a NaN entry at rcond {rcond}"
             );
         }
@@ -62,17 +65,19 @@ macro_rules! assert_nan_spectrum_is_rejected {
         // The truncated compositions fail at the factorization or at the
         // decision; neither publishes a factor.
         for policy in policies() {
-            let svd = diagonal
-                .svd_compact()
-                .and_then(|tenet::typed::Svd { s, .. }| {
-                    s.domain()[0].find_truncated(&s.diagview()?, &policy)
-                });
+            let svd =
+                diagonal
+                    .svd_compact(&[0], &[1])
+                    .and_then(|tenet::typed::Svd { s, .. }| {
+                        s.domain()[0].find_truncated(&s.diagview()?, &policy)
+                    });
             assert!(svd.is_err(), "svd composition {policy:?}");
-            let eigh = diagonal
-                .eigh_full()
-                .and_then(|tenet::typed::Eigh { d, .. }| {
-                    d.domain()[0].find_truncated(&d.diagview()?, &policy)
-                });
+            let eigh =
+                diagonal
+                    .eigh_full(&[0], &[1])
+                    .and_then(|tenet::typed::Eigh { d, .. }| {
+                        d.domain()[0].find_truncated(&d.diagview()?, &policy)
+                    });
             assert!(eigh.is_err(), "eigh composition {policy:?}");
         }
     }};
@@ -151,7 +156,7 @@ fn compact_pinv_of_a_finite_diagonal_is_unchanged() {
         ],
     )
     .unwrap();
-    let image = tenet::expert::diagonal_spectrum(&diagonal.pinv(0.2).unwrap())
+    let image = tenet::expert::diagonal_spectrum(&diagonal.pinv(&[0], &[1], 0.2).unwrap())
         .unwrap()
         .unwrap();
     assert_eq!(image[0].values, vec![0.25, 1.0]);
@@ -180,12 +185,15 @@ fn dense_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
         .unwrap();
     let complex = real.convert::<Complex64>();
     for (case, result) in [
-        ("f64 owned", real.pinv(0.1).map(|_| ())),
-        ("f64 adjoint", real.adjoint().unwrap().pinv(0.1).map(|_| ())),
-        ("c64 owned", complex.pinv(0.1).map(|_| ())),
+        ("f64 owned", real.pinv(&[0], &[1], 0.1).map(|_| ())),
+        (
+            "f64 adjoint",
+            real.adjoint().unwrap().pinv(&[0], &[1], 0.1).map(|_| ()),
+        ),
+        ("c64 owned", complex.pinv(&[0], &[1], 0.1).map(|_| ())),
         (
             "c64 adjoint",
-            complex.adjoint().unwrap().pinv(0.1).map(|_| ()),
+            complex.adjoint().unwrap().pinv(&[0], &[1], 0.1).map(|_| ()),
         ),
     ] {
         match result {

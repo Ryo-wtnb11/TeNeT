@@ -49,7 +49,7 @@ fn work(rt: &Runtime, seed: u64) -> (f64, f64) {
         )
         .unwrap(); // ContextPool
     let p = c.permute(&[1, 0], &[3, 2]).unwrap(); // ContextPool
-    let s = p.svd_vals().unwrap(); // ExecutorPool
+    let s = p.svd_vals(&[0, 1], &[2, 3]).unwrap(); // ExecutorPool
     let first = s
         .first()
         .and_then(|spec| spec.values.first().copied())

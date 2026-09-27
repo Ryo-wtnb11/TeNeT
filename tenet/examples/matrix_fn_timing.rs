@@ -40,19 +40,19 @@ macro_rules! bench {
         let t = a.adjoint().unwrap().compose(&a).unwrap();
         println!("{} (space dim {}):", $name, v.dim().unwrap());
         time_it("pinv(1e-12)", $iters, || {
-            black_box(black_box(&t).pinv(1e-12).unwrap());
+            black_box(black_box(&t).pinv(&[0, 1], &[2, 3], 1e-12).unwrap());
         });
         time_it("inv", $iters, || {
-            black_box(black_box(&t).inv().unwrap());
+            black_box(black_box(&t).inv(&[0, 1], &[2, 3]).unwrap());
         });
         time_it("exp", $iters, || {
-            black_box(black_box(&t).exp().unwrap());
+            black_box(black_box(&t).exp(&[0, 1], &[2, 3]).unwrap());
         });
         time_it("left_polar", $iters, || {
-            black_box(black_box(&t).left_polar().unwrap());
+            black_box(black_box(&t).left_polar(&[0, 1], &[2, 3]).unwrap());
         });
         time_it("right_polar", $iters, || {
-            black_box(black_box(&t).right_polar().unwrap());
+            black_box(black_box(&t).right_polar(&[0, 1], &[2, 3]).unwrap());
         });
     }};
 }

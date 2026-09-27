@@ -275,6 +275,13 @@ macro_rules! ledger {
             )?;
             let hermitian = square.adjoint()?.compose(&square)?;
             let lazy = a.adjoint()?;
+            // Leg roles of `a` (`codomain <- domain`) and of the square
+            // `domain <- domain` matrices: each factorization acts on the
+            // tensor's own split.
+            let rows: Vec<usize> = (0..case.nc).collect();
+            let cols: Vec<usize> = (case.nc..case.nc + case.nd).collect();
+            let square_rows: Vec<usize> = (0..case.nd).collect();
+            let square_cols: Vec<usize> = (case.nd..2 * case.nd).collect();
             let selection = LegSelection::try_new(
                 &leg,
                 sectors.iter().map(|s| (s.clone(), 0..case.deg.div_ceil(2))),
@@ -327,19 +334,21 @@ macro_rules! ledger {
                 black_box(&a).repartition(repartition_to).unwrap()
             });
             run_op(config, &prefix, "qr_compact", || {
-                black_box(&a).qr_compact().unwrap()
+                black_box(&a).qr_compact(&rows, &cols).unwrap()
             });
             run_op(config, &prefix, "svd_compact", || {
-                black_box(&a).svd_compact().unwrap()
+                black_box(&a).svd_compact(&rows, &cols).unwrap()
             });
             run_op(config, &prefix, "lq_compact", || {
-                black_box(&a).lq_compact().unwrap()
+                black_box(&a).lq_compact(&rows, &cols).unwrap()
             });
             run_op(config, &prefix, "left_null", || {
-                black_box(&a).left_null().unwrap()
+                black_box(&a).left_null(&rows, &cols).unwrap()
             });
             run_op(config, &prefix, "eigh_full", || {
-                black_box(&hermitian).eigh_full().unwrap()
+                black_box(&hermitian)
+                    .eigh_full(&square_rows, &square_cols)
+                    .unwrap()
             });
             run_op(config, &prefix, "restrict_leg", || {
                 black_box(&a).restrict_leg(&[(0, &selection)]).unwrap()

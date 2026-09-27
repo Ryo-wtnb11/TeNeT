@@ -2302,7 +2302,7 @@ where
     let source = make(degeneracy)?;
     let changed_source = make(degeneracy + 1)?;
     for selected in [&source, &changed_source] {
-        let Eig { d, v } = selected.eig_full()?;
+        let Eig { d, v } = selected.eig_full(&[0], &[1])?;
         assert_mf_eig(selected, &d, &v, sector_count)?;
         drop((d, v));
     }
@@ -2316,7 +2316,7 @@ where
         "warm_after_preflight",
         min_time,
         || {
-            drop(black_box(source.eig_full()?));
+            drop(black_box(source.eig_full(&[0], &[1])?));
             Ok::<_, Error>(())
         },
     )?;
@@ -2332,7 +2332,7 @@ where
         || {
             let selected = if changed { &changed_source } else { &source };
             changed = !changed;
-            drop(black_box(selected.eig_full()?));
+            drop(black_box(selected.eig_full(&[0], &[1])?));
             Ok::<_, Error>(())
         },
     )?;
@@ -3227,7 +3227,7 @@ fn run_checked_sun(
                     "cold",
                     "warm",
                     min_time,
-                    || lhs.qr_compact(),
+                    || lhs.qr_compact(&[0, 1], &[2, 3]),
                 )?;
                 assert_same_tensor!(q.compose(&r)?, lhs, lhs);
             }

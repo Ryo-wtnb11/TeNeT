@@ -116,7 +116,7 @@ macro_rules! assert_su3_svd_composition {
         let terms = source.dense_data().unwrap().len();
         for (name, truncation, policy) in policies!($target) {
             let case = format!("{} {name}", $tag);
-            let Svd { u, s, vh } = source.svd_compact().unwrap();
+            let Svd { u, s, vh } = source.svd_compact(&[0, 1], &[2]).unwrap();
             assert!(
                 tenet::expert::diagonal_spectrum(&s).unwrap().is_none(),
                 "checked-Generic compact s is dense, which is what exercises diagview's strided arm"
@@ -186,7 +186,7 @@ macro_rules! assert_su3_eigh_composition {
         let terms = source.dense_data().unwrap().len();
         for (name, truncation, policy) in policies!($target) {
             let case = format!("{} {name}", $tag);
-            let Eigh { d, v } = source.eigh_full().unwrap();
+            let Eigh { d, v } = source.eigh_full(&[0], &[1]).unwrap();
             let bond = d.domain()[0].clone();
             let found = bond
                 .find_truncated(&d.diagview().unwrap(), &truncation)
@@ -250,7 +250,7 @@ macro_rules! assert_su3_eig_composition {
         let terms = source.dense_data().unwrap().len();
         for (name, truncation, policy) in policies!($target) {
             let case = format!("{} {name}", $tag);
-            let Eig { d, v } = source.eig_full().unwrap();
+            let Eig { d, v } = source.eig_full(&[0], &[1]).unwrap();
             let bond = d.domain()[0].clone();
             let found = bond
                 .find_truncated(&d.diagview().unwrap(), &truncation)

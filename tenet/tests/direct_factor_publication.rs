@@ -15,6 +15,16 @@ use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::prelude::{Complex32, Complex64, Runtime};
 use tenet::typed::{GradedSpace, Lq, TensorMap, TensorScalar};
 
+/// The receiver's own split as leg roles: `rows = 0..nout`.
+fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (0..t.codomain_rank()).collect()
+}
+
+/// The receiver's own split as leg roles: `cols = nout..rank`.
+fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (t.codomain_rank()..t.rank()).collect()
+}
+
 struct CountingAllocator;
 
 thread_local! {
@@ -148,7 +158,7 @@ macro_rules! assert_residual {
 macro_rules! assert_lq {
     ($d:ty, $a:expr) => {{
         let a = $a;
-        let Lq { l, q } = a.lq_compact().unwrap();
+        let Lq { l, q } = a.lq_compact(&codomain_axes(&a), &domain_axes(&a)).unwrap();
         let terms = a.dense_data().unwrap().len();
         assert_residual!("A = L Q", $d, &l.compose(&q).unwrap(), &a, terms);
         let aqh = a.compose(&owned_adjoint!($d, q)).unwrap();
@@ -213,8 +223,8 @@ fn compact_lq_requests_no_zeroed_output_storage() {
     let leg = u1_leg();
     let a: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1480).unwrap();
-    let warm = a.lq_compact().unwrap();
-    let (Lq { l, q }, counts) = measured(|| a.lq_compact().unwrap());
+    let warm = a.lq_compact(&[0, 1], &[2, 3]).unwrap();
+    let (Lq { l, q }, counts) = measured(|| a.lq_compact(&[0, 1], &[2, 3]).unwrap());
     black_box((&warm, &q));
     let backend_r_bytes = std::mem::size_of_val(l.dense_data().unwrap());
     assert!(
@@ -269,12 +279,14 @@ mod checked_generic {
             let a = $a;
             let terms = a.dense_data().unwrap().len();
             let (w, p, product, gram) = if $left {
-                let LeftPolar { w, p } = a.left_polar().unwrap();
+                let LeftPolar { w, p } =
+                    a.left_polar(&codomain_axes(&a), &domain_axes(&a)).unwrap();
                 let product = w.compose(&p).unwrap();
                 let gram = owned_adjoint!($d, w).compose(&w).unwrap();
                 (w, p, product, gram)
             } else {
-                let RightPolar { p, wh: w } = a.right_polar().unwrap();
+                let RightPolar { p, wh: w } =
+                    a.right_polar(&codomain_axes(&a), &domain_axes(&a)).unwrap();
                 let product = p.compose(&w).unwrap();
                 let gram = w.compose(&owned_adjoint!($d, w)).unwrap();
                 (w, p, product, gram)
@@ -283,7 +295,7 @@ mod checked_generic {
             assert_residual!("A = polar product", $d, &product, a, terms);
             assert_residual!("P = Pᴴ", $d, &owned_adjoint!($d, p), &p, terms);
             let one = numerics::tolerance::<$d>(terms, 1.0);
-            for spectrum in gram.eigh_vals().unwrap() {
+            for spectrum in gram.eigh_vals(&[0], &[1]).unwrap() {
                 for value in spectrum.values {
                     assert!(
                         (value - 1.0).abs() <= one,
@@ -293,7 +305,7 @@ mod checked_generic {
             }
             let psd = numerics::tolerance::<$d>(terms, p.norm(2.0).unwrap());
             let mut p_values = 0;
-            for spectrum in p.eigh_vals().unwrap() {
+            for spectrum in p.eigh_vals(&[0], &[1]).unwrap() {
                 for value in spectrum.values {
                     p_values += 1;
                     assert!(value >= -psd, "P is not PSD: eigenvalue {value:e}");
@@ -353,9 +365,12 @@ mod checked_generic {
             let (rows, cols) = tall_legs(&provider, scale);
             let a: TensorMap<_, f64> =
                 TensorMap::rand_with_seed(&runtime, [&rows], [&cols], 1485).unwrap();
-            let warm = (a.left_polar().unwrap(), a.svd_compact().unwrap());
-            let (LeftPolar { w, p }, polar) = measured(|| a.left_polar().unwrap());
-            let (Svd { u, s, vh }, svd) = measured(|| a.svd_compact().unwrap());
+            let warm = (
+                a.left_polar(&[0], &[1]).unwrap(),
+                a.svd_compact(&[0], &[1]).unwrap(),
+            );
+            let (LeftPolar { w, p }, polar) = measured(|| a.left_polar(&[0], &[1]).unwrap());
+            let (Svd { u, s, vh }, svd) = measured(|| a.svd_compact(&[0], &[1]).unwrap());
             black_box(&warm);
             let polar_outputs = payload_bytes(&w) + payload_bytes(&p);
             let svd_outputs = payload_bytes(&u) + payload_bytes(&s) + payload_bytes(&vh);
@@ -401,13 +416,29 @@ mod checked_generic {
             };
             assert_eq!(payload_bytes(&facade), payload_bytes(&control));
             let counts = |a: &Tensor| {
-                black_box((a.qr_compact().unwrap(), a.svd_compact().unwrap()));
-                black_box((a.lq_compact().unwrap(), a.svd_vals().unwrap()));
+                black_box((
+                    a.qr_compact(&codomain_axes(a), &domain_axes(a)).unwrap(),
+                    a.svd_compact(&codomain_axes(a), &domain_axes(a)).unwrap(),
+                ));
+                black_box((
+                    a.lq_compact(&codomain_axes(a), &domain_axes(a)).unwrap(),
+                    a.svd_vals(&codomain_axes(a), &domain_axes(a)).unwrap(),
+                ));
                 [
-                    measured(|| black_box(a.qr_compact().unwrap())).1,
-                    measured(|| black_box(a.svd_compact().unwrap())).1,
-                    measured(|| black_box(a.lq_compact().unwrap())).1,
-                    measured(|| black_box(a.svd_vals().unwrap())).1,
+                    measured(|| {
+                        black_box(a.qr_compact(&codomain_axes(a), &domain_axes(a)).unwrap())
+                    })
+                    .1,
+                    measured(|| {
+                        black_box(a.svd_compact(&codomain_axes(a), &domain_axes(a)).unwrap())
+                    })
+                    .1,
+                    measured(|| {
+                        black_box(a.lq_compact(&codomain_axes(a), &domain_axes(a)).unwrap())
+                    })
+                    .1,
+                    measured(|| black_box(a.svd_vals(&codomain_axes(a), &domain_axes(a)).unwrap()))
+                        .1,
                 ]
             };
             let (facade_counts, control_counts) = (counts(&facade), counts(&control));

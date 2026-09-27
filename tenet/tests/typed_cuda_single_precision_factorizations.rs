@@ -53,6 +53,16 @@ mod single_precision_oracle;
 use common::{DevicePayload, DeviceRule};
 use single_precision_oracle::{fermion_su2_leg_with, K};
 
+/// The receiver's own split as leg roles: `rows = 0..nout`.
+fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (0..t.codomain_rank()).collect()
+}
+
+/// The receiver's own split as leg roles: `cols = nout..rank`.
+fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (t.codomain_rank()..t.rank()).collect()
+}
+
 // ---------------------------------------------------------------------------
 // Payload markers
 // ---------------------------------------------------------------------------
@@ -217,7 +227,10 @@ where
         .unwrap();
     let mut largest = 0.0_f64;
     let mut smallest = f64::INFINITY;
-    for entry in &wide.svd_vals().unwrap() {
+    for entry in &wide
+        .svd_vals(&codomain_axes(&wide), &domain_axes(&wide))
+        .unwrap()
+    {
         for &value in &entry.values {
             largest = largest.max(value);
             smallest = smallest.min(value);
@@ -284,14 +297,18 @@ fn assert_device_svd_matches_host<R, D>(
         u: host_u,
         s: host_s,
         vh: host_vh,
-    } = source.svd_compact().unwrap();
+    } = source
+        .svd_compact(&codomain_axes(&source), &domain_axes(&source))
+        .unwrap();
 
     let device = source.to_cuda().unwrap();
     let Svd {
         u: device_u,
         s: device_s,
         vh: device_vh,
-    } = device.svd_compact().unwrap();
+    } = device
+        .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap();
     let provider = source.provider() as *const R;
     for factor in [&device_u, &device_s, &device_vh] {
         assert!(std::ptr::eq(factor.provider(), provider));
@@ -427,12 +444,16 @@ fn assert_device_qr_matches_host<R, D>(
     let Qr {
         q: host_q,
         r: host_r,
-    } = source.qr_compact().unwrap();
+    } = source
+        .qr_compact(&codomain_axes(&source), &domain_axes(&source))
+        .unwrap();
     let device = source.to_cuda().unwrap();
     let Qr {
         q: device_q,
         r: device_r,
-    } = device.qr_compact().unwrap();
+    } = device
+        .qr_compact(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap();
     let q = device_q.to_host().unwrap();
     let r = device_r.to_host().unwrap();
 
@@ -512,8 +533,14 @@ where
     let Qr {
         q: host_q,
         r: host_r,
-    } = source.qr_compact().unwrap();
-    let Qr { q, r } = source.to_cuda().unwrap().qr_compact().unwrap();
+    } = source
+        .qr_compact(&codomain_axes(source), &domain_axes(source))
+        .unwrap();
+    let Qr { q, r } = source
+        .to_cuda()
+        .unwrap()
+        .qr_compact(&codomain_axes(source), &domain_axes(source))
+        .unwrap();
     let q = q.to_host().unwrap();
     let r = r.to_host().unwrap();
     assert_eq!(structure(&q), structure(&host_q), "{what} q [{}]", D::NAME);
@@ -598,7 +625,11 @@ fn device_qr_returns_the_positive_diagonal_gauge_at_every_payload() {
     fn assert_gauge<D: FactorPayload>(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) {
         let source = fixture::<U1FusionRule, D>(runtime, leg, leg);
         let terms = source.dense_data().unwrap().len().max(1);
-        let Qr { r, .. } = source.to_cuda().unwrap().qr_compact().unwrap();
+        let Qr { r, .. } = source
+            .to_cuda()
+            .unwrap()
+            .qr_compact(&codomain_axes(&source), &domain_axes(&source))
+            .unwrap();
         let spectra = r.to_host().unwrap().diagview().unwrap();
         assert!(
             !spectra.is_empty(),
@@ -646,7 +677,11 @@ fn device_qr_fixes_a_hand_computed_complex_phase() {
                 D::entry(re, im)
             })
             .unwrap();
-        let Qr { q, r } = source.to_cuda().unwrap().qr_compact().unwrap();
+        let Qr { q, r } = source
+            .to_cuda()
+            .unwrap()
+            .qr_compact(&codomain_axes(&source), &domain_axes(&source))
+            .unwrap();
         let bound = tolerance::<D>(4, 3.0, 1.0);
         for (factor, expected, what) in [(q, q_expected, "q"), (r, r_expected, "r")] {
             let factor = factor.to_host().unwrap();
@@ -697,12 +732,16 @@ fn assert_device_eigh_matches_host<R, D>(
     let Eigh {
         d: host_d,
         v: _host_v,
-    } = source.eigh_full().unwrap();
+    } = source
+        .eigh_full(&codomain_axes(&source), &domain_axes(&source))
+        .unwrap();
     let device = source.to_cuda().unwrap();
     let Eigh {
         d: device_d,
         v: device_v,
-    } = device.eigh_full().unwrap();
+    } = device
+        .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap();
     let d = device_d.to_host().unwrap();
     let v = device_v.to_host().unwrap();
 
@@ -811,17 +850,21 @@ fn device_eigh_admits_a_nearly_hermitian_single_precision_block() {
     let skew = (-20.0_f64).exp2();
 
     assert!(
-        perturbed::<f32>(&runtime, &leg, skew).eigh_full().is_ok(),
+        perturbed::<f32>(&runtime, &leg, skew)
+            .eigh_full(&[0], &[1])
+            .is_ok(),
         "an f32 block within 64*eps(f32) must be admitted"
     );
     assert!(
         perturbed::<Complex32>(&runtime, &leg, skew)
-            .eigh_full()
+            .eigh_full(&[0], &[1])
             .is_ok(),
         "a Complex32 block within 64*eps(f32) must be admitted"
     );
     assert!(
-        perturbed::<f64>(&runtime, &leg, skew).eigh_full().is_err(),
+        perturbed::<f64>(&runtime, &leg, skew)
+            .eigh_full(&[0], &[1])
+            .is_err(),
         "the same numbers at f64 exceed 64*eps(f64) and must be rejected"
     );
 
@@ -831,22 +874,26 @@ fn device_eigh_admits_a_nearly_hermitian_single_precision_block() {
     for (name, error) in [
         (
             "f64",
-            perturbed::<f64>(&runtime, &leg, gross).eigh_full().err(),
+            perturbed::<f64>(&runtime, &leg, gross)
+                .eigh_full(&[0], &[1])
+                .err(),
         ),
         (
             "c64",
             perturbed::<Complex64>(&runtime, &leg, gross)
-                .eigh_full()
+                .eigh_full(&[0], &[1])
                 .err(),
         ),
         (
             "f32",
-            perturbed::<f32>(&runtime, &leg, gross).eigh_full().err(),
+            perturbed::<f32>(&runtime, &leg, gross)
+                .eigh_full(&[0], &[1])
+                .err(),
         ),
         (
             "c32",
             perturbed::<Complex32>(&runtime, &leg, gross)
-                .eigh_full()
+                .eigh_full(&[0], &[1])
                 .err(),
         ),
     ] {
@@ -875,8 +922,16 @@ fn device_factorization_rejections_do_not_depend_on_the_payload() {
 
         let before = cuda_transfer_stats();
         for (operation, error) in [
-            ("svd_compact", lazy.svd_compact().err()),
-            ("eigh_full", lazy.eigh_full().err()),
+            (
+                "svd_compact",
+                lazy.svd_compact(&codomain_axes(&lazy), &domain_axes(&lazy))
+                    .err(),
+            ),
+            (
+                "eigh_full",
+                lazy.eigh_full(&codomain_axes(&lazy), &domain_axes(&lazy))
+                    .err(),
+            ),
         ] {
             assert!(
                 matches!(&error, Some(Error::UnsupportedOnDevice(message))
@@ -965,7 +1020,9 @@ fn assert_truncation_composition<R, D>(
     let bound = tolerance::<D>(terms, source.norm(2.0).unwrap(), kappa);
 
     let expected = {
-        let Svd { u, s, vh } = source.svd_compact().unwrap();
+        let Svd { u, s, vh } = source
+            .svd_compact(&codomain_axes(&source), &domain_axes(&source))
+            .unwrap();
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), truncation)
             .unwrap();
@@ -989,7 +1046,11 @@ fn assert_truncation_composition<R, D>(
         u: device_u,
         s: device_s,
         vh: device_vh,
-    } = source.to_cuda().unwrap().svd_compact().unwrap();
+    } = source
+        .to_cuda()
+        .unwrap()
+        .svd_compact(&codomain_axes(&source), &domain_axes(&source))
+        .unwrap();
     let u = device_u.to_host().unwrap();
     let s = device_s.to_host().unwrap();
     let vh = device_vh.to_host().unwrap();
@@ -1104,14 +1165,38 @@ fn device_factorizations_cost_the_same_calls_and_half_the_bytes() {
             .to_cuda()
             .unwrap();
         // Warm the lane, the scalar operands and the kernels of this dtype.
-        drop(device.svd_compact().unwrap());
-        drop(device.eigh_full().unwrap());
-        drop(device.qr_compact().unwrap());
+        drop(
+            device
+                .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+                .unwrap(),
+        );
+        drop(
+            device
+                .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+                .unwrap(),
+        );
+        drop(
+            device
+                .qr_compact(&codomain_axes(&device), &domain_axes(&device))
+                .unwrap(),
+        );
 
         let before = cuda_transfer_stats();
-        drop(device.svd_compact().unwrap());
-        drop(device.eigh_full().unwrap());
-        drop(device.qr_compact().unwrap());
+        drop(
+            device
+                .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+                .unwrap(),
+        );
+        drop(
+            device
+                .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+                .unwrap(),
+        );
+        drop(
+            device
+                .qr_compact(&codomain_axes(&device), &domain_axes(&device))
+                .unwrap(),
+        );
         let after = cuda_transfer_stats();
         // The SVD's gauge uploads one `i64` weight per row of its largest
         // route (3 rows for this leg): the one upload whose bytes do not
@@ -1169,10 +1254,18 @@ fn complex_device_qr_costs_the_real_calls_and_twice_the_bytes() {
         let device = fixture::<U1FusionRule, D>(runtime, leg, leg)
             .to_cuda()
             .unwrap();
-        drop(device.qr_compact().unwrap());
+        drop(
+            device
+                .qr_compact(&codomain_axes(&device), &domain_axes(&device))
+                .unwrap(),
+        );
 
         let before = cuda_transfer_stats();
-        drop(device.qr_compact().unwrap());
+        drop(
+            device
+                .qr_compact(&codomain_axes(&device), &domain_axes(&device))
+                .unwrap(),
+        );
         let after = cuda_transfer_stats();
         (
             after.h2d_calls - before.h2d_calls,

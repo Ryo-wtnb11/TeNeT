@@ -131,7 +131,7 @@ fn general_exp_matches_the_tensorkit_oracle() {
             &format!("f64 scale {scale} typed input fixture"),
         );
 
-        let typed_exp = typed.exp().unwrap();
+        let typed_exp = typed.exp(&[0], &[1]).unwrap();
         assert_close(
             typed_exp.norm(2.0).unwrap(),
             exponential_norm,
@@ -147,7 +147,7 @@ fn general_exp_matches_the_tensorkit_oracle() {
         "c64 typed input fixture",
     );
 
-    let typed_exp = typed.exp().unwrap();
+    let typed_exp = typed.exp(&[0], &[1]).unwrap();
     assert_close(typed_exp.norm(2.0).unwrap(), 3.1806015158373815, "c64 exp");
 }
 
@@ -171,7 +171,7 @@ fn general_exp_balances_a_badly_scaled_block_like_julia() {
     })
     .unwrap();
 
-    let exponential = tensor.exp().unwrap();
+    let exponential = tensor.exp(&[0], &[1]).unwrap();
 
     let expected = [
         1.0_f64.cosh(),

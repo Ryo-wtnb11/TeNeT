@@ -28,7 +28,7 @@ fn truncated_svd_runtime_reuse_tracks_data_dependent_rank() {
                 }
             })
             .unwrap();
-        let Svd { u, s, vh } = source.svd_compact().unwrap();
+        let Svd { u, s, vh } = source.svd_compact(&[0], &[1]).unwrap();
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), &policy)
             .unwrap();

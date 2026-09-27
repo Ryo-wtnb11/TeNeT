@@ -38,7 +38,7 @@ fn typed_diagonal_preserves_canonical_positions_and_dual_leg() {
     let readback: Vec<SectorSpectrum<U1Irrep, Complex64>> =
         tenet::expert::diagonal_spectrum(&tensor).unwrap().unwrap();
     assert_eq!(readback, values);
-    let singular_values: Vec<SectorSpectrum<U1Irrep>> = tensor.svd_vals().unwrap();
+    let singular_values: Vec<SectorSpectrum<U1Irrep>> = tensor.svd_vals(&[0], &[1]).unwrap();
     assert_eq!(singular_values.len(), values.len());
 }
 
@@ -58,7 +58,7 @@ fn typed_real_c64_eigenvalue_readback_stays_compact() {
             )
         })
         .unwrap();
-    let Eigh { d: diagonal, .. } = source.eigh_full().unwrap();
+    let Eigh { d: diagonal, .. } = source.eigh_full(&[0], &[1]).unwrap();
     assert_eq!(
         tenet::expert::diagonal_spectrum(&diagonal)
             .unwrap()

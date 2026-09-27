@@ -70,9 +70,9 @@ fn observe(rt: &Runtime, salt: usize) -> Vec<HostPoolObservation> {
         .embed_leg(0, &selection)
         .unwrap();
     let _ = t.axpby(2.0, &t, 1.0).unwrap();
-    let _ = t.svd_compact().unwrap();
-    let _ = block.svd_compact().unwrap();
-    let _ = block.lq_compact().unwrap();
+    let _ = t.svd_compact(&[0, 1], &[2]).unwrap();
+    let _ = block.svd_compact(&[0, 1], &[2]).unwrap();
+    let _ = block.lq_compact(&[0, 1], &[2]).unwrap();
     observe_host_pools(false);
     take_host_pool_observations()
 }

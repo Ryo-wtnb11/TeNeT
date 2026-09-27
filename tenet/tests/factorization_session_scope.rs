@@ -18,6 +18,16 @@ use std::sync::Mutex;
 use tenet::prelude::*;
 use tenet_dense::cpu_session_stats;
 
+/// The receiver's own split as leg roles: `rows = 0..nout`.
+fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (0..t.codomain_rank()).collect()
+}
+
+/// The receiver's own split as leg roles: `cols = nout..rank`.
+fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (t.codomain_rank()..t.rank()).collect()
+}
+
 static COUNTER_LOCK: Mutex<()> = Mutex::new(());
 
 fn sessions_during<T>(call: impl FnOnce() -> T) -> (u64, T) {
@@ -44,10 +54,18 @@ macro_rules! assert_one_session_per_factorization {
         coupled.dedup();
         assert!(coupled.len() > 2, "fixture must span many sectors");
 
-        let (sessions, _) = sessions_during(|| tensor.qr_compact().unwrap());
+        let (sessions, _) = sessions_during(|| {
+            tensor
+                .qr_compact(&codomain_axes(&tensor), &domain_axes(&tensor))
+                .unwrap()
+        });
         assert_eq!(sessions, 1, "qr_compact");
 
-        let (sessions, _) = sessions_during(|| tensor.svd_compact().unwrap());
+        let (sessions, _) = sessions_during(|| {
+            tensor
+                .svd_compact(&codomain_axes(&tensor), &domain_axes(&tensor))
+                .unwrap()
+        });
         assert_eq!(sessions, 1, "svd_compact");
     }};
 }
@@ -128,12 +146,12 @@ fn streaming_factorizations_from_rayon_workers_and_threads_match_serial_results(
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     let run = |tensor: &TensorMap<U1FusionRule, f64>| {
-        let Lq { l, q } = tensor.lq_compact().unwrap();
-        let null = tensor.left_null().unwrap();
+        let Lq { l, q } = tensor.lq_compact(&[0, 1], &[2]).unwrap();
+        let null = tensor.left_null(&[0, 1], &[2]).unwrap();
         let Eigh { d: w, v } = tensor
             .compose(&tensor.adjoint().unwrap())
             .unwrap()
-            .eigh_full()
+            .eigh_full(&[0, 1], &[2, 3])
             .unwrap();
         [l, q, null, w, v]
             .iter()

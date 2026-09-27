@@ -1288,7 +1288,7 @@ fn host_diagonal_operands_classify_as_compact_for_device_admission() {
     let dense =
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 748_200)
             .unwrap();
-    let tenet::typed::Svd { s: compact, .. } = dense.svd_compact().unwrap();
+    let tenet::typed::Svd { s: compact, .. } = dense.svd_compact(&[0], &[1]).unwrap();
     assert!(device_operand_admission(
         true,
         tenet::core::FusionRule::braiding_style(dense.provider()),

@@ -168,7 +168,7 @@ fn injected_dense_executor_is_used_and_preserves_results() {
 
     let v = u1_space([(-1, 2), (0, 2), (1, 1)]);
     let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 99).unwrap();
-    let Svd { s, .. } = t.svd_compact().unwrap();
+    let Svd { s, .. } = t.svd_compact(&[0, 1], &[2, 3]).unwrap();
 
     assert!(
         counts.svd.load(Ordering::Relaxed) > 0,
@@ -182,7 +182,7 @@ fn injected_dense_executor_is_used_and_preserves_results() {
     let t_default =
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt_default, [&v, &v], [&v, &v], 99)
             .unwrap();
-    let Svd { s: s_default, .. } = t_default.svd_compact().unwrap();
+    let Svd { s: s_default, .. } = t_default.svd_compact(&[0, 1], &[2, 3]).unwrap();
     assert_eq!(
         s.materialize().unwrap().dense_data().unwrap().len(),
         s_default.materialize().unwrap().dense_data().unwrap().len()
@@ -220,12 +220,12 @@ fn compact_diagonal_exp_drives_no_dense_kernel() {
 
     let v = u1_space([(-1, 3), (0, 4), (1, 3)]);
     let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 578).unwrap();
-    let s = t.svd_compact().unwrap().s;
+    let s = t.svd_compact(&[0], &[1]).unwrap().s;
     let (svd, ..) = counts.read();
     assert!(svd > 0, "the fixture never reached the injected backend");
 
     let before = counts.read();
-    let image = s.exp().unwrap();
+    let image = s.exp(&[0], &[1]).unwrap();
     let (_, eigh, gemm, solve) = counts.read();
     assert_eq!(
         (eigh, gemm, solve),
@@ -236,8 +236,8 @@ fn compact_diagonal_exp_drives_no_dense_kernel() {
     // And it computed the right thing: every singular value exponentiated.
     // Compared per sector, since `svd_vals` sorts within a sector, and the
     // exponential is monotone so the order carries over.
-    let source_values = s.svd_vals().unwrap();
-    let image_values = image.svd_vals().unwrap();
+    let source_values = s.svd_vals(&[0], &[1]).unwrap();
+    let image_values = image.svd_vals(&[0], &[1]).unwrap();
     assert_eq!(source_values.len(), image_values.len());
     for (source, image) in source_values.iter().zip(&image_values) {
         assert_eq!(source.sector, image.sector);
@@ -268,7 +268,7 @@ fn injected_executor_without_eig_reports_unsupported() {
     let v = u1_space([(-1, 1), (0, 2), (1, 1)]);
     let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 1266).unwrap();
 
-    let error = t.eig_full().unwrap_err();
+    let error = t.eig_full(&[0], &[1]).unwrap_err();
     let Error::Operation(operation) = error else {
         panic!("a missing executor capability must surface as an operation error, got {error:?}")
     };

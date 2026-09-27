@@ -149,7 +149,7 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
         rank_three.dense_data().unwrap()
     );
 
-    let Svd { u, s, vh } = tensor.svd_compact().unwrap();
+    let Svd { u, s, vh } = tensor.svd_compact(&[0], &[1]).unwrap();
     let found = s.domain()[0]
         .find_truncated(&s.diagview().unwrap(), &Truncation::rank(2))
         .unwrap();
