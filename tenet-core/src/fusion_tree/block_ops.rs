@@ -1,0 +1,1111 @@
+#[derive(Clone, Copy)]
+struct ValidatedFusionTreeBlockGroup<'a, R> {
+    rule: &'a R,
+    src_keys: &'a [FusionTreeKey],
+    rank: usize,
+    projection: MultiplicityFreeTreeProjection<'a>,
+}
+
+fn validate_fusion_tree_block_group_for_rule<'a, R>(
+    rule: &'a R,
+    src_keys: &'a [FusionTreeKey],
+) -> Result<Option<ValidatedFusionTreeBlockGroup<'a, R>>, CoreError>
+where
+    R: FusionRule,
+{
+    for source in src_keys {
+        validate_fusion_tree_for_rule(rule, source)?;
+    }
+    validate_fusion_tree_block_group_proven(rule, src_keys)
+}
+
+fn validate_fusion_tree_block_group_proven<'a, R>(
+    rule: &'a R,
+    src_keys: &'a [FusionTreeKey],
+) -> Result<Option<ValidatedFusionTreeBlockGroup<'a, R>>, CoreError>
+where
+    R: FusionRule,
+{
+    let projection = MultiplicityFreeTreeProjection::from_validated(rule, src_keys)?;
+    let Some(reference) = src_keys.first() else {
+        return Ok(None);
+    };
+    let same_group = |key: &FusionTreeKey| {
+        key.uncoupled() == reference.uncoupled()
+            && key.is_dual() == reference.is_dual()
+    };
+    for source in src_keys {
+        // Why not compare `coupled`: distinct coupled labels are basis states
+        // within one external-sector group, notably for non-Abelian SU(2)
+        // blocks. Group membership is checked source-by-source so the first
+        // malformed source is reported before any later group mismatch.
+        if !same_group(source) {
+            return Err(CoreError::MalformedFusionTree {
+                message: "fusion-tree keys must share one group",
+            });
+        }
+    }
+    Ok(Some(ValidatedFusionTreeBlockGroup {
+        rule,
+        src_keys,
+        rank: reference.uncoupled().len(),
+        projection,
+    }))
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) fn multiplicity_free_braid_tree_block_proven<R>(
+    batch: ValidatedMultiplicityFreeTreeBatch<'_, R>,
+    permutation: &[usize],
+    levels: &[usize],
+) -> Result<Vec<Vec<(FusionTreeKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let (rule, src_keys) = batch.parts();
+    let Some(first) = src_keys.first() else {
+        return Ok(Vec::new());
+    };
+    let rank = first.uncoupled().len();
+    if levels.len() != rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: rank,
+            actual: levels.len(),
+        });
+    }
+    let prepared = PreparedTreeBraid::new(permutation, levels, rank)?;
+    let group = validate_fusion_tree_block_group_proven(rule, src_keys)?
+        .expect("nonempty proven source block produces a group proof");
+    multiplicity_free_braid_tree_block_validated(group, prepared)
+}
+
+/// Apply one braid to every source tree in an all-codomain block.
+///
+/// Sources and result rows retain source order. Floating-point summation can
+/// differ from repeated scalar calls, so coefficients agree numerically rather
+/// than necessarily bit-for-bit. Empty input returns an empty result. Every
+/// nonempty source must share external sectors, duality, and fusion style;
+/// malformed mixed groups fail before symbol evaluation.
+///
+/// Every source follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
+#[allow(clippy::type_complexity)]
+pub fn multiplicity_free_braid_tree_block<R>(
+    rule: &R,
+    src_keys: &[FusionTreeKey],
+    permutation: &[usize],
+    levels: &[usize],
+) -> Result<Vec<Vec<(FusionTreeKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    validate_multiplicity_free_execution_style(rule)?;
+    let Some(first) = src_keys.first() else {
+        return Ok(Vec::new());
+    };
+    let rank = first.uncoupled().len();
+    if levels.len() != rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: rank,
+            actual: levels.len(),
+        });
+    }
+    let prepared = PreparedTreeBraid::new(permutation, levels, rank)?;
+    let group = validate_fusion_tree_block_group_for_rule(rule, src_keys)?
+        .expect("nonempty source block produces a validation proof");
+    multiplicity_free_braid_tree_block_validated(group, prepared)
+}
+
+#[allow(clippy::type_complexity)]
+fn multiplicity_free_braid_tree_block_validated<R>(
+    group: ValidatedFusionTreeBlockGroup<'_, R>,
+    prepared: PreparedTreeBraid,
+) -> Result<Vec<Vec<(FusionTreeKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let rule = group.rule;
+    let src_keys = group.src_keys;
+    if prepared.permutation.iter().copied().eq(0..group.rank) {
+        return Ok(src_keys
+            .iter()
+            .map(|key| vec![(key.clone(), R::Scalar::one())])
+            .collect());
+    }
+
+    let mut basis = CompactMultiplicityFreeTreeBasis::from_group(group)?;
+    let mut columns = None;
+    for step in &prepared.artin_steps {
+        let (next_basis, next_columns) = match &columns {
+            Some(columns) => compact_artin_tree_block_step(
+                rule,
+                basis,
+                columns,
+                step.index,
+                step.inverse,
+            )?,
+            None => compact_artin_tree_block_first(
+                rule,
+                basis,
+                step.index,
+                step.inverse,
+            )?,
+        };
+        basis = next_basis;
+        columns = Some(next_columns);
+    }
+
+    // A validated non-identity permutation always contains at least one swap.
+    let columns = columns.expect("non-identity permutation produces an Artin step");
+    Ok(scatter_compact_tree_block(basis, &columns))
+}
+
+/// Symmetric-braiding convenience wrapper for
+/// [`multiplicity_free_braid_tree_block`], with the same ordering, validation,
+/// and empty-input contract.
+///
+/// Every source follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
+#[allow(clippy::type_complexity)]
+pub fn multiplicity_free_permute_tree_block<R>(
+    rule: &R,
+    src_keys: &[FusionTreeKey],
+    permutation: &[usize],
+) -> Result<Vec<Vec<(FusionTreeKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        });
+    }
+    validate_multiplicity_free_execution_style(rule)?;
+    let Some(first) = src_keys.first() else {
+        return Ok(Vec::new());
+    };
+    let rank = first.uncoupled().len();
+    let levels = (0..rank).collect::<SmallVec<[usize; 8]>>();
+    let prepared = PreparedTreeBraid::new(permutation, &levels, rank)?;
+    let group = validate_fusion_tree_block_group_for_rule(rule, src_keys)?
+        .expect("nonempty source block produces a validation proof");
+    multiplicity_free_braid_tree_block_validated(group, prepared)
+}
+
+#[derive(Clone, Copy)]
+struct ValidatedTreePairBlockGroup<'a, R> {
+    rule: &'a R,
+    source_len: usize,
+    codomain_rank: usize,
+    domain_rank: usize,
+    projection: MultiplicityFreePairProjection<'a>,
+}
+
+const TREE_PAIR_BLOCK_GROUP_ERROR: &str = "fusion-tree block keys must share one group";
+
+fn validate_tree_pair_block_group_for_rule<'a, R>(
+    rule: &'a R,
+    src_keys: &'a [FusionTreePairKey],
+) -> Result<Option<ValidatedTreePairBlockGroup<'a, R>>, CoreError>
+where
+    R: FusionRule,
+{
+    for source in src_keys {
+        validate_fusion_tree_pair_for_rule(rule, source)?;
+    }
+    let projection = MultiplicityFreePairProjection::from_validated(rule, src_keys)?;
+    validate_tree_pair_block_group_projection(rule, projection)
+}
+
+fn validate_tree_pair_block_group_proven<'a, R>(
+    rule: &'a R,
+    src_keys: &'a [FusionTreePairKey],
+) -> Result<Option<ValidatedTreePairBlockGroup<'a, R>>, CoreError>
+where
+    R: FusionRule,
+{
+    let projection = MultiplicityFreePairProjection::from_validated(rule, src_keys)?;
+    validate_tree_pair_block_group_projection(rule, projection)
+}
+
+fn validate_tree_pair_block_group_structure<'a, R>(
+    rule: &'a R,
+    structure: &'a BlockStructure,
+    indices: &'a [usize],
+    orientation: FusionTreePairOrientation,
+) -> Result<Option<ValidatedTreePairBlockGroup<'a, R>>, CoreError>
+where
+    R: FusionRule,
+{
+    let projection =
+        MultiplicityFreePairProjection::checked_structure(rule, structure, indices, orientation)?;
+    validate_tree_pair_block_group_projection(rule, projection)
+}
+
+fn validate_tree_pair_block_group_projection<'a, R>(
+    rule: &'a R,
+    projection: MultiplicityFreePairProjection<'a>,
+) -> Result<Option<ValidatedTreePairBlockGroup<'a, R>>, CoreError>
+where
+    R: FusionRule,
+{
+    let Some(reference) = projection.pair_at(0) else {
+        return Ok(None);
+    };
+    let reference_codomain = reference.codomain().key();
+    let reference_domain = reference.domain().key();
+    let same_group = |pair: ValidatedMultiplicityFreeTreePair<'_>| {
+        let codomain = pair.codomain().key();
+        let domain = pair.domain().key();
+        codomain.uncoupled() == reference_codomain.uncoupled()
+            && domain.uncoupled() == reference_domain.uncoupled()
+            && codomain.is_dual() == reference_codomain.is_dual()
+            && domain.is_dual() == reference_domain.is_dual()
+    };
+    for index in 0..projection.len() {
+        let source = projection
+            .pair_at(index)
+            .expect("validated projection covers every source");
+        // Why not infer a block from matching ranks or tree shape:
+        // coefficients share a basis only when every external sector,
+        // orientation, and multiplicity invariant agrees. Coupled sectors are
+        // basis states within one group and intentionally need not match.
+        if !same_group(source) {
+            return Err(CoreError::MalformedFusionTree {
+                message: TREE_PAIR_BLOCK_GROUP_ERROR,
+            });
+        }
+    }
+    Ok(Some(ValidatedTreePairBlockGroup {
+        rule,
+        source_len: projection.len(),
+        codomain_rank: reference_codomain.uncoupled().len(),
+        domain_rank: reference_domain.uncoupled().len(),
+        projection,
+    }))
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) fn multiplicity_free_braid_tree_pair_block_proven<R>(
+    batch: ValidatedMultiplicityFreePairBatch<'_, R>,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let (rule, src_keys) = batch.parts();
+    let Some(group) = validate_tree_pair_block_group_proven(rule, src_keys)? else {
+        return Ok(Vec::new());
+    };
+    multiplicity_free_braid_tree_pair_block_validated(group, prepared)
+}
+
+pub(crate) fn multiplicity_free_braid_tree_pair_block_ordered_proven<R>(
+    batch: ValidatedMultiplicityFreePairBatch<'_, R>,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let (rule, src_keys) = batch.parts();
+    let Some(group) = validate_tree_pair_block_group_proven(rule, src_keys)? else {
+        return Ok(OrderedBlockLinearMap {
+            destinations: Vec::new(),
+            source_count: 0,
+            storage: OrderedBlockLinearStorage::DenseDstSrc(Vec::new()),
+        });
+    };
+    multiplicity_free_braid_tree_pair_block_ordered_validated(group, prepared)
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) fn multiplicity_free_transpose_tree_pair_block_proven<R>(
+    batch: ValidatedMultiplicityFreePairBatch<'_, R>,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let (rule, src_keys) = batch.parts();
+    let Some(group) = validate_tree_pair_block_group_proven(rule, src_keys)? else {
+        return Ok(Vec::new());
+    };
+    multiplicity_free_transpose_tree_pair_block_validated(group, prepared)
+}
+
+pub(crate) fn multiplicity_free_transpose_tree_pair_block_ordered_proven<R>(
+    batch: ValidatedMultiplicityFreePairBatch<'_, R>,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let (rule, src_keys) = batch.parts();
+    let Some(group) = validate_tree_pair_block_group_proven(rule, src_keys)? else {
+        return Ok(OrderedBlockLinearMap {
+            destinations: Vec::new(),
+            source_count: 0,
+            storage: OrderedBlockLinearStorage::DenseDstSrc(Vec::new()),
+        });
+    };
+    multiplicity_free_transpose_tree_pair_block_ordered_validated(group, prepared)
+}
+
+/// Batched [`multiplicity_free_braid_tree_pair`] over every source tree-pair of
+/// a block (all sharing the same uncoupled sectors / duality). Returns, per
+/// source (in `src_keys` order), its `(destination tree-pair, coefficient)`
+/// rows — identical content to calling the per-source function on each, but the
+/// bend/braid step structure is walked once for the block.
+///
+/// The floating-point *summation order* of coefficients that reach a
+/// destination by several paths differs from the per-source accumulator, so
+/// results agree with the per-source version to double-precision rounding, not
+/// necessarily bit-for-bit.
+///
+/// `src_keys` must be empty or share one external-sector, duality, and
+/// multiplicity group. Empty input returns an empty transform; mixed groups
+/// return [`CoreError::MalformedFusionTree`] before any symbol evaluation.
+///
+/// Every source follows
+/// [`FusionTreePairKey::validate_for_rule`]'s provider-domain precondition.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public block transform API exposes source-major coefficient rows directly"
+)]
+pub fn multiplicity_free_braid_tree_pair_block<R>(
+    rule: &R,
+    src_keys: &[FusionTreePairKey],
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_levels: &[usize],
+    domain_levels: &[usize],
+) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    validate_multiplicity_free_execution_style(rule)?;
+    let Some(first) = src_keys.first() else {
+        return Ok(Vec::new());
+    };
+    let codomain_rank = first.codomain_tree().uncoupled().len();
+    let domain_rank = first.domain_tree().uncoupled().len();
+    let prepared = PreparedTreePairOperation::prepare_braid(
+        rule,
+        codomain_rank,
+        domain_rank,
+        codomain_permutation,
+        domain_permutation,
+        codomain_levels,
+        domain_levels,
+    )?;
+    let group = validate_tree_pair_block_group_for_rule(rule, src_keys)?
+        .expect("nonempty source block produces a validation proof");
+    multiplicity_free_braid_tree_pair_block_validated(group, &prepared)
+}
+
+#[allow(clippy::type_complexity)]
+fn multiplicity_free_braid_tree_pair_block_validated<R>(
+    group: ValidatedTreePairBlockGroup<'_, R>,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
+    if prepared.is_identity() {
+        return Ok((0..group.source_len)
+            .map(|index| {
+                let key = group
+                    .projection
+                    .pair_at(index)
+                    .expect("validated projection covers every source")
+                    .materialize();
+                vec![(key, R::Scalar::one())]
+            })
+            .collect());
+    }
+    multiplicity_free_braid_tree_pair_block_compact_validated(group, prepared)
+        .map(scatter_compact_tree_pair_block)
+}
+
+fn multiplicity_free_braid_tree_pair_block_ordered_validated<R>(
+    group: ValidatedTreePairBlockGroup<'_, R>,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
+    multiplicity_free_braid_tree_pair_block_compact_validated(group, prepared)
+        .map(order_compact_tree_pair_block)
+}
+
+fn multiplicity_free_braid_tree_pair_block_compact_validated<R>(
+    group: ValidatedTreePairBlockGroup<'_, R>,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<CompactMultiplicityFreeTreePairBlock<R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let rule = group.rule;
+    let codomain_rank = group.codomain_rank;
+    let domain_rank = group.domain_rank;
+    match &prepared.plan {
+        PreparedTreePairPlan::Identity => {
+            return compact_repartition_tree_pair_block(group, codomain_rank);
+        }
+        PreparedTreePairPlan::Repartition => {
+            return compact_repartition_tree_pair_block(
+                group,
+                prepared.target_codomain_rank,
+            );
+        }
+        PreparedTreePairPlan::Braid(_)
+        | PreparedTreePairPlan::SimpleBraid(_)
+        | PreparedTreePairPlan::UniqueBraid(_) => {}
+        PreparedTreePairPlan::Transpose { .. } => {
+            unreachable!("braid preparation cannot create a transpose plan")
+        }
+    }
+    let all_rank = codomain_rank + domain_rank;
+
+    // The first compact operator writes source columns directly; later
+    // operators compose through the resulting dense coefficient matrix.
+    let mut basis = CompactMultiplicityFreeTreePairBasis::from_group(group)?;
+    let mut columns = None;
+
+    // Step A: repartition everything into the codomain (bendleft chain).
+    let mut current_codomain_rank = codomain_rank;
+    while current_codomain_rank < all_rank {
+        let (next_basis, next_columns) = match columns.take() {
+            Some(columns) => compact_bendleft_block_step(rule, basis, &columns)?,
+            None => compact_bendleft_block_first(rule, basis)?,
+        };
+        basis = next_basis;
+        columns = Some(next_columns);
+        current_codomain_rank += 1;
+    }
+
+    // Step B: braid the (now all-codomain) tree ONE adjacent swap at a time,
+    // each swap batched across the whole block. This replaces the per-source
+    // inner braid (`multiplicity_free_braid_tree`, whose `FusionTermAccumulator`
+    // and elementary-swap term lists ran once per source tree) with the shared
+    // block matrix walk — the TensorKit 0.17 `artin_braid`-on-a-block scheme.
+    for step in prepared
+        .plan
+        .artin_steps()
+        .expect("braid preparation has Artin steps")
+    {
+        let (next_basis, next_columns) = match columns.take() {
+            Some(columns) => compact_codomain_artin_block_step(
+                rule,
+                basis,
+                &columns,
+                step.index,
+                step.inverse,
+            )?,
+            None => compact_codomain_artin_block_first(
+                rule,
+                basis,
+                step.index,
+                step.inverse,
+            )?,
+        };
+        basis = next_basis;
+        columns = Some(next_columns);
+    }
+
+    // Step C: repartition back to the requested codomain rank.
+    let target_codomain_rank = prepared.target_codomain_rank;
+    while current_codomain_rank > target_codomain_rank {
+        let (next_basis, next_columns) = match columns.take() {
+            Some(columns) => compact_bendright_block_step(rule, basis, &columns)?,
+            None => compact_bendright_block_first(rule, basis)?,
+        };
+        basis = next_basis;
+        columns = Some(next_columns);
+        current_codomain_rank -= 1;
+    }
+    while current_codomain_rank < target_codomain_rank {
+        let (next_basis, next_columns) = match columns.take() {
+            Some(columns) => compact_bendleft_block_step(rule, basis, &columns)?,
+            None => compact_bendleft_block_first(rule, basis)?,
+        };
+        basis = next_basis;
+        columns = Some(next_columns);
+        current_codomain_rank += 1;
+    }
+
+    // Why not materialize after each braid: both block runners keep the
+    // external frame immutable and reconstruct full keys only at the API edge.
+    Ok(CompactMultiplicityFreeTreePairBlock {
+        basis,
+        columns: columns.expect("nonidentity braid executes at least one compact operator"),
+        records_dimensions: true,
+    })
+}
+
+/// Batched [`multiplicity_free_permute_tree_pair`] over a block: symmetric
+/// braiding with the trivial level ordering.
+///
+/// The group contract is identical to
+/// [`multiplicity_free_braid_tree_pair_block`]. Symmetric braiding remains a
+/// required capability even for an empty source block.
+///
+/// Every source follows
+/// [`FusionTreePairKey::validate_for_rule`]'s provider-domain precondition.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public block transform API exposes source-major coefficient rows directly"
+)]
+pub fn multiplicity_free_permute_tree_pair_block<R>(
+    rule: &R,
+    src_keys: &[FusionTreePairKey],
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        });
+    }
+    validate_multiplicity_free_execution_style(rule)?;
+    let Some(first) = src_keys.first() else {
+        return Ok(Vec::new());
+    };
+    let codomain_rank = first.codomain_tree().uncoupled().len();
+    let domain_rank = first.domain_tree().uncoupled().len();
+    let prepared = PreparedTreePairOperation::prepare_permute(
+        rule,
+        codomain_rank,
+        domain_rank,
+        codomain_permutation,
+        domain_permutation,
+    )?;
+    let group = validate_tree_pair_block_group_for_rule(rule, src_keys)?
+        .expect("nonempty source block produces a validation proof");
+    multiplicity_free_braid_tree_pair_block_validated(group, &prepared)
+}
+
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub fn multiplicity_free_permute_tree_pair_block_indexed<R>(
+    rule: &R,
+    structure: &BlockStructure,
+    src_indices: &[usize],
+    orientation: FusionTreePairOrientation,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        });
+    }
+    validate_multiplicity_free_execution_style(rule)?;
+    let Some(&first_index) = src_indices.first() else {
+        return Ok(Vec::new());
+    };
+    let first = structure.block(first_index)?;
+    let BlockKey::FusionTree(first) = first.key() else {
+        return Err(CoreError::ExpectedFusionTreePairKey {
+            actual: first.key().kind(),
+        });
+    };
+    let (codomain_rank, domain_rank) = match orientation {
+        FusionTreePairOrientation::Direct => (
+            first.codomain_tree().uncoupled().len(),
+            first.domain_tree().uncoupled().len(),
+        ),
+        FusionTreePairOrientation::Adjoint => (
+            first.domain_tree().uncoupled().len(),
+            first.codomain_tree().uncoupled().len(),
+        ),
+    };
+    let prepared = PreparedTreePairOperation::prepare_permute(
+        rule,
+        codomain_rank,
+        domain_rank,
+        codomain_permutation,
+        domain_permutation,
+    )?;
+    let group =
+        validate_tree_pair_block_group_structure(rule, structure, src_indices, orientation)?
+            .expect("nonempty source block produces a validation proof");
+    multiplicity_free_braid_tree_pair_block_validated(group, &prepared)
+}
+
+#[doc(hidden)]
+pub fn multiplicity_free_braid_tree_pair_block_ordered_indexed<R>(
+    rule: &R,
+    structure: &BlockStructure,
+    src_indices: &[usize],
+    orientation: FusionTreePairOrientation,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    validate_multiplicity_free_execution_style(rule)?;
+    prepared.validate_block_preflight(rule, PreparedTreePairFamily::BraidLike)?;
+    let Some(group) =
+        validate_tree_pair_block_group_structure(rule, structure, src_indices, orientation)?
+    else {
+        return Ok(OrderedBlockLinearMap {
+            destinations: Vec::new(),
+            source_count: 0,
+            storage: OrderedBlockLinearStorage::DenseDstSrc(Vec::new()),
+        });
+    };
+    multiplicity_free_braid_tree_pair_block_ordered_validated(group, prepared)
+}
+
+#[doc(hidden)]
+pub fn multiplicity_free_transpose_tree_pair_block_ordered_indexed<R>(
+    rule: &R,
+    structure: &BlockStructure,
+    src_indices: &[usize],
+    orientation: FusionTreePairOrientation,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    validate_multiplicity_free_execution_style(rule)?;
+    prepared.validate_block_preflight(rule, PreparedTreePairFamily::Transpose)?;
+    let Some(group) =
+        validate_tree_pair_block_group_structure(rule, structure, src_indices, orientation)?
+    else {
+        return Ok(OrderedBlockLinearMap {
+            destinations: Vec::new(),
+            source_count: 0,
+            storage: OrderedBlockLinearStorage::DenseDstSrc(Vec::new()),
+        });
+    };
+    multiplicity_free_transpose_tree_pair_block_ordered_validated(group, prepared)
+}
+
+/// Batched [`multiplicity_free_transpose_tree_pair`] over every source
+/// tree-pair of a block (all sharing uncoupled sectors / duality). The planar
+/// cyclic-transpose step sequence — repartition to the target codomain rank,
+/// then rotate the coupled loop one leg at a time — depends only on the ranks
+/// and permutation, so it is identical for every source. Walk it once over the
+/// shared `DenseColumns` matrix instead of replaying the repartition and cyclic
+/// bends per source (TensorKit 0.17's block `fstranspose`). Returns, per source
+/// in `src_keys` order, its `(destination tree-pair, coefficient)` rows.
+///
+/// As with the braid block port, coefficients that reach a destination by
+/// several paths sum in a different order than the per-source accumulator, so
+/// results agree to double-precision rounding, not necessarily bit-for-bit.
+///
+/// The empty/group contract is identical to
+/// [`multiplicity_free_braid_tree_pair_block`].
+///
+/// Every source follows
+/// [`FusionTreePairKey::validate_for_rule`]'s provider-domain precondition.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public block transform API exposes source-major coefficient rows directly"
+)]
+pub fn multiplicity_free_transpose_tree_pair_block<R>(
+    rule: &R,
+    src_keys: &[FusionTreePairKey],
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    validate_multiplicity_free_execution_style(rule)?;
+    let Some(first) = src_keys.first() else {
+        return Ok(Vec::new());
+    };
+    let codomain_rank = first.codomain_tree().uncoupled().len();
+    let domain_rank = first.domain_tree().uncoupled().len();
+    let prepared = PreparedTreePairOperation::prepare_transpose(
+        codomain_rank,
+        domain_rank,
+        codomain_permutation,
+        domain_permutation,
+    )?;
+    let group = validate_tree_pair_block_group_for_rule(rule, src_keys)?
+        .expect("nonempty source block produces a validation proof");
+    multiplicity_free_transpose_tree_pair_block_validated(group, &prepared)
+}
+
+#[allow(clippy::type_complexity)]
+fn multiplicity_free_transpose_tree_pair_block_validated<R>(
+    group: ValidatedTreePairBlockGroup<'_, R>,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
+    if prepared.is_identity() {
+        return Ok((0..group.source_len)
+            .map(|index| {
+                let key = group
+                    .projection
+                    .pair_at(index)
+                    .expect("validated projection covers every source")
+                    .materialize();
+                vec![(key, R::Scalar::one())]
+            })
+            .collect());
+    }
+    multiplicity_free_transpose_tree_pair_block_compact_validated(group, prepared)
+        .map(scatter_compact_tree_pair_block)
+}
+
+fn multiplicity_free_transpose_tree_pair_block_ordered_validated<R>(
+    group: ValidatedTreePairBlockGroup<'_, R>,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
+    multiplicity_free_transpose_tree_pair_block_compact_validated(group, prepared)
+        .map(order_compact_tree_pair_block)
+}
+
+fn multiplicity_free_transpose_tree_pair_block_compact_validated<R>(
+    group: ValidatedTreePairBlockGroup<'_, R>,
+    prepared: &PreparedTreePairOperation<'_>,
+) -> Result<CompactMultiplicityFreeTreePairBlock<R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let rule = group.rule;
+    let codomain_rank = group.codomain_rank;
+    let cycle = match &prepared.plan {
+        PreparedTreePairPlan::Identity => {
+            return compact_repartition_tree_pair_block(group, codomain_rank);
+        }
+        PreparedTreePairPlan::Repartition => {
+            return compact_repartition_tree_pair_block(
+                group,
+                prepared.target_codomain_rank,
+            );
+        }
+        PreparedTreePairPlan::Transpose { direction, count } => {
+            (*direction, *count)
+        }
+        PreparedTreePairPlan::Braid(_)
+        | PreparedTreePairPlan::SimpleBraid(_)
+        | PreparedTreePairPlan::UniqueBraid(_) => {
+            unreachable!("transpose preparation cannot create a braid plan")
+        }
+    };
+
+    let mut basis = CompactMultiplicityFreeTreePairBasis::from_group(group)?;
+    let mut columns = None;
+
+    let target_codomain_rank = prepared.target_codomain_rank;
+    let mut current_codomain_rank = codomain_rank;
+    while current_codomain_rank < target_codomain_rank {
+        let (next_basis, next_columns) = match columns.take() {
+            Some(columns) => compact_bendleft_block_step(rule, basis, &columns)?,
+            None => compact_bendleft_block_first(rule, basis)?,
+        };
+        basis = next_basis;
+        columns = Some(next_columns);
+        current_codomain_rank += 1;
+    }
+    while current_codomain_rank > target_codomain_rank {
+        let (next_basis, next_columns) = match columns.take() {
+            Some(columns) => compact_bendright_block_step(rule, basis, &columns)?,
+            None => compact_bendright_block_first(rule, basis)?,
+        };
+        basis = next_basis;
+        columns = Some(next_columns);
+        current_codomain_rank -= 1;
+    }
+
+    for _ in 0..cycle.1 {
+        let (next_basis, next_columns) = match (cycle.0, columns.take()) {
+            (PreparedCycleDirection::Clockwise, Some(columns)) => {
+                compact_cycle_clockwise_block_step(rule, basis, &columns)?
+            }
+            (PreparedCycleDirection::Clockwise, None) => {
+                compact_cycle_clockwise_block_first(rule, basis)?
+            }
+            (PreparedCycleDirection::Anticlockwise, Some(columns)) => {
+                compact_cycle_anticlockwise_block_step(rule, basis, &columns)?
+            }
+            (PreparedCycleDirection::Anticlockwise, None) => {
+                compact_cycle_anticlockwise_block_first(rule, basis)?
+            }
+        };
+        basis = next_basis;
+        columns = Some(next_columns);
+    }
+
+    // Why not materialize after each fold: the external frame is identical for
+    // every local row and remains immutable until this ordered API boundary.
+    #[cfg(test)]
+    assert_compact_tree_pair_basis_matches_homspace(rule, &basis);
+    Ok(CompactMultiplicityFreeTreePairBlock {
+        basis,
+        columns: columns.expect("nonidentity transpose executes at least one compact operator"),
+        records_dimensions: true,
+    })
+}
+
+#[cfg(test)]
+type MultiplicityFreeTreePairBlockRows<S> = Vec<Vec<(FusionTreePairKey, S)>>;
+
+#[cfg(test)]
+fn multiplicity_free_foldright_tree_pair_legacy_oracle<R>(
+    rule: &R,
+    tree_pair: &FusionTreePairKey,
+) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let codomain = tree_pair.codomain_tree();
+    if codomain.uncoupled().is_empty() {
+        return Err(CoreError::MalformedFusionTree {
+            message: "foldright requires at least one codomain leg",
+        });
+    }
+    let a = codomain.uncoupled()[0];
+    let is_dual_a =
+        codomain
+            .is_dual()
+            .first()
+            .copied()
+            .ok_or(CoreError::MalformedFusionTree {
+                message: "codomain tree is missing the first duality flag",
+            })?;
+    let kappa = rule.frobenius_schur_phase_scalar(a);
+    let c = codomain.coupled();
+
+    let mut terms = FusionTermAccumulator::new();
+    for (codomain_prime, coeff1) in
+        multiplicity_free_multi_fmove_tree_legacy_oracle(rule, codomain)?
+    {
+        let b = codomain_prime.coupled();
+        let a_symbol = rule.a_symbol_scalar(a, b, c);
+        let coeff0 = rule.sqrt_dim_scalar(c) * rule.inv_sqrt_dim_scalar(b);
+        for (domain_prime, coeff2) in multiplicity_free_multi_fmove_inv_tree_legacy_oracle(
+            rule,
+            rule.dual(a),
+            b,
+            tree_pair.domain_tree(),
+            !is_dual_a,
+        )? {
+            let mut coefficient =
+                coeff0.clone() * (coeff2).conj() * a_symbol.clone() * coeff1.clone();
+            if is_dual_a {
+                coefficient = coefficient * kappa.clone();
+            }
+            terms.push(
+                FusionTreePairKey::pair(codomain_prime.clone(), domain_prime),
+                coefficient,
+            );
+        }
+    }
+    Ok(terms.into_vec())
+}
+
+#[cfg(test)]
+fn multiplicity_free_foldleft_tree_pair_legacy_oracle<R>(
+    rule: &R,
+    tree_pair: &FusionTreePairKey,
+) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let swapped = FusionTreePairKey::pair(
+        tree_pair.domain_tree().clone(),
+        tree_pair.codomain_tree().clone(),
+    );
+    Ok(
+        multiplicity_free_foldright_tree_pair_legacy_oracle(rule, &swapped)?
+            .into_iter()
+            .map(|(folded, coefficient)| {
+                (
+                    FusionTreePairKey::pair(
+                        folded.domain_tree().clone(),
+                        folded.codomain_tree().clone(),
+                    ),
+                    (coefficient).conj(),
+                )
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+fn multiplicity_free_cycle_clockwise_tree_pair_legacy_oracle<R>(
+    rule: &R,
+    tree_pair: &FusionTreePairKey,
+) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let first: Vec<_> = if tree_pair.codomain_tree().uncoupled().is_empty() {
+        multiplicity_free_bendleft_tree_pair(rule, tree_pair)?
+            .into_iter()
+            .collect()
+    } else {
+        multiplicity_free_foldright_tree_pair_legacy_oracle(rule, tree_pair)?
+    };
+    if tree_pair.codomain_tree().uncoupled().is_empty() {
+        compose_tree_pair_terms(rule, first, |rule, key| {
+            multiplicity_free_foldright_tree_pair_legacy_oracle(rule, key)
+        })
+    } else {
+        compose_tree_pair_terms(rule, first, |rule, key| {
+            multiplicity_free_bendleft_tree_pair(rule, key)
+        })
+    }
+}
+
+#[cfg(test)]
+fn multiplicity_free_cycle_anticlockwise_tree_pair_legacy_oracle<R>(
+    rule: &R,
+    tree_pair: &FusionTreePairKey,
+) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let first: Vec<_> = if tree_pair.domain_tree().uncoupled().is_empty() {
+        multiplicity_free_bendright_tree_pair(rule, tree_pair)?
+            .into_iter()
+            .collect()
+    } else {
+        multiplicity_free_foldleft_tree_pair_legacy_oracle(rule, tree_pair)?
+    };
+    if tree_pair.domain_tree().uncoupled().is_empty() {
+        compose_tree_pair_terms(rule, first, |rule, key| {
+            multiplicity_free_foldleft_tree_pair_legacy_oracle(rule, key)
+        })
+    } else {
+        compose_tree_pair_terms(rule, first, |rule, key| {
+            multiplicity_free_bendright_tree_pair(rule, key)
+        })
+    }
+}
+
+#[cfg(test)]
+fn multiplicity_free_transpose_tree_pair_block_full_key_oracle<R>(
+    rule: &R,
+    src_keys: &[FusionTreePairKey],
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<MultiplicityFreeTreePairBlockRows<R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let Some(group) = validate_tree_pair_block_group_for_rule(rule, src_keys)? else {
+        return Ok(Vec::new());
+    };
+    let prepared = PreparedTreePairOperation::prepare_transpose(
+        group.codomain_rank,
+        group.domain_rank,
+        codomain_permutation,
+        domain_permutation,
+    )?;
+    let cycle = match &prepared.plan {
+        PreparedTreePairPlan::Identity => {
+            return Ok(src_keys
+                .iter()
+                .map(|key| vec![(key.clone(), R::Scalar::one())])
+                .collect());
+        }
+        PreparedTreePairPlan::Repartition => None,
+        PreparedTreePairPlan::Transpose { direction, count } => Some((*direction, *count)),
+        PreparedTreePairPlan::Braid(_)
+        | PreparedTreePairPlan::SimpleBraid(_)
+        | PreparedTreePairPlan::UniqueBraid(_) => {
+            unreachable!("transpose preparation cannot create a braid plan")
+        }
+    };
+
+    let num_src = src_keys.len();
+    let mut basis = src_keys.to_vec();
+    let mut columns = DenseColumns::with_capacity(num_src, num_src);
+    for source in 0..num_src {
+        let row = columns.push_empty_row();
+        columns.row_mut(row)[source] = Some(R::Scalar::one());
+    }
+
+    let target_codomain_rank = prepared.target_codomain_rank;
+    let mut current_codomain_rank = group.codomain_rank;
+    while current_codomain_rank < target_codomain_rank {
+        (basis, columns) = compose_block_terms(rule, &basis, &columns, |rule, key| {
+            multiplicity_free_bendleft_tree_pair(rule, key)
+        })?;
+        current_codomain_rank += 1;
+    }
+    while current_codomain_rank > target_codomain_rank {
+        (basis, columns) = compose_block_terms(rule, &basis, &columns, |rule, key| {
+            multiplicity_free_bendright_tree_pair(rule, key)
+        })?;
+        current_codomain_rank -= 1;
+    }
+
+    if let Some((direction, count)) = cycle {
+        for _ in 0..count {
+            (basis, columns) = match direction {
+                PreparedCycleDirection::Clockwise => {
+                    compose_block_terms(rule, &basis, &columns, |rule, key| {
+                        multiplicity_free_cycle_clockwise_tree_pair_legacy_oracle(rule, key)
+                    })?
+                }
+                PreparedCycleDirection::Anticlockwise => {
+                    compose_block_terms(rule, &basis, &columns, |rule, key| {
+                        multiplicity_free_cycle_anticlockwise_tree_pair_legacy_oracle(rule, key)
+                    })?
+                }
+            };
+        }
+    }
+
+    let mut rows_per_source = vec![Vec::new(); num_src];
+    for (destination_row, destination) in basis.iter().enumerate() {
+        for (source, coefficient) in columns.row(destination_row).iter().enumerate() {
+            if let Some(coefficient) = coefficient {
+                rows_per_source[source].push((destination.clone(), coefficient.clone()));
+            }
+        }
+    }
+    Ok(rows_per_source)
+}
