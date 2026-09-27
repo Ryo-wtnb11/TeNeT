@@ -230,6 +230,294 @@ where
     right
 }
 
+fn layout_linear_offset(
+    mut linear: usize,
+    shape: &[usize],
+    strides: &[isize],
+    base: isize,
+) -> Result<usize, OperationError> {
+    let mut offset = base;
+    for (&dim, &stride) in shape.iter().zip(strides) {
+        let coordinate = if dim == 0 { 0 } else { linear % dim };
+        if let Some(quotient) = linear.checked_div(dim) {
+            linear = quotient;
+        }
+        let coordinate =
+            isize::try_from(coordinate).map_err(|_| OperationError::ElementCountOverflow)?;
+        offset = offset
+            .checked_add(
+                coordinate
+                    .checked_mul(stride)
+                    .ok_or_else(|| OperationError::ElementCountOverflow)?,
+            )
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
+    }
+    usize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })
+}
+
+/// Fused loop nest over a prebaked layout writing into uninitialized memory
+/// (issue #232, condition 2), mirroring `apply_fused_pair_slices` but with
+/// `MaybeUninit::write` for the destination. Each destination offset is visited
+/// exactly once, identical to `layout_linear_offset`'s odometer, so the
+/// write-once-then-`assume_init` invariant of `initialize_owned` (#226/#233) is
+/// preserved: the normalization only drops extent-1 axes, reorders, and fuses
+/// contiguous runs — the *set* of visited (dst, src) offsets is unchanged, and
+/// there is no read-after-write within a single writer (`src` is a disjoint,
+/// fully-initialized slice). The caller supplies runtime-length traversal scratch.
+fn write_fused_uninit<D, F>(
+    baked: BakedFusedLayout<'_>,
+    dst: &mut [MaybeUninit<D>],
+    src: &[D],
+    dst_offset: isize,
+    src_offset: isize,
+    index: &mut [usize],
+    map: F,
+) -> Result<(), OperationError>
+where
+    D: Copy,
+    F: Fn(D) -> D,
+{
+    let dims = baked.dims();
+    let dst_strides = baked.dst_strides();
+    let src_strides = baked.src_strides();
+    let Some(index) = index.get_mut(..dims.len()) else {
+        return Err(OperationError::InvalidArgument {
+            message: "fused traversal scratch is shorter than the normalized rank",
+        });
+    };
+    for_each_fused_span(
+        dims,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+        index,
+        |dst_base, src_base, inner_len, inner_dst, inner_src| {
+            for position in 0..inner_len {
+                let dst_position = (dst_base + position as isize * inner_dst) as usize;
+                let src_position = (src_base + position as isize * inner_src) as usize;
+                dst[dst_position].write(map(src[src_position]));
+            }
+        },
+    );
+    Ok(())
+}
+
+// Why-not fuse the zero writer: it has no paired source view, and a pure
+// permute — the deg=1 U(1) owned-path regime this optimization targets — always
+// touches every destination block, so `inactive_destination_layouts` is empty
+// and this writer never runs on the hot path. A dedicated single-side fused
+// walk would add a fourth baked role for no measured win, so it stays on the
+// per-element odometer (issue #232, condition 2).
+fn write_uninit_layout_zero<D: Zero + Copy>(
+    layouts: &TreeTransformLayoutTable,
+    layout: &TreeTransformLayout,
+    dst: &mut [MaybeUninit<D>],
+) -> Result<(), OperationError> {
+    for linear in 0..layout.element_count {
+        let index = layout_linear_offset(
+            linear,
+            layouts.shape(layout),
+            layouts.strides(layout),
+            layout.offset,
+        )?;
+        dst[index].write(D::zero());
+    }
+    Ok(())
+}
+
+/// `dst` may be a split of the owned destination starting at absolute offset
+/// `dst_start`; layout offsets are rebased exactly as the initialised parallel
+/// replay rebases them.
+#[allow(clippy::too_many_arguments)]
+fn write_uninit_layout_from_source<D, C>(
+    layouts: &TreeTransformLayoutTable,
+    dst_index: usize,
+    src_index: usize,
+    dst: &mut [MaybeUninit<D>],
+    dst_start: isize,
+    src: &[D],
+    conjugate: bool,
+    scale: TransformScale<D, C>,
+    fused_index: &mut [usize],
+) -> Result<(), OperationError>
+where
+    D: Copy
+        + Mul<D, Output = D>
+        + Zero
+        + One
+        + PartialEq
+        + ConjugateValue
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    // The element op is chosen once per block, with the structural coefficient
+    // still in its own type; see `TransformScale`.
+    if scale.is_identity() {
+        return write_uninit_layout_mapped(
+            layouts,
+            dst_index,
+            src_index,
+            dst,
+            dst_start,
+            src,
+            fused_index,
+            move |value: D| value.maybe_conj(conjugate),
+        );
+    }
+    if scale.is_zero() {
+        let zero = scale.apply(D::zero());
+        return write_uninit_layout_mapped(
+            layouts,
+            dst_index,
+            src_index,
+            dst,
+            dst_start,
+            src,
+            fused_index,
+            move |_: D| zero,
+        );
+    }
+    match scale {
+        TransformScale::Structural(coefficient) => write_uninit_layout_mapped(
+            layouts,
+            dst_index,
+            src_index,
+            dst,
+            dst_start,
+            src,
+            fused_index,
+            move |value: D| {
+                value
+                    .maybe_conj(conjugate)
+                    .scale_by_coefficient(coefficient)
+            },
+        ),
+        TransformScale::Data(scale) => write_uninit_layout_mapped(
+            layouts,
+            dst_index,
+            src_index,
+            dst,
+            dst_start,
+            src,
+            fused_index,
+            move |value: D| scale * value.maybe_conj(conjugate),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_uninit_layout_mapped<D, F>(
+    layouts: &TreeTransformLayoutTable,
+    dst_index: usize,
+    src_index: usize,
+    dst: &mut [MaybeUninit<D>],
+    dst_start: isize,
+    src: &[D],
+    fused_index: &mut [usize],
+    map: F,
+) -> Result<(), OperationError>
+where
+    D: Copy,
+    F: Fn(D) -> D,
+{
+    let dst_layout = layouts.entry(dst_index);
+    let src_layout = layouts.entry(src_index);
+    if let Some(baked) = layouts.fused_baked(dst_index) {
+        return write_fused_uninit(
+            baked,
+            dst,
+            src,
+            dst_layout.offset - dst_start,
+            src_layout.offset,
+            fused_index,
+            map,
+        );
+    }
+    for linear in 0..dst_layout.element_count {
+        let dst_index = layout_linear_offset(
+            linear,
+            layouts.shape(dst_layout),
+            layouts.strides(dst_layout),
+            dst_layout.offset - dst_start,
+        )?;
+        let src_index = layout_linear_offset(
+            linear,
+            layouts.shape(src_layout),
+            layouts.strides(src_layout),
+            src_layout.offset,
+        )?;
+        dst[dst_index].write(map(src[src_index]));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_uninit_layout_from_packed<D>(
+    layouts: &TreeTransformLayoutTable,
+    dst_index: usize,
+    dst: &mut [MaybeUninit<D>],
+    dst_start: isize,
+    packed: &[D],
+    packed_offset: usize,
+    alpha: D,
+    fused_index: &mut [usize],
+) -> Result<(), OperationError>
+where
+    D: Copy + Mul<D, Output = D> + Zero + One + PartialEq,
+{
+    let layout = layouts.entry(dst_index);
+    // Why the identity arm: `1 * (inf + 0i)` is `inf + NaN i`, so the scatter
+    // must copy rather than multiply when the caller's alpha is one. A zero
+    // alpha gives `scale_value`'s exact zero even where the recoupling GEMM
+    // left a NaN in `packed`, as TensorKit's scatter `tensoradd!` does.
+    let identity = alpha.is_one();
+    if let Some(baked) = layouts.fused_baked(dst_index) {
+        // The scatter role bakes src = packed (column-major) strides, so the
+        // fused walk over `packed` starting at `packed_offset` reproduces the
+        // odometer's `packed[packed_offset + linear]` column-major gather.
+        let dst_offset = layout.offset - dst_start;
+        let src_offset = offset_to_isize(packed_offset)?;
+        if identity {
+            write_fused_uninit(
+                baked,
+                dst,
+                packed,
+                dst_offset,
+                src_offset,
+                fused_index,
+                |v| v,
+            )?;
+        } else {
+            write_fused_uninit(
+                baked,
+                dst,
+                packed,
+                dst_offset,
+                src_offset,
+                fused_index,
+                move |value| scale_value(value, alpha),
+            )?;
+        }
+        return Ok(());
+    }
+    for linear in 0..layout.element_count {
+        let dst_index = layout_linear_offset(
+            linear,
+            layouts.shape(layout),
+            layouts.strides(layout),
+            layout.offset - dst_start,
+        )?;
+        let value = packed[packed_offset + linear];
+        dst[dst_index].write(if identity {
+            value
+        } else {
+            scale_value(value, alpha)
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod owned_overwrite_tests {
     use super::*;
@@ -773,292 +1061,4 @@ mod owned_overwrite_tests {
         .unwrap()
         .is_none());
     }
-}
-
-fn layout_linear_offset(
-    mut linear: usize,
-    shape: &[usize],
-    strides: &[isize],
-    base: isize,
-) -> Result<usize, OperationError> {
-    let mut offset = base;
-    for (&dim, &stride) in shape.iter().zip(strides) {
-        let coordinate = if dim == 0 { 0 } else { linear % dim };
-        if let Some(quotient) = linear.checked_div(dim) {
-            linear = quotient;
-        }
-        let coordinate =
-            isize::try_from(coordinate).map_err(|_| OperationError::ElementCountOverflow)?;
-        offset = offset
-            .checked_add(
-                coordinate
-                    .checked_mul(stride)
-                    .ok_or_else(|| OperationError::ElementCountOverflow)?,
-            )
-            .ok_or_else(|| OperationError::ElementCountOverflow)?;
-    }
-    usize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })
-}
-
-/// Fused loop nest over a prebaked layout writing into uninitialized memory
-/// (issue #232, condition 2), mirroring `apply_fused_pair_slices` but with
-/// `MaybeUninit::write` for the destination. Each destination offset is visited
-/// exactly once, identical to `layout_linear_offset`'s odometer, so the
-/// write-once-then-`assume_init` invariant of `initialize_owned` (#226/#233) is
-/// preserved: the normalization only drops extent-1 axes, reorders, and fuses
-/// contiguous runs — the *set* of visited (dst, src) offsets is unchanged, and
-/// there is no read-after-write within a single writer (`src` is a disjoint,
-/// fully-initialized slice). The caller supplies runtime-length traversal scratch.
-fn write_fused_uninit<D, F>(
-    baked: BakedFusedLayout<'_>,
-    dst: &mut [MaybeUninit<D>],
-    src: &[D],
-    dst_offset: isize,
-    src_offset: isize,
-    index: &mut [usize],
-    map: F,
-) -> Result<(), OperationError>
-where
-    D: Copy,
-    F: Fn(D) -> D,
-{
-    let dims = baked.dims();
-    let dst_strides = baked.dst_strides();
-    let src_strides = baked.src_strides();
-    let Some(index) = index.get_mut(..dims.len()) else {
-        return Err(OperationError::InvalidArgument {
-            message: "fused traversal scratch is shorter than the normalized rank",
-        });
-    };
-    for_each_fused_span(
-        dims,
-        dst_strides,
-        src_strides,
-        dst_offset,
-        src_offset,
-        index,
-        |dst_base, src_base, inner_len, inner_dst, inner_src| {
-            for position in 0..inner_len {
-                let dst_position = (dst_base + position as isize * inner_dst) as usize;
-                let src_position = (src_base + position as isize * inner_src) as usize;
-                dst[dst_position].write(map(src[src_position]));
-            }
-        },
-    );
-    Ok(())
-}
-
-// Why-not fuse the zero writer: it has no paired source view, and a pure
-// permute — the deg=1 U(1) owned-path regime this optimization targets — always
-// touches every destination block, so `inactive_destination_layouts` is empty
-// and this writer never runs on the hot path. A dedicated single-side fused
-// walk would add a fourth baked role for no measured win, so it stays on the
-// per-element odometer (issue #232, condition 2).
-fn write_uninit_layout_zero<D: Zero + Copy>(
-    layouts: &TreeTransformLayoutTable,
-    layout: &TreeTransformLayout,
-    dst: &mut [MaybeUninit<D>],
-) -> Result<(), OperationError> {
-    for linear in 0..layout.element_count {
-        let index = layout_linear_offset(
-            linear,
-            layouts.shape(layout),
-            layouts.strides(layout),
-            layout.offset,
-        )?;
-        dst[index].write(D::zero());
-    }
-    Ok(())
-}
-
-/// `dst` may be a split of the owned destination starting at absolute offset
-/// `dst_start`; layout offsets are rebased exactly as the initialised parallel
-/// replay rebases them.
-#[allow(clippy::too_many_arguments)]
-fn write_uninit_layout_from_source<D, C>(
-    layouts: &TreeTransformLayoutTable,
-    dst_index: usize,
-    src_index: usize,
-    dst: &mut [MaybeUninit<D>],
-    dst_start: isize,
-    src: &[D],
-    conjugate: bool,
-    scale: TransformScale<D, C>,
-    fused_index: &mut [usize],
-) -> Result<(), OperationError>
-where
-    D: Copy
-        + Mul<D, Output = D>
-        + Zero
-        + One
-        + PartialEq
-        + ConjugateValue
-        + RecouplingCoefficientAction<C>,
-    C: Copy,
-{
-    // The element op is chosen once per block, with the structural coefficient
-    // still in its own type; see `TransformScale`.
-    if scale.is_identity() {
-        return write_uninit_layout_mapped(
-            layouts,
-            dst_index,
-            src_index,
-            dst,
-            dst_start,
-            src,
-            fused_index,
-            move |value: D| value.maybe_conj(conjugate),
-        );
-    }
-    if scale.is_zero() {
-        let zero = scale.apply(D::zero());
-        return write_uninit_layout_mapped(
-            layouts,
-            dst_index,
-            src_index,
-            dst,
-            dst_start,
-            src,
-            fused_index,
-            move |_: D| zero,
-        );
-    }
-    match scale {
-        TransformScale::Structural(coefficient) => write_uninit_layout_mapped(
-            layouts,
-            dst_index,
-            src_index,
-            dst,
-            dst_start,
-            src,
-            fused_index,
-            move |value: D| {
-                value
-                    .maybe_conj(conjugate)
-                    .scale_by_coefficient(coefficient)
-            },
-        ),
-        TransformScale::Data(scale) => write_uninit_layout_mapped(
-            layouts,
-            dst_index,
-            src_index,
-            dst,
-            dst_start,
-            src,
-            fused_index,
-            move |value: D| scale * value.maybe_conj(conjugate),
-        ),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_uninit_layout_mapped<D, F>(
-    layouts: &TreeTransformLayoutTable,
-    dst_index: usize,
-    src_index: usize,
-    dst: &mut [MaybeUninit<D>],
-    dst_start: isize,
-    src: &[D],
-    fused_index: &mut [usize],
-    map: F,
-) -> Result<(), OperationError>
-where
-    D: Copy,
-    F: Fn(D) -> D,
-{
-    let dst_layout = layouts.entry(dst_index);
-    let src_layout = layouts.entry(src_index);
-    if let Some(baked) = layouts.fused_baked(dst_index) {
-        return write_fused_uninit(
-            baked,
-            dst,
-            src,
-            dst_layout.offset - dst_start,
-            src_layout.offset,
-            fused_index,
-            map,
-        );
-    }
-    for linear in 0..dst_layout.element_count {
-        let dst_index = layout_linear_offset(
-            linear,
-            layouts.shape(dst_layout),
-            layouts.strides(dst_layout),
-            dst_layout.offset - dst_start,
-        )?;
-        let src_index = layout_linear_offset(
-            linear,
-            layouts.shape(src_layout),
-            layouts.strides(src_layout),
-            src_layout.offset,
-        )?;
-        dst[dst_index].write(map(src[src_index]));
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_uninit_layout_from_packed<D>(
-    layouts: &TreeTransformLayoutTable,
-    dst_index: usize,
-    dst: &mut [MaybeUninit<D>],
-    dst_start: isize,
-    packed: &[D],
-    packed_offset: usize,
-    alpha: D,
-    fused_index: &mut [usize],
-) -> Result<(), OperationError>
-where
-    D: Copy + Mul<D, Output = D> + Zero + One + PartialEq,
-{
-    let layout = layouts.entry(dst_index);
-    // Why the identity arm: `1 * (inf + 0i)` is `inf + NaN i`, so the scatter
-    // must copy rather than multiply when the caller's alpha is one. A zero
-    // alpha gives `scale_value`'s exact zero even where the recoupling GEMM
-    // left a NaN in `packed`, as TensorKit's scatter `tensoradd!` does.
-    let identity = alpha.is_one();
-    if let Some(baked) = layouts.fused_baked(dst_index) {
-        // The scatter role bakes src = packed (column-major) strides, so the
-        // fused walk over `packed` starting at `packed_offset` reproduces the
-        // odometer's `packed[packed_offset + linear]` column-major gather.
-        let dst_offset = layout.offset - dst_start;
-        let src_offset = offset_to_isize(packed_offset)?;
-        if identity {
-            write_fused_uninit(
-                baked,
-                dst,
-                packed,
-                dst_offset,
-                src_offset,
-                fused_index,
-                |v| v,
-            )?;
-        } else {
-            write_fused_uninit(
-                baked,
-                dst,
-                packed,
-                dst_offset,
-                src_offset,
-                fused_index,
-                move |value| scale_value(value, alpha),
-            )?;
-        }
-        return Ok(());
-    }
-    for linear in 0..layout.element_count {
-        let dst_index = layout_linear_offset(
-            linear,
-            layouts.shape(layout),
-            layouts.strides(layout),
-            layout.offset - dst_start,
-        )?;
-        let value = packed[packed_offset + linear];
-        dst[dst_index].write(if identity {
-            value
-        } else {
-            scale_value(value, alpha)
-        });
-    }
-    Ok(())
 }

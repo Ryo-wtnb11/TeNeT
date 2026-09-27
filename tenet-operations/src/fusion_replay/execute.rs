@@ -550,7 +550,7 @@ where
 
     /// Plan-time run partition of [`Self::direct_batch`]; handed to the backend
     /// alongside the jobs so it routes runs without recomputing the partition.
-    fn direct_batch_runs(&self) -> &[usize] {
+    pub(super) fn direct_batch_runs(&self) -> &[usize] {
         &self.direct_batch_runs
     }
 
@@ -843,7 +843,7 @@ where
     }
 }
 
-fn pack_group<A, T, C>(
+pub(super) fn pack_group<A, T, C>(
     kernels: &mut A,
     group: &FusionBlockMatrixGroup<C>,
     data: &[T],
@@ -874,7 +874,7 @@ where
     Ok(())
 }
 
-fn scatter_group<A, T, C>(
+pub(super) fn scatter_group<A, T, C>(
     kernels: &mut A,
     group: &FusionBlockMatrixGroup<C>,
     data: &mut [T],

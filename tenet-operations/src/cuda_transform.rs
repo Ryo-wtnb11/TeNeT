@@ -21,7 +21,7 @@
 //! recoupling step is `mul!(dst, src, transpose(U))`
 //! (indexmanipulations.jl:629/:701 @cfaa073), and QSpace `Permute`/`permute`
 //! (Source/QSpace.hh:2837/:2890 @dd2cc7e). Host authority for the lowering is
-//! `transform_replay.rs`: `pack_layout_into_column`, `recoupling_gemm_batch`,
+//! `transform_replay/kernels.rs`: `pack_layout_into_column`, `recoupling_gemm_batch`,
 //! `scatter_column_into_layout`.
 
 use core::any::TypeId;
@@ -722,7 +722,7 @@ impl CudaTreeTransformExecutor {
                 })?;
         // Host order exactly: pack every source column of one job, multiply,
         // scatter every destination column, then move to the next job
-        // (`transform_replay.rs`, the serial `recoupling_plan.entries()` loop).
+        // (`transform_replay/batched.rs`, the serial `recoupling_plan.entries()` loop).
         for recoupling in &prepared.recouplings {
             for pack in &recoupling.packs {
                 submit_move::<D>(

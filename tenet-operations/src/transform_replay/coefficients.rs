@@ -1,6 +1,6 @@
 use super::*;
 
-fn ensure_recoupling_coefficients<D, C>(
+pub(super) fn ensure_recoupling_coefficients<D, C>(
     workspace: &mut TreeTransformWorkspace<D>,
     task: TreeTransformTaskView<'_, C>,
     structure_identity: &Arc<()>,
@@ -67,7 +67,7 @@ where
     Ok(true)
 }
 
-fn recoupling_multi_block<C: Copy>(
+pub(super) fn recoupling_multi_block<C: Copy>(
     task: TreeTransformTaskView<'_, C>,
     block_index: usize,
 ) -> Result<&TreeTransformBlock, OperationError> {
@@ -94,7 +94,7 @@ fn recoupling_multi_block<C: Copy>(
     }
 }
 
-fn scale_inactive_destinations<A, D, C>(
+pub(super) fn scale_inactive_destinations<A, D, C>(
     kernels: &mut A,
     zero_strides: &mut Vec<isize>,
     task: TreeTransformTaskView<'_, C>,

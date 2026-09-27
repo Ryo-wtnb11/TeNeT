@@ -528,7 +528,7 @@ fn contiguous_scale_layout(
     })
 }
 
-fn compile_group_execution<C>(
+pub(super) fn compile_group_execution<C>(
     groups: &[FusionBlockContractGroupPlan<C>],
 ) -> Result<CompiledGroupExecution, OperationError> {
     let mut direct_batch = Vec::new();

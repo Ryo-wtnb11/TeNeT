@@ -1,6 +1,6 @@
 use super::*;
 
-fn effective_tree_transform_threads(
+pub(super) fn effective_tree_transform_threads(
     schedule: &TreeTransformParallelSchedule,
     requested: usize,
 ) -> usize {
@@ -29,7 +29,7 @@ fn effective_tree_transform_threads(
 
 /// Every replay fork runs in the operation's Host pool. Only the outermost
 /// fork installs; nested forks already run on a worker of that pool.
-fn replay_join<A, B, RA, RB>(left: A, right: B) -> (RA, RB)
+pub(super) fn replay_join<A, B, RA, RB>(left: A, right: B) -> (RA, RB)
 where
     A: FnOnce() -> RA + Send,
     B: FnOnce() -> RB + Send,
@@ -49,7 +49,7 @@ where
 /// `Option<&mut profile>` checks constant-fold away in the unprofiled copy.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_blocks_with_batched_recoupling<A, E, D, C>(
+pub(super) fn tree_transform_blocks_with_batched_recoupling<A, E, D, C>(
     kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
@@ -244,7 +244,7 @@ where
     Ok(())
 }
 
-fn parallel_split(items: usize, threads: usize) -> usize {
+pub(super) fn parallel_split(items: usize, threads: usize) -> usize {
     let left_threads = threads / 2;
     items
         .saturating_mul(left_threads)
@@ -332,7 +332,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn replay_single_blocks<A, D, C>(
+pub(super) fn replay_single_blocks<A, D, C>(
     mut kernels: A,
     fused_indices: &mut [usize],
     max_fused_rank: usize,
@@ -543,7 +543,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn replay_scatter_groups<A, D>(
+pub(super) fn replay_scatter_groups<A, D>(
     kernels: A,
     fused_indices: &mut [usize],
     max_fused_rank: usize,
@@ -650,7 +650,7 @@ where
 /// Returns the chunk's packed destination base offset and whether the ordered
 /// scatter groups may be split by destination slice.
 #[allow(clippy::too_many_arguments)]
-fn replay_multi_chunk<A, E, D, C>(
+pub(super) fn replay_multi_chunk<A, E, D, C>(
     kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
@@ -807,7 +807,7 @@ where
 /// Profiling attribution is phase-level; per-item clocks across workers would
 /// measure contention, not work.
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_blocks_with_batched_recoupling_parallel<A, E, D, C>(
+pub(super) fn tree_transform_blocks_with_batched_recoupling_parallel<A, E, D, C>(
     kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,

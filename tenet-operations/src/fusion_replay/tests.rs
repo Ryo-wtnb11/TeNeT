@@ -288,19 +288,13 @@ where
         } else {
             T::from(1.0)
         };
-        let dst_coefficient =
-            if class & usize::from(FusionGroupExecutionClass::SCATTER_DST) != 0 {
-                T::from(5.0)
-            } else {
-                T::from(1.0)
-            };
+        let dst_coefficient = if class & usize::from(FusionGroupExecutionClass::SCATTER_DST) != 0 {
+            T::from(5.0)
+        } else {
+            T::from(1.0)
+        };
         expected.push(
-            dst_coefficient
-                * alpha
-                * lhs_coefficient
-                * lhs[class]
-                * rhs_coefficient
-                * rhs[class]
+            dst_coefficient * alpha * lhs_coefficient * lhs[class] * rhs_coefficient * rhs[class]
                 + beta * initial[class],
         );
     }
@@ -616,8 +610,7 @@ fn asymmetric_packed_adjoint_validates_physical_matrix_shape() {
 
 #[test]
 fn mixed_active_and_inactive_blocks_apply_beta_once() {
-    let structure =
-        Arc::new(BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap());
+    let structure = Arc::new(BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap());
     let inactive = vec![FusionScaleBlockLayout {
         block: FusionStridedBlockLayout {
             shape: vec![1],
@@ -772,12 +765,10 @@ fn packed_matrix_geometry_distinguishes_overlap_gap_and_empty_blocks() {
 
     // What: partial rectangle overlap is invalid even when element counts
     // equal the matrix size.
-    assert!(matrix_layouts_cover_exactly(
-        &group(4, vec![subblock(0, 2), subblock(1, 2)]),
-        4,
-        1
-    )
-    .is_err());
+    assert!(
+        matrix_layouts_cover_exactly(&group(4, vec![subblock(0, 2), subblock(1, 2)]), 4, 1)
+            .is_err()
+    );
     // What: a disjoint incomplete grid is valid but requires scratch clear.
     assert_eq!(
         matrix_layouts_cover_exactly(&group(5, vec![subblock(0, 2), subblock(3, 2)]), 5, 1),
@@ -820,8 +811,7 @@ fn destination_storage_alias_is_rejected_during_compile() {
 
 #[test]
 fn inactive_destination_layouts_are_the_exact_active_complement() {
-    let structure =
-        Arc::new(BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap());
+    let structure = Arc::new(BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap());
     let active = FusionBlockContractGroupPlan::new(
         scalar_group(0, true, 1.0),
         scalar_group(0, true, 1.0),
@@ -1066,9 +1056,8 @@ fn canonical_direct_plan_rejects_equal_dimension_tree_basis_mismatch() {
         reordered[start..end].reverse();
         start = end;
     }
-    let reordered = Arc::new(
-        BlockStructure::coupled_sector_matrix_with_keys(&rule, 2, 4, reordered).unwrap(),
-    );
+    let reordered =
+        Arc::new(BlockStructure::coupled_sector_matrix_with_keys(&rule, 2, 4, reordered).unwrap());
 
     let plan = FusionBlockContractPlan::<f64>::try_from_canonical_coupled_regions_with_ops(
         &canonical,

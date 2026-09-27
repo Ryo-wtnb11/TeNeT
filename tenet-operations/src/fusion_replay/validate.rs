@@ -1,6 +1,6 @@
 use super::*;
 
-fn validate_storage_range(
+pub(super) fn validate_storage_range(
     storage_len: usize,
     base: usize,
     rows: usize,
@@ -21,7 +21,7 @@ fn validate_storage_range(
     Ok(())
 }
 
-fn validate_storage_len(
+pub(super) fn validate_storage_len(
     structure: &BlockStructure,
     actual_len: usize,
 ) -> Result<(), OperationError> {
@@ -37,7 +37,7 @@ fn validate_storage_len(
     Ok(())
 }
 
-fn direct_matrix_len(rows: usize, cols: usize) -> Result<usize, OperationError> {
+pub(super) fn direct_matrix_len(rows: usize, cols: usize) -> Result<usize, OperationError> {
     rows.checked_mul(cols)
         .ok_or_else(|| OperationError::ElementCountOverflow)
 }
@@ -74,7 +74,7 @@ fn validate_group_replay_bounds<C>(
     Ok(())
 }
 
-fn validate_compiled_plan_layouts<C>(
+pub(super) fn validate_compiled_plan_layouts<C>(
     dst_structure: &BlockStructure,
     lhs_structure: &BlockStructure,
     rhs_structure: &BlockStructure,
@@ -155,7 +155,7 @@ where
     Ok(())
 }
 
-fn validate_direct_plan_layouts<C>(
+pub(super) fn validate_direct_plan_layouts<C>(
     dst_structure: &BlockStructure,
     lhs_structure: &BlockStructure,
     rhs_structure: &BlockStructure,
@@ -339,7 +339,7 @@ where
     Ok(())
 }
 
-fn matrix_layouts_cover_exactly<C>(
+pub(super) fn matrix_layouts_cover_exactly<C>(
     group: &FusionBlockMatrixGroup<C>,
     matrix_rows: usize,
     matrix_cols: usize,

@@ -48,7 +48,7 @@ where
     )
 }
 
-fn tensoradd_prepared_block_with_strided_kernel<T>(
+pub(super) fn tensoradd_prepared_block_with_strided_kernel<T>(
     zero_strides: &mut Vec<isize>,
     descriptor: &TensorAddDescriptor,
     term: &TensorAddDescriptorTerm,
@@ -136,7 +136,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_single_with_strided_kernel<A, D, C>(
+pub(super) fn tree_transform_single_with_strided_kernel<A, D, C>(
     kernels: &mut A,
     zero_strides: &mut Vec<isize>,
     fused_index: Option<&mut [usize]>,
@@ -188,7 +188,7 @@ where
 /// grouped call; the naive per-element loop in the kernel adapter remains
 /// only for adapters without a dense executor. Job offsets are relative to the
 /// supplied chunk scratch, matching the trusted-view validation contract.
-fn recoupling_gemm_batch<E, D>(
+pub(super) fn recoupling_gemm_batch<E, D>(
     dense: &mut E,
     destination: &mut [D],
     source: &[D],
@@ -236,7 +236,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_multi_with_pack_gemm_scatter<A, D, C>(
+pub(super) fn tree_transform_multi_with_pack_gemm_scatter<A, D, C>(
     kernels: &mut A,
     workspace: &mut TreeTransformWorkspace<D>,
     layouts: &TreeTransformLayoutTable,
@@ -293,7 +293,13 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_multi_with_scratch_buffers<A, D, C, SourceScratch, DestinationScratch>(
+pub(super) fn tree_transform_multi_with_scratch_buffers<
+    A,
+    D,
+    C,
+    SourceScratch,
+    DestinationScratch,
+>(
     kernels: &mut A,
     zero_strides: &mut Vec<isize>,
     mut fused_index: Option<&mut [usize]>,
@@ -366,7 +372,7 @@ where
     clippy::too_many_arguments,
     reason = "the packing kernel keeps layout authority, source and destination slices, offset, and conjugation explicit"
 )]
-fn pack_layout_into_column<A, T>(
+pub(super) fn pack_layout_into_column<A, T>(
     kernels: &mut A,
     fused_index: Option<&mut [usize]>,
     layouts: &TreeTransformLayoutTable,
@@ -414,7 +420,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scatter_column_into_layout<A, T>(
+pub(super) fn scatter_column_into_layout<A, T>(
     kernels: &mut A,
     zero_strides: &mut Vec<isize>,
     fused_index: Option<&mut [usize]>,
