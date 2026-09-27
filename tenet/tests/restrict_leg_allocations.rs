@@ -180,7 +180,8 @@ fn restrict_leg_allocates_one_unfilled_payload_and_degeneracy_independent_scratc
 
 /// One restriction of all three legs of a tensor whose degeneracies are
 /// `scale` times a base shape: the measurement and the payload byte count.
-fn three_axis_measurement(scale: usize) -> (Measurement, usize) {
+/// `sequential` restricts one leg per call instead, the negative control.
+fn three_axis_measurement(scale: usize, sequential: bool) -> (Measurement, usize) {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let leg = u1(
@@ -207,12 +208,21 @@ fn three_axis_measurement(scale: usize) -> (Measurement, usize) {
     )
     .unwrap();
     let set = [(2, &on_leg), (0, &on_leg), (1, &on_dual)];
+    let restrict = || {
+        if sequential {
+            set.iter().fold(source.clone(), |tensor, &pair| {
+                tensor.restrict_leg(&[pair]).unwrap()
+            })
+        } else {
+            source.restrict_leg(&set).unwrap()
+        }
+    };
 
-    let warm = source.restrict_leg(&set).unwrap();
+    let warm = restrict();
     let payload_bytes = std::mem::size_of_val(warm.data());
     let mut output = None;
     let measurement = measure(|| {
-        output = Some(black_box(source.restrict_leg(&set).unwrap()));
+        output = Some(black_box(restrict()));
     });
     assert_eq!(output.unwrap().data(), warm.data());
     (measurement, payload_bytes)
@@ -227,8 +237,8 @@ fn restricting_three_legs_is_one_payload_pass() {
     // payload (#1561). Sequential one-leg passes would each allocate an
     // intermediate payload whose size grows with the degeneracies, so the
     // non-payload bytes would not stay fixed across scales.
-    let (small, small_bytes) = three_axis_measurement(1);
-    let (large, large_bytes) = three_axis_measurement(8);
+    let (small, small_bytes) = three_axis_measurement(1, false);
+    let (large, large_bytes) = three_axis_measurement(8, false);
     assert!(large_bytes > small_bytes);
     for (measurement, bytes) in [(&small, small_bytes), (&large, large_bytes)] {
         assert!(
@@ -245,6 +255,16 @@ fn restricting_three_legs_is_one_payload_pass() {
          {small:?} vs {large:?} bytes for payloads {small_bytes}/{large_bytes}",
         small = small.bytes,
         large = large.bytes
+    );
+
+    // Negative control: the same three legs restricted one call at a time
+    // allocate two intermediate payloads, so the assertion above would fail.
+    let (small, small_bytes) = three_axis_measurement(1, true);
+    let (large, large_bytes) = three_axis_measurement(8, true);
+    assert_ne!(
+        small.bytes - small_bytes,
+        large.bytes - large_bytes,
+        "sequential passes must show degeneracy-dependent non-payload bytes"
     );
 }
 
