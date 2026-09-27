@@ -3,6 +3,12 @@ pub trait KrylovVector: Clone {
     /// Return a zero vector with the same shape and storage placement as `self`.
     fn zero_like(&self) -> Self;
 
+    /// Whether `other` has the shape and storage placement of `self`.
+    ///
+    /// [`KrylovVector::axpy`] and [`KrylovVector::dot_real`] may assume this
+    /// holds for their arguments; solvers check it on every operator output.
+    fn same_shape(&self, other: &Self) -> bool;
+
     /// Compute `self += alpha * x`.
     fn axpy(&mut self, alpha: f64, x: &Self);
 
@@ -11,17 +17,15 @@ pub trait KrylovVector: Clone {
 
     /// Real part of the inner product between `self` and `rhs`.
     fn dot_real(&self, rhs: &Self) -> f64;
-
-    /// Euclidean norm induced by [`KrylovVector::dot_real`].
-    #[inline]
-    fn norm2(&self) -> f64 {
-        self.dot_real(self).sqrt()
-    }
 }
 
 impl KrylovVector for Vec<f64> {
     fn zero_like(&self) -> Self {
         vec![0.0; self.len()]
+    }
+
+    fn same_shape(&self, other: &Self) -> bool {
+        self.len() == other.len()
     }
 
     fn axpy(&mut self, alpha: f64, x: &Self) {

@@ -9,8 +9,6 @@ pub struct CgOptions {
     pub atol: f64,
     /// Maximum CG iterations.
     pub max_iter: usize,
-    /// Optional Tikhonov/identity damping. Solves `(A + damping I)x = b`.
-    pub damping: f64,
     /// Detect non-positive curvature before taking a CG step.
     pub check_curvature: bool,
 }
@@ -21,7 +19,6 @@ impl Default for CgOptions {
             rtol: 1.0e-12,
             atol: 0.0,
             max_iter: 1_000,
-            damping: 0.0,
             check_curvature: true,
         }
     }
@@ -50,17 +47,22 @@ pub struct CgStats {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CgBreakdown {
     InvalidOptions,
+    /// The operator returned a vector whose shape differs from its input.
+    ShapeMismatch,
     NonFiniteResidual,
     NonPositiveCurvature,
     NonFiniteCurvature,
     MaxIterations,
 }
 
-/// Solve `A x = b` or `(A + damping I) x = b` by Conjugate Gradient.
+/// Solve `A x = b` by Conjugate Gradient.
 ///
 /// The initial guess is `zero_like(b)`. The method stops when
-/// `||r|| <= atol + rtol * ||b||`; all exceptional exits are reported in
-/// [`CgStats`] instead of panicking.
+/// `||r|| <= atol + rtol * ||b||`, with `||v|| = dot_real(v, v).sqrt()`; all
+/// exceptional exits are reported in [`CgStats`] instead of panicking.
+///
+/// To solve a damped system `(A + d I) x = b`, pass a closure that applies
+/// `A` and then adds `d * x` with [`KrylovVector::axpy`].
 pub fn cg<A, V>(op: &A, b: &V, options: CgOptions) -> CgResult<V>
 where
     A: LinearOperator<V>,
@@ -70,8 +72,9 @@ where
     let mut r = b.clone();
     let mut p = r.clone();
 
-    let b_norm = b.norm2();
-    let initial_residual = r.norm2();
+    let mut rho = r.dot_real(&r);
+    let b_norm = rho.sqrt();
+    let initial_residual = b_norm;
     let tolerance = options.atol + options.rtol * b_norm;
 
     let mut stats = CgStats {
@@ -86,10 +89,8 @@ where
 
     if !options.rtol.is_finite()
         || !options.atol.is_finite()
-        || !options.damping.is_finite()
         || options.rtol < 0.0
         || options.atol < 0.0
-        || options.damping < 0.0
     {
         stats.breakdown = Some(CgBreakdown::InvalidOptions);
         return CgResult { solution: x, stats };
@@ -105,18 +106,12 @@ where
         return CgResult { solution: x, stats };
     }
 
-    let mut rho = r.dot_real(&r);
-    if !rho.is_finite() || rho < 0.0 {
-        stats.breakdown = Some(CgBreakdown::NonFiniteResidual);
-        return CgResult { solution: x, stats };
-    }
-
     while stats.iterations < options.max_iter {
-        let mut ap = op.apply(&p);
+        let ap = op.apply(&p);
         stats.matvecs += 1;
-
-        if options.damping != 0.0 {
-            ap.axpy(options.damping, &p);
+        if !p.same_shape(&ap) {
+            stats.breakdown = Some(CgBreakdown::ShapeMismatch);
+            return CgResult { solution: x, stats };
         }
 
         let curvature = p.dot_real(&ap);
@@ -139,7 +134,8 @@ where
         r.axpy(-alpha, &ap);
         stats.iterations += 1;
 
-        let residual = r.norm2();
+        let rho_next = r.dot_real(&r);
+        let residual = rho_next.sqrt();
         stats.final_residual = residual;
         if !residual.is_finite() {
             stats.breakdown = Some(CgBreakdown::NonFiniteResidual);
@@ -147,12 +143,6 @@ where
         }
         if residual <= tolerance {
             stats.converged = true;
-            return CgResult { solution: x, stats };
-        }
-
-        let rho_next = r.dot_real(&r);
-        if !rho_next.is_finite() || rho_next < 0.0 {
-            stats.breakdown = Some(CgBreakdown::NonFiniteResidual);
             return CgResult { solution: x, stats };
         }
 
@@ -240,6 +230,10 @@ mod tests {
             Self(vec![C64::new(0.0, 0.0); self.0.len()])
         }
 
+        fn same_shape(&self, other: &Self) -> bool {
+            self.0.len() == other.0.len()
+        }
+
         fn axpy(&mut self, alpha: f64, x: &Self) {
             for (lhs, rhs) in self.0.iter_mut().zip(&x.0) {
                 *lhs = lhs.add(rhs.scale(alpha));
@@ -281,20 +275,92 @@ mod tests {
         assert_close(result.solution.0[1].im, -1.0);
     }
 
-    #[test]
-    fn damping_changes_diagonal_solution() {
-        let op = |x: &Vec<f64>| vec![2.0 * x[0], 4.0 * x[1]];
-        let b = vec![6.0, 10.0];
-        let options = CgOptions {
-            damping: 1.0,
-            ..CgOptions::default()
-        };
+    fn damped<'a>(
+        op: impl Fn(&Vec<f64>) -> Vec<f64> + 'a,
+        damping: f64,
+    ) -> impl Fn(&Vec<f64>) -> Vec<f64> + 'a {
+        move |x| {
+            let mut y = op(x);
+            y.axpy(damping, x);
+            y
+        }
+    }
 
-        let result = cg(&op, &b, options);
+    #[test]
+    fn damped_closure_solves_shifted_diagonal_system() {
+        let op = damped(|x: &Vec<f64>| vec![2.0 * x[0], 4.0 * x[1]], 1.0);
+        let b = vec![6.0, 10.0];
+
+        let result = cg(&op, &b, CgOptions::default());
 
         assert!(result.stats.converged, "{:?}", result.stats);
         assert_close(result.solution[0], 2.0);
         assert_close(result.solution[1], 2.0);
+    }
+
+    /// Bit patterns recorded from the removed `CgOptions { damping: 0.45, .. }`
+    /// path at 57a6c3d9, truncated after `k` iterations: (final residual, x).
+    #[test]
+    fn damped_closure_matches_removed_damping_option_bitwise() {
+        const INITIAL_RESIDUAL: u64 = 0x400221bc9cc963f6;
+        const TRAJECTORY: [(u64, [u64; 3]); 4] = [
+            (
+                0x3fe1e20e6853bbfa,
+                [0x3fd4a953277871ba, 0xbfe4a953277871ba, 0x3fbe943363605665],
+            ),
+            (
+                0x3fc062165a3f0414,
+                [0x3fda3b6e709c0bb0, 0xbfe63f5a5becede3, 0xbfb1dbe3f53a20ab],
+            ),
+            (
+                0x3c8ad5336963eefc,
+                [0x3fd8f0e4c23bd89e, 0xbfe6b387dd6729a9, 0xbfb521889f1fddde],
+            ),
+            (
+                0x3c75b5c2efa98b08,
+                [0x3fd8f0e4c23bd89e, 0xbfe6b387dd6729a9, 0xbfb521889f1fdddd],
+            ),
+        ];
+        let op = damped(
+            |x: &Vec<f64>| {
+                vec![
+                    4.0 * x[0] + x[1] + 0.3 * x[2],
+                    x[0] + 3.0 * x[1] - 0.7 * x[2],
+                    0.3 * x[0] - 0.7 * x[1] + 2.5 * x[2],
+                ]
+            },
+            0.45,
+        );
+        let b = vec![1.0, -2.0, 0.37];
+
+        for (k, (residual, solution)) in TRAJECTORY.iter().enumerate() {
+            let options = CgOptions {
+                rtol: 0.0,
+                max_iter: k + 1,
+                ..CgOptions::default()
+            };
+            let result = cg(&op, &b, options);
+
+            assert_eq!(result.stats.iterations, k + 1);
+            assert_eq!(result.stats.initial_residual.to_bits(), INITIAL_RESIDUAL);
+            assert_eq!(result.stats.final_residual.to_bits(), *residual);
+            let bits: Vec<u64> = result.solution.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(bits, solution, "iterate {}", k + 1);
+        }
+    }
+
+    #[test]
+    fn reports_operator_shape_mismatch_without_panic() {
+        let op = |_x: &Vec<f64>| vec![0.0; 3];
+        let b = vec![1.0, 2.0];
+
+        let result = cg(&op, &b, CgOptions::default());
+
+        assert!(!result.stats.converged);
+        assert_eq!(result.stats.breakdown, Some(CgBreakdown::ShapeMismatch));
+        assert_eq!(result.stats.iterations, 0);
+        assert_eq!(result.stats.matvecs, 1);
+        assert_eq!(result.solution, vec![0.0, 0.0]);
     }
 
     #[test]
