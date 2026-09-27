@@ -1189,3 +1189,29 @@ fn checked_generic_contract_keeps_its_braiding_boundaries() {
         );
     }
 }
+
+#[test]
+fn factorization_leg_roles_keep_the_permute_braiding_boundary() {
+    // What (#1553): a factorization's leg roles are a `permute`, so a split
+    // other than the current one needs a symmetric braiding. The anyonic
+    // provider refuses it with the permute's typed error before any
+    // factorization work, while its current split, which needs no braid,
+    // factorizes.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedPivotalToy::new(40, BraidingStyleKind::Anyonic, 1.0));
+    let unit = GradedSpace::try_new(Arc::clone(&provider), [(Label::Unit, 2)]).unwrap();
+    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::Unit, 3)]).unwrap();
+    let t: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&unit], [&wide], |_, index| {
+            1.0 + (3 * index[0] + index[1]) as f64
+        })
+        .unwrap();
+    assert!(t.svd_compact(&[0], &[1]).is_ok());
+    for error in [
+        format!("{:?}", t.svd_compact(&[1], &[0]).err().unwrap()),
+        format!("{:?}", t.qr_compact(&[1], &[0]).err().unwrap()),
+        format!("{:?}", t.left_null(&[1], &[0]).err().unwrap()),
+    ] {
+        assert!(error.contains("UnsupportedBraidingStyle"), "{error}");
+    }
+}

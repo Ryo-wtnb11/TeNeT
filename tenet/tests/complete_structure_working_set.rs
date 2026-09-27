@@ -66,10 +66,10 @@ fn warm_working_sets_never_evict() {
         .unwrap();
     });
     assert_warm("qr_compact", 2, || {
-        a.qr_compact().unwrap();
+        a.qr_compact(&[0, 1], &[2, 3]).unwrap();
     });
     assert_warm("svd_compact", 3, || {
-        a.svd_compact().unwrap();
+        a.svd_compact(&[0, 1], &[2, 3]).unwrap();
     });
 
     // Sweep-like loop: an open chain `[vL, p] <- [vR]` with a distinct space

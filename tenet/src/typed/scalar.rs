@@ -200,7 +200,7 @@ impl TensorScalar for num_complex::Complex32 {}
 /// `f64` by calling a factorization on it, because `f64` and
 /// [`num_complex::Complex64`] were the only implementors. With four, inference
 /// waits for the end-of-function fallback, which is too late for a method call
-/// on the result — `t.eigh_full()?.d.diagview()?[0].values[0].abs()` on an
+/// on the result — `t.eigh_full(&[0], &[1])?.d.diagview()?[0].values[0].abs()` on an
 /// un-annotated `from_subblock_fn` tensor now needs the payload dtype written
 /// down. The same holds for [`GradedSpace::find_truncated`], whose spectrum
 /// type is `SpectrumMagnitude` and now has four implementors.
@@ -211,7 +211,7 @@ impl TensorScalar for num_complex::Complex32 {}
 /// use tenet::prelude::{TensorMap, TensorScalar, U1FusionRule};
 ///
 /// fn base_only<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.svd_compact();
+///     let _ = tensor.svd_compact(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -222,7 +222,7 @@ impl TensorScalar for num_complex::Complex32 {}
 /// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
 ///
 /// fn factorizing<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.svd_compact();
+///     let _ = tensor.svd_compact(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -232,7 +232,7 @@ impl TensorScalar for num_complex::Complex32 {}
 /// use tenet::prelude::{TensorMap, TensorScalar, U1FusionRule};
 ///
 /// fn base_only<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.qr_compact();
+///     let _ = tensor.qr_compact(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -240,7 +240,7 @@ impl TensorScalar for num_complex::Complex32 {}
 /// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
 ///
 /// fn factorizing<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.qr_compact();
+///     let _ = tensor.qr_compact(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -257,11 +257,11 @@ use tenet::core::U1FusionRule;
 use tenet::typed::{CudaStorage, TensorMap};
 
 fn f32_device_svd(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
-    let _ = tensor.svd_compact();
+    let _ = tensor.svd_compact(&[0], &[1]);
 }
 
 fn f64_device_svd(tensor: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>) {
-    let _ = tensor.svd_compact();
+    let _ = tensor.svd_compact(&[0], &[1]);
 }
 ```
 
@@ -271,7 +271,7 @@ use tenet::core::U1FusionRule;
 use tenet::typed::{CudaStorage, TensorMap};
 
 fn c32_device_qr(tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>) {
-    let _ = tensor.qr_compact();
+    let _ = tensor.qr_compact(&[0], &[1]);
 }
 ```"
 )]
@@ -322,7 +322,7 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// use tenet::prelude::{TensorMap, TensorScalar, U1FusionRule};
 ///
 /// fn base_only<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.exp();
+///     let _ = tensor.exp(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -330,7 +330,7 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
 ///
 /// fn factorizing_only<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.exp();
+///     let _ = tensor.exp(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -340,8 +340,8 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// use tenet::prelude::{AdvancedLinalgScalar, TensorMap, U1FusionRule};
 ///
 /// fn advanced<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.exp();
-///     let _ = tensor.inv();
+///     let _ = tensor.exp(&[0], &[1]);
+///     let _ = tensor.inv(&[0], &[1]);
 ///     let _ = tensor.solve(tensor);
 /// }
 /// ```
@@ -352,7 +352,7 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
 ///
 /// fn factorizing_only<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.inv();
+///     let _ = tensor.inv(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -360,7 +360,7 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// use tenet::prelude::{AdvancedLinalgScalar, TensorMap, U1FusionRule};
 ///
 /// fn advanced<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.inv();
+///     let _ = tensor.inv(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -376,7 +376,7 @@ impl FactorizationScalar for num_complex::Complex32 {}
 ///     D: FactorizationScalar,
 ///     <D as FactorScalar>::Eig: TensorScalar,
 /// {
-///     let _ = tensor.eig_full();
+///     let _ = tensor.eig_full(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -389,7 +389,7 @@ impl FactorizationScalar for num_complex::Complex32 {}
 ///     D: AdvancedLinalgScalar,
 ///     <D as FactorScalar>::Eig: TensorScalar,
 /// {
-///     let _ = tensor.eig_full();
+///     let _ = tensor.eig_full(&[0], &[1]);
 /// }
 /// ```
 pub trait AdvancedLinalgScalar: FactorizationScalar {}
@@ -818,7 +818,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorPinvDispatch<R, D>,
+    R::Mode: TypedTensorPinvDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: AdvancedLinalgScalar,
 {
     /// TensorKit 0.17 / MatrixAlgebraKit `pinv`: the Moore-Penrose
@@ -870,8 +870,19 @@ where
     /// checked `pinv` has no elementwise compact arm: it materializes that input
     /// for the dense path and publishes a dense result. A checked lazy adjoint
     /// is likewise materialized operation-locally.
-    pub fn pinv(&self, rcond: f64) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorPinvDispatch<R, D>>::pinv(self, rcond)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn pinv(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+        rcond: f64,
+    ) -> Result<Self, TypedFacadeError<R>> {
+        self.with_leg_roles(rows, cols, |t| {
+            <R::Mode as TypedTensorPinvDispatch<R, D>>::pinv(t, rcond)
+        })
     }
 }
 
@@ -1494,7 +1505,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorQrDispatch<R, D>,
+    R::Mode: TypedTensorQrDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the compact QR factorization `self = q * r` as a [`Qr`].
@@ -1529,20 +1540,32 @@ where
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 3)?;
-    /// let Qr { q, r } = a.qr_compact()?;
+    /// let Qr { q, r } = a.qr_compact(&[0], &[1])?;
     /// let rebuilt = q.compose(&r)?;
     /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn qr_compact(&self) -> Result<Qr<Self>, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorQrDispatch<R, D>>::qr_compact(self)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn qr_compact(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+    ) -> Result<Qr<Self>, TypedFacadeError<R>> {
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorQrDispatch<R, D>>::qr_compact,
+        )
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorSvdDispatch<R, D>,
+    R::Mode: TypedTensorSvdDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the compact singular-value decomposition
@@ -1576,13 +1599,38 @@ where
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 4)?;
-    /// let Svd { u, s, vh } = a.svd_compact()?;
+    /// let Svd { u, s, vh } = a.svd_compact(&[0], &[1])?;
     /// let rebuilt = u.compose(&s)?.compose(&vh)?;
     /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn svd_compact(&self) -> Result<Svd<Self>, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_compact(self)
+    ///
+    /// # Leg roles
+    ///
+    /// `rows` and `cols` list source axes (`0..rank`, codomain first) exactly
+    /// as for [`Self::permute`]. They are the codomain and the domain of the
+    /// matrix this operation acts on, and the result is the operation applied
+    /// to `self.permute(rows, cols)`; every space, factor and error stated
+    /// here refers to that matrix view. The current split (`rows = 0..nout`,
+    /// `cols = nout..rank`) borrows `self` and runs no transform. Any other
+    /// split costs that one permute and nothing more: the permuted tensor is
+    /// consumed in place of `self`, and its packed coupled-sector regions are
+    /// read by the solver directly. Every factorization and matrix function
+    /// (`svd_*`, `qr_*`, `lq_*`, the polar and null-space families, `eigh_*`,
+    /// `eig_*`, `exp`, `inv`, `pinv`) takes its leg roles this way. A split
+    /// other than the current one needs a symmetric braiding; otherwise the
+    /// permute's `UnsupportedBraidingStyle` error is returned before any
+    /// factorization work, as are its errors for malformed axes.
+    pub fn svd_compact(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+    ) -> Result<Svd<Self>, TypedFacadeError<R>> {
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_compact,
+        )
     }
 
     /// Returns the full SVD `self = u * s * vh` with square outer factors.
@@ -1595,15 +1643,27 @@ where
     /// a compact diagonal input, but its square outer factors can require more
     /// dense storage. Checked factors use the source provider instance, and a
     /// failure returns no factors.
-    pub fn svd_full(&self) -> Result<Svd<Self>, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_full(self)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn svd_full(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+    ) -> Result<Svd<Self>, TypedFacadeError<R>> {
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_full,
+        )
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorLqDispatch<R, D>,
+    R::Mode: TypedTensorLqDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the compact LQ factorization `self = l * q` as an [`Lq`].
@@ -1629,12 +1689,24 @@ where
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 5)?;
-    /// let Lq { l, q } = a.lq_compact()?;
+    /// let Lq { l, q } = a.lq_compact(&[0], &[1])?;
     /// assert!(l.compose(&q)?.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn lq_compact(&self) -> Result<Lq<Self>, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorLqDispatch<R, D>>::lq_compact(self)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn lq_compact(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+    ) -> Result<Lq<Self>, TypedFacadeError<R>> {
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorLqDispatch<R, D>>::lq_compact,
+        )
     }
 }
 
@@ -1821,7 +1893,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorFullQrDispatch<R, D>,
+    R::Mode: TypedTensorFullQrDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the full QR factorization `self = q * r` as a [`Qr`].
@@ -1834,15 +1906,23 @@ where
     /// square `q` costs `O(m_c²(n_c + m_c))`. Source packing and owned factor
     /// publication are additional costs. See [`Self::qr_compact`] for the
     /// compact alternative, storage and lazy-input behavior, errors, and example.
-    pub fn qr_full(&self) -> Result<Qr<Self>, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorFullQrDispatch<R, D>>::qr_full(self)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn qr_full(&self, rows: &[usize], cols: &[usize]) -> Result<Qr<Self>, TypedFacadeError<R>> {
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorFullQrDispatch<R, D>>::qr_full,
+        )
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorFullLqDispatch<R, D>,
+    R::Mode: TypedTensorFullLqDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the full LQ factorization `self = l * q` as an [`Lq`].
@@ -1856,15 +1936,23 @@ where
     /// adjoint, and owned factor publication are additional costs. See
     /// [`Self::lq_compact`] for the compact alternative, storage and
     /// lazy-input behavior, errors, and example.
-    pub fn lq_full(&self) -> Result<Lq<Self>, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorFullLqDispatch<R, D>>::lq_full(self)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn lq_full(&self, rows: &[usize], cols: &[usize]) -> Result<Lq<Self>, TypedFacadeError<R>> {
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorFullLqDispatch<R, D>>::lq_full,
+        )
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorSvdValsDispatch<R, D>,
+    R::Mode: TypedTensorSvdValsDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns only the singular values, grouped by provider-labelled coupled
@@ -1879,18 +1967,28 @@ where
     /// [`Error::Operation`]; if a provider cannot decode a sector label, its
     /// original error is available as the source. See [`Self::svd_compact`] for
     /// the decomposition contract and representative example.
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn svd_vals(
         &self,
+        rows: &[usize],
+        cols: &[usize],
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
     {
-        <R::Mode as TypedTensorSvdValsDispatch<R, D>>::svd_vals(self)
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorSvdValsDispatch<R, D>>::svd_vals,
+        )
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorEighValsDispatch<R, D>,
+    R::Mode: TypedTensorEighValsDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns only the real Hermitian eigenvalues, grouped by
@@ -1905,18 +2003,28 @@ where
     /// layout failures return [`Error::Core`], and an original provider or
     /// label-decoding error is available as the source. No spectrum is returned
     /// unless every sector succeeds.
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn eigh_vals(
         &self,
+        rows: &[usize],
+        cols: &[usize],
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
     {
-        <R::Mode as TypedTensorEighValsDispatch<R, D>>::eigh_vals(self)
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorEighValsDispatch<R, D>>::eigh_vals,
+        )
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorEighDispatch<R, D>,
+    R::Mode: TypedTensorEighDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the Hermitian eigendecomposition `self = v * d * v^H` as an
@@ -1954,20 +2062,32 @@ where
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?.scale(2.0);
-    /// let Eigh { d, v: eigenvectors } = a.eigh_full()?;
+    /// let Eigh { d, v: eigenvectors } = a.eigh_full(&[0], &[1])?;
     /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.adjoint()?)?;
     /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn eigh_full(&self) -> Result<Eigh<Self>, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorEighDispatch<R, D>>::eigh_full(self)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn eigh_full(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+    ) -> Result<Eigh<Self>, TypedFacadeError<R>> {
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorEighDispatch<R, D>>::eigh_full,
+        )
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorEigValsDispatch<R, D>,
+    R::Mode: TypedTensorEigValsDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: AdvancedLinalgScalar,
 {
     /// Returns only the general eigenvalues as `Complex64` (at every payload
@@ -1980,20 +2100,30 @@ where
     /// call; checked Generic currently requires owned input for this
     /// values-only method. Unlike [`Self::eig_full`], no eigenvector-rank gate
     /// is needed because no eigenbasis is returned.
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn eig_vals(
         &self,
+        rows: &[usize],
+        cols: &[usize],
     ) -> Result<
         Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, num_complex::Complex64>>,
         TypedFacadeError<R>,
     > {
-        <R::Mode as TypedTensorEigValsDispatch<R, D>>::eig_vals(self)
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorEigValsDispatch<R, D>>::eig_vals,
+        )
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorEigDispatch<R, D>,
+    R::Mode: TypedTensorEigDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: AdvancedLinalgScalar,
 {
     /// Returns the general eigendecomposition `self * v = v * d` as an
@@ -2029,14 +2159,24 @@ where
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?.scale(2.0);
-    /// let Eig { d, v: eigenvectors } = a.eig_full()?;
-    /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.inv()?)?;
+    /// let Eig { d, v: eigenvectors } = a.eig_full(&[0], &[1])?;
+    /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.inv(&[0], &[1])?)?;
     /// assert!(rebuilt.axpby(1.0.into(), &a.convert::<num_complex::Complex64>(), (-1.0).into())?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn eig_full(
         &self,
+        rows: &[usize],
+        cols: &[usize],
     ) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorEigDispatch<R, D>>::eig_full(self)
+        self.with_leg_roles(
+            rows,
+            cols,
+            <R::Mode as TypedTensorEigDispatch<R, D>>::eig_full,
+        )
     }
 }

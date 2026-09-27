@@ -84,7 +84,7 @@ macro_rules! is_posdef {
         let t = &$tensor;
         is_hermitian!(t, $tol) && {
             let threshold = ($tol) * t.norm(2.0).unwrap().max(1.0);
-            t.eigh_vals()
+            t.eigh_vals(&codomain_axes(&t), &domain_axes(&t))
                 .unwrap()
                 .iter()
                 .flat_map(|spectrum| spectrum.values.iter())
@@ -140,4 +140,16 @@ macro_rules! project_antihermitian {
             )
         })
     }};
+}
+
+/// The receiver's own split as leg roles: `rows = 0..nout`.
+#[allow(dead_code)]
+fn codomain_axes<R, D, S>(t: &TensorMap<R, D, S>) -> Vec<usize> {
+    (0..t.codomain_rank()).collect()
+}
+
+/// The receiver's own split as leg roles: `cols = nout..rank`.
+#[allow(dead_code)]
+fn domain_axes<R, D, S>(t: &TensorMap<R, D, S>) -> Vec<usize> {
+    (t.codomain_rank()..t.rank()).collect()
 }

@@ -284,7 +284,7 @@ fn checked_generic_lazy_transforms_do_not_materialize_uncached_input() {
             .zip(expected.dense_data().unwrap())
             .all(|(&actual, &expected)| (actual - expected).norm() < 1.0e-10));
         assert!(actual.norm(2.0).unwrap().is_finite());
-        assert!(actual.qr_compact().is_ok());
+        assert!(actual.qr_compact(&[0, 1], &[2]).is_ok());
     }
     assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
 }
@@ -926,7 +926,7 @@ fn storage_parameter_clone_shares_non_clone_payload() {
 fn typed_placement_is_diagnostic_for_dense_compact_and_lazy_host_storage() {
     DIAGONAL_MATERIALIZATIONS.set(0);
     let source = u1_lazy_fixture();
-    let diagonal = source.svd_compact().unwrap().s;
+    let diagonal = source.svd_compact(&[0, 1], &[2]).unwrap().s;
     let lazy = source.adjoint().unwrap();
 
     assert_eq!(source.placement(), Placement::Host);
@@ -1000,7 +1000,7 @@ fn typed_zeros_like_is_exact_and_representation_preserving() {
         .iter()
         .all(|value| value.re.to_bits() == 0 && value.im.to_bits() == 0));
 
-    let compact = source.svd_compact().unwrap().s;
+    let compact = source.svd_compact(&[0, 1], &[2]).unwrap().s;
     let compact = compact.with_spectrum(
         compact
             .spectrum()
@@ -1137,7 +1137,7 @@ fn typed_cuda_qr_tree_route_validation_is_order_independent_and_bijective() {
 #[cfg(feature = "cuda")]
 #[test]
 fn typed_cuda_factorizations_reject_compact_lazy_and_truncation_before_runtime_work() {
-    let diagonal = u1_lazy_fixture().svd_compact().unwrap().s;
+    let diagonal = u1_lazy_fixture().svd_compact(&[0, 1], &[2]).unwrap().s;
     let TypedData::Diagonal(spectrum) = owned(&diagonal).data.as_ref() else {
         unreachable!("SVD factor is compact")
     };
@@ -1149,15 +1149,15 @@ fn typed_cuda_factorizations_reject_compact_lazy_and_truncation_before_runtime_w
         )),
     };
     assert!(matches!(
-        device_diagonal.qr_compact(),
+        device_diagonal.qr_compact(&codomain_axes(&device_diagonal), &domain_axes(&device_diagonal)),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
     ));
     assert!(matches!(
-        device_diagonal.svd_compact(),
+        device_diagonal.svd_compact(&codomain_axes(&device_diagonal), &domain_axes(&device_diagonal)),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
     ));
     assert!(matches!(
-        device_diagonal.eigh_full(),
+        device_diagonal.eigh_full(&codomain_axes(&device_diagonal), &domain_axes(&device_diagonal)),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
     ));
     // #1452: the adjoint of a compact diagonal is the owned (conjugated)
@@ -1168,15 +1168,15 @@ fn typed_cuda_factorizations_reject_compact_lazy_and_truncation_before_runtime_w
     let adjoint = device_diagonal.adjoint().unwrap();
     assert!(Arc::ptr_eq(owned(&adjoint), owned(&device_diagonal)));
     assert!(matches!(
-        adjoint.qr_compact(),
+        adjoint.qr_compact(&codomain_axes(&adjoint), &domain_axes(&adjoint)),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
     ));
     assert!(matches!(
-        adjoint.svd_compact(),
+        adjoint.svd_compact(&codomain_axes(&adjoint), &domain_axes(&adjoint)),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
     ));
     assert!(matches!(
-        adjoint.eigh_full(),
+        adjoint.eigh_full(&codomain_axes(&adjoint), &domain_axes(&adjoint)),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
     ));
 
@@ -1227,15 +1227,15 @@ fn typed_cuda_factorizations_reject_lazy_adjoint_before_runtime_work() {
     let lazy = source.to_cuda().unwrap().adjoint().unwrap();
     assert!(matches!(&lazy.repr, TypedTensorRepr::Adjoint(_)));
     assert!(matches!(
-        lazy.qr_compact(),
+        lazy.qr_compact(&codomain_axes(&lazy), &domain_axes(&lazy)),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
     ));
     assert!(matches!(
-        lazy.svd_compact(),
+        lazy.svd_compact(&codomain_axes(&lazy), &domain_axes(&lazy)),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
     ));
     assert!(matches!(
-        lazy.eigh_full(),
+        lazy.eigh_full(&codomain_axes(&lazy), &domain_axes(&lazy)),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
     ));
 }
@@ -1264,11 +1264,15 @@ fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
     .unwrap();
     let device = source.to_cuda().unwrap();
 
-    let expected_full = source.eigh_full().unwrap();
+    let expected_full = source
+        .eigh_full(&codomain_axes(&source), &domain_axes(&source))
+        .unwrap();
     let Eigh {
         d: d_device,
         v: v_device,
-    } = device.eigh_full().unwrap();
+    } = device
+        .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap();
     assert_eq!(d_device.placement(), Placement::Cuda(0));
     assert_eq!(v_device.placement(), Placement::Cuda(0));
     assert!(Arc::ptr_eq(
@@ -1303,7 +1307,9 @@ fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
     .unwrap();
     assert!(su2_source.subblock_count() >= 2);
     let su2_device = su2_source.to_cuda().unwrap();
-    let Eigh { d: su2_d, v: su2_v } = su2_device.eigh_full().unwrap();
+    let Eigh { d: su2_d, v: su2_v } = su2_device
+        .eigh_full(&codomain_axes(&su2_device), &domain_axes(&su2_device))
+        .unwrap();
     assert!(Arc::ptr_eq(
         su2_v.logical_space().provider_arc(),
         su2_source.logical_space().provider_arc()
@@ -1319,7 +1325,9 @@ fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
     let input_before_failure = device.to_host().unwrap();
     for failure in [("decomposition", 2), ("assembly", 2)] {
         CUDA_EIGH_FAILURE.with(|injected| injected.set(Some(failure)));
-        assert!(device.eigh_full().is_err());
+        assert!(device
+            .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+            .is_err());
         CUDA_EIGH_FAILURE.with(|injected| injected.set(None));
         assert_typed_map_close(
             &device.to_host().unwrap(),
@@ -1338,7 +1346,7 @@ fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
     .to_cuda()
     .unwrap();
     assert!(matches!(
-        nonhermitian.eigh_full(),
+        nonhermitian.eigh_full(&codomain_axes(&nonhermitian), &domain_axes(&nonhermitian)),
         Err(Error::Operation(error))
             if matches!(
                 error.as_ref(),
@@ -1422,7 +1430,7 @@ fn mis_stacked_hermitian_z2(runtime: &Runtime) -> TensorMap<Z2FusionRule, f64> {
 fn host_eigh_refuses_a_mis_stacked_block_that_stays_hermitian() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let tensor = mis_stacked_hermitian_z2(&runtime);
-    let error = format!("{:?}", tensor.eigh_full().err());
+    let error = format!("{:?}", tensor.eigh_full(&[0, 1], &[2, 3]).err());
     assert!(error.contains("eigh_full requires identical"), "{error}");
 }
 
@@ -1436,7 +1444,7 @@ fn typed_cuda_eigh_refuses_a_mis_stacked_block_that_stays_hermitian() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let device = mis_stacked_hermitian_z2(&runtime).to_cuda().unwrap();
     assert!(matches!(
-        device.eigh_full(),
+        device.eigh_full(&codomain_axes(&device), &domain_axes(&device)),
         Err(Error::Operation(error))
             if matches!(
                 error.as_ref(),
@@ -1485,7 +1493,9 @@ fn typed_cuda_eigh_aligned_assembly_matches_the_per_tree_path_bitwise() {
         CUDA_EIGH_TREEWISE.with(|flag| flag.set(treewise));
         CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
         CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.set(Some(0)));
-        let Eigh { d, v } = device.eigh_full().unwrap();
+        let Eigh { d, v } = device
+            .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+            .unwrap();
         CUDA_EIGH_TREEWISE.with(|flag| flag.set(false));
         assert_eq!(
             CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.replace(None)),
@@ -1566,7 +1576,10 @@ fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
     );
 
     CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-    source_device.qr_compact().unwrap().pair();
+    source_device
+        .qr_compact(&codomain_axes(&source_device), &domain_axes(&source_device))
+        .unwrap()
+        .pair();
     CUDA_QR_OBSERVATION.with(|observation| {
         assert_eq!(
             observation.get(),
@@ -1597,7 +1610,7 @@ fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
     let sentinel = (usize::MAX, 0, 0, 0, 0, 0, 0);
     CUDA_QR_OBSERVATION.with(|observation| observation.set(Some(sentinel)));
     assert!(matches!(
-        malformed.qr_compact(),
+        malformed.qr_compact(&codomain_axes(&malformed), &domain_axes(&malformed)),
         Err(Error::InvalidArgument(message)) if message.contains("payload length")
     ));
     CUDA_QR_OBSERVATION.with(|observation| {
@@ -1618,7 +1631,7 @@ fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
     };
     CUDA_QR_OBSERVATION.with(|observation| observation.set(Some(sentinel)));
     assert!(matches!(
-        stranded.qr_compact(),
+        stranded.qr_compact(&codomain_axes(&stranded), &domain_axes(&stranded)),
         Err(Error::InvalidArgument(message)) if message.contains("without a CUDA device")
     ));
     CUDA_QR_OBSERVATION.with(|observation| {
@@ -1632,7 +1645,12 @@ fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
     let empty: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
     CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-    empty.to_cuda().unwrap().qr_compact().unwrap().pair();
+    empty
+        .to_cuda()
+        .unwrap()
+        .qr_compact(&codomain_axes(&empty), &domain_axes(&empty))
+        .unwrap()
+        .pair();
     CUDA_QR_OBSERVATION.with(|observation| {
         assert_eq!(observation.get(), Some((0, 0, 0, 2, 0, 0, 0)));
         observation.set(None);
@@ -1679,7 +1697,9 @@ fn typed_cuda_svd_work_is_streamed_and_preflight_is_transactional() {
     let (factor_copies, _, assembly_gemms) = cuda_route_assembly_counts(&plan);
     CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
     CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-    source_device.svd_compact().unwrap();
+    source_device
+        .svd_compact(&codomain_axes(&source_device), &domain_axes(&source_device))
+        .unwrap();
     CUDA_SVD_OBSERVATION.with(|observation| {
         assert_eq!(
             observation.get(),
@@ -1712,9 +1732,9 @@ fn typed_cuda_svd_work_is_streamed_and_preflight_is_transactional() {
     for lazy in [false, true] {
         CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
         let rejected = if lazy {
-            source_device.adjoint().unwrap().svd_compact()
+            source_device.adjoint().unwrap().svd_compact(&[0], &[1, 2])
         } else {
-            malformed.svd_compact()
+            malformed.svd_compact(&codomain_axes(&malformed), &domain_axes(&malformed))
         };
         assert!(rejected.is_err());
         CUDA_SVD_OBSERVATION.with(|observation| {
@@ -1735,7 +1755,9 @@ fn typed_cuda_svd_work_is_streamed_and_preflight_is_transactional() {
         )),
     };
     CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
-    assert!(stranded.svd_compact().is_err());
+    assert!(stranded
+        .svd_compact(&codomain_axes(&stranded), &domain_axes(&stranded))
+        .is_err());
     CUDA_SVD_OBSERVATION.with(|observation| {
         assert_eq!(observation.get(), Some((0, 0, 0, 0, 0)));
         observation.set(None);
@@ -1776,7 +1798,9 @@ fn typed_cuda_svd_non_aligned_routes_upload_no_selector_and_the_same_diagonal() 
         CUDA_SVD_TREEWISE.with(|flag| flag.set(treewise));
         CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
         CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-        let Svd { s, .. } = device.svd_compact().unwrap();
+        let Svd { s, .. } = device
+            .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+            .unwrap();
         CUDA_SVD_TREEWISE.with(|flag| flag.set(false));
         let (_, _, creations, _, _) = CUDA_SVD_OBSERVATION
             .with(|observation| observation.replace(None))
@@ -1839,7 +1863,9 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaFactorizationPayload,
 {
-    let Svd { u, s, vh } = host.svd_compact().unwrap();
+    let Svd { u, s, vh } = host
+        .svd_compact(&codomain_axes(host), &domain_axes(host))
+        .unwrap();
     let bond = s.domain();
     let spectrum = TensorMap::<R, D>::from_subblock_fn(host.runtime(), &bond, &bond, |_, index| {
         if index[0] != index[1] {
@@ -1867,8 +1893,14 @@ where
     D: CudaFactorizationPayload,
 {
     let tolerance = 1.0e3 * D::epsilon();
-    let expected = host.svd_compact().unwrap();
-    let actual = host.to_cuda().unwrap().svd_compact().unwrap();
+    let expected = host
+        .svd_compact(&codomain_axes(host), &domain_axes(host))
+        .unwrap();
+    let actual = host
+        .to_cuda()
+        .unwrap()
+        .svd_compact(&codomain_axes(host), &domain_axes(host))
+        .unwrap();
     let actual = Svd {
         u: actual.u.to_host().unwrap(),
         s: actual.s.to_host().unwrap(),
@@ -2071,7 +2103,11 @@ fn typed_cuda_svd_of_a_near_tie_follows_the_first_largest_entry() {
             }
         })
         .unwrap();
-    let Svd { u, s, vh } = host.to_cuda().unwrap().svd_compact().unwrap();
+    let Svd { u, s, vh } = host
+        .to_cuda()
+        .unwrap()
+        .svd_compact(&codomain_axes(&host), &domain_axes(&host))
+        .unwrap();
     let (u, s, vh) = (
         u.to_host().unwrap(),
         s.to_host().unwrap(),
@@ -2161,7 +2197,9 @@ fn typed_cuda_svd_gauge_costs_the_documented_ops_and_no_download() {
             CUDA_SVD_TREEWISE.with(|flag| flag.set(treewise));
             CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
             let before = tenet_dense::cuda_transfer_stats();
-            let Svd { u, s, vh } = device.svd_compact().unwrap();
+            let Svd { u, s, vh } = device
+                .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+                .unwrap();
             let after = tenet_dense::cuda_transfer_stats();
             CUDA_SVD_TREEWISE.with(|flag| flag.set(false));
             let (_, _, selector_uploads, _, _, _, _) = CUDA_QR_OBSERVATION
@@ -2259,7 +2297,9 @@ where
         .count();
     assert!(nonempty > 1, "the fixture needs several blocks");
     let device = host.to_cuda().unwrap();
-    let Svd { s, .. } = device.svd_compact().unwrap();
+    let Svd { s, .. } = device
+        .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap();
     let s = s.to_host().unwrap();
     let expected = downloaded_svd_diagonal_bits(
         &device,
@@ -2277,7 +2317,9 @@ where
         .collect();
     assert_eq!(actual, expected);
     // The spectra themselves agree with the Host SVD to dtype tolerance.
-    let Svd { s: host_s, .. } = host.svd_compact().unwrap();
+    let Svd { s: host_s, .. } = host
+        .svd_compact(&codomain_axes(host), &domain_axes(host))
+        .unwrap();
     let tolerance = 1.0e3 * D::epsilon();
     for (device, host) in s
         .materialize()
@@ -2420,7 +2462,10 @@ fn typed_cuda_svd_diagonal_written_on_device_equals_the_downloaded_diagonal_bitw
 fn missing_cuda_context_precedes_compact_expansion_and_lazy_materialization() {
     DIAGONAL_MATERIALIZATIONS.set(0);
     let source = u1_lazy_fixture();
-    let diagonal = source.svd_compact().unwrap().s;
+    let diagonal = source
+        .svd_compact(&codomain_axes(&source), &domain_axes(&source))
+        .unwrap()
+        .s;
     let lazy = source.adjoint().unwrap();
     let TypedData::Diagonal(spectrum) = owned(&diagonal).data.as_ref() else {
         unreachable!("SVD factor is compact")
@@ -2475,7 +2520,10 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
         })
         .unwrap();
 
-    let diagonal = source.svd_compact().unwrap().s;
+    let diagonal = source
+        .svd_compact(&codomain_axes(&source), &domain_axes(&source))
+        .unwrap()
+        .s;
     let TypedData::Diagonal(spectrum) = owned(&diagonal).data.as_ref() else {
         unreachable!("SVD factor is compact")
     };
@@ -3148,7 +3196,7 @@ fn checked_generic_inv_lazy_is_detached_and_keeps_receiver_cold() {
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
     let lazy = source.adjoint().unwrap();
-    let inverse = lazy.inv().unwrap();
+    let inverse = lazy.inv(&[0], &[1]).unwrap();
 
     let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
@@ -3188,14 +3236,14 @@ fn checked_generic_null_lazy_redirects_are_owned_and_keep_receiver_cold() {
     let payload = Arc::clone(&body.data);
     let lazy = source.adjoint().unwrap();
     let expected_left = source
-        .right_null()
+        .right_null(&[0, 1], &[2, 3])
         .unwrap()
         .adjoint()
         .unwrap()
         .materialized_tensor_uncached()
         .unwrap();
     let expected_right = source
-        .left_null()
+        .left_null(&[0, 1], &[2, 3])
         .unwrap()
         .adjoint()
         .unwrap()
@@ -3203,8 +3251,8 @@ fn checked_generic_null_lazy_redirects_are_owned_and_keep_receiver_cold() {
         .unwrap();
 
     for (actual, expected) in [
-        (lazy.left_null().unwrap(), expected_left),
-        (lazy.right_null().unwrap(), expected_right),
+        (lazy.left_null(&[0, 1], &[2, 3]).unwrap(), expected_left),
+        (lazy.right_null(&[0, 1], &[2, 3]).unwrap(), expected_right),
     ] {
         assert!(matches!(&actual.repr, TypedTensorRepr::Owned(_)));
         assert_eq!(
@@ -3243,9 +3291,9 @@ fn checked_generic_compact_qr_lq_reject_lazy_adjoint_without_materializing() {
     for qr in [true, false] {
         let lazy = source.adjoint().unwrap();
         let result = if qr {
-            lazy.qr_compact().map(drop)
+            lazy.qr_compact(&[0], &[1, 2]).map(drop)
         } else {
-            lazy.lq_compact().map(drop)
+            lazy.lq_compact(&[0], &[1, 2]).map(drop)
         };
         assert!(
             matches!(
@@ -3269,8 +3317,8 @@ fn checked_generic_exp_lazy_is_owned_and_stays_cold() {
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 1]))
             .unwrap();
     let lazy = source.adjoint().unwrap();
-    let actual = lazy.exp().unwrap();
-    let expected = source.exp().unwrap().adjoint().unwrap();
+    let actual = lazy.exp(&[0], &[1]).unwrap();
+    let expected = source.exp(&[0], &[1]).unwrap().adjoint().unwrap();
     assert!(matches!(actual.repr, TypedTensorRepr::Owned(_)));
     assert_eq!(
         actual.dense_data().unwrap(),
@@ -3322,11 +3370,11 @@ fn svd_vals_reads_the_parent_without_materializing_the_adjoint() {
     macro_rules! assert_fixture {
         ($source:expr) => {{
             let source = $source;
-            let expected = source.svd_vals().unwrap();
+            let expected = source.svd_vals(&[0, 1], &[2]).unwrap();
             let lazy = source.adjoint().unwrap();
-            assert_eq!(lazy.svd_vals().unwrap(), expected);
-            assert_eq!(lazy.svd_vals().unwrap(), expected);
-            assert_eq!(lazy.clone().svd_vals().unwrap(), expected);
+            assert_eq!(lazy.svd_vals(&[0], &[1, 2]).unwrap(), expected);
+            assert_eq!(lazy.svd_vals(&[0], &[1, 2]).unwrap(), expected);
+            assert_eq!(lazy.clone().svd_vals(&[0], &[1, 2]).unwrap(), expected);
             let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
                 unreachable!()
             };
@@ -3342,12 +3390,12 @@ fn svd_vals_reads_the_parent_without_materializing_the_adjoint() {
     assert_fixture!(su2_lazy_fixture().convert::<Complex64>());
 
     let source = u1_lazy_fixture().convert::<Complex64>();
-    let expected = source.svd_vals().unwrap();
+    let expected = source.svd_vals(&[0, 1], &[2]).unwrap();
     let lazy = source.adjoint().unwrap();
     let threads: Vec<_> = (0..4)
         .map(|_| {
             let lazy = lazy.clone();
-            std::thread::spawn(move || lazy.svd_vals().unwrap())
+            std::thread::spawn(move || lazy.svd_vals(&[0], &[1, 2]).unwrap())
         })
         .collect();
     for thread in threads {
@@ -3365,8 +3413,8 @@ where
 {
     let eager = eager_adjoint_oracle(source);
     let lazy = source.adjoint().unwrap();
-    let actual = lazy.svd_compact().unwrap();
-    let expected = eager.svd_compact().unwrap();
+    let actual = lazy.svd_compact(&[0], &[1, 2]).unwrap();
+    let expected = eager.svd_compact(&[0], &[1, 2]).unwrap();
 
     let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
@@ -3429,8 +3477,12 @@ where
 {
     let eager = eager_adjoint_oracle(source);
     let lazy = source.adjoint().unwrap();
-    let actual = lazy.svd_full().unwrap();
-    let expected = eager.svd_full().unwrap();
+    let actual = lazy
+        .svd_full(&codomain_axes(&lazy), &domain_axes(&lazy))
+        .unwrap();
+    let expected = eager
+        .svd_full(&codomain_axes(&eager), &domain_axes(&eager))
+        .unwrap();
 
     let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
@@ -3531,7 +3583,10 @@ fn full_svd_late_failure_does_not_publish_the_adjoint_cache() {
     let before = source.dense_data().unwrap().to_vec();
     let lazy = source.adjoint().unwrap();
 
-    assert!(matches!(lazy.svd_full(), Err(Error::Operation(_))));
+    assert!(matches!(
+        lazy.svd_full(&[0], &[1]),
+        Err(Error::Operation(_))
+    ));
     assert_eq!(source.dense_data().unwrap(), before);
     let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
@@ -3546,10 +3601,20 @@ where
     let target = eager_adjoint_oracle(source);
     let lazy = source.adjoint().unwrap();
     for (actual, expected, left) in [
-        (lazy.left_null().unwrap(), target.left_null().unwrap(), true),
         (
-            lazy.right_null().unwrap(),
-            target.right_null().unwrap(),
+            lazy.left_null(&codomain_axes(&lazy), &domain_axes(&lazy))
+                .unwrap(),
+            target
+                .left_null(&codomain_axes(&target), &domain_axes(&target))
+                .unwrap(),
+            true,
+        ),
+        (
+            lazy.right_null(&codomain_axes(&lazy), &domain_axes(&lazy))
+                .unwrap(),
+            target
+                .right_null(&codomain_axes(&target), &domain_axes(&target))
+                .unwrap(),
             false,
         ),
     ] {
@@ -3631,9 +3696,9 @@ fn assert_null_late_failure(left: bool) {
     let lazy = source.adjoint().unwrap();
 
     let result = if left {
-        lazy.left_null()
+        lazy.left_null(&[0], &[1])
     } else {
-        lazy.right_null()
+        lazy.right_null(&[0], &[1])
     };
     assert!(matches!(result, Err(Error::Operation(_))));
     assert_eq!(source.dense_data().unwrap(), before);
@@ -3656,14 +3721,19 @@ where
     let target = eager_adjoint_oracle(source);
     let lazy = source.adjoint().unwrap();
     let actual = if left {
-        lazy.left_polar().unwrap().pair()
+        lazy.left_polar(&[0], &[1]).unwrap().pair()
     } else {
-        lazy.right_polar().unwrap().pair()
+        lazy.right_polar(&codomain_axes(&lazy), &domain_axes(&lazy))
+            .unwrap()
+            .pair()
     };
     let expected = if left {
-        target.left_polar().unwrap().pair()
+        target.left_polar(&[0], &[1]).unwrap().pair()
     } else {
-        target.right_polar().unwrap().pair()
+        target
+            .right_polar(&codomain_axes(&target), &domain_axes(&target))
+            .unwrap()
+            .pair()
     };
     assert_polar_factors(source, &target, &actual, &expected, left);
     let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
@@ -3695,15 +3765,15 @@ fn assert_typed_map_close<R, D>(
 
 fn assert_eigh_uses_a_cold_logical_copy(source: &TensorMap<U1FusionRule, f64>) {
     let eager = eager_adjoint_oracle(source);
-    let expected_vals = eager.eigh_vals().unwrap();
-    let expected_full = eager.eigh_full().unwrap();
+    let expected_vals = eager.eigh_vals(&[0], &[1]).unwrap();
+    let expected_full = eager.eigh_full(&[0], &[1]).unwrap();
     let parent_body = Arc::clone(owned(source));
     let parent_data = Arc::clone(&parent_body.data);
     let lazy = source.adjoint().unwrap();
 
     for _ in 0..2 {
-        assert_eq!(lazy.clone().eigh_vals().unwrap(), expected_vals);
-        let full = lazy.clone().eigh_full().unwrap();
+        assert_eq!(lazy.clone().eigh_vals(&[0], &[1]).unwrap(), expected_vals);
+        let full = lazy.clone().eigh_full(&[0], &[1]).unwrap();
         assert_eq!(
             full.d.materialize().unwrap().dense_data().unwrap(),
             expected_full.d.materialize().unwrap().dense_data().unwrap()
@@ -3725,8 +3795,8 @@ fn assert_eigh_uses_a_cold_logical_copy(source: &TensorMap<U1FusionRule, f64>) {
         .map(|_| {
             let clone = lazy.clone();
             std::thread::spawn(move || {
-                let vals = clone.eigh_vals().unwrap();
-                let full = clone.eigh_full().unwrap();
+                let vals = clone.eigh_vals(&[0], &[1]).unwrap();
+                let full = clone.eigh_full(&[0], &[1]).unwrap();
                 (
                     vals,
                     full.d.materialize().unwrap().dense_data().unwrap().to_vec(),
@@ -3763,8 +3833,8 @@ fn eigh_dense_lazy_near_hermitian_uses_logical_triangle_and_stays_cold() {
     })
     .unwrap();
     let logical = eager_adjoint_oracle(&source);
-    let logical_vals = logical.eigh_vals().unwrap();
-    let parent_vals = source.eigh_vals().unwrap();
+    let logical_vals = logical.eigh_vals(&[0], &[1]).unwrap();
+    let parent_vals = source.eigh_vals(&[0], &[1]).unwrap();
     assert!(logical_vals[0]
         .values
         .iter()
@@ -3790,9 +3860,9 @@ fn eigh_dense_lazy_complex_orientation_and_failures_match_logical_oracles() {
     })
     .unwrap();
     let eager = eager_adjoint_oracle(&hermitian);
-    let expected = eager.eigh_full().unwrap();
+    let expected = eager.eigh_full(&[0], &[1]).unwrap();
     let lazy = hermitian.adjoint().unwrap();
-    let actual = lazy.eigh_full().unwrap();
+    let actual = lazy.eigh_full(&[0], &[1]).unwrap();
     assert_eq!(
         actual.d.materialize().unwrap().dense_data().unwrap(),
         expected.d.materialize().unwrap().dense_data().unwrap()
@@ -3823,13 +3893,19 @@ fn eigh_dense_lazy_complex_orientation_and_failures_match_logical_oracles() {
     .unwrap();
     let eager = eager_adjoint_oracle(&nonhermitian);
     let expected = [
-        eager.eigh_vals().unwrap_err().to_string(),
-        eager.eigh_full().unwrap_err().to_string(),
+        eager.eigh_vals(&[0], &[1]).unwrap_err().to_string(),
+        eager.eigh_full(&[0], &[1]).unwrap_err().to_string(),
     ];
     let lazy = nonhermitian.adjoint().unwrap();
     for _ in 0..2 {
-        assert_eq!(lazy.eigh_vals().unwrap_err().to_string(), expected[0]);
-        assert_eq!(lazy.eigh_full().unwrap_err().to_string(), expected[1]);
+        assert_eq!(
+            lazy.eigh_vals(&[0], &[1]).unwrap_err().to_string(),
+            expected[0]
+        );
+        assert_eq!(
+            lazy.eigh_full(&[0], &[1]).unwrap_err().to_string(),
+            expected[1]
+        );
     }
     let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
@@ -3838,15 +3914,15 @@ fn eigh_dense_lazy_complex_orientation_and_failures_match_logical_oracles() {
 
 fn assert_eig_uses_a_cold_logical_copy(source: &TensorMap<U1FusionRule, f64>) {
     let eager = eager_adjoint_oracle(source);
-    let expected_vals = eager.eig_vals().unwrap();
-    let expected_full = eager.eig_full().unwrap();
+    let expected_vals = eager.eig_vals(&[0], &[1]).unwrap();
+    let expected_full = eager.eig_full(&[0], &[1]).unwrap();
     let parent_body = Arc::clone(owned(source));
     let parent_data = Arc::clone(&parent_body.data);
     let lazy = source.adjoint().unwrap();
 
     for _ in 0..2 {
-        assert_eq!(lazy.clone().eig_vals().unwrap(), expected_vals);
-        let full = lazy.clone().eig_full().unwrap();
+        assert_eq!(lazy.clone().eig_vals(&[0], &[1]).unwrap(), expected_vals);
+        let full = lazy.clone().eig_full(&[0], &[1]).unwrap();
         assert_eq!(
             full.d.materialize().unwrap().dense_data().unwrap(),
             expected_full.d.materialize().unwrap().dense_data().unwrap()
@@ -3868,8 +3944,8 @@ fn assert_eig_uses_a_cold_logical_copy(source: &TensorMap<U1FusionRule, f64>) {
         .map(|_| {
             let clone = lazy.clone();
             std::thread::spawn(move || {
-                let vals = clone.eig_vals().unwrap();
-                let full = clone.eig_full().unwrap();
+                let vals = clone.eig_vals(&[0], &[1]).unwrap();
+                let full = clone.eig_full(&[0], &[1]).unwrap();
                 (
                     vals,
                     full.d.materialize().unwrap().dense_data().unwrap().to_vec(),
@@ -3910,7 +3986,7 @@ fn eig_dense_lazy_nonnormal_is_logical_owned_repeatable_and_cold() {
     })
     .unwrap();
     let logical = eager_adjoint_oracle(&source);
-    let Eig { d, v } = source.adjoint().unwrap().eig_full().unwrap();
+    let Eig { d, v } = source.adjoint().unwrap().eig_full(&[0], &[1]).unwrap();
     let lhs = logical.convert::<Complex64>().compose(&v).unwrap();
     let rhs = v.compose(&d).unwrap();
     assert_typed_map_close(&lhs, &rhs, 1.0e-12);
@@ -3926,7 +4002,7 @@ fn eig_dense_lazy_real_order_signed_zero_and_defective_cases_match_logical_oracl
     let negative =
         TensorMap::from_subblock_fn(&runtime, [&scalar_leg], [&scalar_leg], |_, _| -2.0).unwrap();
     let lazy = negative.adjoint().unwrap();
-    let value = lazy.eig_vals().unwrap()[0].values[0];
+    let value = lazy.eig_vals(&[0], &[1]).unwrap()[0].values[0];
     assert_eq!(value, num_complex::Complex64::new(-2.0, 0.0));
     assert_eq!(value.im.to_bits(), 0.0f64.to_bits());
 
@@ -3940,9 +4016,9 @@ fn eig_dense_lazy_real_order_signed_zero_and_defective_cases_match_logical_oracl
     })
     .unwrap();
     let eager = eager_adjoint_oracle(&rotation);
-    let expected = eager.eig_vals().unwrap();
+    let expected = eager.eig_vals(&[0], &[1]).unwrap();
     let lazy = rotation.adjoint().unwrap();
-    assert_eq!(lazy.eig_vals().unwrap(), expected);
+    assert_eq!(lazy.eig_vals(&[0], &[1]).unwrap(), expected);
     assert_eq!(expected[0].values[0].im, 1.0);
     assert_eq!(expected[0].values[1].im, -1.0);
 
@@ -3958,9 +4034,12 @@ fn eig_dense_lazy_real_order_signed_zero_and_defective_cases_match_logical_oracl
         .unwrap();
         let eager = eager_adjoint_oracle(&jordan);
         let lazy = jordan.adjoint().unwrap();
-        assert_eq!(lazy.eig_vals().unwrap(), eager.eig_vals().unwrap());
-        let actual = lazy.eig_full().unwrap();
-        let expected = eager.eig_full().unwrap();
+        assert_eq!(
+            lazy.eig_vals(&[0], &[1]).unwrap(),
+            eager.eig_vals(&[0], &[1]).unwrap()
+        );
+        let actual = lazy.eig_full(&[0], &[1]).unwrap();
+        let expected = eager.eig_full(&[0], &[1]).unwrap();
         assert_eq!(
             actual.d.materialize().unwrap().dense_data().unwrap(),
             expected.d.materialize().unwrap().dense_data().unwrap()
@@ -3984,13 +4063,19 @@ fn eig_dense_lazy_failures_match_logical_oracle_and_stay_cold() {
     .unwrap();
     let eager = eager_adjoint_oracle(&source);
     let expected = [
-        eager.eig_vals().unwrap_err().to_string(),
-        eager.eig_full().unwrap_err().to_string(),
+        eager.eig_vals(&[0], &[1]).unwrap_err().to_string(),
+        eager.eig_full(&[0], &[1]).unwrap_err().to_string(),
     ];
     let lazy = source.adjoint().unwrap();
     for _ in 0..2 {
-        assert_eq!(lazy.eig_vals().unwrap_err().to_string(), expected[0]);
-        assert_eq!(lazy.eig_full().unwrap_err().to_string(), expected[1]);
+        assert_eq!(
+            lazy.eig_vals(&[0], &[1]).unwrap_err().to_string(),
+            expected[0]
+        );
+        assert_eq!(
+            lazy.eig_full(&[0], &[1]).unwrap_err().to_string(),
+            expected[1]
+        );
     }
     let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
         unreachable!()
@@ -4016,16 +4101,16 @@ fn exp_of_a_near_hermitian_adjoint_uses_the_logical_orientation_and_stays_cold()
     })
     .unwrap();
     let eager = eager_adjoint_oracle(&parent);
-    let expected = eager.exp().unwrap();
+    let expected = eager.exp(&[0], &[1]).unwrap();
     let parent_redirect = parent
-        .exp()
+        .exp(&[0], &[1])
         .unwrap()
         .adjoint()
         .unwrap()
         .materialized_tensor_uncached()
         .unwrap();
     let lazy = parent.adjoint().unwrap();
-    let actual = lazy.exp().unwrap();
+    let actual = lazy.exp(&[0], &[1]).unwrap();
 
     assert_typed_map_close(&actual, &expected, 1.0e-20);
     assert!(parent_redirect
@@ -4052,13 +4137,18 @@ where
     D: AdvancedLinalgScalar + core::fmt::Debug + Send + Sync + 'static,
 {
     let eager = eager_adjoint_oracle(source);
-    let expected = eager.exp().unwrap();
+    let expected = eager
+        .exp(&codomain_axes(&eager), &domain_axes(&eager))
+        .unwrap();
     let parent_body = Arc::clone(owned(source));
     let parent_data = Arc::clone(&parent_body.data);
     let lazy = source.adjoint().unwrap();
 
     for _ in 0..2 {
-        let actual = lazy.clone().exp().unwrap();
+        let actual = lazy
+            .clone()
+            .exp(&codomain_axes(&lazy), &domain_axes(&lazy))
+            .unwrap();
         assert_typed_map_close(&actual, &expected, 1.0e-9);
         assert!(actual.owned_body().is_some());
         assert!(Arc::ptr_eq(
@@ -4071,7 +4161,11 @@ where
     let calls = (0..4)
         .map(|_| {
             let clone = lazy.clone();
-            std::thread::spawn(move || clone.exp().unwrap())
+            std::thread::spawn(move || {
+                clone
+                    .exp(&codomain_axes(&clone), &domain_axes(&clone))
+                    .unwrap()
+            })
         })
         .collect::<Vec<_>>();
     for call in calls {
@@ -4141,7 +4235,7 @@ fn exp_failure_leaves_the_lazy_receiver_and_parent_untouched() {
     let data = Arc::clone(&parent.data);
     let lazy = source.adjoint().unwrap();
 
-    assert!(matches!(lazy.exp(), Err(Error::Operation(_))));
+    assert!(matches!(lazy.exp(&[0], &[1]), Err(Error::Operation(_))));
     assert!(source
         .dense_data()
         .unwrap()
@@ -4182,7 +4276,7 @@ fn assert_polar_factors<R, D>(
     });
     assert!(is_hermitian!(positive, 1e-11));
     assert!(positive
-        .eigh_vals()
+        .eigh_vals(&[0], &[1])
         .unwrap()
         .iter()
         .all(|entry| entry.values.iter().all(|&value| value >= -1e-11)));
@@ -4210,21 +4304,21 @@ where
     D: AdvancedLinalgScalar + core::fmt::Debug,
 {
     let target = eager_adjoint_oracle(source);
-    let target_pinv = target.pinv(1e-10).unwrap();
+    let target_pinv = target.pinv(&[0], &[1], 1e-10).unwrap();
     let target_codomain = target.compose(&target_pinv).unwrap();
     let target_domain = target_pinv.compose(&target).unwrap();
     let lazy = source.adjoint().unwrap();
     let factors = if left {
-        lazy.left_polar().unwrap().pair()
+        lazy.left_polar(&[0], &[1]).unwrap().pair()
     } else {
-        lazy.right_polar().unwrap().pair()
+        lazy.right_polar(&[0], &[1]).unwrap().pair()
     };
     let (positive, isometry) = if left {
         (&factors.1, &factors.0)
     } else {
         (&factors.0, &factors.1)
     };
-    let positive_pinv = positive.pinv(1e-10).unwrap();
+    let positive_pinv = positive.pinv(&[0], &[1], 1e-10).unwrap();
     if left {
         let support = positive_pinv.compose(positive).unwrap();
         assert_typed_map_close(&support, &target_domain, 1e-9);
@@ -4262,13 +4356,18 @@ where
     D: AdvancedLinalgScalar + core::fmt::Debug + Send + Sync + 'static,
 {
     let eager = eager_adjoint_oracle(source);
-    let expected = eager.inv().unwrap();
+    let expected = eager
+        .inv(&codomain_axes(&eager), &domain_axes(&eager))
+        .unwrap();
     let parent_body = Arc::clone(owned(source));
     let parent_data = Arc::clone(&parent_body.data);
     let lazy = source.adjoint().unwrap();
 
     for _ in 0..2 {
-        let actual = lazy.clone().inv().unwrap();
+        let actual = lazy
+            .clone()
+            .inv(&codomain_axes(&lazy), &domain_axes(&lazy))
+            .unwrap();
         assert_typed_map_close(&actual, &expected, 1e-10);
         let codomain = eager.codomain();
         let domain = eager.domain();
@@ -4294,7 +4393,11 @@ where
     let calls = (0..4)
         .map(|_| {
             let clone = lazy.clone();
-            std::thread::spawn(move || clone.inv().unwrap())
+            std::thread::spawn(move || {
+                clone
+                    .inv(&codomain_axes(&clone), &domain_axes(&clone))
+                    .unwrap()
+            })
         })
         .collect::<Vec<_>>();
     for call in calls {
@@ -4403,7 +4506,7 @@ fn inverse_redirect_failure_leaves_the_receiver_cold() {
     let body = Arc::clone(owned(&singular));
     let data = Arc::clone(&body.data);
     let cold = singular.adjoint().unwrap();
-    assert!(matches!(cold.inv(), Err(Error::Operation(_))));
+    assert!(matches!(cold.inv(&[0], &[1]), Err(Error::Operation(_))));
     assert_eq!(singular.dense_data().unwrap(), before);
     assert!(Arc::ptr_eq(owned(&singular), &body));
     assert!(Arc::ptr_eq(&owned(&singular).data, &data));
@@ -4426,7 +4529,7 @@ fn inverse_redirect_failure_leaves_the_receiver_cold() {
     let before = late.dense_data().unwrap().to_vec();
     let data = Arc::clone(&owned(&late).data);
     let cold = late.adjoint().unwrap();
-    assert!(matches!(cold.inv(), Err(Error::Operation(_))));
+    assert!(matches!(cold.inv(&[0], &[1]), Err(Error::Operation(_))));
     assert_eq!(late.dense_data().unwrap(), before);
     assert!(Arc::ptr_eq(&owned(&late).data, &data));
     let TypedTensorRepr::Adjoint(_) = &cold.repr else {
@@ -4735,13 +4838,18 @@ where
     D: AdvancedLinalgScalar + core::fmt::Debug + Send + Sync + 'static,
 {
     let eager = eager_adjoint_oracle(source);
-    let expected = eager.pinv(rcond).unwrap();
+    let expected = eager
+        .pinv(&codomain_axes(&eager), &domain_axes(&eager), rcond)
+        .unwrap();
     let parent_body = Arc::clone(owned(source));
     let parent_data = Arc::clone(&parent_body.data);
     let lazy = source.adjoint().unwrap();
 
     for _ in 0..2 {
-        let actual = lazy.clone().pinv(rcond).unwrap();
+        let actual = lazy
+            .clone()
+            .pinv(&codomain_axes(&lazy), &domain_axes(&lazy), rcond)
+            .unwrap();
         assert_typed_map_close(&actual, &expected, 1e-9);
         let pap = actual.compose(&eager).unwrap().compose(&actual).unwrap();
         assert_typed_map_close(&pap, &actual, 1e-8);
@@ -4763,7 +4871,11 @@ where
     let calls = (0..4)
         .map(|_| {
             let clone = lazy.clone();
-            std::thread::spawn(move || clone.pinv(rcond).unwrap())
+            std::thread::spawn(move || {
+                clone
+                    .pinv(&codomain_axes(&clone), &domain_axes(&clone), rcond)
+                    .unwrap()
+            })
         })
         .collect::<Vec<_>>();
     for call in calls {
@@ -4824,7 +4936,10 @@ fn pinv_redirect_late_svd_failure_keeps_parent_and_receiver_cold() {
     let before = source.dense_data().unwrap().to_vec();
     let data = Arc::clone(&owned(&source).data);
     let lazy = source.adjoint().unwrap();
-    assert!(matches!(lazy.pinv(0.0), Err(Error::Operation(_))));
+    assert!(matches!(
+        lazy.pinv(&[0], &[1], 0.0),
+        Err(Error::Operation(_))
+    ));
     assert_eq!(source.dense_data().unwrap(), before);
     assert!(Arc::ptr_eq(&owned(&source).data, &data));
     let TypedTensorRepr::Adjoint(_) = &lazy.repr else {
@@ -4883,15 +4998,15 @@ fn polar_redirect_repeats_clones_and_runs_concurrently_without_warming_receiver(
     let lazy = source.adjoint().unwrap();
     for left in [true, false] {
         let expected = if left {
-            target.left_polar().unwrap().pair()
+            target.left_polar(&[0], &[1]).unwrap().pair()
         } else {
-            target.right_polar().unwrap().pair()
+            target.right_polar(&[0], &[1]).unwrap().pair()
         };
         for _ in 0..2 {
             let actual = if left {
-                lazy.clone().left_polar().unwrap().pair()
+                lazy.clone().left_polar(&[0], &[1]).unwrap().pair()
             } else {
-                lazy.clone().right_polar().unwrap().pair()
+                lazy.clone().right_polar(&[0], &[1]).unwrap().pair()
             };
             assert_polar_factors(&source, &target, &actual, &expected, left);
         }
@@ -4900,9 +5015,9 @@ fn polar_redirect_repeats_clones_and_runs_concurrently_without_warming_receiver(
                 let clone = lazy.clone();
                 std::thread::spawn(move || {
                     if left {
-                        clone.left_polar().unwrap().pair()
+                        clone.left_polar(&[0], &[1]).unwrap().pair()
                     } else {
-                        clone.right_polar().unwrap().pair()
+                        clone.right_polar(&[0], &[1]).unwrap().pair()
                     }
                 })
             })
@@ -4921,7 +5036,7 @@ fn polar_redirect_repeats_clones_and_runs_concurrently_without_warming_receiver(
 fn polar_redirect_wrong_direction_keeps_requested_name_and_receiver_cold() {
     let source = u1_matrix_fixture([(0, 3)], [(0, 2)]);
     let lazy = source.adjoint().unwrap();
-    let error = lazy.left_polar().unwrap_err();
+    let error = lazy.left_polar(&[0], &[1]).unwrap_err();
     assert!(matches!(
         error,
         Error::Operation(error)
@@ -4934,7 +5049,7 @@ fn polar_redirect_wrong_direction_keeps_requested_name_and_receiver_cold() {
 
     let source = u1_matrix_fixture([(0, 2)], [(0, 3)]);
     let lazy = source.adjoint().unwrap();
-    let error = lazy.right_polar().unwrap_err();
+    let error = lazy.right_polar(&[0], &[1]).unwrap_err();
     assert!(matches!(
         error,
         Error::Operation(error)
@@ -4963,9 +5078,9 @@ fn polar_redirect_late_failure_leaves_parent_and_receiver_unchanged() {
         let before = source.dense_data().unwrap().to_vec();
         let lazy = source.adjoint().unwrap();
         let result = if left {
-            lazy.left_polar().map(drop)
+            lazy.left_polar(&[0], &[1]).map(drop)
         } else {
-            lazy.right_polar().map(drop)
+            lazy.right_polar(&[0], &[1]).map(drop)
         };
         assert!(matches!(result, Err(Error::Operation(_))));
         assert_eq!(source.dense_data().unwrap(), before);
@@ -5030,39 +5145,63 @@ where
     let target = eager_adjoint_oracle(source);
     let lazy = source.adjoint().unwrap();
 
-    let actual = lazy.qr_compact().unwrap().pair();
+    let actual = lazy
+        .qr_compact(&codomain_axes(&lazy), &domain_axes(&lazy))
+        .unwrap()
+        .pair();
     assert_qr_lq_factors(
         source,
         &target,
         &actual,
-        &target.qr_compact().unwrap().pair(),
+        &target
+            .qr_compact(&codomain_axes(&target), &domain_axes(&target))
+            .unwrap()
+            .pair(),
         true,
         true,
     );
-    let actual = lazy.lq_compact().unwrap().pair();
+    let actual = lazy
+        .lq_compact(&codomain_axes(&lazy), &domain_axes(&lazy))
+        .unwrap()
+        .pair();
     assert_qr_lq_factors(
         source,
         &target,
         &actual,
-        &target.lq_compact().unwrap().pair(),
+        &target
+            .lq_compact(&codomain_axes(&target), &domain_axes(&target))
+            .unwrap()
+            .pair(),
         false,
         true,
     );
-    let actual = lazy.qr_full().unwrap().pair();
+    let actual = lazy
+        .qr_full(&codomain_axes(&lazy), &domain_axes(&lazy))
+        .unwrap()
+        .pair();
     assert_qr_lq_factors(
         source,
         &target,
         &actual,
-        &target.qr_full().unwrap().pair(),
+        &target
+            .qr_full(&codomain_axes(&target), &domain_axes(&target))
+            .unwrap()
+            .pair(),
         true,
         false,
     );
-    let actual = lazy.lq_full().unwrap().pair();
+    let actual = lazy
+        .lq_full(&codomain_axes(&lazy), &domain_axes(&lazy))
+        .unwrap()
+        .pair();
     assert_qr_lq_factors(
         source,
         &target,
         &actual,
-        &target.lq_full().unwrap().pair(),
+        &target
+            .lq_full(&codomain_axes(&target), &domain_axes(&target))
+            .unwrap()
+            .pair(),
         false,
         false,
     );
@@ -5096,21 +5235,21 @@ fn full_qr_lq_adjoint_dispatch_handles_unmatched_and_disjoint_sectors() {
     ] {
         let target = eager_adjoint_oracle(&source);
         let lazy = source.adjoint().unwrap();
-        let qr = lazy.qr_full().unwrap().pair();
+        let qr = lazy.qr_full(&[0], &[1]).unwrap().pair();
         assert_qr_lq_factors(
             &source,
             &target,
             &qr,
-            &target.qr_full().unwrap().pair(),
+            &target.qr_full(&[0], &[1]).unwrap().pair(),
             true,
             false,
         );
-        let lq = lazy.lq_full().unwrap().pair();
+        let lq = lazy.lq_full(&[0], &[1]).unwrap().pair();
         assert_qr_lq_factors(
             &source,
             &target,
             &lq,
-            &target.lq_full().unwrap().pair(),
+            &target.lq_full(&[0], &[1]).unwrap().pair(),
             false,
             false,
         );
@@ -5132,11 +5271,11 @@ fn qr_lq_uncached_owned_outputs_repeat_clone_and_run_concurrently() {
     let source = genuinely_complex(&su2_lazy_fixture());
     let target = eager_adjoint_oracle(&source);
     let lazy = source.adjoint().unwrap();
-    let expected_qr = lazy.qr_compact().unwrap().pair();
-    let expected_lq = lazy.lq_full().unwrap().pair();
+    let expected_qr = lazy.qr_compact(&[0], &[1, 2]).unwrap().pair();
+    let expected_lq = lazy.lq_full(&[0], &[1, 2]).unwrap().pair();
     for _ in 0..2 {
-        let qr = lazy.clone().qr_compact().unwrap().pair();
-        let lq = lazy.clone().lq_full().unwrap().pair();
+        let qr = lazy.clone().qr_compact(&[0], &[1, 2]).unwrap().pair();
+        let lq = lazy.clone().lq_full(&[0], &[1, 2]).unwrap().pair();
         assert_qr_lq_factors(&source, &target, &qr, &expected_qr, true, true);
         assert_qr_lq_factors(&source, &target, &lq, &expected_lq, false, false);
     }
@@ -5145,8 +5284,8 @@ fn qr_lq_uncached_owned_outputs_repeat_clone_and_run_concurrently() {
             .map(|_| {
                 let lazy = lazy.clone();
                 scope.spawn(move || {
-                    let qr = lazy.qr_compact().unwrap().pair();
-                    let lq = lazy.lq_full().unwrap().pair();
+                    let qr = lazy.qr_compact(&[0], &[1, 2]).unwrap().pair();
+                    let lq = lazy.lq_full(&[0], &[1, 2]).unwrap().pair();
                     (qr, lq)
                 })
             })
@@ -5177,9 +5316,9 @@ fn assert_full_qr_lq_late_failure(qr: bool) {
     let lazy = source.adjoint().unwrap();
 
     let result = if qr {
-        lazy.qr_full().map(drop)
+        lazy.qr_full(&[0], &[1]).map(drop)
     } else {
-        lazy.lq_full().map(drop)
+        lazy.lq_full(&[0], &[1]).map(drop)
     };
     assert!(matches!(result, Err(Error::Operation(_))));
     assert_eq!(source.dense_data().unwrap(), before);
@@ -5213,7 +5352,7 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
         D: FactorizationScalar + SpectrumMagnitude,
     {
-        let Svd { u, s, vh } = tensor.svd_compact().unwrap();
+        let Svd { u, s, vh } = tensor.svd_compact(&[0], &[1, 2]).unwrap();
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), truncation)
             .unwrap();
@@ -5314,7 +5453,7 @@ fn rejected_truncation_does_not_materialize_the_adjoint() {
     let foreign =
         GradedSpace::try_new(Arc::new(SU2FusionRule), [(SU2Irrep::from_twice_spin(0), 1)]).unwrap();
     let lazy = source.adjoint().unwrap();
-    let Svd { s, .. } = lazy.svd_compact().unwrap();
+    let Svd { s, .. } = lazy.svd_compact(&[0], &[1, 2]).unwrap();
     assert!(s.domain()[0]
         .find_truncated(
             &s.diagview().unwrap(),
@@ -6606,7 +6745,7 @@ fn a_compact_payload_materializes_exactly_once_for_the_unit_ops() {
     // contract — a `Diagonal` payload is materialized into a *fresh*
     // dense payload (one copy), and the follow-up remove shares that
     // dense `Arc` rather than copying again.
-    let s = fixture().svd_compact().unwrap().s;
+    let s = fixture().svd_compact(&[0], &[1]).unwrap().s;
     let inserted = s.insert_unit(0, Side::Domain, Duality::Plain).unwrap();
     assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&inserted).data));
     assert!(matches!(&*owned(&inserted).data, TypedData::Dense(_)));
@@ -7063,7 +7202,7 @@ fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
         indices.iter().sum::<usize>() as f64 + 1.0
     })
     .unwrap();
-    let compact = square.svd_compact().unwrap().s;
+    let compact = square.svd_compact(&[0], &[1]).unwrap().s;
     let mut compact_destination = compact.zeros_like();
     let before = compact_destination
         .materialize()
@@ -7452,7 +7591,7 @@ fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjo
         };
     }
 
-    let Svd { u, s, .. } = lhs.svd_compact().unwrap();
+    let Svd { u, s, .. } = lhs.svd_compact(&[0], &[1]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     let expected = u
         .contract(
@@ -7669,7 +7808,7 @@ fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
     };
     assert_eq!(Arc::as_ptr(after), view);
 
-    let mut compact_destination = lhs.svd_compact().unwrap().s;
+    let mut compact_destination = lhs.svd_compact(&[0], &[1]).unwrap().s;
     let payload = Arc::clone(&owned(&compact_destination).data);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert!(lhs
@@ -7932,7 +8071,7 @@ fn high_rank_identity_has_no_inline_capacity_boundary() {
 #[test]
 fn compact_identity_transforms_do_not_materialize() {
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let factor = fixture().svd_compact().unwrap().s;
+    let factor = fixture().svd_compact(&[0], &[1]).unwrap().s;
     assert!(matches!(&*owned(&factor).data, TypedData::Diagonal(_)));
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
@@ -7970,7 +8109,7 @@ fn twist_on_a_compact_spectrum_stays_compact() {
     // unchanged, so O(Σ_c k_c) storage survives — and its own identity
     // answer (θ ≡ 1 across the spectrum's sectors) is a body-sharing
     // clone.
-    let s = fz2_fixture().svd_compact().unwrap().s;
+    let s = fz2_fixture().svd_compact(&[0, 1], &[2]).unwrap().s;
     let twisted = s.twist(&[0], Direction::Forward).unwrap();
     assert!(matches!(&*owned(&twisted).data, TypedData::Diagonal(_)));
     assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&twisted).data));
@@ -7978,7 +8117,7 @@ fn twist_on_a_compact_spectrum_stays_compact() {
     assert!(matches!(&*owned(&inverse).data, TypedData::Diagonal(_)));
     assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&inverse).data));
 
-    let bosonic_s = fixture().svd_compact().unwrap().s;
+    let bosonic_s = fixture().svd_compact(&[0], &[1]).unwrap().s;
     let untouched = bosonic_s.twist(&[0], Direction::Forward).unwrap();
     assert!(Arc::ptr_eq(owned(&bosonic_s), owned(&untouched)));
     let untouched_inverse = bosonic_s.twist(&[0], Direction::Inverse).unwrap();
@@ -8370,8 +8509,12 @@ fn compact_arms_never_densify_their_spectrum_operand() {
     // counts entries directly, which the integration byte ceilings cannot
     // tell apart from a scaled copy.
     let tensor = fixture();
-    let Svd { u, s: d, vh } = tensor.svd_compact().unwrap();
-    let complex_d = tensor.convert::<Complex64>().svd_compact().unwrap().s;
+    let Svd { u, s: d, vh } = tensor.svd_compact(&[0], &[1]).unwrap();
+    let complex_d = tensor
+        .convert::<Complex64>()
+        .svd_compact(&[0], &[1])
+        .unwrap()
+        .s;
     DIAGONAL_MATERIALIZATIONS.set(0);
 
     let _ = d.scale(0.5);
@@ -8387,9 +8530,9 @@ fn compact_arms_never_densify_their_spectrum_operand() {
     }
     let _ = d.tr().unwrap();
     let _ = d.inner(&d).unwrap();
-    let _ = d.exp().unwrap();
-    let _ = d.inv().unwrap();
-    let _ = d.pinv(1e-12).unwrap();
+    let _ = d.exp(&[0], &[1]).unwrap();
+    let _ = d.inv(&[0], &[1]).unwrap();
+    let _ = d.pinv(&[0], &[1], 1e-12).unwrap();
     let _ = d.map_diagonal(|x| x.abs().sqrt()).unwrap();
     let _ = tensor
         .contract(

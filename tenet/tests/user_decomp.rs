@@ -46,7 +46,7 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
 
     // Reconstruction is backward stable: within the tolerance rule, one term
     // per entry of the largest (2 x 2) block.
-    let Svd { u, s, vh } = tensor.svd_compact().unwrap();
+    let Svd { u, s, vh } = tensor.svd_compact(&[0], &[1]).unwrap();
     numerics::assert_slices_close(
         "u s vh",
         u.compose(&s)

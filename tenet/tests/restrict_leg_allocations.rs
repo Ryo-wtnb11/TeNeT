@@ -336,7 +336,7 @@ fn compact_restrict_measurement(scale: usize) -> Measurement {
     let leg = u1(&provider, &[(-1, 2 * scale), (0, 3 * scale)]);
     let source: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 47).unwrap();
-    let Svd { s, .. } = source.svd_compact().unwrap();
+    let Svd { s, .. } = source.svd_compact(&[0], &[1]).unwrap();
     let bond = s.domain()[0].clone();
     let selection =
         LegSelection::try_new(&bond, [(U1Irrep::new(-1), 0..2), (U1Irrep::new(0), 0..3)]).unwrap();

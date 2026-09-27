@@ -182,10 +182,10 @@ fn typed_cat_densifies_a_compact_operand_per_call_and_retains_nothing() {
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| pseudo_random(&mut state))
             .unwrap();
     // Warm every layout cache with a throwaway spectrum factor.
-    let warmup: TensorMap<Z2FusionRule, f64> = tensor.svd_compact().unwrap().s;
+    let warmup: TensorMap<Z2FusionRule, f64> = tensor.svd_compact(&[0], &[1]).unwrap().s;
     black_box(warmup.cat(&warmup, Side::Domain).unwrap());
 
-    let s: TensorMap<Z2FusionRule, f64> = tensor.svd_compact().unwrap().s;
+    let s: TensorMap<Z2FusionRule, f64> = tensor.svd_compact(&[0], &[1]).unwrap().s;
     let dense_payload = DEGENERACY * DEGENERACY * std::mem::size_of::<f64>();
     let output_payload = 2 * dense_payload;
     // Both operands are compact, so each call densifies two of them.

@@ -241,8 +241,8 @@ macro_rules! measure_factorizations {
         let sequence = || {
             let tensor: TensorMap<U1FusionRule, $dtype> =
                 TensorMap::rand_with_seed($runtime, [space, space], [space], 7_502).unwrap();
-            let Qr { q, r } = tensor.qr_compact().unwrap();
-            let Svd { u, s, vh } = tensor.svd_compact().unwrap();
+            let Qr { q, r } = tensor.qr_compact(&[0, 1], &[2]).unwrap();
+            let Svd { u, s, vh } = tensor.svd_compact(&[0, 1], &[2]).unwrap();
             // The truncated SVD is a composition (#1534).
             let found = s.domain()[0]
                 .find_truncated(&s.diagview().unwrap(), &Truncation::rank(4))

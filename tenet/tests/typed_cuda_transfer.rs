@@ -49,7 +49,9 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: tenet::prelude::FactorizationScalar + tenet::typed::SpectrumMagnitude,
 {
-    let Svd { u, s, vh } = source.svd_compact().unwrap();
+    let Svd { u, s, vh } = source
+        .svd_compact(&codomain_axes(source), &domain_axes(source))
+        .unwrap();
     let found = s.domain()[0]
         .find_truncated(&s.diagview().unwrap(), truncation)
         .unwrap();
@@ -83,7 +85,9 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: tenet::prelude::FactorizationScalar + tenet::typed::SpectrumMagnitude,
 {
-    let Eigh { d, v } = source.eigh_full().unwrap();
+    let Eigh { d, v } = source
+        .eigh_full(&codomain_axes(source), &domain_axes(source))
+        .unwrap();
     let found = d.domain()[0]
         .find_truncated(&d.diagview().unwrap(), truncation)
         .unwrap();
@@ -406,12 +410,16 @@ where
     let Qr {
         q: expected_left,
         r: expected_right,
-    } = source.qr_compact().unwrap();
+    } = source
+        .qr_compact(&codomain_axes(source), &domain_axes(source))
+        .unwrap();
     let source_device = source.to_cuda().unwrap();
     let Qr {
         q: left_device,
         r: right_device,
-    } = source_device.qr_compact().unwrap();
+    } = source_device
+        .qr_compact(&codomain_axes(&source_device), &domain_axes(&source_device))
+        .unwrap();
 
     for factor in [&left_device, &right_device] {
         assert!(std::ptr::eq(factor.provider(), provider));
@@ -463,8 +471,16 @@ where
 {
     let source_data = source.dense_data().unwrap().to_vec();
     let source_device = source.to_cuda().unwrap();
-    let expected = source.svd_compact().unwrap();
-    assert_cuda_svd_result(source, &expected, source_device.svd_compact().unwrap());
+    let expected = source
+        .svd_compact(&codomain_axes(source), &domain_axes(source))
+        .unwrap();
+    assert_cuda_svd_result(
+        source,
+        &expected,
+        source_device
+            .svd_compact(&codomain_axes(&source_device), &domain_axes(&source_device))
+            .unwrap(),
+    );
     assert_eq!(
         source_device.to_host().unwrap().dense_data().unwrap(),
         source_data
@@ -552,7 +568,9 @@ fn assert_typed_cuda_svd_trunc_composition_matches_host<R>(
         u: u_device,
         s: s_device,
         vh: vh_device,
-    } = source_device.svd_compact().unwrap();
+    } = source_device
+        .svd_compact(&codomain_axes(&source_device), &domain_axes(&source_device))
+        .unwrap();
     for factor in [&u_device, &s_device, &vh_device] {
         assert!(std::ptr::eq(factor.provider(), provider));
         assert!(runtime.matches(factor.runtime()));
@@ -1091,9 +1109,16 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let Qr {
         q: expected_multi_left,
         r: expected_multi_right,
-    } = multi_tree.qr_compact().unwrap();
+    } = multi_tree
+        .qr_compact(&codomain_axes(&multi_tree), &domain_axes(&multi_tree))
+        .unwrap();
     let multi_tree_device = multi_tree.to_cuda().unwrap();
-    let Qr { q: left, r: right } = multi_tree_device.qr_compact().unwrap();
+    let Qr { q: left, r: right } = multi_tree_device
+        .qr_compact(
+            &codomain_axes(&multi_tree_device),
+            &domain_axes(&multi_tree_device),
+        )
+        .unwrap();
     let left = left.to_host().unwrap();
     let right = right.to_host().unwrap();
     assert_eq!(
@@ -1116,7 +1141,9 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let Qr {
         q: zero_left,
         r: zero_right,
-    } = zero_device.qr_compact().unwrap();
+    } = zero_device
+        .qr_compact(&codomain_axes(&zero_device), &domain_axes(&zero_device))
+        .unwrap();
     let zero_left = zero_left.to_host().unwrap();
     let zero_right = zero_right.to_host().unwrap();
     let zero_rebuilt = zero_left.compose(&zero_right).unwrap();
@@ -1138,7 +1165,14 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let Qr {
         q: rank_left,
         r: rank_right,
-    } = rank_deficient.to_cuda().unwrap().qr_compact().unwrap();
+    } = rank_deficient
+        .to_cuda()
+        .unwrap()
+        .qr_compact(
+            &codomain_axes(&rank_deficient),
+            &domain_axes(&rank_deficient),
+        )
+        .unwrap();
     let rank_left = rank_left.to_host().unwrap();
     let rank_right = rank_right.to_host().unwrap();
     assert!(is_isometric!(rank_left, 1e-10));
@@ -1169,7 +1203,11 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let Qr {
         q: tiny_left,
         r: tiny_right,
-    } = tiny_negative.to_cuda().unwrap().qr_compact().unwrap();
+    } = tiny_negative
+        .to_cuda()
+        .unwrap()
+        .qr_compact(&codomain_axes(&tiny_negative), &domain_axes(&tiny_negative))
+        .unwrap();
     let tiny_left = tiny_left.to_host().unwrap();
     let tiny_right = tiny_right.to_host().unwrap();
     assert_close(
@@ -1194,14 +1232,18 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let device = mixed.to_cuda().unwrap();
     let lazy = device.adjoint().unwrap();
     assert!(matches!(
-        lazy.qr_compact(),
+        lazy.qr_compact(&codomain_axes(&lazy), &domain_axes(&lazy)),
         Err(tenet::typed::Error::UnsupportedOnDevice(_))
     ));
-    let expected = device.qr_compact().unwrap();
+    let expected = device
+        .qr_compact(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap();
     let expected_left = expected.q.to_host().unwrap();
     let expected_right = expected.r.to_host().unwrap();
     for _ in 0..3 {
-        let actual = device.qr_compact().unwrap();
+        let actual = device
+            .qr_compact(&codomain_axes(&device), &domain_axes(&device))
+            .unwrap();
         assert_close(
             actual.q.to_host().unwrap().dense_data().unwrap(),
             expected_left.dense_data().unwrap(),
@@ -1215,7 +1257,13 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     }
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..4)
-            .map(|_| scope.spawn(|| device.qr_compact().unwrap()))
+            .map(|_| {
+                scope.spawn(|| {
+                    device
+                        .qr_compact(&codomain_axes(&device), &domain_axes(&device))
+                        .unwrap()
+                })
+            })
             .collect();
         for worker in workers {
             let actual = worker.join().unwrap();
@@ -1345,16 +1393,30 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
         .map(|value| value.to_bits())
         .collect();
     assert!(matches!(
-        device.adjoint().unwrap().svd_compact(),
+        device.adjoint().unwrap().svd_compact(&[0], &[1]),
         Err(tenet::typed::Error::UnsupportedOnDevice(_))
     ));
-    let expected = rectangular.svd_compact().unwrap();
+    let expected = rectangular
+        .svd_compact(&codomain_axes(&rectangular), &domain_axes(&rectangular))
+        .unwrap();
     for _ in 0..3 {
-        assert_cuda_svd_result(&rectangular, &expected, device.svd_compact().unwrap());
+        assert_cuda_svd_result(
+            &rectangular,
+            &expected,
+            device
+                .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+                .unwrap(),
+        );
     }
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..2)
-            .map(|_| scope.spawn(|| device.svd_compact().unwrap()))
+            .map(|_| {
+                scope.spawn(|| {
+                    device
+                        .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+                        .unwrap()
+                })
+            })
             .collect();
         for worker in workers {
             assert_cuda_svd_result(&rectangular, &expected, worker.join().unwrap());
@@ -1539,15 +1601,34 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
     // Repetition and concurrency now bear on the device half of the
     // composition, which is `svd_compact`.
     let device = mixed.to_cuda().unwrap();
-    let expected = device.svd_compact().unwrap().s.to_host().unwrap();
+    let expected = device
+        .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap()
+        .s
+        .to_host()
+        .unwrap();
     let expected_spectrum = expected.diagview().unwrap();
     for _ in 0..2 {
-        let actual = device.svd_compact().unwrap().s.to_host().unwrap();
+        let actual = device
+            .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+            .unwrap()
+            .s
+            .to_host()
+            .unwrap();
         assert_eq!(actual.diagview().unwrap(), expected_spectrum);
     }
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..2)
-            .map(|_| scope.spawn(|| device.svd_compact().unwrap().s.to_host().unwrap()))
+            .map(|_| {
+                scope.spawn(|| {
+                    device
+                        .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+                        .unwrap()
+                        .s
+                        .to_host()
+                        .unwrap()
+                })
+            })
             .collect();
         for worker in workers {
             assert_eq!(
@@ -2806,13 +2887,17 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let source_data = source.materialize().unwrap().dense_data().unwrap().to_vec();
-    let expected = source.svd_compact().unwrap();
+    let expected = source
+        .svd_compact(&codomain_axes(source), &domain_axes(source))
+        .unwrap();
     let device = source.to_cuda().unwrap();
     let Svd {
         u: u_device,
         s: s_device,
         vh: vh_device,
-    } = device.svd_compact().unwrap();
+    } = device
+        .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap();
     assert_device_factor_handles(source, [&u_device, &s_device, &vh_device]);
 
     let u = u_device.to_host().unwrap();
@@ -2854,7 +2939,10 @@ where
 {
     let source_data = source.dense_data().unwrap().to_vec();
     let (mut largest, mut smallest) = (0.0_f64, f64::INFINITY);
-    for entry in &source.svd_vals().unwrap() {
+    for entry in &source
+        .svd_vals(&codomain_axes(source), &domain_axes(source))
+        .unwrap()
+    {
         for &value in &entry.values {
             largest = largest.max(value);
             smallest = smallest.min(value);
@@ -2869,12 +2957,16 @@ where
     let Qr {
         q: host_q,
         r: host_r,
-    } = source.qr_compact().unwrap();
+    } = source
+        .qr_compact(&codomain_axes(source), &domain_axes(source))
+        .unwrap();
     let device = source.to_cuda().unwrap();
     let Qr {
         q: q_device,
         r: r_device,
-    } = device.qr_compact().unwrap();
+    } = device
+        .qr_compact(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap();
     assert_device_factor_handles(source, [&q_device, &r_device]);
     let q = q_device.to_host().unwrap();
     let r = r_device.to_host().unwrap();
@@ -2912,7 +3004,9 @@ fn assert_c64_svd_trunc_composition_matches_host<R>(
         u: u_device,
         s: s_device,
         vh: vh_device,
-    } = device.svd_compact().unwrap();
+    } = device
+        .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap();
     assert_device_factor_handles(source, [&u_device, &s_device, &vh_device]);
     let u = u_device.to_host().unwrap();
     let s = s_device.to_host().unwrap();
@@ -3004,7 +3098,9 @@ fn assert_c64_eigh_trunc_composition_matches_host<R>(
     let Eigh {
         d: d_device,
         v: v_device,
-    } = device.eigh_full().unwrap();
+    } = device
+        .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+        .unwrap();
     assert_device_factor_handles(source, [&d_device, &v_device]);
     let d = d_device.to_host().unwrap();
     let v = v_device.to_host().unwrap();
@@ -3129,7 +3225,11 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
     assert_c64_eigh_trunc_composition_matches_host(&hermitian, &Truncation::Full);
     assert_c64_eigh_trunc_composition_matches_host(&hermitian, &Truncation::rank(2));
 
-    let Eigh { d, v } = hermitian.to_cuda().unwrap().eigh_full().unwrap();
+    let Eigh { d, v } = hermitian
+        .to_cuda()
+        .unwrap()
+        .eigh_full(&codomain_axes(&hermitian), &domain_axes(&hermitian))
+        .unwrap();
     let d = d.to_host().unwrap();
     let v = v.to_host().unwrap();
     assert!(is_isometric!(v, 1e-10), "V^H V = I");
@@ -3171,13 +3271,21 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
         })
         .unwrap();
     assert!(
-        complex_symmetric.eigh_full().is_err(),
+        complex_symmetric
+            .eigh_full(
+                &codomain_axes(&complex_symmetric),
+                &domain_axes(&complex_symmetric)
+            )
+            .is_err(),
         "the Host oracle rejects a complex-symmetric non-Hermitian input"
     );
     let device_error = complex_symmetric
         .to_cuda()
         .unwrap()
-        .eigh_full()
+        .eigh_full(
+            &codomain_axes(&complex_symmetric),
+            &domain_axes(&complex_symmetric),
+        )
         .expect_err("device EIGH must reject a complex-symmetric non-Hermitian input");
     assert!(
         matches!(
@@ -3203,7 +3311,14 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
             _ => Complex64::new(1.0, 0.0),
         })
         .unwrap();
-    let Eigh { d, .. } = hand_hermitian.to_cuda().unwrap().eigh_full().unwrap();
+    let Eigh { d, .. } = hand_hermitian
+        .to_cuda()
+        .unwrap()
+        .eigh_full(
+            &codomain_axes(&hand_hermitian),
+            &domain_axes(&hand_hermitian),
+        )
+        .unwrap();
     let mut values: Vec<f64> = d
         .to_host()
         .unwrap()
@@ -3224,7 +3339,14 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
             }
         })
         .unwrap();
-    assert!(hand_symmetric.to_cuda().unwrap().eigh_full().is_err());
+    assert!(hand_symmetric
+        .to_cuda()
+        .unwrap()
+        .eigh_full(
+            &codomain_axes(&hand_symmetric),
+            &domain_axes(&hand_symmetric)
+        )
+        .is_err());
 }
 
 /// G3c-2 (#1276): the device destination-overwrite entry writes exactly what

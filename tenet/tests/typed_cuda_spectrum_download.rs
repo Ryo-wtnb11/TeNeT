@@ -24,6 +24,16 @@ use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
 use tenet::typed::{Eigh, GradedSpace, Runtime, Svd, TensorMap};
 
+/// The receiver's own split as leg roles: `rows = 0..nout`.
+fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (0..t.codomain_rank()).collect()
+}
+
+/// The receiver's own split as leg roles: `cols = nout..rank`.
+fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (t.codomain_rank()..t.rank()).collect()
+}
+
 fn delta(before: CudaTransferStats) -> CudaTransferStats {
     let after = cuda_transfer_stats();
     CudaTransferStats {
@@ -55,7 +65,9 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
         let device = host.to_cuda().unwrap();
 
         let before = cuda_transfer_stats();
-        let Svd { u, s, vh } = device.svd_compact().unwrap();
+        let Svd { u, s, vh } = device
+            .svd_compact(&codomain_axes(&device), &domain_axes(&device))
+            .unwrap();
         let svd = delta(before);
         let (u, s, vh) = (
             u.to_host().unwrap(),
@@ -80,7 +92,9 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
         // Per aligned real route: 13 phase ops, then a broadcast and a mul on
         // each side; the gauge never downloads (checked above).
         assert_eq!(svd.gauge_ops, 17 * charges as u64, "{charges} sectors");
-        let Svd { s: expected, .. } = host.svd_compact().unwrap();
+        let Svd { s: expected, .. } = host
+            .svd_compact(&codomain_axes(&host), &domain_axes(&host))
+            .unwrap();
         for (device, host) in s
             .materialize()
             .unwrap()
@@ -95,7 +109,9 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
         let hermitian = host.axpby(1.0, &host.adjoint().unwrap(), 1.0).unwrap();
         let device = hermitian.to_cuda().unwrap();
         let before = cuda_transfer_stats();
-        let Eigh { d, v } = device.eigh_full().unwrap();
+        let Eigh { d, v } = device
+            .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+            .unwrap();
         let eigh = delta(before);
         let (d, v) = (d.to_host().unwrap(), v.to_host().unwrap());
         let eigenvalues = 3 * charges;
@@ -112,7 +128,9 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
                 ),
             "{charges}: {eigh:?}"
         );
-        let Eigh { d: expected, .. } = hermitian.eigh_full().unwrap();
+        let Eigh { d: expected, .. } = hermitian
+            .eigh_full(&codomain_axes(&hermitian), &domain_axes(&hermitian))
+            .unwrap();
         for (device, host) in d
             .materialize()
             .unwrap()

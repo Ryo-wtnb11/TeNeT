@@ -22,7 +22,7 @@ fn spectra(rt: &Runtime) -> Vec<f64> {
     let v = u1_space();
     let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(rt, [&v, &v], [&v, &v], 101).unwrap();
     let mut all: Vec<f64> = t
-        .svd_vals()
+        .svd_vals(&[0, 1], &[2, 3])
         .unwrap()
         .into_iter()
         .flat_map(|s| s.values)

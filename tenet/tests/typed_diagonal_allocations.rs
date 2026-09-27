@@ -207,9 +207,9 @@ fn svd_compacts_s_is_built_compact_and_materializes_only_on_demand() {
     let tensor = source(0x5eed_0001);
 
     // Warm the factorization path itself; `s` is discarded, only caches persist.
-    black_box(tensor.svd_compact().unwrap());
+    black_box(tensor.svd_compact(&[0], &[1]).unwrap());
 
-    let s = tensor.svd_compact().unwrap().s;
+    let s = tensor.svd_compact(&[0], &[1]).unwrap().s;
     assert!(s.dense_data().is_err(), "svd_compact built a dense s");
     let first = measured_bytes(|| s.materialize().unwrap());
     assert!(
@@ -225,7 +225,7 @@ fn a_truncated_s_stays_compact_too() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let tensor = source(0x5eed_0002);
     let truncated = |tensor: &TensorMap<Z2FusionRule, f64>| {
-        let s = tensor.svd_compact().unwrap().s;
+        let s = tensor.svd_compact(&[0], &[1]).unwrap().s;
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), &tenet::typed::Truncation::Full)
             .unwrap();
@@ -247,9 +247,9 @@ fn a_complex_payloads_s_is_compact_as_well() {
     // c64 spectrum takes exactly the same route with no widening variant.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let tensor = complex_source(0x5eed_0003);
-    black_box(tensor.svd_compact().unwrap());
+    black_box(tensor.svd_compact(&[0], &[1]).unwrap());
 
-    let s = tensor.svd_compact().unwrap().s;
+    let s = tensor.svd_compact(&[0], &[1]).unwrap().s;
     assert!(
         s.dense_data().is_err(),
         "the c64 s was dense at construction"
@@ -269,7 +269,7 @@ fn warmed_bytes<T>(operation: impl Fn() -> T) -> u64 {
 }
 
 fn spectrum(seed: u64) -> TensorMap<Z2FusionRule, f64> {
-    source(seed).svd_compact().unwrap().s
+    source(seed).svd_compact(&[0], &[1]).unwrap().s
 }
 
 #[test]
@@ -341,7 +341,7 @@ fn absorbing_a_spectrum_through_compose_scales_instead_of_densifying() {
     // would need `s` materialized as well.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let tensor = source(0x5eed_0013);
-    let Svd { u, s, vh } = tensor.svd_compact().unwrap();
+    let Svd { u, s, vh } = tensor.svd_compact(&[0], &[1]).unwrap();
     let ceiling = dense_payload_bytes() * 3 / 2;
 
     assert!(
@@ -368,9 +368,9 @@ fn the_matrix_functions_have_o_rank_diagonal_arms() {
     let ceiling = dense_payload_bytes();
 
     for (name, bytes) in [
-        ("exp", warmed_bytes(|| d.exp().unwrap())),
-        ("inv", warmed_bytes(|| d.inv().unwrap())),
-        ("pinv", warmed_bytes(|| d.pinv(1e-12).unwrap())),
+        ("exp", warmed_bytes(|| d.exp(&[0], &[1]).unwrap())),
+        ("inv", warmed_bytes(|| d.inv(&[0], &[1]).unwrap())),
+        ("pinv", warmed_bytes(|| d.pinv(&[0], &[1], 1e-12).unwrap())),
         (
             "map_diagonal",
             warmed_bytes(|| d.map_diagonal(|x| x.sqrt()).unwrap()),
@@ -388,13 +388,16 @@ fn a_complex_spectrums_matrix_functions_stay_o_rank_too() {
     // What: the arms are dtype-generic, so a c64 spectrum takes the same route
     // — at twice the byte size, which is what the ceiling here accounts for.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
-    let d = complex_source(0x5eed_0022).svd_compact().unwrap().s;
+    let d = complex_source(0x5eed_0022)
+        .svd_compact(&[0], &[1])
+        .unwrap()
+        .s;
     let ceiling = 2 * dense_payload_bytes();
 
     for (name, bytes) in [
-        ("exp", warmed_bytes(|| d.exp().unwrap())),
-        ("inv", warmed_bytes(|| d.inv().unwrap())),
-        ("pinv", warmed_bytes(|| d.pinv(1e-12).unwrap())),
+        ("exp", warmed_bytes(|| d.exp(&[0], &[1]).unwrap())),
+        ("inv", warmed_bytes(|| d.inv(&[0], &[1]).unwrap())),
+        ("pinv", warmed_bytes(|| d.pinv(&[0], &[1], 1e-12).unwrap())),
         (
             "map_diagonal",
             warmed_bytes(|| d.map_diagonal(|x| x.sqrt()).unwrap()),
@@ -550,7 +553,10 @@ fn compact_is_posdef_never_builds_a_dense_payload() {
         "compact is_posdef allocated at least one dense payload: {bytes} bytes"
     );
 
-    let e = complex_source(0x5eed_0052).svd_compact().unwrap().s;
+    let e = complex_source(0x5eed_0052)
+        .svd_compact(&[0], &[1])
+        .unwrap()
+        .s;
     let bytes = warmed_bytes(|| is_posdef_compact!(e, 1e-12, |v: Complex64| v.re));
     assert!(
         bytes < 2 * ceiling,
@@ -565,7 +571,10 @@ fn pr3_conversions_allocate_one_output_and_stay_compact_on_a_spectrum() {
     // compact (far below one dense payload).
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let d = spectrum(0x5eed_0021);
-    let complex_d = complex_source(0x5eed_0022).svd_compact().unwrap().s;
+    let complex_d = complex_source(0x5eed_0022)
+        .svd_compact(&[0], &[1])
+        .unwrap()
+        .s;
     let ceiling = dense_payload_bytes();
 
     for (name, bytes) in [
@@ -649,9 +658,15 @@ fn the_full_bond_trace_reduces_the_spectrum_without_materializing() {
     );
 
     // Same on a c64 spectrum: the arm is dtype-generic.
-    let warm = complex_source(0x5eed_0082).svd_compact().unwrap().s;
+    let warm = complex_source(0x5eed_0082)
+        .svd_compact(&[0], &[1])
+        .unwrap()
+        .s;
     black_box(warm.trace_pairs(&[(0, 1)]).unwrap());
-    let e = complex_source(0x5eed_0082).svd_compact().unwrap().s;
+    let e = complex_source(0x5eed_0082)
+        .svd_compact(&[0], &[1])
+        .unwrap()
+        .s;
     let bytes = measured_bytes(|| e.trace_pairs(&[(0, 1)]).unwrap());
     assert!(
         bytes < 2 * ceiling,

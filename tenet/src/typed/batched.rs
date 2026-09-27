@@ -1154,12 +1154,32 @@ where
     /// Why a stack and not a bare signature: the plan needs the bound space
     /// and its provider, which a signature does not carry.
     ///
+    /// `rows` and `cols` are the leg roles of the eager
+    /// [`TensorMap::eigh_full`]. A stack has no batched permute, so only the
+    /// members' current split (`rows = 0..nout`, `cols = nout..rank`) is
+    /// supported here.
+    ///
     /// # Errors
     ///
     /// The eager structural errors (not an endomorphism, a non-square
     /// coupled-sector block), `UnsupportedTensorContractScope` for a complex
-    /// payload or a layout without packed coupled-sector regions.
-    pub fn new(source: &StackedTensorMap<R, D, S>) -> Result<Self, Error> {
+    /// payload, a layout without packed coupled-sector regions, or leg roles
+    /// other than the current split.
+    pub fn new(
+        source: &StackedTensorMap<R, D, S>,
+        rows: &[usize],
+        cols: &[usize],
+    ) -> Result<Self, Error> {
+        let nout = source.space.space().nout();
+        if !rows.iter().copied().eq(0..nout)
+            || !cols.iter().copied().eq(nout..source.space.space().rank())
+        {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "a prepared eigh supports only the members' current split; \
+                          permute the members before pack",
+            }
+            .into());
+        }
         if !D::CONJUGATION_IS_IDENTITY {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "a prepared eigh supports real payloads until tenferro-rs#1923",
@@ -2044,7 +2064,7 @@ mod tests {
             .unwrap();
         let run = |treewise: bool| {
             FORCE_TREEWISE.with(|flag| flag.set(treewise));
-            let mut handle = PreparedEighFull::new(&stack).unwrap();
+            let mut handle = PreparedEighFull::new(&stack, &[0, 1], &[2, 3]).unwrap();
             FORCE_TREEWISE.with(|flag| flag.set(false));
             let copies: usize = handle
                 .device
@@ -2074,7 +2094,7 @@ mod tests {
             .to_cuda()
             .unwrap();
         FORCE_TREEWISE.with(|flag| flag.set(true));
-        let mut handle = PreparedEighFull::new(&single).unwrap();
+        let mut handle = PreparedEighFull::new(&single, &[0, 1], &[2, 3]).unwrap();
         FORCE_TREEWISE.with(|flag| flag.set(false));
         let v = handle
             .execute(&single)
@@ -2084,8 +2104,11 @@ mod tests {
             .unwrap()
             .member(0)
             .unwrap();
-        let crate::typed::Eigh { v: eager_v, .. } =
-            members[0].to_cuda().unwrap().eigh_full().unwrap();
+        let crate::typed::Eigh { v: eager_v, .. } = members[0]
+            .to_cuda()
+            .unwrap()
+            .eigh_full(&[0, 1], &[2, 3])
+            .unwrap();
         assert!(v.dense_data().unwrap() == eager_v.to_host().unwrap().dense_data().unwrap());
     }
 

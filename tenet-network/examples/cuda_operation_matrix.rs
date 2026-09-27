@@ -1206,13 +1206,22 @@ mod device {
             let barrier = || {
                 let _ = source_device.norm(2.0);
             };
-            match bench(config, "cold", || source_device.svd_compact(), barrier) {
+            match bench(
+                config,
+                "cold",
+                || source_device.svd_compact(&[0], &[1]),
+                barrier,
+            ) {
                 Err(reason) => skip_row(label("svd_compact"), &reason),
                 Ok((Svd { u, s, vh }, device_rows)) => {
                     let (_, host_rows) = bench(
                         config,
                         "cold",
-                        || Ok::<_, Never>(source.svd_compact().expect("Host svd_compact")),
+                        || {
+                            Ok::<_, Never>(
+                                source.svd_compact(&[0], &[1]).expect("Host svd_compact"),
+                            )
+                        },
                         || {},
                     )
                     .expect("Host svd_compact arm");
@@ -1250,7 +1259,9 @@ mod device {
                 let _ = source_device.norm(2.0);
             };
             let composed = || -> Result<_, String> {
-                let Svd { u, s, vh } = source_device.svd_compact().map_err(|e| e.to_string())?;
+                let Svd { u, s, vh } = source_device
+                    .svd_compact(&[0], &[1])
+                    .map_err(|e| e.to_string())?;
                 let (u, s, vh) = (
                     u.to_host().map_err(|e| e.to_string())?,
                     s.to_host().map_err(|e| e.to_string())?,
@@ -1277,7 +1288,8 @@ mod device {
                         config,
                         "cold",
                         || {
-                            let Svd { u, s, vh } = source.svd_compact().expect("Host svd_compact");
+                            let Svd { u, s, vh } =
+                                source.svd_compact(&[0], &[1]).expect("Host svd_compact");
                             let found = s.domain()[0]
                                 .find_truncated(&s.diagview().expect("Host spectrum"), &truncation)
                                 .expect("Host find_truncated");
@@ -1327,13 +1339,22 @@ mod device {
                     let barrier = || {
                         let _ = source_device.norm(2.0);
                     };
-                    match bench(config, "cold", || source_device.eigh_full(), barrier) {
+                    match bench(
+                        config,
+                        "cold",
+                        || source_device.eigh_full(&[0], &[1]),
+                        barrier,
+                    ) {
                         Err(reason) => skip_row(label("eigh_full"), &reason),
                         Ok((Eigh { d, v }, device_rows)) => {
                             let (_, host_rows) = bench(
                                 config,
                                 "cold",
-                                || Ok::<_, Never>(source.eigh_full().expect("Host eigh_full")),
+                                || {
+                                    Ok::<_, Never>(
+                                        source.eigh_full(&[0], &[1]).expect("Host eigh_full"),
+                                    )
+                                },
                                 || {},
                             )
                             .expect("Host eigh_full arm");
@@ -1442,13 +1463,18 @@ mod device {
         let barrier = || {
             let _ = source_device.norm(2.0);
         };
-        match bench(config, "cold", || source_device.qr_compact(), barrier) {
+        match bench(
+            config,
+            "cold",
+            || source_device.qr_compact(&[0], &[1]),
+            barrier,
+        ) {
             Err(reason) => skip_row(labels, &reason),
             Ok((Qr { q, r }, device_rows)) => {
                 let (_, host_rows) = bench(
                     config,
                     "cold",
-                    || Ok::<_, Never>(source.qr_compact().expect("Host qr_compact")),
+                    || Ok::<_, Never>(source.qr_compact(&[0], &[1]).expect("Host qr_compact")),
                     || {},
                 )
                 .expect("Host qr_compact arm");

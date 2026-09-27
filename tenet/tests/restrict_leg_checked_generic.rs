@@ -131,7 +131,7 @@ fn a_compact_eigh_spectrum_restricted_on_both_legs_stays_compact() {
     })
     .unwrap();
     let hermitian = raw.axpby(1.0, &raw.adjoint().unwrap(), 1.0).unwrap();
-    let d = hermitian.eigh_full().unwrap().d;
+    let d = hermitian.eigh_full(&[0], &[1]).unwrap().d;
     assert!(tenet::expert::diagonal_spectrum(&d).unwrap().is_some());
     let bond = d.domain()[0].clone();
     let kept = [(vec![0i64, 0], 1..3), (vec![2i64, 2], 0..1)];

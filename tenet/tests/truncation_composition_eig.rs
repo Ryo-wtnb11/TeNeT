@@ -31,6 +31,16 @@ mod truncation_oracle;
 
 use truncation_oracle::{discarded_norm, select, triangular_eigenvalues, ClosedFormDim, Offer};
 
+/// The receiver's own split as leg roles: `rows = 0..nout`.
+fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (0..t.codomain_rank()).collect()
+}
+
+/// The receiver's own split as leg roles: `cols = nout..rank`.
+fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
+    (t.codomain_rank()..t.rank()).collect()
+}
+
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()
 }
@@ -78,7 +88,9 @@ macro_rules! assert_eig_composition {
         let case: &str = $case;
         let truncation: &tenet::prelude::Truncation = &$truncation;
 
-        let Eig { d, v } = source.eig_full().unwrap();
+        let Eig { d, v } = source
+            .eig_full(&codomain_axes(&source), &domain_axes(&source))
+            .unwrap();
         let bond = d.domain()[0].clone();
         let spectra = d.diagview().unwrap();
         let found = bond.find_truncated(&spectra, truncation).unwrap();

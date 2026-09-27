@@ -612,7 +612,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorInvDispatch<R, D>,
+    R::Mode: TypedTensorInvDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: AdvancedLinalgScalar,
 {
     /// TensorKit 0.17 / MatrixAlgebraKit `inv`: the true inverse `t^-1` of a
@@ -659,15 +659,19 @@ where
     /// Standalone compact construction is supported, but checked `inv` has no
     /// elementwise compact arm: it materializes that input and publishes a dense
     /// result.
-    pub fn inv(&self) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorInvDispatch<R, D>>::inv(self)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn inv(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
+        self.with_leg_roles(rows, cols, <R::Mode as TypedTensorInvDispatch<R, D>>::inv)
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorExpDispatch<R, D>,
+    R::Mode: TypedTensorExpDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: AdvancedLinalgScalar,
 {
     /// The matrix exponential `exp(t) = Σ_k t^k / k!`, evaluated per coupled
@@ -729,10 +733,14 @@ where
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)])?;
     /// let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&v], [&v])?;
     /// let id: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?;
-    /// assert!(zero.exp()?.dense_data()?.iter().zip(id.dense_data()?).all(|(a, b)| (a - b).abs() < 1e-15));
+    /// assert!(zero.exp(&[0], &[1])?.dense_data()?.iter().zip(id.dense_data()?).all(|(a, b)| (a - b).abs() < 1e-15));
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn exp(&self) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorExpDispatch<R, D>>::exp(self)
+    ///
+    /// `rows` and `cols` are the leg roles: the operation acts on the matrix
+    /// view `self.permute(rows, cols)`, and the current split costs nothing
+    /// extra (see [`Self::svd_compact`]'s *Leg roles*).
+    pub fn exp(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
+        self.with_leg_roles(rows, cols, <R::Mode as TypedTensorExpDispatch<R, D>>::exp)
     }
 }

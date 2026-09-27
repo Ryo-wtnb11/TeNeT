@@ -56,7 +56,7 @@ where
         + tenet::core::CheckedFusionAlgebra
         + tenet::typed::SectorCodec,
 {
-    let Svd { u, s, .. } = source.svd_compact()?;
+    let Svd { u, s, .. } = source.svd_compact(&[0], &[1])?;
     let found = s.domain()[0].find_truncated(&s.diagview()?, truncation)?;
     Ok((
         u.restrict_leg(&[(u.codomain_rank(), &found.selection)])?,
@@ -119,7 +119,7 @@ fn typed_truncspace_clamps_a_request_longer_than_the_spectrum() {
     let greedy = typed_leg(&[(0, 99), (1, 99), (2, 99)]);
     let (clamped, clamped_error) =
         truncated_svd(&source, &Truncation::space(greedy.truncspace())).unwrap();
-    let full = source.svd_compact().unwrap();
+    let full = source.svd_compact(&[0], &[1]).unwrap();
     let clamped_bond = &clamped.domain()[0];
     let full_bond = &full.u.domain()[0];
 

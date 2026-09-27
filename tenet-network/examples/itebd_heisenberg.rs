@@ -81,14 +81,14 @@ fn bond_update(
         * g2[z, qb; w] * l_out[w; r] * gate[pa, pb; qa, qb])?;
     // Truncated SVD: factorize, decide the kept bond from the spectrum, then
     // restrict every factor to it.
-    let Svd { u, s, vh } = theta.svd_compact()?;
+    let Svd { u, s, vh } = theta.svd_compact(&[0, 1], &[2, 3])?;
     let found = s.domain()[0].find_truncated(&s.diagview()?, trunc)?;
     let u = u.restrict_leg(&[(u.codomain_rank(), &found.selection)])?;
     let s = s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])?;
     let vh = vh.restrict_leg(&[(0, &found.selection)])?;
     let l_new = s.scale(1.0 / s.norm(2.0)?);
     // Divide the outer λ back out: diagonal inverse via pinv.
-    let l_out_inv = l_out.pinv(PINV_RCOND)?;
+    let l_out_inv = l_out.pinv(&[0], &[1], PINV_RCOND)?;
     let g1_new = tensor!([l, pa; m] = l_out_inv[l; x] * u[x, pa; m])?;
     let g2_new = tensor!([m, pb; r] = vh[m; pb, x] * l_out_inv[x; r])?;
     Ok((g1_new, l_new, g2_new, found.error))
@@ -166,7 +166,7 @@ pub fn run(chi: usize, schedule: &[(f64, usize)], verbose: bool) -> Result<f64, 
     let mut state = State::init(&rt, &p)?;
     let mut energy = f64::NAN;
     for &(dt, steps) in schedule {
-        let gate = h.scale(-dt).exp()?;
+        let gate = h.scale(-dt).exp(&[0, 1], &[2, 3])?;
         let start = Instant::now();
         let mut max_err = 0.0f64;
         for _ in 0..steps {

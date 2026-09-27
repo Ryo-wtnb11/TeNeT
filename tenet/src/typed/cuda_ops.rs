@@ -135,7 +135,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// })?
 /// .to_cuda()?;
 ///
-/// let Svd { u, s, vh } = device.svd_compact()?;
+/// let Svd { u, s, vh } = device.svd_compact(&[0], &[1])?;
 /// // Until a device `restrict_leg` lands, the factors move to the host once.
 /// let (u, s, vh) = (u.to_host()?, s.to_host()?, vh.to_host()?);
 /// let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(2))?;
@@ -173,7 +173,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 ///         + CheckedGenericFusion
 ///         + CheckedGenericRigidSymbols<Scalar = f64>,
 /// {
-///     let _ = tensor.svd_compact();
+///     let _ = tensor.svd_compact(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -189,7 +189,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// use tenet::typed::{CudaPayload, CudaStorage, TensorMap};
 ///
 /// fn device_payload_only<D: CudaPayload>(tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>) {
-///     let _ = tensor.svd_compact();
+///     let _ = tensor.svd_compact(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -200,7 +200,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// fn device_payload_and_host_factorizing<D: CudaPayload + FactorizationScalar>(
 ///     tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>,
 /// ) {
-///     let _ = tensor.svd_compact();
+///     let _ = tensor.svd_compact(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -211,7 +211,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// fn device_factorizing<D: CudaFactorizationPayload>(
 ///     tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>,
 /// ) {
-///     let _ = tensor.svd_compact();
+///     let _ = tensor.svd_compact(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -223,11 +223,11 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
 /// fn f32_device_svd(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
-///     let _ = tensor.svd_compact();
+///     let _ = tensor.svd_compact(&[0], &[1]);
 /// }
 ///
 /// fn f64_device_svd(tensor: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>) {
-///     let _ = tensor.svd_compact();
+///     let _ = tensor.svd_compact(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -237,11 +237,11 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
 /// fn c32_device_eigh(tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>) {
-///     let _ = tensor.eigh_full();
+///     let _ = tensor.eigh_full(&[0], &[1]);
 /// }
 ///
 /// fn c64_device_eigh(tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>) {
-///     let _ = tensor.eigh_full();
+///     let _ = tensor.eigh_full(&[0], &[1]);
 /// }
 /// ```
 impl<R, D> TensorMap<R, D, CudaStorage<D>>
@@ -322,7 +322,15 @@ where
     /// multiplies by anyway (1 op) or a scaling of the aligned factor before
     /// its copy (2 ops), plus one `conj` for a complex left side. They are
     /// counted in [`tenet_dense::CudaTransferStats::gauge_ops`].
-    pub fn svd_compact(&self) -> Result<Svd<Self>, Error> {
+    ///
+    /// `rows` and `cols` are the leg roles, as for the Host operation: it
+    /// acts on the matrix view `self.permute(rows, cols)` (one device
+    /// permute), and the current split borrows `self` without a transform.
+    pub fn svd_compact(&self, rows: &[usize], cols: &[usize]) -> Result<Svd<Self>, Error> {
+        self.with_cuda_leg_roles(rows, cols, Self::svd_compact_matrix)
+    }
+
+    fn svd_compact_matrix(&self) -> Result<Svd<Self>, Error> {
         let source = self.direct_cuda_storage("svd_compact")?;
         let source_space = self.logical_space().space();
         let required_len = source_space.required_len()?;
@@ -538,7 +546,15 @@ where
     /// device: the only device allocation path is a zero upload of the same
     /// `Σ_c n_c²` elements (#740), so a device scatter would add a
     /// `Σ_c n_c` upload and move nothing less.
-    pub fn eigh_full(&self) -> Result<Eigh<Self>, Error> {
+    ///
+    /// `rows` and `cols` are the leg roles, as for the Host operation: it
+    /// acts on the matrix view `self.permute(rows, cols)` (one device
+    /// permute), and the current split borrows `self` without a transform.
+    pub fn eigh_full(&self, rows: &[usize], cols: &[usize]) -> Result<Eigh<Self>, Error> {
+        self.with_cuda_leg_roles(rows, cols, Self::eigh_full_matrix)
+    }
+
+    fn eigh_full_matrix(&self) -> Result<Eigh<Self>, Error> {
         let source = self.direct_cuda_storage("eigh_full")?;
         let source_space = self.logical_space().space();
         if source_space.homspace().codomain() != source_space.homspace().domain() {
@@ -812,7 +828,7 @@ where
 ///         + CheckedGenericFusion
 ///         + CheckedGenericRigidSymbols<Scalar = f64>,
 /// {
-///     let _ = tensor.qr_compact();
+///     let _ = tensor.qr_compact(&[0], &[1]);
 /// }
 /// ```
 ///
@@ -823,7 +839,7 @@ where
 /// fn device_qr<D: CudaFactorizationPayload>(
 ///     tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>,
 /// ) {
-///     let _ = tensor.qr_compact();
+///     let _ = tensor.qr_compact(&[0], &[1]);
 /// }
 /// ```
 impl<R, D> TensorMap<R, D, CudaStorage<D>>
@@ -839,7 +855,15 @@ where
     /// host. A route whose factor region reproduces the source's tree layout
     /// is assembled by one whole-factor device copy; any other route keeps the
     /// per-tree identity-selector GEMM.
-    pub fn qr_compact(&self) -> Result<Qr<Self>, Error> {
+    ///
+    /// `rows` and `cols` are the leg roles, as for the Host operation: it
+    /// acts on the matrix view `self.permute(rows, cols)` (one device
+    /// permute), and the current split borrows `self` without a transform.
+    pub fn qr_compact(&self, rows: &[usize], cols: &[usize]) -> Result<Qr<Self>, Error> {
+        self.with_cuda_leg_roles(rows, cols, Self::qr_compact_matrix)
+    }
+
+    fn qr_compact_matrix(&self) -> Result<Qr<Self>, Error> {
         let source = self.direct_cuda_storage("qr_compact")?;
         let source_space = self.logical_space().space();
         let required_len = source_space.required_len()?;
@@ -2401,6 +2425,21 @@ where
                 domain_axes.iter().copied(),
             ),
         )
+    }
+
+    /// The device form of the Host leg-role composition: `op` runs on
+    /// `permute(self, rows, cols)`, and the current split borrows `self`
+    /// without a transform or a clone.
+    fn with_cuda_leg_roles<T>(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+        op: impl FnOnce(&Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        if self.axes_are_identity(rows, cols) {
+            return op(self);
+        }
+        op(&self.permute(rows, cols)?)
     }
 
     /// TensorKit `braid` on a device tensor: the Host [`TensorMap::braid`]

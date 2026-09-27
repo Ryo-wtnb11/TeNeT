@@ -142,13 +142,13 @@ fn fixture_c64(sectors: i32, order: usize, scale: f64) -> TensorMap<U1FusionRule
 }
 
 fn warmed_f64(tensor: &TensorMap<U1FusionRule, f64>) -> Sample {
-    black_box(tensor.exp().unwrap());
-    measure(|| tensor.exp().unwrap())
+    black_box(tensor.exp(&[0], &[1]).unwrap());
+    measure(|| tensor.exp(&[0], &[1]).unwrap())
 }
 
 fn warmed_c64(tensor: &TensorMap<U1FusionRule, Complex64>) -> Sample {
-    black_box(tensor.exp().unwrap());
-    measure(|| tensor.exp().unwrap())
+    black_box(tensor.exp(&[0], &[1]).unwrap());
+    measure(|| tensor.exp(&[0], &[1]).unwrap())
 }
 
 /// Ten matrix buffers are allocated once. Backend scratch may add to the live
@@ -250,7 +250,7 @@ fn typed_u1_general_exp_matches_the_upper_triangular_oracle() {
     })
     .unwrap();
 
-    let image = source.exp().unwrap();
+    let image = source.exp(&[0], &[1]).unwrap();
     let expected = [
         1.0_f64.exp(),
         0.0,

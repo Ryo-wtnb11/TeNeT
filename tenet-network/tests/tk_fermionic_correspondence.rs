@@ -53,8 +53,8 @@ fn fz2_contractions_match_tensorkit() {
     let t = fz2_map(&rt, &v, 3.0, 2.0);
 
     // S from an SVD is a compact diagonal factor; singular values = |T| per sector.
-    let Svd { s, .. } = t.svd_compact().unwrap();
-    let sv = s.svd_vals().unwrap();
+    let Svd { s, .. } = t.svd_compact(&[0], &[1]).unwrap();
+    let sv = s.svd_vals(&[0], &[1]).unwrap();
     for entry in &sv {
         let expect = if entry.sector == Z2Irrep::EVEN {
             3.0
@@ -79,13 +79,13 @@ fn fz2_contractions_match_tensorkit() {
 
     // The SVD factor uses compact diagonal storage and must keep the same
     // ordinary trace without materializing its dense block matrices.
-    let Svd { s: compact_d, .. } = d.svd_compact().unwrap();
+    let Svd { s: compact_d, .. } = d.svd_compact(&[0], &[1]).unwrap();
     let compact_ordinary = compact_d.tr().unwrap();
     assert!(
         (compact_ordinary - 5.0).abs() < 1e-12,
         "compact ordinary = {compact_ordinary}"
     );
-    let Svd { s: compact_c64, .. } = d.convert::<Complex64>().svd_compact().unwrap();
+    let Svd { s: compact_c64, .. } = d.convert::<Complex64>().svd_compact(&[0], &[1]).unwrap();
     let compact_c64_ordinary = compact_c64.tr().unwrap();
     assert!(
         (compact_c64_ordinary - Complex64::new(5.0, 0.0)).norm() < 1e-12,
@@ -102,7 +102,7 @@ fn fz2_contractions_match_tensorkit() {
         }
     })
     .unwrap();
-    let Eig { d: complex_d, .. } = complex_source.eig_full().unwrap();
+    let Eig { d: complex_d, .. } = complex_source.eig_full(&[0], &[1]).unwrap();
     let complex_trace = complex_d.tr().unwrap();
     let expected_complex_trace = Complex64::new(5.0, 5.0);
     assert!(

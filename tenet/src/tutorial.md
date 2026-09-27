@@ -309,7 +309,7 @@ let hermitian = |h: &TensorMap<U1FusionRule, f64>| -> Result<bool, Error> {
 assert!(hermitian(&h)?);
 
 // isisometric: ‖u†u - id‖ <= tol·max(‖u†u‖, 1). isunitary also checks u†.
-let u = t.left_polar()?.w;
+let u = t.left_polar(&[0], &[1])?.w;
 let gram = u.adjoint()?.compose(&u)?;
 let identity = TensorMap::isomorphism(&rt, &u.domain(), &u.domain())?;
 assert!(gram.axpby(1.0, &identity, -1.0)?.norm(2.0)? <= tol * gram.norm(2.0)?.max(1.0));
@@ -320,10 +320,10 @@ let threshold = tol * p.norm(2.0)?.max(1.0);
 let positive = |values: &[SectorSpectrum<U1Irrep, f64>]| {
     values.iter().flat_map(|s| &s.values).all(|&x| x > threshold)
 };
-assert!(hermitian(&p)? && positive(&p.eigh_vals()?));
+assert!(hermitian(&p)? && positive(&p.eigh_vals(&[0], &[1])?));
 // A compact spectrum factor already stores its eigenvalues: read them with
 // `diagview` instead of factorizing (compare the real part for complex `d`).
-let d = p.eigh_full()?.d;
+let d = p.eigh_full(&[0], &[1])?.d;
 assert!(hermitian(&d)? && positive(&d.diagview()?));
 # Ok::<(), Error>(())
 ```
@@ -461,7 +461,7 @@ let v = GradedSpace::try_new(
 let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 10)?;
 
 // Truncated SVD: factorize, decide, cut.
-let Svd { u, s, vh } = t.svd_compact()?;
+let Svd { u, s, vh } = t.svd_compact(&[0, 1], &[2, 3])?;
 let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(6))?;
 let u = u.restrict_leg(&[(u.codomain_rank(), &found.selection)])?;
 let s = s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])?;
@@ -471,12 +471,18 @@ let reconstructed = u.compose(&s)?.compose(&vh)?;
 let error = reconstructed.axpby(1.0, &t, -1.0)?.norm(2.0)?;
 assert!((error - found.error).abs() <= 1e-8 * (1.0 + found.error));
 
-let Qr { q, r } = t.qr_compact()?;
+let Qr { q, r } = t.qr_compact(&[0, 1], &[2, 3])?;
 assert!(q.compose(&r)?.axpby(1.0, &t, -1.0)?.norm(2.0)? <= 1e-10 * (1.0 + t.norm(2.0)?));
 # Ok::<(), Error>(())
 ```
 
-To factor a different bipartition, use `permute` or `repartition` first.
+Every factorization and matrix function takes its leg roles `(rows, cols)`:
+the source axes (codomain first) that form the rows and the columns of the
+matrix it acts on. The result is the operation applied to
+`t.permute(rows, cols)`; the current split, as above, runs no transform, and
+any other split costs exactly that one `permute`. Factoring a different
+bipartition is therefore `t.svd_compact(&[0, 2], &[1, 3])`, not a separate
+`permute` first.
 
 The returned `s` is a diagonal tensor map on the newly introduced bond space.
 Keep it when a tensor-network algorithm needs bond weights, or absorb it into

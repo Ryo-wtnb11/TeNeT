@@ -186,16 +186,22 @@ fn typed_compact_svd_keeps_peak_below_the_materialize_baseline() {
     let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 32)]).unwrap();
     let parent: TensorMap<_, num_complex::Complex64> =
         TensorMap::rand_with_seed(&runtime, [&space], [&space], 693_695).unwrap();
-    black_box(parent.svd_compact().unwrap());
+    black_box(parent.svd_compact(&[0], &[1]).unwrap());
 
     let optimized = parent.adjoint().unwrap();
     let baseline = parent.adjoint().unwrap();
     let optimized_cost = measure_peak(|| {
-        black_box(optimized.svd_compact().unwrap());
+        black_box(optimized.svd_compact(&[0], &[1]).unwrap());
     });
     let baseline_cost = measure_peak(|| {
         // The explicit route a caller would otherwise take.
-        black_box(baseline.materialize().unwrap().svd_compact().unwrap());
+        black_box(
+            baseline
+                .materialize()
+                .unwrap()
+                .svd_compact(&[0], &[1])
+                .unwrap(),
+        );
     });
 
     // Total bytes are currently higher than the explicit route; that cost is
@@ -214,17 +220,23 @@ fn typed_full_svd_keeps_peak_below_the_materialize_baseline() {
     let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 32)]).unwrap();
     let parent: TensorMap<_, num_complex::Complex64> =
         TensorMap::rand_with_seed(&runtime, [&space], [&space], 693_697).unwrap();
-    black_box(parent.svd_full().unwrap());
+    black_box(parent.svd_full(&[0], &[1]).unwrap());
 
     let input_bytes = std::mem::size_of_val(parent.dense_data().unwrap()) as u64;
     let optimized = parent.adjoint().unwrap();
     let baseline = parent.adjoint().unwrap();
     let optimized_cost = measure_peak(|| {
-        black_box(optimized.svd_full().unwrap());
+        black_box(optimized.svd_full(&[0], &[1]).unwrap());
     });
     let baseline_cost = measure_peak(|| {
         // The explicit route a caller would otherwise take.
-        black_box(baseline.materialize().unwrap().svd_full().unwrap());
+        black_box(
+            baseline
+                .materialize()
+                .unwrap()
+                .svd_full(&[0], &[1])
+                .unwrap(),
+        );
     });
     eprintln!("input={input_bytes} optimized={optimized_cost:?} materialized={baseline_cost:?}");
 
@@ -249,7 +261,7 @@ fn typed_truncated_svd_keeps_peak_below_the_materialize_baseline() {
     let truncation = tenet::typed::Truncation::rank(16);
     // The truncated SVD is `svd_compact` -> `find_truncated` -> `restrict_*`.
     let truncated_svd = |tensor: &TensorMap<U1FusionRule, num_complex::Complex64>| {
-        let Svd { u, s, vh } = tensor.svd_compact().unwrap();
+        let Svd { u, s, vh } = tensor.svd_compact(&[0], &[1]).unwrap();
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), &truncation)
             .unwrap();

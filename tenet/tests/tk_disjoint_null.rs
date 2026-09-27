@@ -20,8 +20,8 @@ fn direct_and_lazy_adjoint_disjoint_null_spaces_match_tensorkit() {
     assert!(source.dense_data().unwrap().is_empty());
     for (tensor, left_dim, right_dim) in [(source.clone(), 2, 3), (source.adjoint().unwrap(), 3, 2)]
     {
-        let left = tensor.left_null().unwrap();
-        let right = tensor.right_null().unwrap();
+        let left = tensor.left_null(&[0], &[1]).unwrap();
+        let right = tensor.right_null(&[0], &[1]).unwrap();
 
         assert_eq!(left.dense_data().unwrap().len(), left_dim * left_dim);
         assert_eq!(right.dense_data().unwrap().len(), right_dim * right_dim);

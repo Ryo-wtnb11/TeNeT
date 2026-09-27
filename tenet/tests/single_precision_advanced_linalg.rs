@@ -76,7 +76,7 @@ macro_rules! measured_kappa {
     ($tensor:expr) => {{
         let mut largest = 0.0f64;
         let mut smallest = f64::INFINITY;
-        for entry in &$tensor.svd_vals().unwrap() {
+        for entry in &$tensor.svd_vals(&[0], &[1]).unwrap() {
             for &value in &entry.values {
                 largest = largest.max(value);
                 smallest = smallest.min(value);
@@ -185,8 +185,8 @@ macro_rules! advanced_checks {
         // ---- inv / solve / right solve / pinv: forward errors. -------------
         assert_payloads_agree_scaled(
             &format!("{name}: inv (kappa {kappa_a:e})"),
-            a.inv().unwrap().dense_data().unwrap(),
-            wide_a.inv().unwrap().dense_data().unwrap(),
+            a.inv(&[0], &[1]).unwrap().dense_data().unwrap(),
+            wide_a.inv(&[0], &[1]).unwrap().dense_data().unwrap(),
             n,
             kappa_a,
         );
@@ -225,8 +225,8 @@ macro_rules! advanced_checks {
         );
         assert_payloads_agree_scaled(
             &format!("{name}: pinv (kappa {kappa_t:e})"),
-            t.pinv(1e-4).unwrap().dense_data().unwrap(),
-            wide_t.pinv(1e-4).unwrap().dense_data().unwrap(),
+            t.pinv(&[0], &[1], 1e-4).unwrap().dense_data().unwrap(),
+            wide_t.pinv(&[0], &[1], 1e-4).unwrap().dense_data().unwrap(),
             wide_t.dense_data().unwrap().len(),
             kappa_t,
         );
@@ -234,15 +234,15 @@ macro_rules! advanced_checks {
         // ---- exp: spectral (Hermitian) and Padé (non-Hermitian) routes. ----
         assert_payloads_agree_scaled(
             &format!("{name}: exp, Hermitian route"),
-            h.exp().unwrap().dense_data().unwrap(),
-            wide_h.exp().unwrap().dense_data().unwrap(),
+            h.exp(&[0], &[1]).unwrap().dense_data().unwrap(),
+            wide_h.exp(&[0], &[1]).unwrap().dense_data().unwrap(),
             n,
             1.0,
         );
         assert_payloads_agree_scaled(
             &format!("{name}: exp, Padé route"),
-            a.exp().unwrap().dense_data().unwrap(),
-            wide_a.exp().unwrap().dense_data().unwrap(),
+            a.exp(&[0], &[1]).unwrap().dense_data().unwrap(),
+            wide_a.exp(&[0], &[1]).unwrap().dense_data().unwrap(),
             n,
             1.0,
         );
@@ -255,7 +255,7 @@ macro_rules! advanced_checks {
         }
         macro_rules! inverse_square {
             ($t:expr) => {{
-                let inverse = $t.inv().unwrap();
+                let inverse = $t.inv(&[0], &[1]).unwrap();
                 inverse.compose(&inverse).unwrap()
             }};
         }
@@ -278,9 +278,9 @@ macro_rules! advanced_checks {
         // Checked-Generic SVD stores `s` densely; `diagonal(diagview)` makes
         // every provider's `s` compact. The residual reads the factor as
         // published, because checked-Generic reductions need dense payloads.
-        let Svd { s, .. } = h.svd_compact().unwrap();
+        let Svd { s, .. } = h.svd_compact(&[0], &[1]).unwrap();
         let compact_s = TensorMap::diagonal(&rt, &s.domain()[0], s.diagview().unwrap()).unwrap();
-        let Svd { s: wide_s, .. } = wide_h.svd_compact().unwrap();
+        let Svd { s: wide_s, .. } = wide_h.svd_compact(&[0], &[1]).unwrap();
         let wide_s =
             TensorMap::diagonal(&rt, &wide_s.domain()[0], wide_s.diagview().unwrap()).unwrap();
         let root = compact_s.map_diagonal(|value| value.sqrt()).unwrap();
@@ -305,8 +305,8 @@ macro_rules! advanced_checks {
             $narrow
         );
         // ---- General eig: factors in `D::Eig`, spectra `Complex64`. --------
-        let Eig { d, v }: Eig<TensorMap<_, $eig>> = a.eig_full().unwrap();
-        let Eig { v: wide_v, .. } = wide_a.eig_full().unwrap();
+        let Eig { d, v }: Eig<TensorMap<_, $eig>> = a.eig_full(&[0], &[1]).unwrap();
+        let Eig { v: wide_v, .. } = wide_a.eig_full(&[0], &[1]).unwrap();
         let kappa_v = measured_kappa!(&wide_v);
         let to_eig = $to_eig;
         let a_eig: TensorMap<_, $eig> = to_eig(&a);
@@ -318,8 +318,8 @@ macro_rules! advanced_checks {
             n,
             $eig
         );
-        let wide_values = wide_a.eig_vals().unwrap();
-        let values: Vec<SectorSpectrum<_, Complex64>> = a.eig_vals().unwrap();
+        let wide_values = wide_a.eig_vals(&[0], &[1]).unwrap();
+        let values: Vec<SectorSpectrum<_, Complex64>> = a.eig_vals(&[0], &[1]).unwrap();
         assert_complex_spectra_agree!(
             format!("{name}: eig_vals (kappa(V) {kappa_v:e})"),
             &values,
@@ -351,7 +351,7 @@ macro_rules! advanced_checks {
             )
         };
         let (wide_kept, wide_error) = {
-            let Eig { d: wide_d, .. } = wide_a.eig_full().unwrap();
+            let Eig { d: wide_d, .. } = wide_a.eig_full(&[0], &[1]).unwrap();
             let found = wide_d.domain()[0]
                 .find_truncated(&wide_d.diagview().unwrap(), &Truncation::rank(2))
                 .unwrap();
@@ -381,11 +381,11 @@ macro_rules! advanced_checks {
             let lazy = a.adjoint().unwrap();
             assert_payloads_agree_scaled(
                 &format!("{name}: inv of a lazy adjoint"),
-                lazy.inv().unwrap().dense_data().unwrap(),
+                lazy.inv(&[0], &[1]).unwrap().dense_data().unwrap(),
                 wide_a
                     .adjoint()
                     .unwrap()
-                    .inv()
+                    .inv(&[0], &[1])
                     .unwrap()
                     .dense_data()
                     .unwrap(),
@@ -394,11 +394,11 @@ macro_rules! advanced_checks {
             );
             assert_payloads_agree_scaled(
                 &format!("{name}: exp of a lazy adjoint"),
-                lazy.exp().unwrap().dense_data().unwrap(),
+                lazy.exp(&[0], &[1]).unwrap().dense_data().unwrap(),
                 wide_a
                     .adjoint()
                     .unwrap()
-                    .exp()
+                    .exp(&[0], &[1])
                     .unwrap()
                     .dense_data()
                     .unwrap(),
@@ -499,9 +499,9 @@ fn compact_complex32_reciprocal_does_not_underflow() {
         Complex32::new(0.0, -(2.0f32.powi(80))),
         Complex32::new(2.0f32.powi(-100), 0.0),
     ];
-    let inverse = diagonal.inv().unwrap();
+    let inverse = diagonal.inv(&[0], &[1]).unwrap();
     assert_eq!(inverse.diagview().unwrap()[0].values, expected, "inv");
-    let pseudo = diagonal.pinv(0.0).unwrap();
+    let pseudo = diagonal.pinv(&[0], &[1], 0.0).unwrap();
     assert_eq!(pseudo.diagview().unwrap()[0].values, expected, "pinv");
 }
 

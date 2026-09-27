@@ -869,7 +869,7 @@ fn checked_generic_su3_conversions_are_exact_and_keep_structure() {
     let (_, complex, _, _) = assert_adjoint_conversions!("SU(3) dense adjoint", source);
     // Checked-Generic factorizations reject lazy adjoints, so the converted
     // adjoint must come out owned and factorizable.
-    complex.qr_compact().unwrap();
+    complex.qr_compact(&[0, 1], &[2, 3]).unwrap();
 }
 
 /// Checked-Generic compact diagonal adjoint (#1446 review, #1449): the
@@ -983,5 +983,5 @@ fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
         c64_bits(converted.materialize().unwrap().dense_data().unwrap()),
         c64_bits(&expected)
     );
-    converted.qr_compact().unwrap();
+    converted.qr_compact(&[0], &[1]).unwrap();
 }
