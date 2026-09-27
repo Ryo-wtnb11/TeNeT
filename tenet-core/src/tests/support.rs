@@ -1,0 +1,2746 @@
+use smallvec::smallvec;
+
+    use std::hash::{Hash, Hasher};
+
+    /// Fixture layout: subblocks packed contiguously in key order. Not a product
+    /// layout (the only one is the coupled sector matrix); fixtures use it to
+    /// exercise the arbitrary-strided-view contract of [`BlockStructure`].
+    fn packed_fixture_structure<I, K>(rank: usize, blocks: I) -> Result<BlockStructure, CoreError>
+    where
+        I: IntoIterator<Item = (K, Vec<usize>)>,
+        K: Into<BlockKey>,
+    {
+        let mut keys = Vec::new();
+        let mut shapes = Vec::new();
+        for (key, shape) in blocks {
+            keys.push(key.into());
+            shapes.push(shape);
+        }
+        BlockStructure::from_parts(
+            SectorStructure::from_keys(rank, keys)?,
+            DegeneracyStructure::packed_column_major(rank, shapes)?,
+        )
+    }
+
+    fn u1(charge: i32) -> SectorId {
+        U1Irrep::new(charge).sector_id()
+    }
+
+    fn excluded_u1_id() -> SectorId {
+        SectorId::new(u32::MAX as usize)
+    }
+
+    fn z2_even() -> SectorId {
+        Z2Irrep::EVEN.sector_id()
+    }
+
+    fn z2_odd() -> SectorId {
+        Z2Irrep::ODD.sector_id()
+    }
+
+    fn su2(twice_spin: usize) -> SectorId {
+        SU2Irrep::from_twice_spin(twice_spin).sector_id()
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct IsomorphismMultiplicityRule;
+
+    impl FusionRule for IsomorphismMultiplicityRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, sector) | (sector, 0) => smallvec![SectorId::new(sector)],
+                (1, 1) => smallvec![SectorId::new(2)],
+                _ => SectorVec::new(),
+            }
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (1, 1, 2) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct Z4PointedRule;
+
+    impl FusionRule for Z4PointedRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            SectorId::new((4 - sector.id() % 4) % 4)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            smallvec![SectorId::new((left.id() + right.id()) % 4)]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for Z4PointedRule {}
+
+    #[derive(Clone, Copy, Debug)]
+    struct PlanarZ2Rule;
+
+    impl FusionRule for PlanarZ2Rule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::NoBraiding
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            smallvec![SectorId::new((left.id() + right.id()) % 2)]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for PlanarZ2Rule {}
+
+    impl MultiplicityFreeFusionSymbols for PlanarZ2Rule {
+        type Scalar = f64;
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            1.0
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for PlanarZ2Rule {
+        fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct IdentitySymbolPanicRule;
+
+    impl FusionRule for IdentitySymbolPanicRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            smallvec![SectorId::new(left.id() ^ right.id())]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for IdentitySymbolPanicRule {}
+
+    impl MultiplicityFreeFusionSymbols for IdentitySymbolPanicRule {
+        type Scalar = f64;
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            panic!("identity braid evaluated an F symbol")
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            panic!("identity braid evaluated an R symbol")
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for IdentitySymbolPanicRule {
+        fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct SplitOnlyCountingRule {
+        n_calls: std::sync::atomic::AtomicUsize,
+        f_calls: std::sync::atomic::AtomicUsize,
+        r_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FusionRule for SplitOnlyCountingRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            smallvec![SectorId::new(left.id() ^ right.id())]
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            self.n_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            usize::from(left.id() ^ right.id() == coupled.id())
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for SplitOnlyCountingRule {}
+
+    impl MultiplicityFreeFusionSymbols for SplitOnlyCountingRule {
+        type Scalar = f64;
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            self.f_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            1.0
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            self.r_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            1.0
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for SplitOnlyCountingRule {
+        fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    fn legacy_split_only_tree_pair_route<R>(
+        rule: &R,
+        source: &FusionTreePairKey,
+        target_codomain_rank: usize,
+    ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+    {
+        // What: freeze the pre-shortcut composition as an independent oracle:
+        // repartition to all-codomain, apply the identity tree braid, then
+        // repartition back to the requested split.
+        let total_rank =
+            source.codomain_tree().uncoupled().len() + source.domain_tree().uncoupled().len();
+        let identity = (0..total_rank).collect::<Vec<_>>();
+        let levels = identity.clone();
+        let all_codomain =
+            multiplicity_free_repartition_tree_pair(rule, source, total_rank)?;
+        let braided = compose_tree_pair_terms(rule, all_codomain, |rule, key| {
+            multiplicity_free_braid_tree(
+                rule,
+                key.codomain_tree(),
+                &identity,
+                &levels,
+            )
+            .map(|terms| {
+                terms
+                    .into_iter()
+                    .map(|(tree, coefficient)| {
+                        (
+                            FusionTreePairKey::pair(tree, key.domain_tree().clone()),
+                            coefficient,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })?;
+        multiplicity_free_repartition_terms(rule, braided, target_codomain_rank)
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct AsymmetricAnyonicRule;
+
+    impl FusionRule for AsymmetricAnyonicRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Anyonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 2) | (2, 1) => smallvec![SectorId::new(3)],
+                (3, 1) | (1, 3) => smallvec![SectorId::new(2)],
+                (3, 2) | (2, 3) => smallvec![SectorId::new(1)],
+                _ => smallvec![SectorId::new((left.id() + right.id()) % 4)],
+            }
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for AsymmetricAnyonicRule {}
+
+    impl MultiplicityFreeFusionSymbols for AsymmetricAnyonicRule {
+        type Scalar = f64;
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            11.0
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            match (left.id(), right.id()) {
+                (1, 2) => 5.0,
+                (2, 1) => 7.0,
+                (3, 2) => 13.0,
+                (2, 3) => 17.0,
+                (1, 3) => 19.0,
+                (3, 1) => 23.0,
+                _ => 1.0,
+            }
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for AsymmetricAnyonicRule {
+        fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    fn sector_ids(sectors: &[SectorId]) -> Vec<usize> {
+        sectors.iter().map(|sector| sector.id()).collect()
+    }
+
+    #[derive(Debug, Default)]
+    struct CheckedTreeProbe {
+        channel_calls: AtomicUsize,
+        nsymbol_calls: AtomicUsize,
+        legacy_nsymbol_calls: AtomicUsize,
+    }
+
+    impl FusionRule for CheckedTreeProbe {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, _left: SectorId, _right: SectorId) -> SectorVec {
+            core::iter::once(SectorId::new(0)).collect()
+        }
+
+        fn nsymbol(&self, _left: SectorId, _right: SectorId, _coupled: SectorId) -> usize {
+            self.legacy_nsymbol_calls.fetch_add(1, Ordering::Relaxed);
+            1
+        }
+    }
+
+    impl CheckedFusionAlgebra for CheckedTreeProbe {
+        fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            Ok(sector)
+        }
+
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, FusionAlgebraError> {
+            self.channel_calls.fetch_add(1, Ordering::Relaxed);
+            if left == SectorId::new(9) {
+                Err(FusionAlgebraError::FusionNotRepresentable { left, right })
+            } else {
+                Ok(self.fusion_channels(left, right))
+            }
+        }
+
+        fn try_nsymbol(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+        ) -> Result<usize, FusionAlgebraError> {
+            self.nsymbol_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(1)
+        }
+    }
+
+    struct FibonacciFAdmissibilityProbe {
+        calls: std::sync::Mutex<Vec<[SectorId; 6]>>,
+        complex_f_phase: bool,
+    }
+
+    impl FibonacciFAdmissibilityProbe {
+        const SENTINEL: Complex64 = Complex64::new(97.0, -31.0);
+
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                complex_f_phase: false,
+            }
+        }
+
+        fn with_complex_f_phase() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                complex_f_phase: true,
+            }
+        }
+
+        fn take_calls(&self) -> Vec<[SectorId; 6]> {
+            std::mem::take(
+                &mut *self
+                    .calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        }
+    }
+
+    impl FusionRule for FibonacciFAdmissibilityProbe {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FibonacciFusionRule.fusion_style()
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            FibonacciFusionRule.braiding_style()
+        }
+
+        fn vacuum(&self) -> SectorId {
+            FibonacciFusionRule.vacuum()
+        }
+
+        fn supports_unitary_braid_dagger(&self) -> bool {
+            FibonacciFusionRule.supports_unitary_braid_dagger()
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            FibonacciFusionRule.dual(sector)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            FibonacciFusionRule.fusion_channels(left, right)
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            FibonacciFusionRule.nsymbol(left, right, coupled)
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for FibonacciFAdmissibilityProbe {}
+
+    impl MultiplicityFreeFusionSymbols for FibonacciFAdmissibilityProbe {
+        type Scalar = Complex64;
+
+        fn f_symbol_scalar(
+            &self,
+            left: SectorId,
+            middle: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+            left_coupled: SectorId,
+            right_coupled: SectorId,
+        ) -> Self::Scalar {
+            let call = [
+                left,
+                middle,
+                right,
+                coupled,
+                left_coupled,
+                right_coupled,
+            ];
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(call);
+            let admissible = FibonacciFusionRule.nsymbol(left, middle, left_coupled) != 0
+                && FibonacciFusionRule.nsymbol(left_coupled, right, coupled) != 0
+                && FibonacciFusionRule.nsymbol(middle, right, right_coupled) != 0
+                && FibonacciFusionRule.nsymbol(left, right_coupled, coupled) != 0;
+            if admissible {
+                let value = FibonacciFusionRule.f_symbol_scalar(
+                    left,
+                    middle,
+                    right,
+                    coupled,
+                    left_coupled,
+                    right_coupled,
+                );
+                if self.complex_f_phase {
+                    value * Complex64::new(0.6, 0.8)
+                } else {
+                    value
+                }
+            } else {
+                Self::SENTINEL
+            }
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Self::Scalar {
+            FibonacciFusionRule.r_symbol_scalar(left, right, coupled)
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for FibonacciFAdmissibilityProbe {
+        fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            FibonacciFusionRule.dim_scalar(sector)
+        }
+
+        fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            FibonacciFusionRule.inv_dim_scalar(sector)
+        }
+
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            FibonacciFusionRule.sqrt_dim_scalar(sector)
+        }
+
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            FibonacciFusionRule.inv_sqrt_dim_scalar(sector)
+        }
+
+        fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+            FibonacciFusionRule.twist_scalar(sector)
+        }
+
+        fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+            FibonacciFusionRule.frobenius_schur_phase_scalar(sector)
+        }
+    }
+
+    fn assert_fibonacci_f_calls_are_admissible(calls: &[[SectorId; 6]]) {
+        for &[left, middle, right, coupled, left_coupled, right_coupled] in calls {
+            assert_ne!(
+                FibonacciFusionRule.nsymbol(left, middle, left_coupled),
+                0
+            );
+            assert_ne!(
+                FibonacciFusionRule.nsymbol(left_coupled, right, coupled),
+                0
+            );
+            assert_ne!(
+                FibonacciFusionRule.nsymbol(middle, right, right_coupled),
+                0
+            );
+            assert_ne!(
+                FibonacciFusionRule.nsymbol(left, right_coupled, coupled),
+                0
+            );
+        }
+    }
+
+    fn tree_pair_group_fixture(
+        codomain: &[usize],
+        domain: &[usize],
+        coupled: usize,
+        codomain_dual: &[bool],
+        domain_dual: &[bool],
+    ) -> FusionTreePairKey {
+        let codomain_vertices = vec![1; codomain.len().saturating_sub(1)];
+        let domain_vertices = vec![1; domain.len().saturating_sub(1)];
+        FusionTreePairKey::try_pair_from_sector_ids(
+            codomain.iter().copied(),
+            domain.iter().copied(), coupled,
+            codomain_dual.iter().copied(),
+            domain_dual.iter().copied(),
+            [],
+            [],
+            codomain_vertices,
+            domain_vertices,
+        ).unwrap()
+    }
+
+    fn assert_mixed_tree_pair_block_group_is_rejected<R>(
+        rule: &R,
+        keys: &[FusionTreePairKey],
+        expected: CoreError,
+    )
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + std::fmt::Debug,
+    {
+        // What: identity and non-identity braid entry paths reject before
+        // returning a shared coefficient matrix or evaluating rigid symbols.
+        assert_eq!(
+            multiplicity_free_braid_tree_pair_block(
+                rule,
+                keys,
+                &[0, 1],
+                &[2],
+                &[0, 1],
+                &[2],
+            )
+            .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_braid_tree_pair_block(
+                rule,
+                keys,
+                &[1, 0],
+                &[2],
+                &[0, 1],
+                &[2],
+            )
+            .unwrap_err(),
+            expected
+        );
+
+        // What: symmetric permutation validates the same block invariant on
+        // both its identity shortcut and general braid delegation.
+        assert_eq!(
+            multiplicity_free_permute_tree_pair_block(rule, keys, &[0, 1], &[2]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_permute_tree_pair_block(rule, keys, &[1, 0], &[2]).unwrap_err(),
+            expected
+        );
+
+        // What: planar transpose validates before either its identity return or
+        // cyclic repartition path can consume symbols.
+        assert_eq!(
+            multiplicity_free_transpose_tree_pair_block(rule, keys, &[0, 1], &[2]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_transpose_tree_pair_block(rule, keys, &[1, 2], &[0]).unwrap_err(),
+            expected
+        );
+    }
+
+    fn materialized_leg_tuple_oracle(space: &FusionProductSpace) -> Vec<Vec<FusionTreeLeg>> {
+        fn visit(
+            legs: &[SectorLeg],
+            remaining: usize,
+            current: &mut [FusionTreeLeg],
+            out: &mut Vec<Vec<FusionTreeLeg>>,
+        ) {
+            if remaining == 0 {
+                out.push(current.to_vec());
+                return;
+            }
+            let index = remaining - 1;
+            for &sector in legs[index].sectors() {
+                current[index] = FusionTreeLeg::new(sector, legs[index].is_dual());
+                visit(legs, remaining - 1, current, out);
+            }
+        }
+
+        let mut out = Vec::new();
+        let mut current = vec![FusionTreeLeg::new(SectorId::new(0), false); space.len()];
+        visit(space.legs(), space.len(), &mut current, &mut out);
+        out
+    }
+
+    fn legacy_select<R: FusionRule>(
+        rule: &R,
+        homspace: &FusionTreeHomSpace,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> FusionTreeHomSpace {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new(
+                codomain_axes
+                    .iter()
+                    .map(|&axis| homspace.external_axis_leg(rule, axis)),
+            ),
+            FusionProductSpace::new(domain_axes.iter().map(|&axis| {
+                homspace.external_axis_leg(rule, axis).dual(rule)
+            })),
+        )
+    }
+
+    fn legacy_tensorcontract_homspace<R: FusionRule>(
+        rule: &R,
+        lhs: &FusionTreeHomSpace,
+        rhs: &FusionTreeHomSpace,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+        nout: usize,
+    ) -> FusionTreeHomSpace {
+        let lhs_open = (0..lhs.rank())
+            .filter(|axis| !lhs_axes.contains(axis))
+            .collect::<Vec<_>>();
+        let rhs_open = (0..rhs.rank())
+            .filter(|axis| !rhs_axes.contains(axis))
+            .collect::<Vec<_>>();
+        let lhs = legacy_select(rule, lhs, &lhs_open, lhs_axes);
+        let rhs = legacy_select(rule, rhs, rhs_axes, &rhs_open);
+        let composed = FusionTreeHomSpace::compose(rule, &lhs, &rhs).unwrap();
+        legacy_select(
+            rule,
+            &composed,
+            &output_axes[..nout],
+            &output_axes[nout..],
+        )
+    }
+
+    fn assert_direct_contract_matches_legacy<R: CheckedFusionAlgebra>(
+        rule: &R,
+        lhs: &FusionTreeHomSpace,
+        rhs: &FusionTreeHomSpace,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+        nout: usize,
+    ) {
+        let expected = legacy_tensorcontract_homspace(
+            rule,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            nout,
+        );
+        let actual = FusionTreeHomSpace::tensorcontract_homspace(
+            rule,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            nout,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        let checked = FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+            rule,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            nout,
+        )
+        .unwrap();
+        assert_eq!(checked, actual);
+
+        // What: the destination check proves equality from the legs alone,
+        // for both algebra contracts, and a different destination is
+        // rejected with the materializing comparison's answer.
+        let materializations = DESCRIPTOR_MATERIALIZATIONS.get();
+        let matches = |expected: &FusionTreeHomSpace| {
+            let unchecked = FusionTreeHomSpace::tensorcontract_homspace_matches(
+                rule,
+                lhs,
+                rhs,
+                lhs_axes,
+                rhs_axes,
+                output_axes,
+                nout,
+                expected,
+            )
+            .unwrap();
+            let checked = FusionTreeHomSpace::try_tensorcontract_homspace_matches_checked(
+                rule,
+                lhs,
+                rhs,
+                lhs_axes,
+                rhs_axes,
+                output_axes,
+                nout,
+                expected,
+            )
+            .unwrap();
+            assert_eq!(unchecked, checked);
+            unchecked
+        };
+        assert!(matches(&actual));
+        assert_eq!(DESCRIPTOR_MATERIALIZATIONS.get(), materializations);
+        let flipped_leg = |leg: &SectorLeg| SectorLeg::new(leg.iter(), !leg.is_dual());
+        let mut codomain = actual.codomain().legs().to_vec();
+        let mut domain = actual.domain().legs().to_vec();
+        if let Some(leg) = codomain.first_mut() {
+            *leg = flipped_leg(leg);
+        } else if let Some(leg) = domain.first_mut() {
+            *leg = flipped_leg(leg);
+        }
+        let other = FusionTreeHomSpace::new(
+            FusionProductSpace::new(codomain),
+            FusionProductSpace::new(domain),
+        );
+        if other != actual {
+            assert!(!matches(&other));
+        }
+    }
+
+    fn legacy_leg_degeneracy_structure<R>(
+        rule: &R,
+        homspace: &FusionTreeHomSpace,
+    ) -> Arc<BlockStructure>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let keys = homspace.fusion_tree_keys(rule);
+        let blocks = keys
+            .iter()
+            .map(|key| {
+                (
+                    key.clone(),
+                    homspace.degeneracy_shape_for_key(key).unwrap().to_vec(),
+                )
+            })
+            .collect();
+        BlockStructure::coupled_sector_matrix_with_keys(
+            rule,
+            homspace.codomain().len(),
+            homspace.rank(),
+            blocks,
+        )
+        .unwrap()
+        .into_shared()
+    }
+
+    fn singleton_rank_hom(sector: SectorId, rank: usize) -> FusionTreeHomSpace {
+        let side = |invert_dual| {
+            FusionProductSpace::new((0..rank).map(|axis| {
+                SectorLeg::new([(sector, axis % 3 + 1)], (axis % 2 == 0) ^ invert_dual)
+            }))
+        };
+        FusionTreeHomSpace::new(side(false), side(true))
+    }
+
+    fn compact_operator_cohort_fixture<R>(
+        rule: &R,
+        external: SectorId,
+        coupled: SectorId,
+    ) -> Vec<FusionTreePairKey>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + MultiplicityFreeFusionRule,
+    {
+        let codomain: [SectorLeg; 8] =
+            std::array::from_fn(|_| SectorLeg::new([(external, 1)], false));
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new(codomain),
+            FusionProductSpace::new([SectorLeg::new([(coupled, 1)], false)]),
+        );
+        let keys = hom.fusion_tree_keys(rule).to_vec();
+        assert!(
+            keys.len() >= 16,
+            "fixture must expose every requested source cohort"
+        );
+        keys
+    }
+
+    trait TransposeOracleScalar {
+        fn oracle_distance(&self, other: &Self) -> f64;
+        fn oracle_magnitude(&self) -> f64;
+    }
+
+    impl TransposeOracleScalar for f64 {
+        fn oracle_distance(&self, other: &Self) -> f64 {
+            (self - other).abs()
+        }
+
+        fn oracle_magnitude(&self) -> f64 {
+            self.abs()
+        }
+    }
+
+    impl TransposeOracleScalar for Complex64 {
+        fn oracle_distance(&self, other: &Self) -> f64 {
+            (self - other).norm()
+        }
+
+        fn oracle_magnitude(&self) -> f64 {
+            self.norm()
+        }
+    }
+
+    fn assert_compact_transpose_matches_full_key_oracle<R>(
+        rule: &R,
+        sources: &[FusionTreePairKey],
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+        expect_compact_boundary: bool,
+    ) where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone
+            + Add<Output = R::Scalar>
+            + Mul<Output = R::Scalar>
+            + std::fmt::Debug
+            + TransposeOracleScalar,
+    {
+        reset_compact_block_dimensions();
+        let compact = multiplicity_free_transpose_tree_pair_block(
+            rule,
+            sources,
+            codomain_permutation,
+            domain_permutation,
+        )
+        .unwrap();
+        let dimensions = compact_block_dimensions();
+        let group = validate_tree_pair_block_group_for_rule(rule, sources)
+            .unwrap()
+            .expect("oracle cohort is nonempty");
+        let prepared = PreparedTreePairOperation::prepare_transpose(
+            group.codomain_rank,
+            group.domain_rank,
+            codomain_permutation,
+            domain_permutation,
+        )
+        .unwrap();
+        let ordered =
+            multiplicity_free_transpose_tree_pair_block_ordered_validated(group, &prepared)
+                .unwrap();
+        let full_key = multiplicity_free_transpose_tree_pair_block_full_key_oracle(
+            rule,
+            sources,
+            codomain_permutation,
+            domain_permutation,
+        )
+        .unwrap();
+
+        let mut expected_destinations = Vec::new();
+        for source_rows in &compact {
+            for (destination, _) in source_rows {
+                if !expected_destinations.contains(destination) {
+                    expected_destinations.push(destination.clone());
+                }
+            }
+        }
+        assert_eq!(ordered.destinations(), expected_destinations);
+        assert_eq!(ordered.source_count(), sources.len());
+
+        let mut ordered_coefficients =
+            vec![None; ordered.destinations().len().saturating_mul(sources.len())];
+        match ordered.storage() {
+            OrderedBlockLinearStorage::SingletonColumns {
+                destination_rows,
+                coefficients,
+            } => {
+                assert_eq!(destination_rows.len(), sources.len());
+                assert_eq!(coefficients.len(), sources.len());
+                for (source, (&destination_row, coefficient)) in
+                    destination_rows.iter().zip(coefficients).enumerate()
+                {
+                    ordered_coefficients[destination_row * sources.len() + source] =
+                        Some(coefficient.clone());
+                }
+            }
+            OrderedBlockLinearStorage::DenseDstSrc(coefficients) => {
+                assert_eq!(coefficients.len(), ordered_coefficients.len());
+                ordered_coefficients.clone_from_slice(coefficients);
+            }
+        }
+        for destination_row in 0..ordered.destinations().len() {
+            assert!(
+                ordered_coefficients[destination_row * sources.len()
+                    ..(destination_row + 1) * sources.len()]
+                    .iter()
+                    .any(Option::is_some),
+                "ordered maps omit structurally empty destination rows"
+            );
+        }
+        for (source, source_rows) in compact.iter().enumerate() {
+            for (destination_row, destination) in ordered.destinations().iter().enumerate() {
+                let expected = source_rows
+                    .iter()
+                    .find(|(candidate, _)| candidate == destination)
+                    .map(|(_, coefficient)| coefficient);
+                let actual =
+                    ordered_coefficients[destination_row * sources.len() + source].as_ref();
+                assert_eq!(actual.is_some(), expected.is_some());
+                if let (Some(actual), Some(expected)) = (actual, expected) {
+                    assert!(
+                        actual.oracle_distance(expected)
+                            <= 1.0e-12 * (1.0 + expected.oracle_magnitude()),
+                        "ordered coefficient mismatch {expected:?} vs {actual:?}"
+                    );
+                }
+            }
+        }
+
+        assert_eq!(compact.len(), full_key.len());
+        for (compact_rows, full_key_rows) in compact.iter().zip(&full_key) {
+            // What: compact execution preserves the legacy per-source
+            // destination order and every categorical label.
+            assert_eq!(
+                compact_rows.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+                full_key_rows.iter().map(|(key, _)| key).collect::<Vec<_>>()
+            );
+            assert_eq!(compact_rows.len(), full_key_rows.len());
+            for ((_, actual), (_, expected)) in compact_rows.iter().zip(full_key_rows) {
+                assert!(
+                    actual.oracle_distance(expected)
+                        <= 1.0e-12 * (1.0 + expected.oracle_magnitude()),
+                    "coefficient mismatch {expected:?} vs {actual:?}"
+                );
+            }
+        }
+
+        if expect_compact_boundary {
+            let dimensions = dimensions.expect("nonidentity compact transform records dimensions");
+            let destinations = full_key
+                .iter()
+                .flatten()
+                .map(|(key, _)| key)
+                .collect::<std::collections::BTreeSet<_>>();
+            // What: the dense coefficient matrix is exactly the canonical
+            // reachable block basis by the caller's source columns.
+            assert_eq!(dimensions.destination_rows, destinations.len());
+            assert_eq!(dimensions.source_columns, sources.len());
+            assert_eq!(
+                dimensions.coefficient_slots,
+                dimensions.destination_rows * dimensions.source_columns
+            );
+            assert_eq!(
+                dimensions.coefficient_bytes,
+                dimensions.coefficient_slots * std::mem::size_of::<Option<R::Scalar>>()
+            );
+        } else {
+            assert_eq!(dimensions, None);
+        }
+    }
+
+    #[derive(Debug)]
+    struct AdversarialHostStorage<T> {
+        data: Vec<T>,
+        reported_len: std::cell::Cell<usize>,
+    }
+
+    impl<T> TensorStorage<T> for AdversarialHostStorage<T> {
+        fn len(&self) -> usize {
+            self.reported_len.get()
+        }
+
+        fn placement(&self) -> Placement {
+            Placement::Host
+        }
+    }
+
+    impl<T> HostReadableStorage<T> for AdversarialHostStorage<T> {
+        fn as_slice(&self) -> &[T] {
+            &self.data
+        }
+    }
+
+    impl<T> HostWritableStorage<T> for AdversarialHostStorage<T> {
+        fn as_mut_slice(&mut self) -> &mut [T] {
+            &mut self.data
+        }
+    }
+
+    type AdversarialHostTensor =
+        TensorMap<i32, 1, 0, Trivial, AdversarialHostStorage<i32>>;
+
+    fn adversarial_host_tensor(actual_len: usize) -> AdversarialHostTensor {
+        let space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+        let storage = AdversarialHostStorage {
+            data: (0..actual_len).map(|value| value as i32 + 10).collect(),
+            reported_len: std::cell::Cell::new(2),
+        };
+        AdversarialHostTensor::from_storage_with_structure(
+            storage,
+            space,
+            BlockStructure::packed_column_major(1, [vec![2]]).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn assert_host_execution_rejects_extent(
+        mut tensor: AdversarialHostTensor,
+        error: CoreError,
+    ) {
+        let before = tensor.data().to_vec();
+        let visits = std::cell::Cell::new(0);
+        assert_eq!(
+            tensor.for_each_block_element(|_, _, _| visits.set(visits.get() + 1)),
+            Err(error.clone())
+        );
+        assert_eq!(visits.get(), 0);
+
+        let fills = std::cell::Cell::new(0);
+        assert_eq!(
+            tensor.fill_block_elements(|_, _| {
+                fills.set(fills.get() + 1);
+                -1
+            }),
+            Err(error.clone())
+        );
+        assert_eq!(fills.get(), 0);
+        assert_eq!(tensor.data(), before);
+
+        assert_eq!(tensor.subblock().unwrap_err(), error);
+        assert_eq!(tensor.block(0).unwrap_err(), error);
+        assert_eq!(
+            tensor.block_by_key(&BlockKey::ordinal(0)).unwrap_err(),
+            error
+        );
+        assert_eq!(tensor.subblock_mut().unwrap_err(), error);
+        assert_eq!(tensor.block_mut(0).unwrap_err(), error);
+        assert_eq!(
+            tensor
+                .block_mut_by_key(&BlockKey::ordinal(0))
+                .unwrap_err(),
+            error
+        );
+        assert_eq!(tensor.data(), before);
+    }
+
+    fn adversarial_fusion_host_tensor(
+        actual_len: usize,
+    ) -> (
+        TensorMap<i32, 1, 1, Trivial, AdversarialHostStorage<i32>>,
+        FusionTreePairKey,
+    ) {
+        let rule = Z2FusionRule;
+        let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::from_sectors(
+                [(Z2Irrep::EVEN, 1)],
+                [(Z2Irrep::EVEN, 1)],
+            ),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let key = fusion_space.homspace().fusion_tree_keys(&rule)[0].clone();
+        let tensor = TensorMap::from_storage_with_fusion_space(
+            AdversarialHostStorage {
+                data: vec![10; actual_len],
+                reported_len: std::cell::Cell::new(1),
+            },
+            fusion_space,
+        )
+        .unwrap();
+        (tensor, key)
+    }
+
+    // --- Stage A: outer-multiplicity (Generic fusion) foundation ----------
+    //
+    // `ToyOmRule` is purely synthetic (following `AsymmetricAnyonicRule`
+    // above as a template): sector 1 ("a") fuses with itself to sector 3
+    // ("c") via two independent channels, i.e. N(a,a,c) = 2. It exists only
+    // to exercise the `GenericFusionSymbols` wiring and provider-owned
+    // `FusionStyleKind::Generic` gate added in this stage.
+    // Pentagon/hexagon are NOT required to hold — see
+    // scratchpad/toy-om-stageA-plan.md, this is wiring validation only, not
+    // a physical anyon model. The recoupling engine (recouple wrapper,
+    // `UnsupportedFusionStyle` guards) does not consume this rule; that is
+    // explicitly Stage B.
+    #[derive(Clone, Copy, Debug)]
+    struct ToyOmRule;
+
+    impl ToyOmRule {
+        const VACUUM: usize = 0;
+        const A: usize = 1;
+        const C: usize = 3;
+    }
+
+    impl FusionRule for ToyOmRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(Self::VACUUM)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (Self::VACUUM, x) | (x, Self::VACUUM) => smallvec![SectorId::new(x)],
+                (Self::A, Self::A) => smallvec![SectorId::new(Self::C)],
+                (Self::A, Self::C) | (Self::C, Self::A) => smallvec![SectorId::new(Self::A)],
+                _ => smallvec![SectorId::new(Self::VACUUM)],
+            }
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            // The one artificial outer multiplicity this toy rule carries:
+            // a (x) a -> c has two independent fusion channels (N=2). Every
+            // other triple falls back to the multiplicity-free default (0
+            // or 1, from whether `coupled` is a fusion channel of
+            // `left (x) right`) — this is the override the design doc calls
+            // for instead of trying to encode multiplicity through repeated
+            // `fusion_channels` entries.
+            if (left.id(), right.id(), coupled.id()) == (Self::A, Self::A, Self::C) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+
+    impl GenericFusionSymbols for ToyOmRule {
+        type Scalar = f64;
+
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let n_mu = self.nsymbol(a, b, e);
+            let n_nu = self.nsymbol(e, c, d);
+            let n_kappa = self.nsymbol(b, c, f);
+            let n_lambda = self.nsymbol(a, f, d);
+            let ids = (a.id(), b.id(), c.id(), d.id(), e.id(), f.id());
+            if ids == (Self::A, Self::A, Self::VACUUM, Self::C, Self::C, Self::A) {
+                // mu and lambda both range over the N(a,a,c)=2 channel here
+                // (nu = N(c,0,c) = 1, kappa = N(a,0,a) = 1 are trivial), so
+                // this F-block is genuinely a 2x2 matrix. Filled with a
+                // pi/4 rotation — an actual orthogonal matrix, not just
+                // shape-correct filler — because the design doc wants F's
+                // (mu, lambda) block orthogonal so a later (Stage B)
+                // braid * inverse == identity self-consistency check has
+                // something real to check.
+                let s = std::f64::consts::FRAC_1_SQRT_2;
+                GenericFArray::new(vec![s, -s, s, s], (n_mu, n_nu, n_kappa, n_lambda))
+            } else {
+                let total = n_mu * n_nu * n_kappa * n_lambda;
+                GenericFArray::new(vec![1.0; total], (n_mu, n_nu, n_kappa, n_lambda))
+            }
+        }
+
+        fn r_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            let rows = self.nsymbol(a, b, c);
+            let cols = self.nsymbol(b, a, c);
+            if (a.id(), b.id(), c.id()) == (Self::A, Self::A, Self::C) {
+                GenericRMatrix::new(vec![1.0, 0.0, 0.0, 1.0], rows, cols)
+            } else {
+                GenericRMatrix::new(vec![1.0; rows * cols], rows, cols)
+            }
+        }
+    }
+
+    // --- Stage B1: Generic-fusion Artin braid (braid × inverse == identity) --
+    //
+    // `UnitaryToyOmRule` is a *new* rule (pure addition — Stage A's
+    // `ToyOmRule` is left byte-for-byte untouched) with the same fusion
+    // structure (a⊗a→c has N=2, everything else N≤1, mixing an OM vertex with
+    // multiplicity-1 vertices), but with UNITARY F/R blocks so that TensorKit's
+    // inverse-braid identity actually holds:
+    //
+    //   * R(a,a,c) is a genuine 2×2 rotation (unitary), so the braid mixes the
+    //     two outer-multiplicity channels non-trivially — the round-trip test
+    //     is real, not vacuous.
+    //   * F(a,a,a,a,c,c) — the only F block the rank-3 braid touches — is the
+    //     2×2 IDENTITY. This is deliberate: the toy rule is not
+    //     hexagon-consistent, and for the index>1 braid the round-trip
+    //     coefficient works out to `Rθᵀ·M·Rθ·M` (M = that F block); with
+    //     nontrivial rotations Rθ, M that equals I *iff* M = I. A hexagon-
+    //     consistent model would let a nontrivial F cancel, but B1 only needs
+    //     the wiring + inverse-adjoint handling exercised, which the nontrivial
+    //     R already does. (Since both braided legs are the sector `a`,
+    //     R(a,b,c)=R(b,a,c), so no hexagon relation between the two R's is
+    //     needed for index==0 either.)
+    //   * F(a,a,0,c,c,a) is a genuine π/4 rotation, kept only so the unitarity
+    //     assertion test has a non-identity unitary F block to check. It is not
+    //     on any braid path here.
+    #[derive(Clone, Copy, Debug)]
+    struct UnitaryToyOmRule;
+
+    impl UnitaryToyOmRule {
+        const VACUUM: usize = 0;
+        const A: usize = 1;
+        const C: usize = 3;
+        // R(a,a,c) rotation angle. Any nonzero angle whose sin/cos are both
+        // nonzero makes the braid genuinely spread over both OM channels.
+        const R_THETA: f64 = std::f64::consts::PI / 5.0;
+    }
+
+    impl FusionRule for UnitaryToyOmRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            // Bosonic => has_braiding() (needed to pass the NoBraiding guard);
+            // the actual crossings are governed by the (non-symmetric) R blocks.
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(Self::VACUUM)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (Self::VACUUM, x) | (x, Self::VACUUM) => smallvec![SectorId::new(x)],
+                (Self::A, Self::A) => smallvec![SectorId::new(Self::C)],
+                (Self::A, Self::C) | (Self::C, Self::A) => smallvec![SectorId::new(Self::A)],
+                _ => smallvec![SectorId::new(Self::VACUUM)],
+            }
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (Self::A, Self::A, Self::C) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+
+    impl GenericFusionSymbols for UnitaryToyOmRule {
+        type Scalar = f64;
+
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let n_mu = self.nsymbol(a, b, e);
+            let n_nu = self.nsymbol(e, c, d);
+            let n_kappa = self.nsymbol(b, c, f);
+            let n_lambda = self.nsymbol(a, f, d);
+            let shape = (n_mu, n_nu, n_kappa, n_lambda);
+            let ids = (a.id(), b.id(), c.id(), d.id(), e.id(), f.id());
+            if ids == (Self::A, Self::A, Self::VACUUM, Self::C, Self::C, Self::A) {
+                // (mu, lambda) 2×2 block (nu = kappa = 0): a real π/4 rotation.
+                // Kept only for the unitarity assertion — not on a braid path.
+                let s = std::f64::consts::FRAC_1_SQRT_2;
+                GenericFArray::new(vec![s, -s, s, s], shape)
+            } else if ids == (Self::A, Self::A, Self::A, Self::A, Self::C, Self::C) {
+                // The one F block the rank-3 braid reads: shape (2,1,2,1), a
+                // 2×2 in (mu, kappa). IDENTITY (see the module comment for why
+                // it must be I, not a rotation). Row-major over
+                // (mu, nu, kappa, lambda): flat idx = mu*2 + kappa.
+                GenericFArray::new(vec![1.0, 0.0, 0.0, 1.0], shape)
+            } else {
+                // Defensive default: identity on the leading diagonal of the
+                // flattened ((mu,nu) × (kappa,lambda)) matrix. For 1×1 blocks
+                // this is [1.0] (unitary); for any larger square block it is a
+                // genuine unitary. No such block is reached by these tests, but
+                // an all-ones fill would be silently non-unitary if one were.
+                let rows = n_mu * n_nu;
+                let cols = n_kappa * n_lambda;
+                let mut data = vec![0.0; rows * cols];
+                for r in 0..rows {
+                    if r < cols {
+                        data[r * cols + r] = 1.0;
+                    }
+                }
+                GenericFArray::new(data, shape)
+            }
+        }
+
+        fn r_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            let rows = self.nsymbol(a, b, c);
+            let cols = self.nsymbol(b, a, c);
+            if (a.id(), b.id(), c.id()) == (Self::A, Self::A, Self::C) {
+                // 2×2 rotation Rθ = [[cosθ, -sinθ], [sinθ, cosθ]] (unitary),
+                // row-major. This is the block that makes the braid non-trivial.
+                let (s, c_) = Self::R_THETA.sin_cos();
+                GenericRMatrix::new(vec![c_, -s, s, c_], rows, cols)
+            } else {
+                // Every other block is 1×1 with modulus-1 entry (unitary).
+                GenericRMatrix::new(vec![1.0; rows * cols], rows, cols)
+            }
+        }
+    }
+
+    impl CheckedGenericFusion for UnitaryToyOmRule {
+        type Error = std::convert::Infallible;
+        fn rule_identity(&self) -> RuleIdentity { FusionRule::rule_identity(self) }
+        fn fusion_style(&self) -> FusionStyleKind { FusionStyleKind::Generic }
+        fn braiding_style(&self) -> BraidingStyleKind { BraidingStyleKind::Bosonic }
+        fn vacuum(&self) -> SectorId { FusionRule::vacuum(self) }
+        fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> { Ok(sector) }
+        fn try_fusion_channels(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.fusion_channels(a,b)) }
+        fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.fusion_channels(a,b)) }
+        fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.nsymbol(a,b,c)) }
+    }
+
+    impl CheckedGenericRigidSymbols for UnitaryToyOmRule {
+        type Scalar = f64;
+        fn try_sqrt_dim_scalar(&self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
+        fn try_inv_sqrt_dim_scalar(&self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
+        fn try_frobenius_schur_phase_scalar(&self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
+        fn try_f_symbol_generic(&self, a: SectorId,b: SectorId,c: SectorId,d: SectorId,e: SectorId,f: SectorId) -> Result<GenericFArray<f64>, Self::Error> { Ok(self.f_symbol_generic(a,b,c,d,e,f)) }
+        fn try_r_symbol_generic(&self, a: SectorId,b: SectorId,c: SectorId) -> Result<GenericRMatrix<f64>, Self::Error> { Ok(self.r_symbol_generic(a,b,c)) }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ArtinSpyError { F, R }
+
+    impl std::fmt::Display for ArtinSpyError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{self:?}") } }
+
+    impl std::error::Error for ArtinSpyError {}
+
+    struct ArtinSpy {
+        inner: UnitaryToyOmRule,
+        f_calls: std::cell::Cell<usize>,
+        r_calls: std::cell::Cell<usize>,
+        rigid_calls: std::cell::Cell<usize>,
+        fail_f: Option<usize>,
+        fail_r: Option<usize>,
+        bad_f: bool,
+        bad_r: bool,
+    }
+
+    impl ArtinSpy {
+        fn new() -> Self { Self { inner: UnitaryToyOmRule, f_calls: std::cell::Cell::new(0), r_calls: std::cell::Cell::new(0), rigid_calls: std::cell::Cell::new(0), fail_f: None, fail_r: None, bad_f: false, bad_r: false } }
+        fn trip(counter: &std::cell::Cell<usize>, fail: Option<usize>, error: ArtinSpyError) -> Result<(), ArtinSpyError> { let n = counter.get()+1; counter.set(n); if fail == Some(n) { Err(error) } else { Ok(()) } }
+    }
+
+    impl CheckedGenericFusion for ArtinSpy {
+        type Error = ArtinSpyError;
+        fn rule_identity(&self) -> RuleIdentity { FusionRule::rule_identity(&self.inner) }
+        fn fusion_style(&self) -> FusionStyleKind { FusionRule::fusion_style(&self.inner) }
+        fn braiding_style(&self) -> BraidingStyleKind { FusionRule::braiding_style(&self.inner) }
+        fn vacuum(&self) -> SectorId { FusionRule::vacuum(&self.inner) }
+        fn try_dual(&self, s: SectorId) -> Result<SectorId, Self::Error> { Ok(s) }
+        fn try_fusion_channels(&self,a:SectorId,b:SectorId)->Result<SectorVec,Self::Error>{Ok(self.inner.fusion_channels(a,b))}
+        fn try_fusion_channels_in_table(&self,a:SectorId,b:SectorId)->Result<SectorVec,Self::Error>{Ok(self.inner.fusion_channels(a,b))}
+        fn try_nsymbol(&self,a:SectorId,b:SectorId,c:SectorId)->Result<usize,Self::Error>{Ok(self.inner.nsymbol(a,b,c))}
+    }
+
+    impl CheckedGenericRigidSymbols for ArtinSpy {
+        type Scalar=f64;
+        fn try_sqrt_dim_scalar(&self,_:SectorId)->Result<f64,Self::Error>{self.rigid_calls.set(self.rigid_calls.get()+1);Ok(1.0)}
+        fn try_inv_sqrt_dim_scalar(&self,_:SectorId)->Result<f64,Self::Error>{self.rigid_calls.set(self.rigid_calls.get()+1);Ok(1.0)}
+        fn try_frobenius_schur_phase_scalar(&self,_:SectorId)->Result<f64,Self::Error>{self.rigid_calls.set(self.rigid_calls.get()+1);Ok(1.0)}
+        fn try_f_symbol_generic(&self,a:SectorId,b:SectorId,c:SectorId,d:SectorId,e:SectorId,f:SectorId)->Result<GenericFArray<f64>,Self::Error>{Self::trip(&self.f_calls,self.fail_f,ArtinSpyError::F)?; let x=self.inner.f_symbol_generic(a,b,c,d,e,f); if self.bad_f { Ok(GenericFArray::new(x.data().to_vec(), (1,1,x.data().len(),1))) } else { Ok(x) }}
+        fn try_r_symbol_generic(&self,a:SectorId,b:SectorId,c:SectorId)->Result<GenericRMatrix<f64>,Self::Error>{Self::trip(&self.r_calls,self.fail_r,ArtinSpyError::R)?; let x=self.inner.r_symbol_generic(a,b,c); if self.bad_r { Ok(GenericRMatrix::new(x.data().to_vec(), 1,x.data().len())) } else { Ok(x) }}
+    }
+
+    // Rank-2 tree [a, a] -> c with a single OM vertex label `vertex`.
+    fn unitary_rank2_tree(vertex: usize) -> FusionTreeKey {
+        let a = SectorId::new(UnitaryToyOmRule::A);
+        let c = SectorId::new(UnitaryToyOmRule::C);
+        FusionTreeKey::new([a, a], c, [false, false], [], [MultiplicityIndex::new(vertex).expect("test multiplicity label is one-based")])
+    }
+
+    // Rank-3 tree [a, a, a] -> a: fuse a⊗a->c (OM vertex `vertex1`, N=2), then
+    // c⊗a->a (vertex2, forced label 1). Innerline [c]. Mixes an OM vertex with
+    // a multiplicity-1 vertex.
+    fn unitary_rank3_tree(vertex1: usize) -> FusionTreeKey {
+        let a = SectorId::new(UnitaryToyOmRule::A);
+        let c = SectorId::new(UnitaryToyOmRule::C);
+        FusionTreeKey::new(
+            [a, a, a], a,
+            [false, false, false],
+            [c],
+            [MultiplicityIndex::new(vertex1).expect("test multiplicity label is one-based"), MultiplicityIndex::ONE],
+        )
+    }
+
+    // ===================== Stage B2a: Generic bend / repartition =============
+    //
+    // Oracle & gate rule: the REAL A4Irrep(3) outer-multiplicity sub-block.
+    // A4Irrep(3) is self-dual (dual(3)=3), 3⊗3 = {0,1,2,3} with N(3,3,3)=2 (the
+    // only outer multiplicity) AND 3⊗3 ∋ vacuum — so it is genuinely rigid and
+    // can bend. (Contrast the braid-only `UnitaryToyOmRule`: its sector `a` has
+    // NO proper dual — a⊗a ∌ vacuum — so every B-symbol there is degenerate and
+    // bending is undefined. Extending it was therefore impossible without
+    // changing its fusion structure; a new rigid rule is used instead, per the
+    // "stop if existing code must change" constraint.)
+    //
+    // Constants computed out-of-band from TensorKit v0.16.2 + TensorKitSectors
+    // v0.3.6 (git-tree-sha1 334a0ed5a0a0088a2b6fe7a39f78dda928038d85), by
+    // TensorKit's OWN Bsymbol / Asymbol / bendright, independent of this port.
+    //
+    // DISCRIMINATING POWER (honest note): for A4Irrep(3), Bsymbol(3,3,3) AND
+    // Asymbol(3,3,3) are BOTH the 2×2 identity (asserted below) — the A4 3-irrep
+    // bend has no off-diagonal channel mixing. So this oracle does NOT catch a
+    // μ↔ν transpose in the B-matrix indexing. It DOES pin the tree surgery, the
+    // √dim(c)·(1/√dim(a)) coefficient (√3 vs 1 across the varied innerline in the
+    // rank-3 table — a sqrt/invsqrt swap changes these), μ = last-codomain-vertex
+    // selection, ν → domain vertex-label storage, and the F→B derivation. A
+    // μ↔ν-discriminating BEND oracle needs a non-diagonal Bsymbol (e.g. SU(3));
+    // none is available here as verified constants — flagged for B2b.
+    #[derive(Clone, Copy, Debug)]
+    struct A4BendRule;
+
+    impl FusionRule for A4BendRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            // Unused: bend/repartition are planar (no braiding). Bosonic keeps
+            // the rule well-formed.
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            // A4: 0 and 3 self-dual; the two nontrivial 1-dim irreps 1,2 are
+            // each other's dual (verified in Julia). Only dual(3)=3 is exercised
+            // by the bend, but the full map is correct.
+            match sector.id() {
+                1 => SectorId::new(2),
+                2 => SectorId::new(1),
+                _ => sector,
+            }
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (3, 3) => smallvec![
+                    SectorId::new(0),
+                    SectorId::new(1),
+                    SectorId::new(2),
+                    SectorId::new(3)
+                ],
+                (3, _) | (_, 3) => smallvec![SectorId::new(3)],
+                // {1,2}⊗{1,2}: never touched by the bend trees; defensive stub.
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (3, 3, 3) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+
+    impl GenericFusionSymbols for A4BendRule {
+        type Scalar = f64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let inv = 1.0 / 3.0_f64.sqrt(); // 1/√dim(3)
+            let ids = (a.id(), b.id(), c.id(), d.id(), e.id(), f.id());
+            match ids {
+                // F(3,3,3,3,3,0): the block Bsymbol(3,3,3) reshapes, shape
+                // (N(3,3,3),N(3,3,3),1,1)=(2,2,1,1). (μ,ν)=(1/√3)·I, row-major.
+                (3, 3, 3, 3, 3, 0) => GenericFArray::new(vec![inv, 0.0, 0.0, inv], (2, 2, 1, 1)),
+                // F(x,3,3,x,3,0), x∈{0,1,2}: Bsymbol(x,3,3), shape (1,1,1,1)=[1].
+                (0, 3, 3, 0, 3, 0) | (1, 3, 3, 1, 3, 0) | (2, 3, 3, 2, 3, 0) => {
+                    GenericFArray::new(vec![1.0], (1, 1, 1, 1))
+                }
+                // F(3,3,3,3,x,0), x∈{0,1,2}: Bsymbol(3,3,x) (the return bend when
+                // the intermediate coupled sector is x), (1,1,1,1)=[1/3].
+                (3, 3, 3, 3, 0, 0) | (3, 3, 3, 3, 1, 0) | (3, 3, 3, 3, 2, 0) => {
+                    GenericFArray::new(vec![1.0 / 3.0], (1, 1, 1, 1))
+                }
+                // F(3,3,3,3,0,3): the block Asymbol(3,3,3) reshapes, shape
+                // (1,1,N(3,3,3),N(3,3,3))=(1,1,2,2). (κ,λ)=(1/√3)·I, row-major.
+                (3, 3, 3, 3, 0, 3) => GenericFArray::new(vec![inv, 0.0, 0.0, inv], (1, 1, 2, 2)),
+                _ => panic!("A4BendRule: unmodelled F{ids:?}"),
+            }
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            // Unused: planar duality moves never braid. Trivial 1×1 stub.
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
+    }
+
+    impl GenericRigidSymbols for A4BendRule {
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 3 {
+                3.0_f64.sqrt()
+            } else {
+                1.0
+            }
+        }
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 3 {
+                1.0 / 3.0_f64.sqrt()
+            } else {
+                1.0
+            }
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            // All A4 sectors reached here have FS phase +1 (verified in Julia).
+            1.0
+        }
+    }
+
+    impl CheckedGenericFusion for A4BendRule {
+        type Error = std::convert::Infallible;
+
+        fn rule_identity(&self) -> RuleIdentity {
+            FusionRule::rule_identity(self)
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionRule::fusion_style(self)
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            FusionRule::braiding_style(self)
+        }
+
+        fn vacuum(&self) -> SectorId {
+            FusionRule::vacuum(self)
+        }
+
+        fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+            Ok(FusionRule::dual(self, sector))
+        }
+
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, Self::Error> {
+            Ok(FusionRule::fusion_channels(self, left, right))
+        }
+
+        fn try_fusion_channels_in_table(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, Self::Error> {
+            Ok(FusionRule::fusion_channels(self, left, right))
+        }
+
+        fn try_nsymbol(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Result<usize, Self::Error> {
+            Ok(FusionRule::nsymbol(self, left, right, coupled))
+        }
+    }
+
+    impl CheckedGenericRigidSymbols for A4BendRule {
+        type Scalar = f64;
+
+        fn try_sqrt_dim_scalar(
+            &self,
+            sector: SectorId,
+        ) -> Result<Self::Scalar, Self::Error> {
+            Ok(GenericRigidSymbols::sqrt_dim_scalar(self, sector))
+        }
+
+        fn try_inv_sqrt_dim_scalar(
+            &self,
+            sector: SectorId,
+        ) -> Result<Self::Scalar, Self::Error> {
+            Ok(GenericRigidSymbols::inv_sqrt_dim_scalar(self, sector))
+        }
+
+        fn try_frobenius_schur_phase_scalar(
+            &self,
+            sector: SectorId,
+        ) -> Result<Self::Scalar, Self::Error> {
+            Ok(GenericRigidSymbols::frobenius_schur_phase_scalar(
+                self, sector,
+            ))
+        }
+
+        fn try_f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+            Ok(GenericFusionSymbols::f_symbol_generic(
+                self, a, b, c, d, e, f,
+            ))
+        }
+
+        fn try_r_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+            Ok(GenericFusionSymbols::r_symbol_generic(self, a, b, c))
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RigidSpyError {
+        Dual,
+        N,
+        F,
+        Sqrt,
+        InvSqrt,
+        Fs,
+    }
+
+    impl std::fmt::Display for RigidSpyError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "{self:?}")
+        }
+    }
+
+    impl std::error::Error for RigidSpyError {}
+
+    struct CheckedA4Spy {
+        dual_calls: std::cell::Cell<usize>,
+        n_calls: std::cell::Cell<usize>,
+        f_calls: std::cell::Cell<usize>,
+        sqrt_calls: std::cell::Cell<usize>,
+        inv_sqrt_calls: std::cell::Cell<usize>,
+        fs_calls: std::cell::Cell<usize>,
+        fail_dual: Option<usize>,
+        fail_n: Option<usize>,
+        fail_f: Option<usize>,
+        fail_sqrt: Option<usize>,
+        fail_inv_sqrt: Option<usize>,
+        fail_fs: Option<usize>,
+        bad_b_f: bool,
+        bad_a_f: bool,
+        non_diagonal_b: bool,
+    }
+
+    impl CheckedA4Spy {
+        fn new() -> Self {
+            Self {
+                dual_calls: std::cell::Cell::new(0),
+                n_calls: std::cell::Cell::new(0),
+                f_calls: std::cell::Cell::new(0),
+                sqrt_calls: std::cell::Cell::new(0),
+                inv_sqrt_calls: std::cell::Cell::new(0),
+                fs_calls: std::cell::Cell::new(0),
+                fail_dual: None,
+                fail_n: None,
+                fail_f: None,
+                fail_sqrt: None,
+                fail_inv_sqrt: None,
+                fail_fs: None,
+                bad_b_f: false,
+                bad_a_f: false,
+                non_diagonal_b: false,
+            }
+        }
+
+        fn trip(
+            counter: &std::cell::Cell<usize>,
+            fail: Option<usize>,
+            error: RigidSpyError,
+        ) -> Result<(), RigidSpyError> {
+            let call = counter.get() + 1;
+            counter.set(call);
+            if fail == Some(call) {
+                Err(error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl CheckedGenericFusion for CheckedA4Spy {
+        type Error = RigidSpyError;
+
+        fn rule_identity(&self) -> RuleIdentity {
+            FusionRule::rule_identity(&A4BendRule)
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            FusionRule::vacuum(&A4BendRule)
+        }
+
+        fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+            Self::trip(&self.dual_calls, self.fail_dual, RigidSpyError::Dual)?;
+            Ok(FusionRule::dual(&A4BendRule, sector))
+        }
+
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, Self::Error> {
+            Ok(FusionRule::fusion_channels(&A4BendRule, left, right))
+        }
+
+        fn try_fusion_channels_in_table(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, Self::Error> {
+            self.try_fusion_channels(left, right)
+        }
+
+        fn try_nsymbol(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Result<usize, Self::Error> {
+            Self::trip(&self.n_calls, self.fail_n, RigidSpyError::N)?;
+            Ok(FusionRule::nsymbol(
+                &A4BendRule,
+                left,
+                right,
+                coupled,
+            ))
+        }
+    }
+
+    impl CheckedGenericRigidSymbols for CheckedA4Spy {
+        type Scalar = f64;
+
+        fn try_sqrt_dim_scalar(
+            &self,
+            sector: SectorId,
+        ) -> Result<Self::Scalar, Self::Error> {
+            Self::trip(&self.sqrt_calls, self.fail_sqrt, RigidSpyError::Sqrt)?;
+            Ok(GenericRigidSymbols::sqrt_dim_scalar(&A4BendRule, sector))
+        }
+
+        fn try_inv_sqrt_dim_scalar(
+            &self,
+            sector: SectorId,
+        ) -> Result<Self::Scalar, Self::Error> {
+            Self::trip(
+                &self.inv_sqrt_calls,
+                self.fail_inv_sqrt,
+                RigidSpyError::InvSqrt,
+            )?;
+            Ok(GenericRigidSymbols::inv_sqrt_dim_scalar(
+                &A4BendRule,
+                sector,
+            ))
+        }
+
+        fn try_frobenius_schur_phase_scalar(
+            &self,
+            sector: SectorId,
+        ) -> Result<Self::Scalar, Self::Error> {
+            Self::trip(&self.fs_calls, self.fail_fs, RigidSpyError::Fs)?;
+            Ok(GenericRigidSymbols::frobenius_schur_phase_scalar(
+                &A4BendRule,
+                sector,
+            ))
+        }
+
+        fn try_f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+            Self::trip(&self.f_calls, self.fail_f, RigidSpyError::F)?;
+            let symbol =
+                GenericFusionSymbols::f_symbol_generic(&A4BendRule, a, b, c, d, e, f);
+            if self.non_diagonal_b
+                && (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) == (3, 3, 3, 3, 3, 0)
+            {
+                Ok(GenericFArray::new(
+                    vec![0.3, 0.7, 0.9, 0.1],
+                    (2, 2, 1, 1),
+                ))
+            } else if self.bad_b_f
+                && (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) == (3, 3, 3, 3, 3, 0)
+            {
+                Ok(GenericFArray::new(symbol.data().to_vec(), (1, 4, 1, 1)))
+            } else if self.bad_a_f
+                && (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) == (3, 3, 3, 3, 0, 3)
+            {
+                Ok(GenericFArray::new(symbol.data().to_vec(), (1, 1, 1, 4)))
+            } else {
+                Ok(symbol)
+            }
+        }
+
+        fn try_r_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+            Ok(GenericFusionSymbols::r_symbol_generic(
+                &A4BendRule,
+                a,
+                b,
+                c,
+            ))
+        }
+    }
+
+    fn a4_three() -> SectorId {
+        SectorId::new(3)
+    }
+
+    // cod [3,3]->3 (vertex μ), dom [3]->3.
+    fn a4_pair_rank2(mu: usize) -> FusionTreePairKey {
+        let t = a4_three();
+        let cod = FusionTreeKey::new([t, t], t, [false, false], [], [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")]);
+        let dom = FusionTreeKey::new([t], t, [false], [], []);
+        FusionTreePairKey::pair(cod, dom)
+    }
+
+    fn a4_dual_pair_rank2(mu: usize) -> FusionTreePairKey {
+        let t = a4_three();
+        let cod = FusionTreeKey::new(
+            [t, t],
+            t,
+            [false, true],
+            [],
+            [MultiplicityIndex::new(mu)
+                .expect("test multiplicity label is one-based")],
+        );
+        let dom = FusionTreeKey::new([t], t, [false], [], []);
+        FusionTreePairKey::pair(cod, dom)
+    }
+
+    fn assert_rigid_provider_error(
+        error: CheckedGenericSymbolError<RigidSpyError>,
+        expected: RigidSpyError,
+    ) {
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(matches!(
+            error,
+            CheckedGenericSymbolError::Provider(actual) if actual == expected
+        ));
+    }
+
+    // ============ REFUTE(b2a): μ↔ν / κ↔λ transpose discriminator ============
+    //
+    // The A4 oracle CANNOT catch a B-matrix (or A-matrix) index transpose: for
+    // A4Irrep(3) both Bsymbol and Asymbol are the 2×2 IDENTITY, which is its own
+    // transpose. This synthetic rule closes that gap with a *deliberately
+    // non-symmetric* B and A block (B[0,1]≠B[1,0], A[0,1]≠A[1,0]).
+    //
+    // The reshape-collapse is transpose-free in Julia (verified out-of-band:
+    // `reshape(F,(N1,N2))[μ,ν]==F[μ,ν,1,1]` for trailing singletons and
+    // `[κ,λ]==F[1,1,κ,λ]` for leading singletons), so the CORRECT reading is
+    //   B[μ,ν] = √dim(a)·√dim(b)·invsqrtdim(c) · F(a,b,dual(b),a,c,unit)[μ,ν,0,0]
+    //   A[κ,λ] = √dim(a)·√dim(b)·invsqrtdim(c) · conj(κ_a·F(dual(a),a,b,b,unit,c)[0,0,κ,λ]).
+    // A μ↔ν (or κ↔λ) swap in the impl would read F[ν,μ,0,0] / F[0,0,λ,κ] and
+    // produce the TRANSPOSE — which THIS test detects and the A4 oracle does not.
+    #[derive(Clone, Copy, Debug)]
+    struct TransposeProbeRule;
+
+    // Sector 1 is self-dual with dim 4 (so √dim=2, exercising the coeff factor);
+    // 1⊗1 = {0 (rigidity), 1 (with N=2)}. Only the (1,1,1) block is non-trivial.
+    impl FusionRule for TransposeProbeRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            sector // 0 and 1 both self-dual
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 1) => smallvec![SectorId::new(0), SectorId::new(1)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (1, 1, 1) {
+                2 // the single outer multiplicity
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+
+    // The raw F data, in TK [μ,ν,κ,λ] semantic order, row-major — the SAME bytes
+    // the from-scratch oracle below reads directly.
+    const TP_FB: [f64; 4] = [0.3, 0.7, 0.9, 0.1];
+
+ // F(1,1,1,1,1,0)[μ,ν] block, non-symmetric
+    const TP_FA: [f64; 4] = [0.2, 0.5, 0.6, 0.4];
+
+ // F(1,1,1,1,0,1)[κ,λ] block, non-symmetric
+    impl GenericFusionSymbols for TransposeProbeRule {
+        type Scalar = f64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            match (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) {
+                // B block: shape (N(1,1,1),N(1,1,1),1,1) = (2,2,1,1).
+                (1, 1, 1, 1, 1, 0) => GenericFArray::new(TP_FB.to_vec(), (2, 2, 1, 1)),
+                // A block: shape (1,1,N(1,1,1),N(1,1,1)) = (1,1,2,2).
+                (1, 1, 1, 1, 0, 1) => GenericFArray::new(TP_FA.to_vec(), (1, 1, 2, 2)),
+                other => panic!("TransposeProbeRule: unmodelled F{other:?}"),
+            }
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
+    }
+
+    impl GenericRigidSymbols for TransposeProbeRule {
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 1 { 2.0 } else { 1.0 } // dim(1)=4
+        }
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 1 { 0.5 } else { 1.0 }
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    // Independent from-scratch TK evaluation of the reshape formula — explicit
+    // index loops, NO call into b_symbol_generic / a_symbol_generic.
+    fn tp_expected_b() -> [[f64; 2]; 2] {
+        let factor = 2.0 * 2.0 * 0.5; // √dim(1)·√dim(1)·invsqrtdim(1) = 2
+        let mut b = [[0.0; 2]; 2];
+        for mu in 0..2 {
+            for nu in 0..2 {
+                b[mu][nu] = factor * TP_FB[mu * 2 + nu]; // F[μ,ν,0,0]
+            }
+        }
+        b
+    }
+
+    // ================= Stage B2b: Generic fold / multi_Fmove =================
+    //
+    // ORACLE PROVENANCE. All numeric constants below are TensorKit's own values
+    // for `A4Irrep(3)`, extracted by running the mirrored source:
+    //   TensorKit.jl @ git cfaa073 (v0.17.0), TensorKitSectors v0.3.9
+    //   (Fsymbol values identical to v0.3.6, the version the B2a A4 constants
+    //   cite — the A4 category data is version-stable).
+    // The `multi_Fmove` tables come from `TensorKit.multi_Fmove(f)` and the
+    // `foldright` tables from `TensorKit.foldright(FusionTreeBlock)`, both called
+    // directly on A4 fusion trees. F-symbol arrays are transcribed ROW-MAJOR
+    // over the TK axis order (μ, ν, κ, λ) — Julia's `vec()` is column-major, so
+    // the transcription applies `permutedims(F,(4,3,2,1))` first. (The B2a
+    // A4BendRule blocks are all transpose-symmetric, so they never exposed this;
+    // the non-trivial F(3,3,3,3,3,3) block below does.)
+
+    // Full A4Irrep(3) fusion rule with the COMPLETE F(3,3,3,3,e,f) table — the
+    // B2a A4BendRule only modelled the handful of bend/A-symbol tuples, which is
+    // insufficient for multi_Fmove/associator (they consult every (e,f)).
+    #[derive(Clone, Copy, Debug)]
+    struct A4FoldRule;
+
+    impl FusionRule for A4FoldRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            match sector.id() {
+                1 => SectorId::new(2),
+                2 => SectorId::new(1),
+                _ => sector,
+            }
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (3, 3) => smallvec![
+                    SectorId::new(0),
+                    SectorId::new(1),
+                    SectorId::new(2),
+                    SectorId::new(3)
+                ],
+                (3, _) | (_, 3) => smallvec![SectorId::new(3)],
+                (1, 1) => smallvec![SectorId::new(2)],
+                (2, 2) => smallvec![SectorId::new(1)],
+                (1, 2) | (2, 1) => smallvec![SectorId::new(0)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (3, 3, 3) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+
+    impl GenericFusionSymbols for A4FoldRule {
+        type Scalar = f64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let s = 1.0 / 3.0_f64.sqrt(); // 1/√3
+            let m = -1.0 / (2.0 * 3.0_f64.sqrt()); // -1/(2√3)
+            let hs = 3.0_f64.sqrt() / 2.0; // √3/2
+            let ids = (a.id(), b.id(), c.id(), d.id(), e.id(), f.id());
+            // The only non-trivial family: F(3,3,3,3,e,f). ROW-MAJOR (μ,ν,κ,λ).
+            match ids {
+                (3, 3, 3, 3, 0, 0) | (3, 3, 3, 3, 0, 1) | (3, 3, 3, 3, 0, 2)
+                | (3, 3, 3, 3, 1, 0) | (3, 3, 3, 3, 1, 1) | (3, 3, 3, 3, 1, 2)
+                | (3, 3, 3, 3, 2, 0) | (3, 3, 3, 3, 2, 1) | (3, 3, 3, 3, 2, 2) => {
+                    GenericFArray::new(vec![1.0 / 3.0], (1, 1, 1, 1))
+                }
+                // A-symbol reshape F(3,3,b,b,0,3) for b∈{1,2}: TK gives [1] (1×1).
+                (3, 3, 1, 1, 0, 3) | (3, 3, 2, 2, 0, 3) => {
+                    GenericFArray::new(vec![1.0], (1, 1, 1, 1))
+                }
+                (3, 3, 3, 3, 0, 3) => GenericFArray::new(vec![s, 0.0, 0.0, s], (1, 1, 2, 2)),
+                (3, 3, 3, 3, 1, 3) => GenericFArray::new(vec![m, -0.5, 0.5, m], (1, 1, 2, 2)),
+                (3, 3, 3, 3, 2, 3) => GenericFArray::new(vec![m, 0.5, -0.5, m], (1, 1, 2, 2)),
+                (3, 3, 3, 3, 3, 0) => GenericFArray::new(vec![s, 0.0, 0.0, s], (2, 2, 1, 1)),
+                (3, 3, 3, 3, 3, 1) => GenericFArray::new(vec![m, 0.5, -0.5, m], (2, 2, 1, 1)),
+                (3, 3, 3, 3, 3, 2) => GenericFArray::new(vec![m, -0.5, 0.5, m], (2, 2, 1, 1)),
+                (3, 3, 3, 3, 3, 3) => GenericFArray::new(
+                    vec![
+                        0.5, 0.0, 0.0, -0.5, 0.0, -0.5, -0.5, 0.0, 0.0, -0.5, -0.5, 0.0, -0.5, 0.0,
+                        0.0, 0.5,
+                    ],
+                    (2, 2, 2, 2),
+                ),
+                // The 9 non-trivial off-family blocks the CYCLE bends reach
+                // (√3/2 = 0.8660254038). TK row-major (μ,ν,κ,λ) values.
+                (1, 3, 3, 3, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, hs, -hs, -0.5], (1, 2, 2, 1))
+                }
+                (2, 3, 3, 3, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, -hs, hs, -0.5], (1, 2, 2, 1))
+                }
+                (3, 1, 3, 3, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, -hs, hs, -0.5], (1, 2, 1, 2))
+                }
+                (3, 2, 3, 3, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, hs, -hs, -0.5], (1, 2, 1, 2))
+                }
+                (3, 3, 1, 3, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, hs, -hs, -0.5], (2, 1, 1, 2))
+                }
+                (3, 3, 2, 3, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, -hs, hs, -0.5], (2, 1, 1, 2))
+                }
+                (3, 3, 3, 0, 3, 3) => {
+                    GenericFArray::new(vec![1.0, 0.0, 0.0, 1.0], (2, 1, 2, 1))
+                }
+                (3, 3, 3, 1, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, hs, -hs, -0.5], (2, 1, 2, 1))
+                }
+                (3, 3, 3, 2, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, -hs, hs, -0.5], (2, 1, 2, 1))
+                }
+                // Everything else valid in A4 is a singleton block equal to [1]:
+                // any F with a vacuum a/b/c leg, and the residual all-singleton
+                // triples (e.g. F(3,1,3,0,3,3)). Shape-aware so a genuinely
+                // unmodelled MULTI-dim block still panics instead of silently
+                // returning a wrong scalar.
+                _ => {
+                    let shape = (
+                        self.nsymbol(a, b, e),
+                        self.nsymbol(e, c, d),
+                        self.nsymbol(b, c, f),
+                        self.nsymbol(a, f, d),
+                    );
+                    if shape == (1, 1, 1, 1) {
+                        GenericFArray::new(vec![1.0], shape)
+                    } else {
+                        panic!("A4FoldRule: unmodelled non-singleton F{ids:?} shape={shape:?}");
+                    }
+                }
+            }
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
+    }
+
+    impl GenericRigidSymbols for A4FoldRule {
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 3 { 3.0_f64.sqrt() } else { 1.0 }
+        }
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 3 { 1.0 / 3.0_f64.sqrt() } else { 1.0 }
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    fn a4f_rank3(inner: usize, v1: usize, v2: usize) -> FusionTreeKey {
+        let t = SectorId::new(3);
+        FusionTreeKey::new(
+            [t, t, t], t,
+            [false, false, false],
+            [SectorId::new(inner)],
+            [MultiplicityIndex::new(v1).expect("test multiplicity label is one-based"), MultiplicityIndex::new(v2).expect("test multiplicity label is one-based")],
+        )
+    }
+
+    // ===================== Residual (b): complex conj path =====================
+    //
+    // The B2a complex path (`CategoricalScalar for Complex64`, the fold's
+    // `coeff₂.conj()`, and `a_symbol_generic`'s inner `conj`) was only
+    // verified by source-matching. This closes it numerically: a synthetic
+    // Complex64 Generic rule whose A-move / B-move are a genuinely complex 2×2
+    // UNITARY U (non-Hermitian, non-real). Self-dual sector 1, N(1,1,1)=2,
+    // dim=1 (all coeff factors = 1). U = (1/√2)[[1, i],[i, 1]].
+    //
+    // From `a_symbol_generic`: A[κ,λ] = conj(κ_a · F(1,1,1,1,0,1)[0,0,κ,λ]) with
+    // κ_a=1, so setting the F block to conj(U) gives A = U. Likewise B = U from
+    // the F(1,1,1,1,1,0) block. A wrong conj (missing/extra) or a μ↔ν transpose
+    // flips the sign of the imaginary parts and fails both the direct check and
+    // the round-trip (which needs U U† = I).
+    #[derive(Clone, Copy, Debug)]
+    struct ComplexUnitaryRule;
+
+    impl FusionRule for ComplexUnitaryRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            sector // 0 and 1 self-dual
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 1) => smallvec![SectorId::new(0), SectorId::new(1)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (1, 1, 1) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+
+    fn cx(re: f64, im: f64) -> Complex64 {
+        Complex64::new(re, im)
+    }
+
+    // U = (1/√2)[[1, i],[i, 1]], row-major.
+    fn cx_u() -> [Complex64; 4] {
+        let r = 1.0 / 2.0_f64.sqrt();
+        [cx(r, 0.0), cx(0.0, r), cx(0.0, r), cx(r, 0.0)]
+    }
+
+    impl GenericFusionSymbols for ComplexUnitaryRule {
+        type Scalar = Complex64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let u = cx_u();
+            match (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) {
+                // A block: A = conj(U) reshaped => set F = conj(U). shape (1,1,2,2).
+                (1, 1, 1, 1, 0, 1) => GenericFArray::new(
+                    vec![u[0].conj(), u[1].conj(), u[2].conj(), u[3].conj()],
+                    (1, 1, 2, 2),
+                ),
+                // B block: B = U reshaped. shape (2,2,1,1).
+                (1, 1, 1, 1, 1, 0) => {
+                    GenericFArray::new(vec![u[0], u[1], u[2], u[3]], (2, 2, 1, 1))
+                }
+                (aa, bb, cc, _, _, _) if aa == 0 || bb == 0 || cc == 0 => {
+                    GenericFArray::new(vec![cx(1.0, 0.0)], (1, 1, 1, 1))
+                }
+                other => panic!("ComplexUnitaryRule: unmodelled F{other:?}"),
+            }
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![cx(1.0, 0.0)], 1, 1)
+        }
+    }
+
+    impl GenericRigidSymbols for ComplexUnitaryRule {
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            cx(1.0, 0.0)
+        }
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            cx(1.0, 0.0)
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            cx(1.0, 0.0)
+        }
+    }
+
+    // ============ Residual (a): real non-diagonal SU(3) B-symbol ============
+    //
+    // B2a's A4 bend oracle could NOT discriminate a μ↔ν B-matrix transpose:
+    // A4Irrep(3)'s Bsymbol is I₂ (its own transpose). It flagged that a
+    // *non-diagonal Bsymbol from a real category* (SU(3)) was needed. Extracted
+    // from SUNRepresentations.jl v0.4.0 + TensorKitSectors v0.3.9:
+    //   Bsymbol((4,2,0),(3,1,0),(3,1,0)) = [[-1/(2√2), -√(7/8)], [√(7/8), -1/(2√2)]]
+    //   Bsymbol((3,1,0),(3,2,0),(4,2,0)) = its inverse (real orthogonal, so the
+    //   transpose): [[-1/(2√2), √(7/8)], [-√(7/8), -1/(2√2)]]
+    // (B_fwd · B_ret = I₂, verified in Julia). These are GENUINELY non-diagonal
+    // and non-symmetric, so they discriminate the μ↔ν indexing in the real bend,
+    // not just the F→B reshape (which TransposeProbeRule already pins).
+    //
+    // dim((4,2,0))=27, dim((3,1,0))=dim((3,2,0))=15, all FS phases +1.
+    // b_symbol_generic is overridden directly (the full SU(3) F-table is not
+    // transcribed), so the bend surgery, coeff₀ = √dim(c)/√dim(a), μ→ν row
+    // distribution and round-trip are all exercised against real categorical B.
+    #[derive(Clone, Copy, Debug)]
+    struct Su3BendRule;
+
+    // ids: 1 = (4,2,0) self-dual, 2 = (3,1,0), 3 = (3,2,0) = dual((3,1,0)).
+    impl FusionRule for Su3BendRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            match sector.id() {
+                2 => SectorId::new(3),
+                3 => SectorId::new(2),
+                _ => sector, // 0, 1 self-dual
+            }
+        }
+        // bendright/bendleft never consult these (they use only dual, dims, fs,
+        // and b_symbol_generic); provide honest N(a,b,c)=2 for the bent triples.
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 2) | (2, 1) => smallvec![SectorId::new(2)],
+                (2, 3) | (3, 2) => smallvec![SectorId::new(1)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            match (left.id(), right.id(), coupled.id()) {
+                (1, 2, 2) | (2, 3, 1) => 2,
+                _ => usize::from(self.fusion_channels(left, right).contains(&coupled)),
+            }
+        }
+    }
+
+    impl GenericFusionSymbols for Su3BendRule {
+        type Scalar = f64;
+        fn f_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+            _d: SectorId,
+            _e: SectorId,
+            _f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            unreachable!("b_symbol_generic is overridden; F is never read")
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
+    }
+
+    impl GenericRigidSymbols for Su3BendRule {
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            match sector.id() {
+                1 => 27.0_f64.sqrt(),
+                2 | 3 => 15.0_f64.sqrt(),
+                _ => 1.0,
+            }
+        }
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            1.0 / self.sqrt_dim_scalar(sector)
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+        fn b_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            let e = -1.0 / (2.0 * 2.0_f64.sqrt()); // -1/(2√2) = -0.35355339
+            let g = (7.0_f64 / 8.0).sqrt(); //  √(7/8)  =  0.93541435
+            match (a.id(), b.id(), c.id()) {
+                (1, 2, 2) => GenericRMatrix::new(vec![e, -g, g, e], 2, 2), // B_fwd
+                (2, 3, 1) => GenericRMatrix::new(vec![e, g, -g, e], 2, 2), // B_ret
+                other => panic!("Su3BendRule: unmodelled B{other:?}"),
+            }
+        }
+    }
+
+    // ==================================================================
+    // Stage B2c: generic tree-pair permute / braid / transpose composers.
+    // These are thin structural mirrors of the multiplicity-free tree-pair
+    // functions, chaining the adversarially-verified B1/B2a/B2b primitives
+    // (generic_braid_tree, generic_repartition_tree_pair, generic_cycle_*).
+    // The tests below prove the COMPOSITION adds no math: each composer
+    // equals the hand-chained primitives it is built from.
+    // ==================================================================
+
+    use std::collections::HashMap;
+
+    fn map_terms(terms: Vec<(FusionTreePairKey, f64)>) -> HashMap<FusionTreePairKey, f64> {
+        let mut map = HashMap::new();
+        for (key, coeff) in terms {
+            *map.entry(key).or_insert(0.0) += coeff;
+        }
+        map
+    }
+
+    fn assert_term_maps_eq(
+        got: &HashMap<FusionTreePairKey, f64>,
+        want: &HashMap<FusionTreePairKey, f64>,
+        label: &str,
+    ) {
+        let mut keys: std::collections::HashSet<&FusionTreePairKey> = got.keys().collect();
+        keys.extend(want.keys());
+        for key in keys {
+            let g = got.get(key).copied().unwrap_or(0.0);
+            let w = want.get(key).copied().unwrap_or(0.0);
+            assert!((g - w).abs() < 1e-10, "{label}: coeff {g} != {w}");
+        }
+    }
+
+    fn u1_leg(charge: i32, deg: usize, dual: bool) -> SectorLeg {
+        SectorLeg::new([(u1(charge), deg)], dual)
+    }
+
+    // Fixture for the cached-hash contracts (#1207): keys that differ from a
+    // base tree in exactly one identity field each (uncoupled, coupled, dual
+    // flag, inner line, vertex), plus equal copies built with shared and with
+    // fresh backings.
+    fn key_hash_fixture() -> (Vec<FusionTreeKey>, FusionTreeKey, FusionTreeKey) {
+        let base =
+            FusionTreeKey::try_from_sector_ids([3, 3, 3], 3, [false, true, false], [1], [1, 2]).unwrap();
+        let distinct = vec![
+            base.clone(),
+            FusionTreeKey::try_from_sector_ids([3, 3, 4], 3, [false, true, false], [1], [1, 2]).unwrap(),
+            FusionTreeKey::try_from_sector_ids([3, 3, 3], 4, [false, true, false], [1], [1, 2]).unwrap(),
+            FusionTreeKey::try_from_sector_ids([3, 3, 3], 3, [false, true, true], [1], [1, 2]).unwrap(),
+            FusionTreeKey::try_from_sector_ids([3, 3, 3], 3, [false, true, false], [2], [1, 2]).unwrap(),
+            FusionTreeKey::try_from_sector_ids([3, 3, 3], 3, [false, true, false], [1], [2, 2]).unwrap(),
+        ];
+        let shared = FusionTreeKey::from_frozen(
+            Arc::from(base.uncoupled()),
+            base.coupled(),
+            Arc::from(base.is_dual()),
+            Arc::from(base.innerlines()),
+            Arc::from(base.vertices()),
+        );
+        let fresh = FusionTreeKey::new(
+            base.uncoupled().iter().copied(),
+            base.coupled(),
+            base.is_dual().iter().copied(),
+            base.innerlines().iter().copied(),
+            base.vertices().iter().copied(),
+        );
+        (distinct, shared, fresh)
+    }
+
+    fn fx_hash_of<T: Hash>(value: &T) -> u64 {
+        let mut hasher = rustc_hash::FxHasher::default();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Admits `canonical` through the construction witness with no element
+    /// visit, then checks the same geometry without the witness through the
+    /// exact per-element enumeration, which must agree and must actually
+    /// enumerate (interleaved subblocks of one coupled-sector matrix).
+    fn assert_canonical_storage_admitted_without_enumeration(canonical: &BlockStructure) {
+        assert!(canonical.storage_tiling_proven());
+        // Independent of `record_storage_tiling`: every offset of the payload
+        // is reached by exactly one (block, element), the fact the
+        // uninitialized-output path relies on.
+        let mut hits = vec![0usize; canonical.required_len().unwrap()];
+        for index in 0..canonical.block_count() {
+            let block = canonical.block(index).unwrap();
+            let count = block.shape().iter().product::<usize>();
+            for linear in 0..count {
+                let mut rest = linear;
+                let mut offset = block.offset();
+                for (&extent, &stride) in block.shape().iter().zip(block.strides()) {
+                    offset += (rest % extent) * stride;
+                    rest /= extent;
+                }
+                hits[offset] += 1;
+            }
+        }
+        assert!(hits.iter().all(|&hit| hit == 1), "offset histogram {hits:?}");
+        reset_exact_storage_fallback_count();
+        validate_block_storage_injective(canonical).unwrap();
+        assert_eq!(exact_storage_fallback_count(), 0);
+
+        let unwitnessed = PreparedBlockStructure::from_parts(
+            canonical.sector_structure().clone(),
+            canonical.degeneracy_structure().clone(),
+        )
+        .unwrap();
+        assert!(!unwitnessed.structure().storage_tiling_proven());
+        reset_exact_storage_fallback_count();
+        validate_block_storage_injective(unwitnessed.structure()).unwrap();
+        assert!(exact_storage_fallback_count() > 0);
+    }
