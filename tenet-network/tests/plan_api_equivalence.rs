@@ -3,7 +3,7 @@ use tenet_network::{
     greedy_slice, ActivePair, BlockInfo, BlockSparseContractionOptimizer, BlockSparseCostModel,
     BlockSparseTensorInfo, ContractionPlan, DenseContractionOptimizer, DenseCostModel,
     DenseTensorInfo, GreedyBlockSparseOptimizer, GreedyDenseOptimizer, LabelOrderDenseOptimizer,
-    NetworkIR, TemporaryLabel,
+    NetworkIR, SliceLabels, TemporaryLabel,
 };
 
 // Captured with the corresponding old public constructors and both old slice
@@ -115,7 +115,14 @@ fn migrated_plan_entries_match_old_text() {
     )
     .unwrap();
     assert_eq!(
-        greedy_slice(&ir, &internal_plan, &internal_cost, 8, false).to_text(),
+        greedy_slice(
+            &ir,
+            &internal_plan,
+            &internal_cost,
+            8,
+            SliceLabels::InternalOnly
+        )
+        .to_text(),
         SLICE_INTERNAL
     );
 
@@ -126,7 +133,14 @@ fn migrated_plan_entries_match_old_text() {
     )
     .unwrap();
     assert_eq!(
-        greedy_slice(&ir, &output_plan, &output_cost, 6, true).to_text(),
+        greedy_slice(
+            &ir,
+            &output_plan,
+            &output_cost,
+            6,
+            SliceLabels::IncludeOutput
+        )
+        .to_text(),
         SLICE_OUTPUT
     );
 }

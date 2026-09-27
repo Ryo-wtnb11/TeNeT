@@ -3715,7 +3715,13 @@ mod typed_replay_tests {
             ],
         )
         .unwrap();
-        let decision = crate::greedy_slice(&ir, planned.plan(), &cost, 6, true);
+        let decision = crate::greedy_slice(
+            &ir,
+            planned.plan(),
+            &cost,
+            6,
+            crate::SliceLabels::IncludeOutput,
+        );
         assert!(decision.has_output_slices());
         assert!(decision.sliced_width() <= 6);
         let sliced = network

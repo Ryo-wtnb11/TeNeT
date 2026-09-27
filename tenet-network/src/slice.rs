@@ -24,6 +24,15 @@ use crate::plan::ContractionPlan;
 
 const SLICE_PLAN_HEADER: &str = "tenet-slice-plan-v1";
 
+/// Which labels greedy slicing may choose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SliceLabels {
+    /// Only internal (contracted) labels.
+    InternalOnly,
+    /// Internal labels and open output labels.
+    IncludeOutput,
+}
+
 /// Whether a sliced index is **internal** (contracted, summed over) or
 /// **output** (open/free, stacked/scattered into the result).
 ///
@@ -753,7 +762,7 @@ fn nslices_of_labels(cost: &DenseCostModel, sliced: &[TemporaryLabel]) -> u128 {
 }
 
 /// Greedily choose indices to slice until the largest intermediate fits under
-/// `target_width` (in elements). `allow_output_slices` selects whether output
+/// `target_width` (in elements). `labels` determines whether open output
 /// labels may be sliced and later scattered into the output; internal slices
 /// are summed. Candidates must reduce peak width, with ties decided by total
 /// time complexity and then greater width reduction.
@@ -762,7 +771,7 @@ pub fn greedy_slice(
     plan: &ContractionPlan,
     cost: &DenseCostModel,
     target_width: usize,
-    allow_output_slices: bool,
+    labels: SliceLabels,
 ) -> SlicePlan {
     let shapes = step_shapes(ir, plan);
 
@@ -771,7 +780,7 @@ pub fn greedy_slice(
     for tensor in ir.tensors() {
         for label in tensor.labels() {
             if cost.dim(label).unwrap_or(1) > 1
-                && (allow_output_slices || !ir.output_labels().contains(label))
+                && (labels == SliceLabels::IncludeOutput || !ir.output_labels().contains(label))
             {
                 candidates.insert(label.clone());
             }
@@ -1109,7 +1118,7 @@ mod tests {
         // Intermediate "ac" = a*c = 2*8 = 16 is the peak; output "ad" = 4.
         // target 8 forces slicing the internal index c.
         let (ir, plan, cost) = chain_abc(2, 2, 8, 2);
-        let sp = greedy_slice(&ir, &plan, &cost, 8, false);
+        let sp = greedy_slice(&ir, &plan, &cost, 8, SliceLabels::InternalOnly);
 
         assert_eq!(sp.unsliced_width(), 16);
         assert!(!sp.is_empty(), "expected slicing to be required");
@@ -1132,7 +1141,7 @@ mod tests {
     #[test]
     fn slice_plan_text_roundtrip_preserves_output_kinds() {
         let (ir, plan, cost) = chain_abc(6, 1, 1, 6);
-        let sp = greedy_slice(&ir, &plan, &cost, 6, true);
+        let sp = greedy_slice(&ir, &plan, &cost, 6, SliceLabels::IncludeOutput);
         assert!(sp.has_output_slices());
 
         let text = sp.to_text();
@@ -1145,7 +1154,7 @@ mod tests {
         // a,d are output; only internal b,c are sliceable. Forcing slicing must
         // never pick an output label.
         let (ir, plan, cost) = chain_abc(2, 2, 8, 2);
-        let sp = greedy_slice(&ir, &plan, &cost, 8, false);
+        let sp = greedy_slice(&ir, &plan, &cost, 8, SliceLabels::InternalOnly);
         assert!(!sp.is_empty());
         assert!(!sp.sliced_indices().contains(&TemporaryLabel::new("a")));
         assert!(!sp.sliced_indices().contains(&TemporaryLabel::new("d")));

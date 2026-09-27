@@ -95,7 +95,7 @@ pub use plancache::{
 };
 pub use slice::{
     best_next_internal_index, best_next_slice_index, contraction_width, greedy_slice,
-    slice_plan_for, DegeneracyRange, SectorSlice, SliceKind, SlicePlan, SlicedPlan,
+    slice_plan_for, DegeneracyRange, SectorSlice, SliceKind, SliceLabels, SlicePlan, SlicedPlan,
     SymmetricIndexSlice, SymmetricSlicePlan, SymmetricSliceSpec, SymmetricSlicedPlan,
 };
 #[cfg(feature = "cotengra-python")]
