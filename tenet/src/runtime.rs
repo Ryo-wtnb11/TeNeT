@@ -627,6 +627,10 @@ impl RuntimeTreeTransformStores {
         self.ledger.plan_pair_info(&self.real, &self.complex)
     }
 
+    fn group_info(&self) -> RuntimeTreeTransformCacheInfo {
+        self.ledger.group_pair_info(&self.real, &self.complex)
+    }
+
     fn clear(&self) {
         self.real.clear();
         self.complex.clear();
@@ -1154,8 +1158,23 @@ impl Runtime {
         self.inner.tree_transform_stores.plan_info()
     }
 
-    /// Clears this Runtime's tree-transform caches: completed structures and
-    /// categorical plans.
+    /// Returns this Runtime's per-group categorical transform cache activity.
+    ///
+    /// For fusion rules with non-unique fusion (for example SU(2) or SU(3)),
+    /// a plan miss builds the recoupling of each source fusion-tree group only
+    /// when that group, keyed on the rule, the operation, its external sectors
+    /// and its ordered tree pairs, is not cached here. A sector change
+    /// therefore rebuilds only the groups it changed; `misses` counts the
+    /// groups built. Unique-fusion rules never use this tier, because one
+    /// group is one tree with one coefficient. Entry and byte limits are the
+    /// same configured values as [`Self::tree_transform_cache_info`], charged
+    /// separately.
+    pub fn tree_transform_group_cache_info(&self) -> RuntimeTreeTransformCacheInfo {
+        self.inner.tree_transform_stores.group_info()
+    }
+
+    /// Clears this Runtime's tree-transform caches: completed structures,
+    /// categorical plans and their per-group recoupling.
     ///
     /// The device tree-transform executor's prepared state is dropped too, and
     /// strictly after the host store clear has returned: the two locks are

@@ -1,14 +1,15 @@
 use core::ops::{Add, Mul};
+use std::borrow::Borrow;
 use std::fmt;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, Weak};
 
 use num_traits::Zero;
 use rustc_hash::FxHashMap;
 use tenet_core::{
-    BlockStructure, BlockStructureContent, CategoricalScalar, FusionTreePairKey,
-    FusionTreePairOrientation, GenericRigidSymbols, HomSpaceId,
+    BlockStructure, BlockStructureContent, CategoricalScalar, FusionTreeGroupKey,
+    FusionTreePairKey, FusionTreePairOrientation, GenericRigidSymbols, HomSpaceId,
     LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, RuleIdentity, TensorMap, TensorStorage, WeakHomSpaceId,
 };
@@ -199,18 +200,34 @@ impl CategoricalTransformKey {
 
 fn charged_plan_bytes<T>(plan: &TreeTransformGroupPlan<T>) -> usize {
     const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
-    let key_bytes = core::mem::size_of::<FusionTreePairKey>();
     let mut backings = rustc_hash::FxHashSet::default();
-    let mut bytes = core::mem::size_of::<TreeTransformGroupPlan<T>>()
+    let (specs, coefficient_count) = charged_spec_bytes(plan.specs(), &mut backings);
+    // Why charge the flattened payload before it exists: the first layout
+    // binding may materialize it after admission, and a charge never grows.
+    (core::mem::size_of::<TreeTransformGroupPlan<T>>())
         .saturating_add(ARC_CONTROL_BYTES)
         .saturating_add(
             plan.spec_capacity()
                 .saturating_mul(core::mem::size_of::<TreeTransformGroupBlockSpec<T>>()),
-        );
+        )
+        .saturating_add(specs)
+        .saturating_add(ARC_CONTROL_BYTES)
+        .saturating_add(coefficient_count.saturating_mul(core::mem::size_of::<T>()))
+}
+
+/// Heap bytes of `specs` (excluding their inline structs) and their total
+/// coefficient count.
+fn charged_spec_bytes<T>(
+    specs: &[TreeTransformGroupBlockSpec<T>],
+    backings: &mut rustc_hash::FxHashSet<usize>,
+) -> (usize, usize) {
+    const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
+    let key_bytes = core::mem::size_of::<FusionTreePairKey>();
+    let mut bytes = 0usize;
     let mut coefficient_count = 0usize;
     // ponytail: every spec is charged as if its keys and coefficients were
     // heap vectors (`Single` keeps them inline); over-charging is the contract.
-    for spec in plan.specs() {
+    for spec in specs {
         let coefficients = spec.recoupling_coefficients_dst_src().len();
         coefficient_count = coefficient_count.saturating_add(coefficients);
         bytes = bytes
@@ -219,9 +236,9 @@ fn charged_plan_bytes<T>(plan: &TreeTransformGroupPlan<T>) -> usize {
                     .saturating_mul(key_bytes),
             )
             .saturating_add(coefficients.saturating_mul(core::mem::size_of::<T>()))
-            .saturating_add(spec.group_key().charge_retained_backings(&mut backings));
+            .saturating_add(spec.group_key().charge_retained_backings(backings));
         for key in spec.dst_keys().iter().chain(spec.src_keys()) {
-            bytes = bytes.saturating_add(key.charge_retained_backings(&mut backings));
+            bytes = bytes.saturating_add(key.charge_retained_backings(backings));
         }
         if let Some(axes) = spec.source_axes() {
             if backings.insert(axes.as_ptr() as usize) {
@@ -231,11 +248,277 @@ fn charged_plan_bytes<T>(plan: &TreeTransformGroupPlan<T>) -> usize {
             }
         }
     }
-    // Why charge the flattened payload before it exists: the first layout
-    // binding may materialize it after admission, and a charge never grows.
-    bytes
+    (bytes, coefficient_count)
+}
+
+/// Everything one source group's specs read besides the group's own trees.
+///
+/// Why keep `storage_conjugate` although no group builder reads it: it
+/// mirrors [`CategoricalTransformKey`], so it can only split entries.
+#[derive(Debug, Eq, PartialEq)]
+struct GroupContext {
+    rule: RuleIdentity,
+    operation: TreeTransformOperation,
+    orientation: FusionTreePairOrientation,
+    storage_conjugate: bool,
+}
+
+/// Key of one source fusion-tree group's transform specs, TensorKit's
+/// `FSBBraidKey`/`FSBTransposeKey` per `FusionTreeBlock`: the context plus the
+/// group's external sectors and its ordered source tree pairs. A TeNeT group
+/// can hold a subset of the full `FusionTreeBlock`, hence the ordered trees.
+///
+/// The hash is computed once from the borrowed source keys; a lookup compares
+/// through [`GroupKeyView`] and never clones the tree list.
+struct CategoricalGroupKey {
+    context: Arc<GroupContext>,
+    group_key: FusionTreeGroupKey,
+    src_keys: Box<[FusionTreePairKey]>,
+    hash: u64,
+}
+
+/// Borrowed lookup form of a [`CategoricalGroupKey`].
+struct GroupKeyRef<'a> {
+    context: &'a GroupContext,
+    group_key: &'a FusionTreeGroupKey,
+    src_keys: &'a [&'a FusionTreePairKey],
+    hash: u64,
+}
+
+trait GroupKeyView {
+    fn key_hash(&self) -> u64;
+    fn context(&self) -> &GroupContext;
+    fn group_key(&self) -> &FusionTreeGroupKey;
+    fn src_len(&self) -> usize;
+    fn src_key(&self, index: usize) -> &FusionTreePairKey;
+}
+
+impl GroupKeyView for CategoricalGroupKey {
+    fn key_hash(&self) -> u64 {
+        self.hash
+    }
+    fn context(&self) -> &GroupContext {
+        &self.context
+    }
+    fn group_key(&self) -> &FusionTreeGroupKey {
+        &self.group_key
+    }
+    fn src_len(&self) -> usize {
+        self.src_keys.len()
+    }
+    fn src_key(&self, index: usize) -> &FusionTreePairKey {
+        &self.src_keys[index]
+    }
+}
+
+impl GroupKeyView for GroupKeyRef<'_> {
+    fn key_hash(&self) -> u64 {
+        self.hash
+    }
+    fn context(&self) -> &GroupContext {
+        self.context
+    }
+    fn group_key(&self) -> &FusionTreeGroupKey {
+        self.group_key
+    }
+    fn src_len(&self) -> usize {
+        self.src_keys.len()
+    }
+    fn src_key(&self, index: usize) -> &FusionTreePairKey {
+        self.src_keys[index]
+    }
+}
+
+impl Hash for dyn GroupKeyView + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.key_hash());
+    }
+}
+
+impl PartialEq for dyn GroupKeyView + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.key_hash() == other.key_hash()
+            && (std::ptr::eq(self.context(), other.context()) || self.context() == other.context())
+            && self.group_key() == other.group_key()
+            && self.src_len() == other.src_len()
+            && (0..self.src_len()).all(|index| self.src_key(index) == other.src_key(index))
+    }
+}
+
+impl Eq for dyn GroupKeyView + '_ {}
+
+impl Hash for CategoricalGroupKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self as &dyn GroupKeyView).hash(state);
+    }
+}
+
+impl PartialEq for CategoricalGroupKey {
+    fn eq(&self, other: &Self) -> bool {
+        (self as &dyn GroupKeyView) == (other as &dyn GroupKeyView)
+    }
+}
+
+impl Eq for CategoricalGroupKey {}
+
+impl<'a> Borrow<dyn GroupKeyView + 'a> for CategoricalGroupKey {
+    fn borrow(&self) -> &(dyn GroupKeyView + 'a) {
+        self
+    }
+}
+
+#[derive(Clone)]
+struct RuntimeGroupEntry<T> {
+    specs: Arc<[TreeTransformGroupBlockSpec<T>]>,
+    charged_bytes: usize,
+}
+
+impl<T> RuntimeCacheCharge for RuntimeGroupEntry<T> {
+    fn charged_bytes(&self) -> usize {
+        self.charged_bytes
+    }
+}
+
+fn charged_group_entry_bytes<T>(
+    key: &CategoricalGroupKey,
+    entry_specs: &[TreeTransformGroupBlockSpec<T>],
+) -> usize {
+    const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
+    let mut backings = rustc_hash::FxHashSet::default();
+    let mut bytes = core::mem::size_of::<CategoricalGroupKey>()
+        .saturating_add(core::mem::size_of::<RuntimeGroupEntry<T>>())
+        // ponytail: the shared context is charged in full to every entry.
         .saturating_add(ARC_CONTROL_BYTES)
-        .saturating_add(coefficient_count.saturating_mul(core::mem::size_of::<T>()))
+        .saturating_add(core::mem::size_of::<GroupContext>())
+        .saturating_add(key.context.rule.charged_retained_bytes())
+        .saturating_add(key.context.operation.charged_retained_bytes())
+        .saturating_add(key.group_key.charge_retained_backings(&mut backings))
+        .saturating_add(
+            key.src_keys
+                .len()
+                .saturating_mul(core::mem::size_of::<FusionTreePairKey>()),
+        )
+        .saturating_add(ARC_CONTROL_BYTES)
+        .saturating_add(
+            entry_specs
+                .len()
+                .saturating_mul(core::mem::size_of::<TreeTransformGroupBlockSpec<T>>()),
+        )
+        .saturating_add(RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE);
+    for src in key.src_keys.iter() {
+        bytes = bytes.saturating_add(src.charge_retained_backings(&mut backings));
+    }
+    let (specs, coefficients) = charged_spec_bytes(entry_specs, &mut backings);
+    bytes
+        .saturating_add(specs)
+        .saturating_add(coefficients.saturating_mul(core::mem::size_of::<T>()))
+}
+
+/// One source group: its external-sector key and its ordered tree pairs.
+pub(crate) type SourceGroup<'a> = (&'a FusionTreeGroupKey, &'a [&'a FusionTreePairKey]);
+
+/// A freshly built source group with the key hash from its lookup.
+pub(crate) type BuiltGroup<'a, T> = (u64, SourceGroup<'a>, Arc<[TreeTransformGroupBlockSpec<T>]>);
+
+/// One source group's cache state during a plan build.
+pub(crate) enum GroupSlot<T> {
+    /// Cached specs of an unchanged group.
+    Hit(Arc<[TreeTransformGroupBlockSpec<T>]>),
+    /// The group must be built; carries its key hash for admission.
+    Miss(u64),
+}
+
+/// Per-group reuse handle that a categorical-plan miss passes to its builder.
+///
+/// A plan miss (a sector change) builds only the source groups whose key is
+/// absent, as TensorKit's `fsbraid`/`fstranspose` do per `FusionTreeBlock`.
+/// Builders consult it only for non-Unique fusion: a Unique group is one tree
+/// with one scalar, and TensorKit leaves that case uncached (`NoCache`).
+pub(crate) struct GroupSpecReuse<'s, T> {
+    store: &'s RuntimeTreeTransformStore<T>,
+    context: Arc<GroupContext>,
+    context_hash: u64,
+    generation: u64,
+}
+
+impl<T> GroupSpecReuse<'_, T> {
+    fn group_hash<'k>(
+        &self,
+        group_key: &FusionTreeGroupKey,
+        src_keys: impl IntoIterator<Item = &'k FusionTreePairKey>,
+    ) -> u64 {
+        let mut hasher = rustc_hash::FxHasher::default();
+        hasher.write_u64(self.context_hash);
+        group_key.hash(&mut hasher);
+        for key in src_keys {
+            key.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Looks every group up under one lock, in order.
+    pub(crate) fn lookup(&self, groups: &[SourceGroup<'_>]) -> Vec<GroupSlot<T>> {
+        let hashes: Vec<u64> = groups
+            .iter()
+            .map(|(group_key, src_keys)| self.group_hash(group_key, src_keys.iter().copied()))
+            .collect();
+        let mut state = self.store.lock();
+        let tier = &mut state.groups;
+        groups
+            .iter()
+            .zip(hashes)
+            .map(|(&(group_key, src_keys), hash)| {
+                let view = GroupKeyRef {
+                    context: &self.context,
+                    group_key,
+                    src_keys,
+                    hash,
+                };
+                match tier.entries.get(&view as &dyn GroupKeyView) {
+                    Some(entry) => {
+                        tier.hits = tier.hits.saturating_add(1);
+                        GroupSlot::Hit(Arc::clone(&entry.specs))
+                    }
+                    None => {
+                        tier.misses = tier.misses.saturating_add(1);
+                        GroupSlot::Miss(hash)
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Admits freshly built groups; the tree list is cloned only here.
+    pub(crate) fn admit(&self, built: Vec<BuiltGroup<'_, T>>) {
+        let entries: Vec<_> = built
+            .into_iter()
+            .map(|(hash, (group_key, src_keys), specs)| {
+                let key = CategoricalGroupKey {
+                    context: Arc::clone(&self.context),
+                    group_key: group_key.clone(),
+                    src_keys: src_keys.iter().map(|key| (*key).clone()).collect(),
+                    hash,
+                };
+                let charged_bytes = charged_group_entry_bytes(&key, &specs);
+                (
+                    key,
+                    RuntimeGroupEntry {
+                        specs,
+                        charged_bytes,
+                    },
+                )
+            })
+            .collect();
+        let mut state = self.store.lock();
+        if state.generation != self.generation {
+            return;
+        }
+        for (key, entry) in entries {
+            if !state.groups.entries.contains(&key) {
+                state.groups.insert(&self.store.ledger, key, entry);
+            }
+        }
+    }
 }
 
 /// A cache value whose admission charge is fixed at insertion.
@@ -266,6 +549,7 @@ impl<T> RuntimeCacheCharge for RuntimePlanEntry<T> {
 enum RuntimeCacheAccount {
     Structures,
     Plans,
+    Groups,
 }
 
 /// One bounded LRU tier of a typed Runtime store.
@@ -371,6 +655,7 @@ impl<K: Hash + Eq, V: RuntimeCacheCharge> RuntimeCacheTier<K, V> {
 struct RuntimeTreeTransformStoreState<T> {
     structures: RuntimeCacheTier<RuntimeTreeTransformKey, RuntimeTreeTransformStoreEntry<T>>,
     plans: RuntimeCacheTier<CategoricalTransformKey, RuntimePlanEntry<T>>,
+    groups: RuntimeCacheTier<CategoricalGroupKey, RuntimeGroupEntry<T>>,
     generation: u64,
 }
 
@@ -430,6 +715,7 @@ pub struct RuntimeTreeTransformCacheLedger {
     byte_budget: usize,
     state: Mutex<RuntimeTreeTransformCacheLedgerState>,
     plan_state: Mutex<RuntimeTreeTransformCacheLedgerState>,
+    group_state: Mutex<RuntimeTreeTransformCacheLedgerState>,
 }
 
 impl RuntimeTreeTransformCacheInfo {
@@ -485,6 +771,7 @@ impl RuntimeTreeTransformCacheLedger {
             byte_budget,
             state: Mutex::new(RuntimeTreeTransformCacheLedgerState::EMPTY),
             plan_state: Mutex::new(RuntimeTreeTransformCacheLedgerState::EMPTY),
+            group_state: Mutex::new(RuntimeTreeTransformCacheLedgerState::EMPTY),
         }
     }
 
@@ -495,6 +782,7 @@ impl RuntimeTreeTransformCacheLedger {
         match account {
             RuntimeCacheAccount::Structures => &self.state,
             RuntimeCacheAccount::Plans => &self.plan_state,
+            RuntimeCacheAccount::Groups => &self.group_state,
         }
         .lock()
         .expect("runtime tree-transform cache ledger poisoned")
@@ -576,6 +864,17 @@ impl RuntimeTreeTransformCacheLedger {
         let second_info = (!Self::same_store(first, second)).then(|| second.plan_info());
         self.pair_info(RuntimeCacheAccount::Plans, first.plan_info(), second_info)
     }
+
+    /// Categorical-group sibling of [`Self::store_pair_info`].
+    #[doc(hidden)]
+    pub fn group_pair_info<T, U>(
+        &self,
+        first: &RuntimeTreeTransformStore<T>,
+        second: &RuntimeTreeTransformStore<U>,
+    ) -> RuntimeTreeTransformCacheInfo {
+        let second_info = (!Self::same_store(first, second)).then(|| second.group_info());
+        self.pair_info(RuntimeCacheAccount::Groups, first.group_info(), second_info)
+    }
 }
 
 impl<T> RuntimeTreeTransformStore<T> {
@@ -621,10 +920,17 @@ impl<T> RuntimeTreeTransformStore<T> {
             budget,
             max_entry_bytes,
         );
+        let groups = RuntimeCacheTier::new(
+            RuntimeCacheAccount::Groups,
+            capacity,
+            budget,
+            max_entry_bytes,
+        );
         Self {
             state: Mutex::new(RuntimeTreeTransformStoreState {
                 structures,
                 plans,
+                groups,
                 generation: 0,
             }),
             ledger,
@@ -648,12 +954,19 @@ impl<T> RuntimeTreeTransformStore<T> {
         self.lock().plans.info()
     }
 
-    /// Clears both tiers and their counters.
+    /// Categorical-group tier activity; `misses` counts source groups built
+    /// inside plan-tier misses.
+    pub fn group_info(&self) -> RuntimeTreeTransformCacheInfo {
+        self.lock().groups.info()
+    }
+
+    /// Clears every tier and its counters.
     pub fn clear(&self) {
         let mut state = self.lock();
         state.generation = state.generation.wrapping_add(1);
         state.structures.clear(&self.ledger);
         state.plans.clear(&self.ledger);
+        state.groups.clear(&self.ledger);
     }
 
     fn charged_entry_bytes(
@@ -755,7 +1068,7 @@ impl<T> RuntimeTreeTransformStore<T> {
     fn get_or_build_plan<E>(
         &self,
         key: CategoricalTransformKey,
-        build: impl FnOnce() -> Result<TreeTransformGroupPlan<T>, E>,
+        build: impl FnOnce(&GroupSpecReuse<'_, T>) -> Result<TreeTransformGroupPlan<T>, E>,
     ) -> Result<Arc<TreeTransformGroupPlan<T>>, E> {
         let generation = {
             let mut state = self.lock();
@@ -769,7 +1082,24 @@ impl<T> RuntimeTreeTransformStore<T> {
             tier.misses = tier.misses.saturating_add(1);
             generation
         };
-        let plan = Arc::new(build()?);
+        let context = GroupContext {
+            rule: key.rule.clone(),
+            operation: key.operation.clone(),
+            orientation: key.orientation,
+            storage_conjugate: key.storage_conjugate,
+        };
+        let mut hasher = rustc_hash::FxHasher::default();
+        context.rule.hash(&mut hasher);
+        context.operation.hash(&mut hasher);
+        context.orientation.hash(&mut hasher);
+        context.storage_conjugate.hash(&mut hasher);
+        let reuse = GroupSpecReuse {
+            store: self,
+            context_hash: hasher.finish(),
+            context: Arc::new(context),
+            generation,
+        };
+        let plan = Arc::new(build(&reuse)?);
         let charged_bytes = Self::charged_plan_entry_bytes(&key, &plan);
         let mut state = self.lock();
         if let Some(entry) = state.plans.entries.get(&key) {
@@ -891,7 +1221,7 @@ impl<T> RuntimeTreeTransformStore<T> {
         src_structure: &BlockStructure,
         logical_src_structure: Option<&BlockStructure>,
         storage_conjugate: bool,
-        build: impl FnOnce() -> Result<TreeTransformGroupPlan<T>, E>,
+        build: impl FnOnce(&GroupSpecReuse<'_, T>) -> Result<TreeTransformGroupPlan<T>, E>,
     ) -> Result<Arc<TreeTransformGroupPlan<T>>, E> {
         self.get_or_build_plan(
             CategoricalTransformKey::new(
@@ -994,6 +1324,11 @@ impl<T> Drop for RuntimeTreeTransformStore<T> {
                 state.plans.entries.len(),
                 state.plans.charged_payload_bytes,
             ),
+            (
+                RuntimeCacheAccount::Groups,
+                state.groups.entries.len(),
+                state.groups.charged_payload_bytes,
+            ),
         ] {
             self.ledger.release(account, entries, bytes);
         }
@@ -1049,7 +1384,7 @@ where
 {
     #[cfg(test)]
     ORIENTED_TREE_PAIR_COMPILES.set(ORIENTED_TREE_PAIR_COMPILES.get() + 1);
-    let build = || {
+    let build = |reuse: Option<&GroupSpecReuse<'_, R::Scalar>>| {
         build_oriented_tree_pair_transform_group_plan_with_threads(
             rule,
             operation.clone(),
@@ -1059,6 +1394,7 @@ where
             logical_rank,
             projection,
             threads,
+            reuse,
         )
     };
     // Why the storage source's sectors suffice: the logical keys, projection,
@@ -1075,9 +1411,9 @@ where
                 storage_src_structure,
                 None,
             ),
-            build,
+            |reuse| build(Some(reuse)),
         )?,
-        None => Arc::new(build()?),
+        None => Arc::new(build(None)?),
     };
     let source_index = |key: &FusionTreePairKey| {
         projection
@@ -1413,13 +1749,14 @@ where
                     None,
                 );
                 store
-                    .get_or_build_plan(plan_key, || {
+                    .get_or_build_plan(plan_key, |reuse| {
                         build_multiplicity_free_tree_pair_plan_after_capability_with_threads(
                             rule,
                             operation,
                             dst_structure,
                             src_structure,
                             threads,
+                            Some(reuse),
                         )
                     })?
                     .compile_shared_structures_with_storage_conjugation(
@@ -2603,7 +2940,9 @@ mod runtime_store_tests {
         )
     }
 
-    fn empty_plan() -> Result<crate::TreeTransformGroupPlan<f64>, Infallible> {
+    fn empty_plan(
+        _: &super::GroupSpecReuse<'_, f64>,
+    ) -> Result<crate::TreeTransformGroupPlan<f64>, Infallible> {
         Ok(crate::TreeTransformGroupPlan::new(Vec::new()))
     }
 
@@ -2637,7 +2976,7 @@ mod runtime_store_tests {
         // The Runtime-wide ledger caps both dtypes together: a full ledger
         // makes the other dtype bypass rather than evict a foreign entry.
         complex
-            .get_or_build_plan(plan_key(2, 1), || {
+            .get_or_build_plan(plan_key(2, 1), |_| {
                 Ok::<_, Infallible>(crate::TreeTransformGroupPlan::new(Vec::new()))
             })
             .unwrap();
@@ -2673,15 +3012,103 @@ mod runtime_store_tests {
         assert!(slack >= tight + 8 * spec);
     }
 
+    fn pair_key(codomain: [usize; 2]) -> tenet_core::FusionTreePairKey {
+        tenet_core::FusionTreePairKey::try_pair_from_sector_ids(
+            codomain,
+            [1],
+            1,
+            [false, false],
+            [false],
+            [],
+            [],
+            [1],
+            [],
+        )
+        .unwrap()
+    }
+
+    fn one_spec(
+        key: &tenet_core::FusionTreePairKey,
+    ) -> Arc<[crate::TreeTransformGroupBlockSpec<f64>]> {
+        Arc::from(vec![crate::TreeTransformGroupBlockSpec::single(
+            key.clone(),
+            key.clone(),
+            1.0,
+        )])
+    }
+
+    #[test]
+    fn group_tier_hits_equal_ordered_trees_and_obeys_limits() {
+        // What: a borrowed group lookup hits an admitted group with the same
+        // external sectors and ordered trees, misses a reordered tree list,
+        // counts one miss per group to build, and obeys the entry cap.
+        let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(1, usize::MAX));
+        let store = RuntimeTreeTransformStore::<f64>::with_runtime_ledger(Arc::clone(&ledger));
+        let (first, second) = (pair_key([1, 0]), pair_key([0, 1]));
+        let group_key = first.group_key();
+        store
+            .get_or_build_plan(plan_key(0, 1), |reuse| {
+                let ordered: &[&tenet_core::FusionTreePairKey] = &[&first, &second];
+                let reordered: &[&tenet_core::FusionTreePairKey] = &[&second, &first];
+                let [super::GroupSlot::Miss(hash)] = reuse.lookup(&[(&group_key, ordered)])[..]
+                else {
+                    panic!("an empty tier must miss");
+                };
+                reuse.admit(vec![(hash, (&group_key, ordered), one_spec(&first))]);
+                let slots = reuse.lookup(&[(&group_key, ordered), (&group_key, reordered)]);
+                assert!(matches!(slots[0], super::GroupSlot::Hit(_)));
+                assert!(matches!(slots[1], super::GroupSlot::Miss(_)));
+                let super::GroupSlot::Miss(hash) = slots[1] else {
+                    unreachable!()
+                };
+                reuse.admit(vec![(hash, (&group_key, reordered), one_spec(&second))]);
+                empty_plan(reuse)
+            })
+            .unwrap();
+        let info = store.group_info();
+        assert_eq!((info.hits(), info.misses()), (1, 2));
+        assert_eq!((info.entries(), info.evictions()), (1, 1));
+        assert!(info.charged_payload_bytes() > 0);
+        assert_eq!(ledger.group_pair_info(&store, &store).entries(), 1);
+        // Group admissions charge only the group account.
+        assert_eq!(ledger.store_pair_info(&store, &store).entries(), 0);
+
+        store.clear();
+        let cleared = store.group_info();
+        assert_eq!((cleared.entries(), cleared.charged_payload_bytes()), (0, 0));
+        assert_eq!((cleared.hits(), cleared.misses()), (0, 0));
+    }
+
+    #[test]
+    fn group_built_across_a_clear_is_not_admitted() {
+        // What: groups built before a racing clear are not published into the
+        // cleared generation.
+        let store = RuntimeTreeTransformStore::<f64>::with_limits(2, usize::MAX, usize::MAX);
+        let key = pair_key([1, 0]);
+        let group_key = key.group_key();
+        store
+            .get_or_build_plan(plan_key(0, 1), |reuse| {
+                let keys: &[&tenet_core::FusionTreePairKey] = &[&key];
+                let [super::GroupSlot::Miss(hash)] = reuse.lookup(&[(&group_key, keys)])[..] else {
+                    panic!("an empty tier must miss");
+                };
+                store.clear();
+                reuse.admit(vec![(hash, (&group_key, keys), one_spec(&key))]);
+                empty_plan(reuse)
+            })
+            .unwrap();
+        assert_eq!(store.group_info().entries(), 0);
+    }
+
     #[test]
     fn plan_built_across_a_clear_is_not_admitted() {
         // What: a plan whose build raced a clear is returned to its caller but
         // not published into the cleared generation.
         let store = RuntimeTreeTransformStore::<f64>::with_limits(2, usize::MAX, usize::MAX);
         store
-            .get_or_build_plan(plan_key(0, 1), || {
+            .get_or_build_plan(plan_key(0, 1), |reuse| {
                 store.clear();
-                empty_plan()
+                empty_plan(reuse)
             })
             .unwrap();
         assert_eq!(store.plan_info().entries(), 0);
