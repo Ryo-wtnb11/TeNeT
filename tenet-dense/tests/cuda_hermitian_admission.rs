@@ -5,8 +5,8 @@
 //! The decisions are asserted against hand-known truth values (exactly
 //! Hermitian, asymmetric by a whole unit, zero, empty, non-finite, and
 //! residuals just inside and far outside `64 * eps(real(D))`), at both ends
-//! of each lane's normal range. This file holds a single test because it reads
-//! the process-wide [`cuda_transfer_stats`] counters.
+//! of each lane's normal range. The deltas read the calling thread's
+//! [`cuda_transfer_stats`] counters.
 //!
 //! Run with `cargo test -p tenet-dense --no-default-features --features \
 //! cuda,cpu-faer --test cuda_hermitian_admission -- --ignored` on a CUDA host.

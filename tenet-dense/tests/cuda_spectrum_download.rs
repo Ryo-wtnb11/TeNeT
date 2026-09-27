@@ -3,8 +3,7 @@
 //! bitwise equal to downloading each spectrum on its own (the pre-#1484
 //! per-block path), so gathering them on device only moves data.
 //!
-//! This file holds a single test because it reads the process-wide
-//! [`cuda_transfer_stats`] counters.
+//! The deltas read the calling thread's [`cuda_transfer_stats`] counters.
 //!
 //! Run with `cargo test -p tenet-dense --no-default-features --features \
 //! cuda,cpu-faer --test cuda_spectrum_download -- --ignored` on a CUDA host.

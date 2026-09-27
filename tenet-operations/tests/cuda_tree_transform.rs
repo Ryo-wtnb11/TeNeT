@@ -14,8 +14,6 @@
 
 mod common;
 
-use std::sync::Mutex;
-
 use common::{
     all_fixtures, conjugated_recoupling, expert_interleaved_destination,
     expert_interleaved_recoupling_destination, inactive_destination_layouts,
@@ -34,10 +32,6 @@ use tenet_operations::{
     CudaTreeTransformExecutor, OperationError, StridedHostKernelAdapter, TreeTransformWorkspace,
     DEFAULT_PLAN_CACHE_BUDGET_BYTES,
 };
-
-/// The boundary counters are process-wide, so tests that assert on their
-/// deltas must not overlap.
-static COUNTER_TESTS: Mutex<()> = Mutex::new(());
 
 /// Payload dtypes replayed on device, with the host arithmetic the oracle and
 /// the host comparison need.
@@ -296,7 +290,6 @@ fn a_warm_replay_transfers_nothing_and_allocates_no_device_buffer() {
     // What: after the first replay of a structure, replaying it again moves
     // nothing across the host boundary and creates no device buffer; only the
     // per-block submissions remain.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     let fixture = inactive_destination_layouts();
@@ -359,7 +352,6 @@ fn a_warm_replay_transfers_nothing_and_allocates_no_device_buffer() {
 fn alternating_structures_upload_their_coefficients_exactly_once_each() {
     // What: the coefficient cache holds more than one structure, so a network
     // replay alternating two transforms does not re-upload on every switch.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     let fixtures = [rank_sweep().remove(2), interleaved()];
@@ -475,7 +467,6 @@ fn more_signatures_than_the_default_plan_bound_raise_the_cap_without_thrashing()
     // What: a structure with more distinct block layouts than Tenferro's
     // 64-entry cuTENSOR plan bound raises the bound to what it needs, so a warm
     // replay evicts no plan at all.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::new(1 << 20, DEFAULT_PLAN_CACHE_BUDGET_BYTES);
     let fixture = many_distinct_signatures(70);
@@ -807,7 +798,6 @@ fn a_consumer_reserving_first_keeps_its_plans_beside_a_large_executor() {
     // evicts nothing. Under an absolute raise the consumer's `64 + 80` and
     // the executor's own total are combined by max, below the joint working
     // set, and every round thrashes (the origin/main negative control).
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let base = ctx.plan_cache_max_entries().unwrap();
     let consumer_plans = 80;
@@ -889,7 +879,6 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
     // plan-cache change — for a Single-block structure and for a recoupling
     // structure, whose pack columns and coefficient upload must not happen on
     // the strength of one unwritable scatter region.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     let fixture = interleaved();
@@ -1222,7 +1211,6 @@ fn a_warm_recoupling_replay_transfers_nothing_and_reuses_the_workspace() {
     // the whole per-structure device state, so replaying a Multi structure a
     // second time moves nothing across the boundary, allocates nothing, and
     // grows the workspace by nothing.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     let fixture = mixed_single_and_multi();
@@ -1342,7 +1330,6 @@ fn alternating_recoupling_structures_upload_their_matrices_exactly_once_each() {
     // under the same (structure, dtype, context) key, so a replay alternating
     // two Multi structures uploads each structure's matrices once and shares
     // one workspace between them.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     // Widest first, so the workspace is allocated once and the narrower
@@ -1538,7 +1525,6 @@ fn alternating_complex_recoupling_structures_upload_their_matrices_once_each() {
     // What: the per-(structure, dtype, context) key and the shared workspace
     // behave the same for a complex payload, where every coefficient and every
     // packed column is twice as wide.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     let fixtures = [mixed_single_and_multi(), recoupling_non_symmetric_u()];
@@ -1900,7 +1886,6 @@ fn a_warm_replay_is_transfer_free_and_plan_stable_for_every_caller_scale() {
     // requirement already counts. So a warm replay stays transfer-free and
     // allocation-free for every scale including 0, the prepared-structure count
     // does not grow, and the zero-scale fills evict no cuTENSOR plan.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     warm_scale_sweep::<f32>();
     warm_scale_sweep::<f64>();
 }
@@ -1912,7 +1897,6 @@ fn a_warm_complex_replay_is_transfer_free_and_plan_stable_for_every_caller_scale
     // operand and zero template are a different dtype's buffers — the real-only
     // twin above would not notice a complex one uploaded per call. Each dtype
     // owns its own context operand slot, so each needs its own sweep.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     warm_scale_sweep::<Complex32>();
     warm_scale_sweep::<Complex64>();
 }
@@ -2008,7 +1992,6 @@ fn a_zero_caller_scale_is_rejected_in_the_same_order() {
     // What: the caller scale is not an admission input — an unsupported beta and
     // an unwritable destination layout are still reported before any device
     // work, with a zero scale exactly as with a unit one.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     let fixture = mixed_single_and_multi();
@@ -2264,7 +2247,6 @@ fn destination_scales_reuse_the_unscaled_structure_and_transfer_nothing_warm() {
     // What: θ is in no key and uploads nothing — a scaled replay after an
     // unscaled one of the same structure prepares no structure, asks for no
     // plan entry, misses no plan and moves no byte.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     let fixture = mixed_single_and_multi();
@@ -2321,7 +2303,6 @@ fn destination_scales_reuse_the_unscaled_structure_and_transfer_nothing_warm() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn unsorted_or_vanishing_destination_scales_are_rejected_before_any_device_work() {
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     let fixture = mixed_single_and_multi();

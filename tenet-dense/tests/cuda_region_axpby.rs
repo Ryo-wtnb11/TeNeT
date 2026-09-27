@@ -17,7 +17,6 @@
 #![cfg(feature = "cuda")]
 
 use std::fmt::Debug;
-use std::sync::Mutex;
 
 use num_complex::{Complex32, Complex64};
 use tenet_dense::{
@@ -25,10 +24,6 @@ use tenet_dense::{
     CudaDenseContext, CudaDenseStorage, CudaRegion, CudaRegionBeta, CudaRegionCoefficient,
     CudaScalar, DenseError,
 };
-
-/// The boundary counters are process-wide, so tests that assert on their
-/// deltas must not overlap.
-static COUNTER_TESTS: Mutex<()> = Mutex::new(());
 
 /// Payload dtypes under test, with the host arithmetic their oracle needs.
 trait RegionScalar:
@@ -603,7 +598,6 @@ fn the_context_zero_template_overwrites_exactly_its_region() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn the_zero_template_is_uploaded_once_per_dtype_and_grows_monotonically() {
-    let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
     let mut ctx = context();
     let mut dst = upload::<f64>(&ctx, &[1.0f64; 64]);
 
@@ -830,7 +824,6 @@ fn gapped_and_interleaved_destinations_are_accepted() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_reserved_zero_template_makes_every_later_fill_transfer_free() {
-    let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
     let mut ctx = context();
     assert_eq!(ctx.scalar_operand_bytes(), 0);
     let mut dst = upload::<f64>(&ctx, &[1.0f64; 64]);
@@ -872,7 +865,6 @@ fn a_reserved_zero_template_makes_every_later_fill_transfer_free() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn every_rejection_is_typed_and_submits_no_device_work() {
-    let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
     let mut ctx = context();
     let src = upload::<f64>(&ctx, &(0..64).map(|index| index as f64).collect::<Vec<_>>());
     let coeff = upload::<f64>(&ctx, &[2.0, 3.0]);
@@ -1009,7 +1001,6 @@ fn every_rejection_is_typed_and_submits_no_device_work() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_zero_extent_region_is_a_no_op_without_a_submission() {
-    let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
     let mut ctx = context();
     let src = upload::<f64>(&ctx, &(0..16).map(|index| index as f64).collect::<Vec<_>>());
     let coeff = upload::<f64>(&ctx, &[2.0]);
@@ -1047,7 +1038,6 @@ fn a_zero_extent_region_is_a_no_op_without_a_submission() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn the_call_phase_moves_nothing_across_the_host_boundary() {
-    let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
     let mut ctx = context();
     let dims = [3usize, 2, 4];
     let src_strides = permuted_strides(&dims, &[0, 1, 2], 1);
@@ -1155,7 +1145,6 @@ fn the_zero_coefficient_operand_multiplies_on_a_fresh_context() {
     // descriptor scale of zero (now rejected) would have erased it. The context
     // is fresh, so this also executes the lazy one-element template upload and
     // proves the second call needs none.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let dims = [2usize, 2];
     let strides = [1usize, 2];
@@ -1219,7 +1208,6 @@ fn a_zero_descriptor_scale_and_a_rejected_zero_operand_cost_nothing() {
     // What: the zero-scale rejection and every other rejection happen before
     // any device work — including before the lazy zero-template upload the
     // accepted call would have done.
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let src = upload::<f64>(&ctx, &[1.0, 2.0, 3.0, 4.0]);
     let mut dst = upload::<f64>(&ctx, &[0.0; 4]);
