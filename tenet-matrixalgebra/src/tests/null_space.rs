@@ -841,6 +841,12 @@ where
         let (general, hermitian) = (general.as_ref(), hermitian.as_ref());
         let (general, hermitian) = (general.dynamic(), hermitian.dynamic());
         let family = || multiplicity_free_full_family_bits(&general, &tall_input, &hermitian);
+        // Keep the factor structures alive through both measurements. The
+        // process-global caches hold them weakly, so otherwise each call
+        // rebuilds them unless a concurrent test happens to hold equal ones,
+        // and eigh (zero payload margin) sees that race as a byte difference.
+        let _factor_plans = [&general, &tall_input, &hermitian]
+            .map(|input| crate::factorize::compact_factor_plan_for_test(input.space()).unwrap());
         // Warm both paths so one-time caches do not enter the comparison.
         family();
         crate::factorize::with_forced_input_pack(family);
