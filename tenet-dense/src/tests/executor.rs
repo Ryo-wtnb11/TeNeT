@@ -1,7 +1,4 @@
-#![allow(dead_code)]
-
 use super::*;
-use num_complex::{Complex32, Complex64};
 
 #[cfg(feature = "provider-inject")]
 #[test]
@@ -22,7 +19,6 @@ fn provider_inject_rejects_linalg_before_backend_work() {
         "provider-inject requires a registered BLAS/LAPACK provider"
     );
 }
-
 #[cfg(feature = "provider-inject")]
 #[test]
 fn provider_inject_rejects_values_only_before_backend_work() {
@@ -57,1002 +53,6 @@ fn provider_inject_rejects_values_only_before_backend_work() {
         "provider-inject requires a registered BLAS/LAPACK provider"
     );
 }
-
-fn assert_f64_close(actual: f64, expected: f64, tol: f64) {
-    assert!(
-        (actual - expected).abs() <= tol,
-        "expected {expected}, got {actual}, tol={tol}"
-    );
-}
-
-fn assert_f32_close(actual: f32, expected: f32, tol: f32) {
-    assert!(
-        (actual - expected).abs() <= tol,
-        "expected {expected}, got {actual}, tol={tol}"
-    );
-}
-
-fn assert_c32_close(actual: Complex32, expected: Complex32, tol: f32) {
-    assert_f32_close(actual.re, expected.re, tol);
-    assert_f32_close(actual.im, expected.im, tol);
-}
-
-fn assert_c64_close(actual: Complex64, expected: Complex64, tol: f64) {
-    assert_f64_close(actual.re, expected.re, tol);
-    assert_f64_close(actual.im, expected.im, tol);
-}
-
-#[cfg(feature = "tenferro")]
-#[test]
-fn dense_tensor_consuming_vectors_preserve_f64_and_c64_owners() {
-    let mut executor = DefaultDenseExecutor::new();
-    let shape = [2, 2];
-    let strides = [1, 2];
-
-    let f64_data = [1.0, 3.0, 2.0, 4.0];
-    let f64 = executor
-        .qr(DenseRead::F64(
-            DenseView::new(&f64_data, &shape, &strides, 0).unwrap(),
-        ))
-        .unwrap()
-        .remove(0);
-    let f64_ptr = f64.as_f64_slice().unwrap().as_ptr();
-    let f64_data = f64.into_f64_vec().unwrap();
-    assert_eq!(f64_ptr, f64_data.as_ptr());
-
-    let f32_data = [1.0_f32, 3.0, 2.0, 4.0];
-    let f32 = executor
-        .qr(DenseRead::F32(
-            DenseView::new(&f32_data, &shape, &strides, 0).unwrap(),
-        ))
-        .unwrap()
-        .remove(0);
-    let f32_ptr = f32.as_f32_slice().unwrap().as_ptr();
-    let f32_data = f32.into_f32_vec().unwrap();
-    assert_eq!(f32_ptr, f32_data.as_ptr());
-
-    let c64_data = [
-        Complex64::new(1.0, 1.0),
-        Complex64::new(3.0, 0.0),
-        Complex64::new(2.0, -1.0),
-        Complex64::new(4.0, 0.5),
-    ];
-    let c64 = executor
-        .qr(DenseRead::C64(
-            DenseView::new(&c64_data, &shape, &strides, 0).unwrap(),
-        ))
-        .unwrap()
-        .remove(0);
-    let c64_ptr = c64.as_c64_slice().unwrap().as_ptr();
-    let c64_data = c64.into_c64_vec().unwrap();
-    assert_eq!(c64_ptr, c64_data.as_ptr());
-
-    let c32_data = [
-        Complex32::new(1.0, 1.0),
-        Complex32::new(3.0, 0.0),
-        Complex32::new(2.0, -1.0),
-        Complex32::new(4.0, 0.5),
-    ];
-    let c32 = executor
-        .qr(DenseRead::C32(
-            DenseView::new(&c32_data, &shape, &strides, 0).unwrap(),
-        ))
-        .unwrap()
-        .remove(0);
-    let c32_ptr = c32.as_c32_slice().unwrap().as_ptr();
-    let c32_data = c32.into_c32_vec().unwrap();
-    assert_eq!(c32_ptr, c32_data.as_ptr());
-}
-
-#[cfg(feature = "tenferro")]
-#[test]
-fn dense_tensor_consuming_vector_rejects_wrong_dtype() {
-    let mut executor = DefaultDenseExecutor::new();
-    let shape = [1, 1];
-    let strides = [1, 1];
-    let tensor = executor
-        .qr(DenseRead::C64(
-            DenseView::new(&[Complex64::new(1.0, 0.0)], &shape, &strides, 0).unwrap(),
-        ))
-        .unwrap()
-        .remove(0);
-    assert!(tensor.into_f64_vec().is_err());
-}
-
-fn oriented_c64_value(
-    data: &[Complex64],
-    offset: usize,
-    rows: usize,
-    cols: usize,
-    row: usize,
-    col: usize,
-    op: MatrixOp,
-) -> Complex64 {
-    let value = match op {
-        MatrixOp::Identity => data[offset + row + rows * col],
-        MatrixOp::Transpose | MatrixOp::Adjoint => data[offset + col + cols * row],
-    };
-    if op == MatrixOp::Adjoint {
-        value.conj()
-    } else {
-        value
-    }
-}
-
-fn check_complex_oriented_run(
-    executor: &mut DefaultDenseExecutor,
-    shape: (usize, usize, usize),
-    lhs_op: MatrixOp,
-    rhs_op: MatrixOp,
-    broadcast_lhs: bool,
-    run_len: usize,
-) {
-    let (rows, contracted, cols) = shape;
-    let view_offset = 2usize;
-    let lhs_first = 3usize;
-    let rhs_first = 4usize;
-    let dst_first = 5usize;
-    let lhs_step = if broadcast_lhs {
-        0
-    } else {
-        rows * contracted + 2
-    };
-    let rhs_step = contracted * cols + 3;
-    let dst_step = rows * cols + 3;
-    let jobs = (0..run_len)
-        .map(|batch| DenseGemmBatchJob {
-            lhs_offset: lhs_first + batch * lhs_step,
-            rhs_offset: rhs_first + batch * rhs_step,
-            dst_offset: dst_first + batch * dst_step,
-            rows,
-            contracted,
-            cols,
-        })
-        .collect::<Vec<_>>();
-    let runs = strided_batch_runs(&jobs);
-    assert_eq!(runs, [run_len]);
-
-    let last = &jobs[run_len - 1];
-    let lhs_len = view_offset + last.lhs_offset + rows * contracted + 2;
-    let rhs_len = view_offset + last.rhs_offset + contracted * cols + 2;
-    let out_len = view_offset + last.dst_offset + rows * cols + 2;
-    let lhs = (0..lhs_len)
-        .map(|i| Complex64::new(0.5 + 0.25 * i as f64, -0.75 + 0.125 * i as f64))
-        .collect::<Vec<_>>();
-    let rhs = (0..rhs_len)
-        .map(|i| Complex64::new(-1.0 + 0.2 * i as f64, 0.625 - 0.1 * i as f64))
-        .collect::<Vec<_>>();
-    let mut output = (0..out_len)
-        .map(|i| Complex64::new(2.0 + 0.05 * i as f64, -1.0 - 0.025 * i as f64))
-        .collect::<Vec<_>>();
-    let lhs_before = lhs.clone();
-    let rhs_before = rhs.clone();
-    let output_before = output.clone();
-    let alpha = Complex64::new(0.75, -0.5);
-    let beta = Complex64::new(-0.25, 0.125);
-    let strides = [1usize];
-    let lhs_shape = [lhs.len() - view_offset];
-    let rhs_shape = [rhs.len() - view_offset];
-    let out_shape = [output.len() - view_offset];
-
-    executor.reset_seam_dispatches();
-    executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::C64(
-                DenseViewMut::new(&mut output, &out_shape, &strides, view_offset).unwrap(),
-            ),
-            DenseRead::C64(DenseView::new(&lhs, &lhs_shape, &strides, view_offset).unwrap()),
-            DenseRead::C64(DenseView::new(&rhs, &rhs_shape, &strides, view_offset).unwrap()),
-            &jobs,
-            &runs,
-            lhs_op,
-            rhs_op,
-            DenseScalar::C64(alpha),
-            DenseScalar::C64(beta),
-        )
-        .unwrap();
-    assert_eq!(executor.seam_dispatches(), 1);
-
-    let mut touched = vec![false; output.len()];
-    for job in &jobs {
-        for col in 0..cols {
-            for row in 0..rows {
-                let mut sum = Complex64::new(0.0, 0.0);
-                for inner in 0..contracted {
-                    let lhs_value = oriented_c64_value(
-                        &lhs,
-                        view_offset + job.lhs_offset,
-                        rows,
-                        contracted,
-                        row,
-                        inner,
-                        lhs_op,
-                    );
-                    let rhs_value = oriented_c64_value(
-                        &rhs,
-                        view_offset + job.rhs_offset,
-                        contracted,
-                        cols,
-                        inner,
-                        col,
-                        rhs_op,
-                    );
-                    sum += lhs_value * rhs_value;
-                }
-                let index = view_offset + job.dst_offset + row + rows * col;
-                touched[index] = true;
-                assert_c64_close(
-                    output[index],
-                    alpha * sum + beta * output_before[index],
-                    1.0e-11,
-                );
-            }
-        }
-    }
-    assert_eq!(lhs, lhs_before);
-    assert_eq!(rhs, rhs_before);
-    for (index, value) in output.iter().enumerate() {
-        if !touched[index] {
-            assert_eq!(*value, output_before[index]);
-        }
-    }
-}
-
-#[test]
-fn op_bearing_batch_reuses_executor_across_shapes_offsets_and_alpha_beta() {
-    // Adjoint gives both rectangular operands noncontiguous matrix strides.
-    let alpha = Complex64::new(0.75, -0.5);
-    let beta = Complex64::new(-0.25, 0.125);
-    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
-    for (rows, contracted, cols, seed) in [(2, 3, 4, 1.0), (3, 2, 1, 9.0)] {
-        let (view_offset, job_offset) = (1, 2);
-        let lhs_values = (0..contracted * rows)
-            .map(|i| Complex64::new(seed + i as f64, 0.25 * i as f64 - 0.5))
-            .collect::<Vec<_>>();
-        let rhs_values = (0..cols * contracted)
-            .map(|i| Complex64::new(seed - 0.5 * i as f64, 0.75 - 0.1 * i as f64))
-            .collect::<Vec<_>>();
-        let mut lhs = vec![Complex64::new(-99.0, 1.0); view_offset + job_offset];
-        lhs.extend_from_slice(&lhs_values);
-        let mut rhs = vec![Complex64::new(-98.0, 2.0); view_offset + job_offset];
-        rhs.extend_from_slice(&rhs_values);
-        let initial = Complex64::new(0.5, -0.25);
-        let mut output = vec![initial; view_offset + job_offset + rows * cols + 1];
-        let jobs = [DenseGemmBatchJob {
-            dst_offset: job_offset,
-            lhs_offset: job_offset,
-            rhs_offset: job_offset,
-            rows,
-            contracted,
-            cols,
-        }];
-        let flat_strides = [1];
-        let (lhs_shape, rhs_shape, output_shape) = (
-            [lhs.len() - view_offset],
-            [rhs.len() - view_offset],
-            [output.len() - view_offset],
-        );
-        executor
-            .matmul_batch_axpby_with_ops_into(
-                DenseWrite::C64(
-                    DenseViewMut::new(&mut output, &output_shape, &flat_strides, view_offset)
-                        .unwrap(),
-                ),
-                DenseRead::C64(
-                    DenseView::new(&lhs, &lhs_shape, &flat_strides, view_offset).unwrap(),
-                ),
-                DenseRead::C64(
-                    DenseView::new(&rhs, &rhs_shape, &flat_strides, view_offset).unwrap(),
-                ),
-                &jobs,
-                &[1],
-                MatrixOp::Adjoint,
-                MatrixOp::Adjoint,
-                DenseScalar::C64(alpha),
-                DenseScalar::C64(beta),
-            )
-            .unwrap();
-
-        for col in 0..cols {
-            for row in 0..rows {
-                let mut sum = Complex64::new(0.0, 0.0);
-                for inner in 0..contracted {
-                    let left = lhs_values[inner + contracted * row].conj();
-                    let right = rhs_values[col + cols * inner].conj();
-                    sum += left * right;
-                }
-                let index = view_offset + job_offset + row + rows * col;
-                assert_c64_close(output[index], alpha * sum + beta * initial, 1.0e-12);
-            }
-        }
-    }
-}
-
-#[test]
-fn op_bearing_batch_rejects_offset_overflow_before_view_construction() {
-    // What: malformed public batch jobs return a typed offset error instead of
-    // wrapping an operand base offset before the transposed view is validated.
-    let lhs = vec![1.0, 2.0];
-    let rhs = vec![3.0];
-    let mut output = vec![0.0];
-    let jobs = [DenseGemmBatchJob {
-        dst_offset: 0,
-        lhs_offset: usize::MAX,
-        rhs_offset: 0,
-        rows: 1,
-        contracted: 1,
-        cols: 1,
-    }];
-    let shape = [1];
-    let strides = [1];
-    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
-
-    let error = executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::F64(DenseViewMut::new(&mut output, &shape, &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&lhs, &shape, &strides, 1).unwrap()),
-            DenseRead::F64(DenseView::new(&rhs, &shape, &strides, 0).unwrap()),
-            &jobs,
-            &[1],
-            MatrixOp::Adjoint,
-            MatrixOp::Identity,
-            DenseScalar::F64(1.0),
-            DenseScalar::F64(0.0),
-        )
-        .unwrap_err();
-
-    assert!(matches!(
-        error,
-        DenseError::OffsetOverflow { value: usize::MAX }
-    ));
-}
-
-#[test]
-fn op_bearing_uniform_runs_batch_literal_complex_all_matrix_ops() {
-    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
-    let ops = [MatrixOp::Identity, MatrixOp::Transpose, MatrixOp::Adjoint];
-    for (shape, broadcast_lhs, run_len) in [
-        ((2, 3, 4), false, 4),
-        ((3, 2, 2), true, 3),
-        ((2, 4, 3), false, 2),
-    ] {
-        for lhs_op in ops {
-            for rhs_op in ops {
-                if lhs_op != MatrixOp::Identity || rhs_op != MatrixOp::Identity {
-                    check_complex_oriented_run(
-                        &mut executor,
-                        shape,
-                        lhs_op,
-                        rhs_op,
-                        broadcast_lhs,
-                        run_len,
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn op_bearing_rectangular_run_uses_strided_seam_for_other_float_dtypes() {
-    let jobs = [
-        batch_job((2, 3, 2), (1, 1, 2)),
-        batch_job((2, 3, 2), (7, 8, 10)),
-    ];
-    assert_eq!(strided_batch_runs(&jobs), [2]);
-    let lhs_f32 = (0..14).map(|i| 0.5 + i as f32).collect::<Vec<_>>();
-    let rhs_f32 = (0..16).map(|i| 1.25 - 0.125 * i as f32).collect::<Vec<_>>();
-    let mut output_f32 = vec![3.0_f32; 12];
-    let strides = [1];
-    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
-    executor.reset_seam_dispatches();
-    executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::F32(DenseViewMut::new(&mut output_f32, &[12], &strides, 0).unwrap()),
-            DenseRead::F32(DenseView::new(&lhs_f32, &[14], &strides, 0).unwrap()),
-            DenseRead::F32(DenseView::new(&rhs_f32, &[16], &strides, 0).unwrap()),
-            &jobs,
-            &[2],
-            MatrixOp::Transpose,
-            MatrixOp::Identity,
-            DenseScalar::F32(1.25),
-            DenseScalar::F32(-0.5),
-        )
-        .unwrap();
-    assert_eq!(executor.seam_dispatches(), 1);
-    for job in &jobs {
-        for col in 0..2 {
-            for row in 0..2 {
-                let sum = (0..3)
-                    .map(|inner| {
-                        lhs_f32[job.lhs_offset + inner + 3 * row]
-                            * rhs_f32[job.rhs_offset + inner + 3 * col]
-                    })
-                    .sum::<f32>();
-                assert_f32_close(
-                    output_f32[job.dst_offset + row + 2 * col],
-                    1.25 * sum - 1.5,
-                    1.0e-4,
-                );
-            }
-        }
-    }
-
-    let lhs_f64 = lhs_f32
-        .iter()
-        .map(|&value| value as f64)
-        .collect::<Vec<_>>();
-    let rhs_f64 = rhs_f32
-        .iter()
-        .map(|&value| value as f64)
-        .collect::<Vec<_>>();
-    let mut output_f64 = vec![3.0_f64; 12];
-    executor.reset_seam_dispatches();
-    executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::F64(DenseViewMut::new(&mut output_f64, &[12], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&lhs_f64, &[14], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&rhs_f64, &[16], &strides, 0).unwrap()),
-            &jobs,
-            &[2],
-            MatrixOp::Transpose,
-            MatrixOp::Identity,
-            DenseScalar::F64(1.25),
-            DenseScalar::F64(-0.5),
-        )
-        .unwrap();
-    assert_eq!(executor.seam_dispatches(), 1);
-    for job in &jobs {
-        for col in 0..2 {
-            for row in 0..2 {
-                let sum = (0..3)
-                    .map(|inner| {
-                        lhs_f64[job.lhs_offset + inner + 3 * row]
-                            * rhs_f64[job.rhs_offset + inner + 3 * col]
-                    })
-                    .sum::<f64>();
-                assert_f64_close(
-                    output_f64[job.dst_offset + row + 2 * col],
-                    1.25 * sum - 1.5,
-                    1.0e-12,
-                );
-            }
-        }
-    }
-
-    let lhs_c32 = lhs_f32
-        .iter()
-        .enumerate()
-        .map(|(i, &value)| Complex32::new(value, 0.25 * i as f32 - 0.5))
-        .collect::<Vec<_>>();
-    let rhs_c32 = rhs_f32
-        .iter()
-        .enumerate()
-        .map(|(i, &value)| Complex32::new(value, 0.75 - 0.1 * i as f32))
-        .collect::<Vec<_>>();
-    let initial = Complex32::new(3.0, -2.0);
-    let alpha = Complex32::new(0.75, -0.25);
-    let beta = Complex32::new(-0.5, 0.125);
-    let mut output_c32 = vec![initial; 12];
-    executor.reset_seam_dispatches();
-    executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::C32(DenseViewMut::new(&mut output_c32, &[12], &strides, 0).unwrap()),
-            DenseRead::C32(DenseView::new(&lhs_c32, &[14], &strides, 0).unwrap()),
-            DenseRead::C32(DenseView::new(&rhs_c32, &[16], &strides, 0).unwrap()),
-            &jobs,
-            &[2],
-            MatrixOp::Adjoint,
-            MatrixOp::Adjoint,
-            DenseScalar::C32(alpha),
-            DenseScalar::C32(beta),
-        )
-        .unwrap();
-    assert_eq!(executor.seam_dispatches(), 1);
-    for job in &jobs {
-        for col in 0..2 {
-            for row in 0..2 {
-                let sum = (0..3)
-                    .map(|inner| {
-                        lhs_c32[job.lhs_offset + inner + 3 * row].conj()
-                            * rhs_c32[job.rhs_offset + col + 2 * inner].conj()
-                    })
-                    .sum::<Complex32>();
-                assert_c32_close(
-                    output_c32[job.dst_offset + row + 2 * col],
-                    alpha * sum + beta * initial,
-                    1.0e-3,
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn op_bearing_mixed_runs_and_safe_subpartitions_use_absolute_jobs() {
-    let jobs = vec![
-        batch_job((1, 1, 1), (0, 0, 0)),
-        batch_job((1, 1, 1), (1, 1, 1)),
-        batch_job((1, 2, 1), (2, 2, 2)),
-        batch_job((1, 1, 1), (3, 4, 4)),
-        batch_job((1, 1, 1), (4, 5, 5)),
-        batch_job((1, 1, 1), (5, 6, 6)),
-    ];
-    let runs = strided_batch_runs(&jobs);
-    assert_eq!(runs, [2, 1, 3]);
-    let lhs = [2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0];
-    let rhs = [19.0, 23.0, 29.0, 31.0, 37.0, 41.0, 43.0];
-    let mut output = [1.0; 8];
-    let shape = [output.len()];
-    let strides = [1];
-    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
-    executor.reset_seam_dispatches();
-    executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::F64(DenseViewMut::new(&mut output, &shape, &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&lhs, &[lhs.len()], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&rhs, &[rhs.len()], &strides, 0).unwrap()),
-            &jobs,
-            &runs,
-            MatrixOp::Transpose,
-            MatrixOp::Identity,
-            DenseScalar::F64(2.0),
-            DenseScalar::F64(-0.5),
-        )
-        .unwrap();
-    assert_eq!(executor.seam_dispatches(), 3);
-    let sums = [
-        lhs[0] * rhs[0],
-        lhs[1] * rhs[1],
-        lhs[2] * rhs[2] + lhs[3] * rhs[3],
-        lhs[4] * rhs[4],
-        lhs[5] * rhs[5],
-        lhs[6] * rhs[6],
-    ];
-    for (actual, sum) in output[..6].iter().zip(sums) {
-        assert_eq!(*actual, 2.0 * sum - 0.5);
-    }
-    assert_eq!(&output[6..], &[1.0, 1.0]);
-
-    let mut singleton_output = [1.0; 8];
-    executor.reset_seam_dispatches();
-    executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::F64(DenseViewMut::new(&mut singleton_output, &shape, &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&lhs, &[lhs.len()], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&rhs, &[rhs.len()], &strides, 0).unwrap()),
-            &jobs,
-            &[1; 6],
-            MatrixOp::Transpose,
-            MatrixOp::Identity,
-            DenseScalar::F64(2.0),
-            DenseScalar::F64(-0.5),
-        )
-        .unwrap();
-    assert_eq!(executor.seam_dispatches(), jobs.len());
-    for (actual, sum) in singleton_output[..6].iter().zip(sums) {
-        assert_eq!(*actual, 2.0 * sum - 0.5);
-    }
-    assert_eq!(&singleton_output[6..], &[1.0, 1.0]);
-
-    let affine = (0..4)
-        .map(|offset| batch_job((1, 1, 1), (offset, offset, offset)))
-        .collect::<Vec<_>>();
-    let data = [2.0, 3.0, 5.0, 7.0];
-    let mut split_output = [0.0; 4];
-    executor.reset_seam_dispatches();
-    executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::F64(DenseViewMut::new(&mut split_output, &[4], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&data, &[4], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&data, &[4], &strides, 0).unwrap()),
-            &affine,
-            &[2, 2],
-            MatrixOp::Transpose,
-            MatrixOp::Identity,
-            DenseScalar::F64(1.0),
-            DenseScalar::F64(0.0),
-        )
-        .unwrap();
-    assert_eq!(executor.seam_dispatches(), 2);
-    assert_eq!(split_output, [4.0, 9.0, 25.0, 49.0]);
-}
-
-#[test]
-fn op_bearing_malformed_runs_fall_back_without_skipping_late_errors() {
-    let strides = [1];
-    let affine = (0..4)
-        .map(|offset| batch_job((1, 1, 1), (offset, offset, offset)))
-        .collect::<Vec<_>>();
-    let data = [2.0, 3.0, 5.0, 7.0];
-    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
-    for malformed_runs in [&[3][..], &[usize::MAX][..], &[4, 0][..]] {
-        let mut output = [-1.0; 4];
-        executor.reset_seam_dispatches();
-        executor
-            .matmul_batch_axpby_with_ops_into(
-                DenseWrite::F64(DenseViewMut::new(&mut output, &[4], &strides, 0).unwrap()),
-                DenseRead::F64(DenseView::new(&data, &[4], &strides, 0).unwrap()),
-                DenseRead::F64(DenseView::new(&data, &[4], &strides, 0).unwrap()),
-                &affine,
-                malformed_runs,
-                MatrixOp::Transpose,
-                MatrixOp::Identity,
-                DenseScalar::F64(1.0),
-                DenseScalar::F64(0.0),
-            )
-            .unwrap();
-        assert_eq!(executor.seam_dispatches(), 4);
-        assert_eq!(output, [4.0, 9.0, 25.0, 49.0]);
-    }
-
-    let mut nonaffine = affine.clone();
-    nonaffine[2].lhs_offset = 3;
-    let mut nonaffine_output = [-1.0; 4];
-    executor.reset_seam_dispatches();
-    executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::F64(DenseViewMut::new(&mut nonaffine_output, &[4], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&data, &[4], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&data, &[4], &strides, 0).unwrap()),
-            &nonaffine,
-            &[4],
-            MatrixOp::Transpose,
-            MatrixOp::Identity,
-            DenseScalar::F64(1.0),
-            DenseScalar::F64(0.0),
-        )
-        .unwrap();
-    assert_eq!(executor.seam_dispatches(), 4);
-    assert_eq!(nonaffine_output, [4.0, 9.0, 35.0, 49.0]);
-
-    let lhs = [2.0, 3.0, 5.0];
-    let rhs = [7.0, 11.0, 13.0, 17.0];
-    for runs in [&[4][..], &[1, 1, 0, 2][..]] {
-        let mut output = [-1.0; 4];
-        executor.reset_seam_dispatches();
-        let error = executor
-            .matmul_batch_axpby_with_ops_into(
-                DenseWrite::F64(DenseViewMut::new(&mut output, &[4], &strides, 0).unwrap()),
-                DenseRead::F64(DenseView::new(&lhs, &[3], &strides, 0).unwrap()),
-                DenseRead::F64(DenseView::new(&rhs, &[4], &strides, 0).unwrap()),
-                &affine,
-                runs,
-                MatrixOp::Transpose,
-                MatrixOp::Identity,
-                DenseScalar::F64(1.0),
-                DenseScalar::F64(0.0),
-            )
-            .unwrap_err();
-        assert_eq!(error, DenseError::OutOfBounds);
-        assert_eq!(executor.seam_dispatches(), 3);
-        assert_eq!(output, [14.0, 33.0, 65.0, -1.0]);
-    }
-}
-
-#[test]
-fn op_bearing_empty_zero_and_backend_failure_keep_serial_boundaries() {
-    let strides = [1];
-    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
-    let mut output = [3.0];
-    executor.reset_seam_dispatches();
-    executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::F64(DenseViewMut::new(&mut output, &[1], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&[1.0], &[1], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&[2.0], &[1], &strides, 0).unwrap()),
-            &[],
-            &[],
-            MatrixOp::Transpose,
-            MatrixOp::Identity,
-            DenseScalar::F64(1.0),
-            DenseScalar::F64(0.0),
-        )
-        .unwrap();
-    assert_eq!(executor.seam_dispatches(), 0);
-    assert_eq!(output, [3.0]);
-
-    let zero_jobs = [
-        batch_job((0, 1, 1), (0, 0, 0)),
-        batch_job((0, 1, 1), (1, 0, 1)),
-    ];
-    let rhs = [2.0, 3.0];
-    executor.reset_seam_dispatches();
-    executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::F64(DenseViewMut::new(&mut output, &[1], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&[], &[0], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&rhs, &[2], &strides, 0).unwrap()),
-            &zero_jobs,
-            &[2],
-            MatrixOp::Transpose,
-            MatrixOp::Identity,
-            DenseScalar::F64(1.0),
-            DenseScalar::F64(0.0),
-        )
-        .unwrap();
-    assert_eq!(executor.seam_dispatches(), 2);
-    assert_eq!(output, [3.0]);
-
-    let jobs = [
-        batch_job((1, 1, 1), (0, 0, 0)),
-        batch_job((1, 1, 1), (1, 1, 1)),
-    ];
-    let values = [2.0, 3.0];
-    let mut failed_output = [5.0, 7.0];
-    executor.reset_seam_dispatches();
-    let error = executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::F64(DenseViewMut::new(&mut failed_output, &[2], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&values, &[2], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&values, &[2], &strides, 0).unwrap()),
-            &jobs,
-            &[2],
-            MatrixOp::Transpose,
-            MatrixOp::Identity,
-            DenseScalar::C64(Complex64::new(1.0, 0.0)),
-            DenseScalar::F64(0.0),
-        )
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        DenseError::Backend {
-            op: "matmul_batch_axpby_with_ops_into",
-            ..
-        }
-    ));
-    assert_eq!(executor.seam_dispatches(), 1);
-    assert_eq!(failed_output, [5.0, 7.0]);
-}
-
-#[test]
-fn identity_strided_run_keeps_lhs_bounds_before_rhs_offset_error() {
-    let jobs = (0..4)
-        .map(|batch| DenseGemmBatchJob {
-            dst_offset: 2 * batch,
-            lhs_offset: 0,
-            rhs_offset: usize::MAX,
-            rows: 2,
-            contracted: 1,
-            cols: 1,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(strided_batch_runs(&jobs), [4]);
-    let lhs = [1.0];
-    let rhs = [2.0, 3.0];
-    let mut output = [5.0; 8];
-    let strides = [1];
-    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
-    executor.reset_seam_dispatches();
-    let error = executor
-        .matmul_batch_axpby_into(
-            DenseWrite::F64(DenseViewMut::new(&mut output, &[8], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&lhs, &[1], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&rhs, &[1], &strides, 1).unwrap()),
-            &jobs,
-            &[4],
-            DenseScalar::F64(1.0),
-            DenseScalar::F64(0.0),
-        )
-        .unwrap_err();
-    assert_eq!(error, DenseError::OutOfBounds);
-    assert_eq!(executor.seam_dispatches(), 0);
-    assert_eq!(output, [5.0; 8]);
-}
-
-// Regression guard for the conjugated-contraction fast path: a conj flag on
-// `dot_general_into` must fold conjugation into the kernel and produce exactly
-// what contracting an elementwise-conjugated operand would — and it must
-// actually change the result (so the flag can't be silently dropped back to a
-// no-op or a bypassed scalar loop).
-#[test]
-fn dot_general_conjugation_flag_matches_materialized_conjugate() {
-    let c = |re: f64, im: f64| Complex64::new(re, im);
-    let shape = [2usize, 2];
-    let strides = [1usize, 2]; // column-major
-    let lhs = vec![c(1.0, 1.0), c(3.0, 2.0), c(2.0, -1.0), c(4.0, -3.0)];
-    let rhs = vec![c(5.0, -2.0), c(7.0, -4.0), c(6.0, 1.0), c(8.0, 2.0)];
-
-    let run = |lhs_data: &[Complex64], lhs_conj: bool, rhs_conj: bool| -> Vec<Complex64> {
-        let mut out = vec![c(0.0, 0.0); 4];
-        let mut executor = DefaultDenseExecutor::new();
-        executor
-            .dot_general_into(
-                DenseWrite::C64(DenseViewMut::new(&mut out, &shape, &strides, 0).unwrap()),
-                DenseRead::C64(DenseView::new(lhs_data, &shape, &strides, 0).unwrap()),
-                DenseRead::C64(DenseView::new(&rhs, &shape, &strides, 0).unwrap()),
-                &DenseDotConfig::matmul().with_conjugation(lhs_conj, rhs_conj),
-            )
-            .unwrap();
-        out
-    };
-
-    let via_flag = run(&lhs, true, false);
-    let lhs_conjugated: Vec<Complex64> = lhs.iter().map(|z| z.conj()).collect();
-    let via_materialized = run(&lhs_conjugated, false, false);
-    for (actual, expected) in via_flag.iter().zip(&via_materialized) {
-        assert_c64_close(*actual, *expected, 1.0e-12);
-    }
-
-    let plain = run(&lhs, false, false);
-    assert!(
-        via_flag
-            .iter()
-            .zip(&plain)
-            .any(|(a, b)| (a - b).norm() > 1.0e-9),
-        "conjugation flag had no effect on the result"
-    );
-}
-
-fn col_major_index(rows: usize, row: usize, col: usize) -> usize {
-    row + col * rows
-}
-
-fn transpose_f32(mat: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    let mut out = vec![0.0; rows * cols];
-    for j in 0..cols {
-        for i in 0..rows {
-            out[col_major_index(cols, j, i)] = mat[col_major_index(rows, i, j)];
-        }
-    }
-    out
-}
-
-fn transpose_f64(mat: &[f64], rows: usize, cols: usize) -> Vec<f64> {
-    let mut out = vec![0.0; rows * cols];
-    for j in 0..cols {
-        for i in 0..rows {
-            out[col_major_index(cols, j, i)] = mat[col_major_index(rows, i, j)];
-        }
-    }
-    out
-}
-
-fn transpose_c32(mat: &[Complex32], rows: usize, cols: usize) -> Vec<Complex32> {
-    let mut out = vec![Complex32::new(0.0, 0.0); rows * cols];
-    for j in 0..cols {
-        for i in 0..rows {
-            out[col_major_index(cols, j, i)] = mat[col_major_index(rows, i, j)];
-        }
-    }
-    out
-}
-
-fn transpose_c64(mat: &[Complex64], rows: usize, cols: usize) -> Vec<Complex64> {
-    let mut out = vec![Complex64::new(0.0, 0.0); rows * cols];
-    for j in 0..cols {
-        for i in 0..rows {
-            out[col_major_index(cols, j, i)] = mat[col_major_index(rows, i, j)];
-        }
-    }
-    out
-}
-
-fn conjugate_transpose_c32(mat: &[Complex32], rows: usize, cols: usize) -> Vec<Complex32> {
-    let mut out = vec![Complex32::new(0.0, 0.0); rows * cols];
-    for j in 0..cols {
-        for i in 0..rows {
-            out[col_major_index(cols, j, i)] = mat[col_major_index(rows, i, j)].conj();
-        }
-    }
-    out
-}
-
-fn conjugate_transpose_c64(mat: &[Complex64], rows: usize, cols: usize) -> Vec<Complex64> {
-    let mut out = vec![Complex64::new(0.0, 0.0); rows * cols];
-    for j in 0..cols {
-        for i in 0..rows {
-            out[col_major_index(cols, j, i)] = mat[col_major_index(rows, i, j)].conj();
-        }
-    }
-    out
-}
-
-fn matmul_f32(lhs: &[f32], rhs: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
-    let mut out = vec![0.0; m * n];
-    for j in 0..n {
-        for p in 0..k {
-            let rhs_pj = rhs[col_major_index(k, p, j)];
-            for i in 0..m {
-                out[col_major_index(m, i, j)] += lhs[col_major_index(m, i, p)] * rhs_pj;
-            }
-        }
-    }
-    out
-}
-
-fn matmul_f64(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
-    let mut out = vec![0.0; m * n];
-    for j in 0..n {
-        for p in 0..k {
-            let rhs_pj = rhs[col_major_index(k, p, j)];
-            for i in 0..m {
-                out[col_major_index(m, i, j)] += lhs[col_major_index(m, i, p)] * rhs_pj;
-            }
-        }
-    }
-    out
-}
-
-fn matmul_c32(
-    lhs: &[Complex32],
-    rhs: &[Complex32],
-    m: usize,
-    k: usize,
-    n: usize,
-) -> Vec<Complex32> {
-    let mut out = vec![Complex32::new(0.0, 0.0); m * n];
-    for j in 0..n {
-        for p in 0..k {
-            let rhs_pj = rhs[col_major_index(k, p, j)];
-            for i in 0..m {
-                out[col_major_index(m, i, j)] += lhs[col_major_index(m, i, p)] * rhs_pj;
-            }
-        }
-    }
-    out
-}
-
-fn matmul_c64(
-    lhs: &[Complex64],
-    rhs: &[Complex64],
-    m: usize,
-    k: usize,
-    n: usize,
-) -> Vec<Complex64> {
-    let mut out = vec![Complex64::new(0.0, 0.0); m * n];
-    for j in 0..n {
-        for p in 0..k {
-            let rhs_pj = rhs[col_major_index(k, p, j)];
-            for i in 0..m {
-                out[col_major_index(m, i, j)] += lhs[col_major_index(m, i, p)] * rhs_pj;
-            }
-        }
-    }
-    out
-}
-
-fn diag_f32(values: &[f32]) -> Vec<f32> {
-    let mut out = vec![0.0; values.len() * values.len()];
-    for (i, value) in values.iter().enumerate() {
-        out[col_major_index(values.len(), i, i)] = *value;
-    }
-    out
-}
-
-fn diag_f64(values: &[f64]) -> Vec<f64> {
-    let mut out = vec![0.0; values.len() * values.len()];
-    for (i, value) in values.iter().enumerate() {
-        out[col_major_index(values.len(), i, i)] = *value;
-    }
-    out
-}
-
-fn diag_c32_from_real(values: &[f32]) -> Vec<Complex32> {
-    let mut out = vec![Complex32::new(0.0, 0.0); values.len() * values.len()];
-    for (i, value) in values.iter().enumerate() {
-        out[col_major_index(values.len(), i, i)] = Complex32::new(*value, 0.0);
-    }
-    out
-}
-
-fn diag_c64_from_real(values: &[f64]) -> Vec<Complex64> {
-    let mut out = vec![Complex64::new(0.0, 0.0); values.len() * values.len()];
-    for (i, value) in values.iter().enumerate() {
-        out[col_major_index(values.len(), i, i)] = Complex64::new(*value, 0.0);
-    }
-    out
-}
-
-#[test]
-fn dense_view_rejects_out_of_bounds_layout() {
-    let data = [0.0; 6];
-    let shape = [2, 3];
-    let strides = [1, 4];
-    let err = DenseView::new(&data, &shape, &strides, 0).unwrap_err();
-    assert_eq!(err, DenseError::OutOfBounds);
-}
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn default_executor_matmul_into_matches_tensorkit_recoupling_view_for_all_gemm_dtypes() {
@@ -1164,7 +164,6 @@ fn default_executor_matmul_into_matches_tensorkit_recoupling_view_for_all_gemm_d
         ]
     );
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
@@ -1336,7 +335,6 @@ fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
         }
     }
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn default_executor_bundles_short_runs_into_one_seam_dispatch() {
@@ -1437,7 +435,6 @@ fn default_executor_bundles_short_runs_into_one_seam_dispatch() {
         }
     }
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn default_executor_qr_reads_transposed_views_for_all_linalg_dtypes() {
@@ -1535,7 +532,6 @@ fn default_executor_qr_reads_transposed_views_for_all_linalg_dtypes() {
         assert_c64_close(*actual, *expected, 1.0e-9);
     }
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn default_executor_eigh_reads_transposed_views_for_all_linalg_dtypes() {
@@ -1641,7 +637,6 @@ fn default_executor_eigh_reads_transposed_views_for_all_linalg_dtypes() {
         assert_c64_close(*actual, *expected, 1.0e-10);
     }
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn default_executor_svd_accepts_all_supported_linalg_dtypes() {
@@ -1693,7 +688,6 @@ fn default_executor_svd_accepts_all_supported_linalg_dtypes() {
         assert_eq!(outputs[2].dtype(), dtype);
     }
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn default_executor_svd_into_writes_strided_destination_views() {
@@ -1734,7 +728,6 @@ fn default_executor_svd_into_writes_strided_destination_views() {
         assert_f64_close(s[2 * index], expected_s[index], 1e-12);
     }
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn default_executor_qr_into_writes_strided_destination_views() {
@@ -1773,7 +766,6 @@ fn default_executor_qr_into_writes_strided_destination_views() {
         }
     }
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn default_executor_eigh_into_writes_strided_destination_views() {
@@ -1824,7 +816,6 @@ fn default_executor_eigh_into_writes_strided_destination_views() {
         }
     }
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn default_executor_rejects_integer_linalg_view() {
@@ -1845,23 +836,19 @@ fn default_executor_rejects_integer_linalg_view() {
         } if message.contains("does not support dtype I32")
     ));
 }
-
 #[cfg(all(feature = "cpu-faer", not(feature = "cpu-blas-core")))]
 #[test]
 fn faer_only_build_rejects_uncompiled_blas_provider() {
     let error = DefaultDenseExecutor::with_kind(CpuBackendKind::Blas).unwrap_err();
     assert!(error.to_string().contains("cpu-blas"));
 }
-
 #[cfg(all(feature = "cpu-blas-core", not(feature = "cpu-faer")))]
 #[test]
 fn blas_only_build_rejects_uncompiled_faer_provider() {
     let error = DefaultDenseExecutor::with_kind(CpuBackendKind::Faer).unwrap_err();
     assert!(error.to_string().contains("cpu-faer"));
 }
-
 struct FullOnly(DefaultDenseExecutor);
-
 impl DenseExecutor for FullOnly {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         self.0.svd(input)
@@ -1889,7 +876,6 @@ impl DenseExecutor for FullOnly {
         self.0.dot_general_into(output, lhs, rhs, config)
     }
 }
-
 #[test]
 fn owned_full_svd_default_is_explicitly_unsupported() {
     let mut executor = FullOnly(DefaultDenseExecutor::new());
@@ -1907,14 +893,12 @@ fn owned_full_svd_default_is_explicitly_unsupported() {
         }
     ));
 }
-
 /// Implements only the required trait methods, so the accumulate-form matmul
 /// falls through to the [`DenseExecutor`] default.
 #[derive(Default)]
 struct NoAxpby {
     dot_calls: usize,
 }
-
 impl DenseExecutor for NoAxpby {
     fn svd(&mut self, _input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         unreachable!("the accumulate-form matmul default never factorizes")
@@ -1939,7 +923,6 @@ impl DenseExecutor for NoAxpby {
         Ok(())
     }
 }
-
 #[test]
 fn accumulate_form_matmul_default_overwrites_then_reports_unsupported() {
     let mut executor = NoAxpby::default();
@@ -1987,7 +970,6 @@ fn accumulate_form_matmul_default_overwrites_then_reports_unsupported() {
         "the unsupported arm must not drive a kernel"
     );
 }
-
 #[cfg(all(
     any(feature = "cpu-faer", feature = "cpu-blas-core"),
     not(feature = "provider-inject")
@@ -1996,7 +978,6 @@ fn accumulate_form_matmul_default_overwrites_then_reports_unsupported() {
 fn default_executor_advertises_native_owned_full_svd() {
     assert!(DefaultDenseExecutor::new().supports_svd_full());
 }
-
 #[cfg(all(
     any(feature = "cpu-faer", feature = "cpu-blas-core"),
     not(feature = "provider-inject")
@@ -2013,7 +994,6 @@ fn default_executor_runs_native_owned_full_svd() {
     assert_eq!(outputs[1].shape(), [2]);
     assert_eq!(outputs[2].shape(), [3, 3]);
 }
-
 #[cfg(all(
     any(feature = "cpu-faer", feature = "cpu-blas-core"),
     not(feature = "provider-inject")
@@ -2064,7 +1044,6 @@ fn native_owned_full_svd_validates_overflow_length_then_zero_extent() {
     ));
     assert!(owned_full_svd_input_pointers().is_empty());
 }
-
 #[cfg(all(
     any(feature = "cpu-faer", feature = "cpu-blas-core"),
     not(feature = "provider-inject")
@@ -2114,7 +1093,6 @@ fn native_owned_full_svd_moves_each_dtype_input_buffer() {
 
     assert_eq!(owned_full_svd_input_pointers(), expected);
 }
-
 #[test]
 fn solve_default_is_explicitly_unsupported_without_writing() {
     // What: executors without solve capability reject the operation before
@@ -2143,7 +1121,6 @@ fn solve_default_is_explicitly_unsupported_without_writing() {
     ));
     assert_eq!(x, [37.0]);
 }
-
 #[test]
 fn default_executor_solves_f64_from_and_into_strided_views() {
     // What: solve reads legal noncontiguous coefficients and writes only the
@@ -2181,7 +1158,6 @@ fn default_executor_solves_f64_from_and_into_strided_views() {
     }
     assert_eq!([x[1], x[3], x[4], x[6], x[8]], [-77.0; 5]);
 }
-
 #[test]
 fn default_executor_solves_c64_system() {
     // What: complex solve preserves both real and imaginary components for a
@@ -2206,7 +1182,6 @@ fn default_executor_solves_c64_system() {
     assert_c64_close(x[0], c(1.0, 2.0), 1.0e-12);
     assert_c64_close(x[1], c(-1.0, 1.0), 1.0e-12);
 }
-
 #[test]
 fn solve_validates_destination_before_singular_factorization() {
     // What: destination dtype and shape errors take precedence over a singular
@@ -2277,7 +1252,6 @@ fn solve_validates_destination_before_singular_factorization() {
     ));
     assert_eq!(x, [13.0, 17.0]);
 }
-
 // Exercises the values-only trait *defaults* (full decomposition minus the
 // vectors). `DefaultDenseExecutor` overrides them, so this wraps it in an
 // executor that implements svd/eigh/eig but leaves svd_vals/eigh_vals/eig_vals
@@ -2320,7 +1294,6 @@ fn values_only_defaults_fall_back_to_the_full_decomposition_spectrum() {
         assert_c64_close(*a, *b, tol);
     }
 }
-
 #[cfg(not(feature = "provider-inject"))]
 #[test]
 fn default_executor_svd_vals_returns_literal_spectra_for_every_dense_dtype() {
@@ -2392,7 +1365,6 @@ fn default_executor_svd_vals_returns_literal_spectra_for_every_dense_dtype() {
     }
     assert_eq!(c64_data, c64_before);
 }
-
 #[cfg(not(feature = "provider-inject"))]
 #[test]
 fn default_executor_eigh_vals_returns_literal_spectra_for_every_dense_dtype() {
@@ -2462,7 +1434,6 @@ fn default_executor_eigh_vals_returns_literal_spectra_for_every_dense_dtype() {
     }
     assert_eq!(c64_data, c64_before);
 }
-
 #[cfg(not(feature = "provider-inject"))]
 #[test]
 fn default_executor_values_only_reads_offset_padded_transposed_views() {
@@ -2532,7 +1503,6 @@ fn default_executor_values_only_reads_offset_padded_transposed_views() {
     }
     assert_eq!(overlap_data, [2.0]);
 }
-
 #[cfg(not(feature = "provider-inject"))]
 #[test]
 fn default_executor_values_only_admits_batches_and_zero_extents() {
@@ -2599,7 +1569,6 @@ fn default_executor_values_only_admits_batches_and_zero_extents() {
     assert_eq!(values.shape(), &[2, 0]);
     assert!(values.as_f64_slice().unwrap().is_empty());
 }
-
 #[cfg(not(feature = "provider-inject"))]
 #[test]
 fn default_executor_values_only_preserves_rank_and_dtype_rejections() {
@@ -2680,46 +1649,11 @@ fn default_executor_values_only_preserves_rank_and_dtype_rejections() {
         } if message.contains("does not support dtype Bool")
     ));
 }
-
-#[cfg(all(
-    not(feature = "provider-inject"),
-    any(feature = "cpu-faer", feature = "cpu-blas-core")
-))]
-fn assert_values_only_for_explicit_cpu_provider(kind: CpuBackendKind) {
-    let mut executor = DefaultDenseExecutor::with_kind(kind).unwrap();
-    let data = [2.0_f64, 0.0, 0.0, -1.0];
-    let shape = [2, 2];
-    let strides = [1, 2];
-
-    let values = executor
-        .svd_vals(DenseRead::F64(
-            DenseView::new(&data, &shape, &strides, 0).unwrap(),
-        ))
-        .unwrap();
-    let values = values.as_f64_slice().unwrap();
-    assert_eq!(values.len(), 2);
-    for (actual, expected) in values.iter().zip([2.0, 1.0]) {
-        assert_f64_close(*actual, expected, 1.0e-12);
-    }
-
-    let values = executor
-        .eigh_vals(DenseRead::F64(
-            DenseView::new(&data, &shape, &strides, 0).unwrap(),
-        ))
-        .unwrap();
-    let values = values.as_f64_slice().unwrap();
-    assert_eq!(values.len(), 2);
-    for (actual, expected) in values.iter().zip([-1.0, 2.0]) {
-        assert_f64_close(*actual, expected, 1.0e-12);
-    }
-}
-
 #[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
 #[test]
 fn default_executor_values_only_runs_explicit_faer_provider() {
     assert_values_only_for_explicit_cpu_provider(CpuBackendKind::Faer);
 }
-
 #[cfg(all(
     not(feature = "provider-inject"),
     any(
@@ -2732,18 +1666,6 @@ fn default_executor_values_only_runs_explicit_faer_provider() {
 fn default_executor_values_only_runs_explicit_blas_provider() {
     assert_values_only_for_explicit_cpu_provider(CpuBackendKind::Blas);
 }
-
-fn batch_job(shape: (usize, usize, usize), offsets: (usize, usize, usize)) -> DenseGemmBatchJob {
-    DenseGemmBatchJob {
-        rows: shape.0,
-        contracted: shape.1,
-        cols: shape.2,
-        dst_offset: offsets.0,
-        lhs_offset: offsets.1,
-        rhs_offset: offsets.2,
-    }
-}
-
 #[test]
 fn strided_batch_runs_partitions_same_shape_constant_stride_runs() {
     // Two length-2 constant-stride runs (shapes A, B) followed by a singleton
@@ -2774,7 +1696,6 @@ fn strided_batch_runs_partitions_same_shape_constant_stride_runs() {
         "run partition must cover all jobs"
     );
 }
-
 #[test]
 fn strided_batch_runs_breaks_on_shape_and_stride_changes() {
     // A shape change ends a run; a non-constant stride within one shape also
@@ -2786,248 +1707,6 @@ fn strided_batch_runs_breaks_on_shape_and_stride_changes() {
     ];
     assert_eq!(strided_batch_runs(&jobs), vec![2, 1]);
 }
-
-// ---------------------------------------------------------------------------
-// Identity batch dispatch (#1182): one strided rank-3 dot iff the batch is one
-// affine run of >= 2 jobs with destination step >= rows * cols; otherwise one
-// grouped submission over every job. Oracles below are scalar loops over the
-// job list, independent of the adapter's routing.
-// ---------------------------------------------------------------------------
-
-trait IdentityBatchScalar:
-    Copy + Default + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self> + PartialEq
-{
-    fn read(view: DenseView<'_, Self>) -> DenseRead<'_>;
-    fn write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_>;
-    fn scalar(value: Self) -> DenseScalar;
-    fn sample(index: usize, salt: f64) -> Self;
-    fn assert_close(actual: Self, expected: Self);
-}
-
-impl IdentityBatchScalar for f64 {
-    fn read(view: DenseView<'_, Self>) -> DenseRead<'_> {
-        DenseRead::F64(view)
-    }
-    fn write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_> {
-        DenseWrite::F64(view)
-    }
-    fn scalar(value: Self) -> DenseScalar {
-        DenseScalar::F64(value)
-    }
-    fn sample(index: usize, salt: f64) -> Self {
-        0.5 + salt + 0.25 * index as f64 - 0.01 * (index * index % 7) as f64
-    }
-    fn assert_close(actual: Self, expected: Self) {
-        assert_f64_close(actual, expected, 1.0e-10);
-    }
-}
-
-impl IdentityBatchScalar for f32 {
-    fn read(view: DenseView<'_, Self>) -> DenseRead<'_> {
-        DenseRead::F32(view)
-    }
-    fn write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_> {
-        DenseWrite::F32(view)
-    }
-    fn scalar(value: Self) -> DenseScalar {
-        DenseScalar::F32(value)
-    }
-    fn sample(index: usize, salt: f64) -> Self {
-        <f64 as IdentityBatchScalar>::sample(index, salt) as f32
-    }
-    fn assert_close(actual: Self, expected: Self) {
-        assert_f32_close(actual, expected, 1.0e-3);
-    }
-}
-
-impl IdentityBatchScalar for Complex64 {
-    fn read(view: DenseView<'_, Self>) -> DenseRead<'_> {
-        DenseRead::C64(view)
-    }
-    fn write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_> {
-        DenseWrite::C64(view)
-    }
-    fn scalar(value: Self) -> DenseScalar {
-        DenseScalar::C64(value)
-    }
-    fn sample(index: usize, salt: f64) -> Self {
-        Complex64::new(
-            <f64 as IdentityBatchScalar>::sample(index, salt),
-            -0.75 + 0.125 * index as f64 + salt,
-        )
-    }
-    fn assert_close(actual: Self, expected: Self) {
-        assert_c64_close(actual, expected, 1.0e-10);
-    }
-}
-
-impl IdentityBatchScalar for Complex32 {
-    fn read(view: DenseView<'_, Self>) -> DenseRead<'_> {
-        DenseRead::C32(view)
-    }
-    fn write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_> {
-        DenseWrite::C32(view)
-    }
-    fn scalar(value: Self) -> DenseScalar {
-        DenseScalar::C32(value)
-    }
-    fn sample(index: usize, salt: f64) -> Self {
-        let value = <Complex64 as IdentityBatchScalar>::sample(index, salt);
-        Complex32::new(value.re as f32, value.im as f32)
-    }
-    fn assert_close(actual: Self, expected: Self) {
-        assert_c32_close(actual, expected, 1.0e-3);
-    }
-}
-
-/// Column-major scalar oracle: `alpha * lhs * rhs + beta * dst` per job over
-/// flat buffers with view base offsets; elements no job owns are unchanged.
-fn identity_batch_oracle<T: IdentityBatchScalar>(
-    jobs: &[DenseGemmBatchJob],
-    lhs: &[T],
-    rhs: &[T],
-    output_before: &[T],
-    base: (usize, usize, usize),
-    alpha: T,
-    beta: T,
-) -> Vec<T> {
-    let mut expected = output_before.to_vec();
-    for job in jobs {
-        let lhs_base = base.0 + job.lhs_offset;
-        let rhs_base = base.1 + job.rhs_offset;
-        let dst_base = base.2 + job.dst_offset;
-        for col in 0..job.cols {
-            for row in 0..job.rows {
-                let mut sum = T::default();
-                for inner in 0..job.contracted {
-                    sum = sum
-                        + lhs[lhs_base + row + job.rows * inner]
-                            * rhs[rhs_base + inner + job.contracted * col];
-                }
-                let index = dst_base + row + job.rows * col;
-                expected[index] = alpha * sum + beta * output_before[index];
-            }
-        }
-    }
-    expected
-}
-
-struct IdentityBatchFixture<T> {
-    jobs: Vec<DenseGemmBatchJob>,
-    lhs: Vec<T>,
-    rhs: Vec<T>,
-    output: Vec<T>,
-    base: (usize, usize, usize),
-}
-
-/// Lays `shapes` out sequentially in flat lhs/rhs/dst buffers, leaving `gap`
-/// unused elements between consecutive blocks of every operand and `base`
-/// elements before the view offset. `gap == 0` yields a batch whose same-shape
-/// neighbours are one affine run.
-fn identity_fixture<T: IdentityBatchScalar>(
-    shapes: &[(usize, usize, usize)],
-    gap: usize,
-    base: (usize, usize, usize),
-    sentinel: T,
-) -> IdentityBatchFixture<T> {
-    let (mut lhs_off, mut rhs_off, mut dst_off) = (0usize, 0usize, 0usize);
-    let jobs = shapes
-        .iter()
-        .map(|&(rows, contracted, cols)| {
-            let job = DenseGemmBatchJob {
-                dst_offset: dst_off,
-                lhs_offset: lhs_off,
-                rhs_offset: rhs_off,
-                rows,
-                contracted,
-                cols,
-            };
-            lhs_off += rows * contracted + gap;
-            rhs_off += contracted * cols + gap;
-            dst_off += rows * cols + gap;
-            job
-        })
-        .collect::<Vec<_>>();
-    let lhs = (0..base.0 + lhs_off + 1)
-        .map(|i| T::sample(i, 0.0))
-        .collect();
-    let rhs = (0..base.1 + rhs_off + 1)
-        .map(|i| T::sample(i, 1.5))
-        .collect();
-    let output = vec![sentinel; base.2 + dst_off + 1];
-    IdentityBatchFixture {
-        jobs,
-        lhs,
-        rhs,
-        output,
-        base,
-    }
-}
-
-fn run_identity_batch<T: IdentityBatchScalar>(
-    executor: &mut DefaultDenseExecutor,
-    fixture: &mut IdentityBatchFixture<T>,
-    runs: &[usize],
-    alpha: T,
-    beta: T,
-) -> Result<(), DenseError> {
-    let strides = [1usize];
-    let (lhs_base, rhs_base, dst_base) = fixture.base;
-    let lhs_shape = [fixture.lhs.len() - lhs_base];
-    let rhs_shape = [fixture.rhs.len() - rhs_base];
-    let out_shape = [fixture.output.len() - dst_base];
-    executor.reset_seam_dispatches();
-    executor.matmul_batch_axpby_into(
-        T::write(DenseViewMut::new(&mut fixture.output, &out_shape, &strides, dst_base).unwrap()),
-        T::read(DenseView::new(&fixture.lhs, &lhs_shape, &strides, lhs_base).unwrap()),
-        T::read(DenseView::new(&fixture.rhs, &rhs_shape, &strides, rhs_base).unwrap()),
-        &fixture.jobs,
-        runs,
-        T::scalar(alpha),
-        T::scalar(beta),
-    )
-}
-
-/// Executes the batch with the plan-time partition (unless `runs` overrides
-/// it), asserts exactly `dispatches` seam submissions and oracle-exact values.
-#[allow(clippy::too_many_arguments)]
-fn check_identity_batch<T: IdentityBatchScalar>(
-    executor: &mut DefaultDenseExecutor,
-    shapes: &[(usize, usize, usize)],
-    gap: usize,
-    base: (usize, usize, usize),
-    runs: Option<&[usize]>,
-    alpha: T,
-    beta: T,
-    dispatches: usize,
-) {
-    let mut fixture = identity_fixture::<T>(shapes, gap, base, T::sample(3, -4.0));
-    let plan_runs = strided_batch_runs(&fixture.jobs);
-    let runs = runs.unwrap_or(&plan_runs);
-    let expected = identity_batch_oracle(
-        &fixture.jobs,
-        &fixture.lhs,
-        &fixture.rhs,
-        &fixture.output,
-        base,
-        alpha,
-        beta,
-    );
-    run_identity_batch(executor, &mut fixture, runs, alpha, beta).unwrap();
-    assert_eq!(
-        executor.seam_dispatches(),
-        dispatches,
-        "shapes {shapes:?} gap {gap} runs {runs:?}"
-    );
-    for (actual, expected) in fixture.output.iter().zip(&expected) {
-        T::assert_close(*actual, *expected);
-    }
-}
-
-fn c64(re: f64, im: f64) -> Complex64 {
-    Complex64::new(re, im)
-}
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn identity_single_affine_run_is_one_strided_dispatch_for_two_and_four_jobs() {
@@ -3058,7 +1737,6 @@ fn identity_single_affine_run_is_one_strided_dispatch_for_two_and_four_jobs() {
         );
     }
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn identity_long_run_with_residual_jobs_is_one_grouped_dispatch() {
@@ -3099,7 +1777,6 @@ fn identity_long_run_with_residual_jobs_is_one_grouped_dispatch() {
         1,
     );
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn identity_heterogeneous_batch_with_gaps_and_base_offsets_is_one_dispatch() {
@@ -3120,7 +1797,6 @@ fn identity_heterogeneous_batch_with_gaps_and_base_offsets_is_one_dispatch() {
     );
     check_identity_batch::<f32>(&mut executor, &shapes, 1, (0, 1, 0), None, 2.0, 0.0, 1);
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn identity_beta_zero_overwrites_sentinel_on_both_paths() {
@@ -3155,7 +1831,6 @@ fn identity_beta_zero_overwrites_sentinel_on_both_paths() {
         }
     }
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn identity_overlapping_destinations_are_rejected_by_the_grouped_validator_without_writes() {
@@ -3217,7 +1892,6 @@ fn identity_overlapping_destinations_are_rejected_by_the_grouped_validator_witho
     assert_eq!(executor.seam_dispatches(), 1);
     assert_eq!(output, vec![c64(3.0, -3.0); 6]);
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn identity_empty_and_zero_dimension_batches_on_both_paths() {
@@ -3264,7 +1938,6 @@ fn identity_empty_and_zero_dimension_batches_on_both_paths() {
         check_identity_batch::<f64>(&mut executor, &shapes, 1, (0, 0, 0), None, 1.5, 0.5, 1);
     }
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn identity_executor_replays_strided_grouped_strided_across_shapes() {
@@ -3334,7 +2007,6 @@ fn identity_executor_replays_strided_grouped_strided_across_shapes() {
         1,
     );
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn identity_malformed_runs_route_grouped_over_all_jobs() {
@@ -3368,7 +2040,6 @@ fn identity_malformed_runs_route_grouped_over_all_jobs() {
         );
     }
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn identity_grouped_out_of_range_span_fails_before_any_write() {
@@ -3441,7 +2112,6 @@ fn identity_grouped_out_of_range_span_fails_before_any_write() {
     assert_eq!(executor.seam_dispatches(), 1);
     assert_eq!(output, vec![c64(-1.0, 1.0); 4]);
 }
-
 #[cfg(feature = "tenferro")]
 #[test]
 fn identity_two_job_affine_run_is_admitted_to_the_strided_view() {
