@@ -50,11 +50,17 @@ macro_rules! full_transpose {
     }};
 }
 
-macro_rules! full_transpose_overwrite_into {
+macro_rules! full_transpose_into {
     ($tensor:expr, $destination:expr, $alpha:expr) => {{
         let tensor = &$tensor;
         let (codomain_axes, domain_axes) = full_rotation!(tensor);
-        tensor.transpose_overwrite_into($destination, &codomain_axes, &domain_axes, $alpha)
+        tensor.transpose_into(
+            &codomain_axes,
+            &domain_axes,
+            $destination,
+            $alpha,
+            Default::default(),
+        )
     }};
 }
 
@@ -946,7 +952,7 @@ fn device_transforms_of_an_empty_tensor_produce_an_empty_tensor() {
 }
 
 // ---------------------------------------------------------------------------
-// `*_overwrite_into` (issue #1329, G2b-3)
+// `*_into` (issue #1329, G2b-3)
 // ---------------------------------------------------------------------------
 
 /// A destination whose every element is NaN, on the model's space. Overwrite
@@ -1007,7 +1013,7 @@ fn nan_positions<D: Payload>(data: &[D]) -> Vec<usize> {
         .collect()
 }
 
-/// Runs one `*_overwrite_into` on the Host and on the device, into two
+/// Runs one `*_into` on the Host and on the device, into two
 /// independently built NaN-poisoned destinations on the same space, and
 /// asserts the device destination is the Host destination — payload to dtype
 /// tolerance (NaN for NaN), spaces and block identities exactly.
@@ -1053,7 +1059,7 @@ const REAL_ALPHAS: [f64; 4] = [1.0, -2.5, 0.0, -0.0];
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
+fn device_into_matches_the_host_for_every_alpha_and_method() {
     let runtime = runtime();
     let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
     let u1_dual = u1_leg(&[(-1, 1), (0, 2), (1, 1)], true);
@@ -1069,35 +1075,35 @@ fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
     let bent = real.repartition(1).unwrap();
     for alpha in REAL_ALPHAS {
         let written = device_overwrite_matches_host!(
-            &format!("U1/f64 permute_overwrite_into alpha={alpha}"),
+            &format!("U1/f64 permute_into alpha={alpha}"),
             real,
             permuted,
-            |t, d| t.permute_overwrite_into(d, &[2, 0], &[1, 3], alpha)
+            |t, d| t.permute_into(&[2, 0], &[1, 3], d, alpha, Default::default())
         );
         if alpha != 0.0 {
             assert_moved(
                 real.dense_data().unwrap(),
                 written.dense_data().unwrap(),
-                "U1/f64 permute_overwrite_into",
+                "U1/f64 permute_into",
             );
         }
         device_overwrite_matches_host!(
-            &format!("U1/f64 transpose_overwrite_into alpha={alpha}"),
+            &format!("U1/f64 transpose_into alpha={alpha}"),
             real,
             transposed,
-            |t, d| full_transpose_overwrite_into!(t, d, alpha)
+            |t, d| full_transpose_into!(t, d, alpha)
         );
         device_overwrite_matches_host!(
-            &format!("U1/f64 transpose_overwrite_into alpha={alpha}"),
+            &format!("U1/f64 transpose_into alpha={alpha}"),
             real,
             cyclic,
-            |t, d| t.transpose_overwrite_into(d, &[1, 3], &[0, 2], alpha)
+            |t, d| t.transpose_into(&[1, 3], &[0, 2], d, alpha, Default::default())
         );
         device_overwrite_matches_host!(
-            &format!("U1/f64 repartition_overwrite_into alpha={alpha}"),
+            &format!("U1/f64 repartition_into alpha={alpha}"),
             real,
             bent,
-            |t, d| t.repartition_overwrite_into(d, alpha)
+            |t, d| t.repartition_into(d, alpha, Default::default())
         );
     }
 
@@ -1112,7 +1118,7 @@ fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
             &format!("U1/f64 non-finite alpha={alpha}"),
             real,
             permuted_model,
-            |t, d| t.permute_overwrite_into(d, &[2, 0], &[1, 3], alpha)
+            |t, d| t.permute_into(&[2, 0], &[1, 3], d, alpha, Default::default())
         );
         assert!(
             written
@@ -1137,29 +1143,29 @@ fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
     ];
     for alpha in complex_alphas {
         device_overwrite_matches_host!(
-            &format!("U1/c64 permute_overwrite_into alpha={alpha}"),
+            &format!("U1/c64 permute_into alpha={alpha}"),
             complex,
             permuted,
-            |t, d| t.permute_overwrite_into(d, &[2, 0], &[1, 3], alpha)
+            |t, d| t.permute_into(&[2, 0], &[1, 3], d, alpha, Default::default())
         );
         device_overwrite_matches_host!(
-            &format!("U1/c64 transpose_overwrite_into alpha={alpha}"),
+            &format!("U1/c64 transpose_into alpha={alpha}"),
             complex,
             transposed,
-            |t, d| full_transpose_overwrite_into!(t, d, alpha)
+            |t, d| full_transpose_into!(t, d, alpha)
         );
         device_overwrite_matches_host!(
-            &format!("U1/c64 repartition_overwrite_into alpha={alpha}"),
+            &format!("U1/c64 repartition_into alpha={alpha}"),
             complex,
             bent,
-            |t, d| t.repartition_overwrite_into(d, alpha)
+            |t, d| t.repartition_into(d, alpha, Default::default())
         );
     }
 }
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers() {
+fn device_into_matches_the_host_for_recoupling_and_fermionic_providers() {
     let runtime = runtime();
 
     // SU(2): Multi blocks, so the caller scale reaches the scatter rather than
@@ -1174,42 +1180,48 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
     let bent = su2_real.repartition(3).unwrap();
     for alpha in REAL_ALPHAS {
         let written = device_overwrite_matches_host!(
-            &format!("SU2/f64 permute_overwrite_into alpha={alpha}"),
+            &format!("SU2/f64 permute_into alpha={alpha}"),
             su2_real,
             permuted,
-            |t, d| t.permute_overwrite_into(d, &[1, 2], &[3, 0], alpha)
+            |t, d| t.permute_into(&[1, 2], &[3, 0], d, alpha, Default::default())
         );
         if alpha != 0.0 {
             assert_not_a_reordering(
                 su2_real.dense_data().unwrap(),
                 written.dense_data().unwrap(),
-                "SU2 overwrite_into",
+                "SU2 *_into",
             );
         }
         device_overwrite_matches_host!(
-            &format!("SU2/f64 transpose_overwrite_into alpha={alpha}"),
+            &format!("SU2/f64 transpose_into alpha={alpha}"),
             su2_real,
             transposed,
-            |t, d| full_transpose_overwrite_into!(t, d, alpha)
+            |t, d| full_transpose_into!(t, d, alpha)
         );
         device_overwrite_matches_host!(
-            &format!("SU2/f64 repartition_overwrite_into alpha={alpha}"),
+            &format!("SU2/f64 repartition_into alpha={alpha}"),
             su2_real,
             bent,
-            |t, d| t.repartition_overwrite_into(d, alpha)
+            |t, d| t.repartition_into(d, alpha, Default::default())
         );
     }
     let su2_permuted_c = su2_complex.permute(&[1, 2], &[3, 0]).unwrap();
     let written = device_overwrite_matches_host!(
-        "SU2/c64 permute_overwrite_into complex alpha",
+        "SU2/c64 permute_into complex alpha",
         su2_complex,
         su2_permuted_c,
-        |t, d| t.permute_overwrite_into(d, &[1, 2], &[3, 0], Complex64::new(0.75, -0.25))
+        |t, d| t.permute_into(
+            &[1, 2],
+            &[3, 0],
+            d,
+            Complex64::new(0.75, -0.25),
+            Complex64::new(0.0, 0.0)
+        )
     );
     assert_not_a_reordering(
         su2_complex.dense_data().unwrap(),
         written.dense_data().unwrap(),
-        "SU2/c64 overwrite_into",
+        "SU2/c64 *_into",
     );
 
     // fZ2 x U(1): fermionic signs on a charge grading.
@@ -1230,29 +1242,29 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
     let bent = host.repartition(1).unwrap();
     for alpha in REAL_ALPHAS {
         let written = device_overwrite_matches_host!(
-            &format!("fZ2xU1 permute_overwrite_into alpha={alpha}"),
+            &format!("fZ2xU1 permute_into alpha={alpha}"),
             host,
             permuted,
-            |t, d| t.permute_overwrite_into(d, &[2, 1], &[0, 3], alpha)
+            |t, d| t.permute_into(&[2, 1], &[0, 3], d, alpha, Default::default())
         );
         if alpha != 0.0 {
             assert_not_a_reordering(
                 host.dense_data().unwrap(),
                 written.dense_data().unwrap(),
-                "fZ2xU1 overwrite_into",
+                "fZ2xU1 *_into",
             );
         }
         device_overwrite_matches_host!(
-            &format!("fZ2xU1 transpose_overwrite_into alpha={alpha}"),
+            &format!("fZ2xU1 transpose_into alpha={alpha}"),
             host,
             cyclic,
-            |t, d| t.transpose_overwrite_into(d, &[1, 3], &[0, 2], alpha)
+            |t, d| t.transpose_into(&[1, 3], &[0, 2], d, alpha, Default::default())
         );
         device_overwrite_matches_host!(
-            &format!("fZ2xU1 repartition_overwrite_into alpha={alpha}"),
+            &format!("fZ2xU1 repartition_into alpha={alpha}"),
             host,
             bent,
-            |t, d| t.repartition_overwrite_into(d, alpha)
+            |t, d| t.repartition_into(d, alpha, Default::default())
         );
     }
 
@@ -1289,36 +1301,36 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
         Complex64::new(0.75, -0.25),
     ] {
         let written = device_overwrite_matches_host!(
-            &format!("fZ2xSU2 permute_overwrite_into alpha={alpha}"),
+            &format!("fZ2xSU2 permute_into alpha={alpha}"),
             host,
             permuted,
-            |t, d| t.permute_overwrite_into(d, &[1, 2], &[3, 0], alpha)
+            |t, d| t.permute_into(&[1, 2], &[3, 0], d, alpha, Default::default())
         );
         if alpha != Complex64::new(0.0, 0.0) {
             assert_not_a_reordering(
                 host.dense_data().unwrap(),
                 written.dense_data().unwrap(),
-                "fZ2xSU2 overwrite_into",
+                "fZ2xSU2 *_into",
             );
         }
         device_overwrite_matches_host!(
-            &format!("fZ2xSU2 transpose_overwrite_into alpha={alpha}"),
+            &format!("fZ2xSU2 transpose_into alpha={alpha}"),
             host,
             transposed,
-            |t, d| full_transpose_overwrite_into!(t, d, alpha)
+            |t, d| full_transpose_into!(t, d, alpha)
         );
         device_overwrite_matches_host!(
-            &format!("fZ2xSU2 repartition_overwrite_into alpha={alpha}"),
+            &format!("fZ2xSU2 repartition_into alpha={alpha}"),
             host,
             bent,
-            |t, d| t.repartition_overwrite_into(d, alpha)
+            |t, d| t.repartition_into(d, alpha, Default::default())
         );
     }
 }
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_overwrite_into_matches_the_hosts_nan_pattern_for_every_alpha() {
+fn device_into_matches_the_hosts_nan_pattern_for_every_alpha() {
     // At `alpha == 0` device and Host follow VectorInterface's
     // `scale(x, 0) = zero(x) * 0` (#1438): zeros whatever the source holds,
     // as TensorKit's `permute!(tdst, tsrc, p, 0, 0)`. Every other scale
@@ -1355,10 +1367,10 @@ fn device_overwrite_into_matches_the_hosts_nan_pattern_for_every_alpha() {
     // reproduce.
     for alpha in [0.0, -0.0, 1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let written = device_overwrite_matches_host!(
-            &format!("NaN source overwrite_into alpha={alpha}"),
+            &format!("NaN source *_into alpha={alpha}"),
             poisoned_source,
             model,
-            |t, d| t.permute_overwrite_into(d, &[1, 2], &[3, 0], alpha)
+            |t, d| t.permute_into(&[1, 2], &[3, 0], d, alpha, Default::default())
         );
         // The exact NaN *set*, not merely "some NaN survived": `any` would
         // pass if only one of the poisoned blocks propagated. `device ==
@@ -1366,7 +1378,13 @@ fn device_overwrite_into_matches_the_hosts_nan_pattern_for_every_alpha() {
         // adds that the set is non-empty, so the case cannot pass vacuously.
         let mut host_expected = poisoned_like(&model);
         poisoned_source
-            .permute_overwrite_into(&mut host_expected, &[1, 2], &[3, 0], alpha)
+            .permute_into(
+                &[1, 2],
+                &[3, 0],
+                &mut host_expected,
+                alpha,
+                Default::default(),
+            )
             .unwrap();
         let expected_nans = nan_positions(host_expected.dense_data().unwrap());
         if alpha == 0.0 {
@@ -1394,7 +1412,7 @@ fn device_overwrite_into_matches_the_hosts_nan_pattern_for_every_alpha() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_overwrite_into_has_no_identity_short_circuit() {
+fn device_into_has_no_identity_short_circuit() {
     // Host `overwrite_tree_transform` has none: an identity axis list still
     // writes `alpha * self` into the caller's destination. A device clone
     // short circuit would silently leave the destination poisoned.
@@ -1402,27 +1420,23 @@ fn device_overwrite_into_has_no_identity_short_circuit() {
     let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
     let host: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
-    let written =
-        device_overwrite_matches_host!("identity permute_overwrite_into", host, host, |t, d| t
-            .permute_overwrite_into(d, &[0, 1], &[2, 3], -2.5));
+    let written = device_overwrite_matches_host!("identity permute_into", host, host, |t, d| t
+        .permute_into(&[0, 1], &[2, 3], d, -2.5, 0.0));
     assert_payload_close(
         written.dense_data().unwrap(),
         host.scale(-2.5).dense_data().unwrap(),
-        "identity permute_overwrite_into writes alpha * self",
+        "identity permute_into writes alpha * self",
     );
 
     // Same split for `repartition`, and a rank-0 `transpose`: the returning
     // device methods clone there, the overwriting ones must still write.
-    let written = device_overwrite_matches_host!(
-        "same-split repartition_overwrite_into",
-        host,
-        host,
-        |t, d| t.repartition_overwrite_into(d, 2.0)
-    );
+    let written =
+        device_overwrite_matches_host!("same-split repartition_into", host, host, |t, d| t
+            .repartition_into(d, 2.0, 0.0));
     assert_payload_close(
         written.dense_data().unwrap(),
         host.scale(2.0).dense_data().unwrap(),
-        "same-split repartition_overwrite_into writes alpha * self",
+        "same-split repartition_into writes alpha * self",
     );
 
     let square: TensorMap<_, f64> =
@@ -1430,21 +1444,21 @@ fn device_overwrite_into_has_no_identity_short_circuit() {
     let scalar = square.trace_pairs(&[(0, 1)]).unwrap();
     assert_eq!(scalar.rank(), 0);
     let written = device_overwrite_matches_host!(
-        "rank-0 transpose_overwrite_into",
+        "rank-0 transpose_into",
         scalar,
         scalar,
-        |t, d| full_transpose_overwrite_into!(t, d, -0.5)
+        |t, d| full_transpose_into!(t, d, -0.5)
     );
     assert_payload_close(
         written.dense_data().unwrap(),
         scalar.scale(-0.5).dense_data().unwrap(),
-        "rank-0 transpose_overwrite_into writes alpha * self",
+        "rank-0 transpose_into writes alpha * self",
     );
 }
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_overwrite_into_of_an_empty_tensor_succeeds() {
+fn device_into_of_an_empty_tensor_succeeds() {
     let runtime = runtime();
     let codomain = u1_leg(&[(1, 2)], false);
     let domain = u1_leg(&[(0, 3)], false);
@@ -1455,7 +1469,7 @@ fn device_overwrite_into_of_an_empty_tensor_succeeds() {
     let source = host.to_cuda().unwrap();
     let mut destination = model.to_cuda().unwrap();
     source
-        .permute_overwrite_into(&mut destination, &[1], &[0], 2.0)
+        .permute_into(&[1], &[0], &mut destination, 2.0, 0.0)
         .unwrap();
     assert!(destination
         .to_host()

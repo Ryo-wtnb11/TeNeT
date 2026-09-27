@@ -136,7 +136,7 @@ where
         spec: &ContractSpec<'_>,
     ) -> Result<StepOutput<TensorMap<R, D>>, Error> {
         if let Some(destination) = destination {
-            lhs.contract_overwrite_into(rhs, destination, spec, D::from_real(1.0))?;
+            lhs.contract_into(rhs, spec, destination, D::from_real(1.0), D::from_real(0.0))?;
             Ok(StepOutput::Overwritten)
         } else {
             Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
@@ -150,7 +150,13 @@ where
         domain: &[usize],
     ) -> Result<StepOutput<TensorMap<R, D>>, Error> {
         if let Some(destination) = destination {
-            tensor.permute_overwrite_into(destination, codomain, domain, D::from_real(1.0))?;
+            tensor.permute_into(
+                codomain,
+                domain,
+                destination,
+                D::from_real(1.0),
+                D::from_real(0.0),
+            )?;
             Ok(StepOutput::Overwritten)
         } else {
             Ok(StepOutput::Returned(tensor.permute(codomain, domain)?))
@@ -257,9 +263,9 @@ where
 /// retained device destinations.
 ///
 /// Each arm is the Host arm with the device twin of the same typed operation:
-/// general-axes `contract` / `contract_overwrite_into` (the Host-compiled
+/// general-axes `contract` / `contract_into` (the Host-compiled
 /// DynamicTree or core route, fermionic twist included) and `permute` /
-/// `permute_overwrite_into`. Every step but the last overwrites a destination
+/// `permute_into` with `beta = 0`. Every step but the last overwrites a destination
 /// the workspace kept from the previous call (neither device overwrite needs a
 /// reset of it); the final schedule slot leaves the workspace and therefore
 /// always allocates a fresh returning output. Slots, producers, input
@@ -300,7 +306,7 @@ where
         #[cfg(test)]
         CUDA_NETWORK_CONTRACT_CALLS.with(|calls| calls.set(calls.get() + 1));
         if let Some(destination) = destination {
-            lhs.contract_overwrite_into(rhs, destination, spec, D::from_real(1.0))?;
+            lhs.contract_into(rhs, spec, destination, D::from_real(1.0), D::from_real(0.0))?;
             Ok(StepOutput::Overwritten)
         } else {
             Ok(StepOutput::Returned(lhs.contract(rhs, spec)?))
@@ -314,7 +320,13 @@ where
         domain: &[usize],
     ) -> Result<StepOutput<TensorMap<R, D, CudaStorage<D>>>, Error> {
         if let Some(destination) = destination {
-            tensor.permute_overwrite_into(destination, codomain, domain, D::from_real(1.0))?;
+            tensor.permute_into(
+                codomain,
+                domain,
+                destination,
+                D::from_real(1.0),
+                D::from_real(0.0),
+            )?;
             Ok(StepOutput::Overwritten)
         } else {
             Ok(StepOutput::Returned(tensor.permute(codomain, domain)?))

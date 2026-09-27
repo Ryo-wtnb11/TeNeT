@@ -521,7 +521,13 @@ fn materialize_is_the_remedy_for_apis_that_reject_lazy_adjoints() {
     let pointer = destination.dense_data().unwrap().as_ptr();
     lazy.materialize()
         .unwrap()
-        .permute_overwrite_into(&mut destination, &[0], &[1], Complex64::new(1.0, 0.0))
+        .permute_into(
+            &[0],
+            &[1],
+            &mut destination,
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        )
         .unwrap();
     assert_eq!(destination.dense_data().unwrap().as_ptr(), pointer);
     assert_eq!(tensor.dense_data().unwrap(), before.as_slice());

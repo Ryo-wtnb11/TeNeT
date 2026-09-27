@@ -533,16 +533,17 @@ fn assert_reordered_overwrite<R, D>(
         }
     };
     assert_oracle(&expected);
-    lhs.contract_overwrite_into(
+    lhs.contract_into(
         &rhs,
-        &mut destination,
         &ContractSpec {
             lhs: &[1],
             rhs: &[0],
             codomain: &[1],
             domain: &[0],
         },
+        &mut destination,
         D::from_real(1.0),
+        D::from_real(0.0),
     )
     .unwrap();
     assert_oracle(&destination);

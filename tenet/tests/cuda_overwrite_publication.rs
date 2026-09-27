@@ -4,7 +4,7 @@
 //!
 //! F1, overwrite destination. Thread A runs `D = a.contract(a)` and hands `D`
 //! to thread B; B downloads it, which syncs B's stream past `D`'s bind; A then
-//! runs a long `b.contract_overwrite_into(b, &mut D)` and hands `D` back; B
+//! runs a long `b.contract_into(b, &mut D)` and hands `D` back; B
 //! downloads `D` again. Without publication B's stream skips the event and
 //! copies `D` while the overwrite GEMM is still running. The control skips
 //! B's first download, so B's only sync to A's stream is the final one.
@@ -116,16 +116,17 @@ fn overwrite_destination(forced: bool) -> usize {
             )
             .unwrap();
             let mut d = from_b.recv().unwrap();
-            b.contract_overwrite_into(
+            b.contract_into(
                 &b,
-                &mut d,
                 &ContractSpec {
                     lhs: &[1],
                     rhs: &[0],
                     codomain: &[0],
                     domain: &[1],
                 },
+                &mut d,
                 1.0,
+                0.0,
             )
             .unwrap();
             to_b.send(d).unwrap();
@@ -211,7 +212,7 @@ impl F2 {
     /// upload, so the enqueue returns while the GEMMs still run.
     fn enqueue(&mut self) {
         self.x
-            .contract_overwrite_into(&self.y, &mut self.d, &F2_SPEC, 1.0)
+            .contract_into(&self.y, &F2_SPEC, &mut self.d, 1.0, 0.0)
             .unwrap();
     }
 

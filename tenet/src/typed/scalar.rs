@@ -1061,60 +1061,131 @@ where
         }
     }
 
-    /// Replaces the host tensor `x` with `alpha * x + beta * y`, the in-place
-    /// form of [`Self::axpby`].
+    /// `destination = alpha * self + beta * destination`: BLAS `axpby`,
+    /// TensorKit `add!(ty, tx, α, β)`, in place on the destination's dense
+    /// host payload.
     ///
-    /// A uniquely owned dense receiver is updated without allocating a new
-    /// payload. All other representations use [`Self::axpby`], so compact
-    /// spectra remain compact and shared bodies remain copy-on-write.
-    pub fn axpby_assign<'a>(
-        &mut self,
+    /// Each element is `scale(destination, beta) + scale(self, alpha)` with
+    /// VectorInterface's strong zero, in one pass: `beta == 0` does not let a
+    /// NaN in `destination` through, and `alpha == 0` does not read `self`.
+    /// A lazy-adjoint `self` is read in its logical orientation without
+    /// filling its cache; a compact diagonal `self` is added onto the
+    /// diagonal after `destination` is scaled.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RuntimeMismatch`]; [`Error::InvalidArgument`] when the two
+    /// tensors live on different spaces or block layouts, when `destination`
+    /// is not owned dense host storage, or when it aliases `self`;
+    /// [`Error::DestinationShared`] when `destination` shares its storage with
+    /// a clone. Every rejection happens before any write.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
+    /// let x: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 1)?;
+    /// let mut y = x.zeros_like();
+    /// x.axpby_into(&mut y, 2.0, 0.0)?;
+    /// assert_eq!(y.dense_data()?, x.scale(2.0).dense_data()?);
+    ///
+    /// // A clone shares the payload, so it is not a valid destination.
+    /// let shared = y.clone();
+    /// assert_eq!(x.axpby_into(&mut y, 1.0, 1.0), Err(Error::DestinationShared));
+    /// drop(shared);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
+    pub fn axpby_into(
+        &self,
+        destination: &mut Self,
         alpha: D,
-        y: impl Into<TensorRef<'a, R, D>>,
         beta: D,
     ) -> Result<(), TypedFacadeError<R>> {
-        let y = y.into().operand()?;
-        let y = &*y;
-        if !self.runtime.same_runtime(&y.runtime) {
-            return Err(TypedFacadeError::<R>::from(Error::RuntimeMismatch));
-        }
-        if self.logical_space().space() != y.logical_space().space() {
-            return Err(TypedFacadeError::<R>::from(Error::InvalidArgument(
-                "tensors live on different spaces or block layouts".to_string(),
-            )));
-        }
-        let source = match &y.repr {
-            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
-                TypedData::Dense(data) => Some(data.as_slice()),
-                TypedData::Diagonal(_) => None,
-            },
-            TypedTensorRepr::Adjoint(_) => None,
-        };
-        let Some(source) = source else {
-            *self = self.axpby(alpha, y, beta)?;
-            return Ok(());
-        };
-        let Some(body) = (match &mut self.repr {
-            TypedTensorRepr::Owned(body) => Arc::get_mut(body),
-            TypedTensorRepr::Adjoint(_) => None,
-        }) else {
-            *self = self.axpby(alpha, y, beta)?;
-            return Ok(());
-        };
-        let Some(TypedData::Dense(data)) = Arc::get_mut(&mut body.data) else {
-            *self = self.axpby(alpha, y, beta)?;
-            return Ok(());
-        };
-        if data.len() != source.len() {
-            return Err(TypedFacadeError::<R>::from(Error::InvalidArgument(
-                "tensors have different dense payload lengths".to_string(),
-            )));
-        }
-        for (dst, src) in data.iter_mut().zip(source) {
-            *dst = scale_value(*dst, alpha) + scale_value(*src, beta);
-        }
-        Ok(())
+        host_axpby_into(self, destination, alpha, beta).map_err(TypedFacadeError::<R>::from)
     }
+}
+
+/// The host `axpby_into` body, shared with the empty-pair `trace_pairs_into`.
+pub(super) fn host_axpby_into<R, D>(
+    x: &TensorMap<R, D>,
+    destination: &mut TensorMap<R, D>,
+    alpha: D,
+    beta: D,
+) -> Result<(), Error>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    if !x.runtime.same_runtime(&destination.runtime) {
+        return Err(Error::RuntimeMismatch);
+    }
+    if x.logical_space().space() != destination.logical_space().space() {
+        return Err(Error::InvalidArgument(
+            "tensors live on different spaces or block layouts".to_string(),
+        ));
+    }
+    let destination_body = match &destination.repr {
+        TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Dense(_)) => body,
+        _ => {
+            return Err(Error::InvalidArgument(
+                "destination must use ordinary dense host storage".to_string(),
+            ))
+        }
+    };
+    if Arc::ptr_eq(&destination_body.data, &x.storage_body().data) {
+        return Err(Error::InvalidArgument(
+            "destination storage must not alias an input".to_string(),
+        ));
+    }
+    if Arc::strong_count(destination_body) != 1 || Arc::strong_count(&destination_body.data) != 1 {
+        return Err(Error::DestinationShared);
+    }
+    let _host_pool = x.runtime.enter_host_pool();
+    let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
+        return Err(internal_layout_error("ordinary destination checked above"));
+    };
+    let destination_data = Arc::get_mut(destination_body)
+        .and_then(|body| Arc::get_mut(&mut body.data))
+        .ok_or_else(|| internal_layout_error("unique destination checked above"))?;
+    let TypedData::Dense(destination_data) = destination_data else {
+        return Err(internal_layout_error("dense destination checked above"));
+    };
+    match &x.repr {
+        TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+            TypedData::Dense(source) => {
+                if source.len() != destination_data.len() {
+                    return Err(Error::InvalidArgument(
+                        "tensors have different dense payload lengths".to_string(),
+                    ));
+                }
+                for (value, &source) in destination_data.iter_mut().zip(source) {
+                    *value = scale_value(*value, beta) + scale_value(source, alpha);
+                }
+            }
+            TypedData::Diagonal(spectrum) => {
+                for value in destination_data.iter_mut() {
+                    *value = scale_value(*value, beta);
+                }
+                add_spectrum_into(x.logical_space().space(), destination_data, spectrum, alpha)?;
+            }
+        },
+        TypedTensorRepr::Adjoint(_) => {
+            let (operand, source) = x.fusion_operand_and_data();
+            tenet_tensors::oriented_fusion_axpby_into(
+                x.logical_space().space().structure(),
+                destination_data,
+                operand,
+                &source,
+                alpha,
+                beta,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 impl<R, D> TensorMap<R, D>

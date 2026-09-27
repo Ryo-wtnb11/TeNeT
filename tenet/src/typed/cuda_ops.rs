@@ -983,7 +983,7 @@ where
         // zeros; replace only with a measured native allocation. The zeros are
         // also what the accumulating replay starts from.
         let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
-        tenet_tensors::tensortrace_fusion_structure_accumulate_on_cuda(
+        tenet_tensors::tensortrace_fusion_structure_into_on_cuda(
             cuda,
             transforms,
             &self.structure,
@@ -991,6 +991,7 @@ where
             &mut output,
             self.source_space.space().structure(),
             self.source,
+            D::from_real(1.0),
             D::from_real(1.0),
         )?;
         drop(lease);
@@ -1469,6 +1470,94 @@ where
         Ok(self.with_owned_cuda_storage(output))
     }
 
+    /// `destination = alpha * self + beta * destination` on the device: the
+    /// Host [`TensorMap::axpby_into`], BLAS `axpby`.
+    ///
+    /// One `dot_general` over the whole payload with `alpha` as its descriptor
+    /// scale and `beta` in its epilogue: `beta = 0` never reads the
+    /// destination, and a zero `alpha` does not read `self` (the destination
+    /// becomes `beta * destination` through a zero-source move). Nothing is
+    /// uploaded or allocated on a warm context.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RuntimeMismatch`]; [`Error::InvalidArgument`] for different
+    /// spaces or block layouts, a destination that is not owned dense CUDA
+    /// storage, or one that aliases `self`; [`Error::UnsupportedOnDevice`] for
+    /// a lazy-adjoint or compact `self`, as for the returning
+    /// [`Self::axpby`] with mixed operands; [`Error::DestinationShared`];
+    /// [`Error::PlacementMismatch`]. Every rejection happens before any device
+    /// work.
+    pub fn axpby_into(&self, destination: &mut Self, alpha: D, beta: D) -> Result<(), Error> {
+        if !self.runtime.same_runtime(&destination.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if self.logical_space().space() != destination.logical_space().space() {
+            return Err(Error::InvalidArgument(
+                "tensors live on different spaces or block layouts".to_string(),
+            ));
+        }
+        let source = self.direct_cuda_storage("axpby_into")?;
+        let destination_storage = unique_cuda_destination(
+            destination,
+            &self.storage_body().data,
+            self.logical_space().space(),
+        )?;
+        let device = Placement::Cuda(self.runtime.cuda_device_ordinal_checked()?);
+        if source.placement() != device || destination_storage.placement() != device {
+            return Err(Error::PlacementMismatch);
+        }
+        let len = TensorStorage::len(source);
+        let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
+            return Err(internal_layout_error(
+                "ordinary CUDA destination checked above",
+            ));
+        };
+        let destination_data = Arc::get_mut(destination_body)
+            .and_then(|body| Arc::get_mut(&mut body.data))
+            .ok_or_else(|| internal_layout_error("unique CUDA destination checked above"))?;
+        let TypedData::Dense(destination_data) = destination_data else {
+            return Err(internal_layout_error(
+                "dense CUDA destination checked above",
+            ));
+        };
+        if len == 0 {
+            return Ok(());
+        }
+        let dense_err = |err| Error::from(tenet_tensors::OperationError::Dense(err));
+        let region = tenet_dense::CudaRegion::packed(&[len], 0).map_err(dense_err)?;
+        let mut lease = self.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
+        if alpha.is_zero() {
+            return tenet_dense::cuda_region_scale::<D>(
+                cuda,
+                &mut destination_data.0,
+                &region,
+                beta,
+            )
+            .map_err(dense_err);
+        }
+        let beta = if beta.is_zero() {
+            tenet_dense::CudaRegionBeta::Overwrite
+        } else if beta == D::from_real(1.0) {
+            tenet_dense::CudaRegionBeta::Accumulate
+        } else {
+            tenet_dense::CudaRegionBeta::Scale(beta)
+        };
+        tenet_dense::cuda_region_axpby::<D>(
+            cuda,
+            &source.0,
+            &region,
+            false,
+            alpha,
+            tenet_dense::CudaRegionCoefficient::One,
+            beta,
+            &mut destination_data.0,
+            &region,
+        )
+        .map_err(dense_err)
+    }
+
     /// Exact positive-zero device tensor, independent of source values.
     pub fn zeros_like(&self) -> Result<Self, Error> {
         let required_len = self.logical_space().space().required_len()?;
@@ -1925,9 +2014,10 @@ where
             &resolution,
             dst_space.space().structure(),
             &mut dst,
-            true,
             lhs_storage,
             rhs_storage,
+            D::from_real(1.0),
+            tenet_tensors::ContractDestinationInit::Zeroed,
         )?;
         drop(lease);
         Ok(Self {
@@ -1936,41 +2026,42 @@ where
         })
     }
 
-    /// Overwrites `destination` with `alpha * self.contract(other, spec)` while
-    /// preserving the destination's provider, space, body, and device
-    /// allocation: arbitrary contracted and output axes, owned or lazy-adjoint
-    /// operands, through the same resolution as the returning [`Self::contract`].
+    /// `destination = alpha * self.contract(other, spec) + beta * destination`
+    /// on the device, preserving the destination's provider, space, body and
+    /// device allocation: arbitrary contracted and output axes, owned or
+    /// lazy-adjoint operands, through the same resolution as the returning
+    /// [`Self::contract`].
     ///
-    /// The admission sequence is the Host one
-    /// ([`TensorMap::contract_overwrite_into`]) plus the device's own
-    /// boundaries: same Runtime, the symmetric-braiding boundary of
-    /// [`Self::contract`],
-    /// same rule identity, an owned dense device
-    /// destination that aliases neither operand's payload body, the
+    /// The admission sequence is the Host one ([`TensorMap::contract_into`])
+    /// plus the device's own boundaries: same Runtime, the symmetric-braiding
+    /// boundary of [`Self::contract`], same rule identity, an owned dense
+    /// device destination that aliases neither operand's payload body, the
     /// contraction's fusion space and block layout (malformed axes report the
-    /// Host's errors here), exact operand and destination lengths, and unique
-    /// destination ownership; then `alpha = 1`, the compile of the Host route
-    /// and placement. Every rejection — including a compile error, which the
-    /// Host raises only after it has cleared its destination — happens before
-    /// any device work, so a rejected call leaves `destination` untouched.
+    /// Host's errors here), exact operand and destination lengths, unique
+    /// destination ownership ([`Error::DestinationShared`]), then the compile
+    /// of the Host route and placement. Every rejection — including a compile
+    /// error — happens before any device work, so a rejected call leaves
+    /// `destination` untouched.
     ///
-    /// `alpha` other than `1` is [`Error::UnsupportedOnDevice`]: the device
-    /// contraction has no caller scale, rather than a Host fallback.
+    /// `alpha` and `beta` ride the epilogue of whatever writes each element:
+    /// the core GEMMs (`alpha * job_alpha`, `beta`) when they write the
+    /// destination directly, otherwise the output transform in `Axpby(beta)`
+    /// mode. The coupled sectors no GEMM reaches become `beta * destination`
+    /// through a zero-source region move — zeros for `beta = 0`, which never
+    /// reads the destination, and nothing for `beta = 1`.
     ///
     /// # Cost
     ///
-    /// No destination reset: an output transform writes every element in
-    /// overwrite mode, and where the core GEMMs write the destination directly
-    /// exactly the blocks no GEMM reaches are zeroed (the Host clears the
-    /// whole destination). A warm call therefore transfers nothing and
-    /// allocates nothing on the device; scratch and coefficient payloads are
-    /// as for [`Self::contract`].
-    pub fn contract_overwrite_into<'a>(
+    /// No destination reset or separate `beta` pass over written blocks. A
+    /// warm call transfers nothing and allocates nothing on the device;
+    /// scratch and coefficient payloads are as for [`Self::contract`].
+    pub fn contract_into<'a>(
         &self,
         other: impl Into<TensorRef<'a, R, D, CudaStorage<D>>>,
-        destination: &mut Self,
         spec: &ContractSpec<'_>,
+        destination: &mut Self,
         alpha: D,
+        beta: D,
     ) -> Result<(), Error> {
         let (lhs_axes, rhs_axes) = (spec.lhs, spec.rhs);
         let output_axes = &spec.output_axes()[..];
@@ -2062,16 +2153,7 @@ where
         if Arc::strong_count(destination_body) != 1
             || Arc::strong_count(&destination_body.data) != 1
         {
-            return Err(Error::InvalidArgument(
-                "destination storage must be uniquely owned".to_string(),
-            ));
-        }
-        // The executors scale only by the plan's own coefficients and θ; a
-        // caller alpha would need the output-transform alpha rule of #1318.
-        if alpha != D::from_real(1.0) {
-            return Err(Error::UnsupportedOnDevice(
-                "typed CUDA contraction supports only alpha = 1".to_string(),
-            ));
+            return Err(Error::DestinationShared);
         }
         let destination_placement = destination_storage.placement();
 
@@ -2138,9 +2220,10 @@ where
             &resolution,
             execution_destination.space().structure(),
             destination_data,
-            false,
             lhs_storage,
             rhs_storage,
+            alpha,
+            tenet_tensors::ContractDestinationInit::Axpby(beta),
         )?;
         Ok(())
     }
@@ -2335,7 +2418,7 @@ where
     /// an output that was just uploaded as zeros, costing one submission and
     /// `Σ(inactive layout elements)` device writes per call. It is kept
     /// because it is what makes the executor's destination mode independent of
-    /// what the destination held, which `*_overwrite_into` relies on; removing
+    /// what the destination held, which `*_into` with `beta = 0` relies on; removing
     /// it here would need a second replay mode for no transfer saving.
     ///
     /// That warm contract holds only while this Runtime's Host transform store
@@ -2516,42 +2599,46 @@ where
         )
     }
 
-    /// Overwrites `destination` with `alpha * self.permute(...)` on the
-    /// device, without replacing its provider, space, body, or device
-    /// allocation.
+    /// `destination = alpha * self.permute(codomain_axes, domain_axes) +
+    /// beta * destination` on the device, without replacing its provider,
+    /// space, body, or device allocation: the Host [`TensorMap::permute_into`].
     ///
-    /// The admission sequence is the Host one
-    /// ([`TensorMap::permute_overwrite_into`]) plus the device's own placement
+    /// The admission sequence is the Host one plus the device's own placement
     /// check: same Runtime, same rule identity, an owned dense device source
     /// (a lazy adjoint is *rejected*, not lowered onto its parent, exactly as
     /// on Host — the destination is the caller's, so there is no re-wrapping
     /// to do), an owned dense device destination that does not alias the
     /// source payload, the admitted tree-pair operation or else the
     /// transform's own fusion space and block layout, the exact destination
-    /// length, and unique destination ownership. Every one of them, and the
-    /// structure compilation, happens before the device lease is taken; the
-    /// placement check is the first thing under it. After a successful replay
-    /// the exact source/destination layout pair is admitted on the Runtime,
-    /// so a second call with the same pair skips the layout derivation — the
-    /// same store, and the same admitted path, a Host call would take.
+    /// length, and unique destination ownership ([`Error::DestinationShared`]).
+    /// Every one of them, and the structure compilation, happens before the
+    /// device lease is taken; the placement check is the first thing under
+    /// it. After a successful replay the exact source/destination layout pair
+    /// is admitted on the Runtime, so a second call with the same pair skips
+    /// the layout derivation — the same store, and the same admitted path, a
+    /// Host call would take.
     ///
     /// There is no identity short circuit, because Host has none here: an
-    /// identity axis list still writes `alpha * self` into the destination.
+    /// identity axis list still writes `alpha * self + beta * destination`.
+    ///
+    /// `beta` rides the `dot_general` epilogue of the move or scatter that
+    /// writes each destination layout, once per element; the layouts no move
+    /// writes become `beta * destination` through a zero-source move (zeros
+    /// for `beta = 0`, which never reads the destination; nothing for
+    /// `beta = 1`).
     ///
     /// # Cost
     ///
     /// A warm call transfers nothing in either direction and allocates no
     /// device buffer: 0 H2D, 0 D2H, 0 device allocations. Unlike the returning
-    /// [`Self::permute`] it pays no output initialisation — the destination is
-    /// the caller's and the replay's overwrite mode zeroes every inactive
-    /// layout itself. The first call for a given structure uploads that
-    /// structure's coefficient payload once, may grow the pack/scatter
-    /// workspace once, and reserves the context zero template; that warm
-    /// contract holds only while this Runtime's Host transform store admits
-    /// the structure, as for [`Self::permute`]. `alpha == 0` takes its 1x1
-    /// operand from element 0 of that same context zero template, so the first
-    /// zero-scale call on a context whose template is still empty pays one
-    /// `size_of::<D>()`-byte upload and one device allocation — once per
+    /// [`Self::permute`] it pays no output initialisation. The first call for
+    /// a given structure uploads that structure's coefficient payload once,
+    /// may grow the pack/scatter workspace once, and reserves the context zero
+    /// template; that warm contract holds only while this Runtime's Host
+    /// transform store admits the structure, as for [`Self::permute`].
+    /// `alpha == 0` writes `beta * destination` over every written layout
+    /// through the same context zero template, so the first zero-scale call on
+    /// a context whose template is still short pays one upload — once per
     /// context, not per call.
     ///
     /// # Numerics
@@ -2560,38 +2647,38 @@ where
     /// rule: a Single block rounds as `alpha * (c * x)` where the Host folds
     /// the scales and rounds as `(alpha * c) * x`; Multi blocks agree in order
     /// with the Host (`alpha * (U x)`). `alpha == 0` — `-0.0` included, by
-    /// IEEE comparison — is not short-circuited, so a NaN or infinite source
-    /// poisons the destination exactly as it does on Host; only the sign of an
-    /// exact zero may differ.
+    /// IEEE comparison — does not read the source (VectorInterface's
+    /// `scale(x, 0) = zero(x)`), as on Host; only the sign of an exact zero
+    /// may differ.
     ///
     /// # Errors
     ///
     /// The Host variants and messages, with the storage noun naming the
-    /// placement (as for [`Self::contract_overwrite_into`]), plus
+    /// placement (as for [`Self::contract_into`]), plus
     /// [`Error::PlacementMismatch`] for a payload on another device.
     /// Validation and plan-construction failures leave `destination`
     /// untouched — no byte of it is written before the last rejection is
     /// decided. A backend error after replay begins may leave it partially
-    /// overwritten.
+    /// written.
     ///
     /// # Source compatibility
     ///
-    /// As for [`Self::permute`], the `cuda` feature adds these three names to a
-    /// second `impl`, so the *path* forms `TensorMap::permute_overwrite_into`,
-    /// `TensorMap::transpose_overwrite_into` and
-    /// `TensorMap::repartition_overwrite_into` become ambiguous (`E0034`).
-    /// Method-call syntax and `TensorMap::<R, D>::permute_overwrite_into` keep
-    /// working.
-    pub fn permute_overwrite_into(
+    /// As for [`Self::permute`], the `cuda` feature adds these names to a
+    /// second `impl`, so the *path* forms such as `TensorMap::permute_into`
+    /// become ambiguous (`E0034`). Method-call syntax and
+    /// `TensorMap::<R, D>::permute_into` keep working.
+    pub fn permute_into(
         &self,
-        destination: &mut Self,
         codomain_axes: &[usize],
         domain_axes: &[usize],
+        destination: &mut Self,
         alpha: D,
+        beta: D,
     ) -> Result<(), Error> {
-        self.overwrite_tree_transform_cuda(
+        self.tree_transform_into_cuda(
             destination,
             alpha,
+            beta,
             |_, _| {
                 Ok(TreeTransformOperation::permute(
                     codomain_axes.iter().copied(),
@@ -2609,20 +2696,51 @@ where
         )
     }
 
-    /// Overwrites `destination` with
-    /// `alpha * self.transpose(codomain_axes, domain_axes)` on the
-    /// device. Validation, cost, numerics and failure behavior are
-    /// [`Self::permute_overwrite_into`]'s.
-    pub fn transpose_overwrite_into(
+    /// `destination = alpha * self.braid(codomain_axes, domain_axes, levels) +
+    /// beta * destination` on the device: the Host [`TensorMap::braid_into`].
+    /// Validation, cost, numerics and failure behavior are
+    /// [`Self::permute_into`]'s.
+    pub fn braid_into(
         &self,
-        destination: &mut Self,
         codomain_axes: &[usize],
         domain_axes: &[usize],
+        levels: &[usize],
+        destination: &mut Self,
         alpha: D,
+        beta: D,
     ) -> Result<(), Error> {
-        self.overwrite_tree_transform_cuda(
+        let operation = braid_operation(
+            self.rank(),
+            self.codomain_rank(),
+            codomain_axes,
+            domain_axes,
+            levels,
+        )?;
+        let expected = operation.clone();
+        self.tree_transform_into_cuda(
             destination,
             alpha,
+            beta,
+            |_, _| Ok(operation),
+            |admitted| *admitted == expected,
+        )
+    }
+
+    /// `destination = alpha * self.transpose(codomain_axes, domain_axes) +
+    /// beta * destination` on the device. Validation, cost, numerics and
+    /// failure behavior are [`Self::permute_into`]'s.
+    pub fn transpose_into(
+        &self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), Error> {
+        self.tree_transform_into_cuda(
+            destination,
+            alpha,
+            beta,
             |source, _| {
                 with_planar_axes(
                     source.codomain_rank(),
@@ -2650,21 +2768,17 @@ where
         )
     }
 
-    /// Overwrites `destination` with
-    /// `alpha * self.repartition(destination.codomain_rank())` on the device.
-    /// Validation, cost, numerics and failure behavior are
-    /// [`Self::permute_overwrite_into`]'s.
-    pub fn repartition_overwrite_into(
-        &self,
-        destination: &mut Self,
-        alpha: D,
-    ) -> Result<(), Error> {
+    /// `destination = alpha * self.repartition(destination.codomain_rank()) +
+    /// beta * destination` on the device. Validation, cost, numerics and
+    /// failure behavior are [`Self::permute_into`]'s.
+    pub fn repartition_into(&self, destination: &mut Self, alpha: D, beta: D) -> Result<(), Error> {
         let source_codomain_rank = self.codomain_rank();
         let source_rank = self.rank();
         let destination_codomain_rank = destination.codomain_rank();
-        self.overwrite_tree_transform_cuda(
+        self.tree_transform_into_cuda(
             destination,
             alpha,
+            beta,
             |source, destination| {
                 if destination.rank() != source.rank() {
                     return Err(Error::InvalidArgument(format!(
@@ -2712,8 +2826,9 @@ where
         )
     }
 
-    /// One admission and replay boundary for every typed device overwrite,
-    /// mirroring Host `overwrite_tree_transform` step for step.
+    /// One admission and replay boundary for every typed device `*_into`
+    /// tree transform,
+    /// mirroring Host `tree_transform_into` step for step.
     ///
     /// The destination is the caller's device buffer, so — unlike the
     /// returning [`Self::tree_transform_cuda`], which owns a freshly uploaded
@@ -2726,10 +2841,11 @@ where
     /// Lock order is [`Self::tree_transform_cuda`]'s: the pooled Host context
     /// lease that compiles the structure is dropped before the device lease,
     /// and nothing under the device lease leases again.
-    fn overwrite_tree_transform_cuda(
+    fn tree_transform_into_cuda(
         &self,
         destination: &mut Self,
         alpha: D,
+        beta: D,
         operation: impl FnOnce(&Self, &Self) -> Result<TreeTransformOperation, Error>,
         admitted_operation_matches: impl FnMut(&TreeTransformOperation) -> bool,
     ) -> Result<(), Error> {
@@ -2742,7 +2858,7 @@ where
         }
 
         // Same error kinds, wording and order as Host; only the storage noun
-        // names the placement, as in `contract_overwrite_into`.
+        // names the placement, as in `contract_into`.
         // A lazy adjoint source is rejected rather than lowered: Host rejects
         // it here too, because lowering would produce a result shaped like the
         // adjoint's parent, not like the caller's destination.
@@ -2815,9 +2931,7 @@ where
         if Arc::strong_count(destination_body) != 1
             || Arc::strong_count(&destination_body.data) != 1
         {
-            return Err(Error::InvalidArgument(
-                "destination storage must be uniquely owned".to_string(),
-            ));
+            return Err(Error::DestinationShared);
         }
         let destination_placement = destination_storage.placement();
 
@@ -2827,7 +2941,7 @@ where
         // same pooled context lease; here it must happen before the device
         // lease is taken, as in `tree_transform_cuda`. The destination's
         // provider is the authority, exactly as Host's
-        // `tree_transform_dyn_overwrite_into_ref` call passes it.
+        // `tree_transform_dyn_into_ref` call passes it.
         let structure = {
             let mut lease = self.runtime.lease_context()?;
             lease
@@ -2875,7 +2989,7 @@ where
                 destination_data,
                 source_storage,
                 alpha,
-                CudaTreeTransformDestination::Overwrite,
+                CudaTreeTransformDestination::Axpby(beta),
             )?;
         }
         if !exact_layout_admitted {
@@ -3002,6 +3116,76 @@ where
             Some(trace) => trace.execute(),
             None => Ok(self.clone()),
         }
+    }
+
+    /// `destination = alpha * self.trace_pairs(pairs) + beta * destination` on
+    /// the device: the Host [`TensorMap::trace_pairs_into`].
+    ///
+    /// TensorKit's `_trace_permute!` order: every destination layout first
+    /// becomes `beta * destination` through a zero-source region move (zeros
+    /// for `beta = 0`, which never reads the destination; nothing for
+    /// `beta = 1`), then every term accumulates as in [`Self::trace_pairs`].
+    /// An empty `pairs` is [`Self::axpby_into`].
+    ///
+    /// # Errors
+    ///
+    /// [`Self::trace_pairs`]'s, all before any device work, then
+    /// [`Error::RuntimeMismatch`] / [`Error::RuleMismatch`] against the
+    /// destination, [`Error::InvalidArgument`] for a destination that is not
+    /// owned dense CUDA storage, aliases the source, or has the wrong space,
+    /// layout or length, [`Error::DestinationShared`] and
+    /// [`Error::PlacementMismatch`]. A rejected call leaves `destination`
+    /// untouched.
+    pub fn trace_pairs_into(
+        &self,
+        pairs: &[(usize, usize)],
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), Error> {
+        if !self.runtime.same_runtime(&destination.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if TypedSectorAdmission::typed_rule_identity(self.provider())
+            != TypedSectorAdmission::typed_rule_identity(destination.provider())
+        {
+            return Err(Error::RuleMismatch);
+        }
+        let Some(trace) = self.prepare_trace_pairs(pairs)? else {
+            return self.axpby_into(destination, alpha, beta);
+        };
+        let destination_storage =
+            unique_cuda_destination(destination, &self.storage_body().data, trace.space.space())?;
+        if destination_storage.placement() != trace.source.placement() {
+            return Err(Error::PlacementMismatch);
+        }
+        let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
+            return Err(internal_layout_error(
+                "ordinary CUDA destination checked above",
+            ));
+        };
+        let destination_data = Arc::get_mut(destination_body)
+            .and_then(|body| Arc::get_mut(&mut body.data))
+            .ok_or_else(|| internal_layout_error("unique CUDA destination checked above"))?;
+        let TypedData::Dense(destination_data) = destination_data else {
+            return Err(internal_layout_error(
+                "dense CUDA destination checked above",
+            ));
+        };
+        let mut lease = self.runtime.lease_cuda()?;
+        let (cuda, transforms) = lease.split();
+        tenet_tensors::tensortrace_fusion_structure_into_on_cuda(
+            cuda,
+            transforms,
+            &trace.structure,
+            trace.space.space().structure(),
+            destination_data,
+            trace.source_space.space().structure(),
+            trace.source,
+            alpha,
+            beta,
+        )?;
+        Ok(())
     }
 
     /// Everything [`Self::trace_pairs`] decides before the device lease — the
@@ -3678,7 +3862,7 @@ where
     /// The result is neither a lazy adjoint nor a compact diagonal, and its
     /// payload is freshly allocated, so writing to it never changes `self`.
     /// This is the remedy for operations that reject lazy or compact inputs,
-    /// such as `*_overwrite_into` sources and checked-Generic
+    /// such as `*_into` sources and checked-Generic
     /// factorizations. A lazy adjoint is conjugate-transposed from its parent
     /// in one pass.
     ///
@@ -4929,4 +5113,55 @@ where
     {
         Self::structural(runtime, codomain, domain, true, "isometry")
     }
+}
+
+/// The destination checks every device `*_into` shares, in the Host order:
+/// owned dense CUDA storage, no alias of the input payload, the result's
+/// space and block layout, the exact length, then unique ownership.
+#[cfg(feature = "cuda")]
+fn unique_cuda_destination<'d, R, D>(
+    destination: &'d TensorMap<R, D, CudaStorage<D>>,
+    input: &Arc<TypedData<D, CudaStorage<D>>>,
+    expected: &DynamicFusionMapSpace,
+) -> Result<&'d CudaStorage<D>, Error>
+where
+    D: CudaPayload,
+{
+    let (body, storage) = match &destination.repr {
+        TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+            TypedData::Dense(storage) => (body, storage),
+            TypedData::Diagonal(_) => {
+                return Err(Error::InvalidArgument(
+                    "destination must use ordinary dense CUDA storage".to_string(),
+                ))
+            }
+        },
+        TypedTensorRepr::Adjoint(_) => {
+            return Err(Error::InvalidArgument(
+                "destination must use ordinary dense CUDA storage".to_string(),
+            ))
+        }
+    };
+    if Arc::ptr_eq(&body.data, input) {
+        return Err(Error::InvalidArgument(
+            "destination storage must not alias an input".to_string(),
+        ));
+    }
+    if body.space.space() != expected {
+        return Err(Error::InvalidArgument(
+            "destination fusion space or block layout does not match the operation result"
+                .to_string(),
+        ));
+    }
+    let required = expected.required_len()?;
+    let actual = TensorStorage::len(storage);
+    if actual != required {
+        return Err(Error::InvalidArgument(format!(
+            "destination storage length {actual} does not match required length {required}"
+        )));
+    }
+    if Arc::strong_count(body) != 1 || Arc::strong_count(&body.data) != 1 {
+        return Err(Error::DestinationShared);
+    }
+    Ok(storage)
 }

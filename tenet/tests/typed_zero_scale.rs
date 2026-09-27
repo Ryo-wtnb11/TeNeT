@@ -112,10 +112,10 @@ macro_rules! check_dense {
                 x.axpby(a, &y, b).unwrap().dense_data().unwrap(),
                 &want,
             );
-            let mut assigned = x.clone();
-            assigned.axpby_assign(a, &y, b).unwrap();
+            let mut assigned = x.materialize().unwrap();
+            y.axpby_into(&mut assigned, b, a).unwrap();
             assert_same(
-                &format!("{what} add_assign"),
+                &format!("{what} axpby_into"),
                 assigned.dense_data().unwrap(),
                 &want,
             );
@@ -148,8 +148,8 @@ macro_rules! check_dense {
             bits(x.axpby(a, &y, b).unwrap().dense_data().unwrap()),
             bits(&base)
         );
-        let mut assigned = x.clone();
-        assigned.axpby_assign(a, &y, b).unwrap();
+        let mut assigned = x.materialize().unwrap();
+        y.axpby_into(&mut assigned, b, a).unwrap();
         assert_eq!(bits(assigned.dense_data().unwrap()), bits(&base));
         let base: Vec<$d> = x.dense_data().unwrap().iter().map(|&u| u * a).collect();
         assert_eq!(bits(x.scale(a).dense_data().unwrap()), bits(&base));

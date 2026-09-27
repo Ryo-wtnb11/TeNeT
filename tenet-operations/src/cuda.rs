@@ -227,6 +227,34 @@ impl<D: CudaScalar> StorageGemm<D, CudaStorage<D>, CudaStorage<D>, CudaStorage<D
         )
         .map_err(OperationError::Dense)
     }
+
+    fn matmul_range_axpby_with_ops_into(
+        &mut self,
+        dst: &mut CudaStorage<D>,
+        dst_offset: usize,
+        lhs: &CudaStorage<D>,
+        lhs_offset: usize,
+        rhs: &CudaStorage<D>,
+        rhs_offset: usize,
+        rows: usize,
+        contracted: usize,
+        cols: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        if !(cuda_operand_is_supported(lhs_op) && cuda_operand_is_supported(rhs_op)) {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "CUDA storage GEMM supports only identity and adjoint operands",
+            });
+        }
+        cuda_gemm_region_with_ops_into::<D>(
+            self.ctx, &mut dst.0, dst_offset, &lhs.0, lhs_offset, &rhs.0, rhs_offset, rows,
+            contracted, cols, lhs_op, rhs_op, alpha, beta,
+        )
+        .map_err(OperationError::Dense)
+    }
 }
 
 /// [`StorageGemm`] over member-strided device stacks: each plan job is one

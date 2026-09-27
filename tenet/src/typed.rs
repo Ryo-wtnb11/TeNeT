@@ -310,7 +310,7 @@ mod scalar;
 #[allow(unused_imports)]
 pub(crate) use scalar::ScalarOps;
 #[allow(unused_imports)]
-use scalar::{host_add_impl, host_scale_impl, CheckedGenericSpectrumResult};
+use scalar::{host_add_impl, host_axpby_into, host_scale_impl, CheckedGenericSpectrumResult};
 pub use scalar::{
     AdvancedLinalgScalar, FactorizationScalar, NetworkDegeneracyRestriction, TensorScalar,
 };
@@ -466,7 +466,8 @@ pub use cuda_ops::CudaTracePairs;
 mod transform_ops;
 #[allow(unused_imports)]
 use transform_ops::{
-    generic_insert_unit, generic_remove_unit, map_spectrum_dtype, tree_operation_matches_axes,
+    braid_operation, generic_insert_unit, generic_remove_unit, map_spectrum_dtype,
+    tree_operation_matches_axes,
 };
 pub use transform_ops::{ContractSpec, TypedTensorUnitDispatch};
 

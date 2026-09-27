@@ -378,7 +378,7 @@ where
 }
 
 /// A destination of `case`'s result space holding NaN everywhere: a retained
-/// buffer `contract_overwrite_into` must rewrite element by element.
+/// buffer `contract_into` must rewrite element by element.
 pub fn poisoned_destination<R, D>(case: &Case<R, D>) -> TensorMap<R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,

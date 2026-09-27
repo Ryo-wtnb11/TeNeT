@@ -518,6 +518,116 @@ where
     })
 }
 
+/// `destination = alpha * op(source) + beta * destination` per logical block,
+/// in place, for an owned or lazy-adjoint `source` on the destination's own
+/// logical space: BLAS `axpby` / VectorInterface `add!(y, x, α, β)`.
+///
+/// Every block is validated before the first element is written. Each block
+/// is one strided pass carrying both coefficients, so `beta` is applied once
+/// per element; `beta == 0` assigns without reading the destination. A zero
+/// `alpha` does not read the source: VectorInterface's `scale(x, 0) =
+/// zero(x)`, the destination becoming `beta * destination`.
+#[doc(hidden)]
+pub fn oriented_fusion_axpby_into<D>(
+    destination: &BlockStructure,
+    destination_data: &mut [D],
+    source: FusionOperand<'_>,
+    source_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    if destination_data.len() != destination.required_len()?
+        || source_data.len() != source.storage_space().required_len()?
+    {
+        return Err(OperationError::StructureMismatch {
+            tensor: "oriented axpby storage",
+        });
+    }
+    validate_oriented_fusion_layout(destination, source)?;
+    let mut blocks = Vec::with_capacity(destination.block_count());
+    for index in 0..destination.block_count() {
+        let destination_block = destination.block(index)?;
+        let BlockKey::FusionTree(logical_key) = destination_block.key() else {
+            return Err(OperationError::StructureMismatch {
+                tensor: "oriented axpby destination",
+            });
+        };
+        let storage_block = source
+            .storage_space()
+            .structure()
+            .block(source.storage_block_index(logical_key)?)?;
+        let signed = |stride: usize| {
+            isize::try_from(stride).map_err(|_| OperationError::StrideOverflow { value: stride })
+        };
+        let destination_strides = destination_block
+            .strides()
+            .iter()
+            .map(|&stride| signed(stride))
+            .collect::<Result<Vec<_>, _>>()?;
+        let source_strides = (0..destination_block.shape().len())
+            .map(|axis| signed(storage_block.strides()[source.storage_axis(axis)?]))
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_logical_block_shape(source, destination_block.shape(), storage_block.shape())?;
+        let destination_offset = checked_offset(destination_block.offset())?;
+        let source_offset = checked_offset(storage_block.offset())?;
+        preflight_scatter_bounds(
+            destination_data.len(),
+            destination_block.shape(),
+            &destination_strides,
+            destination_offset,
+        )?;
+        preflight_scatter_bounds(
+            source_data.len(),
+            destination_block.shape(),
+            &source_strides,
+            source_offset,
+        )?;
+        blocks.push(ScatterBlock {
+            shape: destination_block.shape().to_vec(),
+            destination_strides,
+            source_strides,
+            destination_offset,
+            source_offset,
+        });
+    }
+    let mut kernels = StridedHostKernelAdapter::default();
+    for block in &blocks {
+        if alpha.is_zero() {
+            tenet_operations::scale_raw_strided_kernel_trusted(
+                destination_data,
+                &block.shape,
+                &block.destination_strides,
+                block.destination_offset,
+                beta,
+            )?;
+            continue;
+        }
+        kernels.tensoradd_strided_checked(
+            destination_data,
+            source_data,
+            &block.shape,
+            &block.destination_strides,
+            &block.source_strides,
+            block.destination_offset,
+            block.source_offset,
+            source.storage_conjugate(),
+            alpha,
+            beta,
+        )?;
+    }
+    Ok(())
+}
+
 /// Quantum-dimension-weighted oriented inner product.
 ///
 /// `sector_weight` supplies `dim(c)` per logical block, as the provider's own

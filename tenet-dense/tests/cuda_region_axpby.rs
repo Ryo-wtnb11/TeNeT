@@ -247,7 +247,7 @@ fn nd_case<D: RegionScalar>(
     dst_order: &[usize],
     coefficients: &[D],
     use_context_one: bool,
-    beta: CudaRegionBeta,
+    beta: CudaRegionBeta<D>,
     conj: bool,
 ) {
     let block: usize = dims.iter().product();
@@ -303,6 +303,7 @@ fn nd_case<D: RegionScalar>(
             let kept = match beta {
                 CudaRegionBeta::Overwrite => D::ZERO,
                 CudaRegionBeta::Accumulate => expected[to],
+                CudaRegionBeta::Scale(beta) => beta * expected[to],
             };
             expected[to] = coefficient * value + kept;
         }
@@ -317,7 +318,9 @@ fn nd_case<D: RegionScalar>(
     // probe established that the device reproduces the host's element order
     // exactly there. Asserting it bitwise is what makes "finite payloads are
     // unaffected by the multiply" a tested claim rather than a tolerance.
-    if use_context_one || coefficients.iter().all(|value| *value == D::ONE) {
+    if (use_context_one || coefficients.iter().all(|value| *value == D::ONE))
+        && !matches!(beta, CudaRegionBeta::Scale(_))
+    {
         assert_bitwise(&actual, &expected, &what);
     } else {
         assert_close(&actual, &expected, &what);
@@ -338,7 +341,12 @@ fn nd_sweep<D: RegionScalar>(ctx: &mut CudaDenseContext) {
     ];
     for &(dims, src_order, dst_order) in ND_CASES {
         for &conj in &[false, true] {
-            for &beta in &[CudaRegionBeta::Overwrite, CudaRegionBeta::Accumulate] {
+            // A general beta (#1550) rides the same epilogue as 0 and 1.
+            for &beta in &[
+                CudaRegionBeta::Overwrite,
+                CudaRegionBeta::Accumulate,
+                CudaRegionBeta::Scale(D::from_parts(-0.5, 0.0)),
+            ] {
                 nd_case::<D>(ctx, dims, src_order, dst_order, &unit, true, beta, conj);
                 nd_case::<D>(ctx, dims, src_order, dst_order, &unit, false, beta, conj);
                 nd_case::<D>(ctx, dims, src_order, dst_order, &real, false, beta, conj);

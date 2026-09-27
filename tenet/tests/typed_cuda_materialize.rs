@@ -3,7 +3,7 @@
 //! The Host `materialize` is checked against independent oracles in
 //! `typed_materialize.rs`. Here the device result must equal it bit for bit
 //! (each entry is `1 * [conj] x`), allocate exactly one device payload with no
-//! download, and own that payload: the device `*_overwrite_into`, which
+//! download, and own that payload: the device `*_into`, which
 //! rejects a destination aliasing its source, accepts it, and the input is
 //! unchanged.
 //!
@@ -184,7 +184,13 @@ where
     let domain: Vec<usize> = (host.codomain_rank()..host.rank()).collect();
     let mut destination = device.materialize().unwrap();
     device
-        .permute_overwrite_into(&mut destination, &codomain, &domain, D::two())
+        .permute_into(
+            &codomain,
+            &domain,
+            &mut destination,
+            D::two(),
+            D::from_real(0.0),
+        )
         .unwrap();
     assert_eq!(
         bits(device.to_host().unwrap().dense_data().unwrap()),
@@ -193,7 +199,7 @@ where
     );
     let mut alias = device.clone();
     assert!(device
-        .permute_overwrite_into(&mut alias, &codomain, &domain, D::two())
+        .permute_into(&codomain, &domain, &mut alias, D::two(), D::from_real(0.0))
         .is_err());
 }
 

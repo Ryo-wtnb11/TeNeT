@@ -103,7 +103,7 @@ fn cached_permute_overwrite_does_not_allocate_on_the_caller_thread() {
     let mut destination = source.permute(&[1], &[2, 0]).unwrap();
 
     source
-        .permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
+        .permute_into(&[1], &[2, 0], &mut destination, 1.0, 0.0)
         .unwrap();
     let destination_data = destination.dense_data().unwrap().as_ptr();
 
@@ -111,7 +111,7 @@ fn cached_permute_overwrite_does_not_allocate_on_the_caller_thread() {
     BYTES.set(0);
     COUNTING.set(true);
     source
-        .permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
+        .permute_into(&[1], &[2, 0], &mut destination, 1.0, 0.0)
         .unwrap();
     COUNTING.set(false);
     black_box(destination.dense_data().unwrap());
@@ -142,7 +142,7 @@ fn cached_u1_permute_overwrite_does_not_allocate_on_the_caller_thread() {
     let mut destination = source.permute(&[1], &[2, 0]).unwrap();
 
     source
-        .permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
+        .permute_into(&[1], &[2, 0], &mut destination, 1.0, 0.0)
         .unwrap();
     let destination_data = destination.dense_data().unwrap().as_ptr();
 
@@ -150,7 +150,7 @@ fn cached_u1_permute_overwrite_does_not_allocate_on_the_caller_thread() {
     BYTES.set(0);
     COUNTING.set(true);
     source
-        .permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
+        .permute_into(&[1], &[2, 0], &mut destination, 1.0, 0.0)
         .unwrap();
     COUNTING.set(false);
     black_box(destination.dense_data().unwrap());
@@ -181,12 +181,12 @@ fn cached_planar_overwrites_do_not_allocate_on_the_caller_thread() {
 
     let mut full = source.transpose(&[2], &[1, 0]).unwrap();
     source
-        .transpose_overwrite_into(&mut full, &[2], &[1, 0], 1.0)
+        .transpose_into(&[2], &[1, 0], &mut full, 1.0, 0.0)
         .unwrap();
     assert_eq!(
         measure(|| {
             source
-                .transpose_overwrite_into(&mut full, &[2], &[1, 0], 1.0)
+                .transpose_into(&[2], &[1, 0], &mut full, 1.0, 0.0)
                 .unwrap()
         }),
         (0, 0)
@@ -194,12 +194,12 @@ fn cached_planar_overwrites_do_not_allocate_on_the_caller_thread() {
 
     let mut explicit = source.transpose(&[1, 2], &[0]).unwrap();
     source
-        .transpose_overwrite_into(&mut explicit, &[1, 2], &[0], 1.0)
+        .transpose_into(&[1, 2], &[0], &mut explicit, 1.0, 0.0)
         .unwrap();
     assert_eq!(
         measure(|| {
             source
-                .transpose_overwrite_into(&mut explicit, &[1, 2], &[0], 1.0)
+                .transpose_into(&[1, 2], &[0], &mut explicit, 1.0, 0.0)
                 .unwrap()
         }),
         (0, 0)
@@ -207,12 +207,12 @@ fn cached_planar_overwrites_do_not_allocate_on_the_caller_thread() {
 
     let mut repartitioned = source.repartition(1).unwrap();
     source
-        .repartition_overwrite_into(&mut repartitioned, 1.0)
+        .repartition_into(&mut repartitioned, 1.0, 0.0)
         .unwrap();
     assert_eq!(
         measure(|| {
             source
-                .repartition_overwrite_into(&mut repartitioned, 1.0)
+                .repartition_into(&mut repartitioned, 1.0, 0.0)
                 .unwrap()
         }),
         (0, 0)

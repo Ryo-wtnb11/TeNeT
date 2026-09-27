@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{GradedSpace, Runtime, TensorMap};
+use tenet::typed::Error;
 
 struct CountingAllocator;
 
@@ -62,34 +63,42 @@ fn scale_assign_mutates_unique_dense_payload() {
 }
 
 #[test]
-fn add_assign_preserves_clone_and_updates_unique_receiver() {
+fn axpby_into_updates_a_unique_destination_and_refuses_a_shared_one() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let mut lhs = tensor(&runtime, 2, 2.0);
-    let original = lhs.clone();
-    let rhs = tensor(&runtime, 2, 3.0);
-    lhs.axpby_assign(2.0, &rhs, -1.0).unwrap();
-    assert_eq!(lhs.dense_data().unwrap(), &[1.0, 0.0, 0.0, 1.0]);
-    assert_eq!(original.dense_data().unwrap(), &[2.0, 0.0, 0.0, 2.0]);
+    let x = tensor(&runtime, 2, 3.0);
+    let mut destination = tensor(&runtime, 2, 2.0);
+    x.axpby_into(&mut destination, -1.0, 2.0).unwrap();
+    assert_eq!(destination.dense_data().unwrap(), &[1.0, 0.0, 0.0, 1.0]);
+
+    // A clone shares the payload: writing it would change the clone too, and
+    // replacing it would allocate behind the caller's back.
+    let clone = destination.clone();
+    assert_eq!(
+        x.axpby_into(&mut destination, 1.0, 1.0),
+        Err(Error::DestinationShared)
+    );
+    assert_eq!(destination.dense_data().unwrap(), &[1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(clone.dense_data().unwrap(), &[1.0, 0.0, 0.0, 1.0]);
 }
 
 #[test]
-fn add_assign_rejects_layout_mismatch_without_mutating_destination() {
+fn axpby_into_rejects_a_layout_mismatch_without_mutating_the_destination() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let mut lhs = tensor(&runtime, 2, 2.0);
-    let rhs = tensor(&runtime, 3, 3.0);
-    let error = lhs.axpby_assign(1.0, &rhs, 1.0).unwrap_err();
+    let mut destination = tensor(&runtime, 2, 2.0);
+    let x = tensor(&runtime, 3, 3.0);
+    let error = x.axpby_into(&mut destination, 1.0, 1.0).unwrap_err();
     assert!(error.to_string().contains("different spaces"));
-    assert_eq!(lhs.dense_data().unwrap(), &[2.0, 0.0, 0.0, 2.0]);
+    assert_eq!(destination.dense_data().unwrap(), &[2.0, 0.0, 0.0, 2.0]);
 }
 
 #[test]
-fn unique_dense_assign_is_allocation_free() {
+fn unique_dense_destinations_are_allocation_free() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let mut lhs = tensor(&runtime, 64, 2.0);
-    let rhs = tensor(&runtime, 64, 3.0);
+    let mut destination = tensor(&runtime, 64, 2.0);
+    let x = tensor(&runtime, 64, 3.0);
     ALLOCATIONS.set(0);
     COUNTING.set(true);
-    lhs.axpby_assign(2.0, &rhs, -1.0).unwrap();
+    x.axpby_into(&mut destination, -1.0, 2.0).unwrap();
     COUNTING.set(false);
     assert_eq!(ALLOCATIONS.get(), 0);
     let mut scaled = tensor(&runtime, 64, 2.0);

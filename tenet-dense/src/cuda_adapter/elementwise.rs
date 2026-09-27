@@ -1,25 +1,27 @@
 use super::*;
 
-/// How a region call treats the destination it writes.
+/// How a region call treats the destination it writes: the `beta` of
+/// `dst_region = coefficient * src_region + beta * dst_region`, carried in the
+/// same `dot_general` epilogue as the move itself.
 ///
-/// Only these two exist: Tenferro has no in-place strided scale
-/// (`scale_tensor_write` is compact-only in 0.5.0 and 0.6.0), so a
-/// general `beta` is a capability boundary rather than a parameter. The host
-/// replay never needs one either — an overwriting transform zeroes its
-/// inactive layouts and assigns the active ones, and an accumulating caller
-/// uses `beta = 1`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CudaRegionBeta {
+/// [`Self::Overwrite`] (`beta = 0`) never reads the destination, so a NaN there
+/// does not survive. [`Self::Scale`] is a general `beta`; `Scale(0)` and
+/// `Scale(1)` are accepted and behave as the two named variants.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CudaRegionBeta<D> {
     /// `dst_region = coefficient * src_region` (`beta = 0`).
     Overwrite,
     /// `dst_region += coefficient * src_region` (`beta = 1`).
     Accumulate,
+    /// `dst_region = coefficient * src_region + beta * dst_region`.
+    Scale(D),
 }
-impl CudaRegionBeta {
-    fn scalar<D: CudaScalar>(self) -> ContractionScalar {
+impl<D: CudaScalar> CudaRegionBeta<D> {
+    fn scalar(self) -> ContractionScalar {
         match self {
             Self::Overwrite => D::ZERO.contraction_scalar(),
             Self::Accumulate => D::ONE.contraction_scalar(),
+            Self::Scale(beta) => beta.contraction_scalar(),
         }
     }
 }
@@ -76,7 +78,7 @@ pub(super) fn submit_region_axpby<D: CudaScalar>(
     alpha: D,
     coeff: &CudaDenseStorage,
     coeff_offset: usize,
-    beta: CudaRegionBeta,
+    beta: CudaRegionBeta<D>,
     dst: &mut CudaDenseStorage,
     dst_region: &CudaRegion,
 ) -> Result<(), DenseError> {
@@ -107,7 +109,7 @@ pub(super) fn submit_region_axpby<D: CudaScalar>(
         lhs_conj: conj,
         rhs_conj: false,
         alpha: alpha.contraction_scalar(),
-        beta: beta.scalar::<D>(),
+        beta: beta.scalar(),
     };
     record(|stats| stats.gemm_calls += 1);
     backend
@@ -202,7 +204,7 @@ pub fn cuda_region_axpby<D: CudaScalar>(
     conj: bool,
     alpha: D,
     coeff: CudaRegionCoefficient<'_>,
-    beta: CudaRegionBeta,
+    beta: CudaRegionBeta<D>,
     dst: &mut CudaDenseStorage,
     dst_region: &CudaRegion,
 ) -> Result<(), DenseError> {
@@ -325,14 +327,56 @@ pub fn cuda_region_zero<D: CudaScalar>(
     dst: &mut CudaDenseStorage,
     dst_region: &CudaRegion,
 ) -> Result<(), DenseError> {
-    const OP: &str = "cuda_region_zero";
-    ensure_cuda_device(ctx.device, OP, &[("dst", dst.device)])?;
-    ensure_payload_dtype::<D>(OP, dst)?;
+    zero_source_move::<D>(
+        ctx,
+        "cuda_region_zero",
+        dst,
+        dst_region,
+        CudaRegionBeta::Overwrite,
+    )
+}
+/// `dst_region = beta * dst_region`: the destination rule of a
+/// beta-accumulating write for a region no source move writes.
+///
+/// Why not a scale kernel: Tenferro has no in-place strided scale, so this is
+/// the [`cuda_region_zero`] move — the context zero template times the
+/// context `1` — with `beta` in its `dot_general` epilogue, `0 + beta * dst`.
+/// A zero `beta` is exactly [`cuda_region_zero`] (the destination is not
+/// read); a unit `beta` submits nothing. Transfer contract and validation are
+/// [`cuda_region_zero`]'s.
+pub fn cuda_region_scale<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    dst: &mut CudaDenseStorage,
+    dst_region: &CudaRegion,
+    beta: D,
+) -> Result<(), DenseError> {
+    const OP: &str = "cuda_region_scale";
+    if beta == D::ONE {
+        ensure_cuda_device(ctx.device, OP, &[("dst", dst.device)])?;
+        ensure_payload_dtype::<D>(OP, dst)?;
+        return Ok(());
+    }
+    let beta = if beta == D::ZERO {
+        CudaRegionBeta::Overwrite
+    } else {
+        CudaRegionBeta::Scale(beta)
+    };
+    zero_source_move::<D>(ctx, OP, dst, dst_region, beta)
+}
+fn zero_source_move<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    op: &'static str,
+    dst: &mut CudaDenseStorage,
+    dst_region: &CudaRegion,
+    beta: CudaRegionBeta<D>,
+) -> Result<(), DenseError> {
+    ensure_cuda_device(ctx.device, op, &[("dst", dst.device)])?;
+    ensure_payload_dtype::<D>(op, dst)?;
     if dst_region.is_empty() {
         return Ok(());
     }
     let count = dst_region.element_count()?;
-    validate_destination_layout(OP, dst_region)?;
+    validate_destination_layout(op, dst_region)?;
     validate_region(dst_region, dst.len)?;
     let src_region = CudaRegion::packed(dst_region.dims(), 0)?;
 
@@ -340,18 +384,18 @@ pub fn cuda_region_zero<D: CudaScalar>(
     ctx.ensure_zeros::<D>(count)?;
     let (backend, operands) = ctx.split_operands::<D>();
     let (Some(ones), Some(zeros)) = (operands.ones.as_ref(), operands.zeros.as_ref()) else {
-        return Err(cuda_error(OP, "context scalar operands are missing"));
+        return Err(cuda_error(op, "context scalar operands are missing"));
     };
     submit_region_axpby::<D>(
         backend,
-        OP,
+        op,
         zeros,
         &src_region,
         false,
         D::ONE,
         ones,
         0,
-        CudaRegionBeta::Overwrite,
+        beta,
         dst,
         dst_region,
     )

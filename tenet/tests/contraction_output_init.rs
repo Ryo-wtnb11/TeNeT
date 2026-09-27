@@ -1,7 +1,7 @@
 //! Behaviour of the owned eager contraction output (#1212): inactive
 //! destination blocks (coupled sectors the contracted bond cannot reach) are
 //! exactly `+0.0`, active blocks agree with the destination path
-//! `contract_overwrite_into` on a `+0.0`-prefilled buffer, and an empty
+//! `contract_into` on a `+0.0`-prefilled buffer, and an empty
 //! support yields an all-zero payload of the full destination length.
 //!
 //! Owned and destination results are two execution paths of one contraction,
@@ -132,16 +132,17 @@ fn u1_case<D: Bits>(seed: u64) {
         )
         .unwrap();
     let mut expected = output.zeros_like();
-    lhs.contract_overwrite_into(
+    lhs.contract_into(
         &rhs,
-        &mut expected,
         &ContractSpec {
             lhs: &[1],
             rhs: &[0],
             codomain: &[0],
             domain: &[1],
         },
+        &mut expected,
         D::from_real(1.0),
+        D::from_real(0.0),
     )
     .unwrap();
     assert_eq!(output.dense_data().unwrap().len(), 4 + 9 + 4);
@@ -167,16 +168,17 @@ fn u1_case<D: Bits>(seed: u64) {
         )
         .unwrap();
     let mut expected = output.zeros_like();
-    lazy.contract_overwrite_into(
+    lazy.contract_into(
         &rhs,
-        &mut expected,
         &ContractSpec {
             lhs: &[1],
             rhs: &[0],
             codomain: &[0],
             domain: &[1],
         },
+        &mut expected,
         D::from_real(1.0),
+        D::from_real(0.0),
     )
     .unwrap();
     assert_eq!(check_owned!(output, expected, lazy, rhs, 2), 2);
@@ -218,16 +220,17 @@ fn su2_case<D: Bits>(seed: u64) {
         )
         .unwrap();
     let mut expected = output.zeros_like();
-    lhs.contract_overwrite_into(
+    lhs.contract_into(
         &rhs,
-        &mut expected,
         &ContractSpec {
             lhs: &[2],
             rhs: &[0],
             codomain: &[0, 1],
             domain: &[2, 3],
         },
+        &mut expected,
         D::from_real(1.0),
+        D::from_real(0.0),
     )
     .unwrap();
     assert!(check_owned!(output, expected, lhs, rhs, 3) >= 1);
@@ -240,16 +243,17 @@ fn su2_case<D: Bits>(seed: u64) {
     let lazy = parent.adjoint().unwrap();
     let output = lazy.compose(&rhs).unwrap();
     let mut expected = output.zeros_like();
-    lazy.contract_overwrite_into(
+    lazy.contract_into(
         &rhs,
-        &mut expected,
         &ContractSpec {
             lhs: &[2],
             rhs: &[0],
             codomain: &[0, 1],
             domain: &[2, 3],
         },
+        &mut expected,
         D::from_real(1.0),
+        D::from_real(0.0),
     )
     .unwrap();
     assert!(check_owned!(output, expected, lazy, rhs, 3) >= 1);

@@ -27,22 +27,27 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use tenet_core::BlockStructure;
-use tenet_dense::{cuda_region_trace_accumulate, CudaDenseContext, CudaRegion, CudaScalar};
+use tenet_dense::{
+    cuda_region_scale, cuda_region_trace_accumulate, CudaDenseContext, CudaRegion, CudaScalar,
+};
 use tenet_operations::cuda::CudaStorage;
 use tenet_operations::CudaTreeTransformExecutor;
 
 use super::{validate_trace_data_extents, TensorTraceFusionStructure};
 use crate::{OperationError, RecouplingCoefficientAction};
 
-/// `dst += alpha * trace(src)` over every term of `structure`, on the device.
+/// `dst = alpha * trace(src) + beta * dst` over every term of `structure`,
+/// on the device.
 ///
-/// Accumulation rule: every term adds (`beta = 1`), so a destination block
+/// TensorKit's `_trace_permute!` order: every destination layout first
+/// becomes `beta * dst` (a zero-source region move with `beta` in its
+/// epilogue: a zero fill for `beta = 0`, which never reads `dst`, and nothing
+/// for `beta = 1`), then every term adds (`beta = 1`), so a destination block
 /// with several producers — several source blocks, or several recoupling
-/// channels of one — receives their sum. The caller passes a zeroed
-/// destination for an overwriting trace; this is the Host fallback writer's
-/// zero-then-accumulate order (`tensortrace_fusion_dyn_structure_into_raw`
-/// with `beta = 0`), and the returning typed trace gets it for free from the
-/// output's zero initialisation.
+/// channels of one — receives their sum. The separate `beta` pass is the
+/// reference's own: no single term writes a whole destination block, so no
+/// term's epilogue can carry it. The returning typed trace passes `beta = 1`
+/// over its zero-initialised output, which submits no `beta` pass.
 ///
 /// Every region is built and every structure identity and length checked
 /// before the first submission, so a rejected call touches neither buffer.
@@ -54,7 +59,7 @@ use crate::{OperationError, RecouplingCoefficientAction};
 /// to that budget rebuilds no plan.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-pub fn tensortrace_fusion_structure_accumulate_on_cuda<C, D>(
+pub fn tensortrace_fusion_structure_into_on_cuda<C, D>(
     ctx: &mut CudaDenseContext,
     transforms: &mut CudaTreeTransformExecutor,
     structure: &TensorTraceFusionStructure<C>,
@@ -63,6 +68,7 @@ pub fn tensortrace_fusion_structure_accumulate_on_cuda<C, D>(
     src_structure: &Arc<BlockStructure>,
     src: &CudaStorage<D>,
     alpha: D,
+    beta: D,
 ) -> Result<(), OperationError>
 where
     C: Copy,
@@ -127,6 +133,24 @@ where
         moves.push((src_region, dst_region, scale, trace_len));
     }
 
+    let mut beta_regions = Vec::new();
+    let mut largest_layout = 0usize;
+    if beta != D::ONE {
+        for layout in descriptor.destination_layouts() {
+            let shape = descriptor.destination_shape(layout);
+            let strides = descriptor
+                .destination_strides(layout)
+                .iter()
+                .map(|&stride| unsigned(stride))
+                .collect::<Result<Vec<_>, _>>()?;
+            let region = CudaRegion::new(shape.to_vec(), strides, unsigned(layout.offset)?)
+                .map_err(OperationError::Dense)?;
+            largest_layout =
+                largest_layout.max(region.element_count().map_err(OperationError::Dense)?);
+            beta_regions.push(region);
+        }
+    }
+
     // A plan is keyed on the three operand layouts: the source and destination
     // regions (offsets excepted, alignment being `size_of::<D>()` for every
     // view) and the ones view, which the source's traced extents fix. The
@@ -145,8 +169,15 @@ where
         .map(|(src, dst, _, _)| (src.dims(), src.strides(), dst.strides()))
         .collect::<HashSet<_>>()
         .len()
-        + fills;
+        + fills
+        + beta_regions
+            .iter()
+            .map(|region| (region.dims(), region.strides()))
+            .collect::<HashSet<_>>()
+            .len();
     transforms.reserve_plan_entries_for_additional(ctx, signatures)?;
+    ctx.reserve_zero_template::<D>(largest_layout)
+        .map_err(OperationError::Dense)?;
     ctx.reserve_ones_template::<D>(largest_unit)
         .map_err(OperationError::Dense)?;
     ctx.reserve_scaled_template::<D>(largest_scaled)
@@ -160,6 +191,9 @@ where
         let (_, _, scale, len) = &moves[term];
         (scale.bit_pattern(), std::cmp::Reverse(*len))
     });
+    for region in &beta_regions {
+        cuda_region_scale::<D>(ctx, &mut dst.0, region, beta).map_err(OperationError::Dense)?;
+    }
     let conjugate = descriptor.source_conjugate();
     for (src_region, dst_region, scale, _) in order.into_iter().map(|term| &moves[term]) {
         cuda_region_trace_accumulate::<D>(

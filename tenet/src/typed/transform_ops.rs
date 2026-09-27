@@ -12,6 +12,30 @@ pub(super) fn tree_operation_matches_axes(
         && operation.domain_permutation() == domain_axes
 }
 
+/// The braid operation of `braid`/`braid_into`, with the facade's one own
+/// check: one level per source axis.
+pub(super) fn braid_operation(
+    rank: usize,
+    codomain_rank: usize,
+    codomain_axes: &[usize],
+    domain_axes: &[usize],
+    levels: &[usize],
+) -> Result<TreeTransformOperation, Error> {
+    if levels.len() != rank {
+        return Err(Error::InvalidArgument(format!(
+            "braid levels must list one level per source axis \
+             (expected {rank}, got {})",
+            levels.len()
+        )));
+    }
+    Ok(TreeTransformOperation::braid(
+        codomain_axes.iter().copied(),
+        domain_axes.iter().copied(),
+        levels[..codomain_rank].iter().copied(),
+        levels[codomain_rank..].iter().copied(),
+    ))
+}
+
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -20,24 +44,39 @@ where
         + SectorCodec,
     D: TensorScalar,
 {
-    /// Overwrites `destination` with `alpha * self.permute(...)` without
-    /// replacing its provider, space, body, or dense host allocation.
+    /// `destination = alpha * self.permute(codomain_axes, domain_axes) +
+    /// beta * destination`, TensorKit `permute!(tdst, tsrc, p, α, β)`, without
+    /// replacing the destination's provider, space, body or host allocation.
+    ///
+    /// `beta` rides the add that writes each destination block, so it is
+    /// applied once per element and never as a separate pass. `beta == 0`
+    /// (IEEE, `-0.0` too) never reads `destination`: a NaN there does not
+    /// survive, and the blocks the transform does not reach become `+0`.
+    /// `beta == 1` leaves those blocks untouched. `alpha == 0` does not read
+    /// the source (VectorInterface's `scale(x, 0) = zero(x)`).
     ///
     /// # Errors
     ///
-    /// Validation and plan-construction failures leave `destination`
-    /// unchanged. A backend error after replay begins may leave it partially
-    /// overwritten.
-    pub fn permute_overwrite_into(
+    /// [`Error::RuntimeMismatch`], [`Error::RuleMismatch`], then
+    /// [`Error::InvalidArgument`] for a lazy-adjoint or compact source, a
+    /// destination that is not owned dense host storage, one that aliases
+    /// the source, or one whose space, block layout or length does not match
+    /// the result; [`Error::DestinationShared`] when `destination` shares its
+    /// storage with a clone. Every rejection happens before any write, and so
+    /// do plan-construction failures. A backend error after replay begins may
+    /// leave `destination` partially written.
+    pub fn permute_into(
         &self,
-        destination: &mut Self,
         codomain_axes: &[usize],
         domain_axes: &[usize],
+        destination: &mut Self,
         alpha: D,
+        beta: D,
     ) -> Result<(), Error> {
-        self.overwrite_tree_transform(
+        self.tree_transform_into(
             destination,
             alpha,
+            beta,
             |_, _| {
                 Ok(TreeTransformOperation::permute(
                     codomain_axes.iter().copied(),
@@ -55,20 +94,52 @@ where
         )
     }
 
-    /// Overwrites `destination` with
-    /// `alpha * self.transpose(codomain_axes, domain_axes)`.
-    /// Validation and failure behavior matches
-    /// [`Self::permute_overwrite_into`].
-    pub fn transpose_overwrite_into(
+    /// `destination = alpha * self.braid(codomain_axes, domain_axes, levels) +
+    /// beta * destination`, TensorKit `braid!(tdst, tsrc, p, levels, α, β)`.
+    /// `levels` must list one level per source axis, as for
+    /// [`Self::braid`]; otherwise destination rules and errors are
+    /// [`Self::permute_into`]'s.
+    pub fn braid_into(
         &self,
-        destination: &mut Self,
         codomain_axes: &[usize],
         domain_axes: &[usize],
+        levels: &[usize],
+        destination: &mut Self,
         alpha: D,
+        beta: D,
     ) -> Result<(), Error> {
-        self.overwrite_tree_transform(
+        let operation = braid_operation(
+            self.rank(),
+            self.codomain_rank(),
+            codomain_axes,
+            domain_axes,
+            levels,
+        )?;
+        let expected = operation.clone();
+        self.tree_transform_into(
             destination,
             alpha,
+            beta,
+            |_, _| Ok(operation),
+            |admitted| *admitted == expected,
+        )
+    }
+
+    /// `destination = alpha * self.transpose(codomain_axes, domain_axes) +
+    /// beta * destination`, TensorKit `transpose!(tdst, tsrc, p, α, β)`.
+    /// Destination rules and errors are [`Self::permute_into`]'s.
+    pub fn transpose_into(
+        &self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), Error> {
+        self.tree_transform_into(
+            destination,
+            alpha,
+            beta,
             |source, _| {
                 with_planar_axes(
                     source.codomain_rank(),
@@ -96,21 +167,18 @@ where
         )
     }
 
-    /// Overwrites `destination` with
-    /// `alpha * self.repartition(destination.codomain_rank())`.
-    /// Validation and failure behavior matches
-    /// [`Self::permute_overwrite_into`].
-    pub fn repartition_overwrite_into(
-        &self,
-        destination: &mut Self,
-        alpha: D,
-    ) -> Result<(), Error> {
+    /// `destination = alpha * self.repartition(destination.codomain_rank()) +
+    /// beta * destination`, TensorKit `repartition!(tdst, tsrc, α, β)`: the
+    /// target split is the destination's own. Destination rules and errors
+    /// are [`Self::permute_into`]'s.
+    pub fn repartition_into(&self, destination: &mut Self, alpha: D, beta: D) -> Result<(), Error> {
         let source_codomain_rank = self.codomain_rank();
         let source_rank = self.rank();
         let destination_codomain_rank = destination.codomain_rank();
-        self.overwrite_tree_transform(
+        self.tree_transform_into(
             destination,
             alpha,
+            beta,
             |source, destination| {
                 if destination.rank() != source.rank() {
                     return Err(Error::InvalidArgument(format!(
@@ -158,11 +226,143 @@ where
         )
     }
 
-    /// One admission and replay boundary for every typed Host overwrite.
-    fn overwrite_tree_transform(
+    /// `destination = alpha * self.trace_pairs(pairs) + beta * destination`,
+    /// TensorKit `tensortrace!(C, A, p, q, false, α, β)`.
+    ///
+    /// TensorKit's `_trace_permute!` order: every destination layout becomes
+    /// `beta * destination` first (a strong zero for `beta = 0`, which never
+    /// reads the destination; nothing for `beta = 1`), then every trace term
+    /// adds `alpha * coefficient * trace(block)`. That `beta` pass is the
+    /// reference's own: several source blocks feed one destination block, so
+    /// no single term's write can carry it. An empty `pairs` is
+    /// [`Self::axpby_into`]. A lazy-adjoint source is read through its parent.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RuntimeMismatch`], [`Error::RuleMismatch`], the pair-list and
+    /// duality errors of [`Self::trace_pairs`], [`Error::Unsupported`] for a
+    /// compact (diagonal) source, [`Error::InvalidArgument`] for a destination
+    /// that is not owned dense host storage, aliases the source, or has the
+    /// wrong space, layout or length, and [`Error::DestinationShared`]. Every
+    /// rejection happens before any write.
+    pub fn trace_pairs_into(
+        &self,
+        pairs: &[(usize, usize)],
+        destination: &mut Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), Error> {
+        if !self.runtime.same_runtime(&destination.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if TypedSectorAdmission::typed_rule_identity(self.provider())
+            != TypedSectorAdmission::typed_rule_identity(destination.provider())
+        {
+            return Err(Error::RuleMismatch);
+        }
+        let Some(TracePairAxes {
+            output_axes,
+            destination_codomain_rank,
+            trace_lhs,
+            trace_rhs,
+        }) = trace_pair_axes(self.rank(), self.codomain_rank(), pairs)?
+        else {
+            return host_axpby_into(self, destination, alpha, beta);
+        };
+        let mapped_output_axes;
+        let mapped_trace_lhs;
+        let mapped_trace_rhs;
+        let (source_space, axes) = match &self.repr {
+            TypedTensorRepr::Owned(body) => (
+                &body.space,
+                tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs),
+            ),
+            TypedTensorRepr::Adjoint(view) => {
+                let parent = view.parent.space.space();
+                mapped_output_axes =
+                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &output_axes);
+                mapped_trace_lhs =
+                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_lhs);
+                mapped_trace_rhs =
+                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_rhs);
+                (
+                    &view.parent.space,
+                    tenet_tensors::TensorTraceAxisSpec::new_with_conjugation(
+                        &mapped_output_axes,
+                        &mapped_trace_lhs,
+                        &mapped_trace_rhs,
+                        true,
+                    ),
+                )
+            }
+        };
+        let TypedData::Dense(source_data) = self.storage_body().data.as_ref() else {
+            return Err(Error::Unsupported {
+                operation: "trace_pairs_into",
+                alternative: Alternative::Materialize,
+            });
+        };
+        let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
+            source_space,
+            axes,
+            destination_codomain_rank,
+        )?;
+        let space = source_space.derive_from_final_homspace(homspace)?;
+        let destination_body = match &destination.repr {
+            TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Dense(_)) => {
+                body
+            }
+            _ => {
+                return Err(Error::InvalidArgument(
+                    "destination must use ordinary dense host storage".to_string(),
+                ))
+            }
+        };
+        if Arc::ptr_eq(&destination_body.data, &self.storage_body().data) {
+            return Err(Error::InvalidArgument(
+                "destination storage must not alias an input".to_string(),
+            ));
+        }
+        if destination_body.space.space() != space.space() {
+            return Err(Error::InvalidArgument(
+                "destination fusion space or block layout does not match the trace result"
+                    .to_string(),
+            ));
+        }
+        if Arc::strong_count(destination_body) != 1
+            || Arc::strong_count(&destination_body.data) != 1
+        {
+            return Err(Error::DestinationShared);
+        }
+        let _host_pool = self.runtime.enter_host_pool();
+        let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
+            return Err(internal_layout_error("ordinary destination checked above"));
+        };
+        let destination_data = Arc::get_mut(destination_body)
+            .and_then(|body| Arc::get_mut(&mut body.data))
+            .ok_or_else(|| internal_layout_error("unique destination checked above"))?;
+        let TypedData::Dense(destination_data) = destination_data else {
+            return Err(internal_layout_error("dense destination checked above"));
+        };
+        tenet_tensors::tensortrace_fusion_dyn_into_checked(
+            &space,
+            destination_data,
+            source_space,
+            source_data,
+            axes,
+            alpha,
+            beta,
+        )?;
+        Ok(())
+    }
+
+    /// One admission and replay boundary for every typed Host
+    /// beta-accumulating tree transform.
+    fn tree_transform_into(
         &self,
         destination: &mut Self,
         alpha: D,
+        beta: D,
         operation: impl FnOnce(&Self, &Self) -> Result<TreeTransformOperation, Error>,
         admitted_operation_matches: impl FnMut(&TreeTransformOperation) -> bool,
     ) -> Result<(), Error> {
@@ -236,9 +436,7 @@ where
         if Arc::strong_count(destination_body) != 1
             || Arc::strong_count(&destination_body.data) != 1
         {
-            return Err(Error::InvalidArgument(
-                "destination storage must be uniquely owned".to_string(),
-            ));
+            return Err(Error::DestinationShared);
         }
 
         let source_structure = source_body.space.space().structure();
@@ -264,7 +462,7 @@ where
             let TypedData::Dense(destination_data) = destination_data else {
                 unreachable!("dense destination checked above")
             };
-            context.tree_transform_dyn_overwrite_into_ref(
+            context.tree_transform_dyn_into_ref(
                 destination_provider,
                 &operation,
                 destination_structure,
@@ -272,6 +470,7 @@ where
                 destination_data.as_mut_slice(),
                 source_data,
                 alpha,
+                beta,
             )?;
         }
         if !exact_layout_admitted {
@@ -285,27 +484,39 @@ where
         Ok(())
     }
 
-    /// Overwrites `destination` with `alpha * self.contract(other, spec)` while
-    /// preserving the destination's provider, space, body, and dense Host
+    /// `destination = alpha * self.contract(other, spec) + beta * destination`,
+    /// TensorKit `tensorcontract!(C, A, pA, false, B, pB, false, pAB, α, β)`,
+    /// preserving the destination's provider, space, body and dense host
     /// allocation. `destination` must have the space of that result, including
     /// its codomain/domain split. A compact diagonal operand is densified into
     /// an operation-local buffer where [`Self::contract`] has no scaling arm.
     ///
+    /// `alpha` and `beta` ride the core GEMMs' epilogue (or the output
+    /// transform's add), TensorKit's `mul!(C, A, B, α, β)`; the coupled
+    /// sectors no GEMM reaches become `beta * destination`, TensorKit's
+    /// `rmul!(C, β)`. `beta == 0` never reads `destination` (NaN does not
+    /// survive; unreached blocks become `+0`) and `beta == 1` leaves the
+    /// unreached blocks untouched. Nothing clears the destination first.
+    ///
     /// # Errors
     ///
+    /// [`Error::RuntimeMismatch`]; then
     /// [`tenet_tensors::OperationError::UnsupportedTensorContractScope`] for
-    /// non-symmetric (anyonic or `NoBraiding`) providers, right after the
-    /// Runtime check, as for [`Self::contract`]. Admission failures through runtime-context leasing
-    /// leave `destination` unchanged. The destination is cleared immediately
-    /// before shared-engine
-    /// compilation/replay, so a later engine error may leave it zeroed or
-    /// partially overwritten.
-    pub fn contract_overwrite_into<'a>(
+    /// non-symmetric (anyonic or `NoBraiding`) providers, as for
+    /// [`Self::contract`]; [`Error::RuleMismatch`]; [`Error::InvalidArgument`]
+    /// for a destination that is not owned dense host storage, aliases an
+    /// operand, or has the wrong space, layout or length;
+    /// [`Error::DestinationShared`] when `destination` shares its storage
+    /// with a clone. These, and runtime-context leasing, leave `destination`
+    /// unchanged; an engine error during replay may leave it partially
+    /// written.
+    pub fn contract_into<'a>(
         &self,
         other: impl Into<TensorRef<'a, R, D>>,
-        destination: &mut Self,
         spec: &ContractSpec<'_>,
+        destination: &mut Self,
         alpha: D,
+        beta: D,
     ) -> Result<(), Error> {
         let (lhs_axes, rhs_axes) = (spec.lhs, spec.rhs);
         let output_axes = &spec.output_axes()[..];
@@ -382,9 +593,7 @@ where
         if Arc::strong_count(destination_body) != 1
             || Arc::strong_count(&destination_body.data) != 1
         {
-            return Err(Error::InvalidArgument(
-                "destination storage must be uniquely owned".to_string(),
-            ));
+            return Err(Error::DestinationShared);
         }
 
         let mut lease = self.runtime.lease_context()?;
@@ -399,8 +608,6 @@ where
         let TypedData::Dense(destination_data) = destination_data else {
             unreachable!("dense destination checked above")
         };
-        let zero = D::from_real(0.0);
-        destination_data.fill(zero);
         context.tensorcontract_fusion_dyn_prelowered_into(
             &execution_destination,
             destination_data,
@@ -416,7 +623,7 @@ where
                 rhs.storage_conjugate(),
             ),
             alpha,
-            zero,
+            beta,
         )?;
         Ok(())
     }

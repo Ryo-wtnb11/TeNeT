@@ -151,12 +151,14 @@ the storage-direct core for `DynamicTree` on device; gated against TensorKit's
 `blas_contract!` with the twist on the B role and on the A role (fZ2 x U(1),
 fZ2 (x) SU(2), all four device dtypes, lazy adjoints, both orientations forced
 at artifact level) and by the TensorKit-valued FZ2 loops as explicit device
-`contract` calls. Device `contract_overwrite_into` takes the same
-resolution for arbitrary axes and twists, writing the caller's destination
-with no reset: an output transform overwrites every element, and where the
-core GEMMs write the destination directly exactly the plan's inactive blocks
-are zeroed (G2c-1b, [#1346](https://github.com/Ryo-wtnb11/TeNeT/issues/1346));
-`alpha` other than `1` stays `UnsupportedOnDevice`; gated into NaN-poisoned
+`contract` calls. Device `contract_into` takes the same
+resolution for arbitrary axes and twists and computes
+`dst = alpha * contract + beta * dst` with no reset: `alpha` and `beta` ride the
+core GEMMs' epilogue or the output transform's `Axpby(beta)` mode, and exactly
+the plan's inactive blocks become `beta * dst` (G2c-1b,
+[#1346](https://github.com/Ryo-wtnb11/TeNeT/issues/1346);
+[#1550](https://github.com/Ryo-wtnb11/TeNeT/issues/1550) removed the
+`alpha = 1` restriction and added `beta`); gated into NaN-poisoned
 destinations against the Host and the same oracles, with a warm call
 transferring and allocating nothing. Device `tensor!` networks run every
 compiled schedule — general steps, result and final permutations, open
@@ -169,15 +171,15 @@ as on Host (it was accepted before). The Host checked-Generic cell is
 accepts arbitrary axes for owned operands (lazy adjoints are
 `InvalidArgument`), but no fixture gates a non-canonical checked-Generic
 contraction against an independent oracle. Host and device
-`contract_overwrite_into` reject anyonic providers with `contract`'s error
+`contract_into` reject anyonic providers with `contract`'s error
 right after the Runtime check, and the Host compact-spectrum `trace_pairs` arm
 rejects non-symmetric braiding with the dense trace's error, as TensorKit
 `blas_contract!` / `trace_permute!` do
 ([#1355](https://github.com/Ryo-wtnb11/TeNeT/issues/1355)).
 Since [#1372](https://github.com/Ryo-wtnb11/TeNeT/issues/1372) every ordinary
 contraction entry — Host and device `contract`, `contract_ordered`,
-`contract_overwrite_into` (and its deprecated `contract_ordered_overwrite_into`
-alias), the checked-Generic `contract`, and Host and device `tensor!`
+`contract_into` (formerly `contract_overwrite_into` and its
+`contract_ordered_overwrite_into` alias), the checked-Generic `contract`, and Host and device `tensor!`
 contraction steps — admits only symmetric braiding (Bosonic, Fermionic) and
 rejects `Anyonic` and `NoBraiding` with one shared
 `UnsupportedTensorContractScope` error (`NON_SYMMETRIC_CONTRACTION_UNSUPPORTED`),
@@ -285,7 +287,7 @@ is composed on the host as described below the table.
 quarantine and byte-budget machinery as Host, keyed by `(provider, dtype,
 storage)`, and reuses slots, producers, the input snapshot and the payload
 destinations of every intermediate step through the device
-`contract_overwrite_into` and `permute_overwrite_into`. Since
+`contract_into` and `permute_into` with `beta = 0`. Since
 [#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348) the schedule is not
 restricted: device admission (placement, compact operands, non-symmetric braiding)
 is decided from the operand count and metadata before the plan-cache lookup
@@ -419,14 +421,21 @@ ownership/cache audit is #783.
   answer for U(1), SU(2), fZ2, fZ2xU(1) and fZ2xSU(2), both device payload
   dtypes, plus the transfer, allocation, statistics and rejection contracts.
   The same two files carry the device
-  `permute`/`transpose`/`transpose_axes`/`repartition` `*_overwrite_into`
+  `permute`/`transpose`/`transpose_axes`/`repartition` `*_into`
   gates: device == Host for every caller scale including `0` and `-0.0`, a
   NaN-poisoned destination, the Host precondition order with the Host's error
   text, the warm 0 H2D / 0 D2H / 0 device-allocation contract and exact-layout
   admission. Their device-free half — the dense physical-basis oracle pinned
   against the Host, the device-less Runtime state, and the Host
-  `*_overwrite_into` precondition order and wording the device mirrors — is
+  `*_into` precondition order and wording the device mirrors — is
   `tenet/tests/typed_transform_host_side.rs`, which is not feature gated.
+- `tenet/tests/beta_destinations.rs` (#1550): every linear `*_into`
+  (`contract`, `permute`, `braid`, `transpose`, `repartition`, `trace_pairs`,
+  `axpby`) against its eager operation combined through `axpby`, for
+  `beta` in {0, 1, general}, NaN destinations under `beta = 0`, unreached
+  contraction sectors left bit-identical under `beta = 1`, U(1)/SU(2)/fZ2xU(1)
+  with dual legs, f64/c64/f32/c32 and lazy-adjoint inputs; its ignored CUDA
+  test checks the device against the Host for the same cases.
 - `tenet/tests/typed_cuda_twist.rs`: real-device `twist`/`twist_inverse`
   against the Host answer for fZ2, fZ2xU(1) and fZ2xSU(2), single-axis,
   multi-axis, repeated, dual and lazy-adjoint operands, both device payload

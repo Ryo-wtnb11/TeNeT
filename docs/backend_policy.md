@@ -135,7 +135,7 @@ then read it unfinished (#1384). The lock covers outputs bound and fully
 written within one lease, which is every operation that returns a new tensor.
 
 A buffer bound in an earlier lease and written again later — a
-`*_overwrite_into` destination, or reused scratch (`CudaContractScratch`,
+`*_into` destination, or reused scratch (`CudaContractScratch`,
 pooled `tensor!` network intermediates) — spans two leases, so the lock alone
 cannot order it: another thread that synced past its bind in between would
 read the later write unfinished, or overwrite it while an earlier read is

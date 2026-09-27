@@ -26,11 +26,17 @@ macro_rules! full_rotation {
     }};
 }
 
-macro_rules! full_transpose_overwrite_into {
+macro_rules! full_transpose_into {
     ($tensor:expr, $destination:expr, $alpha:expr) => {{
         let tensor = &$tensor;
         let (codomain_axes, domain_axes) = full_rotation!(tensor);
-        tensor.transpose_overwrite_into($destination, &codomain_axes, &domain_axes, $alpha)
+        tensor.transpose_into(
+            &codomain_axes,
+            &domain_axes,
+            $destination,
+            $alpha,
+            Default::default(),
+        )
     }};
 }
 
@@ -376,12 +382,12 @@ fn a_cold_device_transform_uploads_one_coefficient_payload_per_structure() {
 }
 
 // ---------------------------------------------------------------------------
-// `*_overwrite_into` contracts (issue #1329, G2b-3)
+// `*_into` contracts (issue #1329, G2b-3)
 // ---------------------------------------------------------------------------
 
 /// The device wording of a Host message. The device mirrors Host's error
 /// variants, messages and order; only the storage noun names the placement,
-/// as in `contract_overwrite_into`. That these are the exact
+/// as in `contract_into`. That these are the exact
 /// Host strings is pinned without a device in `typed_transform_host_side.rs`.
 fn as_device_message(host: &str) -> String {
     host.replace("ordinary dense host source", "ordinary dense CUDA source")
@@ -419,7 +425,7 @@ where
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
+fn a_warm_device_into_transfers_nothing_and_allocates_nothing() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let source = fixture(&runtime).to_cuda().unwrap();
     let mut destination = fixture(&runtime)
@@ -430,7 +436,7 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
 
     // Cold: prepares the structure for this pair.
     source
-        .permute_overwrite_into(&mut destination, &[2, 0], &[1, 3], 1.0)
+        .permute_into(&[2, 0], &[1, 3], &mut destination, 1.0, 0.0)
         .unwrap();
     let cold = runtime.cuda_tree_transform_stats().unwrap();
 
@@ -438,7 +444,7 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
     // `permute` there is no #740 output initialisation left to pay.
     let (_, warm) = delta(|| {
         source
-            .permute_overwrite_into(&mut destination, &[2, 0], &[1, 3], -2.5)
+            .permute_into(&[2, 0], &[1, 3], &mut destination, -2.5, 0.0)
             .unwrap()
     });
     assert_eq!(warm.h2d_calls, 0, "{warm:?}");
@@ -459,7 +465,7 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
     // per context, not per call. Warm, it transfers nothing.
     let (_, first_zero) = delta(|| {
         source
-            .permute_overwrite_into(&mut destination, &[2, 0], &[1, 3], 0.0)
+            .permute_into(&[2, 0], &[1, 3], &mut destination, 0.0, 0.0)
             .unwrap()
     });
     let destination_len = fixture(&runtime)
@@ -475,7 +481,7 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
     );
     let (_, zero) = delta(|| {
         source
-            .permute_overwrite_into(&mut destination, &[2, 0], &[1, 3], -0.0)
+            .permute_into(&[2, 0], &[1, 3], &mut destination, -0.0, 0.0)
             .unwrap()
     });
     assert_eq!(zero.h2d_calls, 0, "{zero:?}");
@@ -487,13 +493,13 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
         .unwrap()
         .to_cuda()
         .unwrap();
-    full_transpose_overwrite_into!(source, &mut transposed, 1.0).unwrap();
-    let (_, warm) = delta(|| full_transpose_overwrite_into!(source, &mut transposed, 1.0).unwrap());
+    full_transpose_into!(source, &mut transposed, 1.0).unwrap();
+    let (_, warm) = delta(|| full_transpose_into!(source, &mut transposed, 1.0).unwrap());
     assert_transfer_free(&warm);
 
     let mut bent = fixture(&runtime).repartition(1).unwrap().to_cuda().unwrap();
-    source.repartition_overwrite_into(&mut bent, 1.0).unwrap();
-    let (_, warm) = delta(|| source.repartition_overwrite_into(&mut bent, 1.0).unwrap());
+    source.repartition_into(&mut bent, 1.0, 0.0).unwrap();
+    let (_, warm) = delta(|| source.repartition_into(&mut bent, 1.0, 0.0).unwrap());
     assert_transfer_free(&warm);
 
     let mut cyclic = fixture(&runtime)
@@ -502,11 +508,11 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
         .to_cuda()
         .unwrap();
     source
-        .transpose_overwrite_into(&mut cyclic, &[1, 3], &[0, 2], 1.0)
+        .transpose_into(&[1, 3], &[0, 2], &mut cyclic, 1.0, 0.0)
         .unwrap();
     let (_, warm) = delta(|| {
         source
-            .transpose_overwrite_into(&mut cyclic, &[1, 3], &[0, 2], 1.0)
+            .transpose_into(&[1, 3], &[0, 2], &mut cyclic, 1.0, 0.0)
             .unwrap()
     });
     assert_transfer_free(&warm);
@@ -514,7 +520,7 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_overwrite_into_admits_the_exact_layout_on_the_shared_runtime_store() {
+fn device_into_admits_the_exact_layout_on_the_shared_runtime_store() {
     // Host `overwrite_tree_transform` admits the source/destination layout
     // pair after a successful replay, so a second call resolves the operation
     // out of the store instead of deriving it. The store is the Runtime's own
@@ -527,13 +533,13 @@ fn device_overwrite_into_admits_the_exact_layout_on_the_shared_runtime_store() {
     runtime.clear_tree_transform_cache();
     let mut first = expected.to_cuda().unwrap();
     source
-        .permute_overwrite_into(&mut first, &[2, 0], &[1, 3], 1.0)
+        .permute_into(&[2, 0], &[1, 3], &mut first, 1.0, 0.0)
         .unwrap();
     let cold = runtime.tree_transform_cache_info().structures;
 
     let mut second = expected.to_cuda().unwrap();
     source
-        .permute_overwrite_into(&mut second, &[2, 0], &[1, 3], 1.0)
+        .permute_into(&[2, 0], &[1, 3], &mut second, 1.0, 0.0)
         .unwrap();
     let warm = runtime.tree_transform_cache_info().structures;
     assert_eq!(
@@ -554,7 +560,7 @@ fn device_overwrite_into_admits_the_exact_layout_on_the_shared_runtime_store() {
     // this operation's result still misses the lookup and is still rejected.
     let mut wrong = full_transpose!(host).unwrap().to_cuda().unwrap();
     let error = source
-        .permute_overwrite_into(&mut wrong, &[2, 0], &[1, 3], 1.0)
+        .permute_into(&[2, 0], &[1, 3], &mut wrong, 1.0, 0.0)
         .unwrap_err()
         .to_string();
     assert!(
@@ -565,7 +571,7 @@ fn device_overwrite_into_admits_the_exact_layout_on_the_shared_runtime_store() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_overwrite_into_rejections_happen_before_any_device_work() {
+fn device_into_rejections_happen_before_any_device_work() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let host = fixture(&runtime);
     let expected = host.permute(&[2, 0], &[1, 3]).unwrap();
@@ -580,7 +586,7 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
     {
         let mut warm = device_destination();
         source
-            .permute_overwrite_into(&mut warm, &[2, 0], &[1, 3], 1.0)
+            .permute_into(&[2, 0], &[1, 3], &mut warm, 1.0, 0.0)
             .unwrap();
     }
     let stats_before = runtime.cuda_tree_transform_stats().unwrap();
@@ -613,7 +619,7 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
         }};
     }
 
-    // `permute_overwrite_into` takes `&mut Self`, so a rule mismatch is only
+    // `permute_into` takes `&mut Self`, so a rule mismatch is only
     // reachable between two *instances* of the same rule type — Z2 against
     // Z3, exactly as the Host unit test builds it.
     let z2 = Arc::new(tenet::core::ZNFusionRule::new(2).unwrap());
@@ -634,9 +640,9 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
         let witness = foreign.clone();
         let error = rejects_like_host!(
             "runtime mismatch precedes rule mismatch",
-            z2_host.permute_overwrite_into(&mut host_foreign, &[0], &[1], 1.0),
+            z2_host.permute_into(&[0], &[1], &mut host_foreign, 1.0, 0.0),
             witness,
-            z2_source.permute_overwrite_into(&mut foreign, &[0], &[1], 1.0)
+            z2_source.permute_into(&[0], &[1], &mut foreign, 1.0, 0.0)
         );
         assert_eq!(error, Error::RuntimeMismatch);
     }
@@ -653,9 +659,9 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
         let witness = z3_destination.clone();
         let error = rejects_like_host!(
             "rule mismatch precedes the lazy-adjoint source",
-            z2_host_lazy_source.permute_overwrite_into(&mut host_z3, &[0], &[1], 1.0),
+            z2_host_lazy_source.permute_into(&[0], &[1], &mut host_z3, 1.0, 0.0),
             witness,
-            z2_lazy_source.permute_overwrite_into(&mut z3_destination, &[0], &[1], 1.0)
+            z2_lazy_source.permute_into(&[0], &[1], &mut z3_destination, 1.0, 0.0)
         );
         assert_eq!(error, Error::RuleMismatch);
     }
@@ -667,9 +673,9 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
     let mut host_lazy_destination = host_destination().adjoint().unwrap();
     let error = rejects_like_host!(
         "the lazy-adjoint source precedes the lazy-adjoint destination",
-        host_lazy_source.permute_overwrite_into(&mut host_lazy_destination, &[2, 0], &[1, 3], 1.0),
+        host_lazy_source.permute_into(&[2, 0], &[1, 3], &mut host_lazy_destination, 1.0, 0.0),
         lazy_parent,
-        lazy_source.permute_overwrite_into(&mut lazy_destination, &[2, 0], &[1, 3], 1.0)
+        lazy_source.permute_into(&[2, 0], &[1, 3], &mut lazy_destination, 1.0, 0.0)
     );
     assert!(
         error.to_string().contains("ordinary dense CUDA source"),
@@ -680,9 +686,9 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
     let mut host_lazy_destination = host_destination().adjoint().unwrap();
     let error = rejects_like_host!(
         "lazy-adjoint destination",
-        host.permute_overwrite_into(&mut host_lazy_destination, &[2, 0], &[1, 3], 1.0),
+        host.permute_into(&[2, 0], &[1, 3], &mut host_lazy_destination, 1.0, 0.0),
         lazy_parent,
-        source.permute_overwrite_into(&mut lazy_destination, &[2, 0], &[1, 3], 1.0)
+        source.permute_into(&[2, 0], &[1, 3], &mut lazy_destination, 1.0, 0.0)
     );
     assert!(
         error.to_string().contains("ordinary dense CUDA storage"),
@@ -698,9 +704,9 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
         let witness = source.clone();
         let error = rejects_like_host!(
             "the alias check precedes the operation build",
-            host.permute_overwrite_into(&mut host_alias, &[0, 0], &[1, 3], 1.0),
+            host.permute_into(&[0, 0], &[1, 3], &mut host_alias, 1.0, 0.0),
             witness,
-            source.permute_overwrite_into(&mut alias, &[0, 0], &[1, 3], 1.0)
+            source.permute_into(&[0, 0], &[1, 3], &mut alias, 1.0, 0.0)
         );
         assert!(error.to_string().contains("must not alias"), "{error}");
     }
@@ -715,9 +721,9 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
         let witness = wrong_space.clone();
         let error = rejects_like_host!(
             "the space check precedes unique ownership",
-            host.permute_overwrite_into(&mut host_wrong_space, &[2, 0], &[1, 3], 1.0),
+            host.permute_into(&[2, 0], &[1, 3], &mut host_wrong_space, 1.0, 0.0),
             witness,
-            source.permute_overwrite_into(&mut wrong_space, &[2, 0], &[1, 3], 1.0)
+            source.permute_into(&[2, 0], &[1, 3], &mut wrong_space, 1.0, 0.0)
         );
         assert!(
             error
@@ -738,11 +744,11 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
         let witness = shared.clone();
         let error = rejects_like_host!(
             "shared destination",
-            host.permute_overwrite_into(&mut host_shared, &[2, 0], &[1, 3], 1.0),
+            host.permute_into(&[2, 0], &[1, 3], &mut host_shared, 1.0, 0.0),
             witness,
-            source.permute_overwrite_into(&mut shared, &[2, 0], &[1, 3], 1.0)
+            source.permute_into(&[2, 0], &[1, 3], &mut shared, 1.0, 0.0)
         );
-        assert!(error.to_string().contains("uniquely owned"), "{error}");
+        assert!(error.to_string().contains("shares its storage"), "{error}");
     }
     drop(shared_handle);
     drop(host_shared_handle);
@@ -755,15 +761,15 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
     let witness = destination.clone();
     rejects_like_host!(
         "malformed axes",
-        host.permute_overwrite_into(&mut host_dst, &[0, 0], &[1, 3], 1.0),
+        host.permute_into(&[0, 0], &[1, 3], &mut host_dst, 1.0, 0.0),
         witness,
-        source.permute_overwrite_into(&mut destination, &[0, 0], &[1, 3], 1.0)
+        source.permute_into(&[0, 0], &[1, 3], &mut destination, 1.0, 0.0)
     );
     rejects_like_host!(
         "non-planar transpose",
-        host.transpose_overwrite_into(&mut host_dst, &[1, 2], &[3, 0], 1.0),
+        host.transpose_into(&[1, 2], &[3, 0], &mut host_dst, 1.0, 0.0),
         witness,
-        source.transpose_overwrite_into(&mut destination, &[1, 2], &[3, 0], 1.0)
+        source.transpose_into(&[1, 2], &[3, 0], &mut destination, 1.0, 0.0)
     );
 
     let v = leg();
@@ -774,9 +780,9 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
         let witness = rank_three.clone();
         let error = rejects_like_host!(
             "repartition destination of another rank",
-            host.repartition_overwrite_into(&mut host_rank_three, 1.0),
+            host.repartition_into(&mut host_rank_three, 1.0, 0.0),
             witness,
-            source.repartition_overwrite_into(&mut rank_three, 1.0)
+            source.repartition_into(&mut rank_three, 1.0, 0.0)
         );
         assert!(
             error.to_string().contains("does not match source rank"),

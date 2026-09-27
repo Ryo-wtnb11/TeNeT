@@ -173,12 +173,12 @@ fn axpby_matches_dense_expansion_on_host() {
 }
 
 #[test]
-fn axpby_assign_matches_dense_expansion_on_host() {
+fn axpby_into_matches_dense_expansion_on_host() {
     macro_rules! assign {
         () => {
             |x: &TensorMap<_, _>, y: &TensorMap<_, _>, a, b| {
-                let mut z = x.clone();
-                z.axpby_assign(a, y, b).unwrap();
+                let mut z = x.materialize().unwrap();
+                y.axpby_into(&mut z, b, a).unwrap();
                 z
             }
         };

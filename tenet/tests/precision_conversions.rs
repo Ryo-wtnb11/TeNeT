@@ -851,13 +851,13 @@ fn converted_lazy_adjoints_are_owned() {
         .diagview()
         .unwrap();
 
-    // A `permute_overwrite_into` source must be owned.
+    // A `permute_into` source must be owned.
     let tensor: TensorMap<U1FusionRule, f32> = filled!([&leg, &leg], [&leg]);
     let source = tensor.adjoint().unwrap().convert::<f64>();
     let expected = source.permute(&[2], &[0, 1]).unwrap();
     let mut destination = expected.zeros_like();
     source
-        .permute_overwrite_into(&mut destination, &[2], &[0, 1], 1.0)
+        .permute_into(&[2], &[0, 1], &mut destination, 1.0, 0.0)
         .unwrap();
     assert_eq!(
         f64_bits(destination.dense_data().unwrap()),
