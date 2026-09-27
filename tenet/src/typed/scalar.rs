@@ -522,9 +522,9 @@ where
         let data = tenet_tensors::oriented_fusion_add_owned(
             tensor.logical_space().space().structure(),
             lhs,
-            lhs_data,
+            &lhs_data,
             rhs,
-            rhs_data,
+            &rhs_data,
             alpha,
             beta,
         )?;
@@ -561,7 +561,8 @@ where
                 other
                     .owned_body()
                     .expect("owned add input")
-                    .materialized_dense_data(),
+                    .materialized_dense_data()
+                    .as_ref(),
                 beta,
                 diagonal,
                 alpha,
@@ -573,7 +574,8 @@ where
                 tensor
                     .owned_body()
                     .expect("owned add input")
-                    .materialized_dense_data(),
+                    .materialized_dense_data()
+                    .as_ref(),
                 alpha,
                 diagonal,
                 beta,
@@ -586,12 +588,14 @@ where
             .owned_body()
             .expect("owned add input")
             .materialized_dense_data()
+            .as_ref()
             .iter()
             .zip(
                 other
                     .owned_body()
                     .expect("owned add input")
-                    .materialized_dense_data(),
+                    .materialized_dense_data()
+                    .as_ref(),
             )
             .map(|(&x, &y)| scale_value(x, alpha) + scale_value(y, beta))
             .collect(),
@@ -633,6 +637,7 @@ where
             .owned_body()
             .expect("owned scale input")
             .materialized_dense_data()
+            .as_ref()
             .iter()
             .map(|&value| scale_value(value, factor))
             .collect(),
@@ -664,8 +669,9 @@ where
     /// Dense input uses one linear solve per coupled sector. A
     /// multiplicity-free compact diagonal divisor instead applies its
     /// elementwise reciprocal and bond scaling; checked Generic materializes
-    /// compact inputs for the dense route. Lazy adjoints are materialized only
-    /// for this call and do not fill the receiver's reusable cache.
+    /// compact inputs for the dense route, and a compact right-hand side of a
+    /// dense divisor is densified into the solve buffer. Lazy adjoints are
+    /// materialized only for this call.
     ///
     /// # Errors
     ///
@@ -716,6 +722,13 @@ where
     /// carrier basis and fusion coefficients determine the embedding; no
     /// symmetry-specific dispatch occurs in this method.
     ///
+    /// # Cost
+    ///
+    /// A lazy adjoint or a compact diagonal is first densified into an
+    /// operation-local reduced buffer, released on return: one copy of the
+    /// reduced payload, never larger than the physical output. TensorKit's
+    /// `convert(Array, t)` pays the same copy through `t[f₁, f₂]`.
+    ///
     /// # Index order matches TensorKit
     ///
     /// Each axis is ordered as TensorKit's `convert(Array, t)` orders it: a
@@ -757,10 +770,25 @@ where
     pub fn to_physical_dense(
         &self,
     ) -> Result<PhysicalDense<D>, PhysicalDenseError<<R as PhysicalFusionBasis>::Error>> {
-        // #1548 decides this implicit materialization of a lazy adjoint or a
-        // compact diagonal; the migration phase keeps it.
-        #[allow(deprecated)]
-        let source = BoundDynamicTensorRef::try_new(self.logical_space(), self.data())?;
+        // Why an operation-local copy rather than `Unsupported`: the physical
+        // output is never smaller than the reduced payload, so the copy at
+        // most doubles the bytes this conversion already writes, and
+        // `PhysicalDenseError` has no `Unsupported` variant to refuse with.
+        let adjoint;
+        let payload = match &self.repr {
+            TypedTensorRepr::Owned(body) => body.materialized_dense_data(),
+            TypedTensorRepr::Adjoint(view) => {
+                #[cfg(test)]
+                observe_adjoint_materialization();
+                adjoint = tenet_tensors::materialize_adjoint_data_dyn(
+                    view.parent.space.space(),
+                    view.logical_space.space(),
+                    view.parent_data(),
+                )?;
+                std::borrow::Cow::Borrowed(adjoint.as_slice())
+            }
+        };
+        let source = BoundDynamicTensorRef::try_new(self.logical_space(), &payload)?;
         let (shape, data) = expand_physical_host(source)?;
         Ok(PhysicalDense { shape, data })
     }
@@ -840,7 +868,8 @@ where
     /// provider `Arc` and validates its identity, HomSpace, rank, and layout
     /// before any SVD/GEMM. Standalone compact construction is supported, but
     /// checked `pinv` has no elementwise compact arm: it materializes that input
-    /// for the dense path and publishes a dense result.
+    /// for the dense path and publishes a dense result. A checked lazy adjoint
+    /// is likewise materialized operation-locally.
     pub fn pinv(&self, rcond: f64) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorPinvDispatch<R, D>>::pinv(self, rcond)
     }
@@ -868,7 +897,7 @@ where
     /// For `p == 2`, abelian providers have `dim(c) = 1`, giving the ordinary Frobenius
     /// norm. Multiplicity-free compact diagonal input is reduced directly in
     /// `O(sum_c k_c)`; dense input is one pass over the payload. Lazy adjoints
-    /// read their parent orientation without caching a materialization.
+    /// read their parent orientation without materializing.
     /// Checked-Generic reductions currently require dense payloads.
     ///
     /// The Host norm does not overflow or underflow while the norm itself is
@@ -917,7 +946,9 @@ where
     /// The product is conjugate-linear in `self`, and `self.inner(&self)` is
     /// `self.norm(2.0)^2` up to floating-point error. Both tensors must share the
     /// same runtime, hom space, and block layout. Two multiplicity-free compact
-    /// diagonal tensors reduce without materialization; checked-Generic
+    /// diagonal tensors reduce without materialization; a compact operand
+    /// paired with a dense one is densified into an operation-local buffer
+    /// (TensorKit reads only the diagonal there); checked-Generic
     /// reductions currently require dense payloads. See [`Self::norm`] for the
     /// weighting, complexity, lazy behavior, and example.
     #[doc(alias = "dot")]
@@ -940,8 +971,8 @@ where
     ///
     /// Multiplicity-free compact diagonal input is summed directly in
     /// `O(sum_c k_c)`. Checked-Generic reductions require dense payloads. A
-    /// lazy adjoint returns the conjugate of its parent's trace without filling
-    /// the materialization cache. See [`Self::norm`] for a runnable example.
+    /// lazy adjoint returns the conjugate of its parent's trace without
+    /// materializing. See [`Self::norm`] for a runnable example.
     pub fn tr(&self) -> Result<D, TypedFacadeError<R>> {
         <R::Mode as TypedTensorReductionDispatch<R, D>>::tr(self)
     }
@@ -1093,7 +1124,8 @@ where
             )));
         };
         let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let raw = tenet_matrixalgebra::eig_vals_dyn_checked_generic(dense.dense(), &input)?;
         let provider = self.logical_space().provider();
@@ -1128,7 +1160,8 @@ where
             )));
         };
         let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let raw = tenet_matrixalgebra::eigh_vals_dyn_checked_generic(dense.dense(), &input)?;
         let provider = self.logical_space().provider();
@@ -1166,7 +1199,8 @@ where
         }
         let body = self.owned_body().expect("owned checked Generic EIGH input");
         let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let out = tenet_matrixalgebra::eigh_full_dyn_checked_generic(dense.dense(), &input)?;
         let (v, mut eigenvalues) = out.into_parts();
@@ -1210,7 +1244,8 @@ where
         }
         let body = self.owned_body().expect("owned checked Generic EIG input");
         let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let out = tenet_matrixalgebra::eig_full_dyn_checked_generic(dense.dense(), &input)?;
         let (v, mut eigenvalues) = out.into_parts();
@@ -1245,7 +1280,8 @@ where
             )));
         };
         let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let Qr { q, r } = tenet_matrixalgebra::qr_full_dyn_checked_generic(dense.dense(), &input)?;
         Ok(Qr {
@@ -1271,7 +1307,8 @@ where
             )));
         };
         let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let raw = tenet_matrixalgebra::svd_vals_dyn_checked_generic(dense.dense(), &input)?;
         let provider = self.logical_space().provider();
@@ -1308,7 +1345,8 @@ where
             )));
         };
         let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let Lq { l, q } =
             tenet_matrixalgebra::lq_compact_dyn_checked_generic(dense.dense(), &input)?;
@@ -1336,7 +1374,8 @@ where
             )));
         };
         let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let out = tenet_matrixalgebra::svd_full_dyn_checked_generic(dense.dense(), &input)?;
         let (u, s, vh, _) = out.into_parts();
@@ -1357,7 +1396,8 @@ where
             )));
         };
         let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let Svd { u, s, vh } =
             tenet_matrixalgebra::svd_compact_dyn_checked_generic(dense.dense(), &input)?;
@@ -1379,8 +1419,8 @@ where
     /// conjugate-transposing every coupled-sector block.
     ///
     /// Dense storage becomes a lazy parent-backed view: its logical space is
-    /// available immediately, while [`Self::data`] performs and caches the
-    /// whole-payload materialization on first demand. Applying `adjoint` twice
+    /// available immediately, and only [`Self::materialize`] builds the
+    /// whole logical payload. Applying `adjoint` twice
     /// returns the original owned parent. Compact diagonal storage instead
     /// performs an owned `O(sum_c k_c)` conjugation and stays compact, as
     /// TensorKit `adjoint(::DiagonalTensorMap)` does.
@@ -1439,7 +1479,8 @@ where
             )));
         };
         let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let Qr { q, r } =
             tenet_matrixalgebra::qr_compact_dyn_checked_generic(dense.dense(), &input)?;
@@ -1468,7 +1509,7 @@ where
     /// Each sector runs one dense QR, with cost
     /// `O(sum_c m_c * n_c * min(m_c, n_c))`. Compact diagonal input is
     /// materialized first. Multiplicity-free lazy adjoints are materialized
-    /// only for the operation and stay uncached; checked-Generic QR requires an
+    /// only for the operation; checked-Generic QR requires an
     /// owned input. Checked factors use the same provider instance as `self`.
     /// If any sector fails or the provider rejects an output space, no factors
     /// are returned.
@@ -1523,7 +1564,8 @@ where
     ///
     /// Dense cost is `O(sum_c m_c * n_c * min(m_c, n_c))`. A
     /// multiplicity-free lazy adjoint is handled from its parent without
-    /// filling the receiver cache; checked-Generic SVD requires owned input.
+    /// materializing it; checked-Generic SVD requires owned input. A compact
+    /// diagonal input is densified into an operation-local buffer first.
     /// Any sector, layout, or provider failure returns no factors.
     ///
     /// ```
@@ -1549,7 +1591,8 @@ where
     /// the dense rectangular `m_c x n_c` diagonal matrix. The spaces are
     /// `u : codomain <- W_out`, `s : W_out <- W_in`, and
     /// `vh : W_in <- domain`. It accepts the same inputs as
-    /// [`Self::svd_compact`], but its square outer factors can require more
+    /// [`Self::svd_compact`], including the operation-local densification of
+    /// a compact diagonal input, but its square outer factors can require more
     /// dense storage. Checked factors use the source provider instance, and a
     /// failure returns no factors.
     pub fn svd_full(&self) -> Result<Svd<Self>, TypedFacadeError<R>> {
@@ -1575,7 +1618,8 @@ where
     /// materialized first, and checked Generic requires an owned input.
     /// Checked factors use the source provider instance, and a failure returns
     /// no factors. A multiplicity-free lazy adjoint runs QR on its owned
-    /// parent and returns detached owned factors without caching the receiver.
+    /// parent and returns detached owned factors without materializing the
+    /// receiver.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -1710,7 +1754,7 @@ where
             destination_data,
             source_structure,
             source_operand,
-            source_data,
+            &source_data,
             &scatter_ranges,
         )
         .map_err(Error::from)
@@ -1828,7 +1872,8 @@ where
     ///
     /// No factor tensor or intermediate bond is built. This is the least
     /// allocating member of the SVD family when only the spectrum is needed.
-    /// Multiplicity-free lazy adjoints are read through their owned parent;
+    /// Multiplicity-free lazy adjoints are read through their owned parent,
+    /// and a compact diagonal input is densified operation-locally;
     /// checked Generic currently requires an owned input and returns
     /// [`Error::InvalidArgument`] for a lazy adjoint. A dense failure returns
     /// [`Error::Operation`]; if a provider cannot decode a sector label, its
@@ -1853,8 +1898,9 @@ where
     ///
     /// No eigenvector factor or bond space is built. The input must be an
     /// endomorphism and every sector must satisfy the same Hermiticity check as
-    /// [`Self::eigh_full`]. Multiplicity-free lazy adjoints are materialized
-    /// only for this call; checked Generic currently requires owned input for
+    /// [`Self::eigh_full`]. Multiplicity-free lazy adjoints and compact
+    /// diagonals are materialized only for this call; checked Generic
+    /// currently requires owned input for
     /// this values-only method. Dense failures return [`Error::Operation`],
     /// layout failures return [`Error::Core`], and an original provider or
     /// label-decoding error is available as the source. No spectrum is returned
@@ -1885,8 +1931,9 @@ where
     ///
     /// Both multiplicity-free and checked-Generic `d` factors use compact
     /// diagonal storage. Checked factors retain the exact source provider
-    /// `Arc`. A lazy adjoint is materialized only for this call and does not
-    /// fill the receiver cache.
+    /// `Arc`. A lazy adjoint or a compact diagonal input (a multiplicity-free
+    /// spectrum or a checked-Generic `d`) is materialized into an
+    /// operation-local dense payload for this call.
     ///
     /// # Errors and cost
     ///
@@ -1928,8 +1975,9 @@ where
     /// provider-labelled sector and descending by magnitude.
     ///
     /// No eigenvector factor or bond space is built. The input must be an
-    /// endomorphism. Multiplicity-free lazy adjoints are materialized only for
-    /// this call; checked Generic currently requires owned input for this
+    /// endomorphism. Multiplicity-free lazy adjoints and compact diagonal
+    /// inputs are materialized into an operation-local dense payload for this
+    /// call; checked Generic currently requires owned input for this
     /// values-only method. Unlike [`Self::eig_full`], no eigenvector-rank gate
     /// is needed because no eigenbasis is returned.
     pub fn eig_vals(
@@ -1965,8 +2013,9 @@ where
     /// `n * epsilon * sigma_max`. This is an operational gate on the computed
     /// matrix, not a universal detector for every defective floating-point
     /// input. The multiplicity-free path forwards the dense backend result
-    /// without this additional rank gate. Lazy adjoints are materialized only
-    /// for this call and stay uncached.
+    /// without this additional rank gate. Lazy adjoints and compact diagonal
+    /// inputs are materialized into an operation-local dense payload for this
+    /// call.
     ///
     /// A non-endomorphism, invalid/non-finite dense result, checked rank-gate
     /// failure, factor-layout failure, or provider failure returns no factors.

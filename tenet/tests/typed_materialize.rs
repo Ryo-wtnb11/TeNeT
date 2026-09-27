@@ -527,26 +527,6 @@ fn materialize_is_the_remedy_for_apis_that_reject_lazy_adjoints() {
     assert_eq!(tensor.dense_data().unwrap(), before.as_slice());
 }
 
-#[test]
-// Tests the deprecated `data()` cache itself until #1548 removes it.
-#[allow(deprecated)]
-fn materialize_never_shares_a_published_adjoint_cache() {
-    let runtime = runtime();
-    let leg = u1_leg();
-    let tensor: TensorMap<_, Complex64> =
-        TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 31).unwrap();
-    let lazy = tensor.adjoint().unwrap();
-    // Publish the view's `data()` cache first; every clone of the view shares it.
-    let published = lazy.data().to_vec();
-    let cache = lazy.data().as_ptr();
-    let owned = lazy.materialize().unwrap();
-    assert_ne!(owned.data().as_ptr(), cache);
-    assert_eq!(owned.data(), published.as_slice());
-    assert_independent_owned_copy!(lazy, owned, "warm adjoint");
-    assert_eq!(lazy.data().as_ptr(), cache);
-    assert_eq!(lazy.data(), published.as_slice());
-}
-
 #[cfg(feature = "racah-generated")]
 mod checked_generic {
     use super::*;

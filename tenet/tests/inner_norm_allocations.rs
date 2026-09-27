@@ -147,7 +147,6 @@ fn warmed_non_abelian_trace_does_not_allocate() {
 }
 
 #[test]
-#[allow(deprecated)] // probes the deprecated `data()` cache until #1548
 fn warmed_lazy_adjoint_inner_does_not_allocate_in_mixed_or_double_orientation() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = non_abelian_space();
@@ -173,13 +172,8 @@ fn warmed_lazy_adjoint_inner_does_not_allocate_in_mixed_or_double_orientation() 
         measured(|| lhs_double.inner(&rhs_double).unwrap()),
     ] {
         black_box(value);
+        // Zero allocations also rules out an operation-local materialization.
         assert_eq!(allocations, 0);
-    }
-    for lazy in [&lhs_mixed_left, &lhs_mixed_right, &lhs_double, &rhs_double] {
-        let parent_len = lhs_parent.data().len();
-        let (materialized_len, allocations) = measured(|| lazy.data().len());
-        assert_eq!(materialized_len, parent_len);
-        assert!(allocations > 0, "inner materialized its lazy operand");
     }
 }
 

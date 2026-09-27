@@ -486,7 +486,7 @@ Check both that error and the observable relevant to the calculation.
 
 ## Physical entries
 
-[`prelude::TensorMap::data`] is reduced fusion-tree storage, not ordinary
+[`prelude::TensorMap::dense_data`] is reduced fusion-tree storage, not ordinary
 carrier-basis data. Use [`prelude::TensorMap::to_physical_dense`] to expand to
 that basis and [`prelude::TensorMap::project_physical_dense`] to project into
 the exact schema of another tensor. Basis alignment is application-specific;

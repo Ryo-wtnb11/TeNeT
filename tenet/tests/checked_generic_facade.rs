@@ -4293,15 +4293,8 @@ macro_rules! assert_sun_polar_laws {
         };
         // Checked Generic contraction reads owned tensors only; the lazy
         // adjoint's logical data is replayed into an owned map.
-        let owned_adjoint = |tensor: &TensorMap<_, _>| {
-            let lazy = tensor.adjoint().unwrap();
-            let blocks: std::collections::HashMap<_, _> = lazy.subblocks().unwrap().collect();
-            let (codomain, domain) = (lazy.codomain(), lazy.domain());
-            TensorMap::from_subblock_fn($runtime, codomain.iter(), domain.iter(), |trees, ij| {
-                *blocks[trees].get(ij).unwrap()
-            })
-            .unwrap()
-        };
+        let owned_adjoint =
+            |tensor: &TensorMap<_, _>| tensor.adjoint().unwrap().materialize().unwrap();
         // A rank-0 map names no leg to rebuild its adjoint from; checked eigh
         // admission is the Hermitian (real scalar) test there.
         let assert_hermitian = |tensor: &TensorMap<_, _>, what: &str| {
@@ -4474,15 +4467,8 @@ macro_rules! assert_sun_compact_laws {
                 "{what}: {error}"
             );
         };
-        let owned_adjoint = |tensor: &TensorMap<_, _>| {
-            let lazy = tensor.adjoint().unwrap();
-            let blocks: std::collections::HashMap<_, _> = lazy.subblocks().unwrap().collect();
-            let (codomain, domain) = (lazy.codomain(), lazy.domain());
-            TensorMap::from_subblock_fn($runtime, codomain.iter(), domain.iter(), |trees, ij| {
-                *blocks[trees].get(ij).unwrap()
-            })
-            .unwrap()
-        };
+        let owned_adjoint =
+            |tensor: &TensorMap<_, _>| tensor.adjoint().unwrap().materialize().unwrap();
         let assert_identity = |gram: &TensorMap<_, _>, what: &str| {
             let (codomain, domain) = (gram.codomain(), gram.domain());
             let rank = codomain.iter().count();

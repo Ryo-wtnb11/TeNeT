@@ -525,7 +525,7 @@ where
         let mut dense = tensor.runtime.lease_dense();
         let factor = tenet_matrixalgebra::inv_direct_into_dyn(
             dense.dense(),
-            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())
                 .map_err(Error::from)?,
             output,
         )
@@ -621,10 +621,16 @@ where
     let mut dense = tensor.runtime.lease_dense();
     tenet_matrixalgebra::solve_left_direct_into_dyn(
         dense.dense(),
-        &BoundDynamicTensorRef::try_new(&divisor_authority, lhs_body.materialized_dense_data())
-            .map_err(Error::from)?,
-        &BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())
-            .map_err(Error::from)?,
+        &BoundDynamicTensorRef::try_new(
+            &divisor_authority,
+            lhs_body.materialized_dense_data().as_ref(),
+        )
+        .map_err(Error::from)?,
+        &BoundDynamicTensorRef::try_new(
+            &rhs_body.space,
+            rhs_body.materialized_dense_data().as_ref(),
+        )
+        .map_err(Error::from)?,
         output,
     )
     .map_err(Error::from)
@@ -671,7 +677,7 @@ where
         let mut dense = tensor.runtime.lease_dense();
         let factor = tenet_matrixalgebra::pinv_direct_into_dyn(
             dense.dense(),
-            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())
                 .map_err(Error::from)?,
             output,
             rcond,
@@ -703,8 +709,8 @@ where
         let body = tensor
             .owned_body()
             .expect("checked Generic left-null input is owned after lazy dispatch");
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
-            .map_err(Error::from)?;
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
         let mut dense = tensor.runtime.lease_dense();
         let factor = tenet_matrixalgebra::left_null_dyn_checked_generic(dense.dense(), &input)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
@@ -724,8 +730,8 @@ where
         let body = tensor
             .owned_body()
             .expect("checked Generic right-null input is owned after lazy dispatch");
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
-            .map_err(Error::from)?;
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
         let mut dense = tensor.runtime.lease_dense();
         let factor = tenet_matrixalgebra::right_null_dyn_checked_generic(dense.dense(), &input)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
@@ -747,9 +753,9 @@ where
         let mut dense = tensor.runtime.lease_dense();
         match &tensor.repr {
             TypedTensorRepr::Owned(body) => {
+                let payload = body.materialized_dense_data();
                 let input =
-                    BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
-                        .map_err(Error::from)?;
+                    BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
                 let LeftPolar { w, p } =
                     tenet_matrixalgebra::left_polar_dyn_checked_generic(dense.dense(), &input)?;
                 Ok(LeftPolar {
@@ -758,11 +764,8 @@ where
                 })
             }
             TypedTensorRepr::Adjoint(view) => {
-                let input = BoundDynamicTensorRef::try_new(
-                    &view.parent.space,
-                    view.parent.materialized_dense_data(),
-                )
-                .map_err(Error::from)?;
+                let input = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
+                    .map_err(Error::from)?;
                 let RightPolar { p, wh: w } =
                     tenet_matrixalgebra::left_polar_adjoint_parent_dyn_checked_generic(
                         dense.dense(),
@@ -787,9 +790,9 @@ where
         let mut dense = tensor.runtime.lease_dense();
         match &tensor.repr {
             TypedTensorRepr::Owned(body) => {
+                let payload = body.materialized_dense_data();
                 let input =
-                    BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
-                        .map_err(Error::from)?;
+                    BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
                 let RightPolar { p, wh: w } =
                     tenet_matrixalgebra::right_polar_dyn_checked_generic(dense.dense(), &input)?;
                 Ok(RightPolar {
@@ -798,11 +801,8 @@ where
                 })
             }
             TypedTensorRepr::Adjoint(view) => {
-                let input = BoundDynamicTensorRef::try_new(
-                    &view.parent.space,
-                    view.parent.materialized_dense_data(),
-                )
-                .map_err(Error::from)?;
+                let input = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
+                    .map_err(Error::from)?;
                 let LeftPolar { w, p } =
                     tenet_matrixalgebra::right_polar_adjoint_parent_dyn_checked_generic(
                         dense.dense(),
@@ -853,7 +853,7 @@ where
         let mut dense = tensor.runtime.lease_dense();
         let factor = tenet_matrixalgebra::exp_pade13_direct_into_dyn(
             dense.dense(),
-            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())
                 .map_err(Error::from)?,
         )
         .map_err(Error::from)?;
@@ -944,7 +944,8 @@ where
             )));
         };
         let mut dense = tensor.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let Lq { l, q } = tenet_matrixalgebra::lq_full_dyn_checked_generic(dense.dense(), &input)?;
         Ok(Lq {
@@ -1099,9 +1100,9 @@ where
             return tenet_tensors::oriented_fusion_inner_with(
                 tensor.logical_space().space().structure(),
                 lhs_operand,
-                lhs_data,
+                &lhs_data,
                 rhs_operand,
-                rhs_data,
+                &rhs_data,
                 weight_of,
             );
         }
@@ -1111,11 +1112,13 @@ where
             tensor
                 .owned_body()
                 .expect("owned inner input")
-                .materialized_dense_data(),
+                .materialized_dense_data()
+                .as_ref(),
             other
                 .owned_body()
                 .expect("owned inner input")
-                .materialized_dense_data(),
+                .materialized_dense_data()
+                .as_ref(),
             weight_of,
         )?;
         Ok(D::from_complex64(value))
@@ -1150,7 +1153,8 @@ where
             )
             .into());
         }
-        let data = body.materialized_dense_data();
+        let payload = body.materialized_dense_data();
+        let data: &[D] = &payload;
         let structure = tensor.logical_space().space().structure();
         let nout = tensor.logical_space().space().nout();
         let provider = tensor.logical_space().provider();
@@ -1202,7 +1206,8 @@ where
             tensor
                 .owned_body()
                 .expect("owned trace input")
-                .materialized_dense_data(),
+                .materialized_dense_data()
+                .as_ref(),
             |sector| <R::Mode as TypedSpaceModeDispatch<R>>::dim(provider, sector),
         )?))
     }
@@ -1407,14 +1412,16 @@ where
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        let payload;
         let input = match &tensor.repr {
             TypedTensorRepr::Owned(body) => {
-                CheckedTreeTransformInput::direct(&body.space, body.materialized_dense_data())
+                payload = body.materialized_dense_data();
+                CheckedTreeTransformInput::direct(&body.space, &payload)
             }
             TypedTensorRepr::Adjoint(view) => CheckedTreeTransformInput::adjoint(
                 &view.logical_space,
                 &view.parent.space,
-                view.parent.materialized_dense_data(),
+                view.parent_data(),
             ),
         };
         let mut lease = tensor.runtime.lease_context()?;
@@ -1634,6 +1641,7 @@ where
         .owned_body()
         .expect("owned checked-Generic flip input")
         .materialized_dense_data()
+        .as_ref()
         .to_vec();
     scale_blocks_impl(space.space(), &mut data, &|key| match key {
         BlockKey::FusionTree(key) => block_factor(key),
@@ -1805,6 +1813,7 @@ where
         .owned_body()
         .expect("owned checked-Generic twist input")
         .materialized_dense_data()
+        .as_ref()
         .to_vec();
     scale_blocks_impl(
         tensor.logical_space().space(),
@@ -1846,8 +1855,14 @@ where
             .owned_body()
             .expect("uncached materialization is owned");
         let (space, data) = tensorproduct_owned_multiplicity_free(
-            BoundDynamicTensorRef::try_new(&lhs_body.space, lhs_body.materialized_dense_data())?,
-            BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())?,
+            BoundDynamicTensorRef::try_new(
+                &lhs_body.space,
+                lhs_body.materialized_dense_data().as_ref(),
+            )?,
+            BoundDynamicTensorRef::try_new(
+                &rhs_body.space,
+                rhs_body.materialized_dense_data().as_ref(),
+            )?,
         )?;
         Ok(TensorMap {
             runtime: lhs.runtime.clone(),
@@ -1878,9 +1893,9 @@ where
             .expect("uncached materialization is owned");
         let (space, data) = tensorproduct_owned_checked_generic(
             &lhs_body.space,
-            lhs_body.materialized_dense_data(),
+            lhs_body.materialized_dense_data().as_ref(),
             &rhs_body.space,
-            rhs_body.materialized_dense_data(),
+            rhs_body.materialized_dense_data().as_ref(),
         )?;
         Ok(TensorMap {
             runtime: lhs.runtime.clone(),
@@ -1948,9 +1963,9 @@ where
         let (space, data) = tensorcompose_owned_checked_generic_in_context(
             lease.context().generic_lane::<D>()?,
             &lhs_body.space,
-            lhs_body.materialized_dense_data(),
+            lhs_body.materialized_dense_data().as_ref(),
             &rhs_body.space,
-            rhs_body.materialized_dense_data(),
+            rhs_body.materialized_dense_data().as_ref(),
         )?;
         Ok(TensorMap {
             runtime: lhs.runtime.clone(),
@@ -1995,9 +2010,9 @@ where
     let (space, data) = tensorcontract_owned_checked_generic_in_context(
         lease.context().generic_lane::<D>()?,
         &lhs_body.space,
-        lhs_body.materialized_dense_data(),
+        lhs_body.materialized_dense_data().as_ref(),
         &rhs_body.space,
-        rhs_body.materialized_dense_data(),
+        rhs_body.materialized_dense_data().as_ref(),
         TensorContractSpec::new(
             spec.lhs,
             spec.rhs,

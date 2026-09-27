@@ -346,8 +346,12 @@ where
     R::Mode: tenet::typed::TypedTensorModeDispatch<R>,
     D: Val,
 {
-    let views: HashMap<_, _> = t.subblocks().unwrap().collect();
-    move |trees, index| views[trees].get(index).unwrap().c()
+    // A lazy adjoint has no borrowed subblocks; the oracle materializes it.
+    let dense = t.materialize().unwrap();
+    move |trees, index| {
+        let views: HashMap<_, _> = dense.subblocks().unwrap().collect();
+        views[trees].get(index).unwrap().c()
+    }
 }
 
 fn label_case<R, D>(

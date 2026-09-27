@@ -1,9 +1,9 @@
 //! Allocation probes for the typed facade's compact diagonal storage (#570).
 //!
-//! The typed facade publishes no compact accessor — [`TensorMap::data`] always
-//! reports the dense buffer — so the `Σ_c k_c` storage claim cannot be asserted
-//! through the API. It is asserted here instead by counting bytes through a
-//! global allocator while one operation runs.
+//! The `Σ_c k_c` storage claim is asserted by counting bytes through a global
+//! allocator while one operation runs, and by `dense_data()` refusing a
+//! compact payload. That no operation densifies a compact operand is probed
+//! directly in the crate's representation gates.
 //!
 //! Every measurement is warmed first. The engine's layout and fusion-tree
 //! caches allocate on first use, and those allocations belong to the cache, not
@@ -127,8 +127,7 @@ fn constructed_diagonal(degeneracy: usize) -> TensorMap<Z2FusionRule, f64> {
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
-fn public_diagonal_constructor_and_readback_stay_compact_until_data() {
+fn public_diagonal_constructor_and_readback_stay_compact() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     black_box(constructed_diagonal(64));
     black_box(constructed_diagonal(DEGENERACY));
@@ -163,39 +162,36 @@ fn public_diagonal_constructor_and_readback_stay_compact_until_data() {
         "typed readback allocated a dense payload: {readback}"
     );
     assert!(
-        measured_bytes(|| diagonal.data().len()) >= dense_payload_bytes(),
+        diagonal.dense_data().is_err(),
         "typed constructor or readback materialized the dense payload"
     );
-    assert_eq!(measured_bytes(|| diagonal.data().len()), 0);
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
-fn labelled_block_inspection_materializes_compact_data_once_and_borrows_it() {
+fn labelled_block_inspection_refuses_compact_data_and_borrows_after_materialize() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let diagonal = constructed_diagonal(DEGENERACY);
 
-    let first = measured_bytes(|| {
-        let blocks = diagonal.subblocks().unwrap().collect::<Vec<_>>();
+    let refused = measured_bytes(|| diagonal.subblocks().map(|_| ()).is_err());
+    assert!(
+        refused < dense_payload_bytes(),
+        "block inspection materialized the compact payload: {refused}"
+    );
+    assert!(diagonal.subblocks().is_err());
+
+    let dense = diagonal.materialize().unwrap();
+    let borrowed = measured_bytes(|| {
+        let blocks = dense.subblocks().unwrap().collect::<Vec<_>>();
         assert_eq!(blocks.len(), 1);
         let (_, values) = &blocks[0];
         assert_eq!(values.shape(), &[DEGENERACY, DEGENERACY]);
         assert_eq!(values.get(&[0, 0]), Some(&1.0));
         assert_eq!(values.get(&[0, 1]), Some(&0.0));
-        assert_eq!(values.data().as_ptr(), diagonal.data().as_ptr());
+        assert_eq!(values.data().as_ptr(), dense.dense_data().unwrap().as_ptr());
     });
     assert!(
-        first >= dense_payload_bytes(),
-        "block inspection did not materialize the compact payload: {first}"
-    );
-
-    let second = measured_bytes(|| {
-        let blocks = diagonal.subblocks().unwrap().collect::<Vec<_>>();
-        assert_eq!(blocks[0].1.data().as_ptr(), diagonal.data().as_ptr());
-    });
-    assert!(
-        second < dense_payload_bytes(),
-        "block inspection rebuilt the dense payload: {second}"
+        borrowed < dense_payload_bytes(),
+        "block inspection copied the dense payload: {borrowed}"
     );
     assert!(tenet::expert::diagonal_spectrum(&diagonal)
         .unwrap()
@@ -203,13 +199,10 @@ fn labelled_block_inspection_materializes_compact_data_once_and_borrows_it() {
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn svd_compacts_s_is_built_compact_and_materializes_only_on_demand() {
-    // What: `svd_compact` stores `s` as `Σ_c k_c` values. The proof is that the
-    // dense buffer is still missing afterwards — the first `data()` on a fresh
-    // `s` has to allocate it, and it could not if construction had already
-    // built one. The second `data()` allocates nothing, which is the body-level
-    // cache being shared rather than rebuilt.
+    // What: `svd_compact` stores `s` as `Σ_c k_c` values: `dense_data()`
+    // refuses it, and only the explicit `materialize()` pays for the dense
+    // buffer.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let tensor = source(0x5eed_0001);
 
@@ -217,32 +210,18 @@ fn svd_compacts_s_is_built_compact_and_materializes_only_on_demand() {
     black_box(tensor.svd_compact().unwrap());
 
     let s = tensor.svd_compact().unwrap().s;
-    let first = measured_bytes(|| s.data().len());
+    assert!(s.dense_data().is_err(), "svd_compact built a dense s");
+    let first = measured_bytes(|| s.materialize().unwrap());
     assert!(
         first >= dense_payload_bytes(),
-        "the dense s payload was already built at construction: first data() \
-         allocated only {first} bytes"
-    );
-    assert_eq!(
-        measured_bytes(|| s.data().len()),
-        0,
-        "the materialization cache is not shared between reads"
-    );
-
-    // And the same buffer, not a fresh one: a clone shares the body.
-    let clone = s.clone();
-    assert_eq!(
-        measured_bytes(|| clone.data().len()),
-        0,
-        "a clone rebuilt the materialization instead of sharing it"
+        "materialize() allocated only {first} bytes for a dense s"
     );
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn a_truncated_s_stays_compact_too() {
     // What: truncation is two-leg `restrict_leg` on `svd_compact`'s `s`, and the
-    // restriction keeps the compact storage. Same proof shape.
+    // restriction keeps the compact storage.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let tensor = source(0x5eed_0002);
     let truncated = |tensor: &TensorMap<Z2FusionRule, f64>| {
@@ -256,16 +235,13 @@ fn a_truncated_s_stays_compact_too() {
     black_box(truncated(&tensor));
 
     let s = truncated(&tensor);
-    let first = measured_bytes(|| s.data().len());
     assert!(
-        first >= dense_payload_bytes(),
-        "the truncated s was dense at construction: first data() allocated only \
-         {first} bytes"
+        s.dense_data().is_err(),
+        "the truncated s was dense at construction"
     );
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn a_complex_payloads_s_is_compact_as_well() {
     // What: the compact arm is dtype-generic — `D` is a type parameter, so a
     // c64 spectrum takes exactly the same route with no widening variant.
@@ -274,11 +250,14 @@ fn a_complex_payloads_s_is_compact_as_well() {
     black_box(tensor.svd_compact().unwrap());
 
     let s = tensor.svd_compact().unwrap().s;
-    let first = measured_bytes(|| s.data().len());
+    assert!(
+        s.dense_data().is_err(),
+        "the c64 s was dense at construction"
+    );
+    let first = measured_bytes(|| s.materialize().unwrap());
     assert!(
         first >= 2 * dense_payload_bytes(),
-        "the dense c64 s payload was already built at construction: first \
-         data() allocated only {first} bytes"
+        "materialize() allocated only {first} bytes for a dense c64 s"
     );
 }
 
@@ -294,7 +273,6 @@ fn spectrum(seed: u64) -> TensorMap<Z2FusionRule, f64> {
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn storage_local_compact_operations_never_build_a_dense_payload() {
     // What: scale, adjoint, add(diagonal, diagonal) and compose(D, D) all stay
     // in O(Σ_c k_c). Each allocates its own compact result and nothing else, so
@@ -328,17 +306,9 @@ fn storage_local_compact_operations_never_build_a_dense_payload() {
     ] {
         assert_eq!(bytes, 0, "compact {name} allocated temporary storage");
     }
-
-    // And none of the above materialized the spectrum as a side effect: the
-    // first read still has to build the dense buffer.
-    assert!(
-        measured_bytes(|| d.data().len()) >= ceiling,
-        "one of the compact operations materialized the spectrum behind our back"
-    );
 }
 
 #[test]
-#[allow(deprecated)] // probes the deprecated `data()` cache until #1548
 fn a_mixed_add_allocates_only_its_own_dense_result() {
     // What: adding a spectrum to a dense tensor on the same bond space scatters
     // straight into the owned result. Materializing the spectrum first would
@@ -354,25 +324,16 @@ fn a_mixed_add_allocates_only_its_own_dense_result() {
         bytes < dense_payload_bytes() * 3 / 2,
         "diagonal + dense allocated more than one dense payload: {bytes} bytes"
     );
-    // The byte ceiling alone cannot see a materialization that the warm-up run
-    // already paid for and cached, so assert the absence directly: `d` must
-    // still owe its dense buffer. This is what dies if the mixed arm reaches
-    // for `dense_data()` instead of scattering the spectrum.
-    assert!(
-        measured_bytes(|| d.data().len()) >= dense_payload_bytes(),
-        "the mixed add materialized the diagonal operand"
-    );
     // Same on the mirrored arm.
     let e = spectrum(0x5eed_0014);
-    black_box(dense.axpby(0.75, &e, -0.5).unwrap());
+    let bytes = warmed_bytes(|| dense.axpby(0.75, &e, -0.5).unwrap());
     assert!(
-        measured_bytes(|| e.data().len()) >= dense_payload_bytes(),
-        "the mirrored mixed add materialized the diagonal operand"
+        bytes < dense_payload_bytes() * 3 / 2,
+        "dense + diagonal allocated more than one dense payload: {bytes} bytes"
     );
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn absorbing_a_spectrum_through_compose_scales_instead_of_densifying() {
     // What: `u * s` and `s * vh` take the bond-scaling arms. Each allocates its
     // own dense result — `u` and `vh` are dense — but not a second dense buffer
@@ -391,21 +352,14 @@ fn absorbing_a_spectrum_through_compose_scales_instead_of_densifying() {
         warmed_bytes(|| s.compose(&vh).unwrap()) < ceiling,
         "s * vh densified the spectrum"
     );
-    // Still compact afterwards, for the same reason as above.
-    assert!(
-        measured_bytes(|| s.data().len()) >= dense_payload_bytes(),
-        "compose materialized the spectrum behind our back"
-    );
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn the_matrix_functions_have_o_rank_diagonal_arms() {
     // What: `exp`, `inv`, `pinv` and `map_diagonal` on a spectrum factor are elementwise
     // on the `Σ_c k_c` stored values, not block work on the `Σ_c k_c²`
-    // materialization. The ceiling catches a densified route; the "still owes"
-    // assertion afterwards catches one that densifies into the shared cache,
-    // which the warm-up run would otherwise have paid for silently.
+    // materialization. The ceiling catches a densified route: no
+    // densification is retained, so the warmed run pays for its own.
     //
     // `exp` needs its own probe because its dense fallback materializes a
     // diagonal payload and eigendecomposes it.
@@ -427,15 +381,9 @@ fn the_matrix_functions_have_o_rank_diagonal_arms() {
             "compact {name} allocated at least one dense payload: {bytes} bytes"
         );
     }
-
-    assert!(
-        measured_bytes(|| d.data().len()) >= ceiling,
-        "one of the matrix functions materialized the spectrum behind our back"
-    );
 }
 
 #[test]
-#[allow(deprecated)] // probes the deprecated `data()` cache until #1548
 fn a_complex_spectrums_matrix_functions_stay_o_rank_too() {
     // What: the arms are dtype-generic, so a c64 spectrum takes the same route
     // — at twice the byte size, which is what the ceiling here accounts for.
@@ -457,27 +405,20 @@ fn a_complex_spectrums_matrix_functions_stay_o_rank_too() {
             "compact c64 {name} allocated at least one dense payload: {bytes} bytes"
         );
     }
-
-    assert!(
-        measured_bytes(|| d.data().len()) >= ceiling,
-        "one of the c64 matrix functions materialized the spectrum"
-    );
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn contracting_a_spectrum_scales_instead_of_densifying() {
     // What: `contract` against a compact operand takes the same scaling route
     // `compose` does (issue #584) — TensorKit's `lmul!`/`rmul!` on a
     // `DiagonalTensorMap` — rather than materializing the `Σ_c k_c²` block
     // diagonal and running a GEMM.
     //
-    // The byte ceiling alone cannot prove it: the scaling route allocates a
-    // scaled copy plus the `permute` destination, which is about what the dense
-    // route spends on the materialization plus the GEMM result. What proves it
-    // is that the spectrum is *still* compact afterwards — the first `data()`
-    // on it must still pay for the dense buffer. That is what dies if the arm
-    // is removed and `contract` reaches for `dense_data()` instead.
+    // The byte ceiling alone cannot prove it for `t · s` and `s · t`: the
+    // scaling route allocates a scaled copy plus the `permute` destination,
+    // which is about what the dense route spends on the materialization plus
+    // the GEMM result. The crate's representation gates probe the absence of
+    // a densification directly; here the two only run as smoke checks.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let d = spectrum(0x5eed_0031);
     let dense = source(0x5eed_0032);
@@ -496,10 +437,6 @@ fn contracting_a_spectrum_scales_instead_of_densifying() {
             )
             .unwrap(),
     );
-    assert!(
-        measured_bytes(|| d.data().len()) >= dense_payload_bytes(),
-        "t * s materialized the spectrum"
-    );
 
     // `s · t`: the mirror image, scaling `t`'s leading codomain leg (`lmul!`).
     let e = spectrum(0x5eed_0033);
@@ -514,10 +451,6 @@ fn contracting_a_spectrum_scales_instead_of_densifying() {
             },
         )
         .unwrap(),
-    );
-    assert!(
-        measured_bytes(|| e.data().len()) >= dense_payload_bytes(),
-        "s * t materialized the spectrum"
     );
 
     // `s · s` stays compact end to end, so here the ceiling *is* decisive: the
@@ -539,24 +472,16 @@ fn contracting_a_spectrum_scales_instead_of_densifying() {
         bytes < dense_payload_bytes(),
         "s * s allocated at least one dense payload: {bytes} bytes"
     );
-    assert!(
-        measured_bytes(|| f.data().len()) >= dense_payload_bytes(),
-        "s * s materialized its operand"
-    );
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn the_rank_one_swap_keeps_its_source_and_its_result_compact() {
     // What: re-ordering the two legs of a spectrum factor is a per-sector
     // rescaling of the stored values (#585), so it neither reads nor writes a
-    // `Σ_c k_c²` payload. Three things are measured, because each catches a
+    // `Σ_c k_c²` payload. Two things are measured, because each catches a
     // different way of getting it wrong: the swap's own byte cost (a densified
-    // route would pay for two dense buffers), that the *source* still owes its
-    // materialization afterwards (a route through `dense_data()` would have
-    // filled the shared cache and hidden itself from the byte ceiling), and
-    // that the *result* owes one too (a compact-in, dense-out route would pass
-    // both of the first two).
+    // route would pay for two dense buffers), and that the *result* is still
+    // compact (a compact-in, dense-out route could pass the first).
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let d = spectrum(0x5eed_0041);
     let ceiling = dense_payload_bytes();
@@ -574,19 +499,14 @@ fn the_rank_one_swap_keeps_its_source_and_its_result_compact() {
         );
     }
 
-    assert!(
-        measured_bytes(|| d.data().len()) >= ceiling,
-        "the rank-one swap materialized its source"
-    );
     let swapped = d.transpose(&[1], &[0]).unwrap();
     assert!(
-        measured_bytes(|| swapped.data().len()) >= ceiling,
+        swapped.dense_data().is_err(),
         "the rank-one swap built a dense result"
     );
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn exact_identity_keeps_compact_storage_and_a_real_braid_keeps_the_dense_route() {
     // What (#689 PR A): exact identities return the source body without
     // allocating or materializing its compact spectrum. A real braid remains
@@ -601,29 +521,25 @@ fn exact_identity_keeps_compact_storage_and_a_real_braid_keeps_the_dense_route()
     );
     let repartitioned = d.repartition(1).unwrap();
     assert!(
-        measured_bytes(|| repartitioned.data().len()) >= dense_payload_bytes(),
+        repartitioned.dense_data().is_err(),
         "identity repartition materialized compact storage"
     );
 
     let braided = d.braid(&[1], &[0], &[0, 1]).unwrap();
-    assert_eq!(
-        measured_bytes(|| braided.data().len()),
-        0,
+    assert!(
+        braided.dense_data().is_ok(),
         "an explicit braid returned compact storage instead of the dense route"
     );
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
-fn compact_is_posdef_never_builds_or_caches_a_dense_payload() {
+fn compact_is_posdef_never_builds_a_dense_payload() {
     // What: the positive-definiteness chain on a spectrum factor (#1557:
     // Hermiticity gate, norm, `diagview`) is a comparison over the stored
     // values (#585). It is not allocation-*free* — the Hermiticity gate it
     // opens with is `t - t†`, which owns two compact `Σ_c k_c` results, and
     // that is the route TensorKit takes too — but it must stay far below the
-    // `Σ_c k_c²` materialization the eigensolver route needed, and it must not
-    // populate the shared dense cache, which the byte ceiling alone cannot see
-    // once the warm-up run has paid for it.
+    // `Σ_c k_c²` materialization the eigensolver route needed.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let ceiling = dense_payload_bytes();
 
@@ -633,10 +549,6 @@ fn compact_is_posdef_never_builds_or_caches_a_dense_payload() {
         bytes < ceiling,
         "compact is_posdef allocated at least one dense payload: {bytes} bytes"
     );
-    assert!(
-        measured_bytes(|| d.data().len()) >= ceiling,
-        "compact is_posdef materialized the spectrum"
-    );
 
     let e = complex_source(0x5eed_0052).svd_compact().unwrap().s;
     let bytes = warmed_bytes(|| is_posdef_compact!(e, 1e-12, |v: Complex64| v.re));
@@ -644,19 +556,13 @@ fn compact_is_posdef_never_builds_or_caches_a_dense_payload() {
         bytes < 2 * ceiling,
         "compact c64 is_posdef allocated at least one dense payload: {bytes} bytes"
     );
-    assert!(
-        measured_bytes(|| e.data().len()) >= 2 * ceiling,
-        "compact c64 is_posdef materialized the spectrum"
-    );
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn pr3_conversions_allocate_one_output_and_stay_compact_on_a_spectrum() {
     // What (issue #580 PR 3): `zeros_like`, `to_c64` and `re`/`im` are one
     // element-wise pass — on a compact spectrum factor the result stays
-    // compact (far below one dense payload), and none of them materializes
-    // the source's dense buffer as a side effect.
+    // compact (far below one dense payload).
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let d = spectrum(0x5eed_0021);
     let complex_d = complex_source(0x5eed_0022).svd_compact().unwrap().s;
@@ -673,17 +579,6 @@ fn pr3_conversions_allocate_one_output_and_stay_compact_on_a_spectrum() {
             "compact {name} allocated at least one dense payload: {bytes} bytes"
         );
     }
-
-    // Neither source was densified behind our back: the first read still has
-    // to build each dense buffer.
-    assert!(
-        measured_bytes(|| d.data().len()) >= ceiling,
-        "a conversion materialized the f64 spectrum as a side effect"
-    );
-    assert!(
-        measured_bytes(|| complex_d.data().len()) >= 2 * ceiling,
-        "a conversion materialized the c64 spectrum as a side effect"
-    );
 }
 
 #[test]
@@ -737,15 +632,11 @@ fn pr3_inspections_allocate_no_payload() {
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn the_full_bond_trace_reduces_the_spectrum_without_materializing() {
     // What (issue #604): `trace_pairs` over the only pair of a compact bond
     // factor reduces the stored spectrum in O(Σ_c k_c), preserving the #585
-    // regression gate. The warm-up runs on a throwaway twin, never on the
-    // measured tensor: the pre-#604 route reached `dense_data()`, which fills
-    // the *measured* tensor's shared cache, so a same-tensor warm-up would pay
-    // for the materialization once and make the densifying route measure
-    // compact (the warm-up blindness the #585 report documents).
+    // regression gate. The warm-up runs on a throwaway twin, so the measured
+    // run pays for everything but the process-global caches.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let ceiling = dense_payload_bytes();
 
@@ -755,13 +646,6 @@ fn the_full_bond_trace_reduces_the_spectrum_without_materializing() {
     assert!(
         bytes < ceiling,
         "compact trace_pairs allocated at least one dense payload: {bytes} bytes"
-    );
-    // The cache-population check: the byte ceiling alone cannot see a route
-    // that densified during someone else's warm-up, so assert the absence
-    // directly — the source must still owe its dense buffer.
-    assert!(
-        measured_bytes(|| d.data().len()) >= ceiling,
-        "compact trace_pairs materialized its source behind our back"
     );
 
     // Same on a c64 spectrum: the arm is dtype-generic.
@@ -773,31 +657,21 @@ fn the_full_bond_trace_reduces_the_spectrum_without_materializing() {
         bytes < 2 * ceiling,
         "compact c64 trace_pairs allocated at least one dense payload: {bytes} bytes"
     );
-    assert!(
-        measured_bytes(|| e.data().len()) >= 2 * ceiling,
-        "compact c64 trace_pairs materialized its source behind our back"
-    );
 
-    // Tracing nothing is the pre-guard clone: no payload either way, and still
-    // no materialization owed.
+    // Tracing nothing is the pre-guard clone: no payload either way.
     let f = spectrum(0x5eed_0083);
-    black_box(f.trace_pairs(&[]).unwrap());
-    assert!(
-        measured_bytes(|| f.data().len()) >= ceiling,
-        "the empty trace materialized its source"
-    );
+    assert!(f.trace_pairs(&[]).unwrap().dense_data().is_err());
 }
 
 #[test]
-#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn contract_keeps_the_compact_storage_outcomes() {
     // What (issue #580 PR 6, gate 3): `contract` keeps the compact-storage
     // outcomes documented by its rustdoc.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
 
     // `s · s` with the identity order stays compact end to end: the whole
-    // contraction costs less than one dense payload, and both the operand and
-    // the result still owe their materialization afterwards.
+    // contraction costs less than one dense payload, and the result is
+    // compact.
     let d = spectrum(0x5eed_0061);
     let bytes = warmed_bytes(|| {
         d.contract(
@@ -815,10 +689,6 @@ fn contract_keeps_the_compact_storage_outcomes() {
         bytes < dense_payload_bytes(),
         "ordered s * s allocated at least one dense payload: {bytes} bytes"
     );
-    assert!(
-        measured_bytes(|| d.data().len()) >= dense_payload_bytes(),
-        "ordered s * s materialized its operand"
-    );
     let product = d
         .contract(
             &d,
@@ -831,14 +701,13 @@ fn contract_keeps_the_compact_storage_outcomes() {
         )
         .unwrap();
     assert!(
-        measured_bytes(|| product.data().len()) >= dense_payload_bytes(),
+        product.dense_data().is_err(),
         "ordered s * s densified its result"
     );
 
     // `s · s` with `[1, 0]` moves the surviving bond across the
     // codomain/domain split, which the rustdoc documents as the dense-route
-    // decline: the result carries a dense payload, so its first `data()` has
-    // nothing left to materialize.
+    // decline: the result carries a dense payload.
     let e = spectrum(0x5eed_0062);
     black_box(
         e.contract(
@@ -864,12 +733,12 @@ fn contract_keeps_the_compact_storage_outcomes() {
         )
         .unwrap();
     assert!(
-        measured_bytes(|| swapped.data().len()) < dense_payload_bytes(),
-        "ordered s * s with the bond-crossing order still owes a materialization, so it kept a compact payload the documented decline should have refused"
+        swapped.dense_data().is_ok(),
+        "ordered s * s with the bond-crossing order kept a compact payload the documented decline should have refused"
     );
 
-    // `t · s` under a non-identity order is still the scaling arm: the
-    // spectrum operand stays compact afterwards.
+    // `t · s` under a non-identity order is still the scaling arm; the
+    // representation gates probe that it does not densify the spectrum.
     let f = spectrum(0x5eed_0063);
     let dense = source(0x5eed_0064);
     black_box(
@@ -884,9 +753,5 @@ fn contract_keeps_the_compact_storage_outcomes() {
                 },
             )
             .unwrap(),
-    );
-    assert!(
-        measured_bytes(|| f.data().len()) >= dense_payload_bytes(),
-        "ordered t * s materialized the spectrum"
     );
 }

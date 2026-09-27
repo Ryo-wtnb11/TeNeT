@@ -117,7 +117,7 @@ trivial/dense provider exists.
 | Capability | Host MF `Vec<D>` | Host checked Generic `Vec<D>` | other Host-readable `S` | CUDA f64 MF | CUDA f64 checked Generic | CUDA c64 | CUDA f32/c32 MF [10] |
 |---|---|---|---|---|---|---|
 | Metadata, provider ownership, handle clone | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED |
-| Stable `data() -> &[D]` | PROVED | PROVED | INTENTIONAL-DIFFERENCE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| Borrowed `dense_data() -> Result<&[D], Error>` | PROVED | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Physical expansion/projection [2] | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Explicit Host/device transfer | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | PROVED | PROVED | PROVED |
 | Lazy adjoint | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | UNSUPPORTED | PROVED | PROVED |
@@ -372,8 +372,8 @@ operation publishes no TeNeT output tensor or partial factor tuple.
 | Mechanism | Owner/trigger | Contract |
 |---|---|---|
 | Parent-backed lazy view | `TypedAdjointView` from `adjoint()` | Metadata plus canonical parent; no payload copy |
-| Receiver-retained logical payload | lazy view `OnceLock`, only on `data()` | Stable borrowed slice; compatibility storage, not an execution cache |
-| Operation-local logical payload | `materialized_tensor_uncached()` | Temporary fallback; never populates the receiver cache |
+| Explicit logical payload | `materialize()` | Fresh owned dense tensor; the only public materialization |
+| Operation-local logical payload | `materialized_tensor_uncached()`, compact densification | Documented part of the operation's cost; released with the operation, never retained by the receiver (#1548) |
 
 Orientation-aware transforms, contractions and algebraic adjoint redirects use
 the parent where their operation law proves it. QR/LQ, EIGH/EIG logical

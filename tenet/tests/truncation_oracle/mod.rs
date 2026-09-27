@@ -190,7 +190,9 @@ pub fn assemble<S: PartialEq + Clone, K: Ord + Clone>(
 #[macro_export]
 macro_rules! sector_matrices {
     ($tensor:expr) => {{
-        let tensor = &$tensor;
+        // The oracle reads values, so a lazy or compact input is
+        // materialized explicitly.
+        let tensor = $tensor.materialize().unwrap();
         let blocks = tensor
             .subblocks()
             .unwrap()

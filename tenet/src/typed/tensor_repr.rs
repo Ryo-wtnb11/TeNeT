@@ -24,9 +24,7 @@ pub(super) struct TypedTensorBody<R, D, S = Vec<D>> {
     /// slice (#580 PR 5) holds that contract in
     /// [`TensorMap::shareable_dense_payload`]: a dense
     /// payload is shared at pointer cost, a compact one is materialized into
-    /// a *fresh* dense payload (one copy) — never by sharing the body-local
-    /// `dense_cache`, which only lends a borrowed slice tied to this body's
-    /// space/payload pairing. And `TypedData::Diagonal` must not be
+    /// a *fresh* dense payload (one copy). And `TypedData::Diagonal` must not be
     /// broadened to non-bond spaces without separately proving every compact
     /// fast path (`spectrum`/`exp`/`inv`/`pinv`/`scale`).
     /// Clone-then-modify keeps the same property from the
@@ -35,18 +33,6 @@ pub(super) struct TypedTensorBody<R, D, S = Vec<D>> {
     /// payloads; every write route publishes a new payload instead of
     /// reaching through the `Arc`).
     pub(super) data: Arc<TypedData<D, S>>,
-    /// Materialization of a [`TypedData::Diagonal`] payload into the dense
-    /// coupled layout, computed at most once and shared by every clone of this
-    /// body. Never populated for a dense payload.
-    ///
-    /// Deliberately *not* inside the payload `Arc`: the materialized buffer is
-    /// a function of the payload **and** the space it is laid out on, so it
-    /// belongs to the body that owns that pairing — any body sharing the
-    /// payload starts from a cold cache and materializes for itself. (Reusing
-    /// a `Diagonal` payload under a *different* space is not a scenario this
-    /// placement serves: that reuse is forbidden outright — see the `data`
-    /// field rationale on the Group 4 contract.)
-    pub(super) dense_cache: std::sync::OnceLock<Vec<D>>,
 }
 
 impl<R, D, S> TypedTensorBody<R, D, S> {
@@ -59,23 +45,17 @@ impl<R, D, S> TypedTensorBody<R, D, S> {
         Self {
             space,
             data: Arc::new(data),
-            dense_cache: std::sync::OnceLock::new(),
         }
     }
 
     /// A body installing an already-shared payload under a (usually
     /// rewritten) space — the unit-leg operations' O(1) dense reuse
-    /// (#580 PR 5). The cache starts cold on purpose: it belongs to the
-    /// body's own space/payload pairing (see the `dense_cache` rationale).
+    /// (#580 PR 5).
     pub(super) fn with_shared_payload(
         space: BoundDynamicFusionMapSpace<R>,
         data: Arc<TypedData<D, S>>,
     ) -> Self {
-        Self {
-            space,
-            data,
-            dense_cache: std::sync::OnceLock::new(),
-        }
+        Self { space, data }
     }
 }
 
@@ -92,15 +72,9 @@ impl<R, D, S> TypedTensorBody<R, D, S> {
 pub(super) struct TypedAdjointView<R, D, S = Vec<D>> {
     pub(super) parent: Arc<TypedTensorBody<R, D, S>>,
     pub(super) logical_space: BoundDynamicFusionMapSpace<R>,
-    // Lazy adjoint materialization is deliberately host-allocated. `S` names
-    // the canonical parent payload; it is not a promise that arbitrary storage
-    // can allocate a same-storage result.
-    pub(super) materialized: OnceLock<Arc<TypedTensorBody<R, D>>>,
     /// Set only on the operation-local header a [`TensorRef`] resolves to:
     /// the materialization path refuses it instead of copying.
     pub(super) borrowed: bool,
-    #[cfg(test)]
-    pub(super) materialized_body_builds: std::sync::atomic::AtomicUsize,
 }
 
 impl<R, D, S> TypedAdjointView<R, D, S> {
@@ -124,18 +98,15 @@ impl<R, D, S> TypedAdjointView<R, D, S> {
         Self {
             parent,
             logical_space,
-            materialized: OnceLock::new(),
             borrowed: false,
-            #[cfg(test)]
-            materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
 
 #[cfg(test)]
 thread_local! {
-    /// Entries into adjoint payload materialization (the `data()` fill and
-    /// `materialized_tensor_uncached`), counted while `Some`.
+    /// Entries into adjoint payload materialization
+    /// (`materialized_tensor_uncached`), counted while `Some`.
     pub(crate) static ADJOINT_MATERIALIZATIONS: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
 }
@@ -257,6 +228,9 @@ impl<R, D, S> TensorMap<R, D, S> {
 #[cfg(test)]
 thread_local! {
     pub(super) static UNCACHED_ADJOINT_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Operation-local densifications of a compact diagonal payload
+    /// (`TypedTensorBody::materialized_dense_data`).
+    pub(crate) static DIAGONAL_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(super) enum TypedTensorRepr<R, D, S = Vec<D>> {
@@ -858,8 +832,7 @@ where
     ///
     /// One output allocation for owned dense inputs plus `O(min-prefix)`
     /// overwrites per shared block. A lazy input currently adds one
-    /// operation-local logical payload; it is not published in the receiver's
-    /// reusable materialization cache.
+    /// operation-local logical payload, released with the operation.
     ///
     /// # Errors
     ///
@@ -918,18 +891,19 @@ where
                 ));
             }
         }
-        // Lazy inputs need an operation-local dense payload, never a warmed
-        // reusable receiver cache.
+        // Lazy and compact inputs take an operation-local dense payload.
         let destination = self.materialized_tensor_uncached()?;
         let source = source.materialized_tensor_uncached()?;
-        let destination_data = destination
+        let destination_data_payload = destination
             .owned_body()
             .expect("uncached materialization is owned")
             .materialized_dense_data();
-        let source_data = source
+        let destination_data: &[D] = &destination_data_payload;
+        let source_data_payload = source
             .owned_body()
             .expect("uncached materialization is owned")
             .materialized_dense_data();
+        let source_data: &[D] = &source_data_payload;
         if destination_space.structure().required_len()? != destination_data.len()
             || source_space.structure().required_len()? != source_data.len()
         {

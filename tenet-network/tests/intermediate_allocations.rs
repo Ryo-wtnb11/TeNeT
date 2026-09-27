@@ -983,7 +983,6 @@ fn run_typed_overwrite_worker(dtype: &str, chi: usize, reuse: bool) -> Vec<Alloc
         .collect()
 }
 
-#[allow(deprecated)] // probes the deprecated `data()` cache until #1548
 fn lazy_conj_worker() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
@@ -1066,11 +1065,14 @@ fn lazy_conj_worker() {
     PAYLOAD_SIZE.store(13 * 13 * std::mem::size_of::<f64>(), Ordering::Relaxed);
     reset_live_registry();
     ENABLED.store(true, Ordering::SeqCst);
-    assert_eq!(std::hint::black_box(compact.data()).len(), 13 * 13);
+    let output = compact_plan
+        .execute(&[&compact], &mut compact_workspace)
+        .unwrap();
     ENABLED.store(false, Ordering::SeqCst);
-    // What: materialization still allocates the dense 13*13 cache after warm
-    // replay, proving replay itself did not publish that cache.
-    assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 1);
+    drop(output);
+    // What: warm replay of the compact input allocates no dense 13*13
+    // payload, so it never densifies that input.
+    assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 0);
     assert_eq!(REGISTRY_OVERFLOWS.load(Ordering::Relaxed), 0);
 }
 
