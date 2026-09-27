@@ -318,9 +318,8 @@ real-device test exists and is ignored without CUDA; default CI is not claimed
 to run it. The CUDA c64 column is the `Complex64` device payload of
 [#1268](https://github.com/Ryo-wtnb11/TeNeT/issues/1268). `svd_compact` and
 `eigh_full` carry both device payloads: EIGH admits a block only when it equals
-its conjugate transpose, and `u`/`vh` keep the raw device SVD gauge rather than
-the Host largest-pivot gauge — an intentional, documented device difference
-that leaves `u s vh` and the spectra identical. `svd_trunc` and `eigh_trunc`
+its conjugate transpose, and `u`/`vh` follow the Host largest-pivot gauge,
+applied on the device ([#1552](https://github.com/Ryo-wtnb11/TeNeT/issues/1552)). `svd_trunc` and `eigh_trunc`
 are deliberately *not* device operations
 ([#1297](https://github.com/Ryo-wtnb11/TeNeT/issues/1297)): they return
 `UnsupportedOnDevice` before any device work, because the truncation decision

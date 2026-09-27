@@ -10,7 +10,7 @@ use tenferro_gpu::cuda::{download_tensor, upload_tensor, CudaBackend, CudaDevice
 use tenferro_linalg::{QrGauge, QrOptions, TensorReadLinalgExt};
 use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
 use tenferro_tensor::{
-    ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, Tensor, TensorDot,
+    CompareDir, ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, Tensor, TensorDot,
     TensorElementwise, TensorIndexing, TensorRead, TensorReduction, TensorScalar as TenferroScalar,
     TensorStructural, TensorView, TensorViewMut, TensorWrite, TypedTensor,
 };
@@ -235,6 +235,7 @@ std::thread_local! {
             gemm_calls: 0,
             solver_calls: 0,
             copy_calls: 0,
+            gauge_ops: 0,
         })
     };
 }
@@ -300,6 +301,8 @@ pub struct CudaPlanCacheStats {
 ///   ([`cuda_region_axpby`], [`cuda_region_zero`]) alike.
 /// - `solver_calls`: cuSOLVER region calls (SVD, QR, EIGH).
 /// - `copy_calls`: `cuda_copy_region_into` calls that move data.
+/// - `gauge_ops`: Tenferro op submissions of the compact-SVD sign/phase
+///   gauge ([`cuda_svd_gauge_phases`] and [`CudaSvdPhases`]).
 ///
 /// The counters are per thread: they count the work this module performs on
 /// the thread that reads them, and never work submitted by another thread. A
@@ -316,6 +319,7 @@ pub struct CudaTransferStats {
     pub gemm_calls: u64,
     pub solver_calls: u64,
     pub copy_calls: u64,
+    pub gauge_ops: u64,
 }
 
 /// Reads the calling thread's CUDA boundary observation counters. See
@@ -2802,6 +2806,233 @@ pub fn cuda_svd_region<D: CudaScalar>(
     Ok((u, s, vt))
 }
 
+/// Row weights `N - i` (`i < N`) that make "first row among equal maxima"
+/// a device reduction for [`cuda_svd_gauge_phases`]. One upload per
+/// `svd_compact` call, shared by every route with at most `N` rows.
+pub struct CudaSvdGaugeWeights {
+    tensor: Tensor,
+    len: usize,
+    device: usize,
+}
+
+impl CudaSvdGaugeWeights {
+    /// Uploads `max_rows` weights in the real lane of `D`: one H2D of
+    /// `max_rows` reals.
+    ///
+    /// A lane that cannot hold every weight exactly (`f32` above `2^24`
+    /// rows) is rejected: a rounded weight would break the first-row
+    /// tie-break silently.
+    pub fn upload<D: CudaScalar>(
+        ctx: &CudaDenseContext,
+        max_rows: usize,
+    ) -> Result<Self, DenseError> {
+        const OP: &str = "cuda_svd_gauge";
+        if max_rows as f64 > 2.0 / <D::Real as CudaRealScalar>::EPSILON {
+            return Err(DenseError::Unsupported {
+                op: OP,
+                message: format!("{max_rows} rows exceed the exact integer range of the real lane"),
+            });
+        }
+        let data = (0..max_rows)
+            .map(|row| <D::Real as CudaRealScalar>::narrow((max_rows - row) as f64))
+            .collect();
+        let host = <D::Real as TenferroScalar>::into_tensor(vec![max_rows], data)
+            .map_err(|err| cuda_error(OP, err))?;
+        let tensor =
+            upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error(OP, err))?;
+        record_h2d(max_rows * std::mem::size_of::<D::Real>());
+        Ok(Self {
+            tensor,
+            len: max_rows,
+            device: ctx.device,
+        })
+    }
+}
+
+/// Per-column phases of a compact SVD's `U`, from [`cuda_svd_gauge_phases`].
+///
+/// Applying them (`U diag(conj(phase))`, `diag(phase) Vh`) leaves
+/// `U diag(s) Vh` unchanged and makes the first largest-magnitude entry of
+/// every `U` column real and non-negative: the Host `svd_compact_gauge`
+/// (tenet-matrixalgebra) and MatrixAlgebraKit's `gaugefix!(svd_compact!)`.
+pub struct CudaSvdPhases {
+    phase: Tensor,
+    k: usize,
+    device: usize,
+}
+
+const SVD_GAUGE_OP: &str = "cuda_svd_gauge";
+
+/// One counted Tenferro op of the SVD gauge.
+fn gauge_op<T>(result: tenferro_tensor::Result<T>) -> Result<T, DenseError> {
+    record(|stats| stats.gauge_ops += 1);
+    result.map_err(|err| cuda_error(SVD_GAUGE_OP, err))
+}
+
+/// The Host SVD gauge phases of the `rows x k` compact left factor `u`
+/// (`rows, k > 0`), computed on the device: nothing is downloaded and no host
+/// barrier is taken.
+///
+/// Tenferro 0.7.1 has no arg-max reduction, so the pivot is composed from 14
+/// ops (each counted in `gauge_ops`): `abs`, column `reduce_max`, broadcast,
+/// `compare` (every maximum), `cast`, weight broadcast, `mul`, column
+/// `reduce_max`, broadcast, `compare` (the first maximum: the weights are
+/// distinct and decreasing), `cast`, `mul`, column `reduce_sum` (the pivot)
+/// and `sign`. Why not `gather` of an arg-max index: an integer index needs a
+/// float-to-int `cast`, which validates its range with a download.
+///
+/// A non-finite column has no maximum under `compare`; its pivot then sums
+/// the whole column and stays non-finite rather than being zeroed.
+pub fn cuda_svd_gauge_phases<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    u: &CudaDenseStorage,
+    rows: usize,
+    k: usize,
+    weights: &CudaSvdGaugeWeights,
+) -> Result<CudaSvdPhases, DenseError> {
+    const OP: &str = SVD_GAUGE_OP;
+    ensure_cuda_device(
+        ctx.device,
+        OP,
+        &[("u", u.device), ("weights", weights.device)],
+    )?;
+    ensure_payload_dtype::<D>(OP, u)?;
+    if rows == 0 || k == 0 || u.tensor.shape() != [rows, k] || rows > weights.len {
+        return Err(cuda_error(
+            OP,
+            format!(
+                "gauge of U={:?} as a nonempty [{rows}, {k}] factor with {} weights",
+                u.tensor.shape(),
+                weights.len
+            ),
+        ));
+    }
+    let shape = [rows, k];
+    let backend = &mut ctx.backend;
+    let magnitude = gauge_op(backend.abs(&u.tensor))?;
+    let largest = gauge_op(backend.reduce_max(&magnitude, &[0]))?;
+    let largest = gauge_op(backend.broadcast_in_dim(&largest, &shape, &[1]))?;
+    let maxima = gauge_op(backend.compare(&magnitude, &largest, &CompareDir::Eq))?;
+    let maxima = gauge_op(backend.cast(&maxima, <D::Real as TenferroScalar>::dtype()))?;
+    let row_weights = if rows == weights.len {
+        gauge_op(backend.broadcast_in_dim(&weights.tensor, &shape, &[0]))?
+    } else {
+        let prefix = weights
+            .tensor
+            .as_typed::<D::Real>()
+            .ok_or_else(|| cuda_error(OP, "gauge weights are not in the real lane"))?
+            .backend_region_view(vec![rows], vec![1], 0)
+            .map(<D::Real as TenferroScalar>::tensor_view)
+            .map_err(|err| cuda_error(OP, err))?;
+        gauge_op(backend.broadcast_in_dim_read(TensorRead::from_view(prefix), &shape, &[0]))?
+    };
+    let score = gauge_op(backend.mul(&maxima, &row_weights))?;
+    let best = gauge_op(backend.reduce_max(&score, &[0]))?;
+    let best = gauge_op(backend.broadcast_in_dim(&best, &shape, &[1]))?;
+    let first = gauge_op(backend.compare(&score, &best, &CompareDir::Eq))?;
+    let first = gauge_op(backend.cast(&first, D::dtype()))?;
+    let pivot = gauge_op(backend.mul(&u.tensor, &first))?;
+    let pivot = gauge_op(backend.reduce_sum(&pivot, &[0]))?;
+    let phase = gauge_op(backend.sign(&pivot))?;
+    Ok(CudaSvdPhases {
+        phase,
+        k,
+        device: ctx.device,
+    })
+}
+
+impl CudaSvdPhases {
+    /// Runs `body` on `conj(phase)`: one `conj` for a complex payload, the
+    /// phase itself for a real one (`±1`).
+    fn with_left_phase<D: CudaScalar, T>(
+        &self,
+        ctx: &mut CudaDenseContext,
+        body: impl FnOnce(&mut CudaDenseContext, &Tensor) -> Result<T, DenseError>,
+    ) -> Result<T, DenseError> {
+        ensure_cuda_device(ctx.device, SVD_GAUGE_OP, &[("phases", self.device)])?;
+        if D::IS_COMPLEX {
+            let conjugated = gauge_op(ctx.backend.conj(&self.phase))?;
+            body(ctx, &conjugated)
+        } else {
+            body(ctx, &self.phase)
+        }
+    }
+
+    fn checked_factor<D: CudaScalar>(
+        &self,
+        factor: &CudaDenseStorage,
+        shape: [usize; 2],
+    ) -> Result<(), DenseError> {
+        ensure_payload_dtype::<D>(SVD_GAUGE_OP, factor)?;
+        if factor.tensor.shape() != shape {
+            return Err(DenseError::ShapeMismatch {
+                op: SVD_GAUGE_OP,
+                expected: shape.to_vec(),
+                actual: factor.tensor.shape().to_vec(),
+            });
+        }
+        Ok(())
+    }
+
+    /// `u diag(conj(phase))` for a `rows x k` factor: broadcast and `mul`,
+    /// plus `conj` for a complex payload.
+    pub fn scale_left<D: CudaScalar>(
+        &self,
+        ctx: &mut CudaDenseContext,
+        u: &CudaDenseStorage,
+        rows: usize,
+    ) -> Result<CudaDenseStorage, DenseError> {
+        self.checked_factor::<D>(u, [rows, self.k])?;
+        let k = self.k;
+        self.with_left_phase::<D, _>(ctx, |ctx, phase| {
+            let phase = gauge_op(ctx.backend.broadcast_in_dim(phase, &[rows, k], &[1]))?;
+            let scaled = gauge_op(ctx.backend.mul(&u.tensor, &phase))?;
+            CudaDenseStorage::from_tensor::<D>(SVD_GAUGE_OP, scaled, ctx.device)
+        })
+    }
+
+    /// `diag(phase) vh` for a `k x cols` factor: broadcast and `mul`.
+    pub fn scale_right<D: CudaScalar>(
+        &self,
+        ctx: &mut CudaDenseContext,
+        vh: &CudaDenseStorage,
+        cols: usize,
+    ) -> Result<CudaDenseStorage, DenseError> {
+        ensure_cuda_device(ctx.device, SVD_GAUGE_OP, &[("phases", self.device)])?;
+        self.checked_factor::<D>(vh, [self.k, cols])?;
+        let phase = gauge_op(
+            ctx.backend
+                .broadcast_in_dim(&self.phase, &[self.k, cols], &[0]),
+        )?;
+        let scaled = gauge_op(ctx.backend.mul(&phase, &vh.tensor))?;
+        CudaDenseStorage::from_tensor::<D>(SVD_GAUGE_OP, scaled, ctx.device)
+    }
+
+    /// `diag(conj(phase))` as a `k x k` right operand for an assembly GEMM
+    /// that already multiplies by a selector: `embed_diagonal`, plus `conj`
+    /// for a complex payload.
+    pub fn left_selector<D: CudaScalar>(
+        &self,
+        ctx: &mut CudaDenseContext,
+    ) -> Result<CudaDenseStorage, DenseError> {
+        self.with_left_phase::<D, _>(ctx, |ctx, phase| {
+            let selector = gauge_op(ctx.backend.embed_diagonal(phase, 0, 1))?;
+            CudaDenseStorage::from_tensor::<D>(SVD_GAUGE_OP, selector, ctx.device)
+        })
+    }
+
+    /// `diag(phase)` as a `k x k` left operand for an assembly GEMM:
+    /// one `embed_diagonal`.
+    pub fn right_selector<D: CudaScalar>(
+        &self,
+        ctx: &mut CudaDenseContext,
+    ) -> Result<CudaDenseStorage, DenseError> {
+        ensure_cuda_device(ctx.device, SVD_GAUGE_OP, &[("phases", self.device)])?;
+        let selector = gauge_op(ctx.backend.embed_diagonal(&self.phase, 0, 1))?;
+        CudaDenseStorage::from_tensor::<D>(SVD_GAUGE_OP, selector, ctx.device)
+    }
+}
+
 fn validate_svd_factor_shapes(
     u_shape: &[usize],
     s_len: usize,
@@ -3834,6 +4065,7 @@ mod tests {
                 gemm_calls: 1,
                 solver_calls: 1,
                 copy_calls: 0,
+                gauge_ops: 0,
             }
         );
 
