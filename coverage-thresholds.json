@@ -28,6 +28,7 @@
     "tenet-network/src/error.rs": 0,
     "tenet-network/src/ir.rs": 65,
     "tenet-network/src/labels.rs": 64,
+    "tenet-network/src/network/dispatch.rs": 50,
     "tenet-network/src/optimizer.rs": 44,
     "tenet-network/src/parse.rs": 64,
     "tenet-network/src/plan.rs": 59,
