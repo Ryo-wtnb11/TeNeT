@@ -26,7 +26,7 @@ impl CudaRegionBeta {
 /// The payload dtype of an operand, checked before any device work rather
 /// than at view construction, so a mismatched call cannot have uploaded a
 /// lazily created scalar operand first.
-fn ensure_payload_dtype<D: CudaScalar>(
+pub(super) fn ensure_payload_dtype<D: CudaScalar>(
     op: &'static str,
     storage: &CudaDenseStorage,
 ) -> Result<(), DenseError> {
@@ -49,7 +49,10 @@ fn ensure_payload_dtype<D: CudaScalar>(
 /// cleared destination is a wrong answer rather than a slow one. The zero
 /// scale is expressible — as an exact zero *data* operand — so this is a
 /// misuse of the argument, not a missing capability.
-fn reject_zero_alpha<D: CudaScalar>(op: &'static str, alpha: D) -> Result<(), DenseError> {
+pub(super) fn reject_zero_alpha<D: CudaScalar>(
+    op: &'static str,
+    alpha: D,
+) -> Result<(), DenseError> {
     // IEEE comparison, so `-0.0` is rejected too: it skips the read just as
     // `0.0` does.
     if alpha != D::ZERO {
@@ -64,7 +67,7 @@ fn reject_zero_alpha<D: CudaScalar>(op: &'static str, alpha: D) -> Result<(), De
 /// Submits one validated region move. Takes the backend rather than the whole
 /// context so a caller can pass a coefficient the context itself owns.
 #[allow(clippy::too_many_arguments)]
-fn submit_region_axpby<D: CudaScalar>(
+pub(super) fn submit_region_axpby<D: CudaScalar>(
     backend: &mut CudaBackend,
     op: &'static str,
     src: &CudaDenseStorage,

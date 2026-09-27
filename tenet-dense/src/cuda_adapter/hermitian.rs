@@ -19,7 +19,7 @@ fn upload_scalar<R: CudaRealScalar>(
     Ok(tensor)
 }
 /// The relative anti-Hermitian residual this payload's real lane admits.
-fn hermitian_tolerance<D: CudaScalar>() -> f64 {
+pub(super) fn hermitian_tolerance<D: CudaScalar>() -> f64 {
     HERMITIAN_TOLERANCE_EPSILONS * <D::Real as CudaRealScalar>::EPSILON
 }
 /// The rank-0 lane operand through which [`scale_by_power_of_two`] multiplies

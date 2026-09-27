@@ -9,7 +9,9 @@
 //! `factorization` each own one device-boundary concern so an independent
 //! leaf can touch one without conflicting with another.
 
+use std::cell::Cell;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use num_complex::{Complex32, Complex64};
 use tenferro_gpu::cuda::{download_tensor, upload_tensor, CudaBackend, CudaDeviceId};
@@ -33,17 +35,61 @@ use crate::plan_ledger::{
 };
 use crate::tensor::dense_dtype_from_tenferro;
 
-use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 mod context;
-mod storage;
-mod gemm;
 mod elementwise;
-mod hermitian;
 mod factorization;
+mod gemm;
+mod hermitian;
+mod storage;
 #[cfg(test)]
 mod tests;
+
+// Re-exports so `crate::cuda_adapter::Item` (what `lib.rs`'s `pub use
+// cuda_adapter::{...}` and every other in-crate caller names) still resolves
+// once the item's *definition* moves into one of the child files above.
+pub use context::{CudaDenseContext, CudaPlanCacheStats};
+pub use elementwise::{
+    cuda_conj, cuda_copy_region_into, cuda_copy_strided_into, cuda_gather_elements,
+    cuda_gather_member_elements, cuda_gather_members, cuda_region_axpby,
+    cuda_region_trace_accumulate, cuda_region_zero, cuda_widen, CudaRegionBeta,
+    CudaRegionCoefficient,
+};
+pub use factorization::{
+    cuda_copy_spectrum_into, cuda_download_batched_spectra, cuda_download_spectra,
+    cuda_eigh_region, cuda_eigh_region_batched, cuda_gather_columns_batched_into, cuda_qr_region,
+    cuda_svd_gauge_phases, cuda_svd_region, CudaSpectrum, CudaSvdGaugeWeights, CudaSvdPhases,
+};
+pub use gemm::{
+    cuda_gemm_region_batched_into, cuda_gemm_region_into, cuda_gemm_region_with_ops_into,
+    cuda_matmul_region_into,
+};
+pub use hermitian::{
+    cuda_hermitian_regions, cuda_hermitian_regions_batched, cuda_is_hermitian_region,
+};
+pub use storage::CudaDenseStorage;
+
+// `context::warm_up` submits an axpby the same way every region call does.
+use elementwise::submit_region_axpby;
+// The SVD host-gauge (factorization) validates its payload the same way
+// every other region primitive does.
+use elementwise::ensure_payload_dtype;
+
+// Cross-child visibility for private helpers the split test module still
+// needs (it was one `mod tests` inside this same file before #1595, so every
+// private item was already in scope; now it is a sibling of these children,
+// so the items it reaches through a *different* file need `pub(super)`
+// there and a re-export here for its `use super::*` to pick them up). Gated
+// to `cfg(test)` so a non-test build does not carry an unused import.
+#[cfg(test)]
+use context::SCALAR_OPERAND_SLOTS;
+#[cfg(test)]
+use elementwise::reject_zero_alpha;
+#[cfg(test)]
+use factorization::{
+    validate_eigh_factor_shapes, validate_qr_factor_shapes, validate_svd_factor_shapes,
+};
+#[cfg(test)]
+use hermitian::hermitian_tolerance;
 
 mod cuda_scalar_sealed {
     pub trait Sealed {}

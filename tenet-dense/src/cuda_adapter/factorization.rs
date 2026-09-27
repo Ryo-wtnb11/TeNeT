@@ -15,7 +15,7 @@ fn with_cuda_linalg<R: Send>(
 /// Callers collect the spectra of all their blocks and read them with one
 /// [`cuda_download_spectra`].
 pub struct CudaSpectrum {
-    tensor: Tensor,
+    pub(super) tensor: Tensor,
 }
 impl CudaSpectrum {
     /// Number of values.
@@ -389,7 +389,7 @@ impl CudaSvdPhases {
         CudaDenseStorage::from_tensor::<D>(SVD_GAUGE_OP, selector, ctx.device)
     }
 }
-fn validate_svd_factor_shapes(
+pub(super) fn validate_svd_factor_shapes(
     u_shape: &[usize],
     s_len: usize,
     vt_shape: &[usize],
@@ -439,7 +439,7 @@ pub fn cuda_qr_region<D: CudaScalar>(
     validate_qr_factor_shapes(q.tensor.shape(), r.tensor.shape(), rows, cols)?;
     Ok((q, r))
 }
-fn validate_qr_factor_shapes(
+pub(super) fn validate_qr_factor_shapes(
     q_shape: &[usize],
     r_shape: &[usize],
     rows: usize,
@@ -698,7 +698,7 @@ pub fn cuda_gather_columns_batched_into<D: CudaScalar>(
     }
     Ok(())
 }
-fn validate_eigh_factor_shapes(
+pub(super) fn validate_eigh_factor_shapes(
     values_len: usize,
     vectors_shape: &[usize],
     n: usize,

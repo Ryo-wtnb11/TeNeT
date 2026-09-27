@@ -3,10 +3,10 @@
 use super::*;
 use num_complex::{Complex32, Complex64};
 
-mod tensor;
 mod dot;
-mod view;
 mod executor;
+mod tensor;
+mod view;
 
 fn assert_f64_close(actual: f64, expected: f64, tol: f64) {
     assert!(
@@ -358,7 +358,6 @@ fn batch_job(shape: (usize, usize, usize), offsets: (usize, usize, usize)) -> De
 // grouped submission over every job. Oracles below are scalar loops over the
 // job list, independent of the adapter's routing.
 // ---------------------------------------------------------------------------
-
 trait IdentityBatchScalar:
     Copy + Default + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self> + PartialEq
 {

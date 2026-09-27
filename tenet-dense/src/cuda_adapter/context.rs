@@ -37,13 +37,13 @@ pub struct CudaPlanCacheStats {
 /// ([`CudaScalar::OPERAND_SLOT`]), not by realness: an `f32` call must never
 /// be handed the `f64` context `1`.
 #[derive(Default)]
-struct ScalarOperands {
-    ones: Option<CudaDenseStorage>,
-    zeros: Option<CudaDenseStorage>,
+pub(super) struct ScalarOperands {
+    pub(super) ones: Option<CudaDenseStorage>,
+    pub(super) zeros: Option<CudaDenseStorage>,
     /// `α` repeated: the trace's per-element scale (TensorOperations'
     /// `Scaler(α)` before the sum). Filled on the device from the ones
     /// template whenever `α` changes, so only growth uploads.
-    scaled: Option<CudaDenseStorage>,
+    pub(super) scaled: Option<CudaDenseStorage>,
     /// The value and length of the filled prefix of `scaled`.
     scaled_prefix: Option<(ContractionScalar, usize)>,
     /// Payload bytes per element of this slot's dtype, recorded when a buffer
@@ -52,11 +52,11 @@ struct ScalarOperands {
     element_bytes: usize,
 }
 /// One [`ScalarOperands`] slot per admitted payload dtype.
-const SCALAR_OPERAND_SLOTS: usize = 4;
+pub(super) const SCALAR_OPERAND_SLOTS: usize = 4;
 /// Owns the tenferro CUDA backend for one device ordinal.
 pub struct CudaDenseContext {
-    backend: CudaBackend,
-    device: usize,
+    pub(super) backend: CudaBackend,
+    pub(super) device: usize,
     identity: u64,
     operands: [ScalarOperands; SCALAR_OPERAND_SLOTS],
     plan_ledger: PlanEntryLedger,
@@ -170,7 +170,7 @@ impl CudaDenseContext {
     /// at least `len` elements. Its first element is the `1` coefficient of an
     /// unscaled move; a longer prefix is the packed ones operand a trace
     /// contracts its diagonal against ([`cuda_region_trace_accumulate`]).
-    fn ensure_ones<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
+    pub(super) fn ensure_ones<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
         let usable = self
             .operands::<D>()
             .ones
@@ -190,7 +190,11 @@ impl CudaDenseContext {
     /// `alpha`. Growth uploads `alpha` repeated (one H2D); a resident template
     /// of another value is refilled on the device as `alpha * ones`, one region
     /// submission and no transfer; the same value and length does nothing.
-    fn ensure_scaled<D: CudaScalar>(&mut self, alpha: D, len: usize) -> Result<(), DenseError> {
+    pub(super) fn ensure_scaled<D: CudaScalar>(
+        &mut self,
+        alpha: D,
+        len: usize,
+    ) -> Result<(), DenseError> {
         let tag = alpha.contraction_scalar();
         let slot = self.operands::<D>();
         if slot
@@ -275,7 +279,7 @@ impl CudaDenseContext {
     /// Uploads this dtype's zero template unless a resident one already holds
     /// at least `len` elements. A prefix of a compact zero buffer is itself a
     /// compact zero buffer, so a longer template serves every shorter fill.
-    fn ensure_zeros<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
+    pub(super) fn ensure_zeros<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
         let usable = self
             .operands::<D>()
             .zeros
@@ -341,7 +345,7 @@ impl CudaDenseContext {
     /// context-owned operand needs `&mut` on the backend and `&` on the
     /// operand simultaneously, which is only sound because they are disjoint
     /// fields.
-    fn split_operands<D: CudaScalar>(&mut self) -> (&mut CudaBackend, &ScalarOperands) {
+    pub(super) fn split_operands<D: CudaScalar>(&mut self) -> (&mut CudaBackend, &ScalarOperands) {
         (&mut self.backend, &self.operands[D::OPERAND_SLOT])
     }
 

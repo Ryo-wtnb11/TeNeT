@@ -5,12 +5,12 @@ use super::*;
 /// The handle itself is dtype-erased; every typed access names the payload
 /// dtype and reports a mismatch as [`DenseError::DTypeMismatch`].
 pub struct CudaDenseStorage {
-    tensor: Tensor,
+    pub(super) tensor: Tensor,
     // Fixed by the typed constructor, so `dtype()` never re-maps Tenferro's
     // dtype, which since 0.6.0 includes the unmappable `DType::External`.
-    dtype: DenseDType,
-    len: usize,
-    device: usize,
+    pub(super) dtype: DenseDType,
+    pub(super) len: usize,
+    pub(super) device: usize,
 }
 impl CudaDenseStorage {
     /// Uploads borrowed host data as a flat device buffer.
@@ -148,7 +148,7 @@ impl CudaDenseStorage {
     /// Bounds a matrix view by the active length rather than the
     /// allocation: after [`Self::set_active_len`] the two differ, and the
     /// backend view itself only checks the allocation.
-    fn check_matrix_bound(
+    pub(super) fn check_matrix_bound(
         &self,
         shape: [usize; 2],
         strides: [usize; 2],
@@ -173,7 +173,7 @@ impl CudaDenseStorage {
     /// Wraps a device tensor produced by a tenferro op (e.g. a cuSOLVER
     /// factor) as flat storage, after proving it carries `D`'s payload — the
     /// dtype recorded here.
-    fn from_tensor<D: CudaScalar>(
+    pub(super) fn from_tensor<D: CudaScalar>(
         op: &'static str,
         tensor: Tensor,
         device: usize,
@@ -193,7 +193,7 @@ impl CudaDenseStorage {
 
     /// Column-major matrix view over a buffer region with an explicit
     /// leading dimension (`ld >= rows`, `ld == rows` for a packed region).
-    fn region_view<D: CudaScalar>(
+    pub(super) fn region_view<D: CudaScalar>(
         &self,
         rows: usize,
         cols: usize,
@@ -203,7 +203,7 @@ impl CudaDenseStorage {
         self.region_view_strided::<D>([rows, cols], [1, ld], offset)
     }
 
-    fn region_view_strided<D: CudaScalar>(
+    pub(super) fn region_view_strided<D: CudaScalar>(
         &self,
         shape: [usize; 2],
         strides: [usize; 2],
@@ -229,7 +229,7 @@ impl CudaDenseStorage {
     /// Rank-N counterpart of [`Self::region_view_strided`]. The caller owns
     /// the bounds and dtype proof only in the sense that both are re-checked
     /// here (dtype) and by [`validate_region`] (bounds) before any submission.
-    fn region_view_nd<D: CudaScalar>(
+    pub(super) fn region_view_nd<D: CudaScalar>(
         &self,
         dims: &[usize],
         strides: &[isize],
@@ -244,7 +244,7 @@ impl CudaDenseStorage {
             .map_err(|err| cuda_error("cuda_region", err))
     }
 
-    fn region_view_nd_mut<D: CudaScalar>(
+    pub(super) fn region_view_nd_mut<D: CudaScalar>(
         &mut self,
         dims: &[usize],
         strides: &[isize],
@@ -264,7 +264,7 @@ impl CudaDenseStorage {
             .map_err(|err| cuda_error("cuda_region", err))
     }
 
-    fn region_view_mut<D: CudaScalar>(
+    pub(super) fn region_view_mut<D: CudaScalar>(
         &mut self,
         rows: usize,
         cols: usize,
