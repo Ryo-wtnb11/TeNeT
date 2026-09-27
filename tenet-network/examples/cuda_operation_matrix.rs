@@ -553,7 +553,7 @@ mod device {
              the timed region; excludes worker threads, frees, and device memory"
         );
         println!(
-            "# device_counter_scope=tenet_dense::cuda_transfer_stats deltas over the timed \
+            "# device_counter_scope=caller-thread tenet_dense::cuda_transfer_stats deltas over the timed \
              region; device_allocs counts uploads plus tenferro tensors wrapped as \
              CudaDenseStorage and excludes tenferro-internal solver workspaces"
         );

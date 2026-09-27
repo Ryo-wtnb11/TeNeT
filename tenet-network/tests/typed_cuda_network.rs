@@ -709,9 +709,6 @@ fn warm_cuda_destination_reuse_matches_the_returning_chain_for_every_provider() 
 /// its N-2 intermediate steps: every destination block of this chain has a
 /// GEMM, so a retained destination needs no reset at all. Only the final,
 /// returned output still uploads its zeros (#740/G3b).
-///
-/// The counters are process-wide, so this test must not run beside another
-/// device test; the device suite runs with `--test-threads=1`.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
@@ -930,8 +927,7 @@ fn single_precision_device_chains_match_the_host_and_reuse_their_destinations() 
 /// calls as the `f64` chain of the same fixture and moves half the bytes.
 ///
 /// Relative, same-process comparison: both dtypes run the same fixture in this
-/// binary, so no absolute platform constant appears. The counters are
-/// process-wide, so this test needs `--test-threads=1`.
+/// binary, so no absolute platform constant appears.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_warm_single_precision_chain_costs_the_same_calls_and_half_the_bytes() {

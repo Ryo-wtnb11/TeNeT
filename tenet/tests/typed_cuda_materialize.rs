@@ -7,8 +7,6 @@
 //! rejects a destination aliasing its source, accepts it, and the input is
 //! unchanged.
 //!
-//! One test only: the transfer counters are process-wide.
-//!
 //! Run with `cargo test -p tenet-rs --features cuda,cpu-faer --test \
 //! typed_cuda_materialize -- --ignored` on a CUDA host.
 

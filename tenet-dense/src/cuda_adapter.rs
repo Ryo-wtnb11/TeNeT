@@ -214,24 +214,44 @@ fn dtype_mismatch<D: CudaScalar>(op: &'static str, tensor: &Tensor) -> DenseErro
     }
 }
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
+// Why thread-local rather than process-wide or per-context: every record site
+// runs on the thread that called into this module (the device lease in
+// `tenet::runtime::CudaLease` is taken and used on the caller's thread, and no
+// worker or pool thread submits device work), so a thread-local counter
+// attributes exactly the caller's work. A process-wide counter mixes in
+// concurrent callers (#1568); a per-context counter would need the context at
+// sites such as `CudaDenseStorage::download` that do not have it.
+std::thread_local! {
+    static TRANSFER_STATS: Cell<CudaTransferStats> = const {
+        Cell::new(CudaTransferStats {
+            h2d_calls: 0,
+            h2d_bytes: 0,
+            d2h_calls: 0,
+            d2h_bytes: 0,
+            device_allocs: 0,
+            gemm_calls: 0,
+            solver_calls: 0,
+            copy_calls: 0,
+        })
+    };
+}
+
+fn record(update: impl FnOnce(&mut CudaTransferStats)) {
+    TRANSFER_STATS.with(|cell| {
+        let mut stats = cell.get();
+        update(&mut stats);
+        cell.set(stats);
+    });
+}
 
 #[cfg(test)]
-static CUDA_FULL_DOWNLOAD_BYTES: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
-static CUDA_METADATA_DOWNLOAD_BYTES: AtomicUsize = AtomicUsize::new(0);
-
-static H2D_CALLS: AtomicU64 = AtomicU64::new(0);
-static H2D_BYTES: AtomicU64 = AtomicU64::new(0);
-static D2H_CALLS: AtomicU64 = AtomicU64::new(0);
-static D2H_BYTES: AtomicU64 = AtomicU64::new(0);
-static DEVICE_ALLOCS: AtomicU64 = AtomicU64::new(0);
-static GEMM_CALLS: AtomicU64 = AtomicU64::new(0);
-static SOLVER_CALLS: AtomicU64 = AtomicU64::new(0);
-static COPY_CALLS: AtomicU64 = AtomicU64::new(0);
+std::thread_local! {
+    static CUDA_FULL_DOWNLOAD_BYTES: Cell<usize> = const { Cell::new(0) };
+    static CUDA_METADATA_DOWNLOAD_BYTES: Cell<usize> = const { Cell::new(0) };
+}
 
 /// A snapshot of the backend's cuTENSOR contraction plan cache.
 ///
@@ -254,7 +274,7 @@ pub struct CudaPlanCacheStats {
     pub reservation_shortfall: u64,
 }
 
-/// A snapshot of the process-wide CUDA boundary observation counters.
+/// A snapshot of the calling thread's CUDA boundary observation counters.
 ///
 /// Observability only: nothing in this module reads these values back, so no
 /// execution decision, dispatch, or capability depends on them. They exist so
@@ -281,8 +301,11 @@ pub struct CudaPlanCacheStats {
 /// - `solver_calls`: cuSOLVER region calls (SVD, QR, EIGH).
 /// - `copy_calls`: `cuda_copy_region_into` calls that move data.
 ///
-/// The counters are `Relaxed` and process-wide: a snapshot taken while another
-/// thread submits work is a consistent-per-field sample, not a global instant.
+/// The counters are per thread: they count the work this module performs on
+/// the thread that reads them, and never work submitted by another thread. A
+/// device operation runs on its caller's thread, so a delta taken around a
+/// call attributes exactly that call's work even while other threads use the
+/// same or another device. To total several threads, read on each thread.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CudaTransferStats {
     pub h2d_calls: u64,
@@ -295,45 +318,31 @@ pub struct CudaTransferStats {
     pub copy_calls: u64,
 }
 
-/// Reads the CUDA boundary observation counters. See [`CudaTransferStats`].
+/// Reads the calling thread's CUDA boundary observation counters. See
+/// [`CudaTransferStats`].
 pub fn cuda_transfer_stats() -> CudaTransferStats {
-    CudaTransferStats {
-        h2d_calls: H2D_CALLS.load(Ordering::Relaxed),
-        h2d_bytes: H2D_BYTES.load(Ordering::Relaxed),
-        d2h_calls: D2H_CALLS.load(Ordering::Relaxed),
-        d2h_bytes: D2H_BYTES.load(Ordering::Relaxed),
-        device_allocs: DEVICE_ALLOCS.load(Ordering::Relaxed),
-        gemm_calls: GEMM_CALLS.load(Ordering::Relaxed),
-        solver_calls: SOLVER_CALLS.load(Ordering::Relaxed),
-        copy_calls: COPY_CALLS.load(Ordering::Relaxed),
-    }
+    TRANSFER_STATS.with(Cell::get)
 }
 
-/// Zeroes the CUDA boundary observation counters. See [`CudaTransferStats`].
+/// Zeroes the calling thread's CUDA boundary observation counters; other
+/// threads' counters are untouched. See [`CudaTransferStats`].
 pub fn reset_cuda_transfer_stats() {
-    for counter in [
-        &H2D_CALLS,
-        &H2D_BYTES,
-        &D2H_CALLS,
-        &D2H_BYTES,
-        &DEVICE_ALLOCS,
-        &GEMM_CALLS,
-        &SOLVER_CALLS,
-        &COPY_CALLS,
-    ] {
-        counter.store(0, Ordering::Relaxed);
-    }
+    TRANSFER_STATS.with(|cell| cell.set(CudaTransferStats::default()));
 }
 
 fn record_h2d(bytes: usize) {
-    H2D_CALLS.fetch_add(1, Ordering::Relaxed);
-    H2D_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-    DEVICE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| {
+        stats.h2d_calls += 1;
+        stats.h2d_bytes += bytes as u64;
+        stats.device_allocs += 1;
+    });
 }
 
 fn record_d2h(bytes: usize) {
-    D2H_CALLS.fetch_add(1, Ordering::Relaxed);
-    D2H_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    record(|stats| {
+        stats.d2h_calls += 1;
+        stats.d2h_bytes += bytes as u64;
+    });
 }
 
 fn cuda_error(op: &'static str, err: impl std::fmt::Display) -> DenseError {
@@ -836,7 +845,7 @@ impl CudaDenseContext {
     /// warmed, because TeNeT reaches no blas1 entry point; extend the warm-up
     /// if that changes.
     ///
-    /// Observation counters ([`cuda_transfer_stats`]) are process-wide and are
+    /// Observation counters ([`cuda_transfer_stats`]) are per thread and are
     /// deliberately *not* reset here, so a caller's deltas are honest about the
     /// work this seam did. Each call adds exactly: `h2d_calls` 3,
     /// `h2d_bytes` 24, `device_allocs` 4 (three uploads plus the eigenvector
@@ -974,7 +983,7 @@ impl CudaDenseStorage {
         // allocation; only the active prefix is the value.
         data.truncate(self.len);
         #[cfg(test)]
-        CUDA_FULL_DOWNLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.set(cell.get() + bytes));
         record_d2h(bytes);
         Ok(data)
     }
@@ -1054,7 +1063,7 @@ impl CudaDenseStorage {
         if D::typed(&tensor).is_none() {
             return Err(dtype_mismatch::<D>(op, &tensor));
         }
-        DEVICE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+        record(|stats| stats.device_allocs += 1);
         let len = tensor.shape().iter().product();
         Ok(Self {
             tensor,
@@ -1335,7 +1344,7 @@ fn cuda_gemm_region_strided_into<D: CudaScalar>(
         alpha: alpha.contraction_scalar(),
         beta: beta.contraction_scalar(),
     };
-    GEMM_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.gemm_calls += 1);
     ctx.backend
         .dot_general_read_into_accum(
             TensorRead::from_view(lhs_view),
@@ -1438,7 +1447,7 @@ pub fn cuda_gemm_region_batched_into<D: CudaScalar>(
         alpha: D::ONE.contraction_scalar(),
         beta: D::ZERO.contraction_scalar(),
     };
-    GEMM_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.gemm_calls += 1);
     ctx.backend
         .dot_general_read_into_accum(
             TensorRead::from_view(lhs_view),
@@ -1569,7 +1578,7 @@ fn submit_region_axpby<D: CudaScalar>(
         alpha: alpha.contraction_scalar(),
         beta: beta.scalar::<D>(),
     };
-    GEMM_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.gemm_calls += 1);
     backend
         .dot_general_read_into_accum(
             TensorRead::from_view(lhs),
@@ -1942,7 +1951,7 @@ pub fn cuda_region_trace_accumulate<D: CudaScalar>(
         alpha: D::ONE.contraction_scalar(),
         beta: D::ONE.contraction_scalar(),
     };
-    GEMM_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.gemm_calls += 1);
     backend
         .dot_general_read_into_accum(
             TensorRead::from_view(lhs),
@@ -1983,7 +1992,7 @@ fn download_values<R: CudaRealScalar>(
         .map_err(|err| cuda_error("cuda_download", err))?;
     let bytes = std::mem::size_of_val(values.as_slice());
     #[cfg(test)]
-    CUDA_METADATA_DOWNLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    CUDA_METADATA_DOWNLOAD_BYTES.with(|cell| cell.set(cell.get() + bytes));
     record_d2h(bytes);
     Ok(values.into_iter().map(R::widen).collect())
 }
@@ -2598,7 +2607,7 @@ pub fn cuda_copy_region_into<D: CudaScalar>(
     if rows == 0 || cols == 0 {
         return Ok(());
     }
-    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.copy_calls += 1);
     if src.len < rows * cols {
         return Err(cuda_error(
             OP,
@@ -2781,7 +2790,7 @@ pub fn cuda_svd_region<D: CudaScalar>(
 ) -> Result<(CudaDenseStorage, CudaSpectrum, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_svd", &[("src", src.device)])?;
     let view = src.region_view::<D>(rows, cols, rows, offset)?;
-    SOLVER_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.solver_calls += 1);
     let (u, s, vt) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).svd_read(exec)
     })
@@ -2834,7 +2843,7 @@ pub fn cuda_qr_region<D: CudaScalar>(
     ensure_cuda_device(ctx.device, "cuda_qr", &[("src", src.device)])?;
     let view = src.region_view::<D>(rows, cols, rows, offset)?;
     let options = QrOptions::default().gauge(QrGauge::PositiveDiagonal);
-    SOLVER_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.solver_calls += 1);
     let (q, r) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).qr_with_options_read(options, exec)
     })
@@ -2876,7 +2885,7 @@ pub fn cuda_eigh_region<D: CudaScalar>(
 ) -> Result<(CudaSpectrum, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_eigh", &[("src", src.device)])?;
     let view = src.region_view::<D>(n, n, n, offset)?;
-    SOLVER_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.solver_calls += 1);
     let (values, vectors) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).eigh_read(exec)
     })
@@ -2918,7 +2927,7 @@ pub fn cuda_eigh_region_batched<D: CudaScalar>(
         &isize_strides(region.strides())?,
         region.offset_isize()?,
     )?;
-    SOLVER_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.solver_calls += 1);
     let (values, vectors) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).eigh_read(exec)
     })
@@ -3083,7 +3092,7 @@ pub fn cuda_gather_columns_batched_into<D: CudaScalar>(
         index_vector_dim: 1,
         slice_sizes: vec![n, 1, 1],
     };
-    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.copy_calls += 1);
     let gathered = ctx
         .backend
         .gather(&src.tensor, &indices, &config)
@@ -3198,7 +3207,7 @@ pub fn cuda_gather_members<D: CudaScalar>(
         i64::into_tensor(vec![selection.len(), 1], starts).map_err(|err| cuda_error(OP, err))?;
     let indices = upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error(OP, err))?;
     record_h2d(selection.len() * std::mem::size_of::<i64>());
-    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.copy_calls += 1);
     let gathered = ctx
         .backend
         .gather(&src.tensor, &indices, &config)
@@ -3257,7 +3266,7 @@ pub fn cuda_gather_member_elements<D: CudaScalar>(
     let host = i64::into_tensor(vec![count, 1], elements).map_err(|err| cuda_error(OP, err))?;
     let indices = upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error(OP, err))?;
     record_h2d(count * std::mem::size_of::<i64>());
-    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.copy_calls += 1);
     let config = tenferro_tensor::GatherConfig {
         offset_dims: vec![1],
         collapsed_slice_dims: vec![0],
@@ -3310,7 +3319,7 @@ pub fn cuda_copy_strided_into<D: CudaScalar>(
         &isize_strides(dst_region.strides())?,
         dst_region.offset_isize()?,
     )?;
-    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.copy_calls += 1);
     ctx.backend
         .copy_read_into(
             TensorRead::from_view(src_view),
@@ -3372,7 +3381,7 @@ pub fn cuda_gather_elements<D: CudaScalar>(
         i64::into_tensor(vec![count, rank], coordinates).map_err(|err| cuda_error(OP, err))?;
     let indices = upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error(OP, err))?;
     record_h2d(count * rank * std::mem::size_of::<i64>());
-    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    record(|stats| stats.copy_calls += 1);
     let config = tenferro_tensor::GatherConfig {
         offset_dims: vec![],
         collapsed_slice_dims: (0..rank).collect(),
@@ -3430,10 +3439,6 @@ fn validate_eigh_factor_shapes(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The observation counters are process-wide, so the device tests that
-    /// assert on their deltas must not overlap with each other.
-    static COUNTER_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn rectangular_operand_views_use_parent_native_strides() {
@@ -3575,7 +3580,6 @@ mod tests {
         // What: with a valid first entry and an out-of-range later one, the
         // gather is rejected and the destination keeps every sentinel; the
         // valid list alone places the selected columns.
-        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
         let mut ctx = CudaDenseContext::new(0).unwrap();
         let (n, members) = (3, 2);
         let mut data = vec![0.0; n * n * members];
@@ -3639,7 +3643,6 @@ mod tests {
     #[test]
     #[ignore = "requires a real CUDA device"]
     fn an_empty_spectrum_copy_touches_nothing_even_for_a_complex_payload() {
-        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
         let mut ctx = CudaDenseContext::new(0).unwrap();
         let empty = CudaDenseStorage::upload_owned::<f64>(&ctx, Vec::new()).unwrap();
         let spectrum = CudaSpectrum {
@@ -3656,7 +3659,6 @@ mod tests {
     #[test]
     #[ignore = "requires a real CUDA device"]
     fn cuda_hermitian_region_is_scaled_and_downloads_only_scalar_metadata() {
-        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
         let mut ctx = CudaDenseContext::new(0).unwrap();
         let n = 4;
         let mut data = vec![0.0; n * n];
@@ -3667,11 +3669,11 @@ mod tests {
         data[1] = data[n];
         let storage = CudaDenseStorage::upload::<f64>(&ctx, &data).unwrap();
 
-        CUDA_FULL_DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
-        CUDA_METADATA_DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
+        CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.set(0));
+        CUDA_METADATA_DOWNLOAD_BYTES.with(|cell| cell.set(0));
         assert!(cuda_is_hermitian_region::<f64>(&mut ctx, &storage, 0, n).unwrap());
-        assert_eq!(CUDA_FULL_DOWNLOAD_BYTES.load(Ordering::Relaxed), 0);
-        assert!(CUDA_METADATA_DOWNLOAD_BYTES.load(Ordering::Relaxed) <= 4 * 8);
+        assert_eq!(CUDA_FULL_DOWNLOAD_BYTES.with(Cell::get), 0);
+        assert!(CUDA_METADATA_DOWNLOAD_BYTES.with(Cell::get) <= 4 * 8);
 
         let near_threshold = |ctx: &CudaDenseContext, delta: f64| {
             // For [[1, delta], [0, 1]], the shared half-residual rule changes
@@ -3707,7 +3709,6 @@ mod tests {
     #[test]
     #[ignore = "requires a real CUDA device"]
     fn cuda_transfer_bytes_scale_with_the_payload_dtype() {
-        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
         // #1268: a complex payload must move the same *number* of buffers as
         // the real one and exactly `size_of::<Complex64>() / size_of::<f64>()`
         // times the bytes for the same element count.
@@ -3718,16 +3719,16 @@ mod tests {
             .map(|index| Complex64::new(index as f64, -(index as f64) - 0.5))
             .collect();
 
-        CUDA_FULL_DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
+        CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.set(0));
         let real_device = CudaDenseStorage::upload::<f64>(&ctx, &real).unwrap();
         assert_eq!(real_device.dtype(), DenseDType::F64);
         assert_eq!(real_device.download::<f64>(&ctx).unwrap(), real);
-        let real_bytes = CUDA_FULL_DOWNLOAD_BYTES.swap(0, Ordering::Relaxed);
+        let real_bytes = CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.replace(0));
 
         let complex_device = CudaDenseStorage::upload::<Complex64>(&ctx, &complex).unwrap();
         assert_eq!(complex_device.dtype(), DenseDType::C64);
         assert_eq!(complex_device.download::<Complex64>(&ctx).unwrap(), complex);
-        let complex_bytes = CUDA_FULL_DOWNLOAD_BYTES.swap(0, Ordering::Relaxed);
+        let complex_bytes = CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.replace(0));
 
         assert_eq!(real_bytes, elements * std::mem::size_of::<f64>());
         assert_eq!(
@@ -3757,14 +3758,13 @@ mod tests {
     #[test]
     #[ignore = "requires a real CUDA device"]
     fn cuda_transfer_counters_attribute_one_upload_download_and_gemm() {
-        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
         let mut ctx = CudaDenseContext::new(0).unwrap();
         let n = 2;
         let lhs_host = vec![1.0_f64, 2.0, 3.0, 4.0];
         let rhs_host = vec![5.0_f64, 6.0, 7.0, 8.0];
 
         reset_cuda_transfer_stats();
-        CUDA_FULL_DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
+        CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.set(0));
         let lhs = CudaDenseStorage::upload::<f64>(&ctx, &lhs_host).unwrap();
         let rhs = CudaDenseStorage::upload::<f64>(&ctx, &rhs_host).unwrap();
         let mut dst = CudaDenseStorage::upload::<f64>(&ctx, &vec![0.0_f64; n * n]).unwrap();
@@ -3800,7 +3800,7 @@ mod tests {
         // The finer-grained test counter stays consistent with the always
         // compiled one for the same download.
         assert_eq!(
-            CUDA_FULL_DOWNLOAD_BYTES.swap(0, Ordering::Relaxed) as u64,
+            CUDA_FULL_DOWNLOAD_BYTES.with(|cell| cell.replace(0)) as u64,
             after_download.d2h_bytes
         );
 
@@ -3811,7 +3811,6 @@ mod tests {
     #[test]
     #[ignore = "requires a real CUDA device"]
     fn warm_up_costs_one_gemm_one_solver_call_and_a_bounded_fixed_traffic() {
-        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
         // A context built directly here has never submitted work: only
         // `RuntimeBuilder::build` warms one, so this is a cold backend.
         let mut ctx = CudaDenseContext::new(0).unwrap();

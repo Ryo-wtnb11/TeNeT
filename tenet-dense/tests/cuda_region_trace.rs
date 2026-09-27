@@ -10,16 +10,12 @@
 #![cfg(feature = "cuda")]
 
 use std::fmt::Debug;
-use std::sync::Mutex;
 
 use num_complex::{Complex32, Complex64};
 use tenet_dense::{
     cuda_region_trace_accumulate, cuda_transfer_stats, CudaDenseContext, CudaDenseStorage,
     CudaRegion, CudaScalar, CudaTransferStats, DenseError,
 };
-
-/// The boundary counters are process-wide.
-static COUNTER_TESTS: Mutex<()> = Mutex::new(());
 
 trait TraceScalar:
     CudaScalar + Copy + Debug + PartialEq + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self>
@@ -318,7 +314,6 @@ fn device_trace_matches_the_unmerged_host_oracle_at_every_dtype() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_zero_scale_adds_nothing_even_over_a_nan_diagonal() {
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = CudaDenseContext::new(0).unwrap();
     let geometry = Geometry::new(&[2], &[3], &[0, 1, 2], &[0]);
     let mut src: Vec<f64> = (0..geometry.src_len()).map(f64::sample).collect();
@@ -354,7 +349,6 @@ fn a_zero_scale_adds_nothing_even_over_a_nan_diagonal() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn the_scale_applies_per_element_before_the_sum() {
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = CudaDenseContext::new(0).unwrap();
     let src_region = CudaRegion::new(vec![2], vec![3], 0).unwrap();
     let dst_region = CudaRegion::new(vec![], vec![], 0).unwrap();
@@ -397,7 +391,6 @@ fn the_scale_applies_per_element_before_the_sum() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_reserved_template_makes_every_trace_upload_free_and_rejections_do_nothing() {
-    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = CudaDenseContext::new(0).unwrap();
     let geometry = Geometry::new(&[2, 3], &[4, 2], &[2, 0, 3, 1, 5, 4], &[1, 0]);
     let src: Vec<f64> = (0..geometry.src_len()).map(f64::sample).collect();

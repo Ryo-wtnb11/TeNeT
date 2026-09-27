@@ -1,16 +1,16 @@
 //! Transfer, allocation, statistics and rejection contracts of the typed
 //! device structural transforms (issue #1322, G2b-2).
 //!
-//! These read the process-wide `tenet::dense::cuda_transfer_stats` counters, so
-//! they live in their own test binary and run single-threaded: another test
-//! submitting device work in the same process would perturb every delta.
+//! These read the calling thread's `tenet::dense::cuda_transfer_stats`
+//! counters, so device work another test submits concurrently does not
+//! perturb their deltas.
 //!
 //! Every test here needs a real device. The Host half of the same contract —
 //! a device-less Runtime reporting no device state and still clearing its
 //! store — is in the ungated `typed_transform_host_side.rs`.
 //!
 //! Run with `cargo test -p tenet-rs --features cuda,cpu-faer --test \
-//! typed_cuda_transform_contracts -- --ignored --test-threads=1`.
+//! typed_cuda_transform_contracts -- --ignored`.
 
 #![cfg(feature = "cuda")]
 
