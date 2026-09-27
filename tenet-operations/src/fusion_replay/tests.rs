@@ -1261,6 +1261,7 @@ fn profiled_direct_replay_uses_one_batched_gemm_call() {
 #[derive(Default)]
 struct RecordingComplexStorageGemm {
     calls: Vec<(usize, Complex64)>,
+    axpby_calls: Vec<(usize, Complex64, Complex64)>,
 }
 
 impl StorageGemm<Complex64, Vec<Complex64>, Vec<Complex64>, Vec<Complex64>>
@@ -1325,6 +1326,45 @@ impl StorageGemm<Complex64, Vec<Complex64>, Vec<Complex64>, Vec<Complex64>>
                                 * rhs[rhs_offset + inner + contracted * col]
                         })
                         .sum::<Complex64>();
+            }
+        }
+        Ok(())
+    }
+
+    fn matmul_range_axpby_with_ops_into(
+        &mut self,
+        dst: &mut Vec<Complex64>,
+        dst_offset: usize,
+        lhs: &Vec<Complex64>,
+        lhs_offset: usize,
+        rhs: &Vec<Complex64>,
+        rhs_offset: usize,
+        rows: usize,
+        contracted: usize,
+        cols: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: Complex64,
+        beta: Complex64,
+    ) -> Result<(), OperationError> {
+        assert_eq!(lhs_op, MatrixOp::Identity);
+        assert_eq!(rhs_op, MatrixOp::Identity);
+        self.axpby_calls.push((dst_offset, alpha, beta));
+        for col in 0..cols {
+            for row in 0..rows {
+                let product = (0..contracted)
+                    .map(|inner| {
+                        lhs[lhs_offset + row + rows * inner]
+                            * rhs[rhs_offset + inner + contracted * col]
+                    })
+                    .sum::<Complex64>();
+                let slot = &mut dst[dst_offset + row + rows * col];
+                // BLAS: beta = 0 does not read the destination.
+                *slot = if beta == Complex64::ZERO {
+                    alpha * product
+                } else {
+                    alpha * product + beta * *slot
+                };
             }
         }
         Ok(())
@@ -2137,4 +2177,115 @@ fn componentwise_pack_matches_promoted_product_on_finite_values() {
     assert!(packed
         .iter()
         .all(|v| v.re.to_bits() == (-0.0f64).to_bits() && v.im == 3.0));
+}
+
+/// Canonical Z2 plan with job coefficients `+1` (even block, offset 0) and
+/// `-1` (odd block, offset 4), and operands whose products are
+/// `[1, 2, 3, 4]` and `[10]`.
+fn signed_z2_storage_plan() -> (FusionBlockContractPlan<f64>, Vec<Complex64>, Vec<Complex64>) {
+    let leg = || SectorLeg::new([(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)], false);
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg()]),
+            FusionProductSpace::new([leg()]),
+        ),
+        &Z2FusionRule,
+        [vec![2, 2], vec![1, 1]],
+    )
+    .unwrap();
+    let structure = Arc::clone(space.subblock_structure());
+    let plan = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_and_alpha(
+        &structure,
+        1,
+        &structure,
+        1,
+        &structure,
+        1,
+        MatrixOp::Identity,
+        MatrixOp::Identity,
+        |coupled| {
+            Ok(if coupled == SectorId::new(0) {
+                1.0
+            } else {
+                -1.0
+            })
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let complex = |values: [f64; 5]| values.map(|value| Complex64::new(value, 0.0)).to_vec();
+    (
+        plan,
+        complex([1.0, 2.0, 3.0, 4.0, 5.0]),
+        complex([1.0, 0.0, 0.0, 1.0, 2.0]),
+    )
+}
+
+#[test]
+fn storage_axpby_jobs_carry_alpha_times_job_coefficient_and_beta() {
+    // What: each job's GEMM gets `alpha * job_alpha` and the caller's beta in
+    // its epilogue, for beta = 0 (a NaN destination is not read), 1 and a
+    // general complex value; the oracle is the hand product `[1, 2, 3, 4]`
+    // and `-[10]`.
+    let (plan, lhs, rhs) = signed_z2_storage_plan();
+    let products = [1.0, 2.0, 3.0, 4.0, -10.0].map(|value| Complex64::new(value, 0.0));
+    let alpha = Complex64::new(0.5, -1.0);
+    let prior = [0.25, -1.5, 2.0, 0.75, 3.0].map(|value| Complex64::new(value, 0.5));
+    for beta in [
+        Complex64::ZERO,
+        Complex64::new(1.0, 0.0),
+        Complex64::new(-0.5, 0.25),
+    ] {
+        let mut dst = if beta == Complex64::ZERO {
+            vec![Complex64::new(f64::NAN, f64::NAN); 5]
+        } else {
+            prior.to_vec()
+        };
+        let mut gemm = RecordingComplexStorageGemm::default();
+        plan.execute_direct_on_storage_axpby(&mut gemm, &mut dst, &lhs, &rhs, alpha, beta)
+            .unwrap();
+        assert!(gemm.calls.is_empty(), "the unscaled entry must not run");
+        assert_eq!(
+            gemm.axpby_calls,
+            [(0, alpha, beta), (4, -alpha, beta)],
+            "beta = {beta}"
+        );
+        for (index, (&got, &product)) in dst.iter().zip(&products).enumerate() {
+            let want = if beta == Complex64::ZERO {
+                alpha * product
+            } else {
+                alpha * product + beta * prior[index]
+            };
+            assert!(
+                (got - want).norm() <= 1e-14,
+                "beta = {beta}, {index}: {got} vs {want}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_storage_gemm_without_the_axpby_entry_rejects_before_writing() {
+    // What: the trait's default beta-accumulating entry is a typed capability
+    // error, raised by the first job, so the destination is untouched.
+    let (plan, lhs, rhs) = signed_z2_storage_plan();
+    let mut dst = vec![Complex64::new(7.0, 0.0); 5];
+    let mut gemm = UnitOnlyComplexStorageGemm::default();
+    let error = plan
+        .execute_direct_on_storage_axpby(
+            &mut gemm,
+            &mut dst,
+            &lhs,
+            &rhs,
+            Complex64::new(2.0, 0.0),
+            Complex64::new(1.0, 0.0),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, OperationError::UnsupportedTensorContractScope { .. }),
+        "{error:?}"
+    );
+    assert_eq!(gemm.unit_calls, 0);
+    assert_eq!(dst, vec![Complex64::new(7.0, 0.0); 5]);
 }
