@@ -3388,9 +3388,10 @@ pub fn cuda_gather_elements<D: CudaScalar>(
 }
 
 /// The elementwise complex conjugate of `src` in a new buffer of the same
-/// shape: one Tenferro `conj` launch, `(re, im) -> (re, -im)` with the
-/// imaginary part negated bit for bit, so infinities, NaN payloads and signed
-/// zeros survive. Why not [`cuda_region_axpby`] with its conjugation flag:
+/// shape: one Tenferro `conj` launch, `(re, im) -> (re, -im)` by a float
+/// negate of the imaginary part, so finite values, infinities and signed
+/// zeros are exact; a NaN stays NaN, but its payload and sign bits are not
+/// guaranteed. Why not [`cuda_region_axpby`] with its conjugation flag:
 /// that is a contraction against a unit operand, and complex multiplication
 /// by `(1, 0)` turns an infinite part into NaN and does not preserve `-0`.
 /// A real payload is returned as a copy of its bits. Counts one device

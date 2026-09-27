@@ -4038,6 +4038,39 @@ fn logical_adjoint_axis_to_parent(
     }
 }
 
+/// Calls `visit(destination, source)` for every element of one block, first
+/// axis fastest; a `None` source (a block that reads as zero) visits `0`.
+#[cfg(feature = "cuda")]
+fn for_each_block_element(
+    shape: &[usize],
+    strides: &[usize],
+    offset: usize,
+    source: &Option<(Vec<usize>, usize)>,
+    mut visit: impl FnMut(usize, usize),
+) {
+    let mut position = vec![0usize; shape.len()];
+    let at = |position: &[usize], strides: &[usize], base: usize| {
+        base + position
+            .iter()
+            .zip(strides)
+            .map(|(i, stride)| i * stride)
+            .sum::<usize>()
+    };
+    for _ in 0..shape.iter().product::<usize>() {
+        let src = source
+            .as_ref()
+            .map_or(0, |(strides, base)| at(&position, strides, *base));
+        visit(at(&position, strides, offset), src);
+        for (axis, extent) in shape.iter().enumerate() {
+            position[axis] += 1;
+            if position[axis] < *extent {
+                break;
+            }
+            position[axis] = 0;
+        }
+    }
+}
+
 pub(crate) fn logical_adjoint_axes_to_parent(
     parent_codomain_rank: usize,
     parent_domain_rank: usize,
@@ -12106,9 +12139,10 @@ where
 
     /// The Host [`TensorMap::materialize`] contract on the device: an owned
     /// dense device tensor with a fresh allocation on the same device, never
-    /// sharing storage with `self`, and bit-equal to the Host result,
-    /// complex infinities and signed zeros included (a NaN payload may be
-    /// canonicalized by the real strided copy).
+    /// sharing storage with `self`, and equal to the Host result: finite
+    /// values, infinities and signed zeros bit for bit. A NaN stays NaN, but
+    /// its payload and sign bits may be canonicalized (by the real strided
+    /// copy, and by Tenferro's `conj`, which is a float negate).
     ///
     /// Every step moves bits rather than computing them, because a device
     /// copy that scales by a complex `1` does not: cuTENSOR's permutation and
@@ -12152,7 +12186,8 @@ where
         // (strided copies for a real adjoint, element table for a complex
         // one, regions to zero)
         type Copies = Vec<(tenet_dense::CudaRegion, tenet_dense::CudaRegion)>;
-        let (source, adjoint): (_, Option<(Copies, Vec<usize>, Copies)>) = match &self.repr {
+        type Adjoint = (Copies, Vec<usize>, Vec<tenet_dense::CudaRegion>);
+        let (source, adjoint): (_, Option<Adjoint>) = match &self.repr {
             TypedTensorRepr::Owned(_) => (self.direct_cuda_storage("materialize")?, None),
             TypedTensorRepr::Adjoint(view) => {
                 let TypedData::Dense(source) = view.parent.data.as_ref() else {
@@ -12168,11 +12203,9 @@ where
                 let parent_structure = parent_space.structure();
                 let structure = space.space().structure();
                 let mut copies = Vec::new();
-                let mut table = if D::IS_COMPLEX {
-                    vec![0; required_len]
-                } else {
-                    Vec::new()
-                };
+                // Per block: (shape, destination strides and offset, source
+                // strides and offset, or `None` for a block that reads as zero).
+                let mut walks = Vec::new();
                 let mut zeros = Vec::new();
                 let mut covered = 0usize;
                 for index in 0..structure.block_count() {
@@ -12184,7 +12217,10 @@ where
                     // Why zero instead of error: a non-fusion-tree block has no
                     // adjoint source and reads as zero, as on the Host.
                     let BlockKey::FusionTree(key) = block.key() else {
-                        zeros.push((destination.clone(), destination));
+                        zeros.push(destination);
+                        if D::IS_COMPLEX {
+                            walks.push((shape, block.strides(), block.offset(), None));
+                        }
                         continue;
                     };
                     let source_block = parent_structure.block(
@@ -12200,25 +12236,12 @@ where
                         })
                         .collect();
                     if D::IS_COMPLEX {
-                        let mut position = vec![0usize; shape.len()];
-                        for _ in 0..shape.iter().product::<usize>() {
-                            let offset = |strides: &[usize], base: usize| {
-                                base + position
-                                    .iter()
-                                    .zip(strides)
-                                    .map(|(i, stride)| i * stride)
-                                    .sum::<usize>()
-                            };
-                            table[offset(block.strides(), block.offset())] =
-                                offset(&source_strides, source_block.offset());
-                            for (axis, extent) in shape.iter().enumerate() {
-                                position[axis] += 1;
-                                if position[axis] < *extent {
-                                    break;
-                                }
-                                position[axis] = 0;
-                            }
-                        }
+                        walks.push((
+                            shape,
+                            block.strides(),
+                            block.offset(),
+                            Some((source_strides, source_block.offset())),
+                        ));
                     } else {
                         copies.push((
                             region(shape.to_vec(), source_strides, source_block.offset())?,
@@ -12230,6 +12253,28 @@ where
                     return Err(internal_layout_error(
                         "adjoint blocks do not tile the payload",
                     ));
+                }
+                // The table maps each output element to its parent element. A
+                // canonical layout lays blocks out compactly in block order, so
+                // the walk visits output positions 0, 1, 2, ... and each entry
+                // is pushed once; any other order falls back to an indexed fill.
+                let mut table = Vec::with_capacity(if D::IS_COMPLEX { required_len } else { 0 });
+                let mut sequential = true;
+                for (shape, strides, offset, source) in &walks {
+                    for_each_block_element(shape, strides, *offset, source, |dst, src| {
+                        sequential &= dst == table.len();
+                        table.push(src);
+                    });
+                }
+                if !sequential {
+                    // ponytail: non-canonical output layouts only; zero-filled
+                    // then overwritten, as tiling was checked above.
+                    table = vec![0; required_len];
+                    for (shape, strides, offset, source) in &walks {
+                        for_each_block_element(shape, strides, *offset, source, |dst, src| {
+                            table[dst] = src;
+                        });
+                    }
                 }
                 (source, Some((copies, table, zeros)))
             }
@@ -12259,7 +12304,7 @@ where
                     }
                     output
                 };
-                for (zero, _) in &zeros {
+                for zero in &zeros {
                     tenet_dense::cuda_region_zero::<D>(cuda, &mut output.0, zero)
                         .map_err(dense_err)?;
                 }

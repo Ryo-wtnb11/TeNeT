@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet::core::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
@@ -25,24 +25,61 @@ use tenet::dense::cuda_transfer_stats;
 use tenet::prelude::{Runtime, TensorScalar};
 use tenet::typed::{GradedSpace, NetworkReuseClass, TensorMap};
 
+/// Value classes compared exactly: each real or imaginary part is its bit
+/// pattern, except that every NaN is one class. Tenferro's `conj` negates
+/// with a float op and cuTENSOR's copy may canonicalize a NaN, so only
+/// finite values, infinities and signed zeros are promised bit for bit.
 trait Bits: TensorScalar + Copy {
-    fn bits(self) -> (u64, u64);
+    fn parts(self) -> [Option<u64>; 2];
+    fn two() -> Self;
+}
+
+fn part_f64(value: f64) -> Option<u64> {
+    (!value.is_nan()).then(|| value.to_bits())
+}
+
+fn part_f32(value: f32) -> Option<u64> {
+    (!value.is_nan()).then(|| u64::from(value.to_bits()))
 }
 
 impl Bits for f64 {
-    fn bits(self) -> (u64, u64) {
-        (self.to_bits(), 0)
+    fn parts(self) -> [Option<u64>; 2] {
+        [part_f64(self), Some(0)]
+    }
+    fn two() -> Self {
+        2.0
+    }
+}
+
+impl Bits for f32 {
+    fn parts(self) -> [Option<u64>; 2] {
+        [part_f32(self), Some(0)]
+    }
+    fn two() -> Self {
+        2.0
     }
 }
 
 impl Bits for Complex64 {
-    fn bits(self) -> (u64, u64) {
-        (self.re.to_bits(), self.im.to_bits())
+    fn parts(self) -> [Option<u64>; 2] {
+        [part_f64(self.re), part_f64(self.im)]
+    }
+    fn two() -> Self {
+        Complex64::new(2.0, 0.0)
     }
 }
 
-fn bits<D: Bits>(data: &[D]) -> Vec<(u64, u64)> {
-    data.iter().map(|value| value.bits()).collect()
+impl Bits for Complex32 {
+    fn parts(self) -> [Option<u64>; 2] {
+        [part_f32(self.re), part_f32(self.im)]
+    }
+    fn two() -> Self {
+        Complex32::new(2.0, 0.0)
+    }
+}
+
+fn bits<D: Bits>(data: &[D]) -> Vec<[Option<u64>; 2]> {
+    data.iter().map(|value| value.parts()).collect()
 }
 
 /// Device `materialize` of `host.to_cuda()` and of its lazy adjoint against
@@ -56,7 +93,7 @@ where
         + tenet::core::TypedSectorAdmission,
     R::Mode: tenet::typed::TypedTensorAdjointDispatch<R, D>
         + tenet::typed::TypedTensorConstructionDispatch<R, D>,
-    D: Bits + tenet::typed::CudaPayload + From<f64>,
+    D: Bits + tenet::typed::CudaPayload,
 {
     assert!(host.subblock_count() >= 2, "{what}: multi-block fixture");
     let host_lazy = host.adjoint().unwrap();
@@ -141,7 +178,7 @@ where
     let domain: Vec<usize> = (host.codomain_rank()..host.rank()).collect();
     let mut destination = device.materialize().unwrap();
     device
-        .permute_overwrite_into(&mut destination, &codomain, &domain, D::from(2.0))
+        .permute_overwrite_into(&mut destination, &codomain, &domain, D::two())
         .unwrap();
     assert_eq!(
         bits(device.to_host().unwrap().data()),
@@ -150,7 +187,7 @@ where
     );
     let mut alias = device.clone();
     assert!(device
-        .permute_overwrite_into(&mut alias, &codomain, &domain, D::from(2.0))
+        .permute_overwrite_into(&mut alias, &codomain, &domain, D::two())
         .is_err());
 }
 
@@ -162,7 +199,7 @@ where
         + tenet::core::TypedSectorAdmission,
     R::Mode: tenet::typed::TypedTensorAdjointDispatch<R, D>
         + tenet::typed::TypedTensorConstructionDispatch<R, D>,
-    D: Bits + tenet::typed::CudaPayload + From<f64>,
+    D: Bits + tenet::typed::CudaPayload,
 {
     let dual = leg.try_dual().unwrap();
     let square: TensorMap<R, D> =
@@ -211,6 +248,9 @@ fn device_materialize_matches_host_with_one_fresh_payload() {
     fixtures::<_, Complex64>(&runtime, &su2, "SU2/c64");
     fixtures::<_, f64>(&runtime, &fz2_u1, "fZ2xU1/f64");
     fixtures::<_, Complex64>(&runtime, &fz2_u1, "fZ2xU1/c64");
+    fixtures::<_, f32>(&runtime, &u1, "U1/f32");
+    fixtures::<_, Complex32>(&runtime, &u1, "U1/c32");
+    fixtures::<_, Complex32>(&runtime, &su2, "SU2/c32");
 
     // Values a unit-operand contraction would change: complex infinities,
     // and signed zeros in either part. The owned copy and the adjoint
@@ -239,4 +279,37 @@ fn device_materialize_matches_host_with_one_fresh_payload() {
         .data()
         .iter()
         .any(|v| v.re.is_infinite() && v.im == 0.0 && v.im.is_sign_negative()));
+
+    // A NaN imaginary (and real) part stays NaN; only its bits are free.
+    let nans = [
+        Complex64::new(1.5, f64::NAN),
+        Complex64::new(f64::NAN, -2.0),
+        Complex64::new(-0.0, 0.5),
+        Complex64::new(3.0, -f64::NAN),
+    ];
+    let mut next = 0;
+    let nan: TensorMap<_, Complex64> =
+        TensorMap::from_subblock_fn(&runtime, [&u1, &dual], [&dual, &u1], |_, _| {
+            next += 1;
+            nans[next % nans.len()]
+        })
+        .unwrap();
+    check(&nan, "U1/c64 NaN");
+    let device_adjoint = nan
+        .to_cuda()
+        .unwrap()
+        .adjoint()
+        .unwrap()
+        .materialize()
+        .unwrap()
+        .to_host()
+        .unwrap();
+    assert!(device_adjoint
+        .data()
+        .iter()
+        .any(|v| v.im.is_nan() && v.re == 1.5));
+    assert!(device_adjoint
+        .data()
+        .iter()
+        .any(|v| v.re.is_nan() && v.im == 2.0));
 }
