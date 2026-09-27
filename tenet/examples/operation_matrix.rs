@@ -99,7 +99,7 @@ struct Counters {
 
 fn counters(runtime: &Runtime) -> Counters {
     Counters {
-        runtime: runtime.tree_transform_cache_info(),
+        runtime: runtime.tree_transform_cache_info().structures,
         fusion_layout: fusion_tree_layout_cache_info(),
         complete_hom: complete_hom_space_structure_cache_info(),
     }

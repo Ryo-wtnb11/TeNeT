@@ -86,7 +86,7 @@ fn runtime() -> Runtime {
 
 /// Tree transforms executed so far: every transform looks its layout up once.
 fn transforms(runtime: &Runtime) -> usize {
-    let info = runtime.tree_transform_cache_info();
+    let info = runtime.tree_transform_cache_info().structures;
     info.hits() + info.misses()
 }
 

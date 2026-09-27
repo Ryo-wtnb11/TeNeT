@@ -7011,9 +7011,9 @@ fn sun_checked_generic_transforms_reuse_the_runtime_completed_store() {
                 _ => unreachable!(),
             };
             let first = apply(&source).unwrap();
-            let cold = runtime.tree_transform_cache_info();
+            let cold = runtime.tree_transform_cache_info().structures;
             let repeated = apply(&source).unwrap();
-            let warm = runtime.tree_transform_cache_info();
+            let warm = runtime.tree_transform_cache_info().structures;
 
             assert_eq!(cold.entries(), 1);
             assert_eq!(cold.misses(), 1);

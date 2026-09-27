@@ -311,10 +311,10 @@ fn checked_generic_public_transform_measurement() {
             TensorMap::rand_with_seed(&runtime, [&half_leg, &half_leg], [&coupled_leg], 783)
                 .unwrap();
         assert_eq!(source.subblock_count(), 2);
-        let runtime_before = runtime.tree_transform_cache_info();
+        let runtime_before = runtime.tree_transform_cache_info().structures;
         let (first, first_allocations, first_bytes, first_ns) =
             measure_value(|| source.permute(&[1, 0], &[2]).unwrap());
-        let runtime_after_first = runtime.tree_transform_cache_info();
+        let runtime_after_first = runtime.tree_transform_cache_info().structures;
         let mut repeat_ns = Vec::with_capacity(7);
         let mut repeat_allocations = Vec::with_capacity(7);
         let mut repeat_bytes = Vec::with_capacity(7);
@@ -326,7 +326,7 @@ fn checked_generic_public_transform_measurement() {
             repeat_allocations.push(allocations);
             repeat_bytes.push(bytes);
         }
-        let runtime_after_repeat = runtime.tree_transform_cache_info();
+        let runtime_after_repeat = runtime.tree_transform_cache_info().structures;
         let mut sorted_ns = repeat_ns.clone();
         sorted_ns.sort_unstable();
         println!(
@@ -365,9 +365,9 @@ fn checked_generic_public_transform_measurement() {
         _ => unreachable!(),
     };
 
-    let runtime_before = runtime.tree_transform_cache_info();
+    let runtime_before = runtime.tree_transform_cache_info().structures;
     let (first, first_allocations, first_bytes, first_ns) = measure_value(|| apply(&source));
-    let runtime_after_first = runtime.tree_transform_cache_info();
+    let runtime_after_first = runtime.tree_transform_cache_info().structures;
     let mut repeat_ns = Vec::with_capacity(7);
     let mut repeat_allocations = Vec::with_capacity(7);
     let mut repeat_bytes = Vec::with_capacity(7);
@@ -379,7 +379,7 @@ fn checked_generic_public_transform_measurement() {
         repeat_allocations.push(allocations);
         repeat_bytes.push(bytes);
     }
-    let runtime_after_repeat = runtime.tree_transform_cache_info();
+    let runtime_after_repeat = runtime.tree_transform_cache_info().structures;
     let mut sorted_ns = repeat_ns.clone();
     sorted_ns.sort_unstable();
     println!(

@@ -244,11 +244,12 @@ where
     let replay = match cached {
         Some(replay) => replay,
         None => {
-            let build = || {
+            let build = |reuse: Option<&crate::tree_transform::GroupSpecReuse<'_, _>>| {
                 build_checked_generic_tree_pair_transform_group_plan_validated(
                     provider,
                     operation.clone(),
                     &source_proof,
+                    reuse,
                 )
             };
             let plan = match &runtime_store {
@@ -259,9 +260,9 @@ where
                     storage_source.structure(),
                     logical_source_key,
                     operand.storage_conjugate(),
-                    build,
+                    |reuse| build(Some(reuse)),
                 )?,
-                None => Arc::new(build()?),
+                None => Arc::new(build(None)?),
             };
             if operand.storage_conjugate() {
                 let logical_to_storage_block = |logical_index| {

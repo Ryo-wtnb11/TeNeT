@@ -51,12 +51,12 @@ macro_rules! check_rule {
             let what = format!("{} {name}", $label);
             let warm = Runtime::builder().dense_threads(1).build().unwrap();
             let _ = operation(&tensor!(&warm, &a));
-            let plans_before = warm.tree_transform_plan_cache_info();
-            let structures_before = warm.tree_transform_cache_info();
+            let plans_before = warm.tree_transform_cache_info().plans;
+            let structures_before = warm.tree_transform_cache_info().structures;
 
             let degeneracy_only = operation(&tensor!(&warm, &b));
-            let plans = warm.tree_transform_plan_cache_info();
-            let structures = warm.tree_transform_cache_info();
+            let plans = warm.tree_transform_cache_info().plans;
+            let structures = warm.tree_transform_cache_info().structures;
             assert!(
                 structures.misses() > structures_before.misses(),
                 "{what}: a new layout must miss the completed-structure tier"
@@ -71,7 +71,7 @@ macro_rules! check_rule {
             let cold = Runtime::builder().dense_threads(1).build().unwrap();
             let expected = operation(&tensor!(&cold, &b));
             assert!(
-                cold.tree_transform_plan_cache_info().misses() > 0,
+                cold.tree_transform_cache_info().plans.misses() > 0,
                 "{what}: the cold path must build through the plan tier"
             );
             assert_eq!(degeneracy_only.codomain(), expected.codomain(), "{what}");
@@ -95,7 +95,7 @@ macro_rules! check_rule {
 
             let _ = operation(&tensor!(&warm, &c));
             assert!(
-                warm.tree_transform_plan_cache_info().misses() > plans.misses(),
+                warm.tree_transform_cache_info().plans.misses() > plans.misses(),
                 "{what}: a sector change must rebuild the plan"
             );
         }
@@ -206,13 +206,13 @@ fn clear_resets_the_plan_tier() {
     )
     .unwrap();
     let _ = tensor!(&runtime, &leg).permute(&[2, 0], &[3, 1]).unwrap();
-    let before = runtime.tree_transform_plan_cache_info();
+    let before = runtime.tree_transform_cache_info().plans;
     assert!(before.entries() > 0 && before.charged_payload_bytes() > 0);
     assert!(before.entries() <= before.entry_capacity());
     assert!(before.charged_payload_bytes() <= before.byte_budget());
 
     runtime.clear_tree_transform_cache();
-    let after = runtime.tree_transform_plan_cache_info();
+    let after = runtime.tree_transform_cache_info().plans;
     assert_eq!(after.entries(), 0);
     assert_eq!(after.charged_payload_bytes(), 0);
     assert_eq!(after.misses(), 0);

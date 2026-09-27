@@ -551,11 +551,11 @@ fn fibonacci_forward_braid_matches_closed_form_and_tensorkit_fixture() {
     let source = fibonacci_tau_braid_fixture(&runtime);
     runtime.clear_tree_transform_cache();
     let braided = source.braid(&[0, 2, 1], &[3], &[0, 1, 2, 3]).unwrap();
-    let cold = runtime.tree_transform_cache_info();
+    let cold = runtime.tree_transform_cache_info().structures;
     assert_eq!((cold.entries(), cold.misses(), cold.hits()), (1, 1, 0));
     let warm = source.braid(&[0, 2, 1], &[3], &[0, 1, 2, 3]).unwrap();
     assert_eq!(warm.dense_data().unwrap(), braided.dense_data().unwrap());
-    let warm_info = runtime.tree_transform_cache_info();
+    let warm_info = runtime.tree_transform_cache_info().structures;
     assert_eq!(
         (warm_info.entries(), warm_info.misses(), warm_info.hits()),
         (1, 1, 1)
@@ -830,9 +830,9 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
         })
         .unwrap();
     runtime.clear_tree_transform_cache();
-    let before = runtime.tree_transform_cache_info();
+    let before = runtime.tree_transform_cache_info().structures;
     let cold = lhs.compose(&rhs).unwrap();
-    let after_cold = runtime.tree_transform_cache_info();
+    let after_cold = runtime.tree_transform_cache_info().structures;
     let warm = lhs.compose(&rhs).unwrap();
     let expected: TensorMap<_, Complex64> =
         TensorMap::from_subblock_fn(&runtime, [&rows], [&columns], |trees, indices| {
@@ -853,7 +853,7 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
     assert_data_close_c64(warm.dense_data().unwrap(), expected.dense_data().unwrap());
     assert!(std::ptr::eq(cold.provider(), lhs.provider()));
     assert_eq!(after_cold, before);
-    assert_eq!(runtime.tree_transform_cache_info(), before);
+    assert_eq!(runtime.tree_transform_cache_info().structures, before);
 
     // What: the same genuinely complex blocks are associative, while ordinary
     // contraction refuses even this crossing-free boundary.
@@ -870,7 +870,7 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
     assert_data_close_c64(left.dense_data().unwrap(), right.dense_data().unwrap());
 
     runtime.clear_tree_transform_cache();
-    let before = runtime.tree_transform_cache_info();
+    let before = runtime.tree_transform_cache_info().structures;
     let error = a
         .contract(
             &b,
@@ -887,7 +887,7 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
         tenet::prelude::Error::Operation(operation)
             if matches!(*operation, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
     ));
-    assert_eq!(runtime.tree_transform_cache_info(), before);
+    assert_eq!(runtime.tree_transform_cache_info().structures, before);
 
     let other_runtime = Runtime::builder().build().unwrap();
     let other: TensorMap<_, Complex64> =
@@ -919,10 +919,10 @@ fn fibonacci_ordinary_permute_rejection_does_not_publish_a_cache_entry() {
     let runtime = runtime();
     let source = fibonacci_tau_braid_fixture(&runtime);
     runtime.clear_tree_transform_cache();
-    let before = runtime.tree_transform_cache_info();
+    let before = runtime.tree_transform_cache_info().structures;
     let error = source.permute(&[0, 2, 1], &[3]).unwrap_err();
     assert!(format!("{error:?}").contains("UnsupportedBraidingStyle"));
-    assert_eq!(runtime.tree_transform_cache_info(), before);
+    assert_eq!(runtime.tree_transform_cache_info().structures, before);
 }
 
 #[test]
@@ -1165,7 +1165,10 @@ fn graded_space_carries_a_simple_fusion_provider_too() {
 
     assert_eq!(space.sectors().unwrap(), vec![SU2Irrep::from_twice_spin(1)]);
     assert!(space.is_dual());
-    assert_eq!(runtime().tree_transform_cache_info().entries(), 0);
+    assert_eq!(
+        runtime().tree_transform_cache_info().structures.entries(),
+        0
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,7 +1297,7 @@ fn checked_construction_failure_publishes_no_cache_state() {
         fusion_tree_layout_cache_info(),
         complete_hom_space_structure_cache_info(),
     );
-    let runtime_before = runtime.tree_transform_cache_info();
+    let runtime_before = runtime.tree_transform_cache_info().structures;
 
     let error = TensorMap::<ExternalZ3, f64>::zeros(&runtime, [&codomain], [&domain]).unwrap_err();
 
@@ -1309,7 +1312,10 @@ fn checked_construction_failure_publishes_no_cache_state() {
         ),
         before
     );
-    assert_eq!(runtime.tree_transform_cache_info(), runtime_before);
+    assert_eq!(
+        runtime.tree_transform_cache_info().structures,
+        runtime_before
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2746,7 +2752,7 @@ fn a_failing_typed_operation_publishes_no_cache_state() {
         fusion_tree_layout_cache_info(),
         complete_hom_space_structure_cache_info(),
     );
-    let runtime_before = runtime.tree_transform_cache_info();
+    let runtime_before = runtime.tree_transform_cache_info().structures;
 
     assert!(tensor.permute(&[0, 0], &[2, 3]).is_err());
     assert!(tensor
@@ -2768,7 +2774,10 @@ fn a_failing_typed_operation_publishes_no_cache_state() {
         ),
         before
     );
-    assert_eq!(runtime.tree_transform_cache_info(), runtime_before);
+    assert_eq!(
+        runtime.tree_transform_cache_info().structures,
+        runtime_before
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -6133,7 +6142,7 @@ fn compact_contract_identity_output_does_not_publish_a_transform_cache_entry() {
         .unwrap()
         .s;
     runtime.clear_tree_transform_cache();
-    let before = runtime.tree_transform_cache_info();
+    let before = runtime.tree_transform_cache_info().structures;
 
     let result = tensor
         .contract(
@@ -6151,7 +6160,7 @@ fn compact_contract_identity_output_does_not_publish_a_transform_cache_entry() {
         result.dense_data().unwrap().len(),
         tensor.dense_data().unwrap().len()
     );
-    assert_eq!(runtime.tree_transform_cache_info(), before);
+    assert_eq!(runtime.tree_transform_cache_info().structures, before);
 }
 
 #[test]

@@ -98,12 +98,15 @@ macro_rules! assert_no_costlier_than_permute {
         };
         fused();
         separate();
-        let misses = $runtime.tree_transform_cache_info().misses();
+        let misses = $runtime.tree_transform_cache_info().structures.misses();
         let (fused_cost, fused_value) = allocations(fused);
         let (separate_cost, separate_value) = allocations(separate);
 
         // What: the warm call compiles no new transform plan.
-        assert_eq!($runtime.tree_transform_cache_info().misses(), misses);
+        assert_eq!(
+            $runtime.tree_transform_cache_info().structures.misses(),
+            misses
+        );
         // What: the same tensor, bit for bit.
         assert_eq!(
             fused_value.dense_data().unwrap(),

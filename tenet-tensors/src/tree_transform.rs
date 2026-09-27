@@ -4,6 +4,7 @@ mod plan;
 
 #[cfg(test)]
 pub(crate) use cache::take_oriented_tree_pair_compiles;
+pub(crate) use cache::GroupSpecReuse;
 pub use cache::{
     RuntimeTreeTransformCacheInfo, RuntimeTreeTransformCacheLedger, RuntimeTreeTransformStore,
     TreePairTransformCache, TreeTransformCache, TreeTransformCacheStats,

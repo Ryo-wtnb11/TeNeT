@@ -10,6 +10,19 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use num_complex::{Complex32, Complex64};
 use tenet_core::{HomSpaceId, RuleIdentity};
 pub use tenet_tensors::RuntimeTreeTransformCacheInfo;
+
+/// Snapshot of a Runtime's tree-transform caches, one entry per tier; see
+/// [`Runtime::tree_transform_cache_info`]. Observability only.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct TreeTransformCacheInfo {
+    /// Completed transforms keyed on exact layouts.
+    pub structures: RuntimeTreeTransformCacheInfo,
+    /// Categorical plans keyed on sector structures.
+    pub plans: RuntimeTreeTransformCacheInfo,
+    /// Per fusion-tree group recoupling (non-unique fusion only).
+    pub groups: RuntimeTreeTransformCacheInfo,
+}
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DenseTreeTransformOperations, OperationCachePolicy,
     RuntimeTreeTransformCacheLedger, RuntimeTreeTransformStore,
@@ -627,6 +640,10 @@ impl RuntimeTreeTransformStores {
         self.ledger.plan_pair_info(&self.real, &self.complex)
     }
 
+    fn group_info(&self) -> RuntimeTreeTransformCacheInfo {
+        self.ledger.group_pair_info(&self.real, &self.complex)
+    }
+
     fn clear(&self) {
         self.real.clear();
         self.complex.clear();
@@ -1134,28 +1151,40 @@ impl Runtime {
         &self.inner.execution_config
     }
 
-    /// Returns this Runtime's completed tree-transform cache activity.
-    pub fn tree_transform_cache_info(&self) -> RuntimeTreeTransformCacheInfo {
-        self.inner.tree_transform_stores.info()
-    }
-
-    /// Returns this Runtime's categorical tree-transform plan cache activity.
+    /// Returns this Runtime's tree-transform cache activity, one snapshot per
+    /// tier. The tiers are sampled one after another, not atomically.
     ///
-    /// A plan holds the recoupling coefficients and fusion-tree pair maps of
-    /// one transform. It is keyed on the rule, the operation and the sector
-    /// structures of source and destination, never on degeneracies, so a
-    /// completed-structure miss caused only by new block dimensions (for
-    /// example after a truncation) reuses it and compiles the layout alone.
-    /// `misses` counts attempted plan builds, including builds that returned an
-    /// error; a failed build is not retained. Entry and byte limits are the same
-    /// configured values as [`Self::tree_transform_cache_info`], charged
-    /// separately.
-    pub fn tree_transform_plan_cache_info(&self) -> RuntimeTreeTransformCacheInfo {
-        self.inner.tree_transform_stores.plan_info()
+    /// - `structures`: completed transforms, keyed on the exact source and
+    ///   destination layouts (degeneracies included).
+    /// - `plans`: categorical plans (recoupling coefficients and fusion-tree
+    ///   pair maps), keyed on the rule, the operation and the sector structures
+    ///   only, so a structure miss caused only by new block dimensions (for
+    ///   example after a truncation) reuses the plan and compiles the layout
+    ///   alone. `misses` counts attempted plan builds, including failed ones;
+    ///   a failed build is not retained.
+    /// - `groups`: per fusion-tree group recoupling for non-unique fusion
+    ///   (for example SU(2) or SU(3)), keyed on the rule, the operation, the
+    ///   group's external sectors and its ordered tree pairs. A plan miss
+    ///   builds only the groups absent here, so a sector change rebuilds only
+    ///   the groups it changed. `misses` counts failed group lookups. Unique
+    ///   fusion never uses this tier.
+    ///
+    /// Bounds: every tier is charged separately against the configured
+    /// [`RuntimeBuilder::tree_transform_cache_byte_budget`] (64 MiB by
+    /// default), so the three retain at most three times that budget. The
+    /// entry caps are 256 structures, 256 plans and 10⁴ groups; a single entry
+    /// above 8 MiB is never retained.
+    pub fn tree_transform_cache_info(&self) -> TreeTransformCacheInfo {
+        let stores = &self.inner.tree_transform_stores;
+        TreeTransformCacheInfo {
+            structures: stores.info(),
+            plans: stores.plan_info(),
+            groups: stores.group_info(),
+        }
     }
 
-    /// Clears this Runtime's tree-transform caches: completed structures and
-    /// categorical plans.
+    /// Clears this Runtime's tree-transform caches: completed structures,
+    /// categorical plans and their per-group recoupling.
     ///
     /// The device tree-transform executor's prepared state is dropped too, and
     /// strictly after the host store clear has returned: the two locks are
@@ -1718,9 +1747,9 @@ impl RuntimeBuilder {
     }
 
     /// Sets the retained-byte budget for completed tree-transform structures,
-    /// and separately for categorical tree-transform plans, so the two tiers
-    /// together retain at most twice this charge. A zero budget disables
-    /// admission to both.
+    /// and separately for categorical tree-transform plans and for their
+    /// per-group recoupling specs, so the three tiers together retain at most
+    /// three times this charge. A zero budget disables admission to all three.
     pub fn tree_transform_cache_byte_budget(mut self, bytes: usize) -> Self {
         self.tree_transform_cache_byte_budget = bytes;
         self
@@ -2230,7 +2259,7 @@ mod tests {
         assert!(cold_layout_calls > 0);
         assert!(destination_data.iter().any(|value| value.im != 0.0));
         let cold_destination_data = destination_data.clone();
-        let cold = runtime.tree_transform_cache_info();
+        let cold = runtime.tree_transform_cache_info().structures;
         assert_eq!(cold.entries(), 1);
         assert_eq!(cold.misses(), 1);
         assert_eq!(cold.hits(), 0);
@@ -2253,7 +2282,7 @@ mod tests {
         // Layout/admission queries are observed separately; only structural
         // F/R replay is promised to disappear on a warm cache hit.
         assert!(rule.layout_calls() >= cold_layout_calls);
-        let warm = runtime.tree_transform_cache_info();
+        let warm = runtime.tree_transform_cache_info().structures;
         assert_eq!(warm.entries(), 1);
         assert_eq!(warm.misses(), 1);
         assert_eq!(warm.hits(), 1);
@@ -2269,7 +2298,7 @@ mod tests {
         let tau = GradedSpace::try_new(Arc::clone(&rule), [(FibonacciSector::Tau, 1)])
             .expect("label admission");
         runtime.clear_tree_transform_cache();
-        let cache_before = runtime.tree_transform_cache_info();
+        let cache_before = runtime.tree_transform_cache_info().structures;
         let callbacks = AtomicUsize::new(0);
 
         let late = TensorMap::<CountingFibonacci, Complex64>::from_subblock_fn(
@@ -2284,7 +2313,7 @@ mod tests {
         let late = late.unwrap_err();
         assert!(format!("{late:?}").contains("InvalidSector"));
         assert_eq!(callbacks.load(Ordering::Relaxed), 0);
-        assert_eq!(runtime.tree_transform_cache_info(), cache_before);
+        assert_eq!(runtime.tree_transform_cache_info().structures, cache_before);
 
         let early = TensorMap::<CountingFibonacci, Complex64>::from_subblock_fn(
             &runtime,
@@ -2301,7 +2330,7 @@ mod tests {
                 if message == "at least one leg is required to infer the fusion provider"
         ));
         assert_eq!(callbacks.load(Ordering::Relaxed), 0);
-        assert_eq!(runtime.tree_transform_cache_info(), cache_before);
+        assert_eq!(runtime.tree_transform_cache_info().structures, cache_before);
 
         assert!(TensorMap::<CountingFibonacci, Complex64>::rand_with_seed(
             &runtime,
@@ -2310,7 +2339,7 @@ mod tests {
             0x9E37_79B9_7F4A_7C15,
         )
         .is_err());
-        assert_eq!(runtime.tree_transform_cache_info(), cache_before);
+        assert_eq!(runtime.tree_transform_cache_info().structures, cache_before);
     }
 
     #[test]
@@ -2333,14 +2362,26 @@ mod tests {
             TensorMap::rand_with_seed(&runtime_b, [&space, &space], [&space], 475_002).unwrap();
         let expected_a = source_a.permute(&[1], &[2, 0]).unwrap();
         let expected_b = source_b.permute(&[1], &[2, 0]).unwrap();
-        assert_eq!(runtime_a.tree_transform_cache_info().entries(), 1);
-        assert_eq!(runtime_b.tree_transform_cache_info().entries(), 1);
+        assert_eq!(
+            runtime_a.tree_transform_cache_info().structures.entries(),
+            1
+        );
+        assert_eq!(
+            runtime_b.tree_transform_cache_info().structures.entries(),
+            1
+        );
 
         runtime_a.clear_tree_transform_cache();
-        assert_eq!(runtime_a.tree_transform_cache_info().entries(), 0);
-        assert_eq!(runtime_a.tree_transform_cache_info().misses(), 0);
-        assert_eq!(runtime_b.tree_transform_cache_info().entries(), 1);
-        assert_eq!(runtime_b.tree_transform_cache_info().misses(), 1);
+        assert_eq!(
+            runtime_a.tree_transform_cache_info().structures.entries(),
+            0
+        );
+        assert_eq!(runtime_a.tree_transform_cache_info().structures.misses(), 0);
+        assert_eq!(
+            runtime_b.tree_transform_cache_info().structures.entries(),
+            1
+        );
+        assert_eq!(runtime_b.tree_transform_cache_info().structures.misses(), 1);
 
         let mut context = TensorExecutionContext::for_config(runtime_b.execution_config()).unwrap();
         let store = runtime_b
