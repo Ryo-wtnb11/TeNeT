@@ -77,9 +77,9 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
             ),
             "{charges} sectors"
         );
-        // Per aligned real route: 14 phase ops, then a broadcast and a mul on
+        // Per aligned real route: 13 phase ops, then a broadcast and a mul on
         // each side; the gauge never downloads (checked above).
-        assert_eq!(svd.gauge_ops, 18 * charges as u64, "{charges} sectors");
+        assert_eq!(svd.gauge_ops, 17 * charges as u64, "{charges} sectors");
         let Svd { s: expected, .. } = host.svd_compact().unwrap();
         for (device, host) in s
             .materialize()

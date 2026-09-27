@@ -2873,12 +2873,12 @@ fn gauge_op<T>(result: tenferro_tensor::Result<T>) -> Result<T, DenseError> {
 /// (`rows, k > 0`), computed on the device: nothing is downloaded and no host
 /// barrier is taken.
 ///
-/// Tenferro 0.7.1 has no arg-max reduction, so the pivot is composed from 14
+/// Tenferro 0.7.1 has no arg-max reduction, so the pivot is composed from 13
 /// ops (each counted in `gauge_ops`): `abs`, column `reduce_max`, broadcast,
 /// `compare` (every maximum), `cast`, weight broadcast, `mul`, column
 /// `reduce_max`, broadcast, `compare` (the first maximum: the weights are
-/// distinct and decreasing), `cast`, `mul`, column `reduce_sum` (the pivot)
-/// and `sign`. Why not `gather` of an arg-max index: an integer index needs a
+/// distinct and decreasing), `cast`, a column-batched `dot_general` of `u`
+/// with that one-hot mask (the pivot) and `sign`. Why not `gather` of an arg-max index: an integer index needs a
 /// float-to-int `cast`, which validates its range with a download.
 ///
 /// A non-finite column has no maximum under `compare`; its pivot then sums
@@ -2931,8 +2931,16 @@ pub fn cuda_svd_gauge_phases<D: CudaScalar>(
     let best = gauge_op(backend.broadcast_in_dim(&best, &shape, &[1]))?;
     let first = gauge_op(backend.compare(&score, &best, &CompareDir::Eq))?;
     let first = gauge_op(backend.cast(&first, D::dtype()))?;
-    let pivot = gauge_op(backend.mul(&u.tensor, &first))?;
-    let pivot = gauge_op(backend.reduce_sum(&pivot, &[0]))?;
+    // Why a batched dot rather than `mul` + `reduce_sum`: Tenferro 0.7.1's
+    // complex warp-plane `reduce_sum` kernel fails NVRTC compilation
+    // (`__shfl_xor_sync` has no `cuDoubleComplex` overload).
+    let column_dot = DotGeneralConfig {
+        lhs_contracting_dims: vec![0],
+        rhs_contracting_dims: vec![0],
+        lhs_batch_dims: vec![1],
+        rhs_batch_dims: vec![1],
+    };
+    let pivot = gauge_op(backend.dot_general(&u.tensor, &first, &column_dot))?;
     let phase = gauge_op(backend.sign(&pivot))?;
     Ok(CudaSvdPhases {
         phase,

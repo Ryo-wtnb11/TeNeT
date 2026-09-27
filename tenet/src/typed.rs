@@ -11792,7 +11792,7 @@ where
     /// `u`, the first largest-magnitude entry is real and non-negative, and
     /// the matching `vh` row takes the inverse phase. The fix-up runs on the
     /// device without a download (see [`tenet_dense::cuda_svd_gauge_phases`]):
-    /// 14 Tenferro ops per route for the phases, then per side either a
+    /// 13 Tenferro ops per route for the phases, then per side either a
     /// `k x k` diagonal selector that the non-aligned assembly GEMM
     /// multiplies by anyway (1 op) or a scaling of the aligned factor before
     /// its copy (2 ops), plus one `conj` for a complex left side. They are
@@ -22282,7 +22282,7 @@ mod representation_gates {
     #[test]
     #[ignore = "requires a real CUDA device"]
     fn typed_cuda_svd_gauge_costs_the_documented_ops_and_no_download() {
-        // What: the rustdoc's cost of the gauge. Per nonempty route, 14 ops for
+        // What: the rustdoc's cost of the gauge. Per nonempty route, 13 ops for
         // the phases, 2 per aligned side (broadcast, mul) or 1 per non-aligned
         // side (the selector's embed_diagonal), and 1 conj for a complex left
         // side. Per call, one gauge-weight upload replaces the old per-route
@@ -22324,7 +22324,7 @@ mod representation_gates {
                     .iter()
                     .map(|route| {
                         let side = |aligned: bool| if aligned && !treewise { 2 } else { 1 };
-                        14 + side(route.aligned_left)
+                        13 + side(route.aligned_left)
                             + side(route.aligned_right)
                             + u64::from(<D as tenet_dense::CudaScalar>::IS_COMPLEX)
                     })
