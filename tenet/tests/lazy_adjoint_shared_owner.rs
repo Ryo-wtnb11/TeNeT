@@ -148,6 +148,9 @@ macro_rules! assert_lazy_adjoint_reads_and_transforms_match_literal {
         cycle.rotate_left(1);
         let (cyclic_codomain, reversed_domain) = cycle.split_at(split);
         let cyclic_domain: Vec<usize> = reversed_domain.iter().rev().copied().collect();
+        // TensorKit's argument-free `transpose`: the full planar rotation.
+        let full_codomain: Vec<usize> = (split..rank).rev().collect();
+        let full_domain: Vec<usize> = (0..split).rev().collect();
         let pairs: [(TensorMap<_, _>, TensorMap<_, _>); 5] = [
             (
                 lazy.permute(codomain_axes, domain_axes).unwrap(),
@@ -161,13 +164,13 @@ macro_rules! assert_lazy_adjoint_reads_and_transforms_match_literal {
                 lazy.repartition(new_split).unwrap(),
                 owned.repartition(new_split).unwrap(),
             ),
-            (lazy.transpose().unwrap(), owned.transpose().unwrap()),
             (
-                lazy.transpose_axes(cyclic_codomain, &cyclic_domain)
-                    .unwrap(),
-                owned
-                    .transpose_axes(cyclic_codomain, &cyclic_domain)
-                    .unwrap(),
+                lazy.transpose(&full_codomain, &full_domain).unwrap(),
+                owned.transpose(&full_codomain, &full_domain).unwrap(),
+            ),
+            (
+                lazy.transpose(cyclic_codomain, &cyclic_domain).unwrap(),
+                owned.transpose(cyclic_codomain, &cyclic_domain).unwrap(),
             ),
         ];
         for (actual, expected) in &pairs {
@@ -214,7 +217,7 @@ fn empty_support_lazy_adjoint_materializes_an_empty_payload() {
     let lazy = parent.adjoint().unwrap();
     assert_eq!(lazy.subblock_count(), 0);
     assert!(lazy.data().is_empty());
-    assert!(lazy.transpose().unwrap().data().is_empty());
+    assert!(lazy.transpose(&[1], &[0]).unwrap().data().is_empty());
 }
 
 fn su2_dim(sector: &SU2Irrep) -> f64 {

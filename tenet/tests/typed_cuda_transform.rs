@@ -1,5 +1,5 @@
 //! Real-device gates for typed structural transforms on CUDA tensors
-//! (issue #1322, G2b-2): `permute`, `braid`, `transpose`, `transpose_axes`
+//! (issue #1322, G2b-2): `permute`, `braid`, `transpose`
 //! and `repartition` on `TensorMap<R, D, CudaStorage<D>>`.
 //!
 //! Evidence chain, as the design review fixed it:
@@ -29,6 +29,34 @@
 #![cfg(feature = "cuda")]
 
 mod common;
+
+/// TensorKit's argument-free `transpose(t)`: the full planar rotation, which
+/// carries every codomain leg across the boundary and every domain leg back.
+macro_rules! full_rotation {
+    ($tensor:expr) => {{
+        let tensor = &$tensor;
+        let codomain_rank = tensor.codomain_rank();
+        let codomain_axes: Vec<usize> = (codomain_rank..tensor.rank()).rev().collect();
+        let domain_axes: Vec<usize> = (0..codomain_rank).rev().collect();
+        (codomain_axes, domain_axes)
+    }};
+}
+
+macro_rules! full_transpose {
+    ($tensor:expr) => {{
+        let tensor = &$tensor;
+        let (codomain_axes, domain_axes) = full_rotation!(tensor);
+        tensor.transpose(&codomain_axes, &domain_axes)
+    }};
+}
+
+macro_rules! full_transpose_overwrite_into {
+    ($tensor:expr, $destination:expr, $alpha:expr) => {{
+        let tensor = &$tensor;
+        let (codomain_axes, domain_axes) = full_rotation!(tensor);
+        tensor.transpose_overwrite_into($destination, &codomain_axes, &domain_axes, $alpha)
+    }};
+}
 
 use std::sync::Arc;
 
@@ -285,10 +313,10 @@ fn device_permute_braid_and_planar_match_the_host_for_u1_and_su2() {
         &[1, 3],
         &[3, 1, 4, 2]
     ));
-    device_matches_host!("U1/f64 transpose", real, |t| t.transpose());
-    device_matches_host!("U1/c64 transpose", complex, |t| t.transpose());
-    device_matches_host!("U1/f64 transpose_axes", real, |t| t
-        .transpose_axes(&[1, 3], &[0, 2]));
+    device_matches_host!("U1/f64 transpose", real, |t| full_transpose!(t));
+    device_matches_host!("U1/c64 transpose", complex, |t| full_transpose!(t));
+    device_matches_host!("U1/f64 cyclic transpose", real, |t| t
+        .transpose(&[1, 3], &[0, 2]));
 
     // SU(2): recoupling, so Multi blocks and coefficients other than 1.
     let su2_real: TensorMap<_, f64> =
@@ -301,7 +329,7 @@ fn device_permute_braid_and_planar_match_the_host_for_u1_and_su2() {
     let permuted = device_matches_host!("SU2/c64 permute", su2_complex, |t| t
         .permute(&[1, 2], &[3, 0]));
     assert_not_a_reordering(su2_complex.data(), permuted.data(), "SU2/c64 permute");
-    let transposed = device_matches_host!("SU2/f64 transpose", su2_real, |t| t.transpose());
+    let transposed = device_matches_host!("SU2/f64 transpose", su2_real, |t| full_transpose!(t));
     assert_not_a_reordering(su2_real.data(), transposed.data(), "SU2/f64 transpose");
 }
 
@@ -393,13 +421,8 @@ fn device_transform_laws_hold_on_device_tensors() {
     );
 
     // Transpose is an involution.
-    let twice = device
-        .transpose()
-        .unwrap()
-        .transpose()
-        .unwrap()
-        .to_host()
-        .unwrap();
+    let once = full_transpose!(device).unwrap();
+    let twice = full_transpose!(once).unwrap().to_host().unwrap();
     assert_eq!(twice.data(), host.data(), "transpose involution is bitwise");
     assert_eq!(layout(&twice), layout(&host), "transpose involution layout");
 }
@@ -449,7 +472,7 @@ fn device_fermionic_signs_match_the_hand_computed_fixture() {
     let device = host.to_cuda().unwrap();
 
     assert_eq!(
-        device.transpose().unwrap().to_host().unwrap().data(),
+        full_transpose!(device).unwrap().to_host().unwrap().data(),
         [1.0, 2.0, 4.0, 3.0]
     );
     assert_eq!(
@@ -463,7 +486,7 @@ fn device_fermionic_signs_match_the_hand_computed_fixture() {
     );
     assert_eq!(
         device
-            .transpose_axes(&[1, 2], &[0])
+            .transpose(&[1, 2], &[0])
             .unwrap()
             .to_host()
             .unwrap()
@@ -525,7 +548,7 @@ fn device_product_providers_match_the_host_for_signs_and_recoupling() {
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], real_fill).unwrap();
     let permuted = device_matches_host!("fZ2xU1 permute", host, |t| t.permute(&[2, 1], &[0, 3]));
     assert_not_a_reordering(host.data(), permuted.data(), "fZ2xU1 permute");
-    device_matches_host!("fZ2xU1 transpose", host, |t| t.transpose());
+    device_matches_host!("fZ2xU1 transpose", host, |t| full_transpose!(t));
     device_matches_host!("fZ2xU1 braid", host, |t| t.braid(
         &[2, 1],
         &[0, 3],
@@ -557,7 +580,7 @@ fn device_product_providers_match_the_host_for_signs_and_recoupling() {
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
     let permuted = device_matches_host!("fZ2xSU2 permute", host, |t| t.permute(&[1, 2], &[3, 0]));
     assert_not_a_reordering(host.data(), permuted.data(), "fZ2xSU2 permute");
-    let transposed = device_matches_host!("fZ2xSU2 transpose", host, |t| t.transpose());
+    let transposed = device_matches_host!("fZ2xSU2 transpose", host, |t| full_transpose!(t));
     assert_not_a_reordering(host.data(), transposed.data(), "fZ2xSU2 transpose");
     device_matches_host!("fZ2xSU2 repartition", host, |t| t.repartition(3));
 }
@@ -572,7 +595,7 @@ fn device_rank_five_transforms_match_the_host() {
     assert!(host.subblock_count() >= 3, "multi-block rank-5 fixture");
     let permuted = device_matches_host!("rank-5 permute", host, |t| t.permute(&[4, 1, 0], &[3, 2]));
     assert_moved(host.data(), permuted.data(), "rank-5 permute");
-    device_matches_host!("rank-5 transpose", host, |t| t.transpose());
+    device_matches_host!("rank-5 transpose", host, |t| full_transpose!(t));
     device_matches_host!("rank-5 repartition", host, |t| t.repartition(1));
 
     let su2 = su2_leg();
@@ -731,16 +754,16 @@ fn assert_lazy_adjoint_transforms_match_host<R, D>(
         ),
         (
             "transpose",
-            host_lazy.transpose().unwrap(),
-            device_lazy.transpose().unwrap(),
+            full_transpose!(host_lazy).unwrap(),
+            full_transpose!(device_lazy).unwrap(),
         ),
         (
-            "transpose_axes",
+            "cyclic transpose",
             host_lazy
-                .transpose_axes(cyclic_codomain, &cyclic_domain)
+                .transpose(cyclic_codomain, &cyclic_domain)
                 .unwrap(),
             device_lazy
-                .transpose_axes(cyclic_codomain, &cyclic_domain)
+                .transpose(cyclic_codomain, &cyclic_domain)
                 .unwrap(),
         ),
     ];
@@ -792,7 +815,7 @@ fn device_transforms_of_an_empty_tensor_produce_an_empty_tensor() {
     for (what, actual) in [
         ("permute", device.permute(&[1], &[0]).unwrap()),
         ("braid", device.braid(&[1], &[0], &[1, 2]).unwrap()),
-        ("transpose", device.transpose().unwrap()),
+        ("transpose", full_transpose!(device).unwrap()),
         ("repartition", device.repartition(0).unwrap()),
     ] {
         let actual = actual.to_host().unwrap();
@@ -803,10 +826,7 @@ fn device_transforms_of_an_empty_tensor_produce_an_empty_tensor() {
         assert_eq!(actual.subblock_count(), 0, "{what}: expected no blocks");
     }
     // The lazy-adjoint lowering must survive it too.
-    assert!(device
-        .adjoint()
-        .unwrap()
-        .transpose()
+    assert!(full_transpose!(device.adjoint().unwrap())
         .unwrap()
         .to_host()
         .unwrap()
@@ -925,8 +945,8 @@ fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
         TensorMap::from_subblock_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], complex_fill).unwrap();
 
     let permuted = real.permute(&[2, 0], &[1, 3]).unwrap();
-    let transposed = real.transpose().unwrap();
-    let cyclic = real.transpose_axes(&[1, 3], &[0, 2]).unwrap();
+    let transposed = full_transpose!(real).unwrap();
+    let cyclic = real.transpose(&[1, 3], &[0, 2]).unwrap();
     let bent = real.repartition(1).unwrap();
     for alpha in REAL_ALPHAS {
         let written = device_overwrite_matches_host!(
@@ -942,13 +962,13 @@ fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
             &format!("U1/f64 transpose_overwrite_into alpha={alpha}"),
             real,
             transposed,
-            |t, d| t.transpose_overwrite_into(d, alpha)
+            |t, d| full_transpose_overwrite_into!(t, d, alpha)
         );
         device_overwrite_matches_host!(
-            &format!("U1/f64 transpose_axes_overwrite_into alpha={alpha}"),
+            &format!("U1/f64 transpose_overwrite_into alpha={alpha}"),
             real,
             cyclic,
-            |t, d| t.transpose_axes_overwrite_into(d, &[1, 3], &[0, 2], alpha)
+            |t, d| t.transpose_overwrite_into(d, &[1, 3], &[0, 2], alpha)
         );
         device_overwrite_matches_host!(
             &format!("U1/f64 repartition_overwrite_into alpha={alpha}"),
@@ -982,7 +1002,7 @@ fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
 
     // Complex payload, including a genuinely complex scale.
     let permuted = complex.permute(&[2, 0], &[1, 3]).unwrap();
-    let transposed = complex.transpose().unwrap();
+    let transposed = full_transpose!(complex).unwrap();
     let bent = complex.repartition(3).unwrap();
     let complex_alphas = [
         Complex64::new(1.0, 0.0),
@@ -1002,7 +1022,7 @@ fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
             &format!("U1/c64 transpose_overwrite_into alpha={alpha}"),
             complex,
             transposed,
-            |t, d| t.transpose_overwrite_into(d, alpha)
+            |t, d| full_transpose_overwrite_into!(t, d, alpha)
         );
         device_overwrite_matches_host!(
             &format!("U1/c64 repartition_overwrite_into alpha={alpha}"),
@@ -1026,7 +1046,7 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
     let su2_complex: TensorMap<_, Complex64> =
         TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2, &su2], complex_fill).unwrap();
     let permuted = su2_real.permute(&[1, 2], &[3, 0]).unwrap();
-    let transposed = su2_real.transpose().unwrap();
+    let transposed = full_transpose!(su2_real).unwrap();
     let bent = su2_real.repartition(3).unwrap();
     for alpha in REAL_ALPHAS {
         let written = device_overwrite_matches_host!(
@@ -1042,7 +1062,7 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
             &format!("SU2/f64 transpose_overwrite_into alpha={alpha}"),
             su2_real,
             transposed,
-            |t, d| t.transpose_overwrite_into(d, alpha)
+            |t, d| full_transpose_overwrite_into!(t, d, alpha)
         );
         device_overwrite_matches_host!(
             &format!("SU2/f64 repartition_overwrite_into alpha={alpha}"),
@@ -1074,7 +1094,7 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
     let host: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], real_fill).unwrap();
     let permuted = host.permute(&[2, 1], &[0, 3]).unwrap();
-    let cyclic = host.transpose_axes(&[1, 3], &[0, 2]).unwrap();
+    let cyclic = host.transpose(&[1, 3], &[0, 2]).unwrap();
     let bent = host.repartition(1).unwrap();
     for alpha in REAL_ALPHAS {
         let written = device_overwrite_matches_host!(
@@ -1087,10 +1107,10 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
             assert_not_a_reordering(host.data(), written.data(), "fZ2xU1 overwrite_into");
         }
         device_overwrite_matches_host!(
-            &format!("fZ2xU1 transpose_axes_overwrite_into alpha={alpha}"),
+            &format!("fZ2xU1 transpose_overwrite_into alpha={alpha}"),
             host,
             cyclic,
-            |t, d| t.transpose_axes_overwrite_into(d, &[1, 3], &[0, 2], alpha)
+            |t, d| t.transpose_overwrite_into(d, &[1, 3], &[0, 2], alpha)
         );
         device_overwrite_matches_host!(
             &format!("fZ2xU1 repartition_overwrite_into alpha={alpha}"),
@@ -1123,7 +1143,7 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
     let host: TensorMap<_, Complex64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
     let permuted = host.permute(&[1, 2], &[3, 0]).unwrap();
-    let transposed = host.transpose().unwrap();
+    let transposed = full_transpose!(host).unwrap();
     let bent = host.repartition(3).unwrap();
     for alpha in [
         Complex64::new(1.0, 0.0),
@@ -1145,7 +1165,7 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
             &format!("fZ2xSU2 transpose_overwrite_into alpha={alpha}"),
             host,
             transposed,
-            |t, d| t.transpose_overwrite_into(d, alpha)
+            |t, d| full_transpose_overwrite_into!(t, d, alpha)
         );
         device_overwrite_matches_host!(
             &format!("fZ2xSU2 repartition_overwrite_into alpha={alpha}"),
@@ -1264,7 +1284,7 @@ fn device_overwrite_into_has_no_identity_short_circuit() {
         "rank-0 transpose_overwrite_into",
         scalar,
         scalar,
-        |t, d| t.transpose_overwrite_into(d, -0.5)
+        |t, d| full_transpose_overwrite_into!(t, d, -0.5)
     );
     assert_payload_close(
         written.data(),

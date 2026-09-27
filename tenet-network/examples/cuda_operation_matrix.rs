@@ -948,8 +948,7 @@ mod device {
         }
         transform_row!("permute", |t| t.permute(&[1], &[0]));
         transform_row!("braid", |t| t.braid(&[1], &[0], &[1, 2]));
-        transform_row!("transpose", |t| t.transpose());
-        transform_row!("transpose_axes", |t| t.transpose_axes(&[1], &[0]));
+        transform_row!("transpose", |t| t.transpose(&[1], &[0]));
         transform_row!("repartition", |t| t.repartition(0));
 
         // scale

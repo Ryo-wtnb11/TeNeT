@@ -763,9 +763,9 @@ where
     // reconstruct F; applying the same planar move again is its inverse.
     let f = std::array::from_fn(|row| {
         std::array::from_fn(|column| {
-            let transformed = basis[column].transpose().unwrap();
+            let transformed = basis[column].transpose(&[3], &[2, 1, 0]).unwrap();
             assert_eq!(transformed.data().len(), 2);
-            let roundtrip = transformed.transpose().unwrap();
+            let roundtrip = transformed.transpose(&[3, 2, 1], &[0]).unwrap();
             for (slot, value) in coordinates(&roundtrip, vacuum, tau_sector)
                 .into_iter()
                 .enumerate()

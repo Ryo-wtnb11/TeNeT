@@ -9,6 +9,7 @@
 //! TensorKit.
 
 use std::sync::Arc;
+use tenet::typed::Direction;
 
 use tenet::core::{FermionParityFusionRule, Z2Irrep};
 use tenet::prelude::Complex64;
@@ -71,7 +72,7 @@ fn fz2_contractions_match_tensorkit() {
     // parity twist (or a closed `@tensor` loop) is the fermionic supertrace.
     let d = fz2_map(&rt, &v, 2.0, 3.0);
     let ordinary = d.tr().unwrap();
-    let twisted = d.twist(&[0]).unwrap().tr().unwrap();
+    let twisted = d.twist(&[0], Direction::Forward).unwrap().tr().unwrap();
     assert!((ordinary - 5.0).abs() < 1e-12, "ordinary = {ordinary}");
     assert!((twisted - (-1.0)).abs() < 1e-12, "twisted = {twisted}");
 

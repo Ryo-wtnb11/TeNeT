@@ -179,21 +179,27 @@ fn cached_planar_overwrites_do_not_allocate_on_the_caller_thread() {
     let source: TensorMap<U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&space, &space], [&space], 779).unwrap();
 
-    let mut full = source.transpose().unwrap();
-    source.transpose_overwrite_into(&mut full, 1.0).unwrap();
-    assert_eq!(
-        measure(|| source.transpose_overwrite_into(&mut full, 1.0).unwrap()),
-        (0, 0)
-    );
-
-    let mut explicit = source.transpose_axes(&[1, 2], &[0]).unwrap();
+    let mut full = source.transpose(&[2], &[1, 0]).unwrap();
     source
-        .transpose_axes_overwrite_into(&mut explicit, &[1, 2], &[0], 1.0)
+        .transpose_overwrite_into(&mut full, &[2], &[1, 0], 1.0)
         .unwrap();
     assert_eq!(
         measure(|| {
             source
-                .transpose_axes_overwrite_into(&mut explicit, &[1, 2], &[0], 1.0)
+                .transpose_overwrite_into(&mut full, &[2], &[1, 0], 1.0)
+                .unwrap()
+        }),
+        (0, 0)
+    );
+
+    let mut explicit = source.transpose(&[1, 2], &[0]).unwrap();
+    source
+        .transpose_overwrite_into(&mut explicit, &[1, 2], &[0], 1.0)
+        .unwrap();
+    assert_eq!(
+        measure(|| {
+            source
+                .transpose_overwrite_into(&mut explicit, &[1, 2], &[0], 1.0)
                 .unwrap()
         }),
         (0, 0)

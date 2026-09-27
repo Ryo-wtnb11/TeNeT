@@ -839,10 +839,10 @@ macro_rules! for_each_fermionic_fixture {
         let fsu2 = $crate::contract_cases::fermion_su2();
         let twist_u1 =
             |t: &tenet::typed::TensorMap<$crate::contract_cases::FermionU1, $payload>,
-             legs: &[usize]| t.twist(legs).unwrap();
+             legs: &[usize]| t.twist(legs, tenet::typed::Direction::Forward).unwrap();
         let twist_su2 =
             |t: &tenet::typed::TensorMap<$crate::contract_cases::FermionSu2, $payload>,
-             legs: &[usize]| t.twist(legs).unwrap();
+             legs: &[usize]| t.twist(legs, tenet::typed::Direction::Forward).unwrap();
         $check(
             $crate::contract_cases::fermionic_general(
                 runtime,

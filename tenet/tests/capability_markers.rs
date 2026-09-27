@@ -16,6 +16,7 @@
 use tenet::prelude::{
     AdvancedLinalgScalar, FactorizationScalar, TensorMap, TensorScalar, U1FusionRule,
 };
+use tenet::typed::Direction;
 use tenet_matrixalgebra::FactorScalar;
 
 /// Base family: everything admitted by [`TensorScalar`] alone.
@@ -26,9 +27,9 @@ fn base_family<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
     let _ = tensor.tr();
     let _ = tensor.adjoint();
     let _ = tensor.permute(&[0], &[1]);
-    let _ = tensor.transpose();
+    let _ = tensor.transpose(&[1], &[0]);
     let _ = tensor.repartition(1);
-    let _ = tensor.twist(&[0]);
+    let _ = tensor.twist(&[0], Direction::Forward);
     let _ = tensor.compose(tensor);
     let _ = tensor.otimes(tensor);
     let _ = tensor.trace_pairs(&[(0, 1)]);

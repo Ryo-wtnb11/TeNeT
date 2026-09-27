@@ -5,10 +5,23 @@
 //! that a downstream application can drive the typed facade with its own
 //! fusion rule.
 
+/// TensorKit's argument-free `transpose(t)`: the full planar rotation, which
+/// carries every codomain leg across the boundary and every domain leg back.
+macro_rules! full_transpose {
+    ($tensor:expr) => {{
+        let tensor = &$tensor;
+        let codomain_rank = tensor.codomain_rank();
+        let codomain_axes: Vec<usize> = (codomain_rank..tensor.rank()).rev().collect();
+        let domain_axes: Vec<usize> = (0..codomain_rank).rev().collect();
+        tensor.transpose(&codomain_axes, &domain_axes)
+    }};
+}
+
 include!("common/predicate_chains.rs");
 include!("common/predicate_chain_coefficients.rs");
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use tenet::typed::{Direction, Duality, Side};
 
 use tenet::core::{
     complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BraidingStyleKind,
@@ -171,7 +184,7 @@ impl MultiplicityFreeRigidSymbols for ExternalZ3 {
 // Opt-in for the typed unit-leg operations (#580 PR 5): the marker certifies
 // that the vacuum obeys the canonical unit laws, which the Z3 vacuum (charge
 // 0, self-dual, trivial unitors) does. A downstream provider makes the same
-// one-line declaration to unlock `insert_left_unit`/`insert_right_unit`/
+// one-line declaration to unlock `insert_unit`/
 // `remove_unit`.
 impl tenet::core::CanonicalUnitFusionRule for ExternalZ3 {}
 
@@ -594,7 +607,7 @@ fn fibonacci_planar_transforms_roundtrip_without_braiding() {
     );
     assert_data_close_c64(repartitioned.repartition(3).unwrap().data(), source.data());
 
-    let transposed = source.transpose().unwrap();
+    let transposed = full_transpose!(source).unwrap();
     // Pinned TensorKit planar-transpose fixture and the closed-form first row
     // of the Fibonacci F matrix.
     assert_data_close_c64(
@@ -624,9 +637,9 @@ fn fibonacci_planar_transforms_roundtrip_without_braiding() {
             .collect::<Vec<_>>(),
         [true, true, true]
     );
-    assert_data_close_c64(transposed.transpose().unwrap().data(), source.data());
+    assert_data_close_c64(full_transpose!(transposed).unwrap().data(), source.data());
 
-    let explicit = source.transpose_axes(&[3], &[2, 1, 0]).unwrap();
+    let explicit = source.transpose(&[3], &[2, 1, 0]).unwrap();
     assert_data_close_c64(explicit.data(), transposed.data());
     for (trees, _) in explicit.subblocks().unwrap() {
         assert_eq!(trees.codomain_uncoupled(), &[FibonacciSector::Tau]);
@@ -2573,7 +2586,7 @@ fn braid_rejects_a_wrong_length_levels_list() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4, slice 2: `TensorMap::transpose` and `TensorMap::transpose_axes`.
+// Phase 4, slice 2: `TensorMap::transpose`.
 // ---------------------------------------------------------------------------
 
 /// The `(is_dual, degeneracies)` shape of a typed tensor map's legs, codomain
@@ -2601,8 +2614,8 @@ fn transpose_twice_returns_the_source_layout() {
     let provider = Arc::new(ExternalZ3::new());
     let tensor = z3_rank_four(&runtime, &provider);
 
-    let once = tensor.transpose().unwrap();
-    let twice = once.transpose().unwrap();
+    let once = full_transpose!(tensor).unwrap();
+    let twice = full_transpose!(once).unwrap();
 
     assert_ne!(once.data(), tensor.data());
     assert_eq!(typed_leg_shapes(&twice), typed_leg_shapes(&tensor));
@@ -2617,18 +2630,18 @@ fn transpose_twice_returns_the_source_layout() {
 }
 
 #[test]
-fn transpose_axes_rejects_malformed_axes_without_panicking() {
+fn transpose_rejects_malformed_axes_without_panicking() {
     // What: out-of-range axes, a wrong-length list and a non-planar
-    // re-arrangement (a permute, which `transpose_axes` must refuse rather than
+    // re-arrangement (a permute, which `transpose` must refuse rather than
     // silently braid) all come back as `Err`.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(ExternalZ3::new());
     let tensor = z3_rank_four(&runtime, &provider);
 
-    assert!(tensor.transpose_axes(&[0, 9], &[2, 3]).is_err());
-    assert!(tensor.transpose_axes(&[0], &[2, 3]).is_err());
-    assert!(tensor.transpose_axes(&[1, 2], &[3, 0]).is_err());
+    assert!(tensor.transpose(&[0, 9], &[2, 3]).is_err());
+    assert!(tensor.transpose(&[0], &[2, 3]).is_err());
+    assert!(tensor.transpose(&[1, 2], &[3, 0]).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -2707,7 +2720,7 @@ mod typed_glob_is_self_sufficient {
                 next += 1.0;
                 next
             })?;
-            tensor.transpose()
+            full_transpose!(tensor)
         };
 
         let transposed = build().expect("the typed pipeline runs");
@@ -2773,7 +2786,10 @@ fn planar_transposes_bend_where_permute_braids_for_a_fermionic_provider() {
     assert_eq!(tensor.data(), [1.0, 2.0, 3.0, 4.0]);
 
     // Full transpose: same element motion either way, opposite signs.
-    assert_eq!(tensor.transpose().unwrap().data(), [1.0, 2.0, 4.0, 3.0]);
+    assert_eq!(
+        full_transpose!(tensor).unwrap().data(),
+        [1.0, 2.0, 4.0, 3.0]
+    );
     assert_eq!(
         tensor.permute(&[2], &[1, 0]).unwrap().data(),
         [1.0, 2.0, -4.0, -3.0]
@@ -2781,7 +2797,7 @@ fn planar_transposes_bend_where_permute_braids_for_a_fermionic_provider() {
 
     // The explicit form, on a different rotation of the planar order.
     assert_eq!(
-        tensor.transpose_axes(&[1, 2], &[0]).unwrap().data(),
+        tensor.transpose(&[1, 2], &[0]).unwrap().data(),
         [1.0, 4.0, 2.0, 3.0]
     );
     assert_eq!(
@@ -5890,8 +5906,8 @@ where
 {
     vec![
         ("permute", tensor.permute(&[1], &[0]).unwrap()),
-        ("transpose", tensor.transpose().unwrap()),
-        ("transpose_axes", tensor.transpose_axes(&[1], &[0]).unwrap()),
+        ("full transpose", full_transpose!(tensor).unwrap()),
+        ("transpose", tensor.transpose(&[1], &[0]).unwrap()),
         ("repartition(1)", tensor.repartition(1).unwrap()),
         ("repartition(0)", tensor.repartition(0).unwrap()),
         ("repartition(2)", tensor.repartition(2).unwrap()),
@@ -6185,7 +6201,7 @@ fn sweep_compact_trace_variants<R, D>(
 {
     let variants: Vec<(&str, TensorMap<R, D>)> = vec![
         ("plain", typed_s.clone()),
-        ("transposed", typed_s.transpose().unwrap()),
+        ("transposed", full_transpose!(typed_s).unwrap()),
         ("permuted", typed_s.permute(&[1], &[0]).unwrap()),
         ("adjoint", typed_s.adjoint().unwrap()),
     ];
@@ -6310,7 +6326,7 @@ fn compact_full_trace_matches_the_forced_dense_route() {
     assert_compact_trace_matches_forced_dense("fz2 rotated c64", &rotated, widen_complex);
     assert_compact_trace_matches_forced_dense(
         "fz2 rotated transposed c64",
-        &rotated.transpose().unwrap(),
+        &full_transpose!(rotated).unwrap(),
         widen_complex,
     );
 }
@@ -6334,7 +6350,7 @@ fn compact_full_trace_is_the_supertrace_and_the_transpose_flips_it() {
             let traced: f64 = s.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
             assert_eq!(traced, sign * positive, "{name}");
             let transposed: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-                s.transpose().unwrap();
+                full_transpose!(s).unwrap();
             let transposed_positive: f64 = transposed.tr().unwrap();
             let transposed_traced: f64 =
                 transposed.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
@@ -6681,7 +6697,10 @@ fn assert_contract_compose_compact_laws_hold<R>(
         .enumerate()
         .filter_map(|(index, leg)| leg.is_dual().then_some(index))
         .collect();
-    let twisted_right = typed.1.twist(&dual_codomain_legs).unwrap();
+    let twisted_right = typed
+        .1
+        .twist(&dual_codomain_legs, Direction::Forward)
+        .unwrap();
     let composed = typed.0.compose(typed.1).unwrap();
     let twisted_contract = typed
         .0
@@ -7972,7 +7991,7 @@ fn typed_leg_dims_route_each_axis_to_its_own_leg() {
 }
 
 // ---------------------------------------------------------------------------
-// #580 PR 4: typed catdomain / catcodomain / absorb.
+// #580 PR 4: typed cat / absorb.
 // ---------------------------------------------------------------------------
 
 /// Position-weighted value from typed U(1) labels.
@@ -8080,7 +8099,7 @@ fn typed_cat_preserves_a_dual_changed_leg_and_its_slabs() {
     let typed_lhs = build(&[(0, 2)]);
     let typed_rhs = build(&[(0, 1), (1, 2)]);
     let typed_joined: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        typed_lhs.catdomain(&typed_rhs).unwrap();
+        typed_lhs.cat(&typed_rhs, Side::Domain).unwrap();
     let changed = &typed_joined.domain()[0];
     assert!(changed.is_dual());
     assert_eq!(
@@ -8109,7 +8128,7 @@ fn typed_cat_pins_the_slab_order_by_value() {
     let b: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::from_subblock_fn(&runtime, [&w], [&v2], |_, i| (i[0] + 2 * i[1] + 3) as f64)
             .unwrap();
-    let joined: TensorMap<tenet::core::U1FusionRule, f64> = a.catdomain(&b).unwrap();
+    let joined: TensorMap<tenet::core::U1FusionRule, f64> = a.cat(&b, Side::Domain).unwrap();
     // Column-major: lhs column [1, 2], then rhs columns [3, 4] and [5, 6].
     assert_eq!(joined.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 
@@ -8118,7 +8137,7 @@ fn typed_cat_pins_the_slab_order_by_value() {
     let bt: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::from_subblock_fn(&runtime, [&v2], [&w], |_, i| (i[0] + 2 * i[1] + 3) as f64)
             .unwrap();
-    let stacked: TensorMap<tenet::core::U1FusionRule, f64> = at.catcodomain(&bt).unwrap();
+    let stacked: TensorMap<tenet::core::U1FusionRule, f64> = at.cat(&bt, Side::Codomain).unwrap();
     // Row slabs: lhs row first within each column.
     assert_eq!(stacked.data(), &[1.0, 3.0, 4.0, 2.0, 5.0, 6.0]);
 }
@@ -8220,7 +8239,7 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
     )
     .unwrap();
     assert_invalid(
-        typed_lhs.catdomain(&two_legs_typed).unwrap_err(),
+        typed_lhs.cat(&two_legs_typed, Side::Domain).unwrap_err(),
         "exactly one domain leg",
     );
 
@@ -8239,7 +8258,9 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
         )
         .unwrap();
     assert_invalid(
-        typed_lhs.catdomain(&other_codomain_typed).unwrap_err(),
+        typed_lhs
+            .cat(&other_codomain_typed, Side::Domain)
+            .unwrap_err(),
         "identical codomain product spaces",
     );
 
@@ -8261,7 +8282,9 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
     let typed_stack_lhs: TensorMap<tenet::core::U1FusionRule, f64> = stack_pair(&[(0, 1), (1, 1)]);
     let typed_stack_rhs: TensorMap<tenet::core::U1FusionRule, f64> = stack_pair(&[(0, 2), (1, 1)]);
     assert_invalid(
-        typed_stack_lhs.catcodomain(&typed_stack_rhs).unwrap_err(),
+        typed_stack_lhs
+            .cat(&typed_stack_rhs, Side::Codomain)
+            .unwrap_err(),
         "identical domain product spaces",
     );
 
@@ -8277,7 +8300,7 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
     )
     .unwrap();
     assert_invalid(
-        typed_lhs.catdomain(&dual_domain_typed).unwrap_err(),
+        typed_lhs.cat(&dual_domain_typed, Side::Domain).unwrap_err(),
         "opposite duality",
     );
 
@@ -8294,8 +8317,8 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
     let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let typed_other = u1_cat_tensor(&other_runtime, &[(0, 1), (1, 1)]);
     for error in [
-        typed_lhs.catdomain(&typed_other).unwrap_err(),
-        typed_lhs.catcodomain(&typed_other).unwrap_err(),
+        typed_lhs.cat(&typed_other, Side::Domain).unwrap_err(),
+        typed_lhs.cat(&typed_other, Side::Codomain).unwrap_err(),
         typed_lhs.absorb(&typed_other).unwrap_err(),
     ] {
         assert!(matches!(error, tenet::prelude::Error::RuntimeMismatch));
@@ -8319,8 +8342,8 @@ fn typed_cat_and_absorb_reject_a_foreign_rule_identity_first() {
     let ours = build(&Arc::new(ExternalZ3::new()));
     let theirs = build(&Arc::new(ExternalZ3::tagged(7)));
     for error in [
-        ours.catdomain(&theirs).unwrap_err(),
-        ours.catcodomain(&theirs).unwrap_err(),
+        ours.cat(&theirs, Side::Domain).unwrap_err(),
+        ours.cat(&theirs, Side::Codomain).unwrap_err(),
         ours.absorb(&theirs).unwrap_err(),
     ] {
         assert!(matches!(error, tenet::prelude::Error::RuleMismatch));
@@ -8376,7 +8399,7 @@ fn external_z3_cat_and_absorb_hold_by_value() {
         })
         .unwrap();
 
-    let joined: TensorMap<ExternalZ3, f64> = a.catdomain(&b).unwrap();
+    let joined: TensorMap<ExternalZ3, f64> = a.cat(&b, Side::Domain).unwrap();
     // Blocks in coupled-sector order: charge 0 holds only the lhs value, the
     // shared charge 1 holds the lhs column then the rhs column; charge 2 has
     // no codomain sector, so the merged leg carries it without a block.
@@ -8513,40 +8536,68 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
     let runtime = runtime();
     let simple = typed_fz2_two_block(&runtime, false);
     let dual = typed_fz2_two_block(&runtime, true);
-    assert_eq!(simple.flip_inverse(&[0]).unwrap().data(), &[2.0, -3.0]);
-    assert_eq!(dual.flip_inverse(&[0]).unwrap().data(), &[2.0, 3.0]);
-    assert_eq!(simple.flip_inverse(&[1]).unwrap().data(), &[2.0, 3.0]);
-    assert_eq!(dual.flip_inverse(&[1]).unwrap().data(), &[2.0, -3.0]);
-    assert_eq!(simple.twist_inverse(&[0]).unwrap().data(), &[2.0, -3.0]);
+    assert_eq!(
+        simple.flip(&[0], Direction::Inverse).unwrap().data(),
+        &[2.0, -3.0]
+    );
+    assert_eq!(
+        dual.flip(&[0], Direction::Inverse).unwrap().data(),
+        &[2.0, 3.0]
+    );
+    assert_eq!(
+        simple.flip(&[1], Direction::Inverse).unwrap().data(),
+        &[2.0, 3.0]
+    );
+    assert_eq!(
+        dual.flip(&[1], Direction::Inverse).unwrap().data(),
+        &[2.0, -3.0]
+    );
+    assert_eq!(
+        simple.twist(&[0], Direction::Inverse).unwrap().data(),
+        &[2.0, -3.0]
+    );
     assert_ne!(
-        simple.flip(&[1]).unwrap().flip(&[1]).unwrap().data(),
+        simple
+            .flip(&[1], Direction::Forward)
+            .unwrap()
+            .flip(&[1], Direction::Forward)
+            .unwrap()
+            .data(),
         simple.data()
     );
     for restored in [
-        simple.flip(&[1]).unwrap().flip_inverse(&[1]).unwrap(),
-        simple.flip_inverse(&[1]).unwrap().flip(&[1]).unwrap(),
+        simple
+            .flip(&[1], Direction::Forward)
+            .unwrap()
+            .flip(&[1], Direction::Inverse)
+            .unwrap(),
+        simple
+            .flip(&[1], Direction::Inverse)
+            .unwrap()
+            .flip(&[1], Direction::Forward)
+            .unwrap(),
     ] {
         assert_eq!(restored.data(), simple.data());
         assert_same_legs(&restored.codomain(), &simple.codomain());
         assert_same_legs(&restored.domain(), &simple.domain());
     }
     assert_eq!(
-        simple.flip_inverse(&[1, 1]).unwrap().data(),
+        simple.flip(&[1, 1], Direction::Inverse).unwrap().data(),
         simple
-            .flip_inverse(&[1])
+            .flip(&[1], Direction::Inverse)
             .unwrap()
-            .flip_inverse(&[1])
+            .flip(&[1], Direction::Inverse)
             .unwrap()
             .data()
     );
 
     let complex = simple.convert::<Complex64>();
     assert_eq!(
-        complex.flip_inverse(&[0]).unwrap().data(),
+        complex.flip(&[0], Direction::Inverse).unwrap().data(),
         &[2.0.into(), (-3.0).into()]
     );
     assert_eq!(
-        complex.twist_inverse(&[0]).unwrap().data(),
+        complex.twist(&[0], Direction::Inverse).unwrap().data(),
         &[2.0.into(), (-3.0).into()]
     );
 
@@ -8556,15 +8607,15 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
     let spin_half_dual = spin_half.try_dual().unwrap();
     let su2: TensorMap<SU2FusionRule, f64> =
         TensorMap::from_subblock_fn(&runtime, [&spin_half_dual], [&spin_half], |_, _| 5.0).unwrap();
-    assert_eq!(su2.flip_inverse(&[0]).unwrap().data(), &[5.0]);
-    assert_eq!(su2.flip_inverse(&[1]).unwrap().data(), &[-5.0]);
+    assert_eq!(su2.flip(&[0], Direction::Inverse).unwrap().data(), &[5.0]);
+    assert_eq!(su2.flip(&[1], Direction::Inverse).unwrap().data(), &[-5.0]);
 
     let structured = fz2_index(&runtime);
-    let twisted = structured.twist_inverse(&[0, 1, 2]).unwrap();
+    let twisted = structured.twist(&[0, 1, 2], Direction::Inverse).unwrap();
     assert!(std::ptr::eq(twisted.provider(), structured.provider()));
     assert_same_legs(&twisted.codomain(), &structured.codomain());
     assert_same_legs(&twisted.domain(), &structured.domain());
-    let codomain_flip = structured.flip_inverse(&[0]).unwrap();
+    let codomain_flip = structured.flip(&[0], Direction::Inverse).unwrap();
     assert_same_typed_block_structure!(&codomain_flip, &structured);
     assert_eq!(
         codomain_flip.codomain()[0].is_dual(),
@@ -8575,7 +8626,7 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
         structured.codomain()[1].is_dual()
     );
     assert_same_legs(&codomain_flip.domain(), &structured.domain());
-    let domain_flip = structured.flip_inverse(&[2]).unwrap();
+    let domain_flip = structured.flip(&[2], Direction::Inverse).unwrap();
     assert_same_typed_block_structure!(&domain_flip, &structured);
     assert_same_legs(&domain_flip.codomain(), &structured.codomain());
     assert_eq!(
@@ -8595,9 +8646,9 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
     .unwrap();
     let u1: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::from_subblock_fn(&runtime, [&u1_leg], [&u1_leg], |_, _| 7.0).unwrap();
-    let u1_twist = u1.twist_inverse(&[0, 1]).unwrap();
+    let u1_twist = u1.twist(&[0, 1], Direction::Inverse).unwrap();
     assert_eq!(u1_twist.data().as_ptr(), u1.data().as_ptr());
-    let u1_flip = u1.flip_inverse(&[0]).unwrap();
+    let u1_flip = u1.flip(&[0], Direction::Inverse).unwrap();
     assert_eq!(u1_flip.data(), u1.data());
     assert_same_typed_block_structure!(&u1_flip, &u1);
     assert_eq!(u1_flip.codomain()[0].is_dual(), !u1.codomain()[0].is_dual());
@@ -8612,15 +8663,20 @@ fn inverse_index_ops_cover_the_fermionic_simple_product() {
     for legs in [&[0usize][..], &[1][..], &[0, 1][..]] {
         assert_eq!(
             typed
-                .twist(legs)
+                .twist(legs, Direction::Forward)
                 .unwrap()
-                .twist_inverse(legs)
+                .twist(legs, Direction::Inverse)
                 .unwrap()
                 .data(),
             typed.data()
         );
         assert_eq!(
-            typed.flip(legs).unwrap().flip_inverse(legs).unwrap().data(),
+            typed
+                .flip(legs, Direction::Forward)
+                .unwrap()
+                .flip(legs, Direction::Inverse)
+                .unwrap()
+                .data(),
             typed.data()
         );
     }
@@ -8633,13 +8689,16 @@ fn typed_flip_and_twist_pin_the_doctest_values() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = typed_fz2_doctest(&runtime);
-    let flipped: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.flip(&[1]).unwrap();
+    let flipped: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+        typed.flip(&[1], Direction::Forward).unwrap();
     assert_eq!(flipped.data(), &[2.0, -3.0]);
     assert_eq!(flipped.domain()[0].is_dual(), !typed.domain()[0].is_dual());
 
-    let twisted: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.twist(&[1]).unwrap();
+    let twisted: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+        typed.twist(&[1], Direction::Forward).unwrap();
     assert_eq!(twisted.data(), &[2.0, -3.0]);
-    let back: TensorMap<tenet::core::FermionParityFusionRule, f64> = twisted.twist(&[1]).unwrap();
+    let back: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+        twisted.twist(&[1], Direction::Forward).unwrap();
     assert_eq!(back.data(), typed.data());
 }
 
@@ -8656,14 +8715,17 @@ fn typed_multi_leg_dense_twist_is_the_per_leg_product_by_value() {
     let typed = typed_fz2_doctest(&runtime);
     // One leg: θ bites, the odd block negates (sanity that the factor is
     // live at all on this fixture).
-    let one: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.twist(&[0]).unwrap();
+    let one: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+        typed.twist(&[0], Direction::Forward).unwrap();
     assert_eq!(one.data(), &[2.0, -3.0]);
     // Two *different* legs: the odd block scales by θ·θ = (−1)² = +1 — the
     // per-leg product, not a single factor.
-    let both: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.twist(&[0, 1]).unwrap();
+    let both: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+        typed.twist(&[0, 1], Direction::Forward).unwrap();
     assert_eq!(both.data(), &[2.0, 3.0]);
     // The same leg listed twice: identity by value, for the same θ² reason.
-    let twice: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.twist(&[1, 1]).unwrap();
+    let twice: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+        typed.twist(&[1, 1], Direction::Forward).unwrap();
     assert_eq!(twice.data(), &[2.0, 3.0]);
 }
 
@@ -8675,13 +8737,18 @@ fn typed_flip_is_a_fourth_root_of_identity_and_flip_squared_scales_odd_blocks() 
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = typed_fz2_doctest(&runtime);
-    let f1: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.flip(&[1]).unwrap();
-    let f2: TensorMap<tenet::core::FermionParityFusionRule, f64> = f1.flip(&[1]).unwrap();
+    let f1: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+        typed.flip(&[1], Direction::Forward).unwrap();
+    let f2: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+        f1.flip(&[1], Direction::Forward).unwrap();
     assert_same_legs(&f2.codomain(), &typed.codomain());
     assert_same_legs(&f2.domain(), &typed.domain());
     assert_eq!(f2.data(), &[2.0, -3.0]);
-    let f4: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        f2.flip(&[1]).unwrap().flip(&[1]).unwrap();
+    let f4: TensorMap<tenet::core::FermionParityFusionRule, f64> = f2
+        .flip(&[1], Direction::Forward)
+        .unwrap()
+        .flip(&[1], Direction::Forward)
+        .unwrap();
     assert_eq!(f4.data(), typed.data());
 }
 
@@ -8693,17 +8760,20 @@ fn typed_flip_repeated_leg_in_one_call_is_sequential() {
     let runtime = runtime();
     let typed = typed_fz2_doctest(&runtime);
     let typed_twice: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        typed.flip(&[1, 1]).unwrap();
+        typed.flip(&[1, 1], Direction::Forward).unwrap();
     assert_eq!(typed_twice.data(), &[2.0, -3.0]);
-    let typed_stepwise: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        typed.flip(&[1]).unwrap().flip(&[1]).unwrap();
+    let typed_stepwise: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed
+        .flip(&[1], Direction::Forward)
+        .unwrap()
+        .flip(&[1], Direction::Forward)
+        .unwrap();
     assert_eq!(typed_twice.data(), typed_stepwise.data());
     assert_same_legs(&typed_twice.domain(), &typed.domain());
 }
 
 #[test]
 fn typed_insert_unit_round_trips_at_every_position_and_shares_the_payload() {
-    // What (gate 4): `insert_left_unit`/`insert_right_unit` at every legal
+    // What (gate 4): `insert_unit` at every legal
     // position `0..=rank` followed by `remove_unit` at the inserted axis
     // restores the spaces *and* the payload allocation — `data()` returns the
     // same buffer address, the O(1) reuse the #613 contract promises for a
@@ -8716,9 +8786,21 @@ fn typed_insert_unit_round_trips_at_every_position_and_shares_the_payload() {
         for left in [true, false] {
             for dual in [false, true] {
                 let inserted: TensorMap<tenet::core::FermionParityFusionRule, f64> = if left {
-                    typed.insert_left_unit(position, dual).unwrap()
+                    typed
+                        .insert_unit(
+                            position,
+                            Side::Domain,
+                            if dual { Duality::Dual } else { Duality::Plain },
+                        )
+                        .unwrap()
                 } else {
-                    typed.insert_right_unit(position, dual).unwrap()
+                    typed
+                        .insert_unit(
+                            position,
+                            Side::Codomain,
+                            if dual { Duality::Dual } else { Duality::Plain },
+                        )
+                        .unwrap()
                 };
                 assert_eq!(
                     inserted.data().as_ptr(),
@@ -8753,20 +8835,20 @@ fn typed_index_op_error_classes_and_empty_shortcuts_are_stable() {
     // Twist / flip: out-of-range leg.
     for (error, message) in [
         (
-            typed.twist(&[5]).unwrap_err(),
+            typed.twist(&[5], Direction::Forward).unwrap_err(),
             "invalid argument: twist leg 5 out of range for rank 3",
         ),
         (
-            typed.flip(&[5]).unwrap_err(),
+            typed.flip(&[5], Direction::Forward).unwrap_err(),
             "invalid argument: flip leg 5 out of range for rank 3",
         ),
         (
-            typed.twist_inverse(&[5]).unwrap_err(),
-            "invalid argument: twist_inverse leg 5 out of range for rank 3",
+            typed.twist(&[5], Direction::Inverse).unwrap_err(),
+            "invalid argument: inverse twist leg 5 out of range for rank 3",
         ),
         (
-            typed.flip_inverse(&[5]).unwrap_err(),
-            "invalid argument: flip_inverse leg 5 out of range for rank 3",
+            typed.flip(&[5], Direction::Inverse).unwrap_err(),
+            "invalid argument: inverse flip leg 5 out of range for rank 3",
         ),
     ] {
         assert!(matches!(error, tenet::typed::Error::InvalidArgument(_)));
@@ -8775,19 +8857,19 @@ fn typed_index_op_error_classes_and_empty_shortcuts_are_stable() {
 
     // Empty leg list: identical clone, shared buffer typed-side.
     let typed_untwisted: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        typed.twist(&[]).unwrap();
+        typed.twist(&[], Direction::Forward).unwrap();
     assert_eq!(typed_untwisted.data().as_ptr(), typed.data().as_ptr());
     let typed_unflipped: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        typed.flip(&[]).unwrap();
+        typed.flip(&[], Direction::Forward).unwrap();
     assert_eq!(typed_unflipped.data().as_ptr(), typed.data().as_ptr());
     let typed_untwisted_inverse: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        typed.twist_inverse(&[]).unwrap();
+        typed.twist(&[], Direction::Inverse).unwrap();
     assert_eq!(
         typed_untwisted_inverse.data().as_ptr(),
         typed.data().as_ptr()
     );
     let typed_unflipped_inverse: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        typed.flip_inverse(&[]).unwrap();
+        typed.flip(&[], Direction::Inverse).unwrap();
     assert_eq!(
         typed_unflipped_inverse.data().as_ptr(),
         typed.data().as_ptr()
@@ -8795,12 +8877,18 @@ fn typed_index_op_error_classes_and_empty_shortcuts_are_stable() {
 
     // Insert: position past the rank.
     assert_eq!(
-        typed.insert_left_unit(4, false).unwrap_err().to_string(),
-        "invalid argument: TensorMap::insert_left_unit: position 4 exceeds rank 3"
+        typed
+            .insert_unit(4, Side::Domain, Duality::Plain)
+            .unwrap_err()
+            .to_string(),
+        "invalid argument: TensorMap::insert_unit: position 4 exceeds rank 3"
     );
     assert_eq!(
-        typed.insert_right_unit(4, false).unwrap_err().to_string(),
-        "invalid argument: TensorMap::insert_right_unit: position 4 exceeds rank 3"
+        typed
+            .insert_unit(4, Side::Codomain, Duality::Plain)
+            .unwrap_err()
+            .to_string(),
+        "invalid argument: TensorMap::insert_unit: position 4 exceeds rank 3"
     );
 
     // Remove: out-of-range axis, then a non-unit leg.
@@ -8830,14 +8918,17 @@ fn typed_twist_on_a_compact_spectrum_matches_the_dense_route() {
         typed.svd_compact().unwrap().s;
     let dense = forced_dense(&typed_s);
     let typed_twisted: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        typed_s.twist(&[0]).unwrap();
-    assert_eq!(typed_twisted.data(), dense.twist(&[0]).unwrap().data());
+        typed_s.twist(&[0], Direction::Forward).unwrap();
+    assert_eq!(
+        typed_twisted.data(),
+        dense.twist(&[0], Direction::Forward).unwrap().data()
+    );
     // And the two-leg twist is the identity on the bond (θ² = 1 per sector).
     let typed_both: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        typed_s.twist(&[0, 1]).unwrap();
+        typed_s.twist(&[0, 1], Direction::Forward).unwrap();
     assert_eq!(typed_both.data(), typed_s.data());
     let typed_inverse: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        typed_s.twist_inverse(&[0]).unwrap();
+        typed_s.twist(&[0], Direction::Inverse).unwrap();
     assert_eq!(typed_inverse.data(), typed_twisted.data());
 }
 
@@ -8860,12 +8951,12 @@ fn external_z3_twist_flip_and_units_hold_by_value() {
         .unwrap();
 
     // Twist: identity, shared buffer.
-    let twisted: TensorMap<ExternalZ3, f64> = t.twist(&[0, 1]).unwrap();
+    let twisted: TensorMap<ExternalZ3, f64> = t.twist(&[0, 1], Direction::Forward).unwrap();
     assert_eq!(twisted.data().as_ptr(), t.data().as_ptr());
 
     // Flip: values unchanged, duality flags toggled, non-self-dual sector
     // sets preserved as stored (flip toggles the flag, not the labels).
-    let flipped: TensorMap<ExternalZ3, f64> = t.flip(&[0, 1]).unwrap();
+    let flipped: TensorMap<ExternalZ3, f64> = t.flip(&[0, 1], Direction::Forward).unwrap();
     assert_eq!(flipped.data(), t.data());
     assert!(flipped.codomain()[0].is_dual());
     assert!(!flipped.domain()[0].is_dual());
@@ -8876,7 +8967,8 @@ fn external_z3_twist_flip_and_units_hold_by_value() {
 
     // Units: insert -> remove round trip on the external provider, O(1)
     // payload reuse observable through `data()`.
-    let inserted: TensorMap<ExternalZ3, f64> = t.insert_right_unit(1, true).unwrap();
+    let inserted: TensorMap<ExternalZ3, f64> =
+        t.insert_unit(1, Side::Codomain, Duality::Dual).unwrap();
     assert_eq!(inserted.data().as_ptr(), t.data().as_ptr());
     assert_eq!(inserted.codomain()[1].sectors().unwrap(), vec![Z3Charge(0)]);
     let removed: TensorMap<ExternalZ3, f64> = inserted.remove_unit(1).unwrap();
@@ -9025,10 +9117,10 @@ fn external_nobraiding_twist_and_flip_reject_nontrivial_sectors() {
         .unwrap();
 
     for error in [
-        t.twist(&[0]).unwrap_err(),
-        t.flip(&[1]).unwrap_err(),
-        t.twist_inverse(&[0]).unwrap_err(),
-        t.flip_inverse(&[1]).unwrap_err(),
+        t.twist(&[0], Direction::Forward).unwrap_err(),
+        t.flip(&[1], Direction::Forward).unwrap_err(),
+        t.twist(&[0], Direction::Inverse).unwrap_err(),
+        t.flip(&[1], Direction::Inverse).unwrap_err(),
     ] {
         assert!(
             matches!(error, tenet::typed::Error::InvalidArgument(_)),
@@ -9040,13 +9132,13 @@ fn external_nobraiding_twist_and_flip_reject_nontrivial_sectors() {
     // the mixed bond space, so its twist must fail before the compact
     // per-sector scaling ever runs.
     let s: TensorMap<PlanarZ2, f64> = t.svd_compact().unwrap().s;
-    let compact_error = s.twist(&[0]).unwrap_err();
+    let compact_error = s.twist(&[0], Direction::Forward).unwrap_err();
     assert!(
         matches!(compact_error, tenet::typed::Error::InvalidArgument(_)),
         "{compact_error:?}"
     );
     assert!(matches!(
-        s.twist_inverse(&[0]),
+        s.twist(&[0], Direction::Inverse),
         Err(tenet::typed::Error::InvalidArgument(_))
     ));
 }
@@ -9073,12 +9165,12 @@ fn external_nobraiding_vacuum_only_legs_twist_passes_flip_rejects() {
         })
         .unwrap();
 
-    let twisted: TensorMap<PlanarZ2, f64> = t.twist(&[0, 1]).unwrap();
+    let twisted: TensorMap<PlanarZ2, f64> = t.twist(&[0, 1], Direction::Forward).unwrap();
     assert_eq!(twisted.data().as_ptr(), t.data().as_ptr());
-    let twisted_inverse: TensorMap<PlanarZ2, f64> = t.twist_inverse(&[0, 1]).unwrap();
+    let twisted_inverse: TensorMap<PlanarZ2, f64> = t.twist(&[0, 1], Direction::Inverse).unwrap();
     assert_eq!(twisted_inverse.data().as_ptr(), t.data().as_ptr());
 
-    let flip_error = t.flip(&[0]).unwrap_err();
+    let flip_error = t.flip(&[0], Direction::Forward).unwrap_err();
     assert!(
         matches!(flip_error, tenet::typed::Error::InvalidArgument(_)),
         "{flip_error:?}"
@@ -9088,13 +9180,13 @@ fn external_nobraiding_vacuum_only_legs_twist_passes_flip_rejects() {
         "{flip_error}"
     );
     assert!(matches!(
-        t.flip_inverse(&[0]),
+        t.flip(&[0], Direction::Inverse),
         Err(tenet::typed::Error::InvalidArgument(_))
     ));
 
-    let unflipped: TensorMap<PlanarZ2, f64> = t.flip(&[]).unwrap();
+    let unflipped: TensorMap<PlanarZ2, f64> = t.flip(&[], Direction::Forward).unwrap();
     assert_eq!(unflipped.data().as_ptr(), t.data().as_ptr());
-    let unflipped_inverse: TensorMap<PlanarZ2, f64> = t.flip_inverse(&[]).unwrap();
+    let unflipped_inverse: TensorMap<PlanarZ2, f64> = t.flip(&[], Direction::Inverse).unwrap();
     assert_eq!(unflipped_inverse.data().as_ptr(), t.data().as_ptr());
 }
 

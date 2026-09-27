@@ -9,6 +9,7 @@
 //! suite when those land.
 
 use std::sync::Arc;
+use tenet::typed::Direction;
 
 use tenet::core::{
     product_sector, FermionParityFusionRule, Fz2SectorLayout, PackedProductCodec,
@@ -385,9 +386,13 @@ fn twist_squares_to_identity_and_naturality() {
             let t: TensorMap<_, f64> =
                 TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 71).unwrap();
             for leg in 0..4usize {
-                let twice = t.twist(&[leg]).unwrap().twist(&[leg]).unwrap();
+                let twice = t
+                    .twist(&[leg], Direction::Forward)
+                    .unwrap()
+                    .twist(&[leg], Direction::Forward)
+                    .unwrap();
                 assert_close(twice.data(), t.data(), 1e-12);
-                let once = t.twist(&[leg]).unwrap();
+                let once = t.twist(&[leg], Direction::Forward).unwrap();
                 if $fermionic {
                     // Every leg of these fermionic fixtures carries an odd sector,
                     // so the twist must negate those blocks. Guards the
@@ -407,8 +412,16 @@ fn twist_squares_to_identity_and_naturality() {
             }
             let s = rand_perm(&mut state, 4);
             let pos = s.iter().position(|&j| j == 0).unwrap();
-            let lhs = t.twist(&[0]).unwrap().permute(&s[..2], &s[2..]).unwrap();
-            let rhs = t.permute(&s[..2], &s[2..]).unwrap().twist(&[pos]).unwrap();
+            let lhs = t
+                .twist(&[0], Direction::Forward)
+                .unwrap()
+                .permute(&s[..2], &s[2..])
+                .unwrap();
+            let rhs = t
+                .permute(&s[..2], &s[2..])
+                .unwrap()
+                .twist(&[pos], Direction::Forward)
+                .unwrap();
             assert_close(lhs.data(), rhs.data(), 1e-12);
         }};
     }

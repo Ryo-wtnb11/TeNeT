@@ -15,6 +15,7 @@ mod single_precision_oracle;
 use num_complex::{Complex32, Complex64};
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{LegSelection, SectorSpectrum, TensorMap};
+use tenet::typed::{Direction, Side};
 
 use single_precision_oracle::{
     assert_payloads_agree, assert_scalars_agree, draw_parts, fermion_su2_leg, one as wide_of_one,
@@ -115,21 +116,21 @@ macro_rules! base_suite {
                     ),
                     (
                         "transpose",
-                        a.transpose().unwrap(),
-                        wa.transpose().unwrap(),
+                        a.transpose(&[3, 2], &[1, 0]).unwrap(),
+                        wa.transpose(&[3, 2], &[1, 0]).unwrap(),
                     ),
                     (
                         "repartition",
                         a.repartition(1).unwrap(),
                         wa.repartition(1).unwrap(),
                     ),
-                    ("twist", a.twist(&[0, 2]).unwrap(), wa.twist(&[0, 2]).unwrap()),
+                    ("twist", a.twist(&[0, 2], Direction::Forward).unwrap(), wa.twist(&[0, 2], Direction::Forward).unwrap()),
                     (
-                        "twist_inverse",
-                        a.twist_inverse(&[1]).unwrap(),
-                        wa.twist_inverse(&[1]).unwrap(),
+                        "inverse twist",
+                        a.twist(&[1], Direction::Inverse).unwrap(),
+                        wa.twist(&[1], Direction::Inverse).unwrap(),
                     ),
-                    ("flip", a.flip(&[0]).unwrap(), wa.flip(&[0]).unwrap()),
+                    ("flip", a.flip(&[0], Direction::Forward).unwrap(), wa.flip(&[0], Direction::Forward).unwrap()),
                     (
                         "adjoint (lazy)",
                         a.adjoint().unwrap(),
@@ -169,7 +170,7 @@ macro_rules! base_suite {
                     "the SU(2)/fermionic fixture must be moved by permute, largest change {largest:e}"
                 );
                 assert_ne!(
-                    a.twist(&[0, 2]).unwrap().data(),
+                    a.twist(&[0, 2], Direction::Forward).unwrap().data(),
                     a.data(),
                     "the fZ2 twist must change the payload of an odd-sector fixture"
                 );
@@ -206,14 +207,14 @@ macro_rules! base_suite {
                     ("compose", a.compose(&b).unwrap(), wa.compose(&wb).unwrap()),
                     ("otimes", a.otimes(&b).unwrap(), wa.otimes(&wb).unwrap()),
                     (
-                        "catdomain",
-                        a.catdomain(&b).unwrap(),
-                        wa.catdomain(&wb).unwrap(),
+                        "cat domain",
+                        a.cat(&b, Side::Domain).unwrap(),
+                        wa.cat(&wb, Side::Domain).unwrap(),
                     ),
                     (
-                        "catcodomain",
-                        a.catcodomain(&b).unwrap(),
-                        wa.catcodomain(&wb).unwrap(),
+                        "cat codomain",
+                        a.cat(&b, Side::Codomain).unwrap(),
+                        wa.cat(&wb, Side::Codomain).unwrap(),
                     ),
                 ] {
                     assert_payloads_agree(what, got.data(), expected.data(), terms);

@@ -16,6 +16,7 @@
 mod common;
 
 use std::sync::Arc;
+use tenet::typed::Direction;
 
 use common::permute_dense;
 use tenet::core::{ProductFusionRuleExt, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
@@ -224,7 +225,7 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
     );
 
     // The space check precedes the unique-ownership check.
-    let mut wrong_space = source.transpose().unwrap();
+    let mut wrong_space = source.transpose(&[3, 2], &[1, 0]).unwrap();
     let wrong_space_handle = wrong_space.clone();
     assert_eq!(
         message(
@@ -342,8 +343,8 @@ macro_rules! assert_signs_only_over {
     ($what:expr, $tensor:expr, $cases:expr) => {
         for legs in $cases {
             for twisted in [
-                $tensor.twist(legs).unwrap(),
-                $tensor.twist_inverse(legs).unwrap(),
+                $tensor.twist(legs, Direction::Forward).unwrap(),
+                $tensor.twist(legs, Direction::Inverse).unwrap(),
             ] {
                 let mut kept = 0usize;
                 let mut negated = 0usize;
@@ -486,16 +487,22 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
     // not the product — so the device gate expects the ordinary per-block
     // work here, and this pins the value it must produce.
     for legs in [&[0usize, 1, 2, 3][..], &[0, 1, 2, 3, 0, 1, 2, 3][..]] {
-        assert_eq!(tensor.twist(legs).unwrap().data(), tensor.data());
-        assert_eq!(tensor.twist_inverse(legs).unwrap().data(), tensor.data());
+        assert_eq!(
+            tensor.twist(legs, Direction::Forward).unwrap().data(),
+            tensor.data()
+        );
+        assert_eq!(
+            tensor.twist(legs, Direction::Inverse).unwrap().data(),
+            tensor.data()
+        );
     }
 
     // An inverse twist undoes a twist exactly, which is what lets the device
     // gate compare the two runs for equality rather than to a tolerance.
     let round_trip = tensor
-        .twist(&[0, 2])
+        .twist(&[0, 2], Direction::Forward)
         .unwrap()
-        .twist_inverse(&[0, 2])
+        .twist(&[0, 2], Direction::Inverse)
         .unwrap();
     assert_eq!(round_trip.data(), tensor.data());
 }
@@ -522,5 +529,9 @@ fn a_twist_of_a_space_with_no_coupled_sector_is_the_identity_short_circuit() {
     let empty: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&even], [&odd], real_fill).unwrap();
     assert!(empty.data().is_empty(), "the fixture must carry no element");
-    assert!(empty.twist(&[0, 1]).unwrap().data().is_empty());
+    assert!(empty
+        .twist(&[0, 1], Direction::Forward)
+        .unwrap()
+        .data()
+        .is_empty());
 }

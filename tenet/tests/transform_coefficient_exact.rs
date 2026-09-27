@@ -201,7 +201,7 @@ fn u1_transforms_scale_componentwise() {
 
     assert_componentwise!([&leg, &other], [&dual], |t| t.permute(&[1, 0], &[2]));
     assert_componentwise!([&leg, &other], [&dual], |t| t.repartition(1));
-    assert_componentwise!([&leg, &other], [&dual], |t| t.transpose());
+    assert_componentwise!([&leg, &other], [&dual], |t| t.transpose(&[2], &[1, 0]));
     assert_componentwise!([&leg], [&other, &dual], |t| t.permute(&[2, 0], &[1]));
     // c32: the coefficient converts with `as f32` before acting, still
     // componentwise.
@@ -230,7 +230,7 @@ fn su2_transforms_scale_componentwise() {
 
     assert_componentwise!([&leg, &other], [&dual], |t| t.permute(&[1, 0], &[2]));
     assert_componentwise!([&leg, &other], [&dual], |t| t.repartition(1));
-    assert_componentwise!([&leg, &other], [&dual], |t| t.transpose());
+    assert_componentwise!([&leg, &other], [&dual], |t| t.transpose(&[2], &[1, 0]));
     assert_componentwise!([&leg], [&other], |t| t.repartition(0));
 }
 
@@ -254,7 +254,7 @@ fn u1_times_su2_transforms_scale_componentwise() {
 
     assert_componentwise!([&leg, &other], [&dual], |t| t.permute(&[1, 0], &[2]));
     assert_componentwise!([&leg, &other], [&dual], |t| t.repartition(1));
-    assert_componentwise!([&leg, &dual], [&other], |t| t.transpose());
+    assert_componentwise!([&leg, &dual], [&other], |t| t.transpose(&[2], &[1, 0]));
 }
 
 /// fZ2 x U(1): the permutation of two odd legs contributes a fermionic `-1`,
@@ -291,7 +291,7 @@ fn fermionic_transforms_scale_componentwise() {
     let (source, permuted) =
         assert_componentwise!([&leg, &other], [&dual], |t| t.permute(&[1, 0], &[2]));
     assert_componentwise!([&leg, &other], [&dual], |t| t.repartition(1));
-    assert_componentwise!([&leg, &other], [&dual], |t| t.transpose());
+    assert_componentwise!([&leg, &other], [&dual], |t| t.transpose(&[2], &[1, 0]));
     assert_componentwise!([&leg, &dual], [&other, &leg], |t| t
         .permute(&[1, 2], &[3, 0]));
 

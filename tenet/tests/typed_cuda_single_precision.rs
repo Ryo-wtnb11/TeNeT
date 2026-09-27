@@ -1016,13 +1016,18 @@ where
     );
 
     assert_close(
-        device.transpose().unwrap().to_host().unwrap().data(),
-        host.transpose().unwrap().data(),
+        device
+            .transpose(&[2], &[1, 0])
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .data(),
+        host.transpose(&[2], &[1, 0]).unwrap().data(),
         tolerance,
         "transpose",
     );
 
-    // The `*_overwrite_into` forms of the same four transforms (#1339) write
+    // The `*_overwrite_into` forms of the same three planar-or-permute transforms (#1339) write
     // what their returning twins return, at every caller scale.
     // Each destination starts poisoned with a different multiple of the
     // expected payload, so an implementation that wrote nothing at `alpha = 1`
@@ -1045,18 +1050,6 @@ where
             "permute_overwrite_into",
         );
 
-        let host_transposed = host.transpose().unwrap();
-        let mut transposed = host_transposed.scale(poison).to_cuda().unwrap();
-        device
-            .transpose_overwrite_into(&mut transposed, alpha)
-            .unwrap();
-        assert_close(
-            transposed.to_host().unwrap().data(),
-            host_transposed.scale(alpha).data(),
-            tolerance,
-            "transpose_overwrite_into",
-        );
-
         let host_bent = host.repartition(1).unwrap();
         let mut bent = host_bent.scale(poison).to_cuda().unwrap();
         device.repartition_overwrite_into(&mut bent, alpha).unwrap();
@@ -1067,16 +1060,16 @@ where
             "repartition_overwrite_into",
         );
 
-        let host_cyclic = host.transpose_axes(&[2], &[1, 0]).unwrap();
+        let host_cyclic = host.transpose(&[2], &[1, 0]).unwrap();
         let mut cyclic = host_cyclic.scale(poison).to_cuda().unwrap();
         device
-            .transpose_axes_overwrite_into(&mut cyclic, &[2], &[1, 0], alpha)
+            .transpose_overwrite_into(&mut cyclic, &[2], &[1, 0], alpha)
             .unwrap();
         assert_close(
             cyclic.to_host().unwrap().data(),
             host_cyclic.scale(alpha).data(),
             tolerance,
-            "transpose_axes_overwrite_into",
+            "transpose_overwrite_into",
         );
     }
 

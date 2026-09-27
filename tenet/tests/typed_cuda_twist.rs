@@ -1,4 +1,4 @@
-//! Real-device gates for `twist` / `twist_inverse` on CUDA tensors
+//! Real-device gates for `twist` in both directions on CUDA tensors
 //! (issue #1330, G2b-t).
 //!
 //! A twist is not a tree transform: the Host builds a per-block ribbon-twist
@@ -25,6 +25,7 @@
 #![cfg(feature = "cuda")]
 
 use std::sync::Arc;
+use tenet::typed::Direction;
 
 use num_complex::Complex64;
 use tenet::core::{
@@ -165,23 +166,23 @@ fn device_twist_matches_the_host_on_fermion_parity() {
     // Single codomain leg, single dual codomain leg, single domain leg.
     for legs in [&[0usize][..], &[1][..], &[3][..]] {
         let what = format!("fZ2/f64 twist {legs:?}");
-        let twisted = device_matches_host!(&what, real, |t| t.twist(legs));
+        let twisted = device_matches_host!(&what, real, |t| t.twist(legs, Direction::Forward));
         assert_signs_only(real.data(), twisted.data(), &what);
     }
     // Multi-axis, across the split and repeating both sides.
     for legs in [&[0usize, 3][..], &[1, 2, 3][..], &[0, 1, 1, 3][..]] {
         let what = format!("fZ2/f64 twist {legs:?}");
-        let twisted = device_matches_host!(&what, real, |t| t.twist(legs));
+        let twisted = device_matches_host!(&what, real, |t| t.twist(legs, Direction::Forward));
         assert_signs_only(real.data(), twisted.data(), &what);
     }
     let what = "fZ2/c64 twist [1, 2]";
-    let twisted = device_matches_host!(what, complex, |t| t.twist(&[1, 2]));
+    let twisted = device_matches_host!(what, complex, |t| t.twist(&[1, 2], Direction::Forward));
     assert_signs_only(complex.data(), twisted.data(), what);
 
-    // `twist_inverse` is the conjugate factor, which is the same `±1` here —
+    // the inverse `twist` is the conjugate factor, which is the same `±1` here —
     // gated against the Host rather than assumed.
-    let what = "fZ2/f64 twist_inverse [0, 3]";
-    let inverted = device_matches_host!(what, real, |t| t.twist_inverse(&[0, 3]));
+    let what = "fZ2/f64 inverse twist [0, 3]";
+    let inverted = device_matches_host!(what, real, |t| t.twist(&[0, 3], Direction::Inverse));
     assert_signs_only(real.data(), inverted.data(), what);
 }
 
@@ -205,7 +206,7 @@ fn device_twist_matches_the_host_for_product_providers() {
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], real_fill).unwrap();
     for legs in [&[1usize][..], &[2][..], &[0, 2][..]] {
         let what = format!("fZ2xU1 twist {legs:?}");
-        let twisted = device_matches_host!(&what, host, |t| t.twist(legs));
+        let twisted = device_matches_host!(&what, host, |t| t.twist(legs, Direction::Forward));
         assert_signs_only(host.data(), twisted.data(), &what);
     }
 
@@ -233,11 +234,11 @@ fn device_twist_matches_the_host_for_product_providers() {
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
     for legs in [&[0usize][..], &[3][..], &[1, 3][..]] {
         let what = format!("fZ2xSU2 twist {legs:?}");
-        let twisted = device_matches_host!(&what, host, |t| t.twist(legs));
+        let twisted = device_matches_host!(&what, host, |t| t.twist(legs, Direction::Forward));
         assert_signs_only(host.data(), twisted.data(), &what);
     }
-    let what = "fZ2xSU2 twist_inverse [1, 3]";
-    let inverted = device_matches_host!(what, host, |t| t.twist_inverse(&[1, 3]));
+    let what = "fZ2xSU2 inverse twist [1, 3]";
+    let inverted = device_matches_host!(what, host, |t| t.twist(&[1, 3], Direction::Inverse));
     assert_signs_only(host.data(), inverted.data(), what);
 }
 
@@ -250,20 +251,28 @@ fn device_twist_round_trips_bitwise_and_short_circuits() {
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
     let device = host.to_cuda().unwrap();
 
-    // twist ∘ twist_inverse == id, bitwise: both factors are exactly ±1.
+    // twist ∘ inverse twist == id, bitwise: both factors are exactly ±1.
     let round_trip = device
-        .twist(&[0, 2, 3])
+        .twist(&[0, 2, 3], Direction::Forward)
         .unwrap()
-        .twist_inverse(&[0, 2, 3])
+        .twist(&[0, 2, 3], Direction::Inverse)
         .unwrap()
         .to_host()
         .unwrap();
     assert_eq!(round_trip.data(), host.data(), "twist round trip is exact");
-    let twisted = device.twist(&[0, 2, 3]).unwrap().to_host().unwrap();
+    let twisted = device
+        .twist(&[0, 2, 3], Direction::Forward)
+        .unwrap()
+        .to_host()
+        .unwrap();
     assert_signs_only(host.data(), twisted.data(), "twist [0, 2, 3]");
 
     // An empty leg list is a clone on both sides.
-    let empty = device.twist(&[]).unwrap().to_host().unwrap();
+    let empty = device
+        .twist(&[], Direction::Forward)
+        .unwrap()
+        .to_host()
+        .unwrap();
     assert_eq!(empty.data(), host.data(), "empty twist is a clone");
 
     // A bosonic provider twists by 1 on every block: a clone, never a scale.
@@ -274,7 +283,7 @@ fn device_twist_round_trips_bitwise_and_short_circuits() {
     for legs in [&[0usize][..], &[1, 3][..]] {
         assert_eq!(
             bosonic_device
-                .twist(legs)
+                .twist(legs, Direction::Forward)
                 .unwrap()
                 .to_host()
                 .unwrap()
@@ -284,13 +293,13 @@ fn device_twist_round_trips_bitwise_and_short_circuits() {
         );
         assert_eq!(
             bosonic_device
-                .twist_inverse(legs)
+                .twist(legs, Direction::Inverse)
                 .unwrap()
                 .to_host()
                 .unwrap()
                 .data(),
             bosonic.data(),
-            "bosonic twist_inverse {legs:?} must be a clone"
+            "bosonic inverse twist {legs:?} must be a clone"
         );
     }
 }
@@ -306,11 +315,15 @@ fn device_twist_on_a_lazy_adjoint_matches_the_host() {
     let device = host.to_cuda().unwrap();
 
     for legs in [&[0usize][..], &[2][..], &[0, 1, 2][..]] {
-        let expected = host.adjoint().unwrap().twist(legs).unwrap();
+        let expected = host
+            .adjoint()
+            .unwrap()
+            .twist(legs, Direction::Forward)
+            .unwrap();
         let actual = device
             .adjoint()
             .unwrap()
-            .twist(legs)
+            .twist(legs, Direction::Forward)
             .unwrap()
             .to_host()
             .unwrap();
@@ -320,18 +333,22 @@ fn device_twist_on_a_lazy_adjoint_matches_the_host() {
             expected.rank(),
             "adjoint twist {legs:?} rank"
         );
-        let inverse_expected = host.adjoint().unwrap().twist_inverse(legs).unwrap();
+        let inverse_expected = host
+            .adjoint()
+            .unwrap()
+            .twist(legs, Direction::Inverse)
+            .unwrap();
         let inverse_actual = device
             .adjoint()
             .unwrap()
-            .twist_inverse(legs)
+            .twist(legs, Direction::Inverse)
             .unwrap()
             .to_host()
             .unwrap();
         assert_eq!(
             inverse_actual.data(),
             inverse_expected.data(),
-            "adjoint twist_inverse {legs:?}"
+            "adjoint inverse twist {legs:?}"
         );
     }
 }
@@ -352,7 +369,7 @@ fn device_twist_handles_a_space_with_no_coupled_sector_and_rejects_a_leg_past_th
     assert!(empty.data().is_empty(), "empty fixture");
     let device = empty.to_cuda().unwrap();
     assert!(device
-        .twist(&[0, 1])
+        .twist(&[0, 1], Direction::Forward)
         .unwrap()
         .to_host()
         .unwrap()
@@ -365,11 +382,21 @@ fn device_twist_handles_a_space_with_no_coupled_sector_and_rejects_a_leg_past_th
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], real_fill).unwrap();
     let device = host.to_cuda().unwrap();
     assert_eq!(
-        device.twist(&[2]).unwrap_err().to_string(),
-        host.twist(&[2]).unwrap_err().to_string(),
+        device
+            .twist(&[2], Direction::Forward)
+            .unwrap_err()
+            .to_string(),
+        host.twist(&[2], Direction::Forward)
+            .unwrap_err()
+            .to_string(),
     );
     assert_eq!(
-        device.twist_inverse(&[7]).unwrap_err().to_string(),
-        host.twist_inverse(&[7]).unwrap_err().to_string(),
+        device
+            .twist(&[7], Direction::Inverse)
+            .unwrap_err()
+            .to_string(),
+        host.twist(&[7], Direction::Inverse)
+            .unwrap_err()
+            .to_string(),
     );
 }
