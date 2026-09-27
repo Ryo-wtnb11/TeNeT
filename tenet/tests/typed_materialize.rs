@@ -111,17 +111,21 @@ macro_rules! assert_independent_owned_copy {
             assert_ne!(payload, input_payload, "{what}: fresh payload");
         }
 
-        let before = input.data().to_vec();
+        let before = input.materialize().unwrap().dense_data().unwrap().to_vec();
         let mut written = result;
-        let pointer = written.data().as_ptr();
+        let pointer = written.dense_data().unwrap().as_ptr();
         written.scale_assign(2.0.into());
         // In place means uniquely owned: nothing else holds this payload.
         assert_eq!(
-            written.data().as_ptr(),
+            written.dense_data().unwrap().as_ptr(),
             pointer,
             "{what}: writable in place"
         );
-        assert_eq!(input.data(), before.as_slice(), "{what}: input unchanged");
+        assert_eq!(
+            input.materialize().unwrap().dense_data().unwrap(),
+            before.as_slice(),
+            "{what}: input unchanged"
+        );
     }};
 }
 
@@ -176,7 +180,11 @@ macro_rules! physical_case {
 
         // Owned dense input: a copy with equal values.
         let copy = tensor.materialize().unwrap();
-        assert_eq!(copy.data(), tensor.data(), "{what}: owned copy values");
+        assert_eq!(
+            copy.dense_data().unwrap(),
+            tensor.dense_data().unwrap(),
+            "{what}: owned copy values"
+        );
         assert_independent_owned_copy!(tensor, copy, what);
 
         // Lazy adjoint input.
@@ -366,7 +374,11 @@ macro_rules! fermionic_case {
         .unwrap();
         assert!(tensor.subblock_count() >= 2, "{what}: multi-block fixture");
         let copy = tensor.materialize().unwrap();
-        assert_eq!(copy.data(), tensor.data(), "{what}: owned copy values");
+        assert_eq!(
+            copy.dense_data().unwrap(),
+            tensor.dense_data().unwrap(),
+            "{what}: owned copy values"
+        );
         assert_independent_owned_copy!(tensor, copy, what);
 
         let lazy = tensor.adjoint().unwrap();
@@ -504,18 +516,20 @@ fn materialize_is_the_remedy_for_apis_that_reject_lazy_adjoints() {
     }
 
     // An owned dense destination can be overwritten; the input is untouched.
-    let before = tensor.data().to_vec();
+    let before = tensor.dense_data().unwrap().to_vec();
     let mut destination = tensor.materialize().unwrap();
-    let pointer = destination.data().as_ptr();
+    let pointer = destination.dense_data().unwrap().as_ptr();
     lazy.materialize()
         .unwrap()
         .permute_overwrite_into(&mut destination, &[0], &[1], Complex64::new(1.0, 0.0))
         .unwrap();
-    assert_eq!(destination.data().as_ptr(), pointer);
-    assert_eq!(tensor.data(), before.as_slice());
+    assert_eq!(destination.dense_data().unwrap().as_ptr(), pointer);
+    assert_eq!(tensor.dense_data().unwrap(), before.as_slice());
 }
 
 #[test]
+// Tests the deprecated `data()` cache itself until #1548 removes it.
+#[allow(deprecated)]
 fn materialize_never_shares_a_published_adjoint_cache() {
     let runtime = runtime();
     let leg = u1_leg();
@@ -563,7 +577,11 @@ mod checked_generic {
                 })
                 .unwrap();
             let copy = tensor.materialize().unwrap();
-            assert_eq!(copy.data(), tensor.data(), "{what}: owned copy values");
+            assert_eq!(
+                copy.dense_data().unwrap(),
+                tensor.dense_data().unwrap(),
+                "{what}: owned copy values"
+            );
             assert_independent_owned_copy!(tensor, copy, what);
 
             let lazy = tensor.adjoint().unwrap();

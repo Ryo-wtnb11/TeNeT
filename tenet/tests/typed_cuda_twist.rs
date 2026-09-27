@@ -71,7 +71,11 @@ macro_rules! device_matches_host {
         .to_host()
         .unwrap();
         let what: &str = $what;
-        assert_eq!(actual.data(), expected.data(), "{what}: payload");
+        assert_eq!(
+            actual.dense_data().unwrap(),
+            expected.dense_data().unwrap(),
+            "{what}: payload"
+        );
         assert_eq!(actual.rank(), expected.rank(), "{what}: rank");
         assert_eq!(
             actual.codomain_rank(),
@@ -167,23 +171,39 @@ fn device_twist_matches_the_host_on_fermion_parity() {
     for legs in [&[0usize][..], &[1][..], &[3][..]] {
         let what = format!("fZ2/f64 twist {legs:?}");
         let twisted = device_matches_host!(&what, real, |t| t.twist(legs, Direction::Forward));
-        assert_signs_only(real.data(), twisted.data(), &what);
+        assert_signs_only(
+            real.dense_data().unwrap(),
+            twisted.dense_data().unwrap(),
+            &what,
+        );
     }
     // Multi-axis, across the split and repeating both sides.
     for legs in [&[0usize, 3][..], &[1, 2, 3][..], &[0, 1, 1, 3][..]] {
         let what = format!("fZ2/f64 twist {legs:?}");
         let twisted = device_matches_host!(&what, real, |t| t.twist(legs, Direction::Forward));
-        assert_signs_only(real.data(), twisted.data(), &what);
+        assert_signs_only(
+            real.dense_data().unwrap(),
+            twisted.dense_data().unwrap(),
+            &what,
+        );
     }
     let what = "fZ2/c64 twist [1, 2]";
     let twisted = device_matches_host!(what, complex, |t| t.twist(&[1, 2], Direction::Forward));
-    assert_signs_only(complex.data(), twisted.data(), what);
+    assert_signs_only(
+        complex.dense_data().unwrap(),
+        twisted.dense_data().unwrap(),
+        what,
+    );
 
     // the inverse `twist` is the conjugate factor, which is the same `±1` here —
     // gated against the Host rather than assumed.
     let what = "fZ2/f64 inverse twist [0, 3]";
     let inverted = device_matches_host!(what, real, |t| t.twist(&[0, 3], Direction::Inverse));
-    assert_signs_only(real.data(), inverted.data(), what);
+    assert_signs_only(
+        real.dense_data().unwrap(),
+        inverted.dense_data().unwrap(),
+        what,
+    );
 }
 
 #[test]
@@ -207,7 +227,11 @@ fn device_twist_matches_the_host_for_product_providers() {
     for legs in [&[1usize][..], &[2][..], &[0, 2][..]] {
         let what = format!("fZ2xU1 twist {legs:?}");
         let twisted = device_matches_host!(&what, host, |t| t.twist(legs, Direction::Forward));
-        assert_signs_only(host.data(), twisted.data(), &what);
+        assert_signs_only(
+            host.dense_data().unwrap(),
+            twisted.dense_data().unwrap(),
+            &what,
+        );
     }
 
     // fZ2 (x) SU(2): fermionic signs with non-Abelian degeneracies.
@@ -235,11 +259,19 @@ fn device_twist_matches_the_host_for_product_providers() {
     for legs in [&[0usize][..], &[3][..], &[1, 3][..]] {
         let what = format!("fZ2xSU2 twist {legs:?}");
         let twisted = device_matches_host!(&what, host, |t| t.twist(legs, Direction::Forward));
-        assert_signs_only(host.data(), twisted.data(), &what);
+        assert_signs_only(
+            host.dense_data().unwrap(),
+            twisted.dense_data().unwrap(),
+            &what,
+        );
     }
     let what = "fZ2xSU2 inverse twist [1, 3]";
     let inverted = device_matches_host!(what, host, |t| t.twist(&[1, 3], Direction::Inverse));
-    assert_signs_only(host.data(), inverted.data(), what);
+    assert_signs_only(
+        host.dense_data().unwrap(),
+        inverted.dense_data().unwrap(),
+        what,
+    );
 }
 
 #[test]
@@ -259,13 +291,21 @@ fn device_twist_round_trips_bitwise_and_short_circuits() {
         .unwrap()
         .to_host()
         .unwrap();
-    assert_eq!(round_trip.data(), host.data(), "twist round trip is exact");
+    assert_eq!(
+        round_trip.dense_data().unwrap(),
+        host.dense_data().unwrap(),
+        "twist round trip is exact"
+    );
     let twisted = device
         .twist(&[0, 2, 3], Direction::Forward)
         .unwrap()
         .to_host()
         .unwrap();
-    assert_signs_only(host.data(), twisted.data(), "twist [0, 2, 3]");
+    assert_signs_only(
+        host.dense_data().unwrap(),
+        twisted.dense_data().unwrap(),
+        "twist [0, 2, 3]",
+    );
 
     // An empty leg list is a clone on both sides.
     let empty = device
@@ -273,7 +313,11 @@ fn device_twist_round_trips_bitwise_and_short_circuits() {
         .unwrap()
         .to_host()
         .unwrap();
-    assert_eq!(empty.data(), host.data(), "empty twist is a clone");
+    assert_eq!(
+        empty.dense_data().unwrap(),
+        host.dense_data().unwrap(),
+        "empty twist is a clone"
+    );
 
     // A bosonic provider twists by 1 on every block: a clone, never a scale.
     let u1 = u1_leg();
@@ -287,8 +331,9 @@ fn device_twist_round_trips_bitwise_and_short_circuits() {
                 .unwrap()
                 .to_host()
                 .unwrap()
-                .data(),
-            bosonic.data(),
+                .dense_data()
+                .unwrap(),
+            bosonic.dense_data().unwrap(),
             "bosonic twist {legs:?} must be a clone"
         );
         assert_eq!(
@@ -297,8 +342,9 @@ fn device_twist_round_trips_bitwise_and_short_circuits() {
                 .unwrap()
                 .to_host()
                 .unwrap()
-                .data(),
-            bosonic.data(),
+                .dense_data()
+                .unwrap(),
+            bosonic.dense_data().unwrap(),
             "bosonic inverse twist {legs:?} must be a clone"
         );
     }
@@ -327,7 +373,11 @@ fn device_twist_on_a_lazy_adjoint_matches_the_host() {
             .unwrap()
             .to_host()
             .unwrap();
-        assert_eq!(actual.data(), expected.data(), "adjoint twist {legs:?}");
+        assert_eq!(
+            actual.materialize().unwrap().dense_data().unwrap(),
+            expected.materialize().unwrap().dense_data().unwrap(),
+            "adjoint twist {legs:?}"
+        );
         assert_eq!(
             actual.rank(),
             expected.rank(),
@@ -346,8 +396,12 @@ fn device_twist_on_a_lazy_adjoint_matches_the_host() {
             .to_host()
             .unwrap();
         assert_eq!(
-            inverse_actual.data(),
-            inverse_expected.data(),
+            inverse_actual.materialize().unwrap().dense_data().unwrap(),
+            inverse_expected
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             "adjoint inverse twist {legs:?}"
         );
     }
@@ -366,14 +420,15 @@ fn device_twist_handles_a_space_with_no_coupled_sector_and_rejects_a_leg_past_th
     let odd = GradedSpace::try_new(Arc::new(FermionParityFusionRule), [(Z2Irrep::ODD, 1)]).unwrap();
     let empty: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&even], [&odd], real_fill).unwrap();
-    assert!(empty.data().is_empty(), "empty fixture");
+    assert!(empty.dense_data().unwrap().is_empty(), "empty fixture");
     let device = empty.to_cuda().unwrap();
     assert!(device
         .twist(&[0, 1], Direction::Forward)
         .unwrap()
         .to_host()
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .is_empty());
 
     // The range check precedes everything, on both sides, with the Host text.

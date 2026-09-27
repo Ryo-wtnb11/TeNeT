@@ -159,9 +159,16 @@ macro_rules! transforms {
 macro_rules! assert_bit_identical {
     ($expected:expr, $actual:expr) => {
         for ((name, expected), (_, actual)) in $expected.iter().zip(&$actual) {
-            assert_eq!(expected.data().len(), actual.data().len(), "{name}");
+            assert_eq!(
+                expected.dense_data().unwrap().len(),
+                actual.dense_data().unwrap().len(),
+                "{name}"
+            );
             assert_eq!(expected.subblock_count(), actual.subblock_count(), "{name}");
-            assert!(expected.data() == actual.data(), "{name}: payloads differ");
+            assert!(
+                expected.dense_data().unwrap() == actual.dense_data().unwrap(),
+                "{name}: payloads differ"
+            );
         }
     };
 }
@@ -176,17 +183,17 @@ fn u1_su2_owned_transforms_are_bit_identical_across_thread_counts() {
         TensorMap::rand_with_seed(&serial, [&space, &space], [&space], 1217).unwrap();
     let real_parallel: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&parallel, [&space, &space], [&space], 1217).unwrap();
-    assert!(real_serial.data() == real_parallel.data());
+    assert!(real_serial.dense_data().unwrap() == real_parallel.dense_data().unwrap());
     assert!(
-        real_serial.data().len() > 1 << 15,
+        real_serial.dense_data().unwrap().len() > 1 << 15,
         "fixture must exceed the backend's parallel size gate: {}",
-        real_serial.data().len()
+        real_serial.dense_data().unwrap().len()
     );
     let complex_serial: TensorMap<_, Complex64> =
         TensorMap::rand_with_seed(&serial, [&space, &space], [&space], 1218).unwrap();
     let complex_parallel: TensorMap<_, Complex64> =
         TensorMap::rand_with_seed(&parallel, [&space, &space], [&space], 1218).unwrap();
-    assert!(complex_serial.data() == complex_parallel.data());
+    assert!(complex_serial.dense_data().unwrap() == complex_parallel.dense_data().unwrap());
 
     let expected_real = transforms!(real_serial);
     let expected_complex = transforms!(complex_serial);
@@ -206,11 +213,11 @@ fn u1_owned_transforms_are_bit_identical_across_thread_counts() {
         TensorMap::rand_with_seed(&serial, [&space, &space], [&space], 1219).unwrap();
     let real_parallel: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&parallel, [&space, &space], [&space], 1219).unwrap();
-    assert!(real_serial.data() == real_parallel.data());
+    assert!(real_serial.dense_data().unwrap() == real_parallel.dense_data().unwrap());
     assert!(
-        real_serial.data().len() > 1 << 15,
+        real_serial.dense_data().unwrap().len() > 1 << 15,
         "fixture must exceed the backend's parallel size gate: {}",
-        real_serial.data().len()
+        real_serial.dense_data().unwrap().len()
     );
     let complex_serial: TensorMap<_, Complex64> =
         TensorMap::rand_with_seed(&serial, [&space, &space], [&space], 1220).unwrap();
@@ -240,26 +247,26 @@ fn parallel_owned_permute_allocates_like_the_serial_owned_path() {
         TensorMap::rand_with_seed(&serial, [&space, &space], [&space], 1221).unwrap();
     let source_parallel: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&parallel, [&space, &space], [&space], 1221).unwrap();
-    let payload_bytes = size_of_val(source_serial.data());
+    let payload_bytes = size_of_val(source_serial.dense_data().unwrap());
     assert!(
-        source_serial.data().len() > 1 << 15,
+        source_serial.dense_data().unwrap().len() > 1 << 15,
         "fixture must exceed the backend's parallel size gate: {}",
-        source_serial.data().len()
+        source_serial.dense_data().unwrap().len()
     );
 
     let warm_serial = source_serial.permute(&[1], &[2, 0]).unwrap();
     let (result_serial, serial_allocations, serial_bytes, serial_zeroed) =
         measure(|| source_serial.permute(&[1], &[2, 0]).unwrap());
-    black_box(result_serial.data());
+    black_box(result_serial.dense_data().unwrap());
 
     let pool = pool();
     let warm_parallel = pool.install(|| source_parallel.permute(&[1], &[2, 0]).unwrap());
-    assert!(warm_serial.data() == warm_parallel.data());
+    assert!(warm_serial.dense_data().unwrap() == warm_parallel.dense_data().unwrap());
     let (result_parallel, parallel_allocations, parallel_bytes, parallel_zeroed) =
         pool.install(|| measure(|| source_parallel.permute(&[1], &[2, 0]).unwrap()));
-    black_box(result_parallel.data());
+    black_box(result_parallel.dense_data().unwrap());
 
-    assert!(result_serial.data() == result_parallel.data());
+    assert!(result_serial.dense_data().unwrap() == result_parallel.dense_data().unwrap());
     assert!(
         serial_bytes >= payload_bytes && parallel_bytes >= payload_bytes,
         "owned outputs allocate at least the payload: {serial_bytes} / {parallel_bytes}"

@@ -170,7 +170,7 @@ macro_rules! measure_pipeline {
                 permuted,
                 sum,
                 tensor.norm(2.0).unwrap(),
-                tensor.data().len(),
+                tensor.dense_data().unwrap().len(),
             ))
         })
     }};
@@ -262,15 +262,21 @@ macro_rules! measure_factorizations {
         }
         // Shape observation, outside the counter: `diagview` allocates.
         let (tensor, q, r, u, s, vh, truncated) = sequence();
-        let produced = tensor.data().len()
-            + q.data().len()
-            + r.data().len()
-            + u.data().len()
-            + s.data().len()
-            + vh.data().len()
-            + truncated.0.data().len()
-            + truncated.1.data().len()
-            + truncated.2.data().len();
+        let produced = tensor.dense_data().unwrap().len()
+            + q.dense_data().unwrap().len()
+            + r.dense_data().unwrap().len()
+            + u.dense_data().unwrap().len()
+            + s.materialize().unwrap().dense_data().unwrap().len()
+            + vh.dense_data().unwrap().len()
+            + truncated.0.dense_data().unwrap().len()
+            + truncated
+                .1
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+                .len()
+            + truncated.2.dense_data().unwrap().len();
         let spectrum_sectors = s.diagview().unwrap().len() + truncated.1.diagview().unwrap().len();
         black_box((tensor, q, r, u, s, vh, truncated));
 

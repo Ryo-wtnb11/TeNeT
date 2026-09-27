@@ -172,7 +172,7 @@ macro_rules! advanced_checks {
         let (t, wide_t) = twin_with!(&rt, $narrow, $wide, [&tall], [&square], |i: &[usize]| {
             hermitian_entry(i[0], i[1])
         });
-        let n = wide_h.data().len();
+        let n = wide_h.dense_data().unwrap().len();
         assert!(
             h.subblock_count() >= $min_blocks,
             "{name}: the fixture must carry at least {} coupled blocks",
@@ -185,15 +185,15 @@ macro_rules! advanced_checks {
         // ---- inv / solve / right solve / pinv: forward errors. -------------
         assert_payloads_agree_scaled(
             &format!("{name}: inv (kappa {kappa_a:e})"),
-            a.inv().unwrap().data(),
-            wide_a.inv().unwrap().data(),
+            a.inv().unwrap().dense_data().unwrap(),
+            wide_a.inv().unwrap().dense_data().unwrap(),
             n,
             kappa_a,
         );
         assert_payloads_agree_scaled(
             &format!("{name}: solve (kappa {kappa_a:e})"),
-            a.solve(&b).unwrap().data(),
-            wide_a.solve(&wide_b).unwrap().data(),
+            a.solve(&b).unwrap().dense_data().unwrap(),
+            wide_a.solve(&wide_b).unwrap().dense_data().unwrap(),
             n,
             kappa_a,
         );
@@ -205,7 +205,10 @@ macro_rules! advanced_checks {
                 .unwrap()
                 .adjoint()
                 .unwrap()
-                .data(),
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             wide_a
                 .adjoint()
                 .unwrap()
@@ -213,30 +216,33 @@ macro_rules! advanced_checks {
                 .unwrap()
                 .adjoint()
                 .unwrap()
-                .data(),
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             n,
             kappa_a,
         );
         assert_payloads_agree_scaled(
             &format!("{name}: pinv (kappa {kappa_t:e})"),
-            t.pinv(1e-4).unwrap().data(),
-            wide_t.pinv(1e-4).unwrap().data(),
-            wide_t.data().len(),
+            t.pinv(1e-4).unwrap().dense_data().unwrap(),
+            wide_t.pinv(1e-4).unwrap().dense_data().unwrap(),
+            wide_t.dense_data().unwrap().len(),
             kappa_t,
         );
 
         // ---- exp: spectral (Hermitian) and Padé (non-Hermitian) routes. ----
         assert_payloads_agree_scaled(
             &format!("{name}: exp, Hermitian route"),
-            h.exp().unwrap().data(),
-            wide_h.exp().unwrap().data(),
+            h.exp().unwrap().dense_data().unwrap(),
+            wide_h.exp().unwrap().dense_data().unwrap(),
             n,
             1.0,
         );
         assert_payloads_agree_scaled(
             &format!("{name}: exp, Padé route"),
-            a.exp().unwrap().data(),
-            wide_a.exp().unwrap().data(),
+            a.exp().unwrap().dense_data().unwrap(),
+            wide_a.exp().unwrap().dense_data().unwrap(),
             n,
             1.0,
         );
@@ -255,15 +261,15 @@ macro_rules! advanced_checks {
         }
         assert_payloads_agree_scaled(
             &format!("{name}: a ∘ a ∘ a"),
-            cube!(a).data(),
-            cube!(wide_a).data(),
+            cube!(a).dense_data().unwrap(),
+            cube!(wide_a).dense_data().unwrap(),
             3 * n,
             1.0,
         );
         assert_payloads_agree_scaled(
             &format!("{name}: h⁻¹ ∘ h⁻¹ (kappa {kappa_h:e})"),
-            inverse_square!(h).data(),
-            inverse_square!(wide_h).data(),
+            inverse_square!(h).dense_data().unwrap(),
+            inverse_square!(wide_h).dense_data().unwrap(),
             2 * n,
             kappa_h * kappa_h,
         );
@@ -280,8 +286,14 @@ macro_rules! advanced_checks {
         let root = compact_s.map_diagonal(|value| value.sqrt()).unwrap();
         assert_payloads_agree_scaled(
             &format!("{name}: sqrt of a compact spectrum"),
-            root.data(),
-            wide_s.map_diagonal(|value| value.sqrt()).unwrap().data(),
+            root.materialize().unwrap().dense_data().unwrap(),
+            wide_s
+                .map_diagonal(|value| value.sqrt())
+                .unwrap()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             n,
             1.0,
         );
@@ -351,8 +363,8 @@ macro_rules! advanced_checks {
             )
         };
         assert_eq!(
-            kept.data().len(),
-            wide_kept.data().len(),
+            kept.materialize().unwrap().dense_data().unwrap().len(),
+            wide_kept.materialize().unwrap().dense_data().unwrap().len(),
             "{name}: truncated eig kept a different number of states than the widened oracle"
         );
         assert!(error > 0.0, "{name}: truncated eig discarded nothing");
@@ -369,15 +381,27 @@ macro_rules! advanced_checks {
             let lazy = a.adjoint().unwrap();
             assert_payloads_agree_scaled(
                 &format!("{name}: inv of a lazy adjoint"),
-                lazy.inv().unwrap().data(),
-                wide_a.adjoint().unwrap().inv().unwrap().data(),
+                lazy.inv().unwrap().dense_data().unwrap(),
+                wide_a
+                    .adjoint()
+                    .unwrap()
+                    .inv()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
                 n,
                 kappa_a,
             );
             assert_payloads_agree_scaled(
                 &format!("{name}: exp of a lazy adjoint"),
-                lazy.exp().unwrap().data(),
-                wide_a.adjoint().unwrap().exp().unwrap().data(),
+                lazy.exp().unwrap().dense_data().unwrap(),
+                wide_a
+                    .adjoint()
+                    .unwrap()
+                    .exp()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
                 n,
                 1.0,
             );

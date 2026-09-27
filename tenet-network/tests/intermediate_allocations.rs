@@ -54,7 +54,7 @@ fn warm_macro_pool_reuses_receiver_sized_dense_payloads() {
         reset_live_registry();
         ENABLED.store(true, Ordering::SeqCst);
         let output = tensor!([c_out; d] = a[a_leg; b_leg] * b[b_leg; c_out] * c[a_leg; d]).unwrap();
-        assert_eq!(output.data().len(), 11 * 11);
+        assert_eq!(output.dense_data().unwrap().len(), 11 * 11);
         drop(output);
         ENABLED.store(false, Ordering::SeqCst);
         assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 0);
@@ -482,7 +482,7 @@ fn temporary_contracted_order_worker() {
     };
     let t = x.contract(y, &[2], &[0], &[0, 1, 2]).unwrap();
     let s = p.contract(q, &[1], &[0], &[0, 1, 2]).unwrap();
-    let t_bytes = std::mem::size_of_val(t.data());
+    let t_bytes = std::mem::size_of_val(t.dense_data().unwrap());
 
     let labels = |names: &[&str]| {
         names
@@ -532,8 +532,8 @@ fn temporary_contracted_order_worker() {
     ];
     for (name, extra_labels, extra_inputs, output, steps, oracle) in cases {
         assert_ne!(
-            oracle.data().len(),
-            t.data().len(),
+            oracle.dense_data().unwrap().len(),
+            t.dense_data().unwrap().len(),
             "{name}: ambiguous size"
         );
         let runtime = Runtime::builder().build().unwrap();
@@ -576,7 +576,12 @@ fn temporary_contracted_order_worker() {
         assert_eq!(REGISTRY_OVERFLOWS.load(Ordering::Relaxed), 0);
         assert_eq!(actual.codomain(), oracle.codomain(), "{name}");
         assert_eq!(actual.domain(), oracle.domain(), "{name}");
-        numerics::assert_slices_close(name, actual.data(), oracle.data(), terms);
+        numerics::assert_slices_close(
+            name,
+            actual.dense_data().unwrap(),
+            oracle.dense_data().unwrap(),
+            terms,
+        );
     }
 }
 
@@ -719,16 +724,17 @@ where
 
     let refs = tensors.iter().collect::<Vec<_>>();
     let output = planned.execute(&refs, workspace).unwrap();
-    assert_eq!(output.data().len(), oracle.len());
+    assert_eq!(output.dense_data().unwrap().len(), oracle.len());
     assert!(
         output
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .zip(oracle)
             .all(|(&lhs, &rhs)| D::close(lhs, rhs)),
         "typed overwrite result differs from the returning oracle"
     );
-    let output_pointer = output.data().as_ptr().cast::<u8>();
+    let output_pointer = output.dense_data().unwrap().as_ptr().cast::<u8>();
     assert!(registered_size(output_pointer).is_some());
     let live_with_output = LIVE_BYTES.load(Ordering::Relaxed);
     let payload_live_with_output = PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed);
@@ -833,7 +839,8 @@ where
         .unwrap()
         .contract(&tensors[2], &[1], &[0], &[0, 1])
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .to_vec();
     let samples = std::array::from_fn::<_, 3, _>(|_| {
         if !reuse {
@@ -912,6 +919,7 @@ fn run_typed_overwrite_worker(dtype: &str, chi: usize, reuse: bool) -> Vec<Alloc
         .collect()
 }
 
+#[allow(deprecated)] // probes the deprecated `data()` cache until #1548
 fn lazy_conj_worker() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
@@ -943,7 +951,7 @@ fn lazy_conj_worker() {
         drop(planned.execute(&refs, &mut workspace).unwrap());
     }
 
-    let parent_pointer = lhs.data().as_ptr();
+    let parent_pointer = lhs.dense_data().unwrap().as_ptr();
     reset_event_counters();
     PAYLOAD_SIZE.store(5 * 7 * std::mem::size_of::<f64>(), Ordering::Relaxed);
     reset_live_registry();
@@ -957,7 +965,7 @@ fn lazy_conj_worker() {
     // PAYLOAD_ALLOC_CALLS includes both allocations and reallocations whose
     // origin or result has the selected size.
     assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 0);
-    assert_eq!(lhs.data().as_ptr(), parent_pointer);
+    assert_eq!(lhs.dense_data().unwrap().as_ptr(), parent_pointer);
     assert_eq!(REGISTRY_OVERFLOWS.load(Ordering::Relaxed), 0);
 
     let compact_bond = space(13);

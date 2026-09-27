@@ -53,7 +53,7 @@ fn typed_static_cache_preserves_hit_clear_and_workspace_stats() {
 
     let second = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
     let warm = plan_cache_stats(&runtime);
-    assert_eq!(first.data(), second.data());
+    assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
     assert_eq!((warm.misses, warm.hits, warm.entries), (1, 1, 1));
     assert_eq!(warm.topology_materializations, 1);
     assert_eq!(warm.workspace_reuses, 1);
@@ -177,7 +177,7 @@ fn persisted_typed_order_roundtrips_into_a_fresh_runtime() {
     let second_space = space(Arc::new(U1FusionRule), 2);
     let (c, d) = pair(&second, &second_space, 80);
     let actual = tensor!([i; k] = c[i; j] * d[j; k]).unwrap();
-    assert_eq!(actual.data(), expected.data());
+    assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
 }
 
 #[test]
@@ -204,8 +204,8 @@ fn concurrent_macro_calls_share_one_plan_and_bound_idle_pool() {
         for handle in handles {
             numerics::assert_slices_close(
                 "macro vs direct contract",
-                handle.join().unwrap().data(),
-                expected.data(),
+                handle.join().unwrap().dense_data().unwrap(),
+                expected.dense_data().unwrap(),
                 8,
             );
         }
@@ -411,7 +411,7 @@ fn enabled_reconfiguration_retains_plans_and_workspaces() {
     let after = plan_cache_stats(&runtime);
     assert_eq!((after.misses, after.hits, after.replans), (1, 1, 0));
     assert_eq!(after.workspace_reuses, before.workspace_reuses + 1);
-    assert_eq!(cold.data(), warm.data());
+    assert_eq!(cold.dense_data().unwrap(), warm.dense_data().unwrap());
 }
 
 #[test]

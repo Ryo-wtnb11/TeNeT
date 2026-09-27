@@ -121,7 +121,7 @@ fn typed_cat_uses_one_output_allocation_without_scratch() {
         })
         .unwrap();
     let warm: TensorMap<U1FusionRule, f64> = lhs.cat(&rhs, Side::Domain).unwrap();
-    let output_payload = std::mem::size_of_val(warm.data());
+    let output_payload = std::mem::size_of_val(warm.dense_data().unwrap());
 
     let (allocated, payload_allocations) =
         measured_allocations(output_payload, || lhs.cat(&rhs, Side::Domain).unwrap());
@@ -156,7 +156,7 @@ fn typed_absorb_clones_the_destination_once() {
     )
     .unwrap();
     black_box(destination.absorb(&source).unwrap());
-    let output_payload = std::mem::size_of_val(destination.data());
+    let output_payload = std::mem::size_of_val(destination.dense_data().unwrap());
 
     let (allocated, payload_allocations) =
         measured_allocations(output_payload, || destination.absorb(&source).unwrap());
@@ -224,8 +224,9 @@ fn typed_lazy_adjoint_cat_allocates_only_the_output_payload() {
     let warm_lhs = lhs_parent.adjoint().unwrap();
     let warm_rhs = rhs_parent.adjoint().unwrap();
     let warm_output = warm_lhs.cat(&warm_rhs, Side::Domain).unwrap();
-    let output_payload = std::mem::size_of_val(warm_output.data());
-    let input_payload = (lhs_parent.data().len() + rhs_parent.data().len()) as u64
+    let output_payload = std::mem::size_of_val(warm_output.dense_data().unwrap());
+    let input_payload = (lhs_parent.dense_data().unwrap().len()
+        + rhs_parent.dense_data().unwrap().len()) as u64
         * std::mem::size_of::<Complex64>() as u64;
 
     let fast_lhs = lhs_parent.adjoint().unwrap();
@@ -237,9 +238,9 @@ fn typed_lazy_adjoint_cat_allocates_only_the_output_payload() {
     let eager_lhs = lhs_parent.adjoint().unwrap();
     let eager_rhs = rhs_parent.adjoint().unwrap();
     let (eager_bytes, _) = measured_allocations(output_payload, || {
-        black_box(eager_lhs.data());
-        black_box(eager_rhs.data());
-        eager_lhs.cat(&eager_rhs, Side::Domain).unwrap()
+        let lhs = eager_lhs.materialize().unwrap();
+        let rhs = eager_rhs.materialize().unwrap();
+        lhs.cat(&rhs, Side::Domain).unwrap()
     });
 
     assert_eq!(payload_allocations, 1);
@@ -285,9 +286,12 @@ fn typed_lazy_adjoint_cat_matches_column_major_oracles_in_every_orientation() {
             lhs_parent
                 .adjoint()
                 .unwrap()
-                .data()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .chain(rhs_owned.data())
+                .chain(rhs_owned.dense_data().unwrap())
                 .copied()
                 .collect::<Vec<_>>(),
         ),
@@ -295,9 +299,18 @@ fn typed_lazy_adjoint_cat_matches_column_major_oracles_in_every_orientation() {
             &lhs_owned,
             &rhs_adjoint,
             lhs_owned
-                .data()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .chain(rhs_parent.adjoint().unwrap().data())
+                .chain(
+                    rhs_parent
+                        .adjoint()
+                        .unwrap()
+                        .materialize()
+                        .unwrap()
+                        .dense_data()
+                        .unwrap(),
+                )
                 .copied()
                 .collect(),
         ),
@@ -307,14 +320,28 @@ fn typed_lazy_adjoint_cat_matches_column_major_oracles_in_every_orientation() {
             lhs_parent
                 .adjoint()
                 .unwrap()
-                .data()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .chain(rhs_parent.adjoint().unwrap().data())
+                .chain(
+                    rhs_parent
+                        .adjoint()
+                        .unwrap()
+                        .materialize()
+                        .unwrap()
+                        .dense_data()
+                        .unwrap(),
+                )
                 .copied()
                 .collect(),
         ),
     ] {
-        assert_eq!(lhs.cat(rhs, Side::Domain).unwrap().data(), expected);
+        assert_eq!(
+            lhs.cat(rhs, Side::Domain).unwrap().dense_data().unwrap(),
+            expected
+        );
     }
 
     let upper_parent: TensorMap<U1FusionRule, Complex64> =
@@ -332,9 +359,15 @@ fn typed_lazy_adjoint_cat_matches_column_major_oracles_in_every_orientation() {
             &upper_adjoint,
             &lower_owned,
             catcodomain_oracle(
-                upper_parent.adjoint().unwrap().data(),
+                upper_parent
+                    .adjoint()
+                    .unwrap()
+                    .materialize()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
                 2,
-                lower_owned.data(),
+                lower_owned.dense_data().unwrap(),
                 4,
             ),
         ),
@@ -342,9 +375,15 @@ fn typed_lazy_adjoint_cat_matches_column_major_oracles_in_every_orientation() {
             &upper_owned,
             &lower_adjoint,
             catcodomain_oracle(
-                upper_owned.data(),
+                upper_owned.dense_data().unwrap(),
                 2,
-                lower_parent.adjoint().unwrap().data(),
+                lower_parent
+                    .adjoint()
+                    .unwrap()
+                    .materialize()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
                 4,
             ),
         ),
@@ -352,13 +391,32 @@ fn typed_lazy_adjoint_cat_matches_column_major_oracles_in_every_orientation() {
             &upper_adjoint,
             &lower_adjoint,
             catcodomain_oracle(
-                upper_parent.adjoint().unwrap().data(),
+                upper_parent
+                    .adjoint()
+                    .unwrap()
+                    .materialize()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
                 2,
-                lower_parent.adjoint().unwrap().data(),
+                lower_parent
+                    .adjoint()
+                    .unwrap()
+                    .materialize()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
                 4,
             ),
         ),
     ] {
-        assert_eq!(upper.cat(lower, Side::Codomain).unwrap().data(), expected);
+        assert_eq!(
+            upper
+                .cat(lower, Side::Codomain)
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            expected
+        );
     }
 }

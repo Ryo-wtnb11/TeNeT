@@ -40,7 +40,7 @@ where
         let mut handle = PreparedCompose::new(&lhs, &rhs).unwrap();
 
         // `terms` = len(A), an upper bound on the inner dimension of a block.
-        let terms = a[0].data().len();
+        let terms = a[0].dense_data().unwrap().len();
         let mut oracles = Vec::new();
         for (x, y) in a.iter().zip(&b) {
             let eager = x.compose(y).unwrap();
@@ -50,7 +50,12 @@ where
                 eager.subblock_count() > unreached + 1,
                 "{label}: several active blocks"
             );
-            assert_close(eager.data(), &oracle, terms, &format!("{label}: eager"));
+            assert_close(
+                eager.dense_data().unwrap(),
+                &oracle,
+                terms,
+                &format!("{label}: eager"),
+            );
             oracles.push(oracle);
         }
 
@@ -60,7 +65,7 @@ where
         for (index, oracle) in oracles.iter().enumerate() {
             let member = output.member(index).unwrap();
             assert_close(
-                member.data(),
+                member.dense_data().unwrap(),
                 oracle,
                 terms,
                 &format!("{label}: member {index}"),
@@ -79,7 +84,7 @@ where
             for (index, oracle) in oracles.iter().enumerate() {
                 let member = dst.member(index).unwrap();
                 assert_close(
-                    member.data(),
+                    member.dense_data().unwrap(),
                     oracle,
                     terms,
                     &format!("{label}: execute_into over {name}, member {index}"),
@@ -156,9 +161,9 @@ fn warm_replay_retains_the_same_bytes_and_a_new_member_count_resizes() {
         for (index, (x, y)) in a.iter().zip(&b).enumerate() {
             let (oracle, _) = compose_oracle(x, y, &x.compose(y).unwrap());
             assert_close(
-                dst.member(index).unwrap().data(),
+                dst.member(index).unwrap().dense_data().unwrap(),
                 &oracle,
-                x.data().len(),
+                x.dense_data().unwrap().len(),
                 &format!("execute_into at B={count}, member {index}"),
             );
         }
@@ -226,7 +231,7 @@ fn mismatched_stacks_are_typed_errors_before_any_work() {
         Err(Error::InvalidArgument(_))
     ));
     assert_eq!(
-        short_dst.member(0).unwrap().data()[0],
+        short_dst.member(0).unwrap().dense_data().unwrap()[0],
         1.0,
         "nothing was written"
     );

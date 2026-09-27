@@ -65,5 +65,8 @@ fn repartition_to_current_split_does_not_allocate() {
 
     assert_eq!(ALLOCATIONS.get(), 0);
     assert!(std::ptr::eq(output.provider(), provider.as_ref()));
-    assert_eq!(output.data().as_ptr(), source.data().as_ptr());
+    assert_eq!(
+        output.dense_data().unwrap().as_ptr(),
+        source.dense_data().unwrap().as_ptr()
+    );
 }

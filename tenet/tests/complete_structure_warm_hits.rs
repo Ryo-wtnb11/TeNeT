@@ -49,22 +49,28 @@ macro_rules! warm_ops {
         let selection =
             LegSelection::try_new(&leg, sectors.iter().map(|s| (s.clone(), 0..1))).unwrap();
         assert_warm_hits(concat!($label, " permute"), || {
-            bits(a.permute(&[1, 2], &[3, 0]).unwrap().data())
+            bits(a.permute(&[1, 2], &[3, 0]).unwrap().dense_data().unwrap())
         });
         assert_warm_hits(concat!($label, " repartition"), || {
-            bits(a.repartition(3).unwrap().data())
+            bits(a.repartition(3).unwrap().dense_data().unwrap())
         });
         assert_warm_hits(concat!($label, " restrict_leg"), || {
-            bits(a.restrict_leg(&[(0, &selection)]).unwrap().data())
+            bits(
+                a.restrict_leg(&[(0, &selection)])
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
+            )
         });
         assert_warm_hits(concat!($label, " compose"), || {
-            bits(a.compose(&square).unwrap().data())
+            bits(a.compose(&square).unwrap().dense_data().unwrap())
         });
         assert_warm_hits(concat!($label, " contract"), || {
             bits(
                 a.contract(&matrix, &[0], &[1], &[0, 1, 2, 3])
                     .unwrap()
-                    .data(),
+                    .dense_data()
+                    .unwrap(),
             )
         });
     }};

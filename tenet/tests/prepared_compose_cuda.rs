@@ -87,7 +87,7 @@ where
         let mut handle = PreparedCompose::new(&lhs, &rhs).unwrap();
 
         // `terms` = len(A), an upper bound on the inner dimension of a block.
-        let terms = a[0].data().len();
+        let terms = a[0].dense_data().unwrap().len();
         let oracles: Vec<_> = a
             .iter()
             .zip(&b)
@@ -96,7 +96,7 @@ where
                 let (oracle, unreached) = compose_oracle(x, y, &eager);
                 assert!(unreached > 0, "{label}: fixture must have inactive blocks");
                 assert_close(
-                    eager.data(),
+                    eager.dense_data().unwrap(),
                     &oracle,
                     terms,
                     &format!("{label}: Host eager"),
@@ -108,7 +108,7 @@ where
             let host = stack.to_host().unwrap();
             for (index, oracle) in oracles.iter().enumerate() {
                 assert_close(
-                    host.member(index).unwrap().data(),
+                    host.member(index).unwrap().dense_data().unwrap(),
                     oracle,
                     terms,
                     &format!("{label}: {what}, member {index}"),
@@ -311,9 +311,9 @@ fn handles_and_an_eager_permute_past_the_default_bound_evict_no_plan() {
             let eager = x.compose(y).unwrap();
             let (oracle, _) = compose_oracle(x, y, &eager);
             assert_close(
-                host.member(index).unwrap().data(),
+                host.member(index).unwrap().dense_data().unwrap(),
                 &oracle,
-                x.data().len(),
+                x.dense_data().unwrap().len(),
                 &format!("execute_into at B={wide}, member {index}"),
             );
         }

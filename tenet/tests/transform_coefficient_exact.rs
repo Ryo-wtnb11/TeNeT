@@ -99,7 +99,7 @@ macro_rules! assert_componentwise {
         assert_non_trivial(
             complex.subblock_count(),
             complex
-                .data()
+                .dense_data().unwrap()
                 .iter()
                 .flat_map(|value| [f64::from(value.re), f64::from(value.im)]),
         );
@@ -112,14 +112,14 @@ macro_rules! assert_componentwise {
             want_real.unwrap(),
             want_imaginary.unwrap(),
         );
-        assert_eq!(got.data().len(), want_real.data().len());
-        assert_eq!(got.data().len(), want_imaginary.data().len());
-        for (position, value) in got.data().iter().enumerate() {
+        assert_eq!(got.dense_data().unwrap().len(), want_real.dense_data().unwrap().len());
+        assert_eq!(got.dense_data().unwrap().len(), want_imaginary.dense_data().unwrap().len());
+        for (position, value) in got.dense_data().unwrap().iter().enumerate() {
             assert_eq!(
                 (value.re.to_bits(), value.im.to_bits()),
                 (
-                    want_real.data()[position].to_bits(),
-                    want_imaginary.data()[position].to_bits(),
+                    want_real.dense_data().unwrap()[position].to_bits(),
+                    want_imaginary.dense_data().unwrap()[position].to_bits(),
                 ),
                 "element {position} of {} <- {}",
                 stringify!([$($codomain),*]),
@@ -218,7 +218,10 @@ fn u1_transforms_scale_componentwise() {
         .unwrap()
         .permute(&[1, 0], &[2])
         .unwrap();
-    assert_eq!(bits(back.data()), bits(source.data()));
+    assert_eq!(
+        bits(back.dense_data().unwrap()),
+        bits(source.dense_data().unwrap())
+    );
 }
 
 #[test]
@@ -297,7 +300,10 @@ fn fermionic_transforms_scale_componentwise() {
 
     // The swap sign is real and involutive: permuting back is the exact input.
     let back = permuted.permute(&[1, 0], &[2]).unwrap();
-    assert_eq!(bits(back.data()), bits(source.data()));
+    assert_eq!(
+        bits(back.dense_data().unwrap()),
+        bits(source.dense_data().unwrap())
+    );
 }
 
 /// Trace (#1407): with `α = 1` the structural coefficient acts on the traced

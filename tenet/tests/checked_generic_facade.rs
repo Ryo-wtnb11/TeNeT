@@ -124,14 +124,16 @@ fn checked_generic_compose_and_inv_powers_match_explicit_real_and_complex_oracle
     ];
     for &(exponent, expected) in real_oracles {
         assert!(power(&real, exponent)
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .zip(expected)
             .all(|(actual, expected)| (actual - expected).abs() < 1e-12));
     }
     for &(exponent, expected) in complex_oracles {
         assert!(power(&complex, exponent)
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .zip(expected)
             .all(|(actual, expected)| (*actual - *expected).norm() < 1e-12));
@@ -174,12 +176,13 @@ where
         let trees = source.subblock_fusion_trees(index).unwrap();
         trees.codomain_vertices()[0].get() == 1
             && trees.domain_vertices()[0].get() == 2
-            && source.data()[source.subblock(index).unwrap().offset()] == D::from_real(1.0)
+            && source.dense_data().unwrap()[source.subblock(index).unwrap().offset()]
+                == D::from_real(1.0)
     }));
 
     let identity: TensorMap<_, D> =
         TensorMap::isomorphism(&runtime, [&leg, &leg], [&leg, &leg]).unwrap();
-    let terms = endomorphism_terms(source.data().len());
+    let terms = endomorphism_terms(source.dense_data().unwrap().len());
     let inverse = source.inv().unwrap();
     assert!(std::ptr::eq(inverse.provider(), provider.as_ref()));
     for product in [
@@ -189,8 +192,8 @@ where
         assert_eq!(product.codomain(), source.codomain());
         numerics::assert_slices_close(
             "inverse against the identity",
-            product.data(),
-            identity.data(),
+            product.dense_data().unwrap(),
+            identity.dense_data().unwrap(),
             terms,
         );
     }
@@ -335,28 +338,35 @@ fn assert_sun_checked_generic_eigh<D>(
             && trees.codomain_vertices()[0].get() == 1
             && trees.domain_vertices()[0].get() == 2
             && source.subblock(index).unwrap().shape() == [2, 2, 2, 2]
-            && source.data()[source.subblock(index).unwrap().offset()] == off_diagonal
+            && source.dense_data().unwrap()[source.subblock(index).unwrap().offset()]
+                == off_diagonal
     }));
 
     let Eigh { d, v } = source.eigh_full().unwrap();
     assert!(std::ptr::eq(d.provider(), provider.as_ref()));
     assert!(std::ptr::eq(v.provider(), provider.as_ref()));
-    let dense_len = d.data().len();
+    let dense_len = d.materialize().unwrap().dense_data().unwrap().len();
     assert!(!format!("{d:?}").contains(&format!("elements: {dense_len}")));
     assert_eq!(v.codomain(), source.codomain());
     assert_eq!(v.domain(), d.codomain());
     for (actual, expected) in source
         .compose(&v)
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(v.compose(&d).unwrap().data())
+        .zip(v.compose(&d).unwrap().dense_data().unwrap())
     {
         assert!(close(*actual, *expected) < 1e-8);
     }
 
     let lazy_vh = v.adjoint().unwrap();
-    let logical_vh = lazy_vh.data().to_vec();
+    let logical_vh = lazy_vh
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
     let position = Cell::new(0usize);
     let codomain = v.domain();
     let domain = v.codomain();
@@ -390,7 +400,7 @@ fn assert_sun_checked_generic_eigh<D>(
     for index in 0..d.subblock_count() {
         let block = d.subblock(index).unwrap();
         for diagonal in 0..block.shape()[0] {
-            let value = d.data()
+            let value = d.materialize().unwrap().dense_data().unwrap()
                 [block.offset() + diagonal * block.strides()[0] + diagonal * block.strides()[1]];
             let scalar = real(value);
             if (scalar - lambda_plus).abs() < 1e-8 {
@@ -518,15 +528,16 @@ where
     let Eig { d, v } = source.eig_full().unwrap();
     assert!(std::ptr::eq(d.provider(), provider.as_ref()));
     assert!(std::ptr::eq(v.provider(), provider.as_ref()));
-    let dense_len = d.data().len();
+    let dense_len = d.materialize().unwrap().dense_data().unwrap().len();
     assert!(!format!("{d:?}").contains(&format!("elements: {dense_len}")));
     let complex_source = D::to_complex(&source);
     let av = complex_source.compose(&v).unwrap();
     let vd = v.compose(&d).unwrap();
     assert!(av
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(vd.data())
+        .zip(vd.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-8));
     let rebuilt = v.compose(&d).unwrap().compose(&v.inv().unwrap()).unwrap();
     assert_same_checked_generic_layout_and_close(&rebuilt, &complex_source, |actual, expected| {
@@ -546,7 +557,7 @@ where
     for index in 0..d.subblock_count() {
         let block = d.subblock(index).unwrap();
         for diagonal in 0..block.shape()[0] {
-            let value = d.data()
+            let value = d.materialize().unwrap().dense_data().unwrap()
                 [block.offset() + diagonal * block.strides()[0] + diagonal * block.strides()[1]];
             if (value - lambda_plus).norm() < 1.0e-8 {
                 assert!(!found_target);
@@ -1086,8 +1097,14 @@ fn checked_generic_diagonal_is_compact_canonical_and_provider_owned() {
     let adjoint = real.adjoint().unwrap();
     assert!(std::ptr::eq(adjoint.provider(), provider.as_ref()));
     assert!(adjoint.network_reuse_class(false) == NetworkReuseClass::Compact);
-    assert_eq!(real.data(), &[1.0, 2.0, 0.0, 0.0, 3.0]);
-    assert_eq!(adjoint.data(), real.data());
+    assert_eq!(
+        real.materialize().unwrap().dense_data().unwrap(),
+        &[1.0, 2.0, 0.0, 0.0, 3.0]
+    );
+    assert_eq!(
+        adjoint.materialize().unwrap().dense_data().unwrap(),
+        real.materialize().unwrap().dense_data().unwrap()
+    );
     assert_eq!(
         tenet::expert::diagonal_spectrum(&adjoint.adjoint().unwrap())
             .unwrap()
@@ -1112,7 +1129,13 @@ fn checked_generic_diagonal_is_compact_canonical_and_provider_owned() {
     .unwrap();
     assert!(std::ptr::eq(complex.provider(), provider.as_ref()));
     assert_eq!(
-        complex.adjoint().unwrap().data()[0],
+        complex
+            .adjoint()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()[0],
         Complex64::new(1.0, -1.0)
     );
 }
@@ -1128,7 +1151,10 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
 
     fn bits<R: TypedSectorAdmission>(tensor: &TensorMap<R, Complex64>) -> Vec<(u64, u64)> {
         tensor
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|z| (z.re.to_bits(), z.im.to_bits()))
             .collect()
@@ -1198,10 +1224,18 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
     };
     // Consumers take the owned compact form as they take `s` itself.
     let Qr { q, r } = adjoint.qr_compact().unwrap();
-    assert_close(q.compose(&r).unwrap().data(), adjoint.data(), "qr");
+    assert_close(
+        q.compose(&r).unwrap().dense_data().unwrap(),
+        adjoint.materialize().unwrap().dense_data().unwrap(),
+        "qr",
+    );
     let Svd { u, s: sigma, vh } = adjoint.svd_compact().unwrap();
     let reconstructed = u.compose(&sigma).unwrap().compose(&vh).unwrap();
-    assert_close(reconstructed.data(), adjoint.data(), "svd");
+    assert_close(
+        reconstructed.dense_data().unwrap(),
+        adjoint.materialize().unwrap().dense_data().unwrap(),
+        "svd",
+    );
     // s^† s is diagonal with |s|^2 entries.
     let gram = adjoint.compose(&s).unwrap();
     let norms = |values: &[(f64, f64)]| -> Vec<Complex64> {
@@ -1225,7 +1259,11 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
         ],
     )
     .unwrap();
-    assert_close(gram.data(), expected_gram.data(), "s^† s");
+    assert_close(
+        gram.dense_data().unwrap(),
+        expected_gram.materialize().unwrap().dense_data().unwrap(),
+        "s^† s",
+    );
 
     // Non-self-dual SU(3) irreps on a dual leg (`[1,0]^2 + [0,1]` dualized to
     // `[0,1]^2 + [1,0]`): the adjoint keeps the space, not its dual, and
@@ -1508,7 +1546,10 @@ fn sun_checked_generic_diagonal_constructs_standalone_compact_blocks() {
         assert_eq!(diagonal.subblock_count(), 1);
         assert_eq!(diagonal.subblock(0).unwrap().shape(), &[2, 2]);
         assert_eq!(diagonal.subblock(0).unwrap().strides(), &[1, 2]);
-        assert_eq!(diagonal.data(), &[2.0, 0.0, 0.0, 3.0]);
+        assert_eq!(
+            diagonal.materialize().unwrap().dense_data().unwrap(),
+            &[2.0, 0.0, 0.0, 3.0]
+        );
     }
 }
 
@@ -1595,7 +1636,10 @@ fn checked_only_provider_uses_ordinary_typed_ownership_and_vertices() {
 
     let clone = tensor.clone();
     assert!(std::ptr::eq(clone.provider(), first.as_ref()));
-    assert_eq!(clone.data().as_ptr(), tensor.data().as_ptr());
+    assert_eq!(
+        clone.dense_data().unwrap().as_ptr(),
+        tensor.dense_data().unwrap().as_ptr()
+    );
 }
 
 #[test]
@@ -1618,7 +1662,10 @@ fn checked_generic_subblocks_decode_transactionally_and_keep_outer_multiplicity(
             assert_eq!(trees.codomain_uncoupled(), &[Label::X, Label::X]);
             assert_eq!(trees.domain_uncoupled(), &[Label::X, Label::X]);
             assert_eq!(values.shape(), &[1, 1, 1, 1]);
-            assert_eq!(values.data().as_ptr(), tensor.data().as_ptr());
+            assert_eq!(
+                values.data().as_ptr(),
+                tensor.dense_data().unwrap().as_ptr()
+            );
             if trees.coupled() == &Label::Vacuum {
                 vacuum_blocks += 1;
                 assert_eq!(trees.codomain_vertices()[0].get(), 1);
@@ -1739,8 +1786,8 @@ fn checked_only_provider_roundtrips_through_typed_cuda_without_algebra_dispatch(
         expected_structure.1,
         [(Label::Vacuum, 1, true), (Label::X, 3, true)]
     );
-    let expected = source.data().to_vec();
-    let expected_vertex_data = vertex_source.data().to_vec();
+    let expected = source.dense_data().unwrap().to_vec();
+    let expected_vertex_data = vertex_source.dense_data().unwrap().to_vec();
     provider.algebra_queries.store(0, Ordering::Relaxed);
     provider.coefficient_queries.store(0, Ordering::Relaxed);
 
@@ -1750,9 +1797,9 @@ fn checked_only_provider_roundtrips_through_typed_cuda_without_algebra_dispatch(
     let vertex_restored = vertex_device.to_host().unwrap();
 
     assert!(std::ptr::eq(restored.provider(), provider.as_ref()));
-    assert_eq!(restored.data(), expected);
+    assert_eq!(restored.dense_data().unwrap(), expected);
     assert_eq!(structure(&restored), expected_structure);
-    assert_eq!(vertex_restored.data(), expected_vertex_data);
+    assert_eq!(vertex_restored.dense_data().unwrap(), expected_vertex_data);
     assert_eq!(block_structure(&vertex_restored), expected_vertex_structure);
     assert_eq!(provider.algebra_queries.load(Ordering::Relaxed), 0);
     assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
@@ -1783,7 +1830,12 @@ fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
     assert!(std::ptr::eq(permuted.provider(), provider.as_ref()));
     let restored = permuted.permute(&[1, 0, 2], &[]).unwrap();
     assert_eq!(snapshot(&restored), source_snapshot);
-    for (actual, expected) in restored.data().iter().zip(source.data()) {
+    for (actual, expected) in restored
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(source.dense_data().unwrap())
+    {
         assert!((actual - expected).abs() <= 1e-12);
     }
 
@@ -1845,12 +1897,13 @@ fn checked_generic_host_add_scale_cover_real_and_complex_payloads() {
         })
         .unwrap();
     let added = source.axpby(2.0, &source, -1.0).unwrap();
-    assert_eq!(added.data(), source.data());
+    assert_eq!(added.dense_data().unwrap(), source.dense_data().unwrap());
     let scaled = source.scale(3.0);
     assert!(scaled
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(source.data())
+        .zip(source.dense_data().unwrap())
         .all(|(a, b)| (*a - 3.0 * *b).abs() < 1e-12));
 
     let complex = source.convert::<Complex64>();
@@ -1861,12 +1914,13 @@ fn checked_generic_host_add_scale_cover_real_and_complex_payloads() {
             Complex64::new(-1.0, 0.0),
         )
         .unwrap();
-    assert_eq!(added.data(), complex.data());
+    assert_eq!(added.dense_data().unwrap(), complex.dense_data().unwrap());
     let scaled = complex.scale(Complex64::new(0.5, -1.0));
     assert!(scaled
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(complex.data())
+        .zip(complex.dense_data().unwrap())
         .all(|(a, b)| (*a - *b * Complex64::new(0.5, -1.0)).norm() < 1e-12));
 }
 
@@ -1882,13 +1936,13 @@ fn checked_generic_add_rejects_runtime_before_layout_without_queries() {
     let right: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&foreign_runtime, [&wide], [&wide], |_, _| 2.0).unwrap();
     reset_provider_queries(&provider);
-    let before = left.data().to_vec();
+    let before = left.dense_data().unwrap().to_vec();
     let error = left.axpby(1.0, &right, 1.0).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Facade(tenet::prelude::Error::RuntimeMismatch)
     ));
-    assert_eq!(left.data(), before.as_slice());
+    assert_eq!(left.dense_data().unwrap(), before.as_slice());
     assert_eq!(provider.algebra_queries.load(Ordering::Relaxed), 0);
     assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
 }
@@ -1904,13 +1958,13 @@ fn checked_generic_add_rejects_layout_mismatch_without_queries() {
     let right: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&wide], [&wide], |_, _| 2.0).unwrap();
     reset_provider_queries(&provider);
-    let before = left.data().to_vec();
+    let before = left.dense_data().unwrap().to_vec();
     let error = left.axpby(1.0, &right, 1.0).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(_))
     ));
-    assert_eq!(left.data(), before.as_slice());
+    assert_eq!(left.dense_data().unwrap(), before.as_slice());
     assert_eq!(provider.algebra_queries.load(Ordering::Relaxed), 0);
     assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
 }
@@ -1926,7 +1980,7 @@ fn checked_generic_add_assign_rejects_runtime_before_layout_and_preserves_receiv
         TensorMap::from_subblock_fn(&runtime, [&narrow], [&narrow], |_, _| 1.0).unwrap();
     let right: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&foreign_runtime, [&wide], [&wide], |_, _| 2.0).unwrap();
-    let before_data = left.data().to_vec();
+    let before_data = left.dense_data().unwrap().to_vec();
     let before_trees = (0..left.subblock_count())
         .map(|index| left.subblock_fusion_trees(index).unwrap())
         .collect::<Vec<_>>();
@@ -1936,7 +1990,7 @@ fn checked_generic_add_assign_rejects_runtime_before_layout_and_preserves_receiv
         error,
         GenericTensorError::Facade(tenet::prelude::Error::RuntimeMismatch)
     ));
-    assert_eq!(left.data(), before_data.as_slice());
+    assert_eq!(left.dense_data().unwrap(), before_data.as_slice());
     assert_eq!(
         (0..left.subblock_count())
             .map(|index| left.subblock_fusion_trees(index).unwrap())
@@ -1957,7 +2011,7 @@ fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
         TensorMap::from_subblock_fn(&runtime, [&narrow], [&narrow], |_, _| 1.0).unwrap();
     let right: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&wide], [&wide], |_, _| 2.0).unwrap();
-    let before_data = left.data().to_vec();
+    let before_data = left.dense_data().unwrap().to_vec();
     let before_trees = (0..left.subblock_count())
         .map(|index| left.subblock_fusion_trees(index).unwrap())
         .collect::<Vec<_>>();
@@ -1967,7 +2021,7 @@ fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
         error,
         GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(_))
     ));
-    assert_eq!(left.data(), before_data.as_slice());
+    assert_eq!(left.dense_data().unwrap(), before_data.as_slice());
     assert_eq!(
         (0..left.subblock_count())
             .map(|index| left.subblock_fusion_trees(index).unwrap())
@@ -1996,11 +2050,17 @@ fn sun_checked_generic_unit_insert_remove_preserves_authority_and_payload() {
             .insert_unit(0, Side::Domain, tenet::typed::Duality::Plain)
             .unwrap();
         assert!(std::ptr::eq(inserted.provider(), provider.as_ref()));
-        assert_eq!(inserted.data().as_ptr(), source.data().as_ptr());
+        assert_eq!(
+            inserted.dense_data().unwrap().as_ptr(),
+            source.dense_data().unwrap().as_ptr()
+        );
         let removed = inserted.remove_unit(0).unwrap();
         assert!(std::ptr::eq(removed.provider(), provider.as_ref()));
-        assert_eq!(removed.data().as_ptr(), source.data().as_ptr());
-        assert_eq!(removed.data(), source.data());
+        assert_eq!(
+            removed.dense_data().unwrap().as_ptr(),
+            source.dense_data().unwrap().as_ptr()
+        );
+        assert_eq!(removed.dense_data().unwrap(), source.dense_data().unwrap());
 
         // The seam decides only the boundary slot `position == codomain_rank`.
         for (seam, codomain_rank) in [(Side::Codomain, 2), (Side::Domain, 1)] {
@@ -2014,7 +2074,10 @@ fn sun_checked_generic_unit_insert_remove_preserves_authority_and_payload() {
             };
             assert!(unit.is_dual(), "{seam:?}");
             assert!(std::ptr::eq(inserted.provider(), provider.as_ref()));
-            assert_eq!(inserted.data().as_ptr(), source.data().as_ptr());
+            assert_eq!(
+                inserted.dense_data().unwrap().as_ptr(),
+                source.dense_data().unwrap().as_ptr()
+            );
         }
     }
 }
@@ -2038,9 +2101,10 @@ fn sun_checked_generic_compact_qr_preserves_provider_and_reconstructs() {
     assert!(std::ptr::eq(r.provider(), provider.as_ref()));
     let rebuilt = q.compose(&r).unwrap();
     assert!(rebuilt
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(source.data())
+        .zip(source.dense_data().unwrap())
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
     let complex = source.convert::<Complex64>();
@@ -2052,9 +2116,10 @@ fn sun_checked_generic_compact_qr_preserves_provider_and_reconstructs() {
     assert!(std::ptr::eq(complex_r.provider(), provider.as_ref()));
     let complex_rebuilt = complex_q.compose(&complex_r).unwrap();
     assert!(complex_rebuilt
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(complex.data())
+        .zip(complex.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
 }
 
@@ -2078,9 +2143,10 @@ fn sun_checked_generic_compact_svd_preserves_provider_and_reconstructs() {
     assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
     let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
     assert!(rebuilt
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(source.data())
+        .zip(source.dense_data().unwrap())
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
     let complex = source.convert::<Complex64>();
@@ -2098,9 +2164,10 @@ fn sun_checked_generic_compact_svd_preserves_provider_and_reconstructs() {
         .compose(&complex_vh)
         .unwrap();
     assert!(complex_rebuilt
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(complex.data())
+        .zip(complex.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
 }
 
@@ -2134,9 +2201,10 @@ fn sun_checked_generic_map_diagonal_keeps_svd_bond_and_principal_branch() {
         assert!(root
             .compose(&root)
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(s.data())
+            .zip(s.dense_data().unwrap())
             .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
         let negative: TensorMap<_, Complex64> = TensorMap::diagonal(
@@ -2181,7 +2249,7 @@ fn checked_generic_map_diagonal_rejects_dense_before_queries_and_preserves_sourc
         })
         .unwrap();
     for tensor in [non_bond, dense_diagonal] {
-        let before = tensor.data().to_vec();
+        let before = tensor.dense_data().unwrap().to_vec();
         reset_provider_queries(&provider);
         match tensor.map_diagonal(f64::sqrt) {
             Err(tenet::typed::Error::InvalidArgument(message)) => {
@@ -2190,7 +2258,7 @@ fn checked_generic_map_diagonal_rejects_dense_before_queries_and_preserves_sourc
             other => panic!("expected dense rejection, got {other:?}"),
         }
         assert_no_provider_queries(&provider);
-        assert_eq!(tensor.data(), before.as_slice());
+        assert_eq!(tensor.dense_data().unwrap(), before.as_slice());
     }
 
     let compact: TensorMap<_, f64> = TensorMap::diagonal(
@@ -2228,9 +2296,10 @@ fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy
     assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
     let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
     assert!(rebuilt
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(source.data())
+        .zip(source.dense_data().unwrap())
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
     let complex = source.convert::<Complex64>();
@@ -2245,9 +2314,10 @@ fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy
         .compose(&complex_vh)
         .unwrap();
     assert!(complex_rebuilt
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(complex.data())
+        .zip(complex.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
 
     let lazy = source.adjoint().unwrap();
@@ -2302,15 +2372,15 @@ where
     // Hand oracle: `source` is `2·1` on its tree diagonal, so both products
     // with the inverse are `1` there, i.e. `source / 2`.
     let expected = source.scale(D::from_real(0.5));
-    let terms = endomorphism_terms(source.data().len());
+    let terms = endomorphism_terms(source.dense_data().unwrap().len());
     for identity in [
         source.compose(&inverse).unwrap(),
         inverse.compose(&source).unwrap(),
     ] {
         numerics::assert_slices_close(
             "inverse product against the identity",
-            identity.data(),
-            expected.data(),
+            identity.dense_data().unwrap(),
+            expected.dense_data().unwrap(),
             terms,
         );
     }
@@ -2391,14 +2461,16 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
         );
     }
     assert!(reconstructed
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(rhs.data())
+        .zip(rhs.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).abs() < 2e-10));
     assert!(reconstructed
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(route_swapped_rhs.data())
+        .zip(route_swapped_rhs.dense_data().unwrap())
         .any(|(actual, swapped)| (*actual - *swapped).abs() > 1e-7));
 
     let complex_divisor = divisor.convert::<Complex64>();
@@ -2416,9 +2488,10 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
         );
     }
     assert!(complex_reconstructed
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(complex_rhs.data())
+        .zip(complex_rhs.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).norm() < 2e-10));
 }
 
@@ -2490,14 +2563,14 @@ fn sun_checked_generic_inv_preflight_counts_outer_multiplicity() {
         |_, _| 1.0,
     )
     .unwrap();
-    let before = rejected.data().to_vec();
+    let before = rejected.dense_data().unwrap().to_vec();
     assert!(matches!(
         rejected.inv(),
         Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
             _
         )))
     ));
-    assert_eq!(rejected.data(), before.as_slice());
+    assert_eq!(rejected.dense_data().unwrap(), before.as_slice());
 }
 
 #[cfg(feature = "racah-generated")]
@@ -2519,9 +2592,10 @@ fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
     assert!(std::ptr::eq(q.provider(), provider.as_ref()));
     let rebuilt = l.compose(&q).unwrap();
     assert!(rebuilt
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(source.data())
+        .zip(source.dense_data().unwrap())
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
     let complex = source.convert::<Complex64>();
@@ -2533,9 +2607,10 @@ fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
     assert!(std::ptr::eq(complex_q.provider(), provider.as_ref()));
     let complex_rebuilt = complex_l.compose(&complex_q).unwrap();
     assert!(complex_rebuilt
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(complex.data())
+        .zip(complex.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
 }
 
@@ -2558,9 +2633,10 @@ fn sun_checked_generic_full_qr_preserves_provider_and_reconstructs() {
     assert!(std::ptr::eq(r.provider(), provider.as_ref()));
     let rebuilt = q.compose(&r).unwrap();
     assert!(rebuilt
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(source.data())
+        .zip(source.dense_data().unwrap())
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
     let complex = source.convert::<Complex64>();
@@ -2572,9 +2648,10 @@ fn sun_checked_generic_full_qr_preserves_provider_and_reconstructs() {
     assert!(std::ptr::eq(complex_r.provider(), provider.as_ref()));
     let complex_rebuilt = complex_q.compose(&complex_r).unwrap();
     assert!(complex_rebuilt
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(complex.data())
+        .zip(complex.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
 }
 
@@ -2636,19 +2713,21 @@ fn assert_checked_generic_eigh_factors<D>(
     assert_eq!(d.codomain(), d.domain());
     assert_eq!(v.domain(), d.codomain());
     assert!(format!("{d:?}").contains("elements: 3"));
-    assert_eq!(d.data().len(), 9);
+    assert_eq!(d.materialize().unwrap().dense_data().unwrap().len(), 9);
 
     for (actual, expected) in source
         .compose(&v)
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(v.compose(&d).unwrap().data())
+        .zip(v.compose(&d).unwrap().dense_data().unwrap())
     {
         assert!(close(*actual, *expected) < 1e-10);
     }
-    let vectors = v.data();
-    let diagonal = d.data();
+    let vectors = v.dense_data().unwrap();
+    let diagonal_materialized = d.materialize().unwrap();
+    let diagonal = diagonal_materialized.dense_data().unwrap();
     for column in 0..3 {
         for row in 0..3 {
             let gram = (0..3).fold(D::from_real(0.0), |sum, inner| {
@@ -2660,7 +2739,7 @@ fn assert_checked_generic_eigh_factors<D>(
                     * diagonal[inner + inner * 3]
                     * adjoint(vectors[column + inner * 3])
             });
-            assert!(close(rebuilt, source.data()[row + column * 3]) < 1e-10);
+            assert!(close(rebuilt, source.dense_data().unwrap()[row + column * 3]) < 1e-10);
         }
     }
 
@@ -2714,7 +2793,13 @@ fn checked_generic_eigh_full_and_trunc_preserve_contract_for_both_dtypes() {
         |value| value.conj(),
     );
     let Eigh { d: complex_d, .. } = complex.eigh_full().unwrap();
-    assert!(complex_d.data().iter().all(|value| value.im == 0.0));
+    assert!(complex_d
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|value| value.im == 0.0));
 }
 
 #[test]
@@ -2942,10 +3027,10 @@ fn checked_generic_eigh_dense_failure_preserves_the_source() {
             [[2.0, 1.0], [1.0, -1.0]][index[0]][index[1]]
         })
         .unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     assert!(source.eigh_full().is_err());
     assert_eq!(calls.load(Ordering::Relaxed), 1);
-    assert_eq!(source.data(), before);
+    assert_eq!(source.dense_data().unwrap(), before);
     assert!(std::ptr::eq(source.provider(), provider.as_ref()));
 }
 
@@ -2967,9 +3052,9 @@ fn checked_generic_eig_dense_and_rank_check_failures_preserve_the_source() {
                 [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
             })
             .unwrap();
-        let before = source.data().to_vec();
+        let before = source.dense_data().unwrap().to_vec();
         assert!(source.eig_full().is_err());
-        assert_eq!(source.data(), before);
+        assert_eq!(source.dense_data().unwrap(), before);
         assert!(std::ptr::eq(source.provider(), provider.as_ref()));
     }
 }
@@ -2984,7 +3069,7 @@ fn checked_generic_eigh_qdim_and_decode_failures_publish_no_pair() {
             [2.0, -1.0][index[0]] * f64::from(index[0] == index[1])
         })
         .unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
 
     // The truncation composition decodes labels in `diagview` and reads the
     // quantum dimension in `find_truncated`; both surface the provider error.
@@ -3008,7 +3093,7 @@ fn checked_generic_eigh_qdim_and_decode_failures_publish_no_pair() {
     ));
     provider.fail_dim.store(false, Ordering::Relaxed);
 
-    assert_eq!(source.data(), before);
+    assert_eq!(source.dense_data().unwrap(), before);
     assert!(std::ptr::eq(source.provider(), provider.as_ref()));
 }
 
@@ -3022,7 +3107,7 @@ fn checked_generic_eig_qdim_and_decode_failures_publish_no_pair() {
             [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
         })
         .unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
 
     // The truncation composition decodes labels in `diagview` and reads the
     // quantum dimension in `find_truncated`; both surface the provider error.
@@ -3046,7 +3131,7 @@ fn checked_generic_eig_qdim_and_decode_failures_publish_no_pair() {
     ));
     provider.fail_dim.store(false, Ordering::Relaxed);
 
-    assert_eq!(source.data(), before);
+    assert_eq!(source.dense_data().unwrap(), before);
     assert!(std::ptr::eq(source.provider(), provider.as_ref()));
 }
 
@@ -3067,7 +3152,11 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
     // eigensolver's rounding (`terms` = the block size 3).
     numerics::assert_slices_close(
         "eigh_full tied spectrum",
-        &[d.data()[0], d.data()[4], d.data()[8]],
+        &[
+            d.materialize().unwrap().dense_data().unwrap()[0],
+            d.materialize().unwrap().dense_data().unwrap()[4],
+            d.materialize().unwrap().dense_data().unwrap()[8],
+        ],
         &[-2.0, 2.0, 1.0],
         3,
     );
@@ -3084,11 +3173,21 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
         &runtime,
         selector_codomain.iter(),
         selector_domain.iter(),
-        |_, index| f64::from(index[0] == index[1] && d.data()[index[0] * 4] == 2.0),
+        |_, index| {
+            f64::from(
+                index[0] == index[1]
+                    && d.materialize().unwrap().dense_data().unwrap()[index[0] * 4] == 2.0,
+            )
+        },
     )
     .unwrap();
     let lazy_vh = v.adjoint().unwrap();
-    let data = lazy_vh.data().to_vec();
+    let data = lazy_vh
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
     let position = Cell::new(0usize);
     let codomain = v.domain();
     let domain = v.codomain();
@@ -3102,7 +3201,7 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
     let projector = v.compose(&selector).unwrap().compose(&vh).unwrap();
     numerics::assert_slices_close(
         "eigh degenerate projector",
-        projector.data(),
+        projector.dense_data().unwrap(),
         &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
         3,
     );
@@ -3149,14 +3248,16 @@ fn assert_checked_generic_eig_reconstruction(
     let av = source.compose(v).unwrap();
     let vd = v.compose(d).unwrap();
     let scale = source
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .map(|value| value.norm())
         .fold(1.0_f64, f64::max);
     assert!(av
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(vd.data())
+        .zip(vd.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).norm() <= 1.0e-11 * scale));
     let rebuilt = v.compose(d).unwrap().compose(&v.inv().unwrap()).unwrap();
     assert_same_checked_generic_layout_and_close(&rebuilt, source, |actual, expected| {
@@ -3178,16 +3279,22 @@ fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
         d: real_d,
         v: real_v,
     } = real.eig_full().unwrap();
-    assert!(real_d.data().iter().any(|value| value.im.abs() > 1.0));
+    assert!(real_d
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.im.abs() > 1.0));
     for column in 0..2 {
         let pivot = (0..2)
             .max_by(|&left, &right| {
-                real_v.data()[left + column * 2]
+                real_v.dense_data().unwrap()[left + column * 2]
                     .norm()
-                    .total_cmp(&real_v.data()[right + column * 2].norm())
+                    .total_cmp(&real_v.dense_data().unwrap()[right + column * 2].norm())
             })
             .unwrap();
-        let pivot = real_v.data()[pivot + column * 2];
+        let pivot = real_v.dense_data().unwrap()[pivot + column * 2];
         assert!(pivot.im.abs() < 1.0e-12);
         assert!(pivot.re >= 0.0);
     }
@@ -3198,7 +3305,13 @@ fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
         d: complex_d,
         v: complex_v,
     } = complex.eig_full().unwrap();
-    assert!(complex_d.data().iter().any(|value| value.im.abs() > 1.0));
+    assert!(complex_d
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.im.abs() > 1.0));
     assert_checked_generic_eig_reconstruction(&complex, &complex_d, &complex_v);
 }
 
@@ -3215,7 +3328,11 @@ fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant()
     let Eig { d, .. } = tied.eig_full().unwrap();
     numerics::assert_slices_close(
         "eig_full tied spectrum",
-        &[d.data()[0], d.data()[4], d.data()[8]],
+        &[
+            d.materialize().unwrap().dense_data().unwrap()[0],
+            d.materialize().unwrap().dense_data().unwrap()[4],
+            d.materialize().unwrap().dense_data().unwrap()[8],
+        ],
         &[
             Complex64::new(-2.0, 0.0),
             Complex64::new(2.0, 0.0),
@@ -3238,7 +3355,10 @@ fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant()
             Complex64::new(
                 f64::from(
                     index[0] == index[1]
-                        && (d.data()[index[0] * 4] - Complex64::new(2.0, 0.0)).norm() < 1.0e-12,
+                        && (d.materialize().unwrap().dense_data().unwrap()[index[0] * 4]
+                            - Complex64::new(2.0, 0.0))
+                        .norm()
+                            < 1.0e-12,
                 ),
                 0.0,
             )
@@ -3252,7 +3372,7 @@ fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant()
         .unwrap();
     numerics::assert_slices_close(
         "eig degenerate projector",
-        projector.data(),
+        projector.dense_data().unwrap(),
         &[
             Complex64::new(1.0, 0.0),
             Complex64::new(0.0, 0.0),
@@ -3373,7 +3493,11 @@ fn checked_generic_svd_truncation_reconstructs_and_preserves_provider() {
     assert!(std::ptr::eq(s.provider(), provider.as_ref()));
     assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
     let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
-    assert!(rebuilt.data().iter().all(|value| value.is_finite()));
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|value| value.is_finite()));
     assert!(s.diagview().unwrap().iter().all(|spectrum| {
         spectrum.values.len() <= 2 && spectrum.values.iter().all(|value| value.is_finite())
     }));
@@ -3419,7 +3543,8 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
     assert_eq!(direct.domain(), source.domain());
     assert_eq!(direct.subblock_count(), source.subblock_count());
     assert!(direct
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .zip(expected)
         .all(|(a, b)| (*a - b).abs() < 1e-12));
@@ -3433,7 +3558,7 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
     // Hand oracle: exp(Nᵀ) = 1 + Nᵀ for the nilpotent N above.
     numerics::assert_slices_close(
         "exp of the lazy adjoint",
-        lazy_exp.data(),
+        lazy_exp.dense_data().unwrap(),
         &[1.0, 1.0, 0.0, 1.0],
         2,
     );
@@ -3448,7 +3573,8 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
     assert_eq!(complex_exp.codomain(), complex.codomain());
     assert_eq!(complex_exp.domain(), complex.domain());
     assert!(complex_exp
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .zip([
             Complex64::new(1.0, 0.0),
@@ -3467,7 +3593,7 @@ fn checked_generic_exp_rejects_nonendomorphism_before_provider_work() {
     let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&wide], [&narrow], |_, _| 1.0).unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     reset_provider_queries(&provider);
     assert!(matches!(
         source.exp(),
@@ -3476,7 +3602,7 @@ fn checked_generic_exp_rejects_nonendomorphism_before_provider_work() {
         )))
     ));
     assert_no_provider_queries(&provider);
-    assert_eq!(source.data(), before.as_slice());
+    assert_eq!(source.dense_data().unwrap(), before.as_slice());
 }
 
 #[test]
@@ -3495,16 +3621,17 @@ fn checked_generic_exp_rejects_early_and_late_nonfinite_sectors_without_publicat
                 }
             })
             .unwrap();
-        let before = source.data().to_vec();
+        let before = source.dense_data().unwrap().to_vec();
         assert!(matches!(
             source.exp(),
             Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
                 _
             )))
         ));
-        assert_eq!(source.data().len(), before.len());
+        assert_eq!(source.dense_data().unwrap().len(), before.len());
         assert!(source
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .zip(&before)
             .all(|(a, b)| a.to_bits() == b.to_bits()));
@@ -3570,9 +3697,10 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
         real_inverse.compose(&real_output).unwrap(),
     ] {
         assert!(product
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(real_identity.data())
+            .zip(real_identity.dense_data().unwrap())
             .all(|(a, b)| (*a - *b).abs() < 2e-10));
     }
     let input = source
@@ -3608,9 +3736,10 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
         inverse.compose(&output).unwrap(),
     ] {
         assert!(product
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(identity.data())
+            .zip(identity.dense_data().unwrap())
             .all(|(a, b)| (*a - *b).norm() < 2e-10));
     }
 }
@@ -3629,14 +3758,14 @@ fn checked_generic_reduction_dimension_failure_is_typed_and_nonpublishing() {
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = source.norm(2.0).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Structure(CheckedGenericStructureError::Provider(ToyError::Algebra))
     ));
-    assert_eq!(source.data(), before.as_slice());
+    assert_eq!(source.dense_data().unwrap(), before.as_slice());
 }
 
 #[test]
@@ -3646,7 +3775,7 @@ fn checked_generic_inv_isomorphism_preflight_failure_is_typed_and_nonpublishing(
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     assert!(matches!(
         source.inv(),
@@ -3654,7 +3783,7 @@ fn checked_generic_inv_isomorphism_preflight_failure_is_typed_and_nonpublishing(
             tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
         ))
     ));
-    assert_eq!(source.data(), before.as_slice());
+    assert_eq!(source.dense_data().unwrap(), before.as_slice());
 }
 
 #[test]
@@ -3664,13 +3793,13 @@ fn checked_generic_inv_destination_admission_failure_is_typed_and_nonpublishing(
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     provider.invalid_style.store(true, Ordering::Relaxed);
     assert!(matches!(
         source.inv(),
         Err(GenericTensorError::Structure(_))
     ));
-    assert_eq!(source.data(), before.as_slice());
+    assert_eq!(source.dense_data().unwrap(), before.as_slice());
 }
 
 #[test]
@@ -3695,31 +3824,31 @@ fn checked_generic_inv_accepts_unequal_isomorphic_spaces_and_rejects_nonisomorph
     assert!(std::ptr::eq(inverse.provider(), provider.as_ref()));
     assert!(source.runtime().shares_state_with(inverse.runtime()));
     // Hand oracle: `source` is `2·1`, so both products are `source / 2`.
-    let terms = endomorphism_terms(source.data().len());
+    let terms = endomorphism_terms(source.dense_data().unwrap().len());
     numerics::assert_slices_close(
         "source ∘ inverse",
-        source.compose(&inverse).unwrap().data(),
-        source.scale(0.5).data(),
+        source.compose(&inverse).unwrap().dense_data().unwrap(),
+        source.scale(0.5).dense_data().unwrap(),
         terms,
     );
     numerics::assert_slices_close(
         "inverse ∘ source",
-        inverse.compose(&source).unwrap().data(),
-        source.scale(0.5).data(),
+        inverse.compose(&source).unwrap().dense_data().unwrap(),
+        source.scale(0.5).dense_data().unwrap(),
         terms,
     );
 
     let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let nonisomorphic: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&narrow], [&x], |_, _| 1.0).unwrap();
-    let before = nonisomorphic.data().to_vec();
+    let before = nonisomorphic.dense_data().unwrap().to_vec();
     assert!(matches!(
         nonisomorphic.inv(),
         Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
             _
         )))
     ));
-    assert_eq!(nonisomorphic.data(), before.as_slice());
+    assert_eq!(nonisomorphic.dense_data().unwrap(), before.as_slice());
 }
 
 #[test]
@@ -3734,30 +3863,44 @@ fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
             for (actual, expected) in aa_plus
                 .compose(input)
                 .unwrap()
-                .data()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .zip(input.data())
+                .zip(input.dense_data().unwrap())
             {
                 assert!(distance(*actual, *expected) < 1e-10);
             }
             for (actual, expected) in a_plus_a
                 .compose(pseudo)
                 .unwrap()
-                .data()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .zip(pseudo.data())
+                .zip(pseudo.dense_data().unwrap())
             {
                 assert!(distance(*actual, *expected) < 1e-10);
             }
-            for (actual, expected) in aa_plus.adjoint().unwrap().data().iter().zip(aa_plus.data()) {
+            for (actual, expected) in aa_plus
+                .adjoint()
+                .unwrap()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(aa_plus.dense_data().unwrap())
+            {
                 assert!(distance(*actual, *expected) < 1e-10);
             }
             for (actual, expected) in a_plus_a
                 .adjoint()
                 .unwrap()
-                .data()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .zip(a_plus_a.data())
+                .zip(a_plus_a.dense_data().unwrap())
             {
                 assert!(distance(*actual, *expected) < 1e-10);
             }
@@ -3773,7 +3916,7 @@ fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
             [[1.0, 0.0, 1.0], [0.0, 2.0, 1.0]][index[0]][index[1]]
         })
         .unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     reset_provider_queries(&provider);
     for rcond in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert!(matches!(
@@ -3784,7 +3927,7 @@ fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
         ));
         assert_no_provider_queries(&provider);
     }
-    assert_eq!(source.data(), before.as_slice());
+    assert_eq!(source.dense_data().unwrap(), before.as_slice());
 
     let pseudo = source.pinv(1e-12).unwrap();
     assert_eq!(pseudo.codomain(), source.domain());
@@ -3823,11 +3966,15 @@ fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
 
     let lazy = source.adjoint().unwrap();
     let lazy_pseudo = lazy.pinv(1e-12).unwrap();
-    for (actual, expected) in lazy_pseudo
-        .data()
-        .iter()
-        .zip(pseudo.adjoint().unwrap().data())
-    {
+    for (actual, expected) in lazy_pseudo.dense_data().unwrap().iter().zip(
+        pseudo
+            .adjoint()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+    ) {
         assert!((actual - expected).abs() < 1e-10);
     }
 }
@@ -3848,8 +3995,16 @@ fn assert_same_checked_generic_layout_and_close<R, D>(
         assert_eq!(actual_block.shape(), expected_block.shape());
         assert_eq!(actual_block.strides(), expected_block.strides());
     }
-    assert_eq!(actual.data().len(), expected.data().len());
-    for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
+    assert_eq!(
+        actual.dense_data().unwrap().len(),
+        expected.materialize().unwrap().dense_data().unwrap().len()
+    );
+    for (&actual, &expected) in actual
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(expected.materialize().unwrap().dense_data().unwrap())
+    {
         assert!(
             close(actual, expected) < 1e-10,
             "{actual:?} != {expected:?}"
@@ -3963,8 +4118,20 @@ fn checked_generic_polar_direction_covers_rectangular_side_only_and_empty_inputs
     assert!(side_only.right_polar().is_err());
     let empty = GradedSpace::try_new(Arc::clone(&provider), []).unwrap();
     let empty_map: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&empty], [&empty]).unwrap();
-    assert!(empty_map.left_polar().unwrap().w.data().is_empty());
-    assert!(empty_map.right_polar().unwrap().p.data().is_empty());
+    assert!(empty_map
+        .left_polar()
+        .unwrap()
+        .w
+        .dense_data()
+        .unwrap()
+        .is_empty());
+    assert!(empty_map
+        .right_polar()
+        .unwrap()
+        .p
+        .dense_data()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -4062,21 +4229,31 @@ fn checked_generic_polar_completes_rank_deficient_and_zero_sectors() {
             } else {
                 p.compose(&w).unwrap()
             };
-            for (&actual, &expected) in rebuilt.data().iter().zip(source.data()) {
+            for (&actual, &expected) in rebuilt
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(source.dense_data().unwrap())
+            {
                 assert!((actual - expected).norm() < 1e-9);
             }
             for col in 0..2 {
                 for row in 0..2 {
                     let gram = (0..2).fold(Complex64::new(0.0, 0.0), |sum, inner| {
                         if left {
-                            sum + w.data()[inner + 2 * row].conj() * w.data()[inner + 2 * col]
+                            sum + w.dense_data().unwrap()[inner + 2 * row].conj()
+                                * w.dense_data().unwrap()[inner + 2 * col]
                         } else {
-                            sum + w.data()[row + 2 * inner] * w.data()[col + 2 * inner].conj()
+                            sum + w.dense_data().unwrap()[row + 2 * inner]
+                                * w.dense_data().unwrap()[col + 2 * inner].conj()
                         }
                     });
                     assert!((gram - Complex64::new(f64::from(row == col), 0.0)).norm() < 1e-10);
                     assert!(
-                        (p.data()[row + 2 * col] - p.data()[col + 2 * row].conj()).norm() < 1e-10
+                        (p.dense_data().unwrap()[row + 2 * col]
+                            - p.dense_data().unwrap()[col + 2 * row].conj())
+                        .norm()
+                            < 1e-10
                     );
                 }
             }
@@ -4159,7 +4336,7 @@ macro_rules! assert_sun_polar_laws {
         if spaces.is_empty() {
             // A rank-0 Gram map sum |w|^2 is real and nonnegative, so unit
             // norm is the scalar identity (no leg names the provider).
-            assert_eq!(gram.data().len(), 1);
+            assert_eq!(gram.dense_data().unwrap().len(), 1);
             assert!((gram.norm(2.0).unwrap() - 1.0).abs() < 1e-9, "W isometry");
         } else {
             let identity = TensorMap::from_subblock_fn(
@@ -4546,7 +4723,7 @@ fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
                 }
             })
             .unwrap();
-        let before = source.data().to_vec();
+        let before = source.dense_data().unwrap().to_vec();
         let result = source.left_polar();
         if fail_svd.is_some() || fail_gemm.is_some() {
             assert!(matches!(
@@ -4562,7 +4739,7 @@ fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
         }
         assert_eq!(svd_calls.load(Ordering::Relaxed), expected_svd);
         assert_eq!(gemm_calls.load(Ordering::Relaxed), expected_gemm);
-        assert_eq!(source.data(), before.as_slice());
+        assert_eq!(source.dense_data().unwrap(), before.as_slice());
     }
 }
 
@@ -4594,7 +4771,7 @@ fn checked_generic_lazy_polar_second_svd_failure_keeps_parent_unchanged() {
                 }
             })
             .unwrap();
-        let before = source.data().to_vec();
+        let before = source.dense_data().unwrap().to_vec();
         let lazy = source.adjoint().unwrap();
         let result = if left {
             lazy.left_polar().map(drop)
@@ -4610,7 +4787,7 @@ fn checked_generic_lazy_polar_second_svd_failure_keeps_parent_unchanged() {
         ));
         assert_eq!(svd_calls.load(Ordering::Relaxed), 2);
         assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(source.data(), before.as_slice());
+        assert_eq!(source.dense_data().unwrap(), before.as_slice());
     }
 }
 
@@ -4634,7 +4811,7 @@ fn checked_generic_polar_provider_error_precedes_dense_work() {
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     assert!(matches!(
         source.left_polar(),
@@ -4644,7 +4821,7 @@ fn checked_generic_polar_provider_error_precedes_dense_work() {
     ));
     assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
     assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(source.data(), before);
+    assert_eq!(source.dense_data().unwrap(), before);
 }
 
 #[test]
@@ -4680,7 +4857,7 @@ fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
                 }
             })
             .unwrap();
-        let before = source.data().to_vec();
+        let before = source.dense_data().unwrap().to_vec();
         let result = source.pinv(0.0);
         if fail_svd.is_some() || fail_gemm.is_some() {
             assert!(matches!(
@@ -4694,7 +4871,7 @@ fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
         }
         assert_eq!(svd_calls.load(Ordering::Relaxed), expected_svd);
         assert_eq!(gemm_calls.load(Ordering::Relaxed), expected_gemm);
-        assert_eq!(source.data(), before.as_slice());
+        assert_eq!(source.dense_data().unwrap(), before.as_slice());
     }
 }
 
@@ -4750,8 +4927,8 @@ fn checked_generic_pinv_uses_a_strict_global_cutoff() {
         .unwrap();
     let pseudo = source.pinv(0.5).unwrap();
     // The cutoff drops the X block exactly; the kept value is 1/4.
-    assert_eq!(pseudo.data()[1], 0.0);
-    numerics::assert_close("pinv kept value", pseudo.data()[0], 0.25, 1);
+    assert_eq!(pseudo.dense_data().unwrap()[1], 0.0);
+    numerics::assert_close("pinv kept value", pseudo.dense_data().unwrap()[0], 0.25, 1);
 }
 
 #[test]
@@ -4773,9 +4950,9 @@ fn checked_generic_pinv_normalized_empty_skips_dense_execution() {
     let empty = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 0)]).unwrap();
     let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&empty], [&empty]).unwrap();
 
-    assert!(source.data().is_empty());
+    assert!(source.dense_data().unwrap().is_empty());
     let pseudo = source.pinv(0.0).unwrap();
-    assert!(pseudo.data().is_empty());
+    assert!(pseudo.dense_data().unwrap().is_empty());
     assert_eq!(pseudo.codomain(), source.domain());
     assert_eq!(pseudo.domain(), source.codomain());
     assert!(std::ptr::eq(pseudo.provider(), provider.as_ref()));
@@ -4802,26 +4979,29 @@ fn checked_generic_null_spaces_cover_rank_cutoff_zero_disjoint_and_side_only_sec
         for null in [source.left_null().unwrap(), source.right_null().unwrap()] {
             assert!(std::ptr::eq(null.provider(), provider.as_ref()));
             if nullity == 0 {
-                assert!(null.data().is_empty());
+                assert!(null.dense_data().unwrap().is_empty());
             } else {
-                assert_eq!(null.data().len(), 2);
+                assert_eq!(null.dense_data().unwrap().len(), 2);
             }
         }
     }
 
     let zero: TensorMap<_, Complex64> = TensorMap::zeros(&runtime, [&x], [&x]).unwrap();
-    assert_eq!(zero.left_null().unwrap().data().len(), 4);
-    assert_eq!(zero.right_null().unwrap().data().len(), 4);
+    assert_eq!(zero.left_null().unwrap().dense_data().unwrap().len(), 4);
+    assert_eq!(zero.right_null().unwrap().dense_data().unwrap().len(), 4);
 
     let vacuum = GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 3)]).unwrap();
     let disjoint: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&x], [&vacuum]).unwrap();
     let left = disjoint.left_null().unwrap();
     let right = disjoint.right_null().unwrap();
-    assert_eq!(left.data(), &[1.0, 0.0, 0.0, 1.0]);
-    assert_eq!(right.data().len(), 9);
+    assert_eq!(left.dense_data().unwrap(), &[1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(right.dense_data().unwrap().len(), 9);
     for column in 0..3 {
         for row in 0..3 {
-            assert_eq!(right.data()[row + 3 * column], f64::from(row == column));
+            assert_eq!(
+                right.dense_data().unwrap()[row + 3 * column],
+                f64::from(row == column)
+            );
         }
     }
 
@@ -4833,8 +5013,21 @@ fn checked_generic_null_spaces_cover_rank_cutoff_zero_disjoint_and_side_only_sec
             f64::from(trees.coupled() == &Label::Vacuum && index[0] == index[1])
         })
         .unwrap();
-    assert_eq!(codomain_side.left_null().unwrap().data().len(), 4);
-    assert!(codomain_side.right_null().unwrap().data().is_empty());
+    assert_eq!(
+        codomain_side
+            .left_null()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .len(),
+        4
+    );
+    assert!(codomain_side
+        .right_null()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -4857,7 +5050,7 @@ fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
     let leg =
         GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     assert!(matches!(
         source.left_null(),
         Err(GenericTensorError::Plan(
@@ -4865,7 +5058,7 @@ fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
         ))
     ));
     assert_eq!(svd_calls.load(Ordering::Relaxed), 2);
-    assert_eq!(source.data(), before);
+    assert_eq!(source.dense_data().unwrap(), before);
     assert!(std::ptr::eq(source.provider(), provider.as_ref()));
 }
 
@@ -4907,7 +5100,8 @@ fn assert_sun_checked_generic_null_projectors<D>(
         let trees = source.subblock_fusion_trees(index).unwrap();
         trees.codomain_vertices()[0].get() == 2
             && trees.domain_vertices()[0].get() == 1
-            && source.data()[source.subblock(index).unwrap().offset()] != D::from_real(0.0)
+            && source.dense_data().unwrap()[source.subblock(index).unwrap().offset()]
+                != D::from_real(0.0)
     }));
     let outer_multiplicity_sectors = (0..source.subblock_count())
         .filter_map(|index| {
@@ -4973,7 +5167,13 @@ fn assert_sun_checked_generic_null_projectors<D>(
             assert_eq!(actual.shape(), expected.shape());
             assert_eq!(actual.strides(), expected.strides());
         }
-        for (index, (&actual, &expected)) in actual.data().iter().zip(expected.data()).enumerate() {
+        for (index, (&actual, &expected)) in actual
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(expected.dense_data().unwrap())
+            .enumerate()
+        {
             assert!(
                 close(actual, expected) < 1e-9,
                 "{name} projector mismatch at raw {index}: {actual:?} != {expected:?}"
@@ -4981,10 +5181,15 @@ fn assert_sun_checked_generic_null_projectors<D>(
         }
     }
 
-    for value in left_adjoint.compose(&source).unwrap().data() {
+    for value in left_adjoint.compose(&source).unwrap().dense_data().unwrap() {
         assert!(close(*value, D::from_real(0.0)) < 1e-9);
     }
-    for value in source.compose(&right_adjoint).unwrap().data() {
+    for value in source
+        .compose(&right_adjoint)
+        .unwrap()
+        .dense_data()
+        .unwrap()
+    {
         assert!(close(*value, D::from_real(0.0)) < 1e-9);
     }
     for gram in [
@@ -4996,7 +5201,7 @@ fn assert_sun_checked_generic_null_projectors<D>(
             for column in 0..block.shape()[1] {
                 for row in 0..block.shape()[0] {
                     let expected = D::from_real(f64::from(row == column));
-                    let actual = gram.data()
+                    let actual = gram.dense_data().unwrap()
                         [block.offset() + row * block.strides()[0] + column * block.strides()[1]];
                     assert!(close(actual, expected) < 1e-9);
                 }
@@ -5012,9 +5217,9 @@ fn assert_sun_checked_generic_null_projectors<D>(
     // adjoint of the parent's right null space, gauge included.
     numerics::assert_slices_close(
         "left_null of the lazy adjoint",
-        lazy_left.data(),
-        expected_lazy_left.data(),
-        endomorphism_terms(source.data().len()),
+        lazy_left.dense_data().unwrap(),
+        expected_lazy_left.dense_data().unwrap(),
+        endomorphism_terms(source.dense_data().unwrap().len()),
     );
 }
 
@@ -5116,7 +5321,12 @@ fn assert_sun_checked_generic_pinv<D>(
         assert_eq!(actual.shape(), expected_block.shape());
         assert_eq!(actual.strides(), expected_block.strides());
     }
-    for (actual, expected) in pseudo.data().iter().zip(expected.data()) {
+    for (actual, expected) in pseudo
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(expected.dense_data().unwrap())
+    {
         assert!(close(*actual, *expected) < 1e-9);
     }
     assert!((0..source.subblock_count()).any(|index| {
@@ -5124,47 +5334,66 @@ fn assert_sun_checked_generic_pinv<D>(
         trees.codomain_vertices()[0].get() == 2
             && trees.domain_vertices()[0].get() == 1
             && source.subblock(index).unwrap().shape() == [2, 2, 2, 2]
-            && source.data()[source.subblock(index).unwrap().offset()] == off_diagonal
+            && source.dense_data().unwrap()[source.subblock(index).unwrap().offset()]
+                == off_diagonal
     }));
     let aa_plus = source.compose(&pseudo).unwrap();
     let a_plus_a = pseudo.compose(&source).unwrap();
     for (actual, expected) in aa_plus
         .compose(&source)
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(source.data())
+        .zip(source.dense_data().unwrap())
     {
         assert!(close(*actual, *expected) < 1e-9);
     }
     for (actual, expected) in a_plus_a
         .compose(&pseudo)
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(pseudo.data())
+        .zip(pseudo.dense_data().unwrap())
     {
         assert!(close(*actual, *expected) < 1e-9);
     }
-    for (actual, expected) in aa_plus.adjoint().unwrap().data().iter().zip(aa_plus.data()) {
+    for (actual, expected) in aa_plus
+        .adjoint()
+        .unwrap()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(aa_plus.dense_data().unwrap())
+    {
         assert!(close(*actual, *expected) < 1e-9);
     }
     for (actual, expected) in a_plus_a
         .adjoint()
         .unwrap()
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(a_plus_a.data())
+        .zip(a_plus_a.dense_data().unwrap())
     {
         assert!(close(*actual, *expected) < 1e-9);
     }
     let lazy = source.adjoint().unwrap();
     let lazy_pseudo = lazy.pinv(1e-12).unwrap();
-    for (actual, expected) in lazy_pseudo
-        .data()
-        .iter()
-        .zip(pseudo.adjoint().unwrap().data())
-    {
+    for (actual, expected) in lazy_pseudo.dense_data().unwrap().iter().zip(
+        pseudo
+            .adjoint()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+    ) {
         assert!(close(*actual, *expected) < 1e-9);
     }
 }
@@ -5303,14 +5532,14 @@ fn checked_generic_inv_singular_early_and_late_sectors_preserve_source() {
             .map(|index| *source.subblock_fusion_trees(index).unwrap().coupled())
             .collect::<Vec<_>>();
         assert_eq!(labels, [Label::Vacuum, Label::X]);
-        let before = source.data().to_vec();
+        let before = source.dense_data().unwrap().to_vec();
         assert!(matches!(
             source.inv(),
             Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
                 _
             )))
         ));
-        assert_eq!(source.data(), before.as_slice());
+        assert_eq!(source.dense_data().unwrap(), before.as_slice());
     }
 }
 
@@ -5351,9 +5580,10 @@ fn checked_generic_left_solve_accepts_distinct_provider_arcs_and_rectangular_rhs
     assert!(divisor
         .compose(&solution)
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(rhs.data())
+        .zip(rhs.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).abs() < 1e-11));
 
     let complex_divisor = divisor.convert::<Complex64>();
@@ -5366,9 +5596,10 @@ fn checked_generic_left_solve_accepts_distinct_provider_arcs_and_rectangular_rhs
     assert!(complex_divisor
         .compose(&complex_solution)
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(complex_rhs.data())
+        .zip(complex_rhs.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).norm() < 1e-11));
 }
 
@@ -5382,14 +5613,14 @@ fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
         TensorMap::from_subblock_fn(&runtime, [&x], [&narrow], |_, _| 1.0).unwrap();
     let rhs: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&x], [&x], |_, _| 1.0).unwrap();
-    let before = lhs.data().to_vec();
+    let before = lhs.dense_data().unwrap().to_vec();
     assert!(matches!(
         lhs.solve(&rhs),
         Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
             _
         )))
     ));
-    assert_eq!(lhs.data(), before.as_slice());
+    assert_eq!(lhs.dense_data().unwrap(), before.as_slice());
 
     let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let runtime_rhs: TensorMap<_, f64> =
@@ -5445,14 +5676,14 @@ fn checked_generic_left_solve_singular_sectors_are_nonpublishing() {
                 f64::from(trees.coupled() != &target)
             })
             .unwrap();
-        let before = divisor.data().to_vec();
+        let before = divisor.dense_data().unwrap().to_vec();
         assert!(matches!(
             divisor.solve(&rhs),
             Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
                 _
             )))
         ));
-        assert_eq!(divisor.data(), before.as_slice());
+        assert_eq!(divisor.dense_data().unwrap(), before.as_slice());
     }
 }
 
@@ -5505,7 +5736,12 @@ fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
         reset_provider_queries(&provider);
         let solution = lhs.solve(&right).unwrap();
         assert!(std::ptr::eq(solution.provider(), provider.as_ref()));
-        numerics::assert_slices_close("solve", solution.data(), expected.data(), 2);
+        numerics::assert_slices_close(
+            "solve",
+            solution.dense_data().unwrap(),
+            expected.dense_data().unwrap(),
+            2,
+        );
         assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 8);
     }
 }
@@ -5517,7 +5753,7 @@ fn checked_generic_compact_qr_failure_is_typed_and_nonpublishing() {
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = source.qr_compact().unwrap_err();
     assert!(matches!(
@@ -5526,7 +5762,7 @@ fn checked_generic_compact_qr_failure_is_typed_and_nonpublishing() {
             ToyError::Algebra
         ))
     ));
-    assert_eq!(source.data(), before.as_slice());
+    assert_eq!(source.dense_data().unwrap(), before.as_slice());
 }
 
 #[test]
@@ -5536,7 +5772,7 @@ fn checked_generic_compact_svd_failure_is_typed_and_nonpublishing() {
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = source.svd_compact().unwrap_err();
     assert!(matches!(
@@ -5545,7 +5781,7 @@ fn checked_generic_compact_svd_failure_is_typed_and_nonpublishing() {
             ToyError::Algebra
         ))
     ));
-    assert_eq!(source.data(), before.as_slice());
+    assert_eq!(source.dense_data().unwrap(), before.as_slice());
 }
 
 #[test]
@@ -5555,7 +5791,7 @@ fn checked_generic_compact_lq_failure_is_typed_and_nonpublishing() {
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = source.lq_compact().unwrap_err();
     assert!(matches!(
@@ -5564,7 +5800,7 @@ fn checked_generic_compact_lq_failure_is_typed_and_nonpublishing() {
             ToyError::Algebra
         ))
     ));
-    assert_eq!(source.data(), before.as_slice());
+    assert_eq!(source.dense_data().unwrap(), before.as_slice());
 }
 
 #[test]
@@ -5574,7 +5810,7 @@ fn checked_generic_full_qr_failure_is_typed_and_nonpublishing() {
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = source.qr_full().unwrap_err();
     assert!(matches!(
@@ -5583,7 +5819,7 @@ fn checked_generic_full_qr_failure_is_typed_and_nonpublishing() {
             ToyError::Algebra
         ))
     ));
-    assert_eq!(source.data(), before.as_slice());
+    assert_eq!(source.dense_data().unwrap(), before.as_slice());
 }
 
 #[test]
@@ -5597,11 +5833,15 @@ fn checked_generic_full_lq_reconstructs_and_preserves_provider() {
     assert!(std::ptr::eq(l.provider(), provider.as_ref()));
     assert!(std::ptr::eq(q.provider(), provider.as_ref()));
     let rebuilt = l.compose(&q).unwrap();
-    assert_eq!(rebuilt.data().len(), source.data().len());
+    assert_eq!(
+        rebuilt.dense_data().unwrap().len(),
+        source.dense_data().unwrap().len()
+    );
     assert!(rebuilt
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(source.data())
+        .zip(source.dense_data().unwrap())
         .all(|(actual, expected)| (actual - expected).abs() < 1e-12));
 }
 
@@ -5627,7 +5867,7 @@ fn checked_generic_full_lq_failure_is_typed_and_nonpublishing() {
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
-    let before = source.data().to_vec();
+    let before = source.dense_data().unwrap().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = source.lq_full().unwrap_err();
     assert!(matches!(
@@ -5636,7 +5876,7 @@ fn checked_generic_full_lq_failure_is_typed_and_nonpublishing() {
             ToyError::Algebra
         ))
     ));
-    assert_eq!(source.data(), before.as_slice());
+    assert_eq!(source.dense_data().unwrap(), before.as_slice());
 }
 
 #[test]
@@ -5660,7 +5900,7 @@ fn checked_only_contract_and_compose_keep_left_authority() {
         source.compose(&identity).unwrap(),
     ] {
         assert!(std::ptr::eq(output.provider(), left_provider.as_ref()));
-        assert_eq!(output.data(), source.data());
+        assert_eq!(output.dense_data().unwrap(), source.dense_data().unwrap());
         for index in 0..source.subblock_count() {
             assert_eq!(
                 output.subblock_fusion_trees(index).unwrap(),
@@ -5739,7 +5979,10 @@ fn checked_only_identity_transforms_make_no_provider_queries() {
         source.repartition(2).unwrap(),
     ] {
         assert!(std::ptr::eq(output.provider(), provider.as_ref()));
-        assert_eq!(output.data().as_ptr(), source.data().as_ptr());
+        assert_eq!(
+            output.dense_data().unwrap().as_ptr(),
+            source.dense_data().unwrap().as_ptr()
+        );
     }
     for counter in [
         &provider.identity_queries,
@@ -5966,7 +6209,7 @@ fn checked_only_otimes_matches_fixed_heterogeneous_nonunit_oracle() {
         4026.0, 2431.0, 2442.0, 4862.0, 4884.0, 7293.0, 7326.0, 3025.0, 3050.0, 6050.0, 6100.0,
         9075.0, 9150.0, 5525.0, 5550.0, 11050.0, 11100.0, 16575.0, 16650.0,
     ];
-    assert_eq!(output.data(), EXPECTED_DATA);
+    assert_eq!(output.dense_data().unwrap(), EXPECTED_DATA);
 
     // The first stored value has two nonzero root-multiplicity paths:
     // μ=1 contributes 111*1 and μ=2 contributes 111*4. The fixed result
@@ -5996,7 +6239,7 @@ fn checked_only_otimes_matches_fixed_heterogeneous_nonunit_oracle() {
     first.reset_commit_spy();
     let complex = complex_lhs.otimes(&complex_rhs).unwrap();
     assert!(std::ptr::eq(complex.provider(), first.as_ref()));
-    for (actual, expected) in complex.data().iter().zip(EXPECTED_DATA) {
+    for (actual, expected) in complex.dense_data().unwrap().iter().zip(EXPECTED_DATA) {
         assert!((*actual - Complex64::new(5.0, -1.0) * expected).norm() <= 1e-12);
     }
 }
@@ -6044,8 +6287,15 @@ fn identity_mismatch_precedes_algebra_queries_and_both_dtypes_fill() {
         TensorMap::rand_with_seed(&runtime, [&left, &left], [&left], 7).unwrap();
     let complex: TensorMap<_, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&left, &left], [&left], 7).unwrap();
-    assert_eq!(real.data().len(), complex.data().len());
-    assert!(complex.data().iter().any(|value| value.im != 0.0));
+    assert_eq!(
+        real.dense_data().unwrap().len(),
+        complex.dense_data().unwrap().len()
+    );
+    assert!(complex
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.im != 0.0));
 }
 
 #[test]
@@ -6065,7 +6315,10 @@ fn failed_checked_admission_leaves_the_provider_usable() {
         TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg], 7).unwrap();
     let control =
         TensorMap::<_, f64>::rand_with_seed(&runtime, [&fresh, &fresh], [&fresh], 7).unwrap();
-    assert_eq!(after_failure.data(), control.data());
+    assert_eq!(
+        after_failure.dense_data().unwrap(),
+        control.dense_data().unwrap()
+    );
     assert_eq!(after_failure.codomain(), control.codomain());
 }
 
@@ -6203,8 +6456,8 @@ fn checked_generic_cat_precedence_and_admission_failure_are_typed_nonpublishing(
     .unwrap();
     let bad_arguments: TensorMap<_, f64> =
         TensorMap::zeros(&runtime, [&equal_leg, &equal_leg], [&equal_leg, &equal_leg]).unwrap();
-    let lhs_before = lhs.data().to_vec();
-    let rhs_before = valid_rhs.data().to_vec();
+    let lhs_before = lhs.dense_data().unwrap().to_vec();
+    let rhs_before = valid_rhs.dense_data().unwrap().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     for counter in [
         &provider.identity_queries,
@@ -6246,8 +6499,8 @@ fn checked_generic_cat_precedence_and_admission_failure_are_typed_nonpublishing(
         ))
     ));
     assert_eq!(provider.commit_count.load(Ordering::Relaxed), 0);
-    assert_eq!(lhs.data(), lhs_before);
-    assert_eq!(valid_rhs.data(), rhs_before);
+    assert_eq!(lhs.dense_data().unwrap(), lhs_before);
+    assert_eq!(valid_rhs.dense_data().unwrap(), rhs_before);
 }
 
 #[cfg(feature = "racah-generated")]
@@ -6314,7 +6567,7 @@ fn assert_sun_cat_values<D>(
                 .map(|(axis, index)| (axis + 1) * index)
                 .sum::<usize>();
             assert_eq!(
-                output.data()[position],
+                output.dense_data().unwrap()[position],
                 value(base + sun_cat_marker(&trees) + index_marker)
             );
         }
@@ -6375,7 +6628,16 @@ where
         .unwrap()
         .cat(&domain_rhs.adjoint().unwrap(), Side::Codomain)
         .unwrap();
-    assert_eq!(lazy_domain.data(), domain.adjoint().unwrap().data());
+    assert_eq!(
+        lazy_domain.dense_data().unwrap(),
+        domain
+            .adjoint()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+    );
 
     let codomain_lhs: TensorMap<_, D> = TensorMap::from_subblock_fn(
         &runtime,
@@ -6400,7 +6662,16 @@ where
         .unwrap()
         .cat(&codomain_rhs.adjoint().unwrap(), Side::Domain)
         .unwrap();
-    assert_eq!(lazy_codomain.data(), codomain.adjoint().unwrap().data());
+    assert_eq!(
+        lazy_codomain.dense_data().unwrap(),
+        codomain
+            .adjoint()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+    );
 }
 
 #[cfg(feature = "racah-generated")]
@@ -6442,7 +6713,7 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
             assert_eq!(trees.codomain_vertices()[0].get(), index + 1);
             assert_eq!(tensor.subblock(index).unwrap().shape(), &[1, 1, 1]);
         }
-        assert_eq!(tensor.data(), &[1.0, 2.0]);
+        assert_eq!(tensor.dense_data().unwrap(), &[1.0, 2.0]);
 
         let identity: TensorMap<_, f64> =
             TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
@@ -6451,7 +6722,7 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
             tensor.compose(&identity).unwrap(),
         ] {
             assert!(std::ptr::eq(output.provider(), provider.as_ref()));
-            assert_eq!(output.data(), tensor.data());
+            assert_eq!(output.dense_data().unwrap(), tensor.dense_data().unwrap());
             for index in 0..tensor.subblock_count() {
                 assert_eq!(
                     output.subblock_fusion_trees(index).unwrap(),
@@ -6508,24 +6779,26 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
             ),
             _ => unreachable!(),
         };
-        assert_eq!(product.data().len(), expected_len);
-        let sum = product.data().iter().sum::<f64>();
+        assert_eq!(product.dense_data().unwrap().len(), expected_len);
+        let sum = product.dense_data().unwrap().iter().sum::<f64>();
         let weighted = product
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .enumerate()
             .map(|(index, value)| (index + 1) as f64 * value)
             .sum::<f64>();
         assert!((sum - expected_sum).abs() <= 1e-10);
         assert!((weighted - expected_weighted).abs() <= 1e-9);
-        for (&actual, &expected) in product.data().iter().zip(expected_prefix) {
+        for (&actual, &expected) in product.dense_data().unwrap().iter().zip(expected_prefix) {
             assert!((actual - expected).abs() <= 1e-10);
         }
         let mut adjoint_root_vertices = Vec::new();
         for index in 0..product.subblock_count() {
             let trees = product.subblock_fusion_trees(index).unwrap();
             if trees.coupled() == &adjoint
-                && product.data()[product.subblock(index).unwrap().offset()].abs() > 1e-10
+                && product.dense_data().unwrap()[product.subblock(index).unwrap().offset()].abs()
+                    > 1e-10
             {
                 assert_eq!(trees.codomain_uncoupled(), vec![adjoint.clone(); 4]);
                 assert_eq!(trees.domain_uncoupled(), vec![adjoint.clone(); 2]);
@@ -6562,7 +6835,12 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
         ] {
             assert!(std::ptr::eq(restored.provider(), provider.as_ref()));
             assert_eq!(snapshot(&restored), source_snapshot);
-            for (actual, expected) in restored.data().iter().zip(tensor.data()) {
+            for (actual, expected) in restored
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(tensor.dense_data().unwrap())
+            {
                 assert!((actual - expected).abs() <= 1e-10);
             }
         }
@@ -6639,7 +6917,7 @@ fn sun_checked_generic_transforms_reuse_the_runtime_completed_store() {
             assert_eq!(warm.entries(), 1);
             assert_eq!(warm.misses(), 1);
             assert_eq!(warm.hits(), 1);
-            assert_eq!(repeated.data(), first.data());
+            assert_eq!(repeated.dense_data().unwrap(), first.dense_data().unwrap());
             assert!(std::ptr::eq(first.provider(), provider.as_ref()));
             assert!(std::ptr::eq(repeated.provider(), provider.as_ref()));
             for index in 0..first.subblock_count() {
@@ -6718,8 +6996,18 @@ macro_rules! assert_checked_lazy_adjoint_matches_literal {
         let parent_snapshot = snapshot!(parent);
         let lazy_snapshot = snapshot!(lazy);
         let literal = common::literal_adjoint_payload(&parent_snapshot, &lazy_snapshot, $conj);
-        assert_eq!(literal.len(), lazy.data().len());
-        for (actual, expected) in lazy.data().iter().zip(&literal) {
+        assert_eq!(
+            literal.len(),
+            lazy.materialize().unwrap().dense_data().unwrap().len()
+        );
+        for (actual, expected) in lazy
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(&literal)
+        {
             assert!($close(*actual, *expected), "{actual:?} != {expected:?}");
         }
         let codomain = lazy.codomain();
@@ -6827,7 +7115,11 @@ fn checked_multiplicity_lazy_adjoint_matches_the_literal_kernel_for_real_and_com
     }
 
     let two_sided = checked_multiplicity_lazy_fixture(&runtime, &provider);
-    assert!(two_sided.data().iter().any(|value| value.im != 0.0));
+    assert!(two_sided
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|value| value.im != 0.0));
     assert_checked_lazy_adjoint_matches_literal!(
         two_sided.clone(),
         |z: Complex64| z.conj(),
@@ -7299,22 +7591,31 @@ fn checked_generic_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
     };
     for (alpha, beta) in [(0.0, 1.0), (1.0, 0.0), (0.0, 0.0), (2.0, -1.0)] {
         let want: Vec<f64> = x
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(y.data())
+            .zip(y.dense_data().unwrap())
             .map(|(&a, &b)| scale(a, alpha) + scale(b, beta))
             .collect();
-        same(x.axpby(alpha, &y, beta).unwrap().data(), &want);
+        same(
+            x.axpby(alpha, &y, beta).unwrap().dense_data().unwrap(),
+            &want,
+        );
         let mut assigned = x.clone();
         assigned.axpby_assign(alpha, &y, beta).unwrap();
-        same(assigned.data(), &want);
+        same(assigned.dense_data().unwrap(), &want);
     }
     for factor in [0.0, 2.0] {
-        let want: Vec<f64> = x.data().iter().map(|&a| scale(a, factor)).collect();
-        same(x.scale(factor).data(), &want);
+        let want: Vec<f64> = x
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|&a| scale(a, factor))
+            .collect();
+        same(x.scale(factor).dense_data().unwrap(), &want);
         let mut assigned = x.clone();
         assigned.scale_assign(factor);
-        same(assigned.data(), &want);
+        same(assigned.dense_data().unwrap(), &want);
     }
 }
 
@@ -7367,29 +7668,45 @@ fn check_generic_structural_constructors<R>(
         let oracle = equal_tree_identity(runtime, &legs);
         let real: TensorMap<R, f64> =
             TensorMap::isomorphism(runtime, legs.iter().copied(), legs.iter().copied()).unwrap();
-        assert_eq!(real.data(), oracle.data());
+        assert_eq!(real.dense_data().unwrap(), oracle.dense_data().unwrap());
         let complex: TensorMap<R, Complex64> =
             TensorMap::isomorphism(runtime, legs.iter().copied(), legs.iter().copied()).unwrap();
-        assert_eq!(complex.data(), oracle.convert::<Complex64>().data());
+        assert_eq!(
+            complex.dense_data().unwrap(),
+            oracle.convert::<Complex64>().dense_data().unwrap()
+        );
     }
 
     let t: TensorMap<R, f64> =
         TensorMap::from_subblock_fn(runtime, [leg, leg], [leg], |_, ij| operand(ij)).unwrap();
     let left: TensorMap<R, f64> = TensorMap::isomorphism(runtime, [leg, leg], [leg, leg]).unwrap();
     let right: TensorMap<R, f64> = TensorMap::isomorphism(runtime, [leg], [leg]).unwrap();
-    assert_eq!(left.compose(&t).unwrap().data(), t.data());
-    assert_eq!(t.compose(&right).unwrap().data(), t.data());
+    assert_eq!(
+        left.compose(&t).unwrap().dense_data().unwrap(),
+        t.dense_data().unwrap()
+    );
+    assert_eq!(
+        t.compose(&right).unwrap().dense_data().unwrap(),
+        t.dense_data().unwrap()
+    );
 
     let w: TensorMap<R, f64> = TensorMap::isometry(runtime, [leg, leg], [leg]).unwrap();
     // Checked-Generic compose takes owned operands, so the lazy adjoint's
     // logical payload is copied into an owned tensor in stored order.
-    let logical = w.adjoint().unwrap().data().to_vec();
+    let logical = w
+        .adjoint()
+        .unwrap()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
     let mut next = logical.into_iter();
     let w_dagger: TensorMap<R, f64> =
         TensorMap::from_subblock_fn(runtime, [leg], [leg, leg], |_, _| next.next().unwrap())
             .unwrap();
     let gram = w_dagger.compose(&w).unwrap();
-    assert_eq!(gram.data(), right.data());
+    assert_eq!(gram.dense_data().unwrap(), right.dense_data().unwrap());
     let error = TensorMap::<R, f64>::isomorphism(runtime, [leg, leg], [leg]).unwrap_err();
     assert!(error.to_string().contains("not isomorphic"), "{error}");
     let error = TensorMap::<R, f64>::isometry(runtime, [leg], [leg, leg]).unwrap_err();

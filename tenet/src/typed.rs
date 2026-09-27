@@ -988,7 +988,7 @@ where
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?;
     /// let b: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 1)?;
-    /// assert_eq!(a.solve(&b)?.data(), b.data());
+    /// assert_eq!(a.solve(&b)?.dense_data()?, b.dense_data()?);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     ///
@@ -1060,6 +1060,9 @@ where
     pub fn to_physical_dense(
         &self,
     ) -> Result<PhysicalDense<D>, PhysicalDenseError<<R as PhysicalFusionBasis>::Error>> {
+        // #1548 decides this implicit materialization of a lazy adjoint or a
+        // compact diagonal; the migration phase keeps it.
+        #[allow(deprecated)]
         let source = BoundDynamicTensorRef::try_new(self.logical_space(), self.data())?;
         let (shape, data) = expand_physical_host(source)?;
         Ok(PhysicalDense { shape, data })
@@ -1696,7 +1699,7 @@ where
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
     /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 2)?;
-    /// assert_eq!(t.adjoint()?.adjoint()?.data(), t.data());
+    /// assert_eq!(t.adjoint()?.adjoint()?.dense_data()?, t.dense_data()?);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn adjoint(&self) -> Result<Self, TypedFacadeError<R>> {
@@ -8517,7 +8520,7 @@ where
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)])?;
     /// let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&v], [&v])?;
     /// let id: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?;
-    /// assert!(zero.exp()?.data().iter().zip(id.data()).all(|(a, b)| (a - b).abs() < 1e-15));
+    /// assert!(zero.exp()?.dense_data()?.iter().zip(id.dense_data()?).all(|(a, b)| (a - b).abs() < 1e-15));
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn exp(&self) -> Result<Self, TypedFacadeError<R>> {
@@ -10545,7 +10548,7 @@ fn owned_repr<R, D, S>(body: TypedTensorBody<R, D, S>) -> TypedTensorRepr<R, D, 
 /// }
 ///
 /// fn cannot_read<R>(tensor: &TensorMap<R, f64, DeviceStorage>) {
-///     let _ = tensor.data();
+///     let _ = tensor.dense_data();
 /// }
 /// ```
 ///
@@ -11391,11 +11394,11 @@ where
     /// )?;
     /// let single: TensorMap<_, f32> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 7)?;
     /// let double = single.convert::<f64>();
-    /// assert_eq!(double.convert::<f32>().data(), single.data());
+    /// assert_eq!(double.convert::<f32>().dense_data()?, single.dense_data()?);
     ///
     /// let widened = double.convert::<Complex64>();
     /// // The real part round-trips exactly; the imaginary part is zero.
-    /// assert_eq!(widened.re().data(), double.data());
+    /// assert_eq!(widened.re().dense_data()?, double.dense_data()?);
     /// assert_eq!(widened.im().norm(2.0)?, 0.0);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
@@ -11542,7 +11545,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
     /// use tenet::typed::{CudaStorage, TensorMap};
     ///
     /// fn no_device_slice(tensor: &TensorMap<U1FusionRule, f64, CudaStorage>) {
-    ///     let _ = tensor.data();
+    ///     let _ = tensor.dense_data();
     /// }
     /// ```
     pub fn to_host(&self) -> Result<TensorMap<R, D>, Error> {
@@ -15056,9 +15059,9 @@ where
     /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 7)?;
     /// let adjoint = t.adjoint()?;
     /// let mut owned = adjoint.materialize()?;
-    /// assert_eq!(owned.data(), adjoint.data());
+    /// assert_eq!(owned.dense_data()?, adjoint.materialize()?.dense_data()?);
     /// owned.scale_assign(2.0);
-    /// assert_ne!(owned.data(), adjoint.data());
+    /// assert_ne!(owned.dense_data()?, adjoint.materialize()?.dense_data()?);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
@@ -15283,6 +15286,9 @@ where
     ///
     /// A lazy adjoint is materialized into host storage at most once across
     /// all clones. The canonical parent payload remains in `S`.
+    #[deprecated(
+        note = "use `dense_data()`, which never copies; for a lazy adjoint or a compact diagonal call `materialize()` first"
+    )]
     #[inline]
     pub fn data(&self) -> &[D] {
         match &self.repr {
@@ -15309,6 +15315,51 @@ where
                     Arc::new(TypedTensorBody::dense(view.logical_space.clone(), data))
                 })
                 .materialized_dense_data(),
+        }
+    }
+}
+
+impl<R, D, S> TensorMap<R, D, S>
+where
+    S: HostReadableStorage<D>,
+{
+    /// Whole reduced payload in the tensor's logical coupled-sector layout,
+    /// borrowed from dense Host storage without copying.
+    ///
+    /// These are fusion-tree-indexed reduced block entries, not entries in the
+    /// physical carrier basis. Use [`Self::to_physical_dense`] when the
+    /// provider implements [`PhysicalFusionBasis`] and physical entries are
+    /// required.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 1)?;
+    /// assert_eq!(t.dense_data()?.len(), 4);
+    /// let adjoint = t.adjoint()?;
+    /// assert!(matches!(adjoint.dense_data(), Err(Error::Unsupported { .. })));
+    /// assert_eq!(adjoint.materialize()?.dense_data()?.len(), 4);
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsupported`] with [`crate::error::Alternative::Materialize`]
+    /// for a lazy adjoint or a compact diagonal, whose entries are not stored
+    /// densely; call [`Self::materialize`] first. Never copies, even when an
+    /// earlier implicit materialization is cached.
+    pub fn dense_data(&self) -> Result<&[D], Error> {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => match &*body.data {
+                TypedData::Dense(data) => Ok(data.as_slice()),
+                TypedData::Diagonal(_) => Err(borrowed_view_unsupported("dense_data")),
+            },
+            TypedTensorRepr::Adjoint(_) => Err(borrowed_view_unsupported("dense_data")),
         }
     }
 }
@@ -15855,7 +15906,7 @@ where
     /// decode failure exposes no prefix. Blocks remain in canonical stored order.
     ///
     /// Dense tensors copy no numeric payload. Compact diagonals and lazy
-    /// adjoints follow [`Self::data`]: the logical dense payload is materialized
+    /// adjoints follow the deprecated `data()`: the logical dense payload is materialized
     /// at most once and then shared by all views and clones.
     ///
     /// # Errors
@@ -15884,6 +15935,9 @@ where
             labelled.push((trees, block));
         }
 
+        // #1548 decides this implicit materialization of a lazy adjoint or a
+        // compact diagonal; the migration phase keeps it.
+        #[allow(deprecated)]
         let data = self.data();
         let blocks = labelled
             .into_iter()
@@ -16709,7 +16763,7 @@ where
     /// assert_eq!(swapped.leg_dims()?, [2, 3]);
     /// // A bosonic two-leg swap is an involution: swapping back restores the
     /// // payload exactly.
-    /// assert_eq!(swapped.permute(&[1], &[0])?.data(), t.data());
+    /// assert_eq!(swapped.permute(&[1], &[0])?.dense_data()?, t.dense_data()?);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn permute(
@@ -17188,7 +17242,7 @@ where
     /// // Contracting the domain leg with the identity's codomain leg is a
     /// // no-op on the payload; `[0, 1]` keeps the open axes in place.
     /// let out = t.contract(&id, &[1], &[0], &[0, 1])?;
-    /// assert_eq!(out.data(), t.data());
+    /// assert_eq!(out.dense_data()?, t.dense_data()?);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn contract<'a>(
@@ -17785,9 +17839,9 @@ where
     /// assert!(gram.axpby(1.0, &identity, -1.0)?.norm(2.0)? <= 1e-12 * gram.norm(2.0)?.max(1.0));
     /// let rebuilt = u.compose(&s)?.compose(&vh)?;
     /// let max_err = rebuilt
-    ///     .data()
+    ///     .dense_data()?
     ///     .iter()
-    ///     .zip(t.data())
+    ///     .zip(t.dense_data()?)
     ///     .map(|(a, b)| (a - b).abs())
     ///     .fold(0.0f64, f64::max);
     /// assert!(max_err < 1e-12);
@@ -20358,11 +20412,15 @@ mod representation_gates {
                 actual.logical_space().space(),
                 expected.logical_space().space()
             );
-            assert_eq!(actual.data().len(), expected.data().len());
+            assert_eq!(
+                actual.dense_data().unwrap().len(),
+                expected.dense_data().unwrap().len()
+            );
             assert!(actual
-                .data()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .zip(expected.data())
+                .zip(expected.dense_data().unwrap())
                 .all(|(&actual, &expected)| (actual - expected).norm() < 1.0e-10));
             assert!(actual.norm(2.0).unwrap().is_finite());
             assert!(actual.qr_compact().is_ok());
@@ -20405,13 +20463,18 @@ mod representation_gates {
             target.logical_space().space()
         );
         assert!(projected
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(source.data())
+            .zip(source.dense_data().unwrap())
             .all(|(&actual, &expected)| (actual - expected).abs() < 2.0e-12));
         assert!(Arc::ptr_eq(owned(&target), &target_body));
         assert!(Arc::ptr_eq(&owned(&target).data, &target_data));
-        assert!(target.data().iter().all(|value| value.is_nan()));
+        assert!(target
+            .dense_data()
+            .unwrap()
+            .iter()
+            .all(|value| value.is_nan()));
 
         let failure = target.project_physical_dense(&PhysicalDense {
             shape: vec![2, 2],
@@ -20440,7 +20503,7 @@ mod representation_gates {
 
         for _ in 0..2 {
             let output = tensor.contract(&identity, &[2], &[0], &[0, 1, 2]).unwrap();
-            assert_eq!(output.data(), tensor.data());
+            assert_eq!(output.dense_data().unwrap(), tensor.dense_data().unwrap());
             assert!(std::ptr::eq(output.provider(), provider.as_ref()));
         }
 
@@ -20532,7 +20595,7 @@ mod representation_gates {
     fn coupled_region_inner_rejects_malformed_scalar_range() {
         let tensor = su2_lazy_fixture();
         let structure = owned(&tensor).space.space().structure();
-        let data = tensor.data();
+        let data = tensor.dense_data().unwrap();
         let error = coupled_region_inner(
             structure,
             owned(&tensor).space.space().nout(),
@@ -20576,7 +20639,7 @@ mod representation_gates {
             actual.logical_space().space(),
             expected.logical_space().space()
         );
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
         assert_eq!(actual.subblock_count(), expected.subblock_count());
         for index in 0..actual.subblock_count() {
             let actual_block = actual.subblock(index).unwrap();
@@ -20698,7 +20761,7 @@ mod representation_gates {
                 ],
             )
             .unwrap();
-        assert_eq!(direct.data(), &[21.0, 22.0, 31.0, 32.0]);
+        assert_eq!(direct.dense_data().unwrap(), &[21.0, 22.0, 31.0, 32.0]);
         assert!(Arc::ptr_eq(
             direct.logical_space().provider_arc(),
             &provider
@@ -20724,7 +20787,7 @@ mod representation_gates {
                 ],
             )
             .unwrap();
-        assert_eq!(restricted.data(), &[11.0, 21.0, 12.0, 22.0]);
+        assert_eq!(restricted.dense_data().unwrap(), &[11.0, 21.0, 12.0, 22.0]);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
     }
 
@@ -20807,14 +20870,15 @@ mod representation_gates {
         assert!(message(&[restriction(0, zero_id, 0..9)]).contains("exceeds axis"));
         // The tensor itself is untouched and a valid request still works.
         assert_eq!(
-            source.data(),
+            source.dense_data().unwrap(),
             &[0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0]
         );
         assert_eq!(
             source
                 .network_restrict_degeneracies(false, &[restriction(0, zero_id, 1..3)])
                 .unwrap()
-                .data(),
+                .dense_data()
+                .unwrap(),
             &[1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
         );
     }
@@ -20849,7 +20913,7 @@ mod representation_gates {
                 ],
             )
             .unwrap();
-        assert_eq!(restricted.data(), &[11.0, 12.0, 21.0, 22.0]);
+        assert_eq!(restricted.dense_data().unwrap(), &[11.0, 12.0, 21.0, 22.0]);
     }
 
     #[test]
@@ -20888,7 +20952,7 @@ mod representation_gates {
             )
             .unwrap();
         assert_eq!(
-            restricted.data(),
+            restricted.dense_data().unwrap(),
             &[
                 Complex64::new(10.0, -2.0),
                 Complex64::new(20.0, -3.0),
@@ -20910,7 +20974,7 @@ mod representation_gates {
                 (1 + ij[0] + 2 * ij[1]) as f64
             })
             .unwrap();
-        let before = destination.data().to_vec();
+        let before = destination.dense_data().unwrap().to_vec();
 
         let other_provider = Arc::new(U1FusionRule);
         let other = GradedSpace::try_new(other_provider, [(zero, 2)]).unwrap();
@@ -20918,13 +20982,13 @@ mod representation_gates {
         assert!(destination
             .network_scatter_add_assign(&wrong_authority, &[None, None])
             .is_err());
-        assert_eq!(destination.data(), before);
+        assert_eq!(destination.dense_data().unwrap(), before);
 
         let wrong_split = TensorMap::<_, f64>::zeros(&runtime, [&full, &full], []).unwrap();
         assert!(destination
             .network_scatter_add_assign(&wrong_split, &[None, None])
             .is_err());
-        assert_eq!(destination.data(), before);
+        assert_eq!(destination.dense_data().unwrap(), before);
 
         // A non-vacuum rank-one map has no admissible blocks, so only logical
         // leg validation can reject malformed scatter metadata.
@@ -20979,7 +21043,7 @@ mod representation_gates {
                 })
             })
             .collect::<Vec<_>>();
-        assert_eq!(destination.data(), expected);
+        assert_eq!(destination.dense_data().unwrap(), expected);
         assert!(matches!(
             &lazy.repr,
             TypedTensorRepr::Adjoint(view) if view.materialized.get().is_none()
@@ -20995,7 +21059,7 @@ mod representation_gates {
             runtime: source.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(
                 source.logical_space().clone(),
-                NonCloneHost(source.data().to_vec()),
+                NonCloneHost(source.dense_data().unwrap().to_vec()),
             )),
         };
 
@@ -21003,7 +21067,7 @@ mod representation_gates {
 
         assert!(Arc::ptr_eq(owned(&tensor), owned(&twin)));
         assert!(std::ptr::eq(tensor.provider(), twin.provider()));
-        assert_eq!(tensor.data(), twin.data());
+        assert_eq!(tensor.dense_data().unwrap(), twin.dense_data().unwrap());
     }
 
     #[test]
@@ -21035,13 +21099,23 @@ mod representation_gates {
             },
         )
         .unwrap();
-        let source_bits: Vec<_> = dense.data().iter().map(|value| value.to_bits()).collect();
+        let source_bits: Vec<_> = dense
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
         let provider = dense.provider() as *const _;
         let zero = dense.zeros_like();
-        assert!(zero.data().iter().all(|value| value.to_bits() == 0));
+        assert!(zero
+            .dense_data()
+            .unwrap()
+            .iter()
+            .all(|value| value.to_bits() == 0));
         assert_eq!(
             dense
-                .data()
+                .dense_data()
+                .unwrap()
                 .iter()
                 .map(|value| value.to_bits())
                 .collect::<Vec<_>>(),
@@ -21054,7 +21128,8 @@ mod representation_gates {
         let complex = dense.convert::<Complex64>();
         let complex = complex.with_data(
             complex
-                .data()
+                .dense_data()
+                .unwrap()
                 .iter()
                 .enumerate()
                 .map(|(i, _)| {
@@ -21067,7 +21142,8 @@ mod representation_gates {
         );
         let complex_zero = complex.zeros_like();
         assert!(complex_zero
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .all(|value| value.re.to_bits() == 0 && value.im.to_bits() == 0));
 
@@ -21113,8 +21189,8 @@ mod representation_gates {
                 f64::NAN
             })
             .unwrap();
-        assert!(empty.data().is_empty());
-        assert!(empty.zeros_like().data().is_empty());
+        assert!(empty.dense_data().unwrap().is_empty());
+        assert!(empty.zeros_like().dense_data().unwrap().is_empty());
     }
 
     #[cfg(feature = "cuda")]
@@ -21590,7 +21666,8 @@ mod representation_gates {
             outputs.push((d.to_host().unwrap(), v.to_host().unwrap()));
         }
         let bits = |map: &TensorMap<U1FusionRule, f64>| {
-            map.data()
+            map.dense_data()
+                .unwrap()
                 .iter()
                 .map(|value| value.to_bits())
                 .collect::<Vec<_>>()
@@ -21697,7 +21774,7 @@ mod representation_gates {
 
         let stranded_storage = {
             let lease = runtime.lease_cuda().unwrap();
-            CudaStorage::upload(&lease, source.data()).unwrap()
+            CudaStorage::upload(&lease, source.dense_data().unwrap()).unwrap()
         };
         let stranded = TensorMap {
             runtime: Runtime::builder().build().unwrap(),
@@ -21814,7 +21891,7 @@ mod representation_gates {
 
         let stranded_storage = {
             let lease = runtime.lease_cuda().unwrap();
-            CudaStorage::upload(&lease, source.data()).unwrap()
+            CudaStorage::upload(&lease, source.dense_data().unwrap()).unwrap()
         };
         let stranded = TensorMap {
             runtime: Runtime::builder().build().unwrap(),
@@ -21881,7 +21958,8 @@ mod representation_gates {
             diagonals.push(
                 s.to_host()
                     .unwrap()
-                    .data()
+                    .dense_data()
+                    .unwrap()
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
@@ -21963,15 +22041,30 @@ mod representation_gates {
         let s = s.to_host().unwrap();
         let expected = downloaded_svd_diagonal_bits(
             &device,
-            s.data().len(),
+            s.materialize().unwrap().dense_data().unwrap().len(),
             s.logical_space().space().structure(),
         );
-        let actual: Vec<_> = s.data().iter().copied().map(widened_bits).collect();
+        let actual: Vec<_> = s
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .copied()
+            .map(widened_bits)
+            .collect();
         assert_eq!(actual, expected);
         // The spectra themselves agree with the Host SVD to dtype tolerance.
         let Svd { s: host_s, .. } = host.svd_compact().unwrap();
         let tolerance = 1.0e3 * D::epsilon();
-        for (device, host) in s.data().iter().zip(host_s.data()) {
+        for (device, host) in s
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(host_s.materialize().unwrap().dense_data().unwrap())
+        {
             let (device, host) = (device.widen_complex(), host.widen_complex());
             assert!(
                 (device - host).norm() <= tolerance * host.norm().max(1.0),
@@ -22182,14 +22275,14 @@ mod representation_gates {
             owned(&diagonal_host).data.as_ref(),
             TypedData::Dense(_)
         ));
-        assert_eq!(diagonal_host.data(), expected_diagonal);
+        assert_eq!(diagonal_host.dense_data().unwrap(), expected_diagonal);
         assert!(owned(&diagonal).dense_cache.get().is_none());
 
         let lazy = source.adjoint().unwrap();
         let expected_lazy = tenet_tensors::materialize_adjoint_data_dyn(
             source.logical_space().space(),
             lazy.logical_space().space(),
-            source.data(),
+            source.dense_data().unwrap(),
         )
         .unwrap();
         let lazy_device = lazy.to_cuda().unwrap();
@@ -22215,7 +22308,7 @@ mod representation_gates {
         .unwrap()
         .len();
         assert_eq!(observed, (1, sector_count.max(1), sector_count.max(1)));
-        assert!(source.data().len() > sector_count.max(1));
+        assert!(source.dense_data().unwrap().len() > sector_count.max(1));
 
         macro_rules! observed_arithmetic {
             ($expression:expr, $arithmetic:expr, $reduction:expr) => {{
@@ -22338,7 +22431,10 @@ mod representation_gates {
         };
         assert!(host_view.materialized.get().is_none());
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
-        assert_eq!(lazy_host.data(), expected_lazy);
+        assert_eq!(
+            lazy_host.materialize().unwrap().dense_data().unwrap(),
+            expected_lazy
+        );
     }
 
     /// #1268: a `Complex64` device payload must perform exactly the same
@@ -22506,8 +22602,14 @@ mod representation_gates {
                     composed.logical_space().space(),
                     expected_compose.logical_space().space()
                 );
-                assert_eq!(contracted.data(), expected_contract.data());
-                assert_eq!(composed.data(), expected_compose.data());
+                assert_eq!(
+                    contracted.dense_data().unwrap(),
+                    expected_contract.dense_data().unwrap()
+                );
+                assert_eq!(
+                    composed.dense_data().unwrap(),
+                    expected_compose.dense_data().unwrap()
+                );
                 assert!(Arc::ptr_eq(
                     contracted.logical_space().provider_arc(),
                     lhs.logical_space().provider_arc()
@@ -22558,8 +22660,8 @@ mod representation_gates {
                 .unwrap();
             let compose = lhs_device.compose(&rhs_device).unwrap().to_host().unwrap();
 
-            assert_eq!(contract.data(), &[-6.0]);
-            assert_eq!(compose.data(), &[6.0]);
+            assert_eq!(contract.dense_data().unwrap(), &[-6.0]);
+            assert_eq!(compose.dense_data().unwrap(), &[6.0]);
             assert_eq!(materialized_adjoint_builds(&lhs_device), 0);
             assert_eq!(materialized_adjoint_builds(&rhs_device), 0);
         }
@@ -22619,6 +22721,7 @@ mod representation_gates {
     }
 
     #[test]
+    #[allow(deprecated)] // tests the deprecated `data()` cache until #1548
     fn generic_lazy_adjoint_keeps_parent_storage_and_caches_a_host_body() {
         let source = u1_lazy_fixture();
         let parent: Arc<TypedTensorBody<_, _, NonCloneHost>> = Arc::new(TypedTensorBody::dense(
@@ -22693,7 +22796,8 @@ mod representation_gates {
             repr: owned_repr(TypedTensorBody::dense(
                 source.logical_space().clone(),
                 source
-                    .data()
+                    .dense_data()
+                    .unwrap()
                     .iter()
                     .enumerate()
                     .map(|(index, &value)| {
@@ -22730,7 +22834,10 @@ mod representation_gates {
 
         let restored = adjoint.adjoint().unwrap();
         assert!(Arc::ptr_eq(owned(source), owned(&restored)));
-        assert_eq!(source.data().as_ptr(), restored.data().as_ptr());
+        assert_eq!(
+            source.dense_data().unwrap().as_ptr(),
+            restored.dense_data().unwrap().as_ptr()
+        );
         assert_eq!(materialized_adjoint_builds(&adjoint), 0);
     }
 
@@ -22825,11 +22932,12 @@ mod representation_gates {
         assert!(view.materialized.get().is_none());
         assert!(matches!(inverse.repr, TypedTensorRepr::Owned(_)));
         assert!(!std::ptr::eq(
-            inverse.data().as_ptr(),
-            source.data().as_ptr()
+            inverse.dense_data().unwrap().as_ptr(),
+            source.dense_data().unwrap().as_ptr()
         ));
         assert!(inverse
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .all(|value| (*value - 0.5).abs() < 1.0e-12));
     }
@@ -22881,9 +22989,10 @@ mod representation_gates {
                 expected.logical_space().space()
             );
             assert!(actual
-                .data()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .zip(expected.data())
+                .zip(expected.dense_data().unwrap())
                 .all(|(&actual, &expected)| (actual - expected).abs() < 1e-10));
             assert!(std::ptr::eq(actual.provider(), provider.as_ref()));
         }
@@ -22943,7 +23052,10 @@ mod representation_gates {
         let actual = lazy.exp().unwrap();
         let expected = source.exp().unwrap().adjoint().unwrap();
         assert!(matches!(actual.repr, TypedTensorRepr::Owned(_)));
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(
+            actual.dense_data().unwrap(),
+            expected.materialize().unwrap().dense_data().unwrap()
+        );
         assert!(std::ptr::eq(actual.provider(), provider.as_ref()));
         assert!(actual.runtime().shares_state_with(source.runtime()));
         assert_eq!(actual.codomain(), lazy.codomain());
@@ -22977,7 +23089,10 @@ mod representation_gates {
             .unwrap()
             .adjoint()
             .unwrap();
-        assert_eq!(flipped.data(), expected.data());
+        assert_eq!(
+            flipped.materialize().unwrap().dense_data().unwrap(),
+            expected.materialize().unwrap().dense_data().unwrap()
+        );
         assert_eq!(flipped.codomain(), expected.codomain());
         assert_eq!(flipped.domain(), expected.domain());
         assert!(std::ptr::eq(flipped.provider(), provider.as_ref()));
@@ -22985,6 +23100,7 @@ mod representation_gates {
     }
 
     #[test]
+    #[allow(deprecated)] // tests the deprecated `data()` cache until #1548
     fn cloned_adjoint_materializes_once_across_threads() {
         let source = u1_lazy_fixture().convert::<Complex64>();
         let (_, expected) =
@@ -23090,9 +23206,12 @@ mod representation_gates {
                 source.logical_space().provider_arc()
             ));
             assert!(actual
-                .data()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .zip(expected.data())
+                .zip(expected.materialize().unwrap().dense_data().unwrap())
                 .all(|(&left, &right)| {
                     (left.widen_complex() - right.widen_complex()).norm() < 1e-12
                 }));
@@ -23105,9 +23224,10 @@ mod representation_gates {
             .compose(&actual.vh)
             .unwrap();
         assert!(rebuilt
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(eager.data())
+            .zip(eager.dense_data().unwrap())
             .all(|(&left, &right)| {
                 (left.widen_complex() - right.widen_complex()).norm() < 1e-12
             }));
@@ -23156,18 +23276,20 @@ mod representation_gates {
         }
         assert!(actual
             .s
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected.s.data())
+            .zip(expected.s.dense_data().unwrap())
             .all(|(&left, &right)| {
                 (left.widen_complex() - right.widen_complex()).norm() < 1e-12
             }));
         if compare_factor_bytes {
             for (actual, expected) in [(&actual.u, &expected.u), (&actual.vh, &expected.vh)] {
                 assert!(actual
-                    .data()
+                    .dense_data()
+                    .unwrap()
                     .iter()
-                    .zip(expected.data())
+                    .zip(expected.dense_data().unwrap())
                     .all(|(&left, &right)| {
                         (left.widen_complex() - right.widen_complex()).norm() < 1e-12
                     }));
@@ -23182,9 +23304,10 @@ mod representation_gates {
             .compose(&actual.vh)
             .unwrap();
         assert!(rebuilt
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(eager.data())
+            .zip(eager.dense_data().unwrap())
             .all(|(&left, &right)| {
                 (left.widen_complex() - right.widen_complex()).norm() < 1e-12
             }));
@@ -23237,11 +23360,11 @@ mod representation_gates {
             (indices.iter().sum::<usize>() + 1) as f64
         })
         .unwrap();
-        let before = source.data().to_vec();
+        let before = source.dense_data().unwrap().to_vec();
         let lazy = source.adjoint().unwrap();
 
         assert!(matches!(lazy.svd_full(), Err(Error::Operation(_))));
-        assert_eq!(source.data(), before);
+        assert_eq!(source.dense_data().unwrap(), before);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
             unreachable!()
@@ -23284,9 +23407,10 @@ mod representation_gates {
                 expected.adjoint().unwrap().compose(&expected).unwrap()
             };
             assert!(actual_projector
-                .data()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .zip(expected_projector.data())
+                .zip(expected_projector.dense_data().unwrap())
                 .all(|(&actual, &expected)| {
                     (actual.widen_complex() - expected.widen_complex()).norm() < 1e-11
                 }));
@@ -23301,7 +23425,7 @@ mod representation_gates {
             } else {
                 is_isometric!(actual.adjoint().unwrap(), 1e-11)
             });
-            let _ = actual.data();
+            let _ = actual.dense_data().unwrap();
         }
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
@@ -23340,7 +23464,7 @@ mod representation_gates {
             (indices.iter().sum::<usize>() + 1) as f64
         })
         .unwrap();
-        let before = source.data().to_vec();
+        let before = source.dense_data().unwrap().to_vec();
         let lazy = source.adjoint().unwrap();
 
         let result = if left {
@@ -23349,7 +23473,7 @@ mod representation_gates {
             lazy.right_null()
         };
         assert!(matches!(result, Err(Error::Operation(_))));
-        assert_eq!(source.data(), before);
+        assert_eq!(source.dense_data().unwrap(), before);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
             unreachable!()
@@ -23401,9 +23525,10 @@ mod representation_gates {
             expected.logical_space().space()
         );
         assert!(actual
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected.data())
+            .zip(expected.materialize().unwrap().dense_data().unwrap())
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < tolerance
             }));
@@ -23420,8 +23545,14 @@ mod representation_gates {
         for _ in 0..2 {
             assert_eq!(lazy.clone().eigh_vals().unwrap(), expected_vals);
             let full = lazy.clone().eigh_full().unwrap();
-            assert_eq!(full.d.data(), expected_full.d.data());
-            assert_eq!(full.v.data(), expected_full.v.data());
+            assert_eq!(
+                full.d.materialize().unwrap().dense_data().unwrap(),
+                expected_full.d.materialize().unwrap().dense_data().unwrap()
+            );
+            assert_eq!(
+                full.v.dense_data().unwrap(),
+                expected_full.v.dense_data().unwrap()
+            );
             for output in [&full.d, &full.v] {
                 assert!(output.owned_body().is_some());
                 assert!(Arc::ptr_eq(
@@ -23437,14 +23568,20 @@ mod representation_gates {
                 std::thread::spawn(move || {
                     let vals = clone.eigh_vals().unwrap();
                     let full = clone.eigh_full().unwrap();
-                    (vals, full.d.data().to_vec())
+                    (
+                        vals,
+                        full.d.materialize().unwrap().dense_data().unwrap().to_vec(),
+                    )
                 })
             })
             .collect::<Vec<_>>();
         for call in calls {
             let (vals, diagonal) = call.join().unwrap();
             assert_eq!(vals, expected_vals);
-            assert_eq!(diagonal, expected_full.d.data());
+            assert_eq!(
+                diagonal,
+                expected_full.d.materialize().unwrap().dense_data().unwrap()
+            );
         }
         assert!(Arc::ptr_eq(owned(source), &parent_body));
         assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
@@ -23500,8 +23637,14 @@ mod representation_gates {
         let expected = eager.eigh_full().unwrap();
         let lazy = hermitian.adjoint().unwrap();
         let actual = lazy.eigh_full().unwrap();
-        assert_eq!(actual.d.data(), expected.d.data());
-        assert_eq!(actual.v.data(), expected.v.data());
+        assert_eq!(
+            actual.d.materialize().unwrap().dense_data().unwrap(),
+            expected.d.materialize().unwrap().dense_data().unwrap()
+        );
+        assert_eq!(
+            actual.v.dense_data().unwrap(),
+            expected.v.dense_data().unwrap()
+        );
         let reconstructed = actual
             .v
             .compose(&actual.d)
@@ -23553,8 +23696,14 @@ mod representation_gates {
         for _ in 0..2 {
             assert_eq!(lazy.clone().eig_vals().unwrap(), expected_vals);
             let full = lazy.clone().eig_full().unwrap();
-            assert_eq!(full.d.data(), expected_full.d.data());
-            assert_eq!(full.v.data(), expected_full.v.data());
+            assert_eq!(
+                full.d.materialize().unwrap().dense_data().unwrap(),
+                expected_full.d.materialize().unwrap().dense_data().unwrap()
+            );
+            assert_eq!(
+                full.v.dense_data().unwrap(),
+                expected_full.v.dense_data().unwrap()
+            );
             for output in [&full.d, &full.v] {
                 assert!(output.owned_body().is_some());
                 assert!(Arc::ptr_eq(
@@ -23570,14 +23719,20 @@ mod representation_gates {
                 std::thread::spawn(move || {
                     let vals = clone.eig_vals().unwrap();
                     let full = clone.eig_full().unwrap();
-                    (vals, full.d.data().to_vec())
+                    (
+                        vals,
+                        full.d.materialize().unwrap().dense_data().unwrap().to_vec(),
+                    )
                 })
             })
             .collect::<Vec<_>>();
         for call in calls {
             let (vals, diagonal) = call.join().unwrap();
             assert_eq!(vals, expected_vals);
-            assert_eq!(diagonal, expected_full.d.data());
+            assert_eq!(
+                diagonal,
+                expected_full.d.materialize().unwrap().dense_data().unwrap()
+            );
         }
         assert!(Arc::ptr_eq(owned(source), &parent_body));
         assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
@@ -23587,6 +23742,7 @@ mod representation_gates {
         };
         assert!(view.materialized.get().is_none());
 
+        #[allow(deprecated)] // positive control: the deprecated `data()` cache until #1548
         let _ = lazy.data();
         assert_eq!(materialized_adjoint_builds(&lazy), 1);
         assert!(view.materialized.get().is_some());
@@ -23663,8 +23819,14 @@ mod representation_gates {
             assert_eq!(lazy.eig_vals().unwrap(), eager.eig_vals().unwrap());
             let actual = lazy.eig_full().unwrap();
             let expected = eager.eig_full().unwrap();
-            assert_eq!(actual.d.data(), expected.d.data());
-            assert_eq!(actual.v.data(), expected.v.data());
+            assert_eq!(
+                actual.d.materialize().unwrap().dense_data().unwrap(),
+                expected.d.materialize().unwrap().dense_data().unwrap()
+            );
+            assert_eq!(
+                actual.v.dense_data().unwrap(),
+                expected.v.dense_data().unwrap()
+            );
             assert_eq!(materialized_adjoint_builds(&lazy), 0);
         }
     }
@@ -23728,9 +23890,10 @@ mod representation_gates {
 
         assert_typed_map_close(&actual, &expected, 1.0e-20);
         assert!(parent_redirect
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected.data())
+            .zip(expected.dense_data().unwrap())
             .any(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() > 1.0e-16
             }));
@@ -23766,7 +23929,7 @@ mod representation_gates {
                 source.logical_space().provider_arc()
             ));
             assert!(!Arc::ptr_eq(&owned(&actual).data, &parent_data));
-            let _ = actual.data();
+            let _ = actual.dense_data().unwrap();
         }
         let calls = (0..4)
             .map(|_| {
@@ -23838,16 +24001,21 @@ mod representation_gates {
             }
         })
         .unwrap();
-        let before = source.data().to_vec();
+        let before = source.dense_data().unwrap().to_vec();
         let parent = Arc::clone(owned(&source));
         let data = Arc::clone(&parent.data);
         let lazy = source.adjoint().unwrap();
 
         assert!(matches!(lazy.exp(), Err(Error::Operation(_))));
-        assert!(source.data().iter().zip(&before).all(|(actual, expected)| {
-            actual.re.to_bits() == expected.re.to_bits()
-                && actual.im.to_bits() == expected.im.to_bits()
-        }));
+        assert!(source
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(&before)
+            .all(|(actual, expected)| {
+                actual.re.to_bits() == expected.re.to_bits()
+                    && actual.im.to_bits() == expected.im.to_bits()
+            }));
         assert!(Arc::ptr_eq(owned(&source), &parent));
         assert!(Arc::ptr_eq(&owned(&source).data, &data));
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
@@ -23891,7 +24059,7 @@ mod representation_gates {
                 factor.logical_space().provider_arc(),
                 source.logical_space().provider_arc()
             ));
-            let _ = factor.data();
+            let _ = factor.dense_data().unwrap();
         }
         assert_eq!(
             actual.0.logical_space().space(),
@@ -23990,7 +24158,7 @@ mod representation_gates {
                 source.logical_space().provider_arc()
             ));
             assert!(!Arc::ptr_eq(&owned(&actual).data, &parent_data));
-            let _ = actual.data();
+            let _ = actual.dense_data().unwrap();
         }
 
         let calls = (0..4)
@@ -24106,12 +24274,12 @@ mod representation_gates {
         })
         .unwrap();
         let singular = source.scale(0.0);
-        let before = singular.data().to_vec();
+        let before = singular.dense_data().unwrap().to_vec();
         let body = Arc::clone(owned(&singular));
         let data = Arc::clone(&body.data);
         let cold = singular.adjoint().unwrap();
         assert!(matches!(cold.inv(), Err(Error::Operation(_))));
-        assert_eq!(singular.data(), before);
+        assert_eq!(singular.dense_data().unwrap(), before);
         assert!(Arc::ptr_eq(owned(&singular), &body));
         assert!(Arc::ptr_eq(&owned(&singular).data, &data));
         assert_eq!(materialized_adjoint_builds(&cold), 0);
@@ -24133,11 +24301,11 @@ mod representation_gates {
             }
         })
         .unwrap();
-        let before = late.data().to_vec();
+        let before = late.dense_data().unwrap().to_vec();
         let data = Arc::clone(&owned(&late).data);
         let cold = late.adjoint().unwrap();
         assert!(matches!(cold.inv(), Err(Error::Operation(_))));
-        assert_eq!(late.data(), before);
+        assert_eq!(late.dense_data().unwrap(), before);
         assert!(Arc::ptr_eq(&owned(&late).data, &data));
         assert_eq!(materialized_adjoint_builds(&cold), 0);
         let TypedTensorRepr::Adjoint(view) = &cold.repr else {
@@ -24370,8 +24538,8 @@ mod representation_gates {
             } else {
                 rhs.clone()
             };
-            let lhs_before = divisor.data().to_vec();
-            let rhs_before = rhs.data().to_vec();
+            let lhs_before = divisor.dense_data().unwrap().to_vec();
+            let rhs_before = rhs.dense_data().unwrap().to_vec();
             calls.store(0, std::sync::atomic::Ordering::Relaxed);
             let solution = lhs.solve(&right).unwrap();
             assert!(matches!(solution.repr, TypedTensorRepr::Owned(_)));
@@ -24383,19 +24551,22 @@ mod representation_gates {
             let lhs_oracle = lhs.materialized_tensor_uncached().unwrap();
             let rhs_oracle = right.materialized_tensor_uncached().unwrap();
             let reconstructed = lhs_oracle.compose(&solution).unwrap();
-            assert!(reconstructed.data().iter().zip(rhs_oracle.data()).all(
-                |(&actual, &expected)| {
+            assert!(reconstructed
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(rhs_oracle.dense_data().unwrap())
+                .all(|(&actual, &expected)| {
                     (actual.widen_complex() - expected.widen_complex()).norm() < 2e-10
-                }
-            ));
+                }));
             for i in 0..solution.subblock_count() {
                 assert_eq!(
                     reconstructed.subblock_fusion_trees(i).unwrap(),
                     rhs_oracle.subblock_fusion_trees(i).unwrap(),
                 );
             }
-            assert_eq!(divisor.data(), lhs_before.as_slice());
-            assert_eq!(rhs.data(), rhs_before.as_slice());
+            assert_eq!(divisor.dense_data().unwrap(), lhs_before.as_slice());
+            assert_eq!(rhs.dense_data().unwrap(), rhs_before.as_slice());
             for input in [&lhs, &right] {
                 assert_eq!(materialized_adjoint_builds(input), 0);
                 if let TypedTensorRepr::Adjoint(view) = &input.repr {
@@ -24436,8 +24607,8 @@ mod representation_gates {
             })
             .unwrap();
         let rhs = lhs.scale(2.0);
-        let before_lhs = lhs.data().to_vec();
-        let before_rhs = rhs.data().to_vec();
+        let before_lhs = lhs.dense_data().unwrap().to_vec();
+        let before_rhs = rhs.dense_data().unwrap().to_vec();
         assert!(matches!(
             lhs.solve(&rhs),
             Err(GenericTensorError::Facade(Error::Operation(error)))
@@ -24446,8 +24617,8 @@ mod representation_gates {
                 ) if message == "injected checked solve failure")
         ));
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-        assert_eq!(lhs.data(), before_lhs.as_slice());
-        assert_eq!(rhs.data(), before_rhs.as_slice());
+        assert_eq!(lhs.dense_data().unwrap(), before_lhs.as_slice());
+        assert_eq!(rhs.dense_data().unwrap(), before_rhs.as_slice());
     }
 
     fn assert_pinv_redirect<R, D>(source: &TensorMap<R, D>, rcond: f64, exact_original: bool)
@@ -24483,7 +24654,7 @@ mod representation_gates {
                 source.logical_space().provider_arc()
             ));
             assert!(!Arc::ptr_eq(&owned(&actual).data, &parent_data));
-            let _ = actual.data();
+            let _ = actual.dense_data().unwrap();
         }
 
         let calls = (0..4)
@@ -24550,11 +24721,11 @@ mod representation_gates {
             (indices.iter().sum::<usize>() + 1) as f64
         })
         .unwrap();
-        let before = source.data().to_vec();
+        let before = source.dense_data().unwrap().to_vec();
         let data = Arc::clone(&owned(&source).data);
         let lazy = source.adjoint().unwrap();
         assert!(matches!(lazy.pinv(0.0), Err(Error::Operation(_))));
-        assert_eq!(source.data(), before);
+        assert_eq!(source.dense_data().unwrap(), before);
         assert!(Arc::ptr_eq(&owned(&source).data, &data));
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
@@ -24695,7 +24866,7 @@ mod representation_gates {
                 (indices.iter().sum::<usize>() + 1) as f64
             })
             .unwrap();
-            let before = source.data().to_vec();
+            let before = source.dense_data().unwrap().to_vec();
             let lazy = source.adjoint().unwrap();
             let result = if left {
                 lazy.left_polar().map(drop)
@@ -24703,7 +24874,7 @@ mod representation_gates {
                 lazy.right_polar().map(drop)
             };
             assert!(matches!(result, Err(Error::Operation(_))));
-            assert_eq!(source.data(), before);
+            assert_eq!(source.dense_data().unwrap(), before);
             assert_eq!(materialized_adjoint_builds(&lazy), 0);
             let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
                 unreachable!()
@@ -24735,9 +24906,10 @@ mod representation_gates {
             ));
             if compare_gauge {
                 assert!(actual
-                    .data()
+                    .dense_data()
+                    .unwrap()
                     .iter()
-                    .zip(expected.data())
+                    .zip(expected.dense_data().unwrap())
                     .all(|(&left, &right)| {
                         (left.widen_complex() - right.widen_complex()).norm() < 1e-12
                     }));
@@ -24751,9 +24923,10 @@ mod representation_gates {
         assert!(isometry);
         let rebuilt = actual.0.compose(&actual.1).unwrap();
         assert!(rebuilt
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(target.data())
+            .zip(target.dense_data().unwrap())
             .all(|(&left, &right)| {
                 (left.widen_complex() - right.widen_complex()).norm() < 1e-12
             }));
@@ -24864,7 +25037,7 @@ mod representation_gates {
     #[test]
     fn qr_lq_adjoint_dispatch_handles_an_empty_homspace() {
         let source = u1_matrix_fixture([(1, 2)], [(0, 3)]);
-        assert!(source.data().is_empty());
+        assert!(source.dense_data().unwrap().is_empty());
         assert_qr_lq_keeps_input_cache_cold(&source);
     }
 
@@ -24917,7 +25090,7 @@ mod representation_gates {
             (indices.iter().sum::<usize>() + 1) as f64
         })
         .unwrap();
-        let before = source.data().to_vec();
+        let before = source.dense_data().unwrap().to_vec();
         let lazy = source.adjoint().unwrap();
 
         let result = if qr {
@@ -24926,7 +25099,7 @@ mod representation_gates {
             lazy.lq_full().map(drop)
         };
         assert!(matches!(result, Err(Error::Operation(_))));
-        assert_eq!(source.data(), before);
+        assert_eq!(source.dense_data().unwrap(), before);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
             unreachable!()
@@ -24993,7 +25166,7 @@ mod representation_gates {
         // materialized adjoint, so kept sectors and counts match exactly and
         // values under the tolerance rule; every payload entry can reach a
         // singular value, so `terms` is the payload length.
-        let terms = source.data().len();
+        let terms = source.dense_data().unwrap().len();
         assert_eq!(actual.singular_values.len(), expected.singular_values.len());
         for (actual, expected) in actual.singular_values.iter().zip(&expected.singular_values) {
             assert_eq!(actual.sector, expected.sector);
@@ -25029,9 +25202,12 @@ mod representation_gates {
                 source.logical_space().provider_arc()
             ));
             assert!(actual
-                .data()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .zip(expected.data())
+                .zip(expected.materialize().unwrap().dense_data().unwrap())
                 .all(|(&left, &right)| {
                     (left.widen_complex() - right.widen_complex()).norm() < 1e-12
                 }));
@@ -25082,7 +25258,8 @@ mod representation_gates {
         D: TensorScalar,
     {
         let (space, data) =
-            tenet_tensors::adjoint_bound_dyn(source.logical_space(), source.data()).unwrap();
+            tenet_tensors::adjoint_bound_dyn(source.logical_space(), source.dense_data().unwrap())
+                .unwrap();
         TensorMap {
             runtime: source.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(space, data)),
@@ -25096,15 +25273,28 @@ mod representation_gates {
 
         let lazy_twist = source.adjoint().unwrap();
         assert_eq!(
-            lazy_twist.twist(&[0], Direction::Inverse).unwrap().data(),
-            eager.twist(&[0], Direction::Inverse).unwrap().data()
+            lazy_twist
+                .twist(&[0], Direction::Inverse)
+                .unwrap()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            eager
+                .twist(&[0], Direction::Inverse)
+                .unwrap()
+                .dense_data()
+                .unwrap()
         );
         assert_eq!(materialized_adjoint_builds(&lazy_twist), 0);
 
         let lazy_flip = source.adjoint().unwrap();
         let actual = lazy_flip.flip(&[1], Direction::Inverse).unwrap();
         let expected = eager.flip(&[1], Direction::Inverse).unwrap();
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(
+            actual.materialize().unwrap().dense_data().unwrap(),
+            expected.dense_data().unwrap()
+        );
         assert_eq!(
             actual.logical_space().space(),
             expected.logical_space().space()
@@ -25113,6 +25303,7 @@ mod representation_gates {
     }
 
     #[test]
+    #[allow(deprecated)] // tests the deprecated `data()` cache until #1548
     fn simple_lazy_observers_and_owned_outputs_do_not_publish() {
         let source = u1_matrix_fixture([(0, 2)], [(0, 2)]);
         let eager = eager_adjoint_oracle(&source);
@@ -25189,7 +25380,7 @@ mod representation_gates {
                 eager_lhs.otimes(&eager_rhs).unwrap(),
             ),
         ] {
-            assert_eq!(actual.data(), expected.data());
+            assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
             assert!(Arc::ptr_eq(
                 actual.logical_space().provider_arc(),
                 lhs.logical_space().provider_arc()
@@ -25211,7 +25402,7 @@ mod representation_gates {
         let expected = eager_deligne_lhs
             .deligne_product(&eager_deligne_rhs, product)
             .unwrap();
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
         assert_eq!(materialized_adjoint_builds(&lazy_deligne_lhs), 0);
         assert_eq!(materialized_adjoint_builds(&lazy_deligne_rhs), 0);
     }
@@ -25256,11 +25447,17 @@ mod representation_gates {
             actual.logical_space().provider_arc(),
             source.logical_space().provider_arc()
         ));
-        assert_eq!(actual.data().len(), expected.data().len());
+        assert_eq!(
+            actual.materialize().unwrap().dense_data().unwrap().len(),
+            expected.dense_data().unwrap().len()
+        );
         assert!(actual
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected.data())
+            .zip(expected.dense_data().unwrap())
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
             }));
@@ -25309,25 +25506,28 @@ mod representation_gates {
         let add = lazy.axpby(alpha, &eager, beta).unwrap();
         let expected_add = eager.axpby(alpha, &eager, beta).unwrap();
         assert!(add
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected_add.data())
+            .zip(expected_add.dense_data().unwrap())
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
             }));
         let add_both = lazy.axpby(alpha, &lazy, beta).unwrap();
         assert!(add_both
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected_add.data())
+            .zip(expected_add.dense_data().unwrap())
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
             }));
         let add_rhs = eager.axpby(alpha, &lazy, beta).unwrap();
         assert!(add_rhs
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected_add.data())
+            .zip(expected_add.dense_data().unwrap())
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
             }));
@@ -25339,9 +25539,12 @@ mod representation_gates {
         };
         assert!(scaled_view.materialized.get().is_none());
         assert!(scaled
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected_scaled.data())
+            .zip(expected_scaled.dense_data().unwrap())
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
             }));
@@ -25406,9 +25609,10 @@ mod representation_gates {
             source.logical_space().provider_arc()
         ));
         assert!(actual
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected.data())
+            .zip(expected.dense_data().unwrap())
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
             }));
@@ -25548,9 +25752,10 @@ mod representation_gates {
                 lhs.logical_space().provider_arc()
             ));
             assert!(actual
-                .data()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .zip(expected.data())
+                .zip(expected.dense_data().unwrap())
                 .all(|(&actual, &expected)| {
                     (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
                 }));
@@ -25566,9 +25771,10 @@ mod representation_gates {
                 lhs.logical_space().provider_arc()
             ));
             assert!(actual
-                .data()
+                .dense_data()
+                .unwrap()
                 .iter()
-                .zip(expected.data())
+                .zip(expected.dense_data().unwrap())
                 .all(|(&actual, &expected)| {
                     (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
                 }));
@@ -25627,9 +25833,10 @@ mod representation_gates {
             source.logical_space().provider_arc()
         ));
         assert!(actual
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected.data())
+            .zip(expected.dense_data().unwrap())
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
             }));
@@ -25646,9 +25853,10 @@ mod representation_gates {
             source.logical_space().provider_arc()
         ));
         assert!(actual
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected.data())
+            .zip(expected.dense_data().unwrap())
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
             }));
@@ -25676,22 +25884,27 @@ mod representation_gates {
         let expected_contract = eager.contract(source, &[1], &[0], &[0, 1]).unwrap();
         let compose = lazy.compose(source).unwrap();
         let expected_compose = eager.compose(source).unwrap();
-        assert!(contract.data().iter().zip(expected_contract.data()).all(
-            |(&actual, &expected)| {
-                (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
-            }
-        ));
-        assert!(compose
-            .data()
+        assert!(contract
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(expected_compose.data())
+            .zip(expected_contract.dense_data().unwrap())
+            .all(|(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+            }));
+        assert!(compose
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(expected_compose.dense_data().unwrap())
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
             }));
         assert!(contract
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
-            .zip(compose.data())
+            .zip(compose.dense_data().unwrap())
             .any(|(&contract, &compose)| {
                 (contract.widen_complex() - compose.widen_complex()).norm() > 1e-12
             }));
@@ -25842,7 +26055,7 @@ mod representation_gates {
                 eager.compose(&rhs_eager).unwrap(),
             ),
         ] {
-            assert_eq!(actual.data(), expected.data());
+            assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
             assert!(Arc::ptr_eq(
                 actual.logical_space().provider_arc(),
                 &lhs_provider
@@ -25878,10 +26091,13 @@ mod representation_gates {
         .unwrap();
         let actual = diagonal.axpby(0.5, &lazy, -2.0).unwrap();
         let expected = diagonal.axpby(0.5, &eager, -2.0).unwrap();
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
         let reverse = lazy.axpby(-2.0, &diagonal, 0.5).unwrap();
         let expected_reverse = eager.axpby(-2.0, &diagonal, 0.5).unwrap();
-        assert_eq!(reverse.data(), expected_reverse.data());
+        assert_eq!(
+            reverse.dense_data().unwrap(),
+            expected_reverse.dense_data().unwrap()
+        );
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         assert!(owned(&diagonal).dense_cache.get().is_none());
 
@@ -25891,10 +26107,10 @@ mod representation_gates {
         ] {
             let actual = lhs.compose(rhs).unwrap();
             let expected = eager_lhs.compose(eager_rhs).unwrap();
-            assert_eq!(actual.data(), expected.data());
+            assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
             let actual = lhs.contract(rhs, &[1], &[0], &[0, 1]).unwrap();
             let expected = eager_lhs.contract(eager_rhs, &[1], &[0], &[0, 1]).unwrap();
-            assert_eq!(actual.data(), expected.data());
+            assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
         }
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         assert!(owned(&diagonal).dense_cache.get().is_none());
@@ -26057,7 +26273,10 @@ mod representation_gates {
         let twin = tensor.clone();
         assert!(Arc::ptr_eq(owned(&tensor), owned(&twin)));
         assert!(Arc::ptr_eq(&owned(&tensor).data, &owned(&twin).data));
-        assert_eq!(tensor.data().as_ptr(), twin.data().as_ptr());
+        assert_eq!(
+            tensor.dense_data().unwrap().as_ptr(),
+            twin.dense_data().unwrap().as_ptr()
+        );
         // One payload, however many handles reach it.
         assert_eq!(Arc::strong_count(&owned(&tensor).data), 1);
         assert_eq!(Arc::strong_count(owned(&tensor)), 2);
@@ -26104,10 +26323,14 @@ mod representation_gates {
         assert!(Arc::ptr_eq(&owned(&tensor).data, &owned(&removed).data));
         // One payload allocation, three bodies holding it.
         assert_eq!(Arc::strong_count(&owned(&tensor).data), 3);
-        assert_eq!(tensor.data().as_ptr(), removed.data().as_ptr());
+        assert_eq!(
+            tensor.dense_data().unwrap().as_ptr(),
+            removed.dense_data().unwrap().as_ptr()
+        );
     }
 
     #[test]
+    #[allow(deprecated)] // tests the deprecated `data()` cache until #1548
     fn a_compact_payload_materializes_exactly_once_for_the_unit_ops() {
         // What (#580 PR 5, gate 5): the compact half of the #613 Group 4
         // contract — a `Diagonal` payload is materialized into a *fresh*
@@ -26175,13 +26398,13 @@ mod representation_gates {
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
         D: TensorScalar + core::fmt::Debug + crate::test_numerics::numerics::Numeric,
     {
-        let source_before = source.data().to_vec();
+        let source_before = source.dense_data().unwrap().to_vec();
         let mut destination = expected.zeros_like();
         poison_destination(&mut destination);
         let provider = Arc::as_ptr(destination.logical_space().provider_arc());
         let body = Arc::as_ptr(owned(&destination));
         let space = destination.logical_space().space() as *const DynamicFusionMapSpace;
-        let storage = destination.data().as_ptr();
+        let storage = destination.dense_data().unwrap().as_ptr();
 
         overwrite(&mut destination).unwrap();
 
@@ -26191,11 +26414,11 @@ mod representation_gates {
         let scaled = expected.scale(alpha);
         crate::test_numerics::numerics::assert_slices_close(
             "overwrite against the scaled owned route",
-            destination.data(),
-            scaled.data(),
+            destination.dense_data().unwrap(),
+            scaled.dense_data().unwrap(),
             source.subblock_count(),
         );
-        assert_eq!(source.data(), source_before);
+        assert_eq!(source.dense_data().unwrap(), source_before);
         assert_eq!(
             Arc::as_ptr(destination.logical_space().provider_arc()),
             provider
@@ -26205,7 +26428,7 @@ mod representation_gates {
             destination.logical_space().space() as *const DynamicFusionMapSpace,
             space
         );
-        assert_eq!(destination.data().as_ptr(), storage);
+        assert_eq!(destination.dense_data().unwrap().as_ptr(), storage);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -26229,14 +26452,14 @@ mod representation_gates {
         let expected = lhs
             .contract(rhs, lhs_axes, rhs_axes, output_axes)
             .unwrap_or_else(|error| panic!("{label} returning oracle failed: {error:?}"));
-        let lhs_before = lhs.data().to_vec();
-        let rhs_before = rhs.data().to_vec();
+        let lhs_before = lhs.dense_data().unwrap().to_vec();
+        let rhs_before = rhs.dense_data().unwrap().to_vec();
         let mut destination = expected.zeros_like();
         poison_destination(&mut destination);
         let provider = Arc::as_ptr(destination.logical_space().provider_arc());
         let body = Arc::as_ptr(owned(&destination));
         let space = destination.logical_space().space() as *const DynamicFusionMapSpace;
-        let storage = destination.data().as_ptr();
+        let storage = destination.dense_data().unwrap().as_ptr();
 
         if ordered_alias {
             lhs.contract_overwrite_into(
@@ -26263,15 +26486,15 @@ mod representation_gates {
         // Owned and destination routes of one contraction. An entry is
         // bilinear in the operands, so `len(lhs) * len(rhs)` bounds its
         // terms, recoupled fusion trees (the cu1 output order) included.
-        let terms = lhs.data().len() * rhs.data().len();
+        let terms = lhs.dense_data().unwrap().len() * rhs.dense_data().unwrap().len();
         crate::test_numerics::numerics::assert_slices_close(
             label,
-            destination.data(),
-            expected.scale(alpha).data(),
+            destination.dense_data().unwrap(),
+            expected.scale(alpha).dense_data().unwrap(),
             terms,
         );
-        assert_eq!(lhs.data(), lhs_before);
-        assert_eq!(rhs.data(), rhs_before);
+        assert_eq!(lhs.dense_data().unwrap(), lhs_before);
+        assert_eq!(rhs.dense_data().unwrap(), rhs_before);
         assert_eq!(
             Arc::as_ptr(destination.logical_space().provider_arc()),
             provider
@@ -26281,7 +26504,7 @@ mod representation_gates {
             destination.logical_space().space() as *const DynamicFusionMapSpace,
             space
         );
-        assert_eq!(destination.data().as_ptr(), storage);
+        assert_eq!(destination.dense_data().unwrap().as_ptr(), storage);
     }
 
     #[test]
@@ -26336,7 +26559,10 @@ mod representation_gates {
             Arc::as_ptr(independent_destination.logical_space().provider_arc());
         u1.permute_overwrite_into(&mut independent_destination, &[0, 1], &[2], 2.0)
             .unwrap();
-        assert_eq!(independent_destination.data(), u1.scale(2.0).data());
+        assert_eq!(
+            independent_destination.dense_data().unwrap(),
+            u1.scale(2.0).dense_data().unwrap()
+        );
         assert_eq!(
             Arc::as_ptr(independent_destination.logical_space().provider_arc()),
             destination_provider
@@ -26422,7 +26648,14 @@ mod representation_gates {
     }
 
     fn f64_bits<R>(tensor: &TensorMap<R, f64>) -> Vec<u64> {
-        tensor.data().iter().map(|value| value.to_bits()).collect()
+        tensor
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect()
     }
 
     fn f64_destination_state<R>(tensor: &TensorMap<R, f64>) -> (Vec<u64>, [usize; 4]) {
@@ -26432,7 +26665,7 @@ mod representation_gates {
                 Arc::as_ptr(tensor.logical_space().provider_arc()) as usize,
                 Arc::as_ptr(owned(tensor)) as usize,
                 tensor.logical_space().space() as *const DynamicFusionMapSpace as usize,
-                tensor.data().as_ptr() as usize,
+                tensor.dense_data().unwrap().as_ptr() as usize,
             ],
         )
     }
@@ -26578,11 +26811,23 @@ mod representation_gates {
         .unwrap();
         let compact = square.svd_compact().unwrap().s;
         let mut compact_destination = compact.zeros_like();
-        let before = compact_destination.data().to_vec();
+        let before = compact_destination
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec();
         assert!(square
             .permute_overwrite_into(&mut compact_destination, &[0], &[1], 1.0)
             .is_err());
-        assert_eq!(compact_destination.data(), before);
+        assert_eq!(
+            compact_destination
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            before
+        );
 
         let z2 = Arc::new(ZNFusionRule::new(2).unwrap());
         let z3 = Arc::new(ZNFusionRule::new(3).unwrap());
@@ -26666,7 +26911,7 @@ mod representation_gates {
         let warm = runtime.tree_transform_cache_info();
         assert_eq!(warm.entries(), cold.entries());
         assert!(warm.hits() > cold.hits());
-        assert_eq!(first.data(), second.data());
+        assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
     }
 
     #[test]
@@ -26706,7 +26951,10 @@ mod representation_gates {
                 })
                 .collect();
             for handle in handles {
-                assert_eq!(handle.join().unwrap().data(), expected.data());
+                assert_eq!(
+                    handle.join().unwrap().dense_data().unwrap(),
+                    expected.dense_data().unwrap()
+                );
             }
         });
     }
@@ -26802,7 +27050,7 @@ mod representation_gates {
         .unwrap();
         let cu1 = TensorMap::from_subblock_fn(&runtime, [&q, &q, &q], [&q], |_, _| 1.0).unwrap();
         let cu1_expected = cu1.contract(&cu1, &[3], &[0], &[5, 1, 3, 0, 4, 2]).unwrap();
-        assert!(cu1_expected.data().contains(&0.0));
+        assert!(cu1_expected.dense_data().unwrap().contains(&0.0));
         assert_contract_overwrite_matches(
             "cu1",
             &cu1,
@@ -26857,12 +27105,15 @@ mod representation_gates {
         let provider = Arc::as_ptr(destination.logical_space().provider_arc());
         let body = Arc::as_ptr(owned(&destination));
         let space = destination.logical_space().space() as *const DynamicFusionMapSpace;
-        let storage = destination.data().as_ptr();
+        let storage = destination.dense_data().unwrap().as_ptr();
 
         lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
             .unwrap();
 
-        assert_eq!(destination.data(), expected.data());
+        assert_eq!(
+            destination.dense_data().unwrap(),
+            expected.dense_data().unwrap()
+        );
         assert_eq!(
             Arc::as_ptr(destination.logical_space().provider_arc()),
             provider
@@ -26872,7 +27123,7 @@ mod representation_gates {
             destination.logical_space().space() as *const DynamicFusionMapSpace,
             space
         );
-        assert_eq!(destination.data().as_ptr(), storage);
+        assert_eq!(destination.dense_data().unwrap().as_ptr(), storage);
     }
 
     #[test]
@@ -26899,7 +27150,10 @@ mod representation_gates {
         lazy_lhs
             .contract_overwrite_into(&lazy_rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
             .unwrap();
-        assert_eq!(destination.data(), expected.data());
+        assert_eq!(
+            destination.dense_data().unwrap(),
+            expected.dense_data().unwrap()
+        );
         assert_eq!(materialized_adjoint_builds(&lazy_lhs), 0);
         assert_eq!(materialized_adjoint_builds(&lazy_rhs), 0);
         for lazy in [&lazy_lhs, &lazy_rhs] {
@@ -26916,7 +27170,10 @@ mod representation_gates {
         poison_destination(&mut destination);
         u.contract_overwrite_into(&s, &mut destination, &[1], &[0], &[0, 1], 1.0)
             .unwrap();
-        assert_eq!(destination.data(), expected.data());
+        assert_eq!(
+            destination.dense_data().unwrap(),
+            expected.dense_data().unwrap()
+        );
         assert!(owned(&s).dense_cache.get().is_some());
     }
 
@@ -27182,7 +27439,7 @@ mod representation_gates {
             .contract_overwrite_into(&source, &mut second, &[3], &[0], &axes, 1.0)
             .unwrap();
         let warm = runtime.tree_transform_cache_info();
-        assert_eq!(first.data(), second.data());
+        assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
         assert_eq!(warm.entries(), cold.entries());
         assert!(warm.hits() > cold.hits());
     }
@@ -27242,7 +27499,10 @@ mod representation_gates {
                     ] {
                         assert!(Arc::ptr_eq(owned(tensor), owned(&output)));
                         assert!(Arc::ptr_eq(&owned(tensor).data, &owned(&output).data));
-                        assert_eq!(tensor.data().as_ptr(), output.data().as_ptr());
+                        assert_eq!(
+                            tensor.dense_data().unwrap().as_ptr(),
+                            output.dense_data().unwrap().as_ptr()
+                        );
                     }
                 });
                 assert_eq!(calls, 0);
@@ -27398,13 +27658,16 @@ mod representation_gates {
         // module publishes a new payload rather than reaching through the `Arc`.
         let tensor = fixture();
         let twin = tensor.clone();
-        let before: Vec<f64> = tensor.data().to_vec();
+        let before: Vec<f64> = tensor.dense_data().unwrap().to_vec();
 
         let scaled = twin.scale(2.0);
 
-        assert_eq!(tensor.data(), before.as_slice());
-        assert_eq!(twin.data(), before.as_slice());
-        assert_ne!(scaled.data().as_ptr(), tensor.data().as_ptr());
+        assert_eq!(tensor.dense_data().unwrap(), before.as_slice());
+        assert_eq!(twin.dense_data().unwrap(), before.as_slice());
+        assert_ne!(
+            scaled.dense_data().unwrap().as_ptr(),
+            tensor.dense_data().unwrap().as_ptr()
+        );
         assert!(!Arc::ptr_eq(&owned(&scaled).data, &owned(&tensor).data));
     }
 
@@ -27460,6 +27723,7 @@ mod representation_gates {
     }
 
     #[test]
+    #[allow(deprecated)] // tests the deprecated `data()` cache until #1548
     fn the_dense_cache_lives_per_body_not_in_the_payload_arc() {
         // What: cache placement. `dense_cache` sits in the body, outside the
         // payload `Arc`, so a body that shares a payload starts with a cold
@@ -27557,7 +27821,7 @@ mod representation_gates {
                     .and_then(|lhs| Ok((lhs, rhs.to_cuda()?)))
                     .and_then(|(lhs, rhs)| lhs.contract(&rhs, &[1], &[0], &[0, 1]))
                     .and_then(|out| out.to_host());
-                let _ = sender.send(device.map(|out| out.data().to_vec()));
+                let _ = sender.send(device.map(|out| out.dense_data().unwrap().to_vec()));
             });
 
             let outcome = receiver.recv_timeout(Duration::from_secs(30));
@@ -27568,9 +27832,9 @@ mod representation_gates {
         });
 
         // The device result under the parked state lock is the Host result.
-        assert_eq!(values.len(), host_expected.data().len());
+        assert_eq!(values.len(), host_expected.dense_data().unwrap().len());
         assert!(values.iter().any(|value| *value != 0.0));
-        for (actual, expected) in values.iter().zip(host_expected.data()) {
+        for (actual, expected) in values.iter().zip(host_expected.dense_data().unwrap()) {
             assert!(
                 (actual - expected).abs() < 1.0e-12,
                 "device value {actual} differs from the Host oracle {expected}"

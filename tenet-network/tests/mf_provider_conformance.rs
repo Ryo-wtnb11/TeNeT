@@ -53,7 +53,12 @@ fn assert_same<R>(
         .all(|leg| std::ptr::eq(leg.provider(), provider)));
     assert_eq!(actual.codomain(), expected.codomain());
     assert_eq!(actual.domain(), expected.domain());
-    numerics::assert_slices_close("payload", actual.data(), expected.data(), terms);
+    numerics::assert_slices_close(
+        "payload",
+        actual.dense_data().unwrap(),
+        expected.dense_data().unwrap(),
+        terms,
+    );
 }
 
 fn ordinary_network_and_workspace_reuse<R>(runtime: &Runtime, space: &GradedSpace<R>, seed: u64)

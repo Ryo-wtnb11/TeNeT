@@ -69,8 +69,8 @@ where
         let actual = planned.execute(&tensors, &mut workspace).unwrap();
         numerics::assert_slices_close(
             "network vs direct contract",
-            actual.data(),
-            expected.data(),
+            actual.dense_data().unwrap(),
+            expected.dense_data().unwrap(),
             terms,
         );
         assert_eq!(actual.codomain(), expected.codomain());
@@ -88,8 +88,18 @@ where
 {
     assert_eq!(actual.codomain(), expected.codomain());
     assert_eq!(actual.domain(), expected.domain());
-    assert_eq!(actual.data().len(), expected.data().len());
-    for (&got, &want) in actual.data().iter().zip(expected.data()) {
+    assert_eq!(
+        actual.materialize().unwrap().dense_data().unwrap().len(),
+        expected.materialize().unwrap().dense_data().unwrap().len()
+    );
+    for (&got, &want) in actual
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(expected.materialize().unwrap().dense_data().unwrap())
+    {
         assert!(
             got.error(want) <= 1.0e-11 * (1.0 + want.magnitude()),
             "expected {want:?}, got {got:?}"
@@ -343,7 +353,7 @@ fn run_shape_reuse_sequence<R, D>(
         [&empty_chain[0], &empty_chain[1], &empty_chain[2]],
     );
     assert_eq!(empty.subblock_count(), 0);
-    assert!(empty.data().is_empty());
+    assert!(empty.dense_data().unwrap().is_empty());
 
     let valid = initial_refs;
     let wrong_bond = make_space(&provider, &[(9, 1)]);
@@ -1058,9 +1068,10 @@ fn greedy_order_and_four_site_ring_match_manual_typed_oracles() {
     assert_eq!(greedy_result.codomain(), naive_result.codomain());
     assert_eq!(greedy_result.domain(), naive_result.domain());
     assert!(greedy_result
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(naive_result.data())
+        .zip(naive_result.dense_data().unwrap())
         .all(|(lhs, rhs)| (lhs - rhs).abs() < 1e-12));
 
     let v = space(3);
@@ -1098,8 +1109,9 @@ fn greedy_order_and_four_site_ring_match_manual_typed_oracles() {
     assert_eq!(actual.codomain(), manual.codomain());
     assert_eq!(actual.domain(), manual.domain());
     assert!(actual
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(manual.data())
+        .zip(manual.dense_data().unwrap())
         .all(|(lhs, rhs)| (lhs - rhs).abs() < 1e-12));
 }

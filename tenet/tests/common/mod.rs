@@ -41,7 +41,7 @@ macro_rules! snapshot {
                     )
                 })
                 .collect(),
-            data: tensor.data().to_vec(),
+            data: tensor.materialize().unwrap().dense_data().unwrap().to_vec(),
         }
     }};
 }

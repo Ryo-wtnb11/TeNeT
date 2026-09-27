@@ -45,7 +45,12 @@ where
         "{}",
         case.name
     );
-    assert_close(host.data(), oracle.data(), case.terms(), case.name);
+    assert_close(
+        host.dense_data().unwrap(),
+        oracle.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
 }
 
 fn every_fixture<D: Payload>() {
@@ -113,18 +118,30 @@ fn check_fermionic<R, D>(
     let host = case.host();
     let b_role = fermionic_blas_contract_oracle(&case, TwistRole::B, twist);
     let a_role = fermionic_blas_contract_oracle(&case, TwistRole::A, twist);
-    assert_close(a_role.data(), b_role.data(), case.terms(), case.name);
-    assert_close(host.data(), b_role.data(), case.terms(), case.name);
+    assert_close(
+        a_role.dense_data().unwrap(),
+        b_role.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
+    assert_close(
+        host.dense_data().unwrap(),
+        b_role.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
     let untwisted = fermionic_blas_contract_oracle(&case, TwistRole::None, twist);
     let scale = host
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .map(|value| value.magnitude())
         .fold(0.0_f64, f64::max);
     let differs = host
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(untwisted.data())
+        .zip(untwisted.dense_data().unwrap())
         .any(|(&left, &right)| left.distance(right) > 1e-3 * scale);
     assert!(differs, "{}: the twist changes nothing here", case.name);
 }
@@ -172,8 +189,8 @@ where
         )
         .unwrap();
     assert_close(
-        destination.data(),
-        case.host().data(),
+        destination.dense_data().unwrap(),
+        case.host().dense_data().unwrap(),
         case.terms(),
         case.name,
     );

@@ -41,12 +41,15 @@ fn physical_dense_roundtrips_real_and_complex_su2_multitree_data() {
             -0.75
         }
     });
-    let real_reduced = real.data().to_vec();
+    let real_reduced = real.dense_data().unwrap().to_vec();
     let physical = real.to_physical_dense().unwrap();
     assert_eq!(physical.shape, [2, 2, 2, 2]);
-    assert_eq!(real.data(), real_reduced);
+    assert_eq!(real.dense_data().unwrap(), real_reduced);
     assert_real_close(
-        real.project_physical_dense(&physical).unwrap().data(),
+        real.project_physical_dense(&physical)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         &real_reduced,
     );
 
@@ -57,19 +60,19 @@ fn physical_dense_roundtrips_real_and_complex_su2_multitree_data() {
             Complex64::new(-0.75, 0.25)
         }
     });
-    let complex_reduced = complex.data().to_vec();
+    let complex_reduced = complex.dense_data().unwrap().to_vec();
     let physical = complex.to_physical_dense().unwrap();
     assert_eq!(physical.shape, [2, 2, 2, 2]);
     let projected = complex.project_physical_dense(&physical).unwrap();
-    assert_complex_close(projected.data(), &complex_reduced);
-    assert_eq!(complex.data(), complex_reduced);
+    assert_complex_close(projected.dense_data().unwrap(), &complex_reduced);
+    assert_eq!(complex.dense_data().unwrap(), complex_reduced);
 }
 
 #[test]
 fn projection_validates_shape_and_length_without_changing_target() {
     let runtime = Runtime::builder().build().unwrap();
     let target = su2_multitree(&runtime, |_| 9.0);
-    let before = target.data().to_vec();
+    let before = target.dense_data().unwrap().to_vec();
 
     let bad_shape = PhysicalDense {
         shape: vec![2, 2],
@@ -80,7 +83,7 @@ fn projection_validates_shape_and_length_without_changing_target() {
         error,
         PhysicalDenseError::Operation(OperationError::ShapeMismatch { .. })
     ));
-    assert_eq!(target.data(), before);
+    assert_eq!(target.dense_data().unwrap(), before);
 
     let bad_length = PhysicalDense {
         shape: vec![2, 2, 2, 2],
@@ -91,7 +94,7 @@ fn projection_validates_shape_and_length_without_changing_target() {
         error,
         PhysicalDenseError::Operation(OperationError::ElementCountMismatch { .. })
     ));
-    assert_eq!(target.data(), before);
+    assert_eq!(target.dense_data().unwrap(), before);
 }
 
 #[test]
@@ -333,9 +336,13 @@ macro_rules! assert_matches_tensorkit {
             assert_complex_close(&actual, &expected);
         }
 
-        let reduced = tensor.data().to_vec();
+        let reduced = tensor.dense_data().unwrap().to_vec();
         let projected = tensor.project_physical_dense(&physical).unwrap();
-        let projected = projected.data().iter().map(|&x| to_complex(x));
+        let projected = projected
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|&x| to_complex(x));
         let reduced = reduced.into_iter().map(&to_complex).collect::<Vec<_>>();
         assert_complex_close(&projected.collect::<Vec<_>>(), &reduced);
     }};

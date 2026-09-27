@@ -140,6 +140,7 @@ fn adjoint_involution_does_not_allocate() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn labelled_block_inspection_materializes_lazy_adjoint_once_and_borrows_it() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -176,6 +177,7 @@ fn labelled_block_inspection_materializes_lazy_adjoint_once_and_borrows_it() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn typed_compact_svd_keeps_total_and_peak_below_materialized_baseline() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: the typed wrapper reuses the same parent-factor seam and does not
@@ -223,6 +225,7 @@ fn typed_compact_svd_keeps_total_and_peak_below_materialized_baseline() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn typed_full_svd_keeps_total_and_peak_below_materialized_baseline() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -269,6 +272,7 @@ fn typed_full_svd_keeps_total_and_peak_below_materialized_baseline() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn typed_truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: typed truncation reuses the parent-factor seam without retaining
@@ -331,6 +335,7 @@ fn typed_truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -384,6 +389,7 @@ fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn mixed_lazy_add_has_no_rank_dependent_stride_allocation() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -498,7 +504,7 @@ fn block_stride_buffers_spill_only_past_rank_sixteen() {
         .0;
         let fresh = parent.adjoint().unwrap();
         let materialize = measure(|| {
-            black_box(fresh.data().len());
+            black_box(fresh.materialize().unwrap().dense_data().unwrap().len());
         })
         .0;
         counts.push((rank, parent.subblock_count() > 1, mixed, pair, materialize));
@@ -622,6 +628,7 @@ fn typed_multigroup_lazy_compose_stays_below_the_measured_engine_margin() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn first_lazy_materialization_allocates_once_per_payload_not_per_block() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: `materialize_adjoint_data_dyn` (the payload behind the first
@@ -667,6 +674,7 @@ fn first_lazy_materialization_allocates_once_per_payload_not_per_block() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn materialize_allocates_one_fresh_payload_per_call() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: `materialize` (#1545) of an owned dense tensor or a lazy adjoint

@@ -28,7 +28,7 @@ macro_rules! device_round_trip {
         let label = format!("{} {}", $label, stringify!($d));
         let members = members!($runtime, $a, $d, 3);
         let stack = StackedTensorMap::pack(&members).unwrap();
-        let bytes = (stack.len() * members[0].data().len() * std::mem::size_of::<$d>()) as u64;
+        let bytes = (stack.len() * members[0].dense_data().unwrap().len() * std::mem::size_of::<$d>()) as u64;
 
         let before = cuda_transfer_stats();
         let device = stack.to_cuda().unwrap();
@@ -50,7 +50,7 @@ macro_rules! device_round_trip {
         );
         assert!(*device.signature() != *stack.signature(), "{label}: placement");
         for (index, member) in members.iter().enumerate() {
-            fixtures::assert_bit_exact(host.member(index).unwrap().data(), member.data(), &label);
+            fixtures::assert_bit_exact(host.member(index).unwrap().dense_data().unwrap(), member.dense_data().unwrap(), &label);
         }
     }};
 }

@@ -17,14 +17,14 @@ fn direct_and_lazy_adjoint_disjoint_null_spaces_match_tensorkit() {
     let domain = GradedSpace::try_new(rule, [(U1Irrep::new(1), 3)]).unwrap();
     let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&codomain], [&domain]).unwrap();
 
-    assert!(source.data().is_empty());
+    assert!(source.dense_data().unwrap().is_empty());
     for (tensor, left_dim, right_dim) in [(source.clone(), 2, 3), (source.adjoint().unwrap(), 3, 2)]
     {
         let left = tensor.left_null().unwrap();
         let right = tensor.right_null().unwrap();
 
-        assert_eq!(left.data().len(), left_dim * left_dim);
-        assert_eq!(right.data().len(), right_dim * right_dim);
+        assert_eq!(left.dense_data().unwrap().len(), left_dim * left_dim);
+        assert_eq!(right.dense_data().unwrap().len(), right_dim * right_dim);
         assert!((left.norm(2.0).unwrap() - (left_dim as f64).sqrt()).abs() <= 1e-12);
         assert!((right.norm(2.0).unwrap() - (right_dim as f64).sqrt()).abs() <= 1e-12);
         assert!(is_isometric!(left, 1e-12));
@@ -34,12 +34,14 @@ fn direct_and_lazy_adjoint_disjoint_null_spaces_match_tensorkit() {
             .unwrap()
             .compose(&tensor)
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
             .is_empty());
         assert!(tensor
             .compose(&right.adjoint().unwrap())
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
             .is_empty());
     }
 }

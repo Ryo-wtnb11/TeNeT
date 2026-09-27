@@ -34,7 +34,7 @@ macro_rules! round_trip {
         for (index, member) in members.iter().enumerate() {
             let unpacked = stack.member(index).unwrap();
             assert!(unpacked.structure_signature() == member.structure_signature());
-            fixtures::assert_bit_exact(unpacked.data(), member.data(), &label);
+            fixtures::assert_bit_exact(unpacked.dense_data().unwrap(), member.dense_data().unwrap(), &label);
         }
         assert_eq!(
             stack.member(3).err(),
@@ -189,17 +189,17 @@ macro_rules! select_members {
             for (j, &i) in selection.iter().enumerate() {
                 let member = selected.member(j).unwrap();
                 assert!(member.structure_signature() == members[i].structure_signature());
-                fixtures::assert_bit_exact(member.data(), members[i].data(), &label);
+                fixtures::assert_bit_exact(member.dense_data().unwrap(), members[i].dense_data().unwrap(), &label);
             }
             let again = selected.select(&[selection.len() - 1, 0]).unwrap();
             fixtures::assert_bit_exact(
-                again.member(0).unwrap().data(),
-                members[selection[selection.len() - 1]].data(),
+                again.member(0).unwrap().dense_data().unwrap(),
+                members[selection[selection.len() - 1]].dense_data().unwrap(),
                 &label,
             );
             fixtures::assert_bit_exact(
-                again.member(1).unwrap().data(),
-                members[selection[0]].data(),
+                again.member(1).unwrap().dense_data().unwrap(),
+                members[selection[0]].dense_data().unwrap(),
                 &label,
             );
         }
@@ -233,9 +233,9 @@ fn select_of_a_blockless_structure_is_empty() {
     let charged = GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(1), 2)]).unwrap();
     let neutral = GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(0), 2)]).unwrap();
     let empty = TensorMap::<_, f64>::zeros(&runtime, [&charged], [&neutral]).unwrap();
-    assert!(empty.data().is_empty());
+    assert!(empty.dense_data().unwrap().is_empty());
     let stack = StackedTensorMap::pack(&[&empty, &empty]).unwrap();
     let selected = stack.select(&[1, 0, 1]).unwrap();
     assert_eq!(selected.len(), 3);
-    assert!(selected.member(2).unwrap().data().is_empty());
+    assert!(selected.member(2).unwrap().dense_data().unwrap().is_empty());
 }

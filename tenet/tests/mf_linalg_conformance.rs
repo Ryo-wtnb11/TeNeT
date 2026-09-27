@@ -47,8 +47,16 @@ macro_rules! assert_complex_close {
     ($actual:expr, $expected:expr) => {{
         let actual = $actual;
         let expected = $expected;
-        assert_eq!(actual.data().len(), expected.data().len());
-        for (actual, expected) in actual.data().iter().zip(expected.data()) {
+        assert_eq!(
+            actual.dense_data().unwrap().len(),
+            expected.dense_data().unwrap().len()
+        );
+        for (actual, expected) in actual
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(expected.dense_data().unwrap())
+        {
             assert!(
                 (*actual - *expected).norm() <= 1e-9 * (1.0 + expected.norm()),
                 "{actual} != {expected}"
@@ -328,16 +336,16 @@ macro_rules! factor_conformance {
             TensorMap::diagonal(&rt, &endo_space, diagonal.diagview().unwrap()).unwrap();
         let root = compact.map_diagonal(f64::sqrt).unwrap();
         assert_provider!(provider; root);
-        assert!(root.data().iter().any(|&value| value == 2.0));
-        assert!(root.data().iter().any(|&value| value == 3.0));
+        assert!(root.materialize().unwrap().dense_data().unwrap().iter().any(|&value| value == 2.0));
+        assert!(root.materialize().unwrap().dense_data().unwrap().iter().any(|&value| value == 3.0));
         assert!(root
-            .data()
+            .materialize().unwrap().dense_data().unwrap()
             .iter()
             .all(|&value| value == 0.0 || value == 2.0 || value == 3.0));
         assert_close!(&root.compose(&root).unwrap(), &diagonal);
-        let before = tall.data().to_vec();
+        let before = tall.dense_data().unwrap().to_vec();
         assert!(tall.pinv(-1.0).is_err());
-        assert_eq!(tall.data(), before.as_slice());
+        assert_eq!(tall.dense_data().unwrap(), before.as_slice());
     }};
 }
 

@@ -106,8 +106,14 @@ macro_rules! assert_warm_lazy_adjoint {
         // What: warm calls reuse every Runtime-owned transform plan.
         assert_eq!(runtime.tree_transform_cache_info().misses(), misses);
         // What: warm replay is deterministic.
-        assert_eq!(warm_contract.data(), cold_contract.data());
-        assert_eq!(warm_compose.data(), cold_compose.data());
+        assert_eq!(
+            warm_contract.dense_data().unwrap(),
+            cold_contract.dense_data().unwrap()
+        );
+        assert_eq!(
+            warm_compose.dense_data().unwrap(),
+            cold_compose.dense_data().unwrap()
+        );
         // What: a warm lazy-adjoint contract allocates like the owned one.
         assert!(
             contract_conj_calls <= contract_calls + LAZY_ADJOINT_SLACK,

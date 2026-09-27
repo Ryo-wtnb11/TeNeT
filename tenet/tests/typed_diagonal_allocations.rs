@@ -126,6 +126,7 @@ fn constructed_diagonal(degeneracy: usize) -> TensorMap<Z2FusionRule, f64> {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn public_diagonal_constructor_and_readback_stay_compact_until_data() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     black_box(constructed_diagonal(64));
@@ -168,6 +169,7 @@ fn public_diagonal_constructor_and_readback_stay_compact_until_data() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn labelled_block_inspection_materializes_compact_data_once_and_borrows_it() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let diagonal = constructed_diagonal(DEGENERACY);
@@ -200,6 +202,7 @@ fn labelled_block_inspection_materializes_compact_data_once_and_borrows_it() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn svd_compacts_s_is_built_compact_and_materializes_only_on_demand() {
     // What: `svd_compact` stores `s` as `Σ_c k_c` values. The proof is that the
     // dense buffer is still missing afterwards — the first `data()` on a fresh
@@ -235,6 +238,7 @@ fn svd_compacts_s_is_built_compact_and_materializes_only_on_demand() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn a_truncated_s_stays_compact_too() {
     // What: truncation is two-leg `restrict_leg` on `svd_compact`'s `s`, and the
     // restriction keeps the compact storage. Same proof shape.
@@ -260,6 +264,7 @@ fn a_truncated_s_stays_compact_too() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn a_complex_payloads_s_is_compact_as_well() {
     // What: the compact arm is dtype-generic — `D` is a type parameter, so a
     // c64 spectrum takes exactly the same route with no widening variant.
@@ -288,6 +293,7 @@ fn spectrum(seed: u64) -> TensorMap<Z2FusionRule, f64> {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn storage_local_compact_operations_never_build_a_dense_payload() {
     // What: scale, adjoint, add(diagonal, diagonal) and compose(D, D) all stay
     // in O(Σ_c k_c). Each allocates its own compact result and nothing else, so
@@ -331,6 +337,7 @@ fn storage_local_compact_operations_never_build_a_dense_payload() {
 }
 
 #[test]
+#[allow(deprecated)] // probes the deprecated `data()` cache until #1548
 fn a_mixed_add_allocates_only_its_own_dense_result() {
     // What: adding a spectrum to a dense tensor on the same bond space scatters
     // straight into the owned result. Materializing the spectrum first would
@@ -364,6 +371,7 @@ fn a_mixed_add_allocates_only_its_own_dense_result() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn absorbing_a_spectrum_through_compose_scales_instead_of_densifying() {
     // What: `u * s` and `s * vh` take the bond-scaling arms. Each allocates its
     // own dense result — `u` and `vh` are dense — but not a second dense buffer
@@ -390,6 +398,7 @@ fn absorbing_a_spectrum_through_compose_scales_instead_of_densifying() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn the_matrix_functions_have_o_rank_diagonal_arms() {
     // What: `exp`, `inv`, `pinv` and `map_diagonal` on a spectrum factor are elementwise
     // on the `Σ_c k_c` stored values, not block work on the `Σ_c k_c²`
@@ -425,6 +434,7 @@ fn the_matrix_functions_have_o_rank_diagonal_arms() {
 }
 
 #[test]
+#[allow(deprecated)] // probes the deprecated `data()` cache until #1548
 fn a_complex_spectrums_matrix_functions_stay_o_rank_too() {
     // What: the arms are dtype-generic, so a c64 spectrum takes the same route
     // — at twice the byte size, which is what the ceiling here accounts for.
@@ -454,6 +464,7 @@ fn a_complex_spectrums_matrix_functions_stay_o_rank_too() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn contracting_a_spectrum_scales_instead_of_densifying() {
     // What: `contract` against a compact operand takes the same scaling route
     // `compose` does (issue #584) — TensorKit's `lmul!`/`rmul!` on a
@@ -500,6 +511,7 @@ fn contracting_a_spectrum_scales_instead_of_densifying() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn the_rank_one_swap_keeps_its_source_and_its_result_compact() {
     // What: re-ordering the two legs of a spectrum factor is a per-sector
     // rescaling of the stored values (#585), so it neither reads nor writes a
@@ -539,6 +551,7 @@ fn the_rank_one_swap_keeps_its_source_and_its_result_compact() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn exact_identity_keeps_compact_storage_and_a_real_braid_keeps_the_dense_route() {
     // What (#689 PR A): exact identities return the source body without
     // allocating or materializing its compact spectrum. A real braid remains
@@ -566,6 +579,7 @@ fn exact_identity_keeps_compact_storage_and_a_real_braid_keeps_the_dense_route()
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn compact_is_posdef_never_builds_or_caches_a_dense_payload() {
     // What: the positive-definiteness chain on a spectrum factor (#1557:
     // Hermiticity gate, norm, `diagview`) is a comparison over the stored
@@ -602,6 +616,7 @@ fn compact_is_posdef_never_builds_or_caches_a_dense_payload() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn pr3_conversions_allocate_one_output_and_stay_compact_on_a_spectrum() {
     // What (issue #580 PR 3): `zeros_like`, `to_c64` and `re`/`im` are one
     // element-wise pass — on a compact spectrum factor the result stays
@@ -687,6 +702,7 @@ fn pr3_inspections_allocate_no_payload() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn the_full_bond_trace_reduces_the_spectrum_without_materializing() {
     // What (issue #604): `trace_pairs` over the only pair of a compact bond
     // factor reduces the stored spectrum in O(Σ_c k_c), preserving the #585
@@ -738,6 +754,7 @@ fn the_full_bond_trace_reduces_the_spectrum_without_materializing() {
 }
 
 #[test]
+#[allow(deprecated)] // tests the deprecated `data()` cache until #1548
 fn contract_keeps_the_compact_storage_outcomes() {
     // What (issue #580 PR 6, gate 3): `contract` keeps the compact-storage
     // outcomes documented by its rustdoc.

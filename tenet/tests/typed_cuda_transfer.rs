@@ -309,7 +309,7 @@ where
     let provider = source.provider() as *const R;
     let runtime = source.runtime().identity();
     let structure = structural_snapshot(&source);
-    let expected = source.data().to_vec();
+    let expected = source.dense_data().unwrap().to_vec();
 
     let device = source.to_cuda().unwrap();
     assert_eq!(device.placement(), tenet::core::Placement::Cuda(0));
@@ -318,7 +318,7 @@ where
 
     assert!(std::ptr::eq(restored.provider(), provider));
     assert!(runtime.matches(restored.runtime()));
-    assert_eq!(restored.data(), expected);
+    assert_eq!(restored.dense_data().unwrap(), expected);
     assert_eq!(structural_snapshot(&restored), structure);
 }
 
@@ -351,7 +351,7 @@ where
     ] {
         assert!(std::ptr::eq(actual.provider(), provider));
         assert!(runtime.matches(actual.runtime()));
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
         assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
     }
 }
@@ -391,7 +391,12 @@ where
 {
     let provider = source.provider() as *const R;
     let runtime = source.runtime().identity();
-    let source_bits: Vec<_> = source.data().iter().map(|value| value.to_bits()).collect();
+    let source_bits: Vec<_> = source
+        .dense_data()
+        .unwrap()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
     let Qr {
         q: expected_left,
         r: expected_right,
@@ -409,8 +414,16 @@ where
     }
     let left = left_device.to_host().unwrap();
     let right = right_device.to_host().unwrap();
-    assert_close(left.data(), expected_left.data(), 1e-10);
-    assert_close(right.data(), expected_right.data(), 1e-10);
+    assert_close(
+        left.dense_data().unwrap(),
+        expected_left.dense_data().unwrap(),
+        1e-10,
+    );
+    assert_close(
+        right.dense_data().unwrap(),
+        expected_right.dense_data().unwrap(),
+        1e-10,
+    );
     assert_eq!(
         structural_snapshot(&left),
         structural_snapshot(&expected_left)
@@ -420,12 +433,17 @@ where
         structural_snapshot(&expected_right)
     );
     let rebuilt = left.compose(&right).unwrap();
-    assert_close(rebuilt.data(), source.data(), 1e-10);
+    assert_close(
+        rebuilt.dense_data().unwrap(),
+        source.dense_data().unwrap(),
+        1e-10,
+    );
     assert_eq!(
         source_device
             .to_host()
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|value| value.to_bits())
             .collect::<Vec<_>>(),
@@ -437,11 +455,14 @@ fn assert_typed_cuda_svd_matches_host<R>(source: &TensorMap<R, f64>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    let source_data = source.data().to_vec();
+    let source_data = source.dense_data().unwrap().to_vec();
     let source_device = source.to_cuda().unwrap();
     let expected = source.svd_compact().unwrap();
     assert_cuda_svd_result(source, &expected, source_device.svd_compact().unwrap());
-    assert_eq!(source_device.to_host().unwrap().data(), source_data);
+    assert_eq!(
+        source_device.to_host().unwrap().dense_data().unwrap(),
+        source_data
+    );
 }
 
 /// Host and device factors, as `svd_compact` returns them.
@@ -467,7 +488,11 @@ fn assert_cuda_svd_result<R>(
         factors.s.to_host().unwrap(),
         factors.vh.to_host().unwrap(),
     );
-    assert_close(actual.1.data(), expected.s.data(), 1e-10);
+    assert_close(
+        actual.1.materialize().unwrap().dense_data().unwrap(),
+        expected.s.materialize().unwrap().dense_data().unwrap(),
+        1e-10,
+    );
     assert_eq!(
         structural_snapshot(&actual.0),
         structural_snapshot(&expected.u)
@@ -488,7 +513,11 @@ fn assert_cuda_svd_result<R>(
         .unwrap()
         .compose(&actual.2)
         .unwrap();
-    assert_close(rebuilt.data(), source.data(), 1e-10);
+    assert_close(
+        rebuilt.materialize().unwrap().dense_data().unwrap(),
+        source.materialize().unwrap().dense_data().unwrap(),
+        1e-10,
+    );
 }
 
 /// The device truncated SVD: compact SVD on the device, one download per
@@ -504,7 +533,12 @@ fn assert_typed_cuda_svd_trunc_composition_matches_host<R>(
 {
     let provider = source.provider() as *const R;
     let runtime = source.runtime().identity();
-    let source_bits: Vec<_> = source.data().iter().map(|value| value.to_bits()).collect();
+    let source_bits: Vec<_> = source
+        .dense_data()
+        .unwrap()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
     let expected = host_svd_trunc(source, truncation, |value: f64| value);
     let source_device = source.to_cuda().unwrap();
 
@@ -557,12 +591,17 @@ fn assert_typed_cuda_svd_trunc_composition_matches_host<R>(
         .unwrap()
         .compose(&expected.vh)
         .unwrap();
-    assert_close(actual_rebuilt.data(), expected_rebuilt.data(), 1e-10);
+    assert_close(
+        actual_rebuilt.dense_data().unwrap(),
+        expected_rebuilt.dense_data().unwrap(),
+        1e-10,
+    );
     assert_eq!(
         source_device
             .to_host()
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|value| value.to_bits())
             .collect::<Vec<_>>(),
@@ -578,7 +617,7 @@ where
         let block = right.subblock(block_index).unwrap();
         let diagonal_len = block.shape()[0].min(block.shape()[1]);
         for index in 0..diagonal_len {
-            let value = right.data()
+            let value = right.dense_data().unwrap()
                 [block.offset() + index * block.strides()[0] + index * block.strides()[1]];
             if value.is_finite() {
                 assert!(value >= 0.0, "negative finite R diagonal {value:?}");
@@ -907,8 +946,9 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
-        probe_lhs.permute(&[1], &[0]).unwrap().data()
+            .dense_data()
+            .unwrap(),
+        probe_lhs.permute(&[1], &[0]).unwrap().dense_data().unwrap()
     );
 
     let other_runtime = Runtime::builder().cuda(0).build().unwrap();
@@ -934,14 +974,17 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
         u1_device.inner(&mismatched),
         Err(tenet::typed::Error::InvalidArgument(_))
     ));
-    assert_eq!(u1_device.to_host().unwrap().data(), u1_lhs.data());
+    assert_eq!(
+        u1_device.to_host().unwrap().dense_data().unwrap(),
+        u1_lhs.dense_data().unwrap()
+    );
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
     let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
     let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
     let empty: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
-    assert!(empty.data().is_empty());
+    assert!(empty.dense_data().unwrap().is_empty());
     let empty_device = empty.to_cuda().unwrap();
     assert_eq!(empty_device.norm(2.0).unwrap(), 0.0);
     assert_eq!(empty_device.inner(&empty_device).unwrap(), 0.0);
@@ -1056,7 +1099,11 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
         structural_snapshot(&expected_multi_right)
     );
     let rebuilt = left.compose(&right).unwrap();
-    assert_close(rebuilt.data(), multi_tree.data(), 1e-10);
+    assert_close(
+        rebuilt.dense_data().unwrap(),
+        multi_tree.dense_data().unwrap(),
+        1e-10,
+    );
 
     let zero = TensorMap::from_subblock_fn(&runtime, [&wide], [&wide], |_, _| 0.0).unwrap();
     let zero_device = zero.to_cuda().unwrap();
@@ -1067,7 +1114,11 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let zero_left = zero_left.to_host().unwrap();
     let zero_right = zero_right.to_host().unwrap();
     let zero_rebuilt = zero_left.compose(&zero_right).unwrap();
-    assert_close(zero_rebuilt.data(), zero.data(), 1e-10);
+    assert_close(
+        zero_rebuilt.dense_data().unwrap(),
+        zero.dense_data().unwrap(),
+        1e-10,
+    );
     assert_finite_r_diagonal_nonnegative(&zero_right);
 
     let rank_deficient_leg = GradedSpace::try_new(Arc::clone(&u1), [(U1Irrep::new(0), 3)]).unwrap();
@@ -1086,8 +1137,12 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let rank_right = rank_right.to_host().unwrap();
     assert!(is_isometric!(rank_left, 1e-10));
     assert_close(
-        rank_left.compose(&rank_right).unwrap().data(),
-        rank_deficient.data(),
+        rank_left
+            .compose(&rank_right)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        rank_deficient.dense_data().unwrap(),
         1e-10,
     );
     assert_finite_r_diagonal_nonnegative(&rank_right);
@@ -1112,8 +1167,12 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let tiny_left = tiny_left.to_host().unwrap();
     let tiny_right = tiny_right.to_host().unwrap();
     assert_close(
-        tiny_left.compose(&tiny_right).unwrap().data(),
-        tiny_negative.data(),
+        tiny_left
+            .compose(&tiny_right)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        tiny_negative.dense_data().unwrap(),
         1e-10,
     );
     assert_finite_r_diagonal_nonnegative(&tiny_right);
@@ -1123,7 +1182,7 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 3)]).unwrap();
     let empty: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
-    assert!(empty.data().is_empty());
+    assert!(empty.dense_data().unwrap().is_empty());
     assert_typed_cuda_qr_matches_host(&empty);
 
     let device = mixed.to_cuda().unwrap();
@@ -1138,13 +1197,13 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     for _ in 0..3 {
         let actual = device.qr_compact().unwrap();
         assert_close(
-            actual.q.to_host().unwrap().data(),
-            expected_left.data(),
+            actual.q.to_host().unwrap().dense_data().unwrap(),
+            expected_left.dense_data().unwrap(),
             1e-10,
         );
         assert_close(
-            actual.r.to_host().unwrap().data(),
-            expected_right.data(),
+            actual.r.to_host().unwrap().dense_data().unwrap(),
+            expected_right.dense_data().unwrap(),
             1e-10,
         );
     }
@@ -1155,13 +1214,13 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
         for worker in workers {
             let actual = worker.join().unwrap();
             assert_close(
-                actual.q.to_host().unwrap().data(),
-                expected_left.data(),
+                actual.q.to_host().unwrap().dense_data().unwrap(),
+                expected_left.dense_data().unwrap(),
                 1e-10,
             );
             assert_close(
-                actual.r.to_host().unwrap().data(),
-                expected_right.data(),
+                actual.r.to_host().unwrap().dense_data().unwrap(),
+                expected_right.dense_data().unwrap(),
                 1e-10,
             );
         }
@@ -1227,7 +1286,11 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
     assert_typed_cuda_svd_matches_host(&multi_tree);
 
     let all_zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&wide], [&wide]).unwrap();
-    assert!(all_zero.data().iter().all(|value| *value == 0.0));
+    assert!(all_zero
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|value| *value == 0.0));
     assert_typed_cuda_svd_matches_host(&all_zero);
 
     let fermion = Arc::new(FermionParityFusionRule);
@@ -1270,7 +1333,8 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
     let source_bits: Vec<_> = device
         .to_host()
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .iter()
         .map(|value| value.to_bits())
         .collect();
@@ -1294,7 +1358,8 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
         device
             .to_host()
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|value| value.to_bits())
             .collect::<Vec<_>>(),
@@ -1417,7 +1482,7 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
     let no_intersection: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&no_intersection_rows], [&cols], |_, _| 1.0)
             .unwrap();
-    assert!(no_intersection.data().is_empty());
+    assert!(no_intersection.dense_data().unwrap().is_empty());
     assert_typed_cuda_svd_trunc_composition_matches_host(&no_intersection, &Truncation::Full);
 
     let su2 = Arc::new(SU2FusionRule);
@@ -1513,8 +1578,8 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
             2.0 * indices.iter().sum::<usize>() as f64 - 1.0
         })
         .unwrap();
-    let lhs_data = lhs.data().to_vec();
-    let rhs_data = rhs.data().to_vec();
+    let lhs_data = lhs.materialize().unwrap().dense_data().unwrap().to_vec();
+    let rhs_data = rhs.materialize().unwrap().dense_data().unwrap().to_vec();
     let lhs_provider = lhs.provider() as *const U1FusionRule;
     let rhs_provider = rhs.provider() as *const U1FusionRule;
     let runtime_id = runtime.identity();
@@ -1524,7 +1589,10 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     for factor in [2.5, -1.75] {
         let expected = lhs.scale(factor);
         let actual = lhs_device.scale(factor).unwrap().to_host().unwrap();
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(
+            actual.materialize().unwrap().dense_data().unwrap(),
+            expected.materialize().unwrap().dense_data().unwrap()
+        );
         assert!(std::ptr::eq(actual.provider(), lhs_provider));
         assert!(runtime_id.matches(actual.runtime()));
         assert_eq!(structural_snapshot(&actual), structural_snapshot(&lhs));
@@ -1537,13 +1605,22 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         .unwrap()
         .to_host()
         .unwrap();
-    assert_eq!(actual_add.data(), expected_add.data());
+    assert_eq!(
+        actual_add.materialize().unwrap().dense_data().unwrap(),
+        expected_add.materialize().unwrap().dense_data().unwrap()
+    );
     assert!(std::ptr::eq(actual_add.provider(), lhs_provider));
     assert!(!std::ptr::eq(actual_add.provider(), rhs_provider));
     assert!(runtime_id.matches(actual_add.runtime()));
     assert_eq!(structural_snapshot(&actual_add), structural_snapshot(&lhs));
-    assert_eq!(lhs_device.to_host().unwrap().data(), lhs_data);
-    assert_eq!(rhs_device.to_host().unwrap().data(), rhs_data);
+    assert_eq!(
+        lhs_device.to_host().unwrap().dense_data().unwrap(),
+        lhs_data
+    );
+    assert_eq!(
+        rhs_device.to_host().unwrap().dense_data().unwrap(),
+        rhs_data
+    );
     for _ in 0..3 {
         assert_eq!(
             lhs_device
@@ -1551,8 +1628,11 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
                 .unwrap()
                 .to_host()
                 .unwrap()
-                .data(),
-            expected_add.data()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            expected_add.materialize().unwrap().dense_data().unwrap()
         );
     }
 
@@ -1565,13 +1645,22 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     })
     .unwrap();
     let nonfinite_bits: Vec<_> = nonfinite
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
         .map(|value| value.to_bits())
         .collect();
     let nonfinite_device = nonfinite.to_cuda().unwrap();
     let exact_zero = nonfinite_device.zeros_like().unwrap().to_host().unwrap();
-    assert!(exact_zero.data().iter().all(|value| value.to_bits() == 0));
+    assert!(exact_zero
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|value| value.to_bits() == 0));
 
     let finite_values = [0.0, -0.0, 2.0, -3.0, 1.0];
     let finite_index = std::cell::Cell::new(0usize);
@@ -1600,7 +1689,18 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
             .unwrap()
             .to_host()
             .unwrap();
-        assert_nonfinite_numeric_parity(actual_scale_zero.data(), expected_scale_zero.data());
+        assert_nonfinite_numeric_parity(
+            actual_scale_zero
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            expected_scale_zero
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+        );
 
         let expected_zero_alpha = nonfinite.axpby(zero_factor, &finite, 1.0).unwrap();
         let actual_zero_alpha = nonfinite_device
@@ -1608,7 +1708,18 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
             .unwrap()
             .to_host()
             .unwrap();
-        assert_nonfinite_numeric_parity(actual_zero_alpha.data(), expected_zero_alpha.data());
+        assert_nonfinite_numeric_parity(
+            actual_zero_alpha
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            expected_zero_alpha
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+        );
 
         let expected_zero_beta = finite.axpby(1.0, &nonfinite, zero_factor).unwrap();
         let actual_zero_beta = finite_device
@@ -1616,18 +1727,52 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
             .unwrap()
             .to_host()
             .unwrap();
-        assert_nonfinite_numeric_parity(actual_zero_beta.data(), expected_zero_beta.data());
+        assert_nonfinite_numeric_parity(
+            actual_zero_beta
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            expected_zero_beta
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+        );
         // TensorKit's `scale(x, 0)` drops a zero-scaled operand, NaN and Inf
         // included (#1442).
-        assert!(actual_scale_zero.data().iter().all(|&value| value == 0.0));
-        assert_eq!(actual_zero_alpha.data(), finite.data());
-        assert_eq!(actual_zero_beta.data(), finite.data());
+        assert!(actual_scale_zero
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .all(|&value| value == 0.0));
+        assert_eq!(
+            actual_zero_alpha
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            finite.materialize().unwrap().dense_data().unwrap()
+        );
+        assert_eq!(
+            actual_zero_beta
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            finite.materialize().unwrap().dense_data().unwrap()
+        );
     }
     assert_eq!(
         nonfinite_device
             .to_host()
             .unwrap()
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|value| value.to_bits())
             .collect::<Vec<_>>(),
@@ -1644,20 +1789,35 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         .unwrap();
     let lazy_zero = lhs_lazy.zeros_like().unwrap().to_host().unwrap();
     assert_eq!(
-        lazy_scale.data(),
-        lhs.adjoint().unwrap().scale(alpha).data()
+        lazy_scale.materialize().unwrap().dense_data().unwrap(),
+        lhs.adjoint()
+            .unwrap()
+            .scale(alpha)
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
     );
     assert_eq!(
-        lazy_add.data(),
+        lazy_add.materialize().unwrap().dense_data().unwrap(),
         lhs.adjoint()
             .unwrap()
             .axpby(alpha, &rhs.adjoint().unwrap(), beta)
             .unwrap()
-            .data()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
     );
     assert!(std::ptr::eq(lazy_add.provider(), lhs_provider));
     assert!(!std::ptr::eq(lazy_add.provider(), rhs_provider));
-    assert!(lazy_zero.data().iter().all(|value| value.to_bits() == 0));
+    assert!(lazy_zero
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|value| value.to_bits() == 0));
     assert!(matches!(
         lhs_lazy.axpby(alpha, &rhs_device, beta),
         Err(tenet::typed::Error::UnsupportedOnDevice(_))
@@ -1672,13 +1832,19 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
                         .unwrap()
                         .to_host()
                         .unwrap()
-                        .data()
+                        .materialize()
+                        .unwrap()
+                        .dense_data()
+                        .unwrap()
                         .to_vec()
                 })
             })
             .collect();
         for worker in workers {
-            assert_eq!(worker.join().unwrap(), expected_add.data());
+            assert_eq!(
+                worker.join().unwrap(),
+                expected_add.materialize().unwrap().dense_data().unwrap()
+            );
         }
     });
 
@@ -1714,21 +1880,30 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         .unwrap()
         .to_host()
         .unwrap()
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .is_empty());
     assert!(empty_device
         .axpby(alpha, &empty_device, beta)
         .unwrap()
         .to_host()
         .unwrap()
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .is_empty());
     assert!(empty_device
         .zeros_like()
         .unwrap()
         .to_host()
         .unwrap()
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .is_empty());
 
     let other_runtime = Runtime::builder().cuda(0).build().unwrap();
@@ -1750,7 +1925,10 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         lhs_device.axpby(alpha, &mismatched, beta),
         Err(tenet::typed::Error::InvalidArgument(_))
     ));
-    assert_eq!(lhs_device.to_host().unwrap().data(), lhs_data);
+    assert_eq!(
+        lhs_device.to_host().unwrap().dense_data().unwrap(),
+        lhs_data
+    );
 }
 
 #[test]
@@ -1771,10 +1949,13 @@ fn typed_cuda_fermionic_contract_is_minus_six_and_compose_stays_plus_six() {
     let rhs =
         TensorMap::from_subblock_fn(&runtime, [&rhs_codomain], [&rhs_domain], |_, _| 3.0).unwrap();
     assert_eq!(
-        lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap().data(),
+        lhs.contract(&rhs, &[1], &[0], &[0, 1])
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         [-6.0]
     );
-    assert_eq!(lhs.compose(&rhs).unwrap().data(), [6.0]);
+    assert_eq!(lhs.compose(&rhs).unwrap().dense_data().unwrap(), [6.0]);
 
     let lhs_device = lhs.to_cuda().unwrap();
     let rhs_device = rhs.to_cuda().unwrap();
@@ -1784,7 +1965,8 @@ fn typed_cuda_fermionic_contract_is_minus_six_and_compose_stays_plus_six() {
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
+            .dense_data()
+            .unwrap(),
         [6.0]
     );
     assert_eq!(
@@ -1793,7 +1975,8 @@ fn typed_cuda_fermionic_contract_is_minus_six_and_compose_stays_plus_six() {
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
+            .dense_data()
+            .unwrap(),
         [-6.0]
     );
 }
@@ -1811,7 +1994,7 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
     .unwrap();
     let other_host =
         TensorMap::from_subblock_fn(&other_runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
-    let expected = host.data().to_vec();
+    let expected = host.dense_data().unwrap().to_vec();
     let device = host.to_cuda().unwrap();
     let other_device = other_host.to_cuda().unwrap();
 
@@ -1842,8 +2025,12 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
-        host.contract(&host, &[1], &[0], &[1, 0]).unwrap().data(),
+            .dense_data()
+            .unwrap(),
+        host.contract(&host, &[1], &[0], &[1, 0])
+            .unwrap()
+            .dense_data()
+            .unwrap(),
     );
     let lazy_host = host.adjoint().unwrap();
     let expected_lazy_compose = lazy_host.compose(&host).unwrap();
@@ -1851,7 +2038,10 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
     let lazy_compose = lazy.compose(&device).unwrap().to_host().unwrap();
     assert!(std::ptr::eq(lazy_compose.provider(), host.provider()));
     assert!(runtime.identity().matches(lazy_compose.runtime()));
-    assert_eq!(lazy_compose.data(), expected_lazy_compose.data());
+    assert_eq!(
+        lazy_compose.dense_data().unwrap(),
+        expected_lazy_compose.dense_data().unwrap()
+    );
     assert_eq!(
         structural_snapshot(&lazy_compose),
         structural_snapshot(&expected_lazy_compose)
@@ -1859,10 +2049,10 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
     let lazy_general = lazy.contract(&device, &[1], &[0], &[1, 0]).unwrap();
     let expected_lazy_general = lazy_host.contract(&host, &[1], &[0], &[1, 0]).unwrap();
     close(
-        lazy_general.to_host().unwrap().data(),
-        expected_lazy_general.data(),
+        lazy_general.to_host().unwrap().dense_data().unwrap(),
+        expected_lazy_general.dense_data().unwrap(),
     );
-    assert_eq!(device.to_host().unwrap().data(), expected);
+    assert_eq!(device.to_host().unwrap().dense_data().unwrap(), expected);
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
     let zn4 = Arc::new(ZNFusionRule::new(4).unwrap());
@@ -1875,8 +2065,8 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
     let zn3_device = zn3_tensor.to_cuda().unwrap();
     let zn4_device = zn4_tensor.to_cuda().unwrap();
     assert!(zn3_device.compose(&zn4_device).is_err());
-    assert_eq!(zn3_device.to_host().unwrap().data(), [1.0]);
-    assert_eq!(zn4_device.to_host().unwrap().data(), [1.0]);
+    assert_eq!(zn3_device.to_host().unwrap().dense_data().unwrap(), [1.0]);
+    assert_eq!(zn4_device.to_host().unwrap().dense_data().unwrap(), [1.0]);
 
     let left_open = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
     let seam = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
@@ -1895,7 +2085,7 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
         .to_host()
         .unwrap();
     assert_eq!(zero_output.subblock_count(), 0);
-    assert!(zero_output.data().is_empty());
+    assert!(zero_output.dense_data().unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -1927,7 +2117,7 @@ where
     let provider = source.provider() as *const R;
     let runtime = source.runtime().identity();
     let structure = structural_snapshot(&source);
-    let expected = source.data().to_vec();
+    let expected = source.dense_data().unwrap().to_vec();
     assert!(
         expected.iter().all(|value| value.im != 0.0),
         "fixture must have nonzero imaginary parts"
@@ -1939,7 +2129,7 @@ where
 
     assert!(std::ptr::eq(restored.provider(), provider));
     assert!(runtime.matches(restored.runtime()));
-    assert_eq!(restored.data(), expected);
+    assert_eq!(restored.dense_data().unwrap(), expected);
     assert_eq!(structural_snapshot(&restored), structure);
 }
 
@@ -2039,7 +2229,11 @@ where
         (&contract, &expected_contract),
         (&compose, &expected_compose),
     ] {
-        assert_close_c64(actual.data(), expected.data(), 1e-12);
+        assert_close_c64(
+            actual.dense_data().unwrap(),
+            expected.dense_data().unwrap(),
+            1e-12,
+        );
         assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
     }
 
@@ -2054,14 +2248,22 @@ where
         .unwrap()
         .to_host()
         .unwrap();
-    assert_close_c64(device_left.data(), host_left.data(), 1e-12);
+    assert_close_c64(
+        device_left.dense_data().unwrap(),
+        host_left.dense_data().unwrap(),
+        1e-12,
+    );
     let host_right = rhs.compose(&rhs.adjoint().unwrap()).unwrap();
     let device_right = rhs_device
         .compose(&rhs_device.adjoint().unwrap())
         .unwrap()
         .to_host()
         .unwrap();
-    assert_close_c64(device_right.data(), host_right.data(), 1e-12);
+    assert_close_c64(
+        device_right.dense_data().unwrap(),
+        host_right.dense_data().unwrap(),
+        1e-12,
+    );
 }
 
 #[test]
@@ -2163,8 +2365,16 @@ fn typed_cuda_c64_contract_and_compose_match_host() {
             .unwrap()
             .to_host()
             .unwrap();
-        assert_eq!(actual.data().len(), expected.data().len());
-        for (actual, expected) in actual.data().iter().zip(expected.data()) {
+        assert_eq!(
+            actual.dense_data().unwrap().len(),
+            expected.dense_data().unwrap().len()
+        );
+        for (actual, expected) in actual
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(expected.dense_data().unwrap())
+        {
             assert!((actual - expected).norm() <= 1e-12 * (1.0 + expected.norm()));
         }
     }
@@ -2209,7 +2419,11 @@ fn typed_cuda_c64_inner_is_conjugate_linear_in_the_first_argument() {
         assert!((inner - host_inner).norm() <= tolerance);
         assert!((b_device.inner(&a_device).unwrap() - inner.conj()).norm() <= tolerance);
         let scaled = a_device.scale(i).unwrap();
-        assert_close_c64(scaled.to_host().unwrap().data(), a.scale(i).data(), 1e-12);
+        assert_close_c64(
+            scaled.to_host().unwrap().dense_data().unwrap(),
+            a.scale(i).dense_data().unwrap(),
+            1e-12,
+        );
         assert!((scaled.inner(&b_device).unwrap() - (-i) * inner).norm() <= tolerance);
         assert!(
             (a_device.inner(&b_device.scale(i).unwrap()).unwrap() - i * inner).norm() <= tolerance
@@ -2247,8 +2461,16 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
     let b_device = b.to_cuda().unwrap();
 
     assert_close_c64(
-        a_device.scale(alpha).unwrap().to_host().unwrap().data(),
-        a.scale(alpha).data(),
+        a_device
+            .scale(alpha)
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        a.scale(alpha).materialize().unwrap().dense_data().unwrap(),
         1e-12,
     );
     assert_close_c64(
@@ -2257,13 +2479,24 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
-        a.axpby(alpha, &b, beta).unwrap().data(),
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        a.axpby(alpha, &b, beta).unwrap().dense_data().unwrap(),
         1e-12,
     );
     assert_close_c64(
-        a_device.zeros_like().unwrap().to_host().unwrap().data(),
-        &vec![Complex64::new(0.0, 0.0); a.data().len()],
+        a_device
+            .zeros_like()
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        &vec![Complex64::new(0.0, 0.0); a.materialize().unwrap().dense_data().unwrap().len()],
         0.0,
     );
 
@@ -2281,14 +2514,31 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
             .unwrap()
             .to_host()
             .unwrap()
-            .data(),
-        host_fold.data(),
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        host_fold.materialize().unwrap().dense_data().unwrap(),
         1e-12,
     );
     for factor in [Complex64::new(0.0, 1.0), Complex64::new(1.0, 2.0), alpha] {
         assert_close_c64(
-            lazy_a.scale(factor).unwrap().to_host().unwrap().data(),
-            a.adjoint().unwrap().scale(factor).data(),
+            lazy_a
+                .scale(factor)
+                .unwrap()
+                .to_host()
+                .unwrap()
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            a.adjoint()
+                .unwrap()
+                .scale(factor)
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             1e-12,
         );
     }
@@ -2327,7 +2577,7 @@ fn typed_cuda_c64_lazy_adjoint_contract_matches_a_hand_expansion() {
         assert_eq!(block.shape(), [2, 2]);
         let offset = block.offset();
         let strides = block.strides().to_vec();
-        let data = tensor.data().to_vec();
+        let data = tensor.dense_data().unwrap().to_vec();
         move |row: usize, col: usize| data[offset + row * strides[0] + col * strides[1]]
     }
     let a_block = reduced_block(&a);
@@ -2383,14 +2633,16 @@ fn typed_cuda_c64_lazy_adjoint_contract_matches_a_hand_expansion() {
             for (j, &value) in row.iter().enumerate() {
                 let index = offset + i * strides[0] + j * strides[1];
                 assert!(
-                    (host.data()[index] - value).norm() <= 1e-12 * (1.0 + value.norm()),
+                    (host.dense_data().unwrap()[index] - value).norm()
+                        <= 1e-12 * (1.0 + value.norm()),
                     "host {label} {:?} != hand {value:?}",
-                    host.data()[index]
+                    host.dense_data().unwrap()[index]
                 );
                 assert!(
-                    (device.data()[index] - value).norm() <= 1e-12 * (1.0 + value.norm()),
+                    (device.dense_data().unwrap()[index] - value).norm()
+                        <= 1e-12 * (1.0 + value.norm()),
                     "device {label} {:?} != hand {value:?}",
-                    device.data()[index]
+                    device.dense_data().unwrap()[index]
                 );
             }
         }
@@ -2451,7 +2703,7 @@ fn assert_c64_svd_matches_host<R>(source: &TensorMap<R, Complex64>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    let source_data = source.data().to_vec();
+    let source_data = source.materialize().unwrap().dense_data().unwrap().to_vec();
     let expected = source.svd_compact().unwrap();
     let device = source.to_cuda().unwrap();
     let Svd {
@@ -2469,15 +2721,26 @@ where
     }
     // `u`/`vh` keep the raw device gauge, so only gauge-invariant quantities
     // are compared: the spectrum, both orthonormality relations, and `u s vh`.
-    assert_close_c64(s.data(), expected.s.data(), 1e-9);
+    assert_close_c64(
+        s.materialize().unwrap().dense_data().unwrap(),
+        expected.s.materialize().unwrap().dense_data().unwrap(),
+        1e-9,
+    );
     assert!(is_isometric!(u, 1e-10), "U^H U = I");
     assert!(is_isometric!(vh.adjoint().unwrap(), 1e-10), "V^H V = I");
     assert_close_c64(
-        u.compose(&s).unwrap().compose(&vh).unwrap().data(),
+        u.compose(&s)
+            .unwrap()
+            .compose(&vh)
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         &source_data,
         1e-9,
     );
-    assert_eq!(device.to_host().unwrap().data(), source_data);
+    assert_eq!(device.to_host().unwrap().dense_data().unwrap(), source_data);
 }
 
 /// Device QR is gauge-fixed like Host QR (positive diagonal), so the factors
@@ -2487,7 +2750,7 @@ fn assert_c64_qr_matches_host<R>(source: &TensorMap<R, Complex64>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    let source_data = source.data().to_vec();
+    let source_data = source.dense_data().unwrap().to_vec();
     let (mut largest, mut smallest) = (0.0_f64, f64::INFINITY);
     for entry in &source.svd_vals().unwrap() {
         for &value in &entry.values {
@@ -2515,10 +2778,22 @@ where
     let r = r_device.to_host().unwrap();
     assert_eq!(structural_snapshot(&q), structural_snapshot(&host_q));
     assert_eq!(structural_snapshot(&r), structural_snapshot(&host_r));
-    assert_close_c64(q.data(), host_q.data(), tolerance);
-    assert_close_c64(r.data(), host_r.data(), tolerance);
-    assert_close_c64(q.compose(&r).unwrap().data(), &source_data, tolerance);
-    assert_eq!(device.to_host().unwrap().data(), source_data);
+    assert_close_c64(
+        q.dense_data().unwrap(),
+        host_q.dense_data().unwrap(),
+        tolerance,
+    );
+    assert_close_c64(
+        r.dense_data().unwrap(),
+        host_r.dense_data().unwrap(),
+        tolerance,
+    );
+    assert_close_c64(
+        q.compose(&r).unwrap().dense_data().unwrap(),
+        &source_data,
+        tolerance,
+    );
+    assert_eq!(device.to_host().unwrap().dense_data().unwrap(), source_data);
 }
 
 fn assert_c64_svd_trunc_composition_matches_host<R>(
@@ -2527,7 +2802,7 @@ fn assert_c64_svd_trunc_composition_matches_host<R>(
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    let source_data = source.data().to_vec();
+    let source_data = source.dense_data().unwrap().to_vec();
     let expected = host_svd_trunc(source, truncation, |value: Complex64| value.re);
     let device = source.to_cuda().unwrap();
 
@@ -2572,8 +2847,12 @@ fn assert_c64_svd_trunc_composition_matches_host<R>(
         .unwrap()
         .compose(&expected.vh)
         .unwrap();
-    assert_close_c64(actual_rebuilt.data(), expected_rebuilt.data(), 1e-9);
-    assert_eq!(device.to_host().unwrap().data(), source_data);
+    assert_close_c64(
+        actual_rebuilt.dense_data().unwrap(),
+        expected_rebuilt.dense_data().unwrap(),
+        1e-9,
+    );
+    assert_eq!(device.to_host().unwrap().dense_data().unwrap(), source_data);
 }
 
 /// `a + a^H` as a Hermitian fixture with nonzero imaginary off-diagonals: a
@@ -2596,7 +2875,7 @@ where
                 (0..block.shape()[0]).any(|row| {
                     (0..block.shape()[1]).any(|col| {
                         row != col
-                            && hermitian.data()[block.offset()
+                            && hermitian.dense_data().unwrap()[block.offset()
                                 + row * block.strides()[0]
                                 + col * block.strides()[1]]
                                 .im
@@ -2616,7 +2895,7 @@ fn assert_c64_eigh_trunc_composition_matches_host<R>(
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    let source_data = source.data().to_vec();
+    let source_data = source.dense_data().unwrap().to_vec();
     let expected = host_eigh_trunc(source, truncation, |value: Complex64| value.re);
     let device = source.to_cuda().unwrap();
 
@@ -2640,7 +2919,10 @@ fn assert_c64_eigh_trunc_composition_matches_host<R>(
     assert_eq!(structural_snapshot(&v), structural_snapshot(&expected.v));
     // Hermitian eigenvalues are real for a complex payload too.
     assert!(
-        d.data().iter().all(|value| value.im.abs() <= 1e-10),
+        d.dense_data()
+            .unwrap()
+            .iter()
+            .all(|value| value.im.abs() <= 1e-10),
         "eigenvalues must be real"
     );
     let mut kept = d.diagview().unwrap();
@@ -2660,9 +2942,9 @@ fn assert_c64_eigh_trunc_composition_matches_host<R>(
             .unwrap()
             .compose(&v.adjoint().unwrap())
             .unwrap();
-        assert_close_c64(rebuilt.data(), &source_data, 1e-9);
+        assert_close_c64(rebuilt.dense_data().unwrap(), &source_data, 1e-9);
     }
-    assert_eq!(device.to_host().unwrap().data(), source_data);
+    assert_eq!(device.to_host().unwrap().dense_data().unwrap(), source_data);
 }
 
 #[test]
@@ -2754,8 +3036,9 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
             .unwrap()
             .compose(&v.adjoint().unwrap())
             .unwrap()
-            .data(),
-        hermitian.data(),
+            .dense_data()
+            .unwrap(),
+        hermitian.dense_data().unwrap(),
         1e-9,
     );
 
@@ -2819,7 +3102,14 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
         })
         .unwrap();
     let Eigh { d, .. } = hand_hermitian.to_cuda().unwrap().eigh_full().unwrap();
-    let mut values: Vec<f64> = d.to_host().unwrap().data().iter().map(|z| z.re).collect();
+    let mut values: Vec<f64> = d
+        .to_host()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .map(|z| z.re)
+        .collect();
     values.sort_by(f64::total_cmp);
     assert_close(&values, &[0.0, 0.0, 0.0, 2.0], 1e-10);
 
@@ -2862,7 +3152,7 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
         .unwrap();
 
     let expected = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
-    let expected_data = expected.to_host().unwrap().data().to_vec();
+    let expected_data = expected.to_host().unwrap().dense_data().unwrap().to_vec();
     assert!(
         expected_data.contains(&0.0),
         "fixture must contain a destination block no GEMM reaches"
@@ -2877,7 +3167,12 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     let mut destination = poisoned();
     lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
         .unwrap();
-    let written = destination.to_host().unwrap().data().to_vec();
+    let written = destination
+        .to_host()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
     assert_eq!(written.len(), expected_data.len());
     // Reached entries are two-term GEMM sums that the two entry points may
     // accumulate differently: within the tolerance rule. Unreached entries
@@ -2900,14 +3195,14 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
 
     // Every rejection is refused before a device write: the poisoned bytes
     // survive each one unchanged.
-    let poison_data = poisoned().to_host().unwrap().data().to_vec();
+    let poison_data = poisoned().to_host().unwrap().dense_data().unwrap().to_vec();
     let assert_rejected =
         |label: &str,
          result: Result<(), tenet::prelude::Error>,
          dst: &TensorMap<U1FusionRule, f64, CudaStorage>| {
             assert!(result.is_err(), "{label} must be rejected");
             assert_eq!(
-                dst.to_host().unwrap().data(),
+                dst.to_host().unwrap().dense_data().unwrap(),
                 poison_data.as_slice(),
                 "{label} wrote to the destination before rejecting"
             );
@@ -2915,21 +3210,27 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
 
     // Alias: the destination shares the lhs payload body, directly and through
     // a lazy adjoint view of the same parent.
-    let lhs_data = lhs.to_host().unwrap().data().to_vec();
+    let lhs_data = lhs.to_host().unwrap().dense_data().unwrap().to_vec();
     let mut lhs_alias = lhs.clone();
     assert!(
         lhs.contract_overwrite_into(&rhs, &mut lhs_alias, &[1], &[0], &[0, 1], 1.0)
             .is_err(),
         "an lhs alias must be rejected"
     );
-    assert_eq!(lhs_alias.to_host().unwrap().data(), lhs_data.as_slice());
+    assert_eq!(
+        lhs_alias.to_host().unwrap().dense_data().unwrap(),
+        lhs_data.as_slice()
+    );
     let mut adjoint_alias = lhs.clone();
     assert!(lhs
         .adjoint()
         .unwrap()
         .contract_overwrite_into(&rhs, &mut adjoint_alias, &[0], &[0], &[0, 1], 1.0)
         .is_err());
-    assert_eq!(adjoint_alias.to_host().unwrap().data(), lhs_data.as_slice());
+    assert_eq!(
+        adjoint_alias.to_host().unwrap().dense_data().unwrap(),
+        lhs_data.as_slice()
+    );
 
     // Same required length, different block charges: the space check must
     // catch what the length check cannot.
@@ -2947,7 +3248,12 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     .unwrap()
     .to_cuda()
     .unwrap();
-    let wrong_space_before = wrong_space.to_host().unwrap().data().to_vec();
+    let wrong_space_before = wrong_space
+        .to_host()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
     assert_eq!(
         wrong_space_before.len(),
         expected_data.len(),
@@ -2959,7 +3265,7 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
         "a destination whose block layout differs must be rejected"
     );
     assert_eq!(
-        wrong_space.to_host().unwrap().data(),
+        wrong_space.to_host().unwrap().dense_data().unwrap(),
         wrong_space_before.as_slice()
     );
 
@@ -2968,13 +3274,16 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
             .unwrap()
             .to_cuda()
             .unwrap();
-    let short_before = short.to_host().unwrap().data().to_vec();
+    let short_before = short.to_host().unwrap().dense_data().unwrap().to_vec();
     assert!(
         lhs.contract_overwrite_into(&rhs, &mut short, &[1], &[0], &[0, 1], 1.0)
             .is_err(),
         "a destination of the wrong length must be rejected"
     );
-    assert_eq!(short.to_host().unwrap().data(), short_before.as_slice());
+    assert_eq!(
+        short.to_host().unwrap().dense_data().unwrap(),
+        short_before.as_slice()
+    );
 
     let mut destination = poisoned();
     let shared = destination.clone();
@@ -3009,8 +3318,8 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
         .contract_overwrite_into(&empty_rhs, &mut empty_destination, &[1], &[0], &[0, 1], 1.0)
         .unwrap();
     assert_eq!(
-        empty_destination.to_host().unwrap().data(),
-        empty_expected.to_host().unwrap().data()
+        empty_destination.to_host().unwrap().dense_data().unwrap(),
+        empty_expected.to_host().unwrap().dense_data().unwrap()
     );
 
     // A destination space with no coupled sector at all: `required_len` is 0,
@@ -3036,20 +3345,26 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     .to_cuda()
     .unwrap();
     assert!(
-        zero_destination.to_host().unwrap().data().is_empty(),
+        zero_destination
+            .to_host()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .is_empty(),
         "the fixture must have a zero-length destination"
     );
     zero_lhs
         .contract_overwrite_into(&zero_rhs, &mut zero_destination, &[1], &[0], &[0, 1], 1.0)
         .unwrap();
     assert_eq!(
-        zero_destination.to_host().unwrap().data(),
+        zero_destination.to_host().unwrap().dense_data().unwrap(),
         zero_lhs
             .contract(&zero_rhs, &[1], &[0], &[0, 1])
             .unwrap()
             .to_host()
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
     );
 }
 

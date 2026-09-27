@@ -239,7 +239,7 @@ macro_rules! assert_exact_adjoint {
         assert_eq!(lazy.codomain(), expected.codomain());
         assert_eq!(lazy.domain(), expected.domain());
         assert!(expected.subblock_count() > 1);
-        assert_eq!(bits(lazy.data()), bits(expected.data()));
+        assert_eq!(bits(lazy.materialize().unwrap().dense_data().unwrap()), bits(expected.dense_data().unwrap()));
 
         let lazy = first.adjoint().unwrap();
         let other_lazy = second.adjoint().unwrap();
@@ -280,21 +280,21 @@ macro_rules! assert_exact_adjoint {
                 let copy = [(one, zero), (zero, one), (zero, zero)].contains(&(a, b));
                 if copy {
                     assert_eq!(
-                        bits(sum.data()),
-                        bits(expected.data()),
+                        bits(sum.dense_data().unwrap()),
+                        bits(expected.dense_data().unwrap()),
                         "salts ({lhs_salt}, {rhs_salt})"
                     );
                 } else {
                     assert_update_close(
                         &format!("salts ({lhs_salt}, {rhs_salt})"),
-                        sum.data(),
-                        expected.data(),
+                        sum.dense_data().unwrap(),
+                        expected.dense_data().unwrap(),
                     );
                 }
             }
         }
         // The operands stayed lazy views of untouched parents.
-        assert_eq!(bits(first.data()), bits(parent(0).data()));
+        assert_eq!(bits(first.dense_data().unwrap()), bits(parent(0).dense_data().unwrap()));
     }};
 }
 

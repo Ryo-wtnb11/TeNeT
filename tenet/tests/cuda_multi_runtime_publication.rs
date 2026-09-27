@@ -98,7 +98,7 @@ fn run(r1: Runtime, r2: Runtime) -> usize {
         std::thread::sleep(delay(iter, compose));
         t.to_host().unwrap();
         let host = o_rx.recv().unwrap().to_host().unwrap();
-        let data = host.data();
+        let data = host.dense_data().unwrap();
         let wrong = data.iter().filter(|&&x| x != DEG as f64).count();
         if wrong > 0 {
             stale += 1;
@@ -164,7 +164,10 @@ fn round(own: &Runtime, other: &Runtime, seed: usize) {
     if seed.is_multiple_of(5) {
         other.clear_tree_transform_cache();
     }
-    assert_eq!(out.to_host().unwrap().data(), expected.data());
+    assert_eq!(
+        out.to_host().unwrap().dense_data().unwrap(),
+        expected.dense_data().unwrap()
+    );
 }
 
 fn interleave(r1: &Runtime, r2: &Runtime, threads: usize) {

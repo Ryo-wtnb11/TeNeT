@@ -136,7 +136,7 @@ fn u1_contract_measurement<D: TensorScalar + std::fmt::Debug>(max_allocations: u
     let rhs: TensorMap<_, D> =
         TensorMap::rand_with_seed(&runtime, [&bond], [&open], seed + 1).unwrap();
     let warm = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
-    let payload_len = warm.data().len();
+    let payload_len = warm.dense_data().unwrap().len();
     assert_eq!(payload_len, 2 * 2 + 3 * 3 + 2 * 2);
     assert_eq!(warm.subblock_count(), 3);
 
@@ -145,9 +145,9 @@ fn u1_contract_measurement<D: TensorScalar + std::fmt::Debug>(max_allocations: u
         output = Some(black_box(lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap()));
     });
     let output = output.unwrap();
-    assert_eq!(output.data(), warm.data());
+    assert_eq!(output.dense_data().unwrap(), warm.dense_data().unwrap());
 
-    let payload_bytes = std::mem::size_of_val(warm.data());
+    let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
     assert_eq!(
         measurement.zeroed_allocations_of(payload_bytes),
         1,
@@ -198,7 +198,7 @@ fn su2_compose_measurement<D: TensorScalar>(seed: u64) -> usize {
     let measurement = measure(|| {
         black_box(lhs.compose(&rhs).unwrap());
     });
-    let payload_bytes = std::mem::size_of_val(warm.data());
+    let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
     assert_eq!(
         measurement.zeroed_allocations_of(payload_bytes),
         1,

@@ -229,8 +229,8 @@ macro_rules! pin_family {
         assert!(project_hermitian!(isometry).is_err());
         assert!(project_antihermitian!(isometry).is_err());
 
-        assert_eq!(bits(h.data()), $hermitian);
-        assert_eq!(bits(a.data()), $antihermitian);
+        assert_eq!(bits(h.dense_data().unwrap()), $hermitian);
+        assert_eq!(bits(a.dense_data().unwrap()), $antihermitian);
     }};
 }
 
@@ -315,7 +315,14 @@ fn checked_generic_su3_chains_decide_true_and_false_cases() {
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 2)]).unwrap();
     let materialized_adjoint = |t: &TensorMap<SUNFusionRule, f64>| {
-        let logical = t.adjoint().unwrap().data().to_vec();
+        let logical = t
+            .adjoint()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .to_vec();
         let position = Cell::new(0usize);
         TensorMap::from_subblock_fn(&rt, t.domain().iter(), t.codomain().iter(), |_, _| {
             let index = position.get();

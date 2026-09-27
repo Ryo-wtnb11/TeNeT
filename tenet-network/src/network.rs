@@ -3244,7 +3244,10 @@ mod typed_replay_tests {
             rank_four_orientation_inputs(runtime, provider, [2, 2, 3, 2, 3, 5], 11.0, make);
         assert_eq!(first.3.codomain(), returned.3.codomain());
         assert_eq!(first.3.domain(), returned.3.domain());
-        assert_ne!(first.3.data(), returned.3.data());
+        assert_ne!(
+            first.3.dense_data().unwrap(),
+            returned.3.dense_data().unwrap()
+        );
 
         let network = rank_four_orientation_network();
         let first_refs = [&first.0, &first.1, &first.2];
@@ -3272,7 +3275,7 @@ mod typed_replay_tests {
             let actual = execute(x, y, z);
             assert_eq!(actual.codomain(), expected.codomain());
             assert_eq!(actual.domain(), expected.domain());
-            assert_eq!(actual.data(), expected.data());
+            assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
 
             let refs = [x, y, z];
             let fresh = network
@@ -3282,7 +3285,7 @@ mod typed_replay_tests {
                 .unwrap();
             assert_eq!(fresh.codomain(), expected.codomain());
             assert_eq!(fresh.domain(), expected.domain());
-            assert_eq!(fresh.data(), expected.data());
+            assert_eq!(fresh.dense_data().unwrap(), expected.dense_data().unwrap());
         }
         let stats = plan_cache_stats(runtime);
         assert_eq!(
@@ -3340,8 +3343,8 @@ mod typed_replay_tests {
 
         assert_eq!(cold_calls, 0);
         assert_eq!(warm_calls, 0);
-        assert_eq!(cold.data(), &[109.0, 160.0, 169.0, 248.0]);
-        assert_eq!(warm.data(), &[109.0, 160.0, 169.0, 248.0]);
+        assert_eq!(cold.dense_data().unwrap(), &[109.0, 160.0, 169.0, 248.0]);
+        assert_eq!(warm.dense_data().unwrap(), &[109.0, 160.0, 169.0, 248.0]);
     }
 
     #[test]
@@ -3506,7 +3509,7 @@ mod typed_replay_tests {
                     expected.subblock(index).unwrap()
                 );
             }
-            assert_eq!(actual.data(), expected.data());
+            assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
         }
         assert_eq!(cold_stats, warm_stats);
         assert!(cold_stats.peak_total_bytes() > 0);
@@ -3610,7 +3613,7 @@ mod typed_replay_tests {
                     expected.subblock(index).unwrap()
                 );
             }
-            assert_eq!(actual.data(), expected.data());
+            assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
             assert_eq!(
                 stats.peak_total_bytes(),
                 stats
@@ -3669,7 +3672,7 @@ mod typed_replay_tests {
         let (actual, _) = network
             .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
             .unwrap();
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
         assert_eq!(actual.subblock_count(), expected.subblock_count());
     }
 
@@ -3733,7 +3736,7 @@ mod typed_replay_tests {
         let (actual, _) = network
             .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
             .unwrap();
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
         assert_eq!(actual.codomain(), expected.codomain());
         assert_eq!(actual.domain(), expected.domain());
     }
@@ -3824,7 +3827,7 @@ mod typed_replay_tests {
         let (actual, _) = network
             .execute_symmetric_sliced(&refs, sliced, usize::MAX)
             .unwrap();
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
         assert!(std::ptr::eq(actual.provider(), providers[1].as_ref()));
         assert!(!std::ptr::eq(actual.provider(), providers[0].as_ref()));
     }
@@ -3891,7 +3894,7 @@ mod typed_replay_tests {
             )
             .unwrap();
         assert_eq!(actual.subblock_count(), expected.subblock_count());
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
         assert_eq!(
             stats.destination_bytes(),
             actual.network_owned_payload().unwrap().1
@@ -3950,7 +3953,7 @@ mod typed_replay_tests {
         let (actual, _) = network
             .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
             .unwrap();
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
     }
 
     #[test]
@@ -3990,7 +3993,7 @@ mod typed_replay_tests {
         let (actual, _) = network
             .execute_symmetric_sliced(&[&tensor], sliced, usize::MAX)
             .unwrap();
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
         assert_eq!(actual.codomain(), expected.codomain());
         assert_eq!(actual.domain(), expected.domain());
     }
@@ -4041,7 +4044,7 @@ mod typed_replay_tests {
                 })
             })
             .collect::<Vec<_>>();
-        assert_eq!(actual.data(), expected);
+        assert_eq!(actual.dense_data().unwrap(), expected);
     }
 
     #[test]
@@ -4158,7 +4161,7 @@ mod typed_replay_tests {
         let (actual, _) = network
             .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
             .unwrap();
-        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
     }
 
     #[test]
@@ -4224,8 +4227,12 @@ mod typed_replay_tests {
         let (actual, _) = network
             .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
             .unwrap();
-        assert_eq!(actual.data(), expected.data());
-        assert!(actual.data().iter().any(|value| value.im != 0.0));
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
+        assert!(actual
+            .dense_data()
+            .unwrap()
+            .iter()
+            .any(|value| value.im != 0.0));
     }
 
     fn crossed_plan() -> PlannedNetwork {
@@ -4670,8 +4677,17 @@ mod typed_replay_tests {
             let device = cuda_edited.execute_cuda(&refs).unwrap().to_host().unwrap();
             assert_eq!(device.codomain(), host.codomain(), "{what}");
             assert_eq!(device.domain(), host.domain(), "{what}");
-            assert_eq!(device.data().len(), host.data().len(), "{what}");
-            for (&got, &want) in device.data().iter().zip(host.data()) {
+            assert_eq!(
+                device.dense_data().unwrap().len(),
+                host.dense_data().unwrap().len(),
+                "{what}"
+            );
+            for (&got, &want) in device
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(host.dense_data().unwrap())
+            {
                 assert!((got - want).abs() <= 1e-12 * (1.0 + want.abs()), "{what}");
             }
         }
@@ -4742,22 +4758,32 @@ mod typed_replay_tests {
         let before = workspace.intermediates[0]
             .oriented
             .as_ref()
-            .map(|tensor| (tensor.data().as_ptr(), tensor.data().len()))
+            .map(|tensor| {
+                (
+                    tensor.dense_data().unwrap().as_ptr(),
+                    tensor.dense_data().unwrap().len(),
+                )
+            })
             .unwrap();
         let output = planned.execute(&refs, &mut workspace).unwrap();
         let after = workspace.intermediates[0]
             .oriented
             .as_ref()
-            .map(|tensor| (tensor.data().as_ptr(), tensor.data().len()))
+            .map(|tensor| {
+                (
+                    tensor.dense_data().unwrap().as_ptr(),
+                    tensor.dense_data().unwrap().len(),
+                )
+            })
             .unwrap();
         assert_eq!(before, after);
-        assert_ne!(after.0, output.data().as_ptr());
+        assert_ne!(after.0, output.dense_data().unwrap().as_ptr());
         // The crossed schedule groups the bond-8 and left-9 contractions
         // differently from the chained direct calls: 8 * 9 terms per entry.
         crate::test_numerics::numerics::assert_slices_close(
             "crossed schedule vs chained contract",
-            output.data(),
-            oracle.data(),
+            output.dense_data().unwrap(),
+            oracle.dense_data().unwrap(),
             8 * 9,
         );
 
@@ -4771,7 +4797,13 @@ mod typed_replay_tests {
                 .unwrap(),
         );
         let rhs_only = workspace.intermediates[0].oriented.as_ref().unwrap();
-        assert_eq!((rhs_only.data().as_ptr(), rhs_only.data().len()), before);
+        assert_eq!(
+            (
+                rhs_only.dense_data().unwrap().as_ptr(),
+                rhs_only.dense_data().unwrap().len()
+            ),
+            before
+        );
         assert!(std::ptr::eq(rhs_only.provider(), provider.as_ref()));
 
         let retained = rhs_only.clone();
@@ -4781,9 +4813,10 @@ mod typed_replay_tests {
                 .oriented
                 .as_ref()
                 .unwrap()
-                .data()
+                .dense_data()
+                .unwrap()
                 .as_ptr(),
-            retained.data().as_ptr()
+            retained.dense_data().unwrap().as_ptr()
         );
         let bad_bond = space(&provider, 7);
         let bad_rhs = TensorMap::rand_with_seed(&runtime, [&bad_bond], [&right], 5).unwrap();
@@ -4795,9 +4828,10 @@ mod typed_replay_tests {
                 .oriented
                 .as_ref()
                 .unwrap()
-                .data()
+                .dense_data()
+                .unwrap()
                 .as_ptr(),
-            retained.data().as_ptr()
+            retained.dense_data().unwrap().as_ptr()
         );
 
         let other_left = space(&other_provider, 9);
@@ -4809,7 +4843,10 @@ mod typed_replay_tests {
                 .unwrap(),
         );
         let replaced = workspace.intermediates[0].oriented.as_ref().unwrap();
-        assert_ne!(replaced.data().as_ptr(), retained.data().as_ptr());
+        assert_ne!(
+            replaced.dense_data().unwrap().as_ptr(),
+            retained.dense_data().unwrap().as_ptr()
+        );
         assert!(std::ptr::eq(replaced.provider(), other_provider.as_ref()));
 
         let replaced = replaced.clone();
@@ -4825,7 +4862,10 @@ mod typed_replay_tests {
                 .unwrap(),
         );
         let widened = workspace.intermediates[0].oriented.as_ref().unwrap();
-        assert_ne!(widened.data().len(), replaced.data().len());
+        assert_ne!(
+            widened.dense_data().unwrap().len(),
+            replaced.dense_data().unwrap().len()
+        );
 
         let widened = widened.clone();
         let other_runtime = Runtime::builder().build().unwrap();
@@ -4850,9 +4890,10 @@ mod typed_replay_tests {
                 .oriented
                 .as_ref()
                 .unwrap()
-                .data()
+                .dense_data()
+                .unwrap()
                 .as_ptr(),
-            widened.data().as_ptr()
+            widened.dense_data().unwrap().as_ptr()
         );
 
         let previous = workspace.intermediates[0]
@@ -4872,9 +4913,10 @@ mod typed_replay_tests {
                 .oriented
                 .as_ref()
                 .unwrap()
-                .data()
+                .dense_data()
+                .unwrap()
                 .as_ptr(),
-            previous.data().as_ptr()
+            previous.dense_data().unwrap().as_ptr()
         );
     }
 
@@ -4949,8 +4991,12 @@ mod typed_replay_tests {
         let mut workspace = NetworkExecutionWorkspace::default();
         for _ in 0..2 {
             assert_eq!(
-                planned.execute(&refs, &mut workspace).unwrap().data(),
-                expected.data()
+                planned
+                    .execute(&refs, &mut workspace)
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
+                expected.dense_data().unwrap()
             );
         }
         assert!(workspace.intermediates[0].contracted.is_some());

@@ -119,7 +119,12 @@ fn overwrite_destination(forced: bool) -> usize {
         }
         to_a.send(d).unwrap();
         let d = from_a.recv().unwrap();
-        stale += check("F1", iter, d.to_host().unwrap().data(), expected);
+        stale += check(
+            "F1",
+            iter,
+            d.to_host().unwrap().dense_data().unwrap(),
+            expected,
+        );
         let _ = read_tx.send(());
     }
     writer.join().unwrap();
@@ -172,7 +177,7 @@ impl F2 {
             x,
             y,
             d,
-            expected: expected.data().to_vec(),
+            expected: expected.dense_data().unwrap().to_vec(),
         }
     }
 
@@ -194,7 +199,7 @@ impl F2 {
     /// Reads the destination on the calling (writing) thread's own stream.
     fn wrong(&self, label: &str, iter: usize) -> usize {
         let host = self.d.to_host().unwrap();
-        let data = host.data();
+        let data = host.dense_data().unwrap();
         let miss = data
             .iter()
             .zip(&self.expected)

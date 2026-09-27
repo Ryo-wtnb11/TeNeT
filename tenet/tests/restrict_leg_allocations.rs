@@ -134,13 +134,16 @@ fn restrict_measurement(scale: usize) -> (Measurement, usize) {
 
     // Warm every structural cache the call can hit before measuring.
     let warm = source.restrict_leg(&[(0, &selection)]).unwrap();
-    let payload_bytes = std::mem::size_of_val(warm.data());
+    let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
 
     let mut output = None;
     let measurement = measure(|| {
         output = Some(black_box(source.restrict_leg(&[(0, &selection)]).unwrap()));
     });
-    assert_eq!(output.unwrap().data(), warm.data());
+    assert_eq!(
+        output.unwrap().dense_data().unwrap(),
+        warm.dense_data().unwrap()
+    );
     (measurement, payload_bytes)
 }
 
@@ -219,12 +222,15 @@ fn three_axis_measurement(scale: usize, sequential: bool) -> (Measurement, usize
     };
 
     let warm = restrict();
-    let payload_bytes = std::mem::size_of_val(warm.data());
+    let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
     let mut output = None;
     let measurement = measure(|| {
         output = Some(black_box(restrict()));
     });
-    assert_eq!(output.unwrap().data(), warm.data());
+    assert_eq!(
+        output.unwrap().dense_data().unwrap(),
+        warm.dense_data().unwrap()
+    );
     (measurement, payload_bytes)
 }
 
@@ -299,8 +305,8 @@ fn the_network_restriction_of_several_axes_fills_no_payload() {
     let warm = source
         .network_restrict_degeneracies(false, &restrictions)
         .unwrap();
-    let payload_bytes = std::mem::size_of_val(warm.data());
-    assert_eq!(warm.data().len(), 3 * 4);
+    let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
+    assert_eq!(warm.dense_data().unwrap().len(), 3 * 4);
 
     let mut output = None;
     let measurement = measure(|| {
@@ -310,7 +316,10 @@ fn the_network_restriction_of_several_axes_fills_no_payload() {
                 .unwrap(),
         ));
     });
-    assert_eq!(output.unwrap().data(), warm.data());
+    assert_eq!(
+        output.unwrap().dense_data().unwrap(),
+        warm.dense_data().unwrap()
+    );
     assert!(
         !measurement.zeroed_sizes.contains(&payload_bytes),
         "two restricted axes write one unfilled payload, got {:?}",
@@ -383,7 +392,7 @@ fn lazy_adjoint_add_and_materialization_fill_no_payload() {
     let partner: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &other], [&leg, &other], 59).unwrap();
     let lazy = square.adjoint().unwrap();
-    let payload_bytes = std::mem::size_of_val(square.data());
+    let payload_bytes = std::mem::size_of_val(square.dense_data().unwrap());
     assert!(square.subblock_count() > 1);
 
     let mut sum = None;
@@ -397,7 +406,7 @@ fn lazy_adjoint_add_and_materialization_fill_no_payload() {
     );
 
     let materialize = measure(|| {
-        black_box(lazy.data().len());
+        black_box(lazy.materialize().unwrap().dense_data().unwrap().len());
     });
     assert!(
         !materialize.zeroed_sizes.contains(&payload_bytes),
@@ -407,12 +416,21 @@ fn lazy_adjoint_add_and_materialization_fill_no_payload() {
     // Oracle: the elementwise sum over the materialized adjoint payload,
     // which shares the partner's logical layout.
     let expected: Vec<u64> = lazy
-        .data()
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
         .iter()
-        .zip(partner.data())
+        .zip(partner.dense_data().unwrap())
         .map(|(&x, &y)| (0.5 * x + -2.0 * y).to_bits())
         .collect();
-    let actual: Vec<u64> = sum.unwrap().data().iter().map(|x| x.to_bits()).collect();
+    let actual: Vec<u64> = sum
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .map(|x| x.to_bits())
+        .collect();
     assert_eq!(actual, expected);
 }
 
@@ -439,15 +457,15 @@ fn steady_multi_row_restrict(scale: usize) -> (Measurement, usize) {
     )
     .unwrap();
     let warm = source.restrict_leg(&[(0, &selection)]).unwrap();
-    let expected = warm.data().to_vec();
-    let payload_bytes = std::mem::size_of_val(warm.data());
+    let expected = warm.dense_data().unwrap().to_vec();
+    let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
     drop(warm);
     drop(black_box(source.restrict_leg(&[(0, &selection)]).unwrap()));
     let mut output = None;
     let measurement = measure(|| {
         output = Some(black_box(source.restrict_leg(&[(0, &selection)]).unwrap()));
     });
-    assert_eq!(output.unwrap().data(), expected.as_slice());
+    assert_eq!(output.unwrap().dense_data().unwrap(), expected.as_slice());
     (measurement, payload_bytes)
 }
 
@@ -495,7 +513,8 @@ fn stacked_restrict_measurement(members: usize) -> (Measurement, usize) {
     let selection =
         LegSelection::try_new(&leg, [(U1Irrep::new(-1), 0..1), (U1Irrep::new(0), 1..3)]).unwrap();
     let warm = stack.restrict_leg(&[(0, &selection)]).unwrap();
-    let payload_bytes = members * std::mem::size_of_val(warm.member(0).unwrap().data());
+    let payload_bytes =
+        members * std::mem::size_of_val(warm.member(0).unwrap().dense_data().unwrap());
     drop(warm);
     let mut output = None;
     let measurement = measure(|| {
@@ -504,8 +523,12 @@ fn stacked_restrict_measurement(members: usize) -> (Measurement, usize) {
     let output = output.unwrap();
     for (index, tensor) in tensors.iter().enumerate() {
         assert_eq!(
-            output.member(index).unwrap().data(),
-            tensor.restrict_leg(&[(0, &selection)]).unwrap().data()
+            output.member(index).unwrap().dense_data().unwrap(),
+            tensor
+                .restrict_leg(&[(0, &selection)])
+                .unwrap()
+                .dense_data()
+                .unwrap()
         );
     }
     (measurement, payload_bytes)

@@ -34,30 +34,30 @@ macro_rules! base_suite {
                 let leg = u1_leg();
                 let (a, wa) = twin!(&runtime, $narrow, $wide, [&leg, &leg], [&leg], 9_001);
                 let (b, wb) = twin!(&runtime, $narrow, $wide, [&leg, &leg], [&leg], 9_002);
-                let terms = wa.data().len();
+                let terms = wa.dense_data().unwrap().len();
 
-                assert_payloads_agree("input", a.data(), wa.data(), 1);
+                assert_payloads_agree("input", a.dense_data().unwrap(), wa.dense_data().unwrap(), 1);
 
                 let scale = <$narrow as Parts>::parts(0.5, -0.25);
                 let wide_scale = <$wide as Parts>::parts(0.5, -0.25);
                 assert_payloads_agree(
                     "scale",
-                    a.scale(scale).data(),
-                    wa.scale(wide_scale).data(),
+                    a.scale(scale).dense_data().unwrap(),
+                    wa.scale(wide_scale).dense_data().unwrap(),
                     1,
                 );
                 assert_payloads_agree(
                     "add",
-                    a.axpby(scale, &b, wide_of_one::<$narrow>()).unwrap().data(),
+                    a.axpby(scale, &b, wide_of_one::<$narrow>()).unwrap().dense_data().unwrap(),
                     wa.axpby(wide_scale, &wb, wide_of_one::<$wide>())
                         .unwrap()
-                        .data(),
+                        .dense_data().unwrap(),
                     2,
                 );
                 assert_payloads_agree(
                     "zeros_like",
-                    a.zeros_like().data(),
-                    wa.zeros_like().data(),
+                    a.zeros_like().dense_data().unwrap(),
+                    wa.zeros_like().dense_data().unwrap(),
                     1,
                 );
 
@@ -101,7 +101,7 @@ macro_rules! base_suite {
                 let runtime = runtime();
                 let leg = fermion_su2_leg();
                 let (a, wa) = twin!(&runtime, $narrow, $wide, [&leg, &leg], [&leg, &leg], 9_101);
-                let terms = wa.data().len();
+                let terms = wa.dense_data().unwrap().len();
 
                 for (what, got, expected) in [
                     (
@@ -147,7 +147,7 @@ macro_rules! base_suite {
                         wa.trace_pairs(&[(0, 3)]).unwrap(),
                     ),
                 ] {
-                    assert_payloads_agree(what, got.data(), expected.data(), terms);
+                    assert_payloads_agree(what, got.materialize().unwrap().dense_data().unwrap(), expected.materialize().unwrap().dense_data().unwrap(), terms);
                     assert_eq!(
                         got.subblock_count(),
                         expected.subblock_count(),
@@ -160,9 +160,9 @@ macro_rules! base_suite {
                 // accident of a payload the operations leave alone.
                 let moved = a.permute(&[1, 2], &[3, 0]).unwrap();
                 let largest = wa
-                    .data()
+                    .dense_data().unwrap()
                     .iter()
-                    .zip(moved.data())
+                    .zip(moved.dense_data().unwrap())
                     .map(|(&expected, &got)| (got.wide() - expected.wide()).norm())
                     .fold(0.0f64, f64::max);
                 assert!(
@@ -170,8 +170,8 @@ macro_rules! base_suite {
                     "the SU(2)/fermionic fixture must be moved by permute, largest change {largest:e}"
                 );
                 assert_ne!(
-                    a.twist(&[0, 2], Direction::Forward).unwrap().data(),
-                    a.data(),
+                    a.twist(&[0, 2], Direction::Forward).unwrap().dense_data().unwrap(),
+                    a.dense_data().unwrap(),
                     "the fZ2 twist must change the payload of an odd-sector fixture"
                 );
 
@@ -184,8 +184,8 @@ macro_rules! base_suite {
                 let restored = a.permute(&[1, 2], &[3, 0]).unwrap();
                 assert_payloads_agree(
                     "permute round trip",
-                    restored.permute(&[3, 0], &[1, 2]).unwrap().data(),
-                    a.data(),
+                    restored.permute(&[3, 0], &[1, 2]).unwrap().dense_data().unwrap(),
+                    a.dense_data().unwrap(),
                     terms,
                 );
             }
@@ -196,7 +196,7 @@ macro_rules! base_suite {
                 let leg = fermion_su2_leg();
                 let (a, wa) = twin!(&runtime, $narrow, $wide, [&leg], [&leg], 9_201);
                 let (b, wb) = twin!(&runtime, $narrow, $wide, [&leg], [&leg], 9_202);
-                let terms = wa.data().len();
+                let terms = wa.dense_data().unwrap().len();
 
                 for (what, got, expected) in [
                     (
@@ -217,7 +217,7 @@ macro_rules! base_suite {
                         wa.cat(&wb, Side::Codomain).unwrap(),
                     ),
                 ] {
-                    assert_payloads_agree(what, got.data(), expected.data(), terms);
+                    assert_payloads_agree(what, got.dense_data().unwrap(), expected.dense_data().unwrap(), terms);
                 }
             }
 
@@ -236,22 +236,22 @@ macro_rules! base_suite {
                 assert_eq!(a.rank(), 5);
                 assert!(a.subblock_count() > 1, "the fixture must be multi-block");
                 let (b, wb) = twin!(&runtime, $narrow, $wide, [&leg, &leg], [&leg], 9_302);
-                let terms = wa.data().len().max(wb.data().len());
+                let terms = wa.dense_data().unwrap().len().max(wb.dense_data().unwrap().len());
 
                 assert_payloads_agree(
                     "rank-5 contract",
                     a.contract(&b, &[3, 4], &[0, 1], &[0, 1, 2, 3])
                         .unwrap()
-                        .data(),
+                        .dense_data().unwrap(),
                     wa.contract(&wb, &[3, 4], &[0, 1], &[0, 1, 2, 3])
                         .unwrap()
-                        .data(),
+                        .dense_data().unwrap(),
                     terms,
                 );
                 assert_payloads_agree(
                     "rank-5 permute",
-                    a.permute(&[4, 0, 2], &[1, 3]).unwrap().data(),
-                    wa.permute(&[4, 0, 2], &[1, 3]).unwrap().data(),
+                    a.permute(&[4, 0, 2], &[1, 3]).unwrap().dense_data().unwrap(),
+                    wa.permute(&[4, 0, 2], &[1, 3]).unwrap().dense_data().unwrap(),
                     terms,
                 );
             }
@@ -261,7 +261,7 @@ macro_rules! base_suite {
                 let runtime = runtime();
                 let leg = u1_leg();
                 let (a, wa) = twin!(&runtime, $narrow, $wide, [&leg], [&leg], 9_401);
-                let terms = wa.data().len();
+                let terms = wa.dense_data().unwrap().len();
 
                 let selection =
                     LegSelection::try_new(&leg, [(U1Irrep::new(0), 0..2), (U1Irrep::new(1), 0..1)])
@@ -270,14 +270,14 @@ macro_rules! base_suite {
                 let wide_restricted = wa.restrict_leg(&[(1, &selection)]).unwrap();
                 assert_payloads_agree(
                     "restrict_leg",
-                    restricted.data(),
-                    wide_restricted.data(),
+                    restricted.dense_data().unwrap(),
+                    wide_restricted.dense_data().unwrap(),
                     1,
                 );
                 assert_payloads_agree(
                     "embed_leg",
-                    restricted.embed_leg(1, &selection).unwrap().data(),
-                    wide_restricted.embed_leg(1, &selection).unwrap().data(),
+                    restricted.embed_leg(1, &selection).unwrap().dense_data().unwrap(),
+                    wide_restricted.embed_leg(1, &selection).unwrap().dense_data().unwrap(),
                     1,
                 );
 
@@ -313,14 +313,14 @@ macro_rules! base_suite {
                 );
                 assert_payloads_agree(
                     "compact restrict_leg",
-                    compact.restrict_leg(&[(0, &selection), (1, &selection)]).unwrap().data(),
-                    wide_compact.restrict_leg(&[(0, &selection), (1, &selection)]).unwrap().data(),
+                    compact.restrict_leg(&[(0, &selection), (1, &selection)]).unwrap().materialize().unwrap().dense_data().unwrap(),
+                    wide_compact.restrict_leg(&[(0, &selection), (1, &selection)]).unwrap().materialize().unwrap().dense_data().unwrap(),
                     1,
                 );
                 assert_payloads_agree(
                     "compact compose",
-                    compact.compose(&a).unwrap().data(),
-                    wide_compact.compose(&wa).unwrap().data(),
+                    compact.compose(&a).unwrap().dense_data().unwrap(),
+                    wide_compact.compose(&wa).unwrap().dense_data().unwrap(),
                     terms,
                 );
             }
@@ -335,14 +335,14 @@ macro_rules! base_suite {
                 let runtime = runtime();
                 let leg = fermion_su2_leg();
                 let (a, wa) = twin!(&runtime, $narrow, $wide, [&leg, &leg], [&leg, &leg], 9_501);
-                let terms = wa.data().len();
+                let terms = wa.dense_data().unwrap().len();
                 for _ in 0..3 {
                     let narrow = a.permute(&[2, 0], &[1, 3]).unwrap();
                     let wide = wa.permute(&[2, 0], &[1, 3]).unwrap();
                     assert_payloads_agree(
                         "interleaved permute",
-                        narrow.data(),
-                        wide.data(),
+                        narrow.dense_data().unwrap(),
+                        wide.dense_data().unwrap(),
                         terms,
                     );
                 }
@@ -404,7 +404,7 @@ mod checked_generic {
                             .any(|vertex| vertex.get() > 1)),
                         "the fixture must carry a Generic multiplicity vertex"
                     );
-                    let terms = wa.data().len();
+                    let terms = wa.dense_data().unwrap().len();
 
                     for (what, got, expected) in [
                         (
@@ -424,7 +424,12 @@ mod checked_generic {
                             wa.trace_pairs(&[(0, 3)]).unwrap(),
                         ),
                     ] {
-                        assert_payloads_agree(what, got.data(), expected.data(), terms);
+                        assert_payloads_agree(
+                            what,
+                            got.materialize().unwrap().dense_data().unwrap(),
+                            expected.materialize().unwrap().dense_data().unwrap(),
+                            terms,
+                        );
                     }
 
                     assert_scalars_agree(

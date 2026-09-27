@@ -100,8 +100,8 @@ fn the_dense_permute_oracle_agrees_with_the_host_for_u1_and_su2() {
         values
     };
     assert_ne!(
-        sorted(su2_tensor.data()),
-        sorted(permuted.data()),
+        sorted(su2_tensor.dense_data().unwrap()),
+        sorted(permuted.dense_data().unwrap()),
         "SU(2) permute must apply coefficients other than 1"
     );
 }
@@ -275,17 +275,29 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() 
         TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
 
     let mut poisoned = source.permute(&[2, 0], &[1, 3]).unwrap().scale(f64::NAN);
-    assert!(poisoned.data().iter().all(|value| value.is_nan()));
+    assert!(poisoned
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|value| value.is_nan()));
     source
         .permute_overwrite_into(&mut poisoned, &[2, 0], &[1, 3], 1.0)
         .unwrap();
     assert!(
-        poisoned.data().iter().all(|value| value.is_finite()),
+        poisoned
+            .dense_data()
+            .unwrap()
+            .iter()
+            .all(|value| value.is_finite()),
         "Overwrite mode must clear every destination layout, inactive ones included"
     );
     assert_eq!(
-        poisoned.data(),
-        source.permute(&[2, 0], &[1, 3]).unwrap().data()
+        poisoned.dense_data().unwrap(),
+        source
+            .permute(&[2, 0], &[1, 3])
+            .unwrap()
+            .dense_data()
+            .unwrap()
     );
 
     // No identity short circuit: `alpha * self` is written.
@@ -293,12 +305,18 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() 
     source
         .permute_overwrite_into(&mut identity, &[0, 1], &[2, 3], -2.5)
         .unwrap();
-    assert_eq!(identity.data(), source.scale(-2.5).data());
+    assert_eq!(
+        identity.dense_data().unwrap(),
+        source.scale(-2.5).dense_data().unwrap()
+    );
     let mut same_split = source.scale(f64::NAN);
     source
         .repartition_overwrite_into(&mut same_split, 2.0)
         .unwrap();
-    assert_eq!(same_split.data(), source.scale(2.0).data());
+    assert_eq!(
+        same_split.dense_data().unwrap(),
+        source.scale(2.0).dense_data().unwrap()
+    );
 
     // `alpha == 0`, `-0.0` included, writes VectorInterface's
     // `scale(x, 0) = zero(x) * 0` (#1438): an exact zero at every position,
@@ -316,7 +334,7 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() 
         .unwrap();
     let permuted_source = nan_source.permute(&[1, 2], &[3, 0]).unwrap();
     assert!(
-        !nan_positions(permuted_source.data()).is_empty(),
+        !nan_positions(permuted_source.dense_data().unwrap()).is_empty(),
         "the fixture must carry NaNs through the permute"
     );
     for alpha in [0.0, -0.0] {
@@ -325,7 +343,11 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() 
             .permute_overwrite_into(&mut destination, &[1, 2], &[3, 0], alpha)
             .unwrap();
         assert!(
-            destination.data().iter().all(|value| *value == 0.0),
+            destination
+                .dense_data()
+                .unwrap()
+                .iter()
+                .all(|value| *value == 0.0),
             "alpha = {alpha}: every position must be an exact zero"
         );
     }
@@ -348,7 +370,12 @@ macro_rules! assert_signs_only_over {
             ] {
                 let mut kept = 0usize;
                 let mut negated = 0usize;
-                for (&before, &after) in $tensor.data().iter().zip(twisted.data()) {
+                for (&before, &after) in $tensor
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .zip(twisted.dense_data().unwrap())
+                {
                     if after == before {
                         kept += 1;
                     } else {
@@ -488,12 +515,20 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
     // work here, and this pins the value it must produce.
     for legs in [&[0usize, 1, 2, 3][..], &[0, 1, 2, 3, 0, 1, 2, 3][..]] {
         assert_eq!(
-            tensor.twist(legs, Direction::Forward).unwrap().data(),
-            tensor.data()
+            tensor
+                .twist(legs, Direction::Forward)
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            tensor.dense_data().unwrap()
         );
         assert_eq!(
-            tensor.twist(legs, Direction::Inverse).unwrap().data(),
-            tensor.data()
+            tensor
+                .twist(legs, Direction::Inverse)
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            tensor.dense_data().unwrap()
         );
     }
 
@@ -504,7 +539,10 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
         .unwrap()
         .twist(&[0, 2], Direction::Inverse)
         .unwrap();
-    assert_eq!(round_trip.data(), tensor.data());
+    assert_eq!(
+        round_trip.dense_data().unwrap(),
+        tensor.dense_data().unwrap()
+    );
 }
 
 /// The zero-block fixture of the device gate. A space with no coupled sector
@@ -528,10 +566,14 @@ fn a_twist_of_a_space_with_no_coupled_sector_is_the_identity_short_circuit() {
     .unwrap();
     let empty: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&even], [&odd], real_fill).unwrap();
-    assert!(empty.data().is_empty(), "the fixture must carry no element");
+    assert!(
+        empty.dense_data().unwrap().is_empty(),
+        "the fixture must carry no element"
+    );
     assert!(empty
         .twist(&[0, 1], Direction::Forward)
         .unwrap()
-        .data()
+        .dense_data()
+        .unwrap()
         .is_empty());
 }

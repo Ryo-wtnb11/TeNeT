@@ -48,17 +48,21 @@ fn restrict_and_embed_preserve_su3_multiplicity_vertices() {
     // Oracle: a literal per-block gather driven by the public fusion-tree
     // keys and block geometry, sharing no code with the restriction kernel.
     let expected = literal_slice(&source, &restricted, &[(0, 1)]);
-    assert_eq!(restricted.data(), expected);
+    assert_eq!(restricted.dense_data().unwrap(), expected);
 
     // Embedding back writes the same rectangle into a zero payload and leaves
     // every vertex key in place.
     let embedded = restricted.embed_leg(0, &selection).unwrap();
     assert_eq!(embedded.codomain()[0], leg);
     let expected = literal_scatter(&restricted, &embedded, 0, 1);
-    assert_eq!(embedded.data(), expected);
+    assert_eq!(embedded.dense_data().unwrap(), expected);
     assert_eq!(
-        embedded.restrict_leg(&[(0, &selection)]).unwrap().data(),
-        restricted.data()
+        embedded
+            .restrict_leg(&[(0, &selection)])
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        restricted.dense_data().unwrap()
     );
 }
 
@@ -85,7 +89,7 @@ fn a_multi_axis_restriction_is_the_literal_slice_on_every_axis_at_once() {
     assert_eq!(restricted.codomain()[2], *head.subspace());
     assert_eq!(restricted.subblock_count(), source.subblock_count());
     assert_eq!(
-        restricted.data(),
+        restricted.dense_data().unwrap(),
         literal_slice(&source, &restricted, &[(0, 1), (2, 0)])
     );
     let sequential = source
@@ -95,12 +99,14 @@ fn a_multi_axis_restriction_is_the_literal_slice_on_every_axis_at_once() {
         .unwrap();
     assert_eq!(
         restricted
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|value| value.to_bits())
             .collect::<Vec<_>>(),
         sequential
-            .data()
+            .dense_data()
+            .unwrap()
             .iter()
             .map(|value| value.to_bits())
             .collect::<Vec<_>>()
@@ -148,12 +154,13 @@ fn a_compact_eigh_spectrum_restricted_on_both_legs_stays_compact() {
         assert_eq!(entry.values, from.values[range.clone()].to_vec());
     }
     assert_eq!(
-        restricted.materialize().unwrap().data(),
+        restricted.materialize().unwrap().dense_data().unwrap(),
         d.materialize()
             .unwrap()
             .restrict_leg(&[(0, &selection), (1, &selection)])
             .unwrap()
-            .data()
+            .dense_data()
+            .unwrap()
     );
 }
 
@@ -165,7 +172,7 @@ fn literal_slice(
     destination: &TensorMap<SUNFusionRule, f64>,
     starts: &[(usize, usize)],
 ) -> Vec<f64> {
-    let mut payload = vec![f64::NAN; destination.data().len()];
+    let mut payload = vec![f64::NAN; destination.dense_data().unwrap().len()];
     for index in 0..destination.subblock_count() {
         let trees = destination.subblock_fusion_trees(index).unwrap();
         let block = destination.subblock(index).unwrap();
@@ -193,7 +200,7 @@ fn literal_slice(
                         (index + start) * stride
                     })
                     .sum::<usize>();
-            payload[to_offset] = source.data()[from_offset];
+            payload[to_offset] = source.dense_data().unwrap()[from_offset];
         });
     }
     payload
@@ -207,7 +214,7 @@ fn literal_scatter(
     axis: usize,
     start: usize,
 ) -> Vec<f64> {
-    let mut payload = vec![0.0; destination.data().len()];
+    let mut payload = vec![0.0; destination.dense_data().unwrap().len()];
     for index in 0..source.subblock_count() {
         let trees = source.subblock_fusion_trees(index).unwrap();
         let block = source.subblock(index).unwrap();
@@ -231,7 +238,7 @@ fn literal_scatter(
                         (index + if dimension == axis { start } else { 0 }) * stride
                     })
                     .sum::<usize>();
-            payload[to_offset] = source.data()[from_offset];
+            payload[to_offset] = source.dense_data().unwrap()[from_offset];
         });
     }
     payload

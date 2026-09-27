@@ -34,7 +34,7 @@ fn zn3_index_flip_and_units_keep_the_original_provider() {
 
     // Independent label/value oracle: the three diagonal charge blocks are
     // ordered by their Z3 charge, not merely restored by an inverse operation.
-    assert_eq!(source.data(), &[10.0, 11.0, 12.0]);
+    assert_eq!(source.dense_data().unwrap(), &[10.0, 11.0, 12.0]);
     assert_eq!(
         (0..source.subblock_count())
             .map(|i| *source.subblock_fusion_trees(i).unwrap().coupled())
@@ -53,10 +53,14 @@ fn zn3_index_flip_and_units_keep_the_original_provider() {
         provider.as_ref()
     ));
     assert!(flipped.codomain()[0].is_dual());
-    assert_eq!(flipped.data(), source.data());
+    assert_eq!(flipped.dense_data().unwrap(), source.dense_data().unwrap());
     assert_eq!(
-        flipped.flip(&[0], Direction::Inverse).unwrap().data(),
-        source.data()
+        flipped
+            .flip(&[0], Direction::Inverse)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        source.dense_data().unwrap()
     );
 
     let inserted = source.insert_unit(1, Side::Domain, Duality::Dual).unwrap();
@@ -68,7 +72,7 @@ fn zn3_index_flip_and_units_keep_the_original_provider() {
     assert_eq!(inserted.domain()[0].sectors().unwrap(), vec![charge(0)]);
     let restored = inserted.remove_unit(1).unwrap();
     assert!(std::ptr::eq(restored.provider(), provider.as_ref()));
-    assert_eq!(restored.data(), source.data());
+    assert_eq!(restored.dense_data().unwrap(), source.dense_data().unwrap());
 }
 
 #[test]
@@ -94,7 +98,10 @@ fn z2_cat_and_absorb_have_hand_computed_slabs() {
         joined.domain()[0].provider(),
         provider.as_ref()
     ));
-    assert_eq!(joined.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(
+        joined.dense_data().unwrap(),
+        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    );
     assert_eq!(joined.domain()[0].degeneracies(), &[3]);
 
     let destination: TensorMap<Z2FusionRule, f64> = TensorMap::from_subblock_fn(
@@ -113,7 +120,10 @@ fn z2_cat_and_absorb_have_hand_computed_slabs() {
     .unwrap();
     let absorbed = destination.absorb(&source).unwrap();
     assert!(std::ptr::eq(absorbed.provider(), provider.as_ref()));
-    assert_eq!(absorbed.data(), &[-11.0, -21.0, -12.0, -22.0, 13.0, 23.0]);
+    assert_eq!(
+        absorbed.dense_data().unwrap(),
+        &[-11.0, -21.0, -12.0, -22.0, 13.0, 23.0]
+    );
 }
 
 #[test]
@@ -133,10 +143,10 @@ fn fermionic_product_contract_otimes_and_reductions_keep_provider_and_signs() {
         contracted.codomain()[0].provider(),
         provider.as_ref()
     ));
-    assert_eq!(contracted.data(), &[6.0]);
+    assert_eq!(contracted.dense_data().unwrap(), &[6.0]);
     let product = lhs.otimes(&rhs).unwrap();
     assert!(std::ptr::eq(product.provider(), provider.as_ref()));
-    assert_eq!(product.data(), &[6.0]);
+    assert_eq!(product.dense_data().unwrap(), &[6.0]);
     assert_eq!(lhs.inner(&rhs).unwrap(), 6.0);
     assert_eq!(lhs.norm(2.0).unwrap(), 2.0);
     assert_eq!(lhs.tr().unwrap(), 2.0);
@@ -169,10 +179,17 @@ fn nested_fermionic_su2_product_and_complex_adjoint_are_publicly_conformant() {
         provider.as_ref()
     ));
     assert_eq!(
-        source.twist(&[0, 1], Direction::Forward).unwrap().data(),
-        source.data()
+        source
+            .twist(&[0, 1], Direction::Forward)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        source.dense_data().unwrap()
     );
-    assert_eq!(adjoint.data(), &[Complex64::new(2.0, -3.0)]);
+    assert_eq!(
+        adjoint.materialize().unwrap().dense_data().unwrap(),
+        &[Complex64::new(2.0, -3.0)]
+    );
     assert_eq!(
         adjoint.codomain()[0].sectors().unwrap(),
         vec![spin_half],
@@ -200,14 +217,18 @@ fn zn3_extended_structural_paths_execute_on_the_original_arc() {
         .unwrap();
     let permuted = source.permute(&[1, 0], &[2]).unwrap();
     let braided = source.braid(&[1, 0], &[2], &[1, 0, 2]).unwrap();
-    assert_eq!(braided.data(), permuted.data(), "Z3 is bosonic");
+    assert_eq!(
+        braided.dense_data().unwrap(),
+        permuted.dense_data().unwrap(),
+        "Z3 is bosonic"
+    );
     assert_ne!(
-        permuted.data(),
-        source.data(),
+        permuted.dense_data().unwrap(),
+        source.dense_data().unwrap(),
         "asymmetric raw payload moved"
     );
     let restored = permuted.permute(&[1, 0], &[2]).unwrap();
-    assert_eq!(restored.data(), source.data());
+    assert_eq!(restored.dense_data().unwrap(), source.dense_data().unwrap());
     for index in 0..source.subblock_count() {
         assert_eq!(
             restored.subblock_fusion_trees(index).unwrap(),
@@ -215,8 +236,15 @@ fn zn3_extended_structural_paths_execute_on_the_original_arc() {
         );
     }
     let twisted = source.twist(&[0, 1, 2], Direction::Forward).unwrap();
-    assert_eq!(twisted.data(), source.data(), "ZN(3) has trivial twist");
-    assert_eq!(twisted.data().as_ptr(), source.data().as_ptr());
+    assert_eq!(
+        twisted.dense_data().unwrap(),
+        source.dense_data().unwrap(),
+        "ZN(3) has trivial twist"
+    );
+    assert_eq!(
+        twisted.dense_data().unwrap().as_ptr(),
+        source.dense_data().unwrap().as_ptr()
+    );
     for output in [
         source.adjoint().unwrap(),
         source.transpose(&[2], &[1, 0]).unwrap(),
@@ -261,16 +289,30 @@ fn cu1_charged_structural_paths_keep_the_original_arc() {
         ));
     }
     assert_eq!(
-        source.adjoint().unwrap().data(),
+        source
+            .adjoint()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap(),
         &[Complex64::new(2.0, -3.0)]
     );
     assert_eq!(
-        source.twist(&[0, 1], Direction::Forward).unwrap().data(),
-        source.data()
+        source
+            .twist(&[0, 1], Direction::Forward)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        source.dense_data().unwrap()
     );
     assert_eq!(
-        source.flip(&[0], Direction::Forward).unwrap().data(),
-        source.data()
+        source
+            .flip(&[0], Direction::Forward)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        source.dense_data().unwrap()
     );
     let pseudo =
         GradedSpace::try_new(Arc::clone(&provider), [(CU1Irrep::PSEUDOSCALAR, 1)]).unwrap();
@@ -281,8 +323,8 @@ fn cu1_charged_structural_paths_keep_the_original_arc() {
     // `permute` is the symmetric-braiding permutation (not a raw ndarray
     // transpose), so it and `braid` coincide for CU1.  Both differ from the
     // raw source by the charged exchange coefficient R(q,q;pseudo) = -1.
-    assert_eq!(permuted.data(), &[-1.0]);
-    assert_eq!(braided.data(), &[-1.0]);
+    assert_eq!(permuted.dense_data().unwrap(), &[-1.0]);
+    assert_eq!(braided.dense_data().unwrap(), &[-1.0]);
     assert!(std::ptr::eq(braided.provider(), provider.as_ref()));
     let inserted = source
         .insert_unit(0, Side::Codomain, Duality::Plain)
@@ -313,7 +355,7 @@ fn su2_and_exact_products_keep_their_provider_through_flip_and_units() {
                     provider.as_ref()
                 ));
             }
-            assert_eq!(restored.data(), source.data());
+            assert_eq!(restored.dense_data().unwrap(), source.dense_data().unwrap());
         }};
     }
     check!(SU2FusionRule, SU2Irrep::from_twice_spin(1));
@@ -354,7 +396,7 @@ fn dual_nonabelian_flip_pins_the_pivotal_phase() {
             ));
             assert_eq!(flipped.codomain()[0].is_dual(), $codomain_dual);
             assert_eq!(flipped.domain()[0].is_dual(), $domain_dual);
-            assert_eq!(flipped.data(), &[-1.0]);
+            assert_eq!(flipped.dense_data().unwrap(), &[-1.0]);
         }};
     }
     // Dual SU2 codomain: the forward factor is χθ=-1.
@@ -399,9 +441,9 @@ fn covered_builtin_multiplicity_free_providers_have_cat_and_absorb_execution() {
             }
             // Single-sector column and row slabs, plus overwrite, are raw
             // payload oracles independent of a round trip.
-            assert_eq!(domain.data(), &[1.0, 2.0]);
-            assert_eq!(codomain_join.data(), &[1.0, 2.0]);
-            assert_eq!(absorbed.data(), &[2.0]);
+            assert_eq!(domain.dense_data().unwrap(), &[1.0, 2.0]);
+            assert_eq!(codomain_join.dense_data().unwrap(), &[1.0, 2.0]);
+            assert_eq!(absorbed.dense_data().unwrap(), &[2.0]);
         }};
     }
     check!(Z2FusionRule, Z2Irrep::EVEN);
@@ -446,11 +488,15 @@ fn zn3_and_cu1_arithmetic_contraction_and_reductions_have_scalar_oracles() {
             for output in [&ordered, &composed, &tensor_product, &sum, &scaled] {
                 assert!(std::ptr::eq(output.provider(), provider.as_ref()));
             }
-            for values in [ordered.data(), composed.data(), tensor_product.data()] {
+            for values in [
+                ordered.dense_data().unwrap(),
+                composed.dense_data().unwrap(),
+                tensor_product.dense_data().unwrap(),
+            ] {
                 assert!((values[0] - 6.0).abs() < 1e-12);
             }
-            assert_eq!(sum.data(), &[-1.0]);
-            assert_eq!(scaled.data(), &[8.0]);
+            assert_eq!(sum.dense_data().unwrap(), &[-1.0]);
+            assert_eq!(scaled.dense_data().unwrap(), &[8.0]);
             assert!((a.norm(2.0).unwrap() - 2.0 * ($qdim as f64).sqrt()).abs() < 1e-12);
             assert!((a.inner(&b).unwrap() - 6.0 * $qdim).abs() < 1e-12);
             assert!((a.tr().unwrap() - 2.0 * $qdim).abs() < 1e-12);

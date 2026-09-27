@@ -129,17 +129,17 @@ macro_rules! network_suite {
                 let (a, wa) = twin!(&runtime, $narrow, $wide, [&leg], [&leg], 7_001);
                 let (b, wb) = twin!(&runtime, $narrow, $wide, [&leg], [&leg], 7_002);
                 let (c, wc) = twin!(&runtime, $narrow, $wide, [&leg], [&leg], 7_003);
-                let terms = wa.data().len();
+                let terms = wa.dense_data().unwrap().len();
 
                 let got = tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap();
                 let expected = tensor!([i; l] = wa[i; j] * wb[j; k] * wc[k; l]).unwrap();
-                assert_payloads_agree("u1 chain", got.data(), expected.data(), terms);
+                assert_payloads_agree("u1 chain", got.dense_data().unwrap(), expected.dense_data().unwrap(), terms);
 
                 // The plan cache is keyed by structure, not payload dtype; a
                 // second execution must therefore still produce the same
                 // result at this precision.
                 let again = tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap();
-                assert_eq!(again.data(), got.data());
+                assert_eq!(again.dense_data().unwrap(), got.dense_data().unwrap());
 
                 // Full trace through the macro, on the single-precision lane.
                 let traced = tensor!([] = a[i; i]).unwrap().scalar().unwrap();
@@ -167,13 +167,13 @@ macro_rules! network_suite {
                 .unwrap();
                 let (a, wa) = twin!(&runtime, $narrow, $wide, [&leg, &leg], [&leg], 7_101);
                 let (b, wb) = twin!(&runtime, $narrow, $wide, [&leg], [&leg, &leg], 7_102);
-                let terms = wa.data().len();
+                let terms = wa.dense_data().unwrap().len();
 
                 let got = tensor!([i, j; l, m] = a[i, j; k] * b[k; l, m]).unwrap();
                 let expected = tensor!([i, j; l, m] = wa[i, j; k] * wb[k; l, m]).unwrap();
-                assert_payloads_agree("su2 network", got.data(), expected.data(), terms);
+                assert_payloads_agree("su2 network", got.dense_data().unwrap(), expected.dense_data().unwrap(), terms);
                 assert!(
-                    got.data().iter().any(|&value| value.wide().norm() > 1e-3),
+                    got.dense_data().unwrap().iter().any(|&value| value.wide().norm() > 1e-3),
                     "the SU(2) fixture must produce a nonzero result"
                 );
             }

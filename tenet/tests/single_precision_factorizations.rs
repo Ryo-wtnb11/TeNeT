@@ -308,7 +308,7 @@ macro_rules! factor_checks {
             short_dom.iter().copied(),
             |index: &[usize]| fixture_entry(index[0], index[1])
         );
-        let terms = wide_tall.data().len();
+        let terms = wide_tall.dense_data().unwrap().len();
         assert!(
             tall.subblock_count() >= $min_blocks,
             "{name}: the fixture must carry at least {} coupled blocks, has {}",
@@ -338,15 +338,15 @@ macro_rules! factor_checks {
         assert_positive_real_diagonal!(format!("{name}: qr_compact R"), r);
         assert_payloads_agree_scaled(
             &format!("{name}: qr_compact Q against the widened oracle (kappa {kappa:e})"),
-            q.data(),
-            wq.data(),
+            q.dense_data().unwrap(),
+            wq.dense_data().unwrap(),
             terms,
             kappa,
         );
         assert_payloads_agree_scaled(
             &format!("{name}: qr_compact R against the widened oracle (kappa {kappa:e})"),
-            r.data(),
-            wr.data(),
+            r.dense_data().unwrap(),
+            wr.dense_data().unwrap(),
             terms,
             kappa,
         );
@@ -376,15 +376,15 @@ macro_rules! factor_checks {
         assert_positive_real_diagonal!(format!("{name}: lq_compact L"), l);
         assert_payloads_agree_scaled(
             &format!("{name}: lq_compact L against the widened oracle (kappa {short_kappa:e})"),
-            l.data(),
-            wl.data(),
+            l.dense_data().unwrap(),
+            wl.dense_data().unwrap(),
             terms,
             short_kappa,
         );
         assert_payloads_agree_scaled(
             &format!("{name}: lq_compact Q against the widened oracle (kappa {short_kappa:e})"),
-            q.data(),
-            wq.data(),
+            q.dense_data().unwrap(),
+            wq.dense_data().unwrap(),
             terms,
             short_kappa,
         );
@@ -443,8 +443,20 @@ macro_rules! factor_checks {
         let truncated = svd_trunc!(tall, &Truncation::rank(2));
         let wide_truncated = svd_trunc!(wide_tall, &Truncation::rank(2));
         assert_eq!(
-            truncated.s.data().len(),
-            wide_truncated.s.data().len(),
+            truncated
+                .s
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+                .len(),
+            wide_truncated
+                .s
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+                .len(),
             "{name}: svd_trunc kept a different number of states than the widened oracle"
         );
         assert!(
@@ -483,7 +495,7 @@ macro_rules! factor_checks {
             short_cod.iter().copied(),
             |index: &[usize]| fixture_entry(index[0], index[1])
         );
-        let h_terms = wide_h.data().len();
+        let h_terms = wide_h.dense_data().unwrap().len();
 
         let Eigh { d, v } = h.eigh_full().unwrap();
         assert_reconstruction!(
@@ -524,8 +536,20 @@ macro_rules! factor_checks {
             "{name}: eigh_trunc discarded nothing"
         );
         assert_eq!(
-            truncated.d.data().len(),
-            wide_truncated.d.data().len(),
+            truncated
+                .d
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+                .len(),
+            wide_truncated
+                .d
+                .materialize()
+                .unwrap()
+                .dense_data()
+                .unwrap()
+                .len(),
             "{name}: eigh_trunc kept a different number of states than the widened oracle"
         );
         assert_scalars_agree(
@@ -540,7 +564,7 @@ macro_rules! factor_checks {
         // rows; the annihilation is a forward error, hence the `kappa`.
         let left = tall.left_null().unwrap();
         assert!(
-            left.data().len() > 0,
+            left.dense_data().unwrap().len() > 0,
             "{name}: the tall fixture must have a nonempty left null space"
         );
         let annihilated = left
@@ -560,7 +584,7 @@ macro_rules! factor_checks {
 
         let right = short.right_null().unwrap();
         assert!(
-            right.data().len() > 0,
+            right.dense_data().unwrap().len() > 0,
             "{name}: the wide fixture must have a nonempty right null space"
         );
         let annihilated = short
@@ -597,15 +621,15 @@ macro_rules! factor_checks {
         );
         assert_payloads_agree_scaled(
             &format!("{name}: left_polar W against the widened oracle (kappa {kappa:e})"),
-            w.data(),
-            ww.data(),
+            w.dense_data().unwrap(),
+            ww.dense_data().unwrap(),
             terms,
             kappa,
         );
         assert_payloads_agree_scaled(
             &format!("{name}: left_polar P against the widened oracle (kappa {kappa:e})"),
-            p.data(),
-            wp.data(),
+            p.dense_data().unwrap(),
+            wp.dense_data().unwrap(),
             terms,
             kappa,
         );
@@ -822,7 +846,7 @@ mod checked_generic {
                         [&tall_leg],
                         |index: &[usize]| fixture_entry(index[0], index[1])
                     );
-                    let terms = wide_tall.data().len();
+                    let terms = wide_tall.dense_data().unwrap().len();
                     let kappa = measured_kappa!(&wide_tall);
                     let short_kappa = measured_kappa!(&wide_short);
                     assert!(
@@ -844,15 +868,15 @@ mod checked_generic {
                     assert_positive_real_diagonal!(format!("{name}: qr_compact R"), r);
                     assert_payloads_agree_scaled(
                         &format!("{name}: qr_compact Q against the widened oracle"),
-                        q.data(),
-                        wq.data(),
+                        q.dense_data().unwrap(),
+                        wq.dense_data().unwrap(),
                         terms,
                         kappa,
                     );
                     assert_payloads_agree_scaled(
                         &format!("{name}: qr_compact R against the widened oracle"),
-                        r.data(),
-                        wr.data(),
+                        r.dense_data().unwrap(),
+                        wr.dense_data().unwrap(),
                         terms,
                         kappa,
                     );
@@ -890,8 +914,8 @@ mod checked_generic {
                         "{name}: the rank budget must discard something"
                     );
                     assert_eq!(
-                        truncated.s.data().len(),
-                        wide_truncated.s.data().len(),
+                        truncated.s.dense_data().unwrap().len(),
+                        wide_truncated.s.dense_data().unwrap().len(),
                         "{name}: svd_trunc kept a different number of states than the oracle"
                     );
                     assert_scalars_agree(
@@ -911,7 +935,7 @@ mod checked_generic {
                         [&short_leg],
                         |index: &[usize]| fixture_entry(index[0], index[1])
                     );
-                    let h_terms = wide_h.data().len();
+                    let h_terms = wide_h.dense_data().unwrap().len();
                     // `v ∘ d ∘ v†` would need the adjoint operand the checked
                     // dispatch rejects, so `eigh_full` is pinned here by its
                     // spectrum factor instead: `d` must carry exactly the
@@ -984,15 +1008,15 @@ mod checked_generic {
                     );
                     assert_payloads_agree_scaled(
                         &format!("{name}: left_polar W against the widened oracle"),
-                        w.data(),
-                        ww.data(),
+                        w.dense_data().unwrap(),
+                        ww.dense_data().unwrap(),
                         terms,
                         kappa,
                     );
                     assert_payloads_agree_scaled(
                         &format!("{name}: left_polar P against the widened oracle"),
-                        p.data(),
-                        wp.data(),
+                        p.dense_data().unwrap(),
+                        wp.dense_data().unwrap(),
                         terms,
                         kappa,
                     );

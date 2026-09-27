@@ -67,11 +67,22 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
         assert_eq!(svd.h2d_calls, 3, "{charges} sectors");
         assert_eq!(
             svd.h2d_bytes,
-            bytes(u.data().len() + s.data().len() + vh.data().len()),
+            bytes(
+                u.materialize().unwrap().dense_data().unwrap().len()
+                    + s.materialize().unwrap().dense_data().unwrap().len()
+                    + vh.materialize().unwrap().dense_data().unwrap().len()
+            ),
             "{charges} sectors"
         );
         let Svd { s: expected, .. } = host.svd_compact().unwrap();
-        for (device, host) in s.data().iter().zip(expected.data()) {
+        for (device, host) in s
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(expected.materialize().unwrap().dense_data().unwrap())
+        {
             assert!((device - host).abs() <= 1e-12 * host.abs().max(1.0));
         }
 
@@ -88,11 +99,22 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
         // `d` arrives filled in its one dense upload, beside `v`'s zeros and
         // the `n_c x n_c` selector; the remainder is per-sector scalars.
         assert!(
-            eigh.h2d_bytes >= bytes(2 * d.data().len() + v.data().len()),
+            eigh.h2d_bytes
+                >= bytes(
+                    2 * d.materialize().unwrap().dense_data().unwrap().len()
+                        + v.materialize().unwrap().dense_data().unwrap().len()
+                ),
             "{charges}: {eigh:?}"
         );
         let Eigh { d: expected, .. } = hermitian.eigh_full().unwrap();
-        for (device, host) in d.data().iter().zip(expected.data()) {
+        for (device, host) in d
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(expected.materialize().unwrap().dense_data().unwrap())
+        {
             assert!((device - host).abs() <= 1e-10 * host.abs().max(1.0));
         }
     }

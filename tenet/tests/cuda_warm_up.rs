@@ -44,7 +44,10 @@ fn a_first_contract_on_a_fresh_runtime_does_no_backend_initialization_work() {
     assert_eq!(after.gemm_calls - before.gemm_calls, 1);
     assert_eq!(after.solver_calls, before.solver_calls);
 
-    assert_eq!(product.to_host().unwrap().data(), expected.data());
+    assert_eq!(
+        product.to_host().unwrap().dense_data().unwrap(),
+        expected.dense_data().unwrap()
+    );
 }
 
 // Not `#[ignore]`d: the ordinal is rejected before anything touches CUDA, so

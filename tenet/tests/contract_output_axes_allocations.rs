@@ -96,7 +96,10 @@ macro_rules! assert_no_costlier_than_permute {
         // What: the warm call compiles no new transform plan.
         assert_eq!($runtime.tree_transform_cache_info().misses(), misses);
         // What: the same tensor, bit for bit.
-        assert_eq!(fused_value.data(), separate_value.data());
+        assert_eq!(
+            fused_value.dense_data().unwrap(),
+            separate_value.dense_data().unwrap()
+        );
         assert_eq!(fused_value.codomain_rank(), codomain.len());
         // What: no more allocation calls or bytes than the two-step route.
         assert!(
@@ -145,9 +148,9 @@ macro_rules! assert_output_axes_cost {
                 assert_eq!(got.leg_dims().unwrap(), want.leg_dims().unwrap());
                 numerics::assert_slices_close(
                     "contract(output_axes) vs pre-permuted operand",
-                    got.data(),
-                    want.data(),
-                    a.data().len() * b.data().len(),
+                    got.dense_data().unwrap(),
+                    want.dense_data().unwrap(),
+                    a.dense_data().unwrap().len() * b.dense_data().unwrap().len(),
                 );
             }
             assert_no_costlier_than_permute!(

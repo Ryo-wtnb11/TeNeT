@@ -96,11 +96,11 @@ where
         );
         if inputs.len() == 1 {
             assert!(
-                d.data() == eager_d.data(),
+                d.dense_data().unwrap() == eager_d.dense_data().unwrap(),
                 "{what}: d bit-identical to eager"
             );
             assert!(
-                v.data() == eager_v.data(),
+                v.dense_data().unwrap() == eager_v.dense_data().unwrap(),
                 "{what}: v bit-identical to eager"
             );
         }
@@ -448,7 +448,7 @@ fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
             if inputs.len() == 1 {
                 let Eigh { v: eager_v, .. } = input.to_cuda().unwrap().eigh_full().unwrap();
                 assert!(
-                    v.data() == eager_v.to_host().unwrap().data(),
+                    v.dense_data().unwrap() == eager_v.to_host().unwrap().dense_data().unwrap(),
                     "{what}: B = 1 bits"
                 );
             }

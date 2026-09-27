@@ -139,7 +139,10 @@ fn streaming_factorizations_from_rayon_workers_and_threads_match_serial_results(
             .iter()
             .flat_map(|factor| {
                 factor
-                    .data()
+                    .materialize()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap()
                     .iter()
                     .map(|x| x.to_bits())
                     .collect::<Vec<_>>()

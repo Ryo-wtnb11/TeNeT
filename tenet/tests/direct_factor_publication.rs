@@ -149,7 +149,7 @@ macro_rules! assert_lq {
     ($d:ty, $a:expr) => {{
         let a = $a;
         let Lq { l, q } = a.lq_compact().unwrap();
-        let terms = a.data().len();
+        let terms = a.dense_data().unwrap().len();
         assert_residual!("A = L Q", $d, &l.compose(&q).unwrap(), &a, terms);
         let aqh = a.compose(&owned_adjoint!($d, q)).unwrap();
         assert_residual!("A Qᴴ = L", $d, &aqh, &l, terms);
@@ -216,7 +216,7 @@ fn compact_lq_requests_no_zeroed_output_storage() {
     let warm = a.lq_compact().unwrap();
     let (Lq { l, q }, counts) = measured(|| a.lq_compact().unwrap());
     black_box((&warm, &q));
-    let backend_r_bytes = std::mem::size_of_val(l.data());
+    let backend_r_bytes = std::mem::size_of_val(l.dense_data().unwrap());
     assert!(
         counts.zeroed_bytes <= backend_r_bytes,
         "{counts:?}, L bytes {backend_r_bytes}"
@@ -257,7 +257,7 @@ mod checked_generic {
     }
 
     fn payload_bytes(tensor: &TensorMap<SUNFusionRule, f64>) -> usize {
-        std::mem::size_of_val(tensor.data())
+        std::mem::size_of_val(tensor.dense_data().unwrap())
     }
 
     /// Left: `A = W P`, right: `A = P W`, with `W` an isometry (`Wᴴ W = 1`
@@ -267,7 +267,7 @@ mod checked_generic {
     macro_rules! assert_polar {
         ($d:ty, $a:expr, $left:expr) => {{
             let a = $a;
-            let terms = a.data().len();
+            let terms = a.dense_data().unwrap().len();
             let (w, p, product, gram) = if $left {
                 let LeftPolar { w, p } = a.left_polar().unwrap();
                 let product = w.compose(&p).unwrap();
@@ -279,7 +279,7 @@ mod checked_generic {
                 let gram = w.compose(&owned_adjoint!($d, w)).unwrap();
                 (w, p, product, gram)
             };
-            assert!(!w.data().is_empty());
+            assert!(!w.dense_data().unwrap().is_empty());
             assert_residual!("A = polar product", $d, &product, a, terms);
             assert_residual!("P = Pᴴ", $d, &owned_adjoint!($d, p), &p, terms);
             let one = numerics::tolerance::<$d>(terms, 1.0);

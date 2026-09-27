@@ -220,11 +220,11 @@ let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 
 let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 5)?;
 let c = a.compose(&b)?;
 let same = a.contract(&b, &[2, 3], &[0, 1], &[0, 1, 2, 3])?;
-assert_eq!(c.data(), same.data());
+assert_eq!(c.dense_data()?, same.dense_data()?);
 
 let reordered = c.permute(&[0, 2], &[1, 3])?;
 assert_eq!((reordered.codomain_rank(), reordered.domain_rank()), (2, 2));
-assert_eq!(c.repartition(1)?.repartition(2)?.data(), c.data());
+assert_eq!(c.repartition(1)?.repartition(2)?.dense_data()?, c.dense_data()?);
 # Ok::<(), Error>(())
 ```
 

@@ -463,7 +463,7 @@ fn single_precision_reductions_accumulate_in_double() {
             }
         })
         .unwrap();
-    assert_eq!(dense.data().len(), dense_entries);
+    assert_eq!(dense.dense_data().unwrap().len(), dense_entries);
 
     let expected = wide_sum(dense_entries);
     assert_ne!(
