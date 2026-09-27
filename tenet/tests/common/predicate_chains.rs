@@ -52,7 +52,7 @@ macro_rules! is_antihermitian {
 #[allow(unused_macros)]
 macro_rules! is_isometric {
     ($tensor:expr, $tol:expr) => {{
-        let t = &$tensor;
+        let t: &TensorMap<_, _> = &$tensor;
         let gram = t.adjoint().unwrap().compose(t).unwrap();
         let identity = TensorMap::isomorphism(t.runtime(), &t.domain(), &t.domain()).unwrap();
         gram.axpby(

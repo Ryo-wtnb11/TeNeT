@@ -80,7 +80,7 @@ pub use runtime::RuntimeIdentity;
 /// }
 /// ```
 pub mod prelude {
-    pub use crate::error::Error;
+    pub use crate::error::{Alternative, Error};
     #[cfg(feature = "cotengra-python")]
     pub use crate::plancache::CotengraSlicingConfig;
     #[cfg(feature = "cotengra-python")]
@@ -97,7 +97,7 @@ pub mod prelude {
         AdvancedLinalgScalar, DecodeError, DecodeLimits, Direction, Duality, Eig, Eigh,
         EncodeError, FactorizationScalar, GenericTensorError, GradedSpace, LeftPolar, LegSelection,
         Lq, PersistedScalar, PhysicalDense, PhysicalDenseError, Qr, RightPolar, SectorSpectrum,
-        Side, Svd, TensorMap, TensorScalar, TruncatedSelection, TypedPersistenceCodec,
+        Side, Svd, TensorMap, TensorRef, TensorScalar, TruncatedSelection, TypedPersistenceCodec,
     };
     pub use num_complex::{Complex32, Complex64};
     #[allow(deprecated)]
