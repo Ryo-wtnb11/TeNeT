@@ -269,7 +269,8 @@ fn planned_and_sliced_executions_reject_non_symmetric_braiding_first() {
         allocations(|| lhs.contract(&rhs, &[1], &[0], &[0, 1]).map(drop));
     let contract = contract.unwrap_err().to_string();
 
-    let (count, error) = allocations(|| planned.execute(&tensors).map(drop));
+    let (count, error) =
+        allocations(|| planned.execute(&tensors, &mut Default::default()).map(drop));
     assert_eq!(error.unwrap_err().to_string(), contract, "execute");
     assert!(
         count <= contract_count,

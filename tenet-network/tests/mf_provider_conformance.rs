@@ -83,12 +83,8 @@ where
     let tensors = [&lhs, &rhs];
     let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
     let mut workspace = NetworkExecutionWorkspace::default();
-    let first = planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    let second = planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
+    let first = planned.execute(&tensors, &mut workspace).unwrap();
+    let second = planned.execute(&tensors, &mut workspace).unwrap();
     assert_same(&first, &expected, space.provider(), terms);
     assert_same(&second, &expected, space.provider(), terms);
 

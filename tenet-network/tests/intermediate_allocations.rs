@@ -12,8 +12,8 @@ use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap as TypedTensorMap};
 mod numerics;
 
 use tenet_network::{
-    tensor, ContractionPlan, ContractionStep, Network, NetworkExecutionWorkspace, PlannedNetwork,
-    TemporaryLabel, TensorId,
+    tensor, ContractionPlan, ContractionStep, Network, NetworkExecutionWorkspace, NetworkIR,
+    PlannedNetwork, TemporaryLabel, TensorId,
 };
 
 #[test]
@@ -547,7 +547,7 @@ fn temporary_contracted_order_worker() {
         input_labels.extend(extra_labels.iter().map(|names| labels(names)));
         let count = refs.len();
         let network = Network::new(
-            input_labels,
+            input_labels.clone(),
             vec![false; count],
             refs.iter()
                 .map(|tensor| Some(tensor.codomain_rank()))
@@ -556,7 +556,8 @@ fn temporary_contracted_order_worker() {
             Some(1),
         )
         .unwrap();
-        let plan = ContractionPlan::new(count, output, steps).unwrap();
+        let ir = NetworkIR::from_labels(input_labels, output).unwrap();
+        let plan = ContractionPlan::from_steps(&ir, steps).unwrap();
         let planned = network.plan_with(&refs, plan).unwrap();
 
         reset_event_counters();
@@ -564,7 +565,7 @@ fn temporary_contracted_order_worker() {
         reset_live_registry();
         ENABLED.store(true, Ordering::SeqCst);
         let actual = planned
-            .execute_with_workspace(&refs, &mut NetworkExecutionWorkspace::default())
+            .execute(&refs, &mut NetworkExecutionWorkspace::default())
             .unwrap();
         ENABLED.store(false, Ordering::SeqCst);
         assert_eq!(
@@ -717,7 +718,7 @@ where
     ENABLED.store(true, Ordering::SeqCst);
 
     let refs = tensors.iter().collect::<Vec<_>>();
-    let output = planned.execute_with_workspace(&refs, workspace).unwrap();
+    let output = planned.execute(&refs, workspace).unwrap();
     assert_eq!(output.data().len(), oracle.len());
     assert!(
         output
@@ -784,21 +785,22 @@ where
     });
     let label = TemporaryLabel::from;
     let output = vec![label("c"), label("d")];
+    let inputs = vec![
+        vec![label("a"), label("b")],
+        vec![label("b"), label("c")],
+        vec![label("a"), label("d")],
+    ];
+    let ir = NetworkIR::from_labels(inputs.clone(), output.clone()).unwrap();
     let network = Network::new(
-        vec![
-            vec![label("a"), label("b")],
-            vec![label("b"), label("c")],
-            vec![label("a"), label("d")],
-        ],
+        inputs,
         vec![false; 3],
         vec![Some(1); 3],
         output.clone(),
         Some(1),
     )
     .unwrap();
-    let plan = ContractionPlan::new(
-        3,
-        output,
+    let plan = ContractionPlan::from_steps(
+        &ir,
         vec![
             ContractionStep::new(
                 TensorId::new(0),
@@ -824,11 +826,7 @@ where
         if !reuse {
             workspace = NetworkExecutionWorkspace::default();
         }
-        drop(
-            planned
-                .execute_with_workspace(&refs, &mut workspace)
-                .unwrap(),
-        );
+        drop(planned.execute(&refs, &mut workspace).unwrap());
     }
     let oracle = tensors[0]
         .contract(&tensors[1], &[1], &[0], &[1, 0])
@@ -942,11 +940,7 @@ fn lazy_conj_worker() {
         .unwrap();
     let mut workspace = NetworkExecutionWorkspace::default();
     for _ in 0..3 {
-        drop(
-            planned
-                .execute_with_workspace(&refs, &mut workspace)
-                .unwrap(),
-        );
+        drop(planned.execute(&refs, &mut workspace).unwrap());
     }
 
     let parent_pointer = lhs.data().as_ptr();
@@ -954,9 +948,7 @@ fn lazy_conj_worker() {
     PAYLOAD_SIZE.store(5 * 7 * std::mem::size_of::<f64>(), Ordering::Relaxed);
     reset_live_registry();
     ENABLED.store(true, Ordering::SeqCst);
-    let output = planned
-        .execute_with_workspace(&refs, &mut workspace)
-        .unwrap();
+    let output = planned.execute(&refs, &mut workspace).unwrap();
     assert_eq!(output.rank(), 2);
     drop(output);
     ENABLED.store(false, Ordering::SeqCst);
@@ -993,7 +985,7 @@ fn lazy_conj_worker() {
     for _ in 0..3 {
         drop(
             compact_plan
-                .execute_with_workspace(&[&compact], &mut compact_workspace)
+                .execute(&[&compact], &mut compact_workspace)
                 .unwrap(),
         );
     }

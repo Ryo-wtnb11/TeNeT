@@ -382,8 +382,8 @@ where
 {
     let refs = [&tensors[0], &tensors[1], &tensors[2]];
     match workspace {
-        Some(workspace) => planned.execute_with_workspace(&refs, workspace).unwrap(),
-        None => planned.execute(&refs).unwrap(),
+        Some(workspace) => planned.execute(&refs, workspace).unwrap(),
+        None => planned.execute(&refs, &mut Default::default()).unwrap(),
     }
 }
 

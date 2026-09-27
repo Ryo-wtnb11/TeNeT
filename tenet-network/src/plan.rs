@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 
-use crate::cost::{BlockSparseCostModel, DenseCostModel};
+use crate::cost::DenseCostModel;
 use crate::error::{ContractError, Result};
 use crate::ir::NetworkIR;
 use crate::labels::{TemporaryLabel, TensorId};
 use crate::optimizer::{
-    block_sparse_order_from_labels, charge_dense_orientation_costs, dense_order_from_labels,
-    dense_plan_cost_report, BlockSparseContractionOptimizer, ContractionStep,
-    DenseContractionOptimizer, DensePlanCostReport,
+    charge_dense_orientation_costs, dense_plan_cost_report, ContractionStep, DensePlanCostReport,
 };
 use crate::tree::ContractionTree;
 
@@ -36,7 +34,8 @@ const PLAN_HEADER: &str = "tenet-contract-plan-v1";
 /// ];
 /// let cost = DenseCostModel::from_network(&ir, &infos)?;
 /// let path = vec![ActivePair::new(0, 1), ActivePair::new(0, 1)];
-/// let plan = ContractionPlan::from_dense_active_pair_path(&ir, &path, &cost)?;
+/// let steps = dense_steps_from_active_pair_path(&ir, &path, &cost)?;
+/// let plan = ContractionPlan::from_steps(&ir, steps)?;
 /// assert_eq!(plan.active_pair_path()?, path);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -107,7 +106,8 @@ impl ActivePair {
 /// ];
 /// let cost = DenseCostModel::from_network(&ir, &infos)?;
 /// let path = vec![ActivePair::new(0, 1)];
-/// let plan = ContractionPlan::from_dense_active_pair_path(&ir, &path, &cost)?;
+/// let steps = dense_steps_from_active_pair_path(&ir, &path, &cost)?;
+/// let plan = ContractionPlan::from_steps(&ir, steps)?;
 /// let text = plan.to_text();
 /// let restored = ContractionPlan::from_text(&text)?;
 /// assert_eq!(plan.active_pair_path()?, restored.active_pair_path()?);
@@ -120,22 +120,7 @@ pub struct ContractionPlan {
 }
 
 impl ContractionPlan {
-    /// Construct and validate a plan from raw contraction steps.
-    pub fn new(
-        tensor_count: usize,
-        output_labels: Vec<TemporaryLabel>,
-        steps: Vec<ContractionStep>,
-    ) -> Result<Self> {
-        let plan = Self {
-            tensor_count,
-            output_labels,
-            steps,
-        };
-        plan.validate()?;
-        Ok(plan)
-    }
-
-    /// Construct a plan for an already parsed network.
+    /// Construct a plan for an already parsed network and its contraction steps.
     ///
     /// In addition to the topology checks in `validate`, this
     /// path knows each input tensor's leg labels (from `ir`) and therefore
@@ -143,92 +128,16 @@ impl ContractionPlan {
     /// what contracting its two operands actually produces. See
     /// [`validate_step_result_labels`](Self::validate_step_result_labels).
     pub fn from_steps(ir: &NetworkIR, steps: Vec<ContractionStep>) -> Result<Self> {
-        let plan = Self::new(ir.tensors().len(), ir.output_labels().to_vec(), steps)?;
+        let plan = Self {
+            tensor_count: ir.tensors().len(),
+            output_labels: ir.output_labels().to_vec(),
+            steps,
+        };
+        plan.validate()?;
         let input_labels: Vec<Vec<TemporaryLabel>> =
             ir.tensors().iter().map(|t| t.labels().to_vec()).collect();
         plan.validate_step_result_labels(&input_labels)?;
         Ok(plan)
-    }
-
-    /// Construct a dense plan from active-pair positions.
-    ///
-    /// The path length must be `ir.tensors().len() - 1`. Each pair indexes the
-    /// active tensor list at that step, not the original input tensor list.
-    pub fn from_dense_active_pair_path(
-        ir: &NetworkIR,
-        path: &[ActivePair],
-        cost_model: &DenseCostModel,
-    ) -> Result<Self> {
-        let steps = dense_steps_from_active_pair_path(ir, path, cost_model)?;
-        Self::from_steps(ir, steps)
-    }
-
-    /// Construct a dense plan from an explicit contracted-label order.
-    ///
-    /// This is TeNeT's explicit label-order entry point. Output labels, free
-    /// labels, repeated labels in `order`, and labels that do not appear exactly
-    /// twice are rejected.
-    pub fn from_dense_label_order(
-        ir: &NetworkIR,
-        order: &[TemporaryLabel],
-        cost_model: &DenseCostModel,
-    ) -> Result<Self> {
-        let steps = dense_order_from_labels(ir, cost_model, order)?;
-        Self::from_steps(ir, steps)
-    }
-
-    /// Construct a dense plan using a caller-provided optimizer.
-    pub fn from_dense_optimizer<O>(
-        ir: &NetworkIR,
-        optimizer: &O,
-        cost_model: &DenseCostModel,
-    ) -> Result<Self>
-    where
-        O: DenseContractionOptimizer + ?Sized,
-    {
-        let steps = optimizer.optimize(ir, cost_model)?;
-        Self::from_steps(ir, steps)
-    }
-
-    /// Construct a dense plan from a contraction tree.
-    ///
-    /// The tree leaves must be original input tensor ids for `ir`. Internal node
-    /// ids stored on the tree are ignored; the returned plan assigns fresh
-    /// result ids in execution order.
-    pub fn from_dense_tree(
-        ir: &NetworkIR,
-        tree: &ContractionTree,
-        cost_model: &DenseCostModel,
-    ) -> Result<Self> {
-        let path = active_pair_path_from_tree(ir.tensors().len(), tree)?;
-        Self::from_dense_active_pair_path(ir, &path, cost_model)
-    }
-
-    /// Construct an Abelian block-sparse plan from an explicit contracted-label order.
-    pub fn from_block_sparse_label_order<S>(
-        ir: &NetworkIR,
-        order: &[TemporaryLabel],
-        cost_model: &BlockSparseCostModel<S>,
-    ) -> Result<Self>
-    where
-        S: Ord + Clone,
-    {
-        let steps = block_sparse_order_from_labels(ir, cost_model, order)?;
-        Self::from_steps(ir, steps)
-    }
-
-    /// Construct an Abelian block-sparse plan using a caller-provided optimizer.
-    pub fn from_block_sparse_optimizer<S, O>(
-        ir: &NetworkIR,
-        optimizer: &O,
-        cost_model: &BlockSparseCostModel<S>,
-    ) -> Result<Self>
-    where
-        S: Ord + Clone,
-        O: BlockSparseContractionOptimizer<S> + ?Sized,
-    {
-        let steps = optimizer.optimize(ir, cost_model)?;
-        Self::from_steps(ir, steps)
     }
 
     /// Number of original input tensors expected by this plan.
@@ -253,8 +162,8 @@ impl ContractionPlan {
 
     /// Return this plan as active-pair positions.
     ///
-    /// This is the inverse representation accepted by
-    /// [`from_dense_active_pair_path`](Self::from_dense_active_pair_path).
+    /// This is the inverse representation consumed by
+    /// [`dense_steps_from_active_pair_path`].
     pub fn active_pair_path(&self) -> Result<Vec<ActivePair>> {
         active_pair_path_from_steps(self.tensor_count, &self.steps)
     }
@@ -351,7 +260,13 @@ impl ContractionPlan {
             steps.push(parse_step(line)?);
         }
 
-        Self::new(tensor_count, output_labels, steps)
+        let plan = Self {
+            tensor_count,
+            output_labels,
+            steps,
+        };
+        plan.validate()?;
+        Ok(plan)
     }
 
     fn validate(&self) -> Result<()> {
@@ -703,7 +618,7 @@ fn invalid_serialized_plan(message: impl Into<String>) -> ContractError {
 mod tests {
     use super::*;
     use crate::cost::DenseTensorInfo;
-    use crate::optimizer::{greedy_order, GreedyDenseOptimizer};
+    use crate::optimizer::{DenseContractionOptimizer, GreedyDenseOptimizer};
     use crate::parse::parse_einsum;
 
     fn label(s: &str) -> TemporaryLabel {
@@ -721,8 +636,7 @@ mod tests {
             DenseTensorInfo::new(vec![4, 5]),
         ];
         let cost = DenseCostModel::from_network(&ir, &infos).unwrap();
-        let steps = greedy_order(&ir, &cost).unwrap();
-        // Constructed via `from_steps`, which now runs the label check.
+        let steps = GreedyDenseOptimizer.optimize(&ir, &cost).unwrap();
         let plan = ContractionPlan::from_steps(&ir, steps).unwrap();
         assert_eq!(plan.steps().len(), 2);
     }
@@ -736,12 +650,13 @@ mod tests {
             DenseTensorInfo::new(vec![3, 7]),
         ];
         let cost = DenseCostModel::from_network(&ir, &infos).unwrap();
-        let plan = ContractionPlan::from_dense_active_pair_path(
+        let steps = dense_steps_from_active_pair_path(
             &ir,
             &[ActivePair::new(0, 1), ActivePair::new(1, 0)],
             &cost,
         )
         .unwrap();
+        let plan = ContractionPlan::from_steps(&ir, steps).unwrap();
 
         // Step 0 contracts xy with xz: contraction work 2*3*5 = 30.
         // Its raw result is y,z but the next parent needs it as lhs with y
@@ -760,7 +675,8 @@ mod tests {
         ];
         let cost = DenseCostModel::from_network(&ir, &infos).unwrap();
         let plan =
-            ContractionPlan::from_dense_optimizer(&ir, &GreedyDenseOptimizer, &cost).unwrap();
+            ContractionPlan::from_steps(&ir, GreedyDenseOptimizer.optimize(&ir, &cost).unwrap())
+                .unwrap();
 
         // Pair contraction work is a*b*c = 30. The raw tensor order is a,c, but
         // the requested output is c,a; charge one final 2*5 element permute.
@@ -789,27 +705,20 @@ mod tests {
 
     #[test]
     fn aggregate_costs_saturate_and_preserve_exact_totals() {
-        let saturated =
-            ContractionPlan::new(3, vec![label("a"), label("d")], chain_steps(usize::MAX, 1))
-                .unwrap();
+        let ir = parse_einsum("ab,bc,cd->ad").unwrap();
+        let saturated = ContractionPlan::from_steps(&ir, chain_steps(usize::MAX, 1)).unwrap();
         assert_eq!(saturated.total_cost(), usize::MAX);
         assert_eq!(saturated.tree().unwrap().total_cost(), usize::MAX);
 
-        let boundary = ContractionPlan::new(
-            3,
-            vec![label("a"), label("d")],
-            chain_steps(usize::MAX - 1, 1),
-        )
-        .unwrap();
+        let boundary = ContractionPlan::from_steps(&ir, chain_steps(usize::MAX - 1, 1)).unwrap();
         assert_eq!(boundary.total_cost(), usize::MAX);
         assert_eq!(boundary.tree().unwrap().total_cost(), usize::MAX);
 
-        let ordinary =
-            ContractionPlan::new(3, vec![label("a"), label("d")], chain_steps(20, 22)).unwrap();
+        let ordinary = ContractionPlan::from_steps(&ir, chain_steps(20, 22)).unwrap();
         assert_eq!(ordinary.total_cost(), 42);
         assert_eq!(ordinary.tree().unwrap().total_cost(), 42);
 
-        let leaf = ContractionPlan::new(1, Vec::new(), Vec::new()).unwrap();
+        let leaf = ContractionPlan::from_steps(&parse_einsum("a->a").unwrap(), Vec::new()).unwrap();
         assert_eq!(leaf.total_cost(), 0);
         assert_eq!(leaf.tree().unwrap().total_cost(), 0);
     }

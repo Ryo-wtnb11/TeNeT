@@ -474,7 +474,7 @@ impl CachedPlan {
         R::Mode: HostNetworkModeDispatch<R, D>,
         D: TensorScalar + Send + Sync + 'static,
     {
-        self.execute_leased(tensors, PlannedNetwork::execute_with_workspace)
+        self.execute_leased(tensors, PlannedNetwork::execute)
     }
 
     #[cfg(feature = "cuda")]

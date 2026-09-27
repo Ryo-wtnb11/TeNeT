@@ -315,10 +315,11 @@ impl Network {
     {
         let LoweredTypedNetwork { ir, infos, .. } = self.lower_typed(tensors)?;
         let plan = if ir.tensors().len() == 1 {
-            ContractionPlan::new(1, self.output.clone(), Vec::new()).map_err(invalid)?
+            ContractionPlan::from_steps(&ir, Vec::new()).map_err(invalid)?
         } else {
             let cost = DenseCostModel::from_network(&ir, &infos).map_err(invalid)?;
-            ContractionPlan::from_dense_optimizer(&ir, optimizer, &cost).map_err(invalid)?
+            ContractionPlan::from_steps(&ir, optimizer.optimize(&ir, &cost).map_err(invalid)?)
+                .map_err(invalid)?
         };
         self.finish_typed_plan(tensors, ir, plan)
     }
@@ -338,15 +339,18 @@ impl Network {
     {
         let LoweredTypedNetwork { ir, infos, .. } = self.lower_typed(tensors)?;
         let plan = if ir.tensors().len() == 1 {
-            ContractionPlan::new(1, self.output.clone(), Vec::new()).map_err(invalid)?
+            ContractionPlan::from_steps(&ir, Vec::new()).map_err(invalid)?
         } else {
             let cost = DenseCostModel::from_network(&ir, &infos).map_err(invalid)?;
-            let mut result = ContractionPlan::from_dense_optimizer(&ir, optimizer, &cost);
+            let try_plan = |optimizer: &dyn DenseContractionOptimizer| {
+                ContractionPlan::from_steps(&ir, optimizer.optimize(&ir, &cost)?)
+            };
+            let mut result = try_plan(optimizer);
             for optimizer in fallbacks {
                 if result.is_ok() {
                     break;
                 }
-                result = ContractionPlan::from_dense_optimizer(&ir, *optimizer, &cost);
+                result = try_plan(*optimizer);
             }
             result.map_err(invalid)?
         };
@@ -1905,7 +1909,7 @@ impl PlannedNetwork {
         D: CudaPayload,
     {
         self.validate_cuda_admission(tensors)?;
-        self.execute_with_workspace(tensors, workspace)
+        self.execute(tensors, workspace)
     }
 
     /// The device network preflight: every rejection class a device step
@@ -2002,24 +2006,11 @@ fn device_operand_admission(
 }
 
 impl PlannedNetwork {
-    /// Executes this plan with a fresh typed workspace.
-    pub fn execute<R, D>(
-        &self,
-        tensors: &[&TensorMap<R, D>],
-    ) -> Result<TensorMap<R, D>, HostNetworkError<R>>
-    where
-        R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D>,
-        D: TensorScalar,
-    {
-        self.execute_with_workspace(tensors, &mut NetworkExecutionWorkspace::default())
-    }
-
     /// Executes this plan with reusable private Host replay state.
     ///
     /// This does not accept or preserve a caller-owned output destination;
     /// successful execution returns a new owned tensor.
-    pub fn execute_with_workspace<R, D, S>(
+    pub fn execute<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
         workspace: &mut NetworkExecutionWorkspace<R, D, S>,
@@ -3287,7 +3278,7 @@ mod typed_replay_tests {
             let fresh = network
                 .plan(&refs, &GreedyDenseOptimizer)
                 .unwrap()
-                .execute(&refs)
+                .execute(&refs, &mut Default::default())
                 .unwrap();
             assert_eq!(fresh.codomain(), expected.codomain());
             assert_eq!(fresh.domain(), expected.domain());
@@ -3342,16 +3333,10 @@ mod typed_replay_tests {
         assert!(planned.schedule.steps.len() > 1);
         let mut workspace = NetworkExecutionWorkspace::default();
 
-        let (cold, cold_calls) = intermediate_payload_snapshot_calls(|| {
-            planned
-                .execute_with_workspace(&refs, &mut workspace)
-                .unwrap()
-        });
-        let (warm, warm_calls) = intermediate_payload_snapshot_calls(|| {
-            planned
-                .execute_with_workspace(&refs, &mut workspace)
-                .unwrap()
-        });
+        let (cold, cold_calls) =
+            intermediate_payload_snapshot_calls(|| planned.execute(&refs, &mut workspace).unwrap());
+        let (warm, warm_calls) =
+            intermediate_payload_snapshot_calls(|| planned.execute(&refs, &mut workspace).unwrap());
 
         assert_eq!(cold_calls, 0);
         assert_eq!(warm_calls, 0);
@@ -3383,13 +3368,13 @@ mod typed_replay_tests {
         )
         .unwrap();
         let ir = NetworkIR::from_labels(vec![effective.clone()], effective.clone()).unwrap();
-        let order = ContractionPlan::new(1, effective.clone(), Vec::new()).unwrap();
+        let order = ContractionPlan::from_steps(&ir, Vec::new()).unwrap();
         let cost = DenseCostModel::from_network(&ir, &[DenseTensorInfo::new(vec![2, 1])]).unwrap();
         let dense = SlicedPlan::new(
             order,
             crate::slice_plan_for(
                 &ir,
-                &ContractionPlan::new(1, effective, Vec::new()).unwrap(),
+                &ContractionPlan::from_steps(&ir, Vec::new()).unwrap(),
                 &cost,
                 &[label("x")],
             ),
@@ -3484,7 +3469,7 @@ mod typed_replay_tests {
         .unwrap();
         let tensors = [&a, &b, &c];
         let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-        let expected = planned.execute(&tensors).unwrap();
+        let expected = planned.execute(&tensors, &mut Default::default()).unwrap();
         let ir = NetworkIR::from_labels(inputs, output).unwrap();
         let cost = DenseCostModel::from_network(
             &ir,
@@ -3590,7 +3575,7 @@ mod typed_replay_tests {
         .unwrap();
         let tensors = [&lhs, &rhs];
         let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-        let expected = planned.execute(&tensors).unwrap();
+        let expected = planned.execute(&tensors, &mut Default::default()).unwrap();
         let ir = NetworkIR::from_labels(inputs, output).unwrap();
         let cost = DenseCostModel::from_network(
             &ir,
@@ -3662,7 +3647,7 @@ mod typed_replay_tests {
         .unwrap();
         let tensors = [&lhs, &rhs];
         let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-        let expected = planned.execute(&tensors).unwrap();
+        let expected = planned.execute(&tensors, &mut Default::default()).unwrap();
         let ir = NetworkIR::from_labels(inputs, output).unwrap();
         let cost = DenseCostModel::from_network(
             &ir,
@@ -3719,7 +3704,7 @@ mod typed_replay_tests {
         .unwrap();
         let tensors = [&lhs, &middle, &rhs];
         let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-        let expected = planned.execute(&tensors).unwrap();
+        let expected = planned.execute(&tensors, &mut Default::default()).unwrap();
         let ir = NetworkIR::from_labels(inputs, output).unwrap();
         let cost = DenseCostModel::from_network(
             &ir,
@@ -3730,7 +3715,13 @@ mod typed_replay_tests {
             ],
         )
         .unwrap();
-        let decision = crate::greedy_slice_with_output(&ir, planned.plan(), &cost, 6);
+        let decision = crate::greedy_slice(
+            &ir,
+            planned.plan(),
+            &cost,
+            6,
+            crate::SliceLabels::IncludeOutput,
+        );
         assert!(decision.has_output_slices());
         assert!(decision.sliced_width() <= 6);
         let sliced = network
@@ -3785,9 +3776,9 @@ mod typed_replay_tests {
             Some(1),
         )
         .unwrap();
-        let order = ContractionPlan::new(
-            3,
-            output.clone(),
+        let ir = NetworkIR::from_labels(inputs.clone(), output.clone()).unwrap();
+        let order = ContractionPlan::from_steps(
+            &ir,
             vec![
                 ContractionStep::new(
                     TensorId::new(1),
@@ -3812,7 +3803,7 @@ mod typed_replay_tests {
             planned.schedule.steps.last().unwrap().authority_input_slot,
             1
         );
-        let expected = planned.execute(&refs).unwrap();
+        let expected = planned.execute(&refs, &mut Default::default()).unwrap();
         assert!(std::ptr::eq(expected.provider(), providers[1].as_ref()));
 
         let ir = NetworkIR::from_labels(inputs, output).unwrap();
@@ -3858,7 +3849,7 @@ mod typed_replay_tests {
         .unwrap();
         let tensors = [&a, &b];
         let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-        let expected = planned.execute(&tensors).unwrap();
+        let expected = planned.execute(&tensors, &mut Default::default()).unwrap();
         let ir = NetworkIR::from_labels(inputs, output).unwrap();
         let effective = typed_effective_spaces(&a, false).unwrap();
         let output_authority = ir.edge(&label("a")).unwrap().occurrences()[0];
@@ -3934,7 +3925,7 @@ mod typed_replay_tests {
         .unwrap();
         let tensors = [&a, &b];
         let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-        let expected = planned.execute(&tensors).unwrap();
+        let expected = planned.execute(&tensors, &mut Default::default()).unwrap();
         let ir = NetworkIR::from_labels(inputs, output).unwrap();
         let cost = DenseCostModel::from_network(
             &ir,
@@ -3981,7 +3972,9 @@ mod typed_replay_tests {
         )
         .unwrap();
         let planned = network.plan(&[&tensor], &GreedyDenseOptimizer).unwrap();
-        let expected = planned.execute(&[&tensor]).unwrap();
+        let expected = planned
+            .execute(&[&tensor], &mut Default::default())
+            .unwrap();
         let ir = NetworkIR::from_labels(vec![labels.clone()], labels).unwrap();
         let cost = DenseCostModel::from_network(&ir, &[DenseTensorInfo::new(vec![3, 3])]).unwrap();
         let dense = SlicedPlan::new(
@@ -4076,7 +4069,7 @@ mod typed_replay_tests {
         )
         .unwrap();
         let ir = NetworkIR::from_labels(vec![labels.clone()], labels.clone()).unwrap();
-        let plan = ContractionPlan::new(1, labels, Vec::new()).unwrap();
+        let plan = ContractionPlan::from_steps(&ir, Vec::new()).unwrap();
         let authority = ir.edge(&label("a")).unwrap().occurrences()[0];
         let effective = typed_effective_spaces(&compact, false).unwrap();
         let authority_leg = effective[authority.axis()].network_sector_leg().clone();
@@ -4109,7 +4102,7 @@ mod typed_replay_tests {
             network.execute_symmetric_sliced(
                 &[&compact],
                 SymmetricSlicedPlan::new(
-                    ContractionPlan::new(1, vec![label("a"), label("b")], Vec::new()).unwrap(),
+                    ContractionPlan::from_steps(&ir, Vec::new()).unwrap(),
                     empty,
                 ),
                 usize::MAX,
@@ -4145,7 +4138,7 @@ mod typed_replay_tests {
         .unwrap();
         let tensors = [&a, &b];
         let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-        let expected = planned.execute(&tensors).unwrap();
+        let expected = planned.execute(&tensors, &mut Default::default()).unwrap();
         let ir = NetworkIR::from_labels(inputs, output).unwrap();
         let cost = DenseCostModel::from_network(
             &ir,
@@ -4211,7 +4204,7 @@ mod typed_replay_tests {
         .unwrap();
         let tensors = [&a, &b];
         let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-        let expected = planned.execute(&tensors).unwrap();
+        let expected = planned.execute(&tensors, &mut Default::default()).unwrap();
         let ir = NetworkIR::from_labels(effective_inputs, output).unwrap();
         let cost = DenseCostModel::from_network(
             &ir,
@@ -4243,9 +4236,8 @@ mod typed_replay_tests {
         ];
         let output = vec![label("c"), label("d")];
         let ir = NetworkIR::from_labels(inputs.clone(), output.clone()).unwrap();
-        let plan = ContractionPlan::new(
-            3,
-            output,
+        let plan = ContractionPlan::from_steps(
+            &ir,
             vec![
                 ContractionStep::new(
                     TensorId::new(0),
@@ -4585,10 +4577,18 @@ mod typed_replay_tests {
         )
         .unwrap();
         let refs = [&tensors[0], &tensors[1], &tensors[2]];
+        let ir = NetworkIR::from_labels(
+            vec![
+                labels(&["a", "b"]),
+                labels(&["b", "c"]),
+                labels(&["c", "d"]),
+            ],
+            labels(&["a", "d"]),
+        )
+        .unwrap();
         let canonical_order = || {
-            ContractionPlan::new(
-                3,
-                labels(&["a", "d"]),
+            ContractionPlan::from_steps(
+                &ir,
                 vec![
                     ContractionStep::new(
                         TensorId::new(0),
@@ -4664,7 +4664,9 @@ mod typed_replay_tests {
             edit(&mut host_edited.schedule);
             let mut cuda_edited = network.plan_with(&refs, canonical_order()).unwrap();
             edit(&mut cuda_edited.schedule);
-            let host = host_edited.execute(&host_refs).unwrap();
+            let host = host_edited
+                .execute(&host_refs, &mut Default::default())
+                .unwrap();
             let device = cuda_edited.execute_cuda(&refs).unwrap().to_host().unwrap();
             assert_eq!(device.codomain(), host.codomain(), "{what}");
             assert_eq!(device.domain(), host.domain(), "{what}");
@@ -4736,19 +4738,13 @@ mod typed_replay_tests {
             .unwrap()
             .contract(&c, &[1], &[0], &[0, 1])
             .unwrap();
-        drop(
-            planned
-                .execute_with_workspace(&refs, &mut workspace)
-                .unwrap(),
-        );
+        drop(planned.execute(&refs, &mut workspace).unwrap());
         let before = workspace.intermediates[0]
             .oriented
             .as_ref()
             .map(|tensor| (tensor.data().as_ptr(), tensor.data().len()))
             .unwrap();
-        let output = planned
-            .execute_with_workspace(&refs, &mut workspace)
-            .unwrap();
+        let output = planned.execute(&refs, &mut workspace).unwrap();
         let after = workspace.intermediates[0]
             .oriented
             .as_ref()
@@ -4771,7 +4767,7 @@ mod typed_replay_tests {
             TensorMap::rand_with_seed(&runtime, [&other_bond], [&other_right], 4).unwrap();
         drop(
             planned
-                .execute_with_workspace(&[&a, &rhs_drift, &c], &mut workspace)
+                .execute(&[&a, &rhs_drift, &c], &mut workspace)
                 .unwrap(),
         );
         let rhs_only = workspace.intermediates[0].oriented.as_ref().unwrap();
@@ -4779,9 +4775,7 @@ mod typed_replay_tests {
         assert!(std::ptr::eq(rhs_only.provider(), provider.as_ref()));
 
         let retained = rhs_only.clone();
-        assert!(planned
-            .execute_with_workspace(&refs[..2], &mut workspace)
-            .is_err());
+        assert!(planned.execute(&refs[..2], &mut workspace).is_err());
         assert_eq!(
             workspace.intermediates[0]
                 .oriented
@@ -4794,7 +4788,7 @@ mod typed_replay_tests {
         let bad_bond = space(&provider, 7);
         let bad_rhs = TensorMap::rand_with_seed(&runtime, [&bad_bond], [&right], 5).unwrap();
         assert!(planned
-            .execute_with_workspace(&[&a, &bad_rhs, &c], &mut workspace)
+            .execute(&[&a, &bad_rhs, &c], &mut workspace)
             .is_err());
         assert_eq!(
             workspace.intermediates[0]
@@ -4811,7 +4805,7 @@ mod typed_replay_tests {
             TensorMap::rand_with_seed(&runtime, [&other_left], [&other_bond], 6).unwrap();
         drop(
             planned
-                .execute_with_workspace(&[&lhs_drift, &b, &c], &mut workspace)
+                .execute(&[&lhs_drift, &b, &c], &mut workspace)
                 .unwrap(),
         );
         let replaced = workspace.intermediates[0].oriented.as_ref().unwrap();
@@ -4827,7 +4821,7 @@ mod typed_replay_tests {
         let wide_a = TensorMap::rand_with_seed(&runtime, [&wide_left], [&other_bond], 8).unwrap();
         drop(
             planned
-                .execute_with_workspace(&[&wide_a, &rhs_drift, &wide_c], &mut workspace)
+                .execute(&[&wide_a, &rhs_drift, &wide_c], &mut workspace)
                 .unwrap(),
         );
         let widened = workspace.intermediates[0].oriented.as_ref().unwrap();
@@ -4848,7 +4842,7 @@ mod typed_replay_tests {
         .unwrap();
         drop(
             planned
-                .execute_with_workspace(&[&foreign_a, &foreign_b, &foreign_c], &mut workspace)
+                .execute(&[&foreign_a, &foreign_b, &foreign_c], &mut workspace)
                 .unwrap(),
         );
         assert_ne!(
@@ -4869,7 +4863,7 @@ mod typed_replay_tests {
         let other_plan = crossed_plan();
         drop(
             other_plan
-                .execute_with_workspace(&[&foreign_a, &foreign_b, &foreign_c], &mut workspace)
+                .execute(&[&foreign_a, &foreign_b, &foreign_c], &mut workspace)
                 .unwrap(),
         );
         assert_eq!(workspace.owner_token, Some(other_plan.owner_token));
@@ -4903,38 +4897,22 @@ mod typed_replay_tests {
         let refs = [&a, &b, &c];
         let mut planned = crossed_plan();
         let mut workspace = NetworkExecutionWorkspace::default();
-        drop(
-            planned
-                .execute_with_workspace(&refs, &mut workspace)
-                .unwrap(),
-        );
+        drop(planned.execute(&refs, &mut workspace).unwrap());
 
         let rhs_axes = std::mem::replace(
             &mut planned.schedule.steps[1].rhs_contract_axes,
             vec![usize::MAX],
         );
-        assert!(planned
-            .execute_with_workspace(&refs, &mut workspace)
-            .is_err());
+        assert!(planned.execute(&refs, &mut workspace).is_err());
         assert!(workspace.slots[planned.schedule.steps[0].result_slot].is_some());
         planned.schedule.steps[1].rhs_contract_axes = rhs_axes;
-        drop(
-            planned
-                .execute_with_workspace(&refs, &mut workspace)
-                .unwrap(),
-        );
+        drop(planned.execute(&refs, &mut workspace).unwrap());
 
         planned.schedule.final_permutation = Some((vec![usize::MAX], vec![0]));
-        assert!(planned
-            .execute_with_workspace(&refs, &mut workspace)
-            .is_err());
+        assert!(planned.execute(&refs, &mut workspace).is_err());
         assert!(workspace.slots[planned.schedule.final_slot].is_some());
         planned.schedule.final_permutation = None;
-        drop(
-            planned
-                .execute_with_workspace(&refs, &mut workspace)
-                .unwrap(),
-        );
+        drop(planned.execute(&refs, &mut workspace).unwrap());
     }
 
     #[test]
@@ -4967,14 +4945,11 @@ mod typed_replay_tests {
             .unwrap();
         assert!(planned.schedule.steps[0].result_output_axes.is_none());
         assert!(planned.schedule.steps[0].result_permutation.is_some());
-        let expected = planned.execute(&refs).unwrap();
+        let expected = planned.execute(&refs, &mut Default::default()).unwrap();
         let mut workspace = NetworkExecutionWorkspace::default();
         for _ in 0..2 {
             assert_eq!(
-                planned
-                    .execute_with_workspace(&refs, &mut workspace)
-                    .unwrap()
-                    .data(),
+                planned.execute(&refs, &mut workspace).unwrap().data(),
                 expected.data()
             );
         }
@@ -5020,24 +4995,14 @@ mod typed_replay_tests {
         planned.schedule.steps[0].contract_output_axes = vec![0, 1];
         planned.schedule.steps[0].result_permutation = Some((vec![1], vec![0]));
         let mut workspace = NetworkExecutionWorkspace::default();
-        drop(
-            planned
-                .execute_with_workspace(&refs, &mut workspace)
-                .unwrap(),
-        );
+        drop(planned.execute(&refs, &mut workspace).unwrap());
 
         planned.schedule.steps[0].result_permutation = Some((vec![usize::MAX], vec![0]));
-        assert!(planned
-            .execute_with_workspace(&refs, &mut workspace)
-            .is_err());
+        assert!(planned.execute(&refs, &mut workspace).is_err());
         assert!(workspace.intermediates[0].contracted.is_some());
         assert!(workspace.intermediates[0].oriented.is_some());
         planned.schedule.steps[0].result_permutation = Some((vec![1], vec![0]));
-        drop(
-            planned
-                .execute_with_workspace(&refs, &mut workspace)
-                .unwrap(),
-        );
+        drop(planned.execute(&refs, &mut workspace).unwrap());
     }
 }
 

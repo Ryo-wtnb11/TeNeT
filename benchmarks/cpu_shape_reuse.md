@@ -6,8 +6,8 @@ Issue: #1141 (parent #1140). Baseline authority: TeNeT
 `microbench_cpu_shape_reuse` measures one deterministic two-step, three-operand
 matrix chain. The first contraction destination remains eligible for reuse by
 `NetworkExecutionWorkspace`. The same plan and fixtures run under either
-`PlannedNetwork::execute` (fresh workspace) or `execute_with_workspace` (one
-caller-owned workspace). Before warmup and timing, every fixture is executed
+`PlannedNetwork::execute` with either a fresh or a reused caller-owned
+workspace. Before warmup and timing, every fixture is executed
 once in the selected mode and checked by direct column-major indexing of every
 reduced block and two nested summations. Timed repetitions are not checked
 individually; production regressions own the full replay-history contract.
@@ -52,7 +52,7 @@ macro-cache retention, not the active allocator peak of this explicit plan, so
 they are not reported. Copy/pack calls and bytes are `NA`: there is no public
 direct counter, and allocator traffic is not used as a proxy. The harness
 asserts the selected `(A, B)` then `(C, AB)` plan. Its execution enters
-`PlannedNetwork::execute_with_workspace` and the multiplicity-free
+`PlannedNetwork::execute` and the multiplicity-free
 `HostNetworkModeDispatch::contract_step`; those source facts alone do not prove
 whether a backend call packed or copied data.
 
