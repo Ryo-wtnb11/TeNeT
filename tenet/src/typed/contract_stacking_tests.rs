@@ -248,12 +248,10 @@ where
     let cube = compose_oracle(&square, &entries(&good));
     for (stacking, tensor) in &tilings {
         let what = |op: &str| format!("{stacking:?} {op}");
-        assert_entries_close(
-            &entries(&tensor.powi(2).unwrap()),
-            &square,
-            &what("powi(2)"),
-        );
-        assert_entries_close(&entries(&tensor.powi(3).unwrap()), &cube, &what("powi(3)"));
+        let squared = tensor.compose(tensor).unwrap();
+        assert_entries_close(&entries(&squared), &square, &what("t∘t"));
+        let cubed = tensor.compose(&squared).unwrap();
+        assert_entries_close(&entries(&cubed), &cube, &what("t∘t∘t"));
         // A lazy adjoint admits only the ordinary layout; others are refused.
         if let Ok(adjoint) = tensor.adjoint() {
             let good_adjoint = good.adjoint().unwrap();
@@ -460,7 +458,7 @@ fn assert_dense_close(actual: &PhysicalDense<f64>, expected: &PhysicalDense<f64>
     }
 }
 
-/// `compose`, `powi` and `contract` of every stacking pair (and the lazy
+/// `compose` (including self-composition) and `contract` of every stacking pair (and the lazy
 /// adjoint) match a physical-basis einsum of the canonical operand, which
 /// does not depend on any fusion-tree basis or stacking. Returns the number
 /// of checks.
@@ -505,8 +503,13 @@ where
     for (name, tensor, dense) in &operands {
         let square = dense_contract(dense, dense, &[2, 3], &[0, 1], &[0, 1, 2, 3]);
         let cube = dense_contract(&square, dense, &[2, 3], &[0, 1], &[0, 1, 2, 3]);
-        check(&tensor.powi(2).unwrap(), &square, format!("{name} powi(2)"));
-        check(&tensor.powi(3).unwrap(), &cube, format!("{name} powi(3)"));
+        let squared = tensor.compose(tensor).unwrap();
+        check(&squared, &square, format!("{name} t∘t"));
+        check(
+            &tensor.compose(&squared).unwrap(),
+            &cube,
+            format!("{name} t∘t∘t"),
+        );
         for (other_name, other, other_dense) in &operands {
             let what = |op: &str| format!("{name}·{other_name} {op}");
             check(

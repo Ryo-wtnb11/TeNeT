@@ -50,9 +50,9 @@ or recursively nested `ProductFusionRule` values.
 | Left/right polar factors | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | EIGH full/truncated/values | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | EIG full/truncated/values | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
-| `inv`, `exp`, `powi`, left/right `solve` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| `inv`, `exp`, `solve` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | `pinv` [5] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | INTENTIONAL-DIFFERENCE | UNSUPPORTED |
-| Dense diagonal `sqrt` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| Compact `map_diagonal` | PROVED | PROVED | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | PROVED | NEEDS-PROOF | NEEDS-PROOF | PROVED | UNSUPPORTED |
 | Network ordinary planning, contraction/permute replay [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | Network intra-operand trace [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | Network payload-destination reuse [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | [INTENTIONAL-DIFFERENCE](https://github.com/Ryo-wtnb11/TeNeT/issues/1005) | UNSUPPORTED |
@@ -378,7 +378,7 @@ operation publishes no TeNeT output tensor or partial factor tuple.
 
 Orientation-aware transforms, contractions and algebraic adjoint redirects use
 the parent where their operation law proves it. QR/LQ, EIGH/EIG logical
-orientation, `exp`, solves, `sqrt`, selected cat/absorb conversions and network
+orientation, `exp`, solves, selected cat/absorb conversions and network
 rejection checks may use or encounter the operation-local seam. A cold receiver
 cache proves only nonpublication; it does not prove zero peak-copy cost. The
 ownership/cache audit is #783.

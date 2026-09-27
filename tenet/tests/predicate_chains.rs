@@ -301,8 +301,9 @@ fn su2_chains_match_the_removed_methods() {
 
 /// Checked-Generic providers never had the removed methods; the chains are
 /// the only spelling there. SU(3) with an adjoint leg carries outer
-/// multiplicity. The identity is `powi(0)`, and checked-Generic `compose`
-/// rejects a lazy adjoint operand, so `t†` enters the Gram map materialized.
+/// multiplicity. The identity is `isomorphism(V, V)`, and checked-Generic
+/// `compose` rejects a lazy adjoint operand, so `t†` enters the Gram map
+/// materialized.
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_su3_chains_decide_true_and_false_cases() {
@@ -323,8 +324,11 @@ fn checked_generic_su3_chains_decide_true_and_false_cases() {
         })
         .unwrap()
     };
+    let identity_like = |t: &TensorMap<SUNFusionRule, f64>| {
+        TensorMap::isomorphism(&rt, t.codomain().iter(), t.domain().iter()).unwrap()
+    };
     let is_identity = |gram: TensorMap<SUNFusionRule, f64>, tol: f64| {
-        let identity = gram.powi(0).unwrap();
+        let identity = identity_like(&gram);
         gram.axpby(1.0, &identity, -1.0).unwrap().norm(2.0).unwrap()
             <= tol * gram.norm(2.0).unwrap().max(1.0)
     };
@@ -343,7 +347,7 @@ fn checked_generic_su3_chains_decide_true_and_false_cases() {
     let positive = h
         .compose(&h)
         .unwrap()
-        .axpby(1.0, &x.powi(0).unwrap(), 1.0)
+        .axpby(1.0, &identity_like(&x), 1.0)
         .unwrap();
     let negative = positive.scale(-1.0);
     let Qr { q: unitary, .. } = x.qr_compact().unwrap();

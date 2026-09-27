@@ -390,7 +390,7 @@ fn absorbing_a_spectrum_through_compose_scales_instead_of_densifying() {
 
 #[test]
 fn the_matrix_functions_have_o_rank_diagonal_arms() {
-    // What: `exp`, `inv`, `pinv` and `sqrt` on a spectrum factor are elementwise
+    // What: `exp`, `inv`, `pinv` and `map_diagonal` on a spectrum factor are elementwise
     // on the `Σ_c k_c` stored values, not block work on the `Σ_c k_c²`
     // materialization. The ceiling catches a densified route; the "still owes"
     // assertion afterwards catches one that densifies into the shared cache,
@@ -406,7 +406,10 @@ fn the_matrix_functions_have_o_rank_diagonal_arms() {
         ("exp", warmed_bytes(|| d.exp().unwrap())),
         ("inv", warmed_bytes(|| d.inv().unwrap())),
         ("pinv", warmed_bytes(|| d.pinv(1e-12).unwrap())),
-        ("sqrt", warmed_bytes(|| d.sqrt().unwrap())),
+        (
+            "map_diagonal",
+            warmed_bytes(|| d.map_diagonal(|x| x.sqrt()).unwrap()),
+        ),
     ] {
         assert!(
             bytes < ceiling,
@@ -432,7 +435,10 @@ fn a_complex_spectrums_matrix_functions_stay_o_rank_too() {
         ("exp", warmed_bytes(|| d.exp().unwrap())),
         ("inv", warmed_bytes(|| d.inv().unwrap())),
         ("pinv", warmed_bytes(|| d.pinv(1e-12).unwrap())),
-        ("sqrt", warmed_bytes(|| d.sqrt().unwrap())),
+        (
+            "map_diagonal",
+            warmed_bytes(|| d.map_diagonal(|x| x.sqrt()).unwrap()),
+        ),
     ] {
         assert!(
             bytes < ceiling,

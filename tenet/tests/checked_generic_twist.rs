@@ -1050,9 +1050,9 @@ fn assert_compose_any_braiding<D>(
     ] {
         composed(lhs, rhs);
     }
-    // `powi(2)` is one self-composition of the endomorphism A∘B.
+    // One self-composition of the endomorphism A∘B.
     let endomorphism = composed(&a, &b);
-    let squared = endomorphism.powi(2).unwrap();
+    let squared = endomorphism.compose(&endomorphism).unwrap();
     assert_compose_oracle(&endomorphism, &endomorphism, &squared);
     // Composition is not a contraction over mismatched spaces, and a lazy
     // adjoint operand stays outside this engine's direct-operand scope.

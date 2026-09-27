@@ -41,36 +41,24 @@ fn endomorphism_terms(payload_len: usize) -> usize {
 }
 
 #[test]
-fn checked_generic_powi_zero_reuses_the_admitted_space_without_provider_work() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
-    let source: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 1]))
-            .unwrap();
-    reset_provider_queries(&provider);
-    let identity = source.powi(0).unwrap();
-    assert_no_provider_queries(&provider);
-    assert!(std::ptr::eq(identity.provider(), provider.as_ref()));
-    assert!(identity.runtime().shares_state_with(source.runtime()));
-    assert_eq!(identity.codomain(), source.codomain());
-    assert_eq!(identity.domain(), source.domain());
-    assert_eq!(identity.subblock_count(), source.subblock_count());
-    assert_eq!(identity.data(), &[1.0, 0.0, 0.0, 1.0]);
-    for index in 0..source.subblock_count() {
-        assert_eq!(
-            identity.subblock(index).unwrap(),
-            source.subblock(index).unwrap()
-        );
-        assert_eq!(
-            identity.subblock_fusion_trees(index).unwrap(),
-            source.subblock_fusion_trees(index).unwrap()
-        );
+fn checked_generic_compose_and_inv_powers_match_explicit_real_and_complex_oracles() {
+    // What: integer powers are compositions (`inv` first for a negative
+    // exponent); the oracles are hand-computed 2x2 matrix powers.
+    fn power<D: tenet::typed::AdvancedLinalgScalar>(
+        tensor: &TensorMap<CheckedOnlyToy, D>,
+        exponent: i32,
+    ) -> TensorMap<CheckedOnlyToy, D> {
+        let base = if exponent < 0 {
+            tensor.inv().unwrap()
+        } else {
+            tensor.clone()
+        };
+        let mut result = base.clone();
+        for _ in 1..exponent.unsigned_abs() {
+            result = result.compose(&base).unwrap();
+        }
+        result
     }
-}
-
-#[test]
-fn checked_generic_powi_matches_explicit_real_and_complex_oracles() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
@@ -80,7 +68,6 @@ fn checked_generic_powi_matches_explicit_real_and_complex_oracles() {
     .unwrap();
     let complex = real.convert::<Complex64>().scale(Complex64::new(1.0, 1.0));
     let real_oracles: &[(i32, &[f64])] = &[
-        (0, &[1.0, 0.0, 0.0, 1.0]),
         (1, &[2.0, 3.0, 1.0, 4.0]),
         (2, &[7.0, 18.0, 6.0, 19.0]),
         (3, &[32.0, 93.0, 31.0, 94.0]),
@@ -88,15 +75,6 @@ fn checked_generic_powi_matches_explicit_real_and_complex_oracles() {
         (-2, &[0.76, -0.72, -0.24, 0.28]),
     ];
     let complex_oracles: &[(i32, &[Complex64])] = &[
-        (
-            0,
-            &[
-                Complex64::new(1.0, 0.0),
-                Complex64::new(0.0, 0.0),
-                Complex64::new(0.0, 0.0),
-                Complex64::new(1.0, 0.0),
-            ],
-        ),
         (
             1,
             &[
@@ -144,18 +122,14 @@ fn checked_generic_powi_matches_explicit_real_and_complex_oracles() {
         ),
     ];
     for &(exponent, expected) in real_oracles {
-        assert!(real
-            .powi(exponent)
-            .unwrap()
+        assert!(power(&real, exponent)
             .data()
             .iter()
             .zip(expected)
             .all(|(actual, expected)| (actual - expected).abs() < 1e-12));
     }
     for &(exponent, expected) in complex_oracles {
-        assert!(complex
-            .powi(exponent)
-            .unwrap()
+        assert!(power(&complex, exponent)
             .data()
             .iter()
             .zip(expected)
@@ -163,84 +137,8 @@ fn checked_generic_powi_matches_explicit_real_and_complex_oracles() {
     }
 }
 
-#[test]
-fn checked_generic_powi_rejects_nonendomorphisms_before_provider_work() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let provider = Arc::new(CheckedOnlyToy::new(0));
-    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
-    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
-    let source: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&wide], [&narrow], |_, _| 1.0).unwrap();
-    let before = source
-        .data()
-        .iter()
-        .map(|value| value.to_bits())
-        .collect::<Vec<_>>();
-    for exponent in [0, 1, -1] {
-        reset_provider_queries(&provider);
-        match source.powi(exponent) {
-            Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))) => {
-                assert!(message.contains("endomorphism"));
-            }
-            other => panic!("unexpected powi({exponent}) result: {other:?}"),
-        }
-        assert_no_provider_queries(&provider);
-        assert_eq!(
-            source
-                .data()
-                .iter()
-                .map(|value| value.to_bits())
-                .collect::<Vec<_>>(),
-            before
-        );
-    }
-}
-
-#[test]
-fn checked_generic_powi_singular_negative_powers_do_not_publish() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
-    let source: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 0]))
-            .unwrap();
-    assert_eq!(source.powi(2).unwrap().data(), &[1.0, 0.0, 0.0, 0.0]);
-    let before = source
-        .data()
-        .iter()
-        .map(|value| value.to_bits())
-        .collect::<Vec<_>>();
-    for exponent in [-1, -2] {
-        assert!(matches!(
-            source.powi(exponent),
-            Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
-                _
-            )))
-        ));
-        assert_eq!(
-            source
-                .data()
-                .iter()
-                .map(|value| value.to_bits())
-                .collect::<Vec<_>>(),
-            before
-        );
-    }
-}
-
-#[test]
-fn checked_generic_powi_i32_min_on_identity_is_exact() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
-    let identity: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij[0] == ij[1]))
-            .unwrap();
-    assert_eq!(identity.powi(i32::MIN).unwrap().data(), identity.data());
-}
-
 #[cfg(feature = "racah-generated")]
-fn assert_sun_checked_generic_powi_outer_multiplicity<D>(n: usize, adjoint: Vec<i64>)
+fn assert_sun_checked_generic_inverse_outer_multiplicity<D>(n: usize, adjoint: Vec<i64>)
 where
     D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq + numerics::Numeric,
 {
@@ -278,37 +176,18 @@ where
             && source.data()[source.subblock(index).unwrap().offset()] == D::from_real(1.0)
     }));
 
-    let identity = source.powi(0).unwrap();
-    assert!(std::ptr::eq(identity.provider(), provider.as_ref()));
-    assert!(identity.runtime().shares_state_with(source.runtime()));
-    assert_eq!(identity.codomain(), source.codomain());
-    assert_eq!(identity.domain(), source.domain());
-    for index in 0..source.subblock_count() {
-        assert_eq!(
-            identity.subblock(index).unwrap(),
-            source.subblock(index).unwrap()
-        );
-        assert_eq!(
-            identity.subblock_fusion_trees(index).unwrap(),
-            source.subblock_fusion_trees(index).unwrap()
-        );
-    }
-    // `powi(2)` is defined as `self ∘ self`, so the two paths must agree.
+    let identity: TensorMap<_, D> =
+        TensorMap::isomorphism(&runtime, [&leg, &leg], [&leg, &leg]).unwrap();
     let terms = endomorphism_terms(source.data().len());
-    let squared = source.powi(2).unwrap();
-    numerics::assert_slices_close(
-        "powi(2) against self ∘ self",
-        squared.data(),
-        source.compose(&source).unwrap().data(),
-        terms,
-    );
-    let inverse = source.powi(-1).unwrap();
+    let inverse = source.inv().unwrap();
+    assert!(std::ptr::eq(inverse.provider(), provider.as_ref()));
     for product in [
         source.compose(&inverse).unwrap(),
         inverse.compose(&source).unwrap(),
     ] {
+        assert_eq!(product.codomain(), source.codomain());
         numerics::assert_slices_close(
-            "powi(-1) against the identity",
+            "inverse against the identity",
             product.data(),
             identity.data(),
             terms,
@@ -318,10 +197,10 @@ where
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn checked_generic_powi_sun_outer_multiplicity_preserves_full_layout_and_power_laws() {
+fn checked_generic_inv_sun_outer_multiplicity_satisfies_inverse_laws() {
     for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
-        assert_sun_checked_generic_powi_outer_multiplicity::<f64>(n, adjoint.clone());
-        assert_sun_checked_generic_powi_outer_multiplicity::<Complex64>(n, adjoint);
+        assert_sun_checked_generic_inverse_outer_multiplicity::<f64>(n, adjoint.clone());
+        assert_sun_checked_generic_inverse_outer_multiplicity::<Complex64>(n, adjoint);
     }
 }
 
@@ -2210,7 +2089,10 @@ fn sun_checked_generic_compact_svd_preserves_provider_and_reconstructs() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn sun_checked_generic_dense_sqrt_preserves_svd_bond_and_principal_branch() {
+fn sun_checked_generic_map_diagonal_keeps_svd_bond_and_principal_branch() {
+    // What: checked SVD publishes `s` densely, so the elementwise root goes
+    // through `diagview` into a compact diagonal on the same bond; the result
+    // keeps the provider, space and runtime, and `Complex64::sqrt` is principal.
     use tenet::typed::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -2224,7 +2106,10 @@ fn sun_checked_generic_dense_sqrt_preserves_svd_bond_and_principal_branch() {
             })
             .unwrap();
         let Svd { s, .. } = source.svd_compact().unwrap();
-        let root = s.sqrt().unwrap();
+        assert!(s.map_diagonal(f64::sqrt).is_err());
+        let bond = s.domain()[0].clone();
+        let compact = TensorMap::diagonal(&runtime, &bond, s.diagview().unwrap()).unwrap();
+        let root = compact.map_diagonal(f64::sqrt).unwrap();
         assert!(std::ptr::eq(root.provider(), s.provider()));
         assert_eq!(root.codomain(), s.codomain());
         assert_eq!(root.domain(), s.domain());
@@ -2236,136 +2121,74 @@ fn sun_checked_generic_dense_sqrt_preserves_svd_bond_and_principal_branch() {
             .iter()
             .zip(s.data())
             .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
-        let complex = source.convert::<Complex64>();
-        let Svd { s, .. } = complex.svd_compact().unwrap();
-        let root = s.sqrt().unwrap();
-        assert!(std::ptr::eq(root.provider(), s.provider()));
-        assert_eq!(root.codomain(), s.codomain());
-        assert_eq!(root.domain(), s.domain());
-        assert!(root.runtime().shares_state_with(s.runtime()));
-        assert!(root
-            .compose(&root)
-            .unwrap()
-            .data()
-            .iter()
-            .zip(s.data())
-            .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
-        let negative: TensorMap<_, Complex64> =
-            TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
-                if indices[0] == indices[1] {
-                    Complex64::new(-1.0, 0.0)
-                } else {
-                    Complex64::new(0.0, 0.0)
-                }
-            })
-            .unwrap();
-        let principal = negative.sqrt().unwrap();
+
+        let negative: TensorMap<_, Complex64> = TensorMap::diagonal(
+            &runtime,
+            &leg,
+            leg.sectors()
+                .unwrap()
+                .into_iter()
+                .map(|sector| SectorSpectrum {
+                    sector,
+                    values: vec![Complex64::new(-1.0, 0.0)],
+                }),
+        )
+        .unwrap();
+        let principal = negative.map_diagonal(|value| value.sqrt()).unwrap();
         assert!(principal
-            .data()
-            .iter()
-            .any(|value| *value == Complex64::new(0.0, 1.0)));
-        assert!(principal.data().iter().all(|value| {
-            *value == Complex64::new(0.0, 0.0) || *value == Complex64::new(0.0, 1.0)
-        }));
-        assert!(principal
-            .compose(&principal)
+            .diagview()
             .unwrap()
-            .data()
             .iter()
-            .zip(negative.data())
-            .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
+            .flat_map(|entry| &entry.values)
+            .all(|value| *value == Complex64::new(0.0, 1.0)));
     }
 }
 
 #[test]
-fn checked_generic_sqrt_rejects_shape_before_queries_and_preserves_source() {
+fn checked_generic_map_diagonal_rejects_dense_before_queries_and_preserves_source() {
+    // What: dense storage is refused before any provider query, whether or not
+    // it is bond shaped, and the source is untouched.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
-    let source: TensorMap<_, f64> =
+    let bond_leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let non_bond: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
-    let before = source.data().to_vec();
-    reset_provider_queries(&provider);
-    match source.sqrt() {
-        Err(tenet::typed::Error::InvalidArgument(message)) => {
-            assert!(message.contains("diagonal bond tensor"));
-        }
-        other => panic!("expected shape rejection, got {other:?}"),
-    }
-    assert_eq!(source.data(), before.as_slice());
-    assert_no_provider_queries(&provider);
-
-    let dense = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
-        if indices[0] == indices[1] {
-            4.0_f64
-        } else {
-            0.0
-        }
-    })
-    .unwrap();
-    let before = dense.data().to_vec();
-    reset_provider_queries(&provider);
-    let root = dense.sqrt().unwrap();
-    assert_no_provider_queries(&provider);
-    assert!(root
-        .compose(&root)
-        .unwrap()
-        .data()
-        .iter()
-        .zip(&before)
-        .all(|(actual, expected)| (actual - expected).abs() < 1.0e-12));
-    assert_eq!(dense.data(), before.as_slice());
-
-    macro_rules! assert_failure {
-        ($fill:expr, $needle:literal) => {{
-            let tensor = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], $fill).unwrap();
-            let before = tensor.data().to_vec();
-            reset_provider_queries(&provider);
-            match tensor.sqrt() {
-                Err(tenet::typed::Error::InvalidArgument(message)) => {
-                    assert!(
-                        message.contains($needle),
-                        "unexpected sqrt error: {message}"
-                    );
-                }
-                other => panic!("expected sqrt rejection, got {other:?}"),
-            }
-            assert_eq!(tensor.data(), before.as_slice());
-            assert_no_provider_queries(&provider);
-        }};
-    }
-    assert_failure!(
-        |_, indices: &[usize]| {
-            if indices[0] == indices[1] {
-                -1.0
+    let dense_diagonal: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&bond_leg], [&bond_leg], |_, ij| {
+            if ij[0] == ij[1] {
+                4.0
             } else {
                 0.0
             }
-        },
-        "negative"
-    );
-    let bond_leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
-    let tensor = TensorMap::from_subblock_fn(&runtime, [&bond_leg], [&bond_leg], |_, indices| {
-        if indices[0] == indices[1] {
-            4.0
-        } else {
-            1.0
+        })
+        .unwrap();
+    for tensor in [non_bond, dense_diagonal] {
+        let before = tensor.data().to_vec();
+        reset_provider_queries(&provider);
+        match tensor.map_diagonal(f64::sqrt) {
+            Err(tenet::typed::Error::InvalidArgument(message)) => {
+                assert!(message.contains("compact diagonal"), "{message}");
+            }
+            other => panic!("expected dense rejection, got {other:?}"),
         }
-    })
-    .unwrap();
-    let before = tensor.data().to_vec();
-    reset_provider_queries(&provider);
-    match tensor.sqrt() {
-        Err(tenet::typed::Error::InvalidArgument(message)) => {
-            assert!(
-                message.contains("off-diagonal"),
-                "unexpected sqrt error: {message}"
-            );
-        }
-        other => panic!("expected off-diagonal rejection, got {other:?}"),
+        assert_no_provider_queries(&provider);
+        assert_eq!(tensor.data(), before.as_slice());
     }
-    assert_eq!(tensor.data(), before.as_slice());
+
+    let compact: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond_leg,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![4.0, 9.0],
+        }],
+    )
+    .unwrap();
+    reset_provider_queries(&provider);
+    let root = compact.map_diagonal(f64::sqrt).unwrap();
     assert_no_provider_queries(&provider);
+    assert_eq!(root.diagview().unwrap()[0].values, [2.0, 3.0]);
 }
 
 #[cfg(feature = "racah-generated")]
@@ -5431,197 +5254,6 @@ fn sun_checked_generic_polar_cross_mu_qh_oracles_for_both_dtypes() {
     }
 }
 
-#[cfg(feature = "racah-generated")]
-fn assert_sun_checked_generic_solve_right<D>(
-    n: usize,
-    label: Vec<i64>,
-    off_diagonal: D,
-    close: impl Fn(D, D) -> f64,
-) where
-    D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq,
-{
-    use tenet::typed::SUNFusionRule;
-
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let receiver_provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let divisor_provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let cross_sector = label.clone();
-    let receiver_leg =
-        GradedSpace::try_new(Arc::clone(&receiver_provider), [(label.clone(), 2)]).unwrap();
-    let divisor_leg = GradedSpace::try_new(Arc::clone(&divisor_provider), [(label, 2)]).unwrap();
-    let receiver_off_diagonal = D::from_real(0.75);
-    let receiver: TensorMap<_, D> = TensorMap::from_subblock_fn(
-        &runtime,
-        [&receiver_leg, &receiver_leg],
-        [&receiver_leg, &receiver_leg],
-        |trees, index| {
-            let row = index[0] + 2 * index[1];
-            let column = index[2] + 2 * index[3];
-            if trees.codomain_vertices() == trees.domain_vertices() && row == column {
-                D::from_real(3.0)
-            } else if trees.codomain_vertices()[0].get() == 1
-                && trees.domain_vertices()[0].get() == 2
-                && row == column
-            {
-                receiver_off_diagonal
-            } else {
-                D::from_real(0.0)
-            }
-        },
-    )
-    .unwrap();
-    let divisor: TensorMap<_, D> = TensorMap::from_subblock_fn(
-        &runtime,
-        [&divisor_leg, &divisor_leg],
-        [&divisor_leg, &divisor_leg],
-        |trees, index| {
-            let row = index[0] + 2 * index[1];
-            let column = index[2] + 2 * index[3];
-            if trees.codomain_vertices() == trees.domain_vertices() && row == column {
-                D::from_real(2.0)
-            } else if trees.codomain_vertices()[0].get() == 2
-                && trees.domain_vertices()[0].get() == 1
-                && row == column
-            {
-                off_diagonal
-            } else {
-                D::from_real(0.0)
-            }
-        },
-    )
-    .unwrap();
-    let ab = receiver.compose(&divisor).unwrap();
-    let ba = divisor.compose(&receiver).unwrap();
-    assert!(ab
-        .data()
-        .iter()
-        .zip(ba.data())
-        .any(|(&left, &right)| close(left, right) > 1e-9));
-
-    let solution = receiver.solve_right(&divisor).unwrap();
-    assert!(std::ptr::eq(
-        solution.provider(),
-        receiver_provider.as_ref()
-    ));
-    assert!(!std::ptr::eq(
-        solution.provider(),
-        divisor_provider.as_ref()
-    ));
-    assert_eq!(solution.codomain(), receiver.codomain());
-    assert_eq!(solution.domain(), divisor.codomain());
-    // What: for `M=|1><2|`, `N=|2><1|`, and `MN=P1`,
-    // `(3I+mM)(2I+nN)^-1 = 3/2 I - 3n/4 N + m/2 M - mn/4 P1`.
-    let expected: TensorMap<_, D> = TensorMap::from_subblock_fn(
-        &runtime,
-        [&receiver_leg, &receiver_leg],
-        [&receiver_leg, &receiver_leg],
-        |trees, index| {
-            let row = index[0] + 2 * index[1];
-            let column = index[2] + 2 * index[3];
-            if trees.codomain_vertices() == trees.domain_vertices() && row == column {
-                let correction = if trees.coupled() == &cross_sector
-                    && trees.codomain_vertices()[0].get() == 1
-                {
-                    D::from_real(-0.25) * receiver_off_diagonal * off_diagonal
-                } else {
-                    D::from_real(0.0)
-                };
-                D::from_real(1.5) + correction
-            } else if trees.codomain_vertices()[0].get() == 2
-                && trees.domain_vertices()[0].get() == 1
-                && row == column
-            {
-                D::from_real(-0.75) * off_diagonal
-            } else if trees.codomain_vertices()[0].get() == 1
-                && trees.domain_vertices()[0].get() == 2
-                && row == column
-            {
-                D::from_real(0.5) * receiver_off_diagonal
-            } else {
-                D::from_real(0.0)
-            }
-        },
-    )
-    .unwrap();
-    for index in 0..solution.subblock_count() {
-        let actual = solution.subblock(index).unwrap();
-        let expected_block = expected.subblock(index).unwrap();
-        assert_eq!(actual.key(), expected_block.key());
-        assert_eq!(actual.shape(), expected_block.shape());
-        assert_eq!(actual.strides(), expected_block.strides());
-    }
-    for (index, (&actual, &expected)) in solution.data().iter().zip(expected.data()).enumerate() {
-        assert!(
-            close(actual, expected) < 1e-9,
-            "payload {index}: actual={actual:?}, expected={expected:?}"
-        );
-    }
-    assert!(solution
-        .compose(&divisor)
-        .unwrap()
-        .data()
-        .iter()
-        .zip(receiver.data())
-        .all(|(&actual, &expected)| close(actual, expected) < 1e-9));
-}
-
-#[cfg(feature = "racah-generated")]
-#[test]
-fn sun_checked_generic_solve_right_cross_mu_for_both_dtypes_and_receiver_arcs() {
-    // What: noncommuting cross-multiplicity matrices distinguish `A / B`
-    // from left solve and exercise both payload types and receiver Arc authority.
-    for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
-        assert_sun_checked_generic_solve_right::<f64>(n, label.clone(), 1.0, |actual, expected| {
-            (actual - expected).abs()
-        });
-        assert_sun_checked_generic_solve_right::<Complex64>(
-            n,
-            label,
-            Complex64::new(1.0, 0.5),
-            |actual, expected| (actual - expected).norm(),
-        );
-    }
-}
-
-struct SolveCallSpy {
-    inner: DefaultDenseExecutor,
-    calls: Arc<AtomicUsize>,
-}
-
-impl DenseExecutor for SolveCallSpy {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.svd(input)
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.eigh(input)
-    }
-
-    fn solve_into(
-        &mut self,
-        a: DenseRead<'_>,
-        b: DenseRead<'_>,
-        x: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        self.inner.solve_into(a, b, x)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.inner.dot_general_into(output, lhs, rhs, config)
-    }
-}
-
 #[test]
 fn checked_generic_inv_singular_early_and_late_sectors_preserve_source() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -5847,163 +5479,6 @@ fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
         numerics::assert_slices_close("solve", solution.data(), expected.data(), 2);
         assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 8);
     }
-}
-
-#[test]
-fn checked_generic_solve_right_preflight_precedence_and_provider_failure_are_nonpublishing() {
-    // What: error precedence and provider failures are pre-kernel, while a
-    // rank-2 <- rank-1 result keeps the unequal receiver/divisor codomains.
-    let solve_calls = Arc::new(AtomicUsize::new(0));
-    let runtime = Runtime::builder()
-        .dense_threads(1)
-        .with_dense_executor(Box::new(SolveCallSpy {
-            inner: DefaultDenseExecutor::default(),
-            calls: Arc::clone(&solve_calls),
-        }))
-        .build()
-        .unwrap();
-    let receiver_provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let divisor_provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let receiver_leg =
-        GradedSpace::try_new(Arc::clone(&receiver_provider), [(Label::X, 2)]).unwrap();
-    let divisor_leg = GradedSpace::try_new(Arc::clone(&divisor_provider), [(Label::X, 2)]).unwrap();
-    let receiver: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&receiver_leg], [&receiver_leg], |_, ij| {
-            f64::from(ij[0] == ij[1])
-        })
-        .unwrap();
-    let divisor: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&divisor_leg], [&divisor_leg], |_, ij| {
-            if ij[0] == ij[1] {
-                2.0
-            } else {
-                0.25
-            }
-        })
-        .unwrap();
-    let receiver_before = receiver.data().to_vec();
-    let divisor_before = divisor.data().to_vec();
-
-    let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let runtime_divisor: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&other_runtime, [&divisor_leg], [&divisor_leg], |_, ij| {
-            f64::from(ij[0] == ij[1])
-        })
-        .unwrap();
-    reset_provider_queries(&receiver_provider);
-    reset_provider_queries(&divisor_provider);
-    assert!(matches!(
-        receiver.solve_right(&runtime_divisor),
-        Err(GenericTensorError::Facade(
-            tenet::typed::Error::RuntimeMismatch
-        ))
-    ));
-    assert_no_provider_queries(&receiver_provider);
-    assert_no_provider_queries(&divisor_provider);
-
-    let foreign_provider = Arc::new(CheckedOnlyToy::new_product_probe(1));
-    let foreign_leg = GradedSpace::try_new(Arc::clone(&foreign_provider), [(Label::X, 2)]).unwrap();
-    let foreign_divisor: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&foreign_leg], [&foreign_leg], |_, ij| {
-            f64::from(ij[0] == ij[1])
-        })
-        .unwrap();
-    reset_provider_queries(&receiver_provider);
-    reset_provider_queries(&foreign_provider);
-    assert!(matches!(
-        receiver.solve_right(&foreign_divisor),
-        Err(GenericTensorError::Facade(
-            tenet::typed::Error::RuleMismatch
-        ))
-    ));
-    assert_no_provider_queries(&receiver_provider);
-    assert_no_provider_queries(&foreign_provider);
-
-    let wrong_domain =
-        GradedSpace::try_new(Arc::clone(&divisor_provider), [(Label::Vacuum, 1)]).unwrap();
-    let domain_divisor: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&divisor_leg], [&wrong_domain], |_, _| 1.0).unwrap();
-    divisor_provider.fail_algebra.store(true, Ordering::Relaxed);
-    assert!(matches!(
-        receiver.solve_right(&domain_divisor),
-        Err(GenericTensorError::Facade(
-            tenet::typed::Error::InvalidArgument(_)
-        ))
-    ));
-    divisor_provider
-        .fail_algebra
-        .store(false, Ordering::Relaxed);
-
-    let narrow = GradedSpace::try_new(Arc::clone(&divisor_provider), [(Label::X, 1)]).unwrap();
-    let rectangular_divisor: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime, [&narrow], [&divisor_leg], |_, _| 1.0).unwrap();
-    assert!(matches!(
-        receiver.solve_right(&rectangular_divisor),
-        Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
-            _
-        )))
-    ));
-
-    divisor_provider.fail_algebra.store(true, Ordering::Relaxed);
-    assert!(matches!(
-        receiver.solve_right(&divisor),
-        Err(GenericTensorError::Plan(
-            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
-        ))
-    ));
-    assert_eq!(solve_calls.load(Ordering::Relaxed), 0);
-    divisor_provider
-        .fail_algebra
-        .store(false, Ordering::Relaxed);
-
-    let wide_receiver: TensorMap<_, f64> = TensorMap::from_subblock_fn(
-        &runtime,
-        [&receiver_leg, &receiver_leg],
-        [&receiver_leg],
-        |_, _| 1.0,
-    )
-    .unwrap();
-    let wide_before = wide_receiver.data().to_vec();
-    receiver_provider
-        .fail_algebra
-        .store(true, Ordering::Relaxed);
-    assert!(matches!(
-        wide_receiver.solve_right(&divisor),
-        Err(GenericTensorError::Plan(
-            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
-        ))
-    ));
-    assert_eq!(solve_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(wide_receiver.data(), wide_before.as_slice());
-    assert_eq!(receiver.data(), receiver_before.as_slice());
-    assert_eq!(divisor.data(), divisor_before.as_slice());
-    receiver_provider
-        .fail_algebra
-        .store(false, Ordering::Relaxed);
-
-    let geometry_solution = wide_receiver.solve_right(&divisor).unwrap();
-    assert!(std::ptr::eq(
-        geometry_solution.provider(),
-        receiver_provider.as_ref()
-    ));
-    assert_ne!(wide_receiver.codomain(), divisor.codomain());
-    assert_eq!(geometry_solution.codomain(), wide_receiver.codomain());
-    assert_eq!(geometry_solution.domain(), divisor.codomain());
-    assert_eq!(geometry_solution.codomain_rank(), 2);
-    assert_eq!(geometry_solution.domain_rank(), 1);
-    for index in 0..geometry_solution.subblock_count() {
-        assert_eq!(
-            geometry_solution.subblock(index).unwrap().shape(),
-            [2, 2, 2]
-        );
-    }
-    assert!(geometry_solution
-        .compose(&divisor)
-        .unwrap()
-        .data()
-        .iter()
-        .zip(wide_receiver.data())
-        .all(|(actual, expected)| (*actual - *expected).abs() < 1e-11));
 }
 
 #[test]

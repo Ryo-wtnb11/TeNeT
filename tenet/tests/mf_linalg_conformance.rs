@@ -288,13 +288,16 @@ macro_rules! factor_conformance {
                 .unwrap(),
             &id
         );
-        let squared = h.powi(2).unwrap();
-        assert_provider!(provider; squared);
-        assert_close!(&squared, &h.compose(&h).unwrap());
         let solved = h.solve(&id).unwrap();
         assert_provider!(provider; solved);
         assert_close!(&solved, &inverse);
-        let solved_right = id.solve_right(&h).unwrap();
+        let solved_right = h
+            .adjoint()
+            .unwrap()
+            .solve(&id.adjoint().unwrap())
+            .unwrap()
+            .adjoint()
+            .unwrap();
         assert_provider!(provider; solved_right);
         assert_close!(&solved_right, &inverse);
         let pseudo = tall.pinv(1e-12).unwrap();
@@ -320,7 +323,10 @@ macro_rules! factor_conformance {
                 }
             })
             .unwrap();
-        let root = diagonal.sqrt().unwrap();
+        assert!(diagonal.map_diagonal(f64::sqrt).is_err());
+        let compact =
+            TensorMap::diagonal(&rt, &endo_space, diagonal.diagview().unwrap()).unwrap();
+        let root = compact.map_diagonal(f64::sqrt).unwrap();
         assert_provider!(provider; root);
         assert!(root.data().iter().any(|&value| value == 2.0));
         assert!(root.data().iter().any(|&value| value == 3.0));

@@ -86,7 +86,7 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
 }
 
 #[test]
-fn solve_right_reuses_left_solve_for_real_complex_and_nonselfdual_u1() {
+fn right_solve_composes_adjoints_around_left_solve_for_real_and_complex_u1() {
     let runtime = Runtime::builder().build().unwrap();
     let space = GradedSpace::try_new(
         Arc::new(U1FusionRule),
@@ -109,12 +109,24 @@ fn solve_right_reuses_left_solve_for_real_complex_and_nonselfdual_u1() {
         }
     })
     .unwrap();
-    let solved = lhs.solve_right(&rhs).unwrap();
+    let solved = rhs
+        .adjoint()
+        .unwrap()
+        .solve(&lhs.adjoint().unwrap())
+        .unwrap()
+        .adjoint()
+        .unwrap();
     assert_eq!(solved.compose(&rhs).unwrap().data(), lhs.data());
 
     let lhs_c = lhs.convert::<Complex64>();
     let rhs_c = rhs.convert::<Complex64>();
-    let solved_c = lhs_c.solve_right(&rhs_c).unwrap();
+    let solved_c = rhs_c
+        .adjoint()
+        .unwrap()
+        .solve(&lhs_c.adjoint().unwrap())
+        .unwrap()
+        .adjoint()
+        .unwrap();
     assert!(solved_c
         .compose(&rhs_c)
         .unwrap()

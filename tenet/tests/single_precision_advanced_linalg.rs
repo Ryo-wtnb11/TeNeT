@@ -1,8 +1,9 @@
 //! Advanced linear-algebra oracle for the single-precision payloads (#1459).
 //!
-//! Every operation `AdvancedLinalgScalar` admits — `inv`, `solve`,
-//! `solve_right`, `pinv`, `exp` (Hermitian spectral route and non-Hermitian
-//! Padé route), `powi`, `sqrt`, `eig_vals`, `eig_full` and its truncation — is
+//! Every operation `AdvancedLinalgScalar` admits — `inv`, `solve` (also in
+//! its adjointed right-solve composition), `pinv`, `exp` (Hermitian spectral
+//! route and non-Hermitian Padé route), integer powers composed from `compose`
+//! and `inv`, `map_diagonal(sqrt)`, `eig_vals`, `eig_full` and its truncation — is
 //! compared against the `f64`/`Complex64` result of the same operation on the
 //! exactly widened input (`single_precision_oracle`).
 //!
@@ -12,8 +13,8 @@
 //!
 //! | quantity | `kappa` |
 //! | --- | --- |
-//! | `inv`, `solve`, `solve_right`, `pinv`, `powi(-p)` | `sigma_max / sigma_min` of the divisor |
-//! | `exp`, `powi(+p)`, `sqrt`, `eig_full` residual | 1 (backward stable / elementwise) |
+//! | `inv`, `solve`, right solve, `pinv`, negative powers | `sigma_max / sigma_min` of the divisor |
+//! | `exp`, positive powers, `map_diagonal(sqrt)`, `eig_full` residual | 1 (backward stable / elementwise) |
 //! | eigenvalues | `sigma_max / sigma_min` of the double-precision eigenvector factor (Bauer–Fike) |
 
 mod single_precision_oracle;
@@ -181,7 +182,7 @@ macro_rules! advanced_checks {
         let kappa_a = measured_kappa!(&wide_a);
         let kappa_t = measured_kappa!(&wide_t);
 
-        // ---- inv / solve / solve_right / pinv: forward errors. -------------
+        // ---- inv / solve / right solve / pinv: forward errors. -------------
         assert_payloads_agree_scaled(
             &format!("{name}: inv (kappa {kappa_a:e})"),
             a.inv().unwrap().data(),
@@ -197,9 +198,22 @@ macro_rules! advanced_checks {
             kappa_a,
         );
         assert_payloads_agree_scaled(
-            &format!("{name}: solve_right (kappa {kappa_a:e})"),
-            b.solve_right(&a).unwrap().data(),
-            wide_b.solve_right(&wide_a).unwrap().data(),
+            &format!("{name}: right solve (kappa {kappa_a:e})"),
+            a.adjoint()
+                .unwrap()
+                .solve(&b.adjoint().unwrap())
+                .unwrap()
+                .adjoint()
+                .unwrap()
+                .data(),
+            wide_a
+                .adjoint()
+                .unwrap()
+                .solve(&wide_b.adjoint().unwrap())
+                .unwrap()
+                .adjoint()
+                .unwrap()
+                .data(),
             n,
             kappa_a,
         );
@@ -227,30 +241,47 @@ macro_rules! advanced_checks {
             1.0,
         );
 
-        // ---- powi: repeated composition; a negative power inverts once. ----
+        // ---- Integer powers: repeated composition; a negative power inverts once.
+        macro_rules! cube {
+            ($t:expr) => {
+                $t.compose(&$t.compose(&$t).unwrap()).unwrap()
+            };
+        }
+        macro_rules! inverse_square {
+            ($t:expr) => {{
+                let inverse = $t.inv().unwrap();
+                inverse.compose(&inverse).unwrap()
+            }};
+        }
         assert_payloads_agree_scaled(
-            &format!("{name}: powi(3)"),
-            a.powi(3).unwrap().data(),
-            wide_a.powi(3).unwrap().data(),
+            &format!("{name}: a ∘ a ∘ a"),
+            cube!(a).data(),
+            cube!(wide_a).data(),
             3 * n,
             1.0,
         );
         assert_payloads_agree_scaled(
-            &format!("{name}: powi(-2) (kappa {kappa_h:e})"),
-            h.powi(-2).unwrap().data(),
-            wide_h.powi(-2).unwrap().data(),
+            &format!("{name}: h⁻¹ ∘ h⁻¹ (kappa {kappa_h:e})"),
+            inverse_square!(h).data(),
+            inverse_square!(wide_h).data(),
             2 * n,
             kappa_h * kappa_h,
         );
 
-        // ---- sqrt of a diagonal bond tensor (dense and compact arms). ------
+        // ---- Elementwise sqrt of a compact spectrum. ------------------------
+        // Checked-Generic SVD stores `s` densely; `diagonal(diagview)` makes
+        // every provider's `s` compact. The residual reads the factor as
+        // published, because checked-Generic reductions need dense payloads.
         let Svd { s, .. } = h.svd_compact().unwrap();
+        let compact_s = TensorMap::diagonal(&rt, &s.domain()[0], s.diagview().unwrap()).unwrap();
         let Svd { s: wide_s, .. } = wide_h.svd_compact().unwrap();
-        let root = s.sqrt().unwrap();
+        let wide_s =
+            TensorMap::diagonal(&rt, &wide_s.domain()[0], wide_s.diagview().unwrap()).unwrap();
+        let root = compact_s.map_diagonal(|value| value.sqrt()).unwrap();
         assert_payloads_agree_scaled(
             &format!("{name}: sqrt of a compact spectrum"),
             root.data(),
-            wide_s.sqrt().unwrap().data(),
+            wide_s.map_diagonal(|value| value.sqrt()).unwrap().data(),
             n,
             1.0,
         );
@@ -261,28 +292,6 @@ macro_rules! advanced_checks {
             n,
             $narrow
         );
-        let (dense_diagonal, wide_dense_diagonal) = twin_with!(
-            &rt,
-            $narrow,
-            $wide,
-            [&square],
-            [&square],
-            |i: &[usize]| {
-                if i[0] == i[1] {
-                    hermitian_entry(i[0], i[1])
-                } else {
-                    (0.0, 0.0)
-                }
-            }
-        );
-        assert_payloads_agree_scaled(
-            &format!("{name}: sqrt of a dense diagonal"),
-            dense_diagonal.sqrt().unwrap().data(),
-            wide_dense_diagonal.sqrt().unwrap().data(),
-            n,
-            1.0,
-        );
-
         // ---- General eig: factors in `D::Eig`, spectra `Complex64`. --------
         let Eig { d, v }: Eig<TensorMap<_, $eig>> = a.eig_full().unwrap();
         let Eig { v: wide_v, .. } = wide_a.eig_full().unwrap();
