@@ -2,7 +2,6 @@ use core::ops::{Add, Mul};
 use std::borrow::Borrow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, Weak};
 
 use num_traits::Zero;
@@ -574,11 +573,9 @@ impl<K: Hash + Eq, V: RuntimeCacheCharge> RuntimeCacheTier<K, V> {
         max_entry_bytes: usize,
     ) -> Self {
         Self {
-            entries: lru::LruCache::with_hasher(
-                NonZeroUsize::new(entry_capacity)
-                    .expect("tree-transform cache capacity is nonzero"),
-                rustc_hash::FxBuildHasher,
-            ),
+            // Why unbounded: `insert` enforces `entry_capacity` itself, and a
+            // bounded LRU would preallocate the 10⁴-entry group table eagerly.
+            entries: lru::LruCache::unbounded_with_hasher(rustc_hash::FxBuildHasher),
             account,
             entry_capacity,
             byte_budget,
@@ -660,18 +657,30 @@ struct RuntimeTreeTransformStoreState<T> {
 }
 
 const DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_ENTRIES: usize = 256;
+/// Why a separate, larger cap: the other tiers hold one entry per sector
+/// structure, this one one entry per fusion-tree group, and one structure has
+/// many groups. TensorKit's `fsbraid`/`fstranspose` LRU default
+/// (`caches.jl:DEFAULT_GLOBALCACHE_SIZE`) is the same 10⁴; the byte budget is
+/// the binding limit.
+const DEFAULT_RUNTIME_TREE_TRANSFORM_GROUP_ENTRIES: usize = 10_000;
 const DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 const RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE: usize = 8 * core::mem::size_of::<usize>();
 
 /// One Runtime-owned store for immutable tree-transform data of one
-/// coefficient dtype, in two tiers:
+/// coefficient dtype, in three tiers:
 ///
 /// - completed [`TreeTransformStructure`]s, keyed on the exact source and
 ///   destination layouts;
 /// - categorical [`TreeTransformGroupPlan`]s, keyed on rule, operation and the
 ///   sector structures only. A completed-structure miss whose sector structure
 ///   was seen before binds the cached plan to the new layout instead of
-///   recomputing recoupling coefficients.
+///   recomputing recoupling coefficients;
+/// - per-group recoupling specs (non-Unique fusion), keyed on rule, operation,
+///   one source group's external sectors and its ordered tree pairs. A plan
+///   miss rebuilds only the groups absent here.
+///
+/// Each tier is charged to its own Runtime-wide ledger account under the same
+/// byte budget, so the store retains at most three times that budget.
 #[doc(hidden)]
 pub struct RuntimeTreeTransformStore<T> {
     state: Mutex<RuntimeTreeTransformStoreState<T>>,
@@ -712,6 +721,7 @@ impl RuntimeTreeTransformCacheLedgerState {
 #[doc(hidden)]
 pub struct RuntimeTreeTransformCacheLedger {
     entry_capacity: usize,
+    group_entry_capacity: usize,
     byte_budget: usize,
     state: Mutex<RuntimeTreeTransformCacheLedgerState>,
     plan_state: Mutex<RuntimeTreeTransformCacheLedgerState>,
@@ -758,16 +768,29 @@ impl RuntimeTreeTransformCacheInfo {
 impl RuntimeTreeTransformCacheLedger {
     #[doc(hidden)]
     pub fn new(byte_budget: usize) -> Self {
-        Self::with_limits(DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_ENTRIES, byte_budget)
+        Self::with_group_limits(
+            DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_ENTRIES,
+            DEFAULT_RUNTIME_TREE_TRANSFORM_GROUP_ENTRIES,
+            byte_budget,
+        )
     }
 
     fn with_limits(entry_capacity: usize, byte_budget: usize) -> Self {
+        Self::with_group_limits(entry_capacity, entry_capacity, byte_budget)
+    }
+
+    fn with_group_limits(
+        entry_capacity: usize,
+        group_entry_capacity: usize,
+        byte_budget: usize,
+    ) -> Self {
         assert!(
-            entry_capacity != 0,
+            entry_capacity != 0 && group_entry_capacity != 0,
             "tree-transform cache capacity is nonzero"
         );
         Self {
             entry_capacity,
+            group_entry_capacity,
             byte_budget,
             state: Mutex::new(RuntimeTreeTransformCacheLedgerState::EMPTY),
             plan_state: Mutex::new(RuntimeTreeTransformCacheLedgerState::EMPTY),
@@ -788,9 +811,16 @@ impl RuntimeTreeTransformCacheLedger {
         .expect("runtime tree-transform cache ledger poisoned")
     }
 
+    fn entry_capacity_of(&self, account: RuntimeCacheAccount) -> usize {
+        match account {
+            RuntimeCacheAccount::Structures | RuntimeCacheAccount::Plans => self.entry_capacity,
+            RuntimeCacheAccount::Groups => self.group_entry_capacity,
+        }
+    }
+
     fn try_reserve(&self, account: RuntimeCacheAccount, charged_bytes: usize) -> bool {
         let mut state = self.account(account);
-        if state.entries == self.entry_capacity
+        if state.entries == self.entry_capacity_of(account)
             || state.charged_payload_bytes.saturating_add(charged_bytes) > self.byte_budget
         {
             return false;
@@ -815,7 +845,7 @@ impl RuntimeTreeTransformCacheLedger {
         let state = self.account(account);
         let mut combined = RuntimeTreeTransformCacheInfo {
             entries: state.entries,
-            entry_capacity: self.entry_capacity,
+            entry_capacity: self.entry_capacity_of(account),
             charged_payload_bytes: state.charged_payload_bytes,
             byte_budget: self.byte_budget,
             ..RuntimeTreeTransformCacheInfo::default()
@@ -922,7 +952,7 @@ impl<T> RuntimeTreeTransformStore<T> {
         );
         let groups = RuntimeCacheTier::new(
             RuntimeCacheAccount::Groups,
-            capacity,
+            ledger.group_entry_capacity,
             budget,
             max_entry_bytes,
         );
@@ -954,8 +984,9 @@ impl<T> RuntimeTreeTransformStore<T> {
         self.lock().plans.info()
     }
 
-    /// Categorical-group tier activity; `misses` counts source groups built
-    /// inside plan-tier misses.
+    /// Categorical-group tier activity; `misses` counts failed group lookups
+    /// inside plan-tier misses, each of which is followed by one group build
+    /// unless an earlier group's build fails.
     pub fn group_info(&self) -> RuntimeTreeTransformCacheInfo {
         self.lock().groups.info()
     }

@@ -128,6 +128,8 @@ macro_rules! check_rule {
     }};
 }
 
+type Su2Operation = dyn Fn(&TensorMap<SU2FusionRule, f64>) -> TensorMap<SU2FusionRule, f64>;
+
 fn su2_leg(sectors: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
     GradedSpace::try_new(
         Arc::new(SU2FusionRule),
@@ -207,6 +209,8 @@ fn clear_resets_the_group_tier() {
     let before = runtime.tree_transform_group_cache_info();
     assert!(before.entries() > 0 && before.charged_payload_bytes() > 0);
     assert!(before.entries() <= before.entry_capacity());
+    // The group tier counts groups, not structures, so its cap is larger.
+    assert!(before.entry_capacity() > runtime.tree_transform_plan_cache_info().entry_capacity());
     assert!(before.charged_payload_bytes() <= before.byte_budget());
 
     runtime.clear_tree_transform_cache();
@@ -214,4 +218,119 @@ fn clear_resets_the_group_tier() {
     assert_eq!(after.entries(), 0);
     assert_eq!(after.charged_payload_bytes(), 0);
     assert_eq!((after.hits(), after.misses()), (0, 0));
+}
+
+/// Many operations on one Runtime keep far more groups than the 256
+/// structures the other tiers hold. Every unchanged group must still hit:
+/// the group tier's entry cap is per group, and the byte budget binds.
+#[test]
+fn shared_runtime_keeps_every_unchanged_group_across_operations() {
+    let (a, c) = (
+        su2_leg(&[(0, 2), (1, 2), (2, 1)]),
+        su2_leg(&[(0, 2), (1, 2), (2, 1), (3, 1)]),
+    );
+    let probe = Runtime::builder().dense_threads(1).build().unwrap();
+    let before = source_groups!(&probe, &a).len();
+    let after = source_groups!(&probe, &c).len();
+    let operations: [&Su2Operation; 5] = [
+        &|t| t.permute(&[2, 0], &[3, 1]).unwrap(),
+        &|t| t.permute(&[1, 3], &[0, 2]).unwrap(),
+        &|t| t.permute(&[0, 2], &[1, 3]).unwrap(),
+        &|t| t.transpose(&[1, 3], &[0, 2]).unwrap(),
+        // Why not `[2, 0], [3, 1]`: on this self-adjoint space that adjoint
+        // permute reads storage like the direct `[0, 2], [1, 3]` above and is
+        // served by the completed-structure tier without a plan lookup.
+        &|t| t.adjoint().unwrap().permute(&[1, 0], &[3, 2]).unwrap(),
+    ];
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for operation in operations {
+        let _ = operation(&tensor!(&runtime, &a));
+    }
+    let warm = runtime.tree_transform_group_cache_info();
+    for operation in operations {
+        let _ = operation(&tensor!(&runtime, &c));
+    }
+    let info = runtime.tree_transform_group_cache_info();
+    let n = operations.len();
+    assert_eq!(
+        info.hits() - warm.hits(),
+        n * before,
+        "every unchanged group must hit"
+    );
+    assert_eq!(info.misses() - warm.misses(), n * (after - before));
+    assert_eq!(info.evictions(), 0);
+    assert!(
+        info.entries() > 256,
+        "fixture must exceed the per-structure tiers' 256 entries"
+    );
+}
+
+/// Operations that share a source structure but differ in the permutation,
+/// the braid levels or the orientation must not share groups: each result on
+/// one shared Runtime equals a cold Runtime's bit for bit.
+#[test]
+fn shared_runtime_distinguishes_operations_on_the_same_groups() {
+    let leg = su2_leg(&[(0, 2), (1, 2), (2, 1)]);
+    let operations: [(&str, &Su2Operation); 5] = [
+        ("permute p1", &|t| t.permute(&[2, 0], &[3, 1]).unwrap()),
+        ("permute p2", &|t| t.permute(&[3, 1], &[2, 0]).unwrap()),
+        ("transpose", &|t| t.transpose(&[1, 3], &[0, 2]).unwrap()),
+        ("direct permute", &|t| t.permute(&[1, 0], &[3, 2]).unwrap()),
+        ("adjoint permute", &|t| {
+            t.adjoint().unwrap().permute(&[1, 0], &[3, 2]).unwrap()
+        }),
+    ];
+    let shared = Runtime::builder().dense_threads(1).build().unwrap();
+    for (name, operation) in operations {
+        let warm = operation(&tensor!(&shared, &leg));
+        let cold_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let cold = operation(&tensor!(&cold_runtime, &leg));
+        assert_eq!(warm.codomain(), cold.codomain(), "{name}");
+        assert_eq!(
+            bits(warm.materialize().unwrap().dense_data().unwrap()),
+            bits(cold.materialize().unwrap().dense_data().unwrap()),
+            "{name}: shared-Runtime result differs from a cold Runtime"
+        );
+    }
+
+    // Levels only matter for non-symmetric braiding.
+    let fib = GradedSpace::try_new(
+        Arc::new(FibonacciFusionRule),
+        [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 2)],
+    )
+    .unwrap();
+    let fib_tensor = |runtime: &Runtime| {
+        let dual = fib.try_dual().unwrap();
+        TensorMap::<_, Complex64>::rand_with_seed(runtime, [&fib, &dual], [&fib, &dual], 5).unwrap()
+    };
+    let complex_bits = |t: &TensorMap<FibonacciFusionRule, Complex64>| {
+        t.materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .flat_map(|z| [z.re.to_bits(), z.im.to_bits()])
+            .collect::<Vec<_>>()
+    };
+    let shared = Runtime::builder().dense_threads(1).build().unwrap();
+    let under = fib_tensor(&shared)
+        .braid(&[1, 3], &[0, 2], &[0, 1, 2, 3])
+        .unwrap();
+    let over = fib_tensor(&shared)
+        .braid(&[1, 3], &[0, 2], &[3, 2, 1, 0])
+        .unwrap();
+    assert_ne!(
+        complex_bits(&under),
+        complex_bits(&over),
+        "fixture: levels matter"
+    );
+    let cold_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let cold_over = fib_tensor(&cold_runtime)
+        .braid(&[1, 3], &[0, 2], &[3, 2, 1, 0])
+        .unwrap();
+    assert_eq!(
+        complex_bits(&over),
+        complex_bits(&cold_over),
+        "Fibonacci braid levels: shared-Runtime result differs from a cold Runtime"
+    );
 }

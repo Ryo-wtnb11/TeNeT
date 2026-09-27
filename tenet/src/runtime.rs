@@ -1164,11 +1164,13 @@ impl Runtime {
     /// a plan miss builds the recoupling of each source fusion-tree group only
     /// when that group, keyed on the rule, the operation, its external sectors
     /// and its ordered tree pairs, is not cached here. A sector change
-    /// therefore rebuilds only the groups it changed; `misses` counts the
-    /// groups built. Unique-fusion rules never use this tier, because one
-    /// group is one tree with one coefficient. Entry and byte limits are the
-    /// same configured values as [`Self::tree_transform_cache_info`], charged
-    /// separately.
+    /// therefore rebuilds only the groups it changed; `misses` counts failed
+    /// group lookups, each followed by one group build unless an earlier
+    /// group's build fails. Unique-fusion rules never use this tier, because
+    /// one group is one tree with one coefficient. The byte budget is the
+    /// configured value of [`Self::tree_transform_cache_info`], charged
+    /// separately; the entry capacity is per group (10⁴ by default) rather
+    /// than per structure, so the byte budget is the binding limit.
     pub fn tree_transform_group_cache_info(&self) -> RuntimeTreeTransformCacheInfo {
         self.inner.tree_transform_stores.group_info()
     }
@@ -1737,9 +1739,9 @@ impl RuntimeBuilder {
     }
 
     /// Sets the retained-byte budget for completed tree-transform structures,
-    /// and separately for categorical tree-transform plans, so the two tiers
-    /// together retain at most twice this charge. A zero budget disables
-    /// admission to both.
+    /// and separately for categorical tree-transform plans and for their
+    /// per-group recoupling specs, so the three tiers together retain at most
+    /// three times this charge. A zero budget disables admission to all three.
     pub fn tree_transform_cache_byte_budget(mut self, bytes: usize) -> Self {
         self.tree_transform_cache_byte_budget = bytes;
         self

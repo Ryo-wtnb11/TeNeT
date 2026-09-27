@@ -912,9 +912,9 @@ where
                 group_specs
             }
         };
-        // Why clone rather than share: a plan owns its specs contiguously,
-        // and one group's specs are O(|dst|·|src|) values against the F/R
-        // recoupling that built them.
+        // Why cloning is cheap: a plan owns its spec array, but a `Multi`
+        // spec shares its keys and recoupling matrix, so a clone only bumps
+        // reference counts; a `Single` spec clones one key pair.
         specs.extend(group_specs.iter().cloned());
     }
     reuse.admit(admitted);

@@ -19,6 +19,9 @@ use crate::transform_helpers::{
 use crate::transform_structure::{SharedTreeTransformCoefficients, TreeTransformStructure};
 use crate::OperationError;
 
+/// Why shared slices: a Runtime reuses one group's specs across the plans of
+/// every sector structure containing that group, so a clone must be O(1)
+/// rather than a copy of the `|dst|·|src|` recoupling matrix.
 #[derive(Clone, Debug)]
 enum SpecEntries<K, T> {
     Single {
@@ -27,9 +30,9 @@ enum SpecEntries<K, T> {
         coefficient: T,
     },
     Multi {
-        dst: Vec<K>,
-        src: Vec<K>,
-        coefficients: Vec<T>,
+        dst: Arc<[K]>,
+        src: Arc<[K]>,
+        coefficients: Arc<[T]>,
     },
 }
 
@@ -257,9 +260,9 @@ impl<T> TreeTransformBlockSpec<T> {
     ) -> Self {
         Self {
             entries: SpecEntries::Multi {
-                dst: dst_blocks,
-                src: src_blocks,
-                coefficients: recoupling_coefficients_dst_src,
+                dst: dst_blocks.into(),
+                src: src_blocks.into(),
+                coefficients: recoupling_coefficients_dst_src.into(),
             },
             source_axes: None,
         }
@@ -338,7 +341,7 @@ impl<T> TreeTransformKeyBlockSpec<T> {
             entries: SpecEntries::Multi {
                 dst: dst_keys.into_iter().map(Into::into).collect(),
                 src: src_keys.into_iter().map(Into::into).collect(),
-                coefficients: recoupling_coefficients_dst_src,
+                coefficients: recoupling_coefficients_dst_src.into(),
             },
             source_axes: None,
         }
@@ -507,9 +510,9 @@ impl<T> TreeTransformGroupBlockSpec<T> {
         Ok(Self {
             group_key,
             entries: SpecEntries::Multi {
-                dst: dst_keys,
-                src: src_keys,
-                coefficients: recoupling_coefficients_dst_src,
+                dst: dst_keys.into(),
+                src: src_keys.into(),
+                coefficients: recoupling_coefficients_dst_src.into(),
             },
             source_axes: None,
         })
