@@ -22,7 +22,6 @@
     "tenet-dense/src/view.rs": 47,
     "tenet-macros/src/lib.rs": 93,
     "tenet-matrixalgebra/src/compose.rs": 85,
-    "tenet-matrixalgebra/src/factorize.rs": 85,
     "tenet-matrixalgebra/src/matrix_functions.rs": 90,
     "tenet-matrixalgebra/src/truncation.rs": 89,
     "tenet-network/src/cost.rs": 23,
