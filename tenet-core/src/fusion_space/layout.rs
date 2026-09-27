@@ -1,0 +1,440 @@
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FusionTreeBlockLayoutEntry {
+    row: usize,
+    col: usize,
+}
+
+#[derive(Clone, Debug)]
+struct FusionTreeCoupledSectorLayout {
+    start: usize,
+    row_count: usize,
+    col_count: usize,
+}
+
+#[derive(Clone, Debug)]
+struct FusionTreeHomSpaceLayoutData {
+    keys: Arc<[FusionTreePairKey]>,
+    sectors: Vec<FusionTreeCoupledSectorLayout>,
+}
+
+fn generic_keys_for_coupled_from_groups(
+    codomain: &[CoupledFusionTrees], codomain_fold: &CoupledSectorFold,
+    domain: &[CoupledFusionTrees], domain_fold: &CoupledSectorFold, coupled: SectorId,
+    outside_table_error: impl Fn(&str, &CoupledSectorFold, SectorId) -> CoreError,
+) -> Result<Vec<FusionTreePairKey>, CoreError> {
+    for (side, fold) in [("codomain", codomain_fold), ("domain", domain_fold)] {
+        if fold.is_unknown() || fold.tainted().contains(&coupled) {
+            return Err(outside_table_error(side, fold, coupled));
+        }
+    }
+    let codomain = codomain.iter().find(|g| g.coupled == coupled).map_or(&[][..], |g| g.trees.as_slice());
+    let domain = domain.iter().find(|g| g.coupled == coupled).map_or(&[][..], |g| g.trees.as_slice());
+    let mut keys = Vec::with_capacity(codomain.len() * domain.len());
+    for domain_tree in domain { for codomain_tree in codomain { keys.push(FusionTreePairKey::pair(codomain_tree.clone(), domain_tree.clone())); } }
+    Ok(keys)
+}
+
+#[derive(Clone, Debug)]
+struct FusionTreeHomSpaceLayout {
+    id: FusionTreeLayoutId,
+    data: FusionTreeHomSpaceLayoutData,
+}
+
+#[derive(Debug)]
+enum PreparedFusionTreeLayoutState {
+    Cached {
+        key: FusionTreeHomSpaceCacheKey,
+        layout: Arc<FusionTreeHomSpaceLayout>,
+    },
+    Cold {
+        key: FusionTreeHomSpaceCacheKey,
+        data: FusionTreeHomSpaceLayoutData,
+    },
+}
+
+/// Checked fusion-tree metadata staged without publishing process-local state.
+///
+/// This is an expert transaction boundary for downstream builders that still
+/// have fallible shape or storage work. Call [`Self::commit`] only after that
+/// work succeeds.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct PreparedFusionTreeLayout {
+    state: PreparedFusionTreeLayoutState,
+}
+
+impl PreparedFusionTreeLayout {
+    fn cache_key(&self) -> &FusionTreeHomSpaceCacheKey {
+        match &self.state {
+            PreparedFusionTreeLayoutState::Cached { key, .. }
+            | PreparedFusionTreeLayoutState::Cold { key, .. } => key,
+        }
+    }
+
+    fn layout_data(&self) -> &FusionTreeHomSpaceLayoutData {
+        match &self.state {
+            PreparedFusionTreeLayoutState::Cached { layout, .. } => layout,
+            PreparedFusionTreeLayoutState::Cold { data, .. } => data,
+        }
+    }
+
+    fn validate_homspace_signature(&self, homspace: &FusionTreeHomSpace) -> Result<(), CoreError> {
+        let key = self.cache_key();
+        if !product_space_signature_eq(homspace.codomain(), &key.homspace.codomain)
+            || !product_space_signature_eq(homspace.domain(), &key.homspace.domain)
+        {
+            return Err(CoreError::MalformedFusionTree {
+                message: "prepared layout does not match HomSpace sector signature",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn keys(&self) -> &[FusionTreePairKey] {
+        match &self.state {
+            PreparedFusionTreeLayoutState::Cached { layout, .. } => layout.keys.as_ref(),
+            PreparedFusionTreeLayoutState::Cold { data, .. } => data.keys.as_ref(),
+        }
+    }
+
+    pub fn keys_arc(&self) -> Arc<[FusionTreePairKey]> {
+        match &self.state {
+            PreparedFusionTreeLayoutState::Cached { layout, .. } => Arc::clone(&layout.keys),
+            PreparedFusionTreeLayoutState::Cold { data, .. } => Arc::clone(&data.keys),
+        }
+    }
+
+    /// Builds final coupled storage directly from authoritative leg
+    /// degeneracies while keeping this prepared layout unpublished.
+    pub fn build_from_leg_degeneracies(
+        &self,
+        homspace: &FusionTreeHomSpace,
+    ) -> Result<Arc<BlockStructure>, CoreError> {
+        self.validate_homspace_signature(homspace)?;
+        // Why not call the cached public builder: downstream validation must
+        // finish before this transaction publishes a layout ID or admission,
+        // and the prepared data already owns the one checked enumeration.
+        // Degeneracies are deliberately absent from the signature: the target
+        // HomSpace is their authority, while sectors and duality select keys.
+        let (sector, degeneracy) =
+            coupled_subblock_parts_from_leg_degeneracies(homspace, self.layout_data())?;
+        let structure = BlockStructure::from_parts(sector, degeneracy)?;
+        structure.record_storage_tiling();
+        Ok(structure.into_shared())
+    }
+
+    /// Finalizes a checked complete multiplicity-free layout through the core
+    /// structural cache after all fallible leg-derived storage work succeeds.
+    #[doc(hidden)]
+    pub fn build_complete_from_leg_degeneracies(
+        &self,
+        homspace: &FusionTreeHomSpace,
+    ) -> Result<Arc<BlockStructure>, CoreError> {
+        self.validate_homspace_signature(homspace)?;
+        let key = CompleteHomSpaceStructureCacheKey {
+            rule: self.cache_key().rule.clone(),
+            homspace: Arc::clone(&homspace.content),
+        };
+        // Why no extent walk before the lookup: entries are admitted only
+        // after the builder's walk succeeded over an equal (rule identity,
+        // complete HomSpace content) key, and that walk is a pure function of
+        // the key because `RuleIdentity` determines the fusion enumeration.
+        // A hit therefore proves the walk would succeed; a miss walks once,
+        // inside the builder, before any statistic changes.
+        if let Some(structure) = complete_hom_space_structure_cached(&key) {
+            return Ok(structure);
+        }
+
+        let built = self.build_from_leg_degeneracies(homspace)?;
+        Ok(admit_complete_hom_space_structure(key, built))
+    }
+
+    /// Publishes the prepared layout and returns its shared key storage.
+    ///
+    /// Why no fallible return: checked enumeration and layout-data formation
+    /// completed in `prepare`; the remaining cache race check, monotonic ID,
+    /// and bounded admission are process-local publication only.
+    pub fn commit(self) -> Arc<[FusionTreePairKey]> {
+        Arc::clone(&self.commit_layout().keys)
+    }
+
+    fn commit_layout(self) -> Arc<FusionTreeHomSpaceLayout> {
+        let cache = fusion_tree_layout_cache();
+        // Why a read lock first: a warm commit only re-finds an entry that is
+        // already published, and taking the process-global write lock for that
+        // serializes concurrent warm calls. The admitting branches keep their
+        // own lookup, which still closes the race against a concurrent admit
+        // between this read lock and theirs.
+        if let Some(existing) = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lookup(self.cache_key())
+        {
+            return existing;
+        }
+        match self.state {
+            PreparedFusionTreeLayoutState::Cached { key, layout } => {
+                let mut write = fusion_tree_layout_cache_write();
+                if let Some(existing) = write.lookup(&key) {
+                    return existing;
+                }
+                let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
+                write.admit(Arc::new(key), layout, charged_bytes)
+            }
+            PreparedFusionTreeLayoutState::Cold { key, data } => {
+                let mut write = fusion_tree_layout_cache_write();
+                if let Some(existing) = write.lookup(&key) {
+                    return existing;
+                }
+                let computed = Arc::new(FusionTreeHomSpaceLayout {
+                    id: next_fusion_tree_layout_id(),
+                    data,
+                });
+                let charged_bytes = charged_fusion_tree_layout_bytes(&key, &computed);
+                write.admit(Arc::new(key), computed, charged_bytes)
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for FusionTreeHomSpaceLayout {
+    type Target = FusionTreeHomSpaceLayoutData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+struct FusionTreeLayoutId(usize);
+
+static FUSION_TREE_LAYOUT_ID: AtomicUsize = AtomicUsize::new(1);
+
+#[cfg(test)]
+std::thread_local! {
+    static FUSION_TREE_LAYOUT_ID_CALLS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static FUSION_TREE_LAYOUT_ADMISSIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static FUSION_TREE_LAYOUT_WRITE_LOCKS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static COUPLED_GRID_BUILD_OBSERVATIONS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_fusion_tree_layout_probe_side_effect_calls() {
+    FUSION_TREE_LAYOUT_ID_CALLS.set(0);
+    FUSION_TREE_LAYOUT_ADMISSIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn fusion_tree_layout_probe_side_effect_calls() -> (usize, usize) {
+    (
+        FUSION_TREE_LAYOUT_ID_CALLS.get(),
+        FUSION_TREE_LAYOUT_ADMISSIONS.get(),
+    )
+}
+
+#[cfg(test)]
+fn reset_coupled_grid_build_observations() {
+    COUPLED_GRID_BUILD_OBSERVATIONS.set((0, 0));
+}
+
+#[cfg(test)]
+fn coupled_grid_build_observations() -> (usize, usize) {
+    COUPLED_GRID_BUILD_OBSERVATIONS.get()
+}
+
+#[cfg(test)]
+fn observe_coupled_grid_reconstruction_insert() {
+    COUPLED_GRID_BUILD_OBSERVATIONS.set({
+        let (reconstruction_inserts, side_derivations) =
+            COUPLED_GRID_BUILD_OBSERVATIONS.get();
+        (reconstruction_inserts + 1, side_derivations)
+    });
+}
+
+#[cfg(test)]
+fn observe_coupled_grid_side_derivation() {
+    COUPLED_GRID_BUILD_OBSERVATIONS.set({
+        let (reconstruction_inserts, side_derivations) =
+            COUPLED_GRID_BUILD_OBSERVATIONS.get();
+        (reconstruction_inserts, side_derivations + 1)
+    });
+}
+
+fn next_fusion_tree_layout_id() -> FusionTreeLayoutId {
+    #[cfg(test)]
+    FUSION_TREE_LAYOUT_ID_CALLS.set(FUSION_TREE_LAYOUT_ID_CALLS.get() + 1);
+    let id = FUSION_TREE_LAYOUT_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .expect("fusion-tree layout identity space exhausted");
+    FusionTreeLayoutId(id)
+}
+
+#[cfg(test)]
+fn fusion_tree_layout_from_data(
+    id: FusionTreeLayoutId,
+    data: FusionTreeHomSpaceLayoutData,
+) -> FusionTreeHomSpaceLayout {
+    FusionTreeHomSpaceLayout { id, data }
+}
+
+#[cfg(test)]
+struct ReconstructedFusionTreeCoupledSectorLayout {
+    start: usize,
+    row_count: usize,
+    col_count: usize,
+    row_key_offsets: Vec<usize>,
+    col_key_offsets: Vec<usize>,
+    entries: Vec<FusionTreeBlockLayoutEntry>,
+}
+
+#[cfg(test)]
+struct ReconstructedFusionTreeHomSpaceLayoutData {
+    keys: Arc<[FusionTreePairKey]>,
+    sectors: Vec<ReconstructedFusionTreeCoupledSectorLayout>,
+}
+
+#[cfg(test)]
+fn reconstructed_fusion_tree_layout_data_from_keys(
+    keys: Vec<FusionTreePairKey>,
+) -> ReconstructedFusionTreeHomSpaceLayoutData {
+    let keys = Arc::<[FusionTreePairKey]>::from(keys);
+    let mut sectors = Vec::new();
+    let mut run_start = 0usize;
+    while run_start < keys.len() {
+        let coupled = keys[run_start].codomain_tree().coupled();
+        let mut run_end = run_start;
+        let mut row_indices = FxHashMap::<FusionTreeKey, usize>::default();
+        let mut col_indices = FxHashMap::<FusionTreeKey, usize>::default();
+        let mut row_key_offsets = Vec::new();
+        let mut col_key_offsets = Vec::new();
+        let mut entries = Vec::new();
+        while run_end < keys.len()
+            && keys[run_end].codomain_tree().coupled() == coupled
+        {
+            let row = match row_indices.get(keys[run_end].codomain_tree()) {
+                Some(&index) => index,
+                None => {
+                    let index = row_indices.len();
+                    row_indices.insert(keys[run_end].codomain_tree().clone(), index);
+                    row_key_offsets.push(run_end - run_start);
+                    observe_coupled_grid_reconstruction_insert();
+                    index
+                }
+            };
+            let col = match col_indices.get(keys[run_end].domain_tree()) {
+                Some(&index) => index,
+                None => {
+                    let index = col_indices.len();
+                    col_indices.insert(keys[run_end].domain_tree().clone(), index);
+                    col_key_offsets.push(run_end - run_start);
+                    observe_coupled_grid_reconstruction_insert();
+                    index
+                }
+            };
+            entries.push(FusionTreeBlockLayoutEntry { row, col });
+            run_end += 1;
+        }
+        sectors.push(ReconstructedFusionTreeCoupledSectorLayout {
+            start: run_start,
+            row_count: row_indices.len(),
+            col_count: col_indices.len(),
+            row_key_offsets,
+            col_key_offsets,
+            entries,
+        });
+        run_start = run_end;
+    }
+    ReconstructedFusionTreeHomSpaceLayoutData { keys, sectors }
+}
+
+fn fusion_tree_layout_capacities(
+    codomain: &[CoupledFusionTrees],
+    domain: &[CoupledFusionTrees],
+) -> Option<(usize, usize)> {
+    let mut key_count = 0usize;
+    let mut sector_count = 0usize;
+    let mut codomain_index = 0usize;
+    let mut domain_index = 0usize;
+    while codomain_index < codomain.len() && domain_index < domain.len() {
+        match codomain[codomain_index]
+            .coupled
+            .cmp(&domain[domain_index].coupled)
+        {
+            std::cmp::Ordering::Less => codomain_index += 1,
+            std::cmp::Ordering::Greater => domain_index += 1,
+            std::cmp::Ordering::Equal => {
+                let row_count = codomain[codomain_index].trees.len();
+                let col_count = domain[domain_index].trees.len();
+                if row_count != 0 && col_count != 0 {
+                    key_count = key_count.checked_add(row_count.checked_mul(col_count)?)?;
+                    sector_count = sector_count.checked_add(1)?;
+                }
+                codomain_index += 1;
+                domain_index += 1;
+            }
+        }
+    }
+    Some((key_count, sector_count))
+}
+
+fn fusion_tree_layout_data_from_groups(
+    codomain: &[CoupledFusionTrees],
+    domain: &[CoupledFusionTrees],
+) -> FusionTreeHomSpaceLayoutData {
+    let (key_capacity, sector_capacity) =
+        fusion_tree_layout_capacities(codomain, domain).unwrap_or((0, 0));
+    let mut keys = Vec::with_capacity(key_capacity);
+    let mut sectors = Vec::with_capacity(sector_capacity);
+    let mut codomain_index = 0usize;
+    let mut domain_index = 0usize;
+    while codomain_index < codomain.len() && domain_index < domain.len() {
+        match codomain[codomain_index]
+            .coupled
+            .cmp(&domain[domain_index].coupled)
+        {
+            std::cmp::Ordering::Less => codomain_index += 1,
+            std::cmp::Ordering::Greater => domain_index += 1,
+            std::cmp::Ordering::Equal => {
+                let codomain_trees = &codomain[codomain_index].trees;
+                let domain_trees = &domain[domain_index].trees;
+                let start = keys.len();
+                let row_count = codomain_trees.len();
+                let col_count = domain_trees.len();
+                if row_count == 0 || col_count == 0 {
+                    codomain_index += 1;
+                    domain_index += 1;
+                    continue;
+                }
+                for domain_tree in domain_trees {
+                    for codomain_tree in codomain_trees {
+                        keys.push(FusionTreePairKey::pair(
+                            codomain_tree.clone(),
+                            domain_tree.clone(),
+                        ));
+                    }
+                }
+                sectors.push(FusionTreeCoupledSectorLayout {
+                    start,
+                    row_count,
+                    col_count,
+                });
+                codomain_index += 1;
+                domain_index += 1;
+            }
+        }
+    }
+    FusionTreeHomSpaceLayoutData {
+        keys: Arc::from(keys),
+        sectors,
+    }
+}
