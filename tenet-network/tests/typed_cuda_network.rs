@@ -11,7 +11,8 @@ use tenet::prelude::{Complex32, Complex64};
 use tenet::typed::{CudaStorage, GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     clear_plan_cache, configure_plan_cache, plan_cache_stats, tensor, ContractionPlan,
-    ContractionStep, GreedyDenseOptimizer, Network, PlanCacheConfig, TemporaryLabel, TensorId,
+    ContractionStep, GreedyDenseOptimizer, Network, NetworkIR, PlanCacheConfig, TemporaryLabel,
+    TensorId,
 };
 
 #[path = "../../tests/support/numerics.rs"]
@@ -208,9 +209,17 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     )
     .unwrap();
     let refs = [&tensors[0], &tensors[1], &tensors[2]];
-    let chain_order = ContractionPlan::new(
-        3,
+    let ir = NetworkIR::from_labels(
+        vec![
+            labels(&["a", "b"]),
+            labels(&["b", "c"]),
+            labels(&["c", "d"]),
+        ],
         labels(&["a", "d"]),
+    )
+    .unwrap();
+    let chain_order = ContractionPlan::from_steps(
+        &ir,
         vec![
             ContractionStep::new(
                 TensorId::new(0),

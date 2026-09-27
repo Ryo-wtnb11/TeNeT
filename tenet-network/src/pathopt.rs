@@ -260,9 +260,9 @@ impl PathStrategy {
 
 /// Dense contraction-order optimizer backed by the `opt-einsum-path` crate.
 ///
-/// Implements [`DenseContractionOptimizer`], so it plugs into
-/// [`crate::ContractionPlan::from_dense_optimizer`], the einsum facade
-/// (`einsum_with_optimizer` (legacy)), and the slicer without any other changes.
+/// Implements [`DenseContractionOptimizer`]; its steps feed
+/// [`crate::ContractionPlan::from_steps`] and the einsum facade
+/// (`einsum_with_optimizer` (legacy)).
 ///
 /// ```text
 /// use tenet_contract::prelude::*;
@@ -275,7 +275,8 @@ impl PathStrategy {
 ///     DenseTensorInfo::new(vec![4, 5]),
 /// ];
 /// let cost = DenseCostModel::from_network(&ir, &infos)?;
-/// let plan = ContractionPlan::from_dense_optimizer(&ir, &OptEinsumPathOptimizer::default(), &cost)?;
+/// let steps = OptEinsumPathOptimizer::default().optimize(&ir, &cost)?;
+/// let plan = ContractionPlan::from_steps(&ir, steps)?;
 /// assert_eq!(plan.active_pair_path()?.len(), 2);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -346,8 +347,7 @@ impl DenseContractionOptimizer for OptEinsumPathOptimizer {
 /// not, because lhs/rhs orientation controls fermionic order and orientation
 /// costs. Preserve the upstream contraction tree while orienting each pair by
 /// the earliest written operand in its subtree. The public explicit
-/// [`ContractionPlan::from_dense_active_pair_path`](crate::ContractionPlan::from_dense_active_pair_path)
-/// remains untouched and preserves caller-supplied lhs/rhs exactly.
+/// [`dense_steps_from_active_pair_path`] preserves caller-supplied lhs/rhs exactly.
 fn path_to_active_pairs(path: &[Vec<usize>], tensor_count: usize) -> Result<Vec<ActivePair>> {
     let pairs = path
         .iter()
@@ -417,9 +417,13 @@ mod tests {
         ];
         let cost = DenseCostModel::from_network(&ir, &infos).unwrap();
 
-        let plan =
-            ContractionPlan::from_dense_optimizer(&ir, &OptEinsumPathOptimizer::default(), &cost)
-                .unwrap();
+        let plan = ContractionPlan::from_steps(
+            &ir,
+            OptEinsumPathOptimizer::default()
+                .optimize(&ir, &cost)
+                .unwrap(),
+        )
+        .unwrap();
 
         assert_eq!(
             plan.active_pair_path().unwrap(),
@@ -428,8 +432,11 @@ mod tests {
         assert_eq!(plan.output_labels(), ir.output_labels());
 
         let explicit_path = vec![ActivePair::new(0, 1), ActivePair::new(0, 1)];
-        let explicit =
-            ContractionPlan::from_dense_active_pair_path(&ir, &explicit_path, &cost).unwrap();
+        let explicit = ContractionPlan::from_steps(
+            &ir,
+            dense_steps_from_active_pair_path(&ir, &explicit_path, &cost).unwrap(),
+        )
+        .unwrap();
         assert_eq!(explicit.active_pair_path().unwrap(), explicit_path);
 
         let report = plan.dense_cost_report(&ir, &cost).unwrap();
@@ -489,7 +496,8 @@ mod tests {
             .with_memory_limit(PathMemoryLimit::Size(20)),
             OptEinsumPathOptimizer::new(PathStrategy::RandomGreedy(4)),
         ] {
-            let plan = ContractionPlan::from_dense_optimizer(&ir, &optimizer, &cost).unwrap();
+            let plan =
+                ContractionPlan::from_steps(&ir, optimizer.optimize(&ir, &cost).unwrap()).unwrap();
             assert_eq!(plan.active_pair_path().unwrap().len(), 2);
         }
     }

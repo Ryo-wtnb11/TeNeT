@@ -211,9 +211,7 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
     for planned in [&explicit, &greedy] {
         let authority = authority_provider(planned, &tensors);
         for _ in 0..2 {
-            let actual = planned
-                .execute_with_workspace(&tensors, &mut workspace)
-                .unwrap();
+            let actual = planned.execute(&tensors, &mut workspace).unwrap();
             assert_eq!(actual.provider() as *const _, authority);
             assert_same(&actual, &expected);
         }
@@ -221,15 +219,11 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
     let mut separate_a = NetworkExecutionWorkspace::default();
     let mut separate_b = NetworkExecutionWorkspace::default();
     assert_same(
-        &explicit
-            .execute_with_workspace(&tensors, &mut separate_a)
-            .unwrap(),
+        &explicit.execute(&tensors, &mut separate_a).unwrap(),
         &expected,
     );
     assert_same(
-        &explicit
-            .execute_with_workspace(&tensors, &mut separate_b)
-            .unwrap(),
+        &explicit.execute(&tensors, &mut separate_b).unwrap(),
         &expected,
     );
 
@@ -262,9 +256,7 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
         })
         .unwrap();
     let drift_refs = [&drift_lhs, &drift_middle, &drift_tail];
-    let drift = explicit
-        .execute_with_workspace(&drift_refs, &mut separate_a)
-        .unwrap();
+    let drift = explicit.execute(&drift_refs, &mut separate_a).unwrap();
     assert_eq!(
         drift.provider() as *const _,
         authority_provider(&explicit, &drift_refs)
@@ -288,7 +280,10 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
             let operands = operands.clone();
             std::thread::spawn(move || {
                 planned
-                    .execute(&[&operands[0], &operands[1], &operands[2]])
+                    .execute(
+                        &[&operands[0], &operands[1], &operands[2]],
+                        &mut Default::default(),
+                    )
                     .unwrap()
             })
         })
@@ -343,7 +338,7 @@ fn sun_checked_generic_mixed_slice_preserves_outer_multiplicity_keys() {
     .unwrap();
     let tensors = [&lhs, &rhs];
     let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-    let expected = planned.execute(&tensors).unwrap();
+    let expected = planned.execute(&tensors, &mut Default::default()).unwrap();
     let ir = NetworkIR::from_labels(inputs, output).unwrap();
     let cost = DenseCostModel::from_network(
         &ir,
@@ -711,15 +706,13 @@ fn assert_injected_recovery(
     let mut workspace = NetworkExecutionWorkspace::default();
     provider.arm_symbol(ordinal);
     assert!(matches!(
-        planned.execute_with_workspace(tensors, &mut workspace),
+        planned.execute(tensors, &mut workspace),
         Err(GenericTensorError::Plan(_))
     ));
     provider.reset_symbols();
-    let recovered = planned
-        .execute_with_workspace(tensors, &mut workspace)
-        .unwrap();
+    let recovered = planned.execute(tensors, &mut workspace).unwrap();
     provider.reset_symbols();
-    let expected = planned.execute(tensors).unwrap();
+    let expected = planned.execute(tensors, &mut Default::default()).unwrap();
     assert_eq!(recovered.subblock_count(), expected.subblock_count());
     for (&actual, &want) in recovered.data().iter().zip(expected.data()) {
         assert!((actual - want).abs() <= 1.0e-12 * (1.0 + want.abs()));
@@ -751,7 +744,7 @@ fn cold_query_count(operands: usize, permute_output: bool) -> usize {
     let (provider, tensors, planned) = injected_plan_case(operands, permute_output);
     let refs = tensors.iter().take(operands).collect::<Vec<_>>();
     provider.reset_symbols();
-    planned.execute(&refs).unwrap();
+    planned.execute(&refs, &mut Default::default()).unwrap();
     provider.symbol_calls.load(Ordering::SeqCst)
 }
 
@@ -935,7 +928,10 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
         .plan(&[&scalar], &GreedyDenseOptimizer)
         .unwrap();
     assert_eq!(
-        scalar_plan.execute(&[&scalar]).unwrap().data(),
+        scalar_plan
+            .execute(&[&scalar], &mut Default::default())
+            .unwrap()
+            .data(),
         scalar.data()
     );
     let outer = Network::new(
@@ -948,7 +944,7 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
     .unwrap()
     .plan(&[&lhs, &rhs], &GreedyDenseOptimizer)
     .unwrap()
-    .execute(&[&lhs, &rhs])
+    .execute(&[&lhs, &rhs], &mut Default::default())
     .unwrap();
     let expected_outer = lhs.contract(&rhs, &[], &[], &[0, 1]).unwrap();
     assert_eq!(outer.data(), expected_outer.data());
@@ -968,7 +964,7 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
     .unwrap()
     .plan(&[&rank_three], &GreedyDenseOptimizer)
     .unwrap()
-    .execute(&[&rank_three])
+    .execute(&[&rank_three], &mut Default::default())
     .unwrap();
     assert_eq!(
         permuted.data(),
@@ -991,7 +987,7 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
     .unwrap()
     .plan(&[&zero, &zero], &GreedyDenseOptimizer)
     .unwrap()
-    .execute(&[&zero, &zero])
+    .execute(&[&zero, &zero], &mut Default::default())
     .unwrap();
     assert!(zero_outer.data().is_empty());
 }
@@ -1045,7 +1041,7 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
     .unwrap();
     let planned = network.plan(&[&lazy, &b64], &GreedyDenseOptimizer).unwrap();
     let direct = lazy.contract(&b64, &[1], &[0], &[0, 1]);
-    let replay = planned.execute(&[&lazy, &b64]);
+    let replay = planned.execute(&[&lazy, &b64], &mut Default::default());
     assert!(matches!(
         direct,
         Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
@@ -1065,7 +1061,7 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
     .unwrap()
     .plan(&[&a64, &b64], &GreedyDenseOptimizer)
     .unwrap()
-    .execute(&[&a64, &b64]);
+    .execute(&[&a64, &b64], &mut Default::default());
     assert!(matches!(
         conjugated,
         Err(GenericTensorError::Facade(Error::InvalidArgument(_)))

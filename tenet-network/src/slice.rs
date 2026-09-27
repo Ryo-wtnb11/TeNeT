@@ -479,8 +479,8 @@ fn validate_partition(
 /// The set of indices to slice plus summary cost metrics.
 ///
 /// Each sliced label carries a [`SliceKind`] marking whether it is internal
-/// (summed) or output (stacked). [`greedy_slice`] only ever marks labels
-/// `Internal`; [`greedy_slice_with_output`] may also mark labels `Output`.
+/// (summed) or output (stacked). [`greedy_slice`] marks output labels only
+/// when output slicing is enabled.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlicePlan {
     sliced: Vec<TemporaryLabel>,
@@ -753,116 +753,26 @@ fn nslices_of_labels(cost: &DenseCostModel, sliced: &[TemporaryLabel]) -> u128 {
 }
 
 /// Greedily choose indices to slice until the largest intermediate fits under
-/// `target_width` (in elements). At each step picks the not-yet-sliced index
-/// that strictly reduces peak memory and minimizes total time complexity
-/// (`per_slice_flops * nslices`), breaking ties toward the larger memory
-/// reduction. Stops early if no remaining index can reduce the peak further.
-///
-/// Only **internal (contracted)** indices are sliced (dim > 1, not an output
-/// label), so every per-slice partial has the full output shape and partials are
-/// summed. Slicing output/open indices (which would need stack/chunk
-/// recombination) is intentionally out of scope here.
+/// `target_width` (in elements). `allow_output_slices` selects whether output
+/// labels may be sliced and later scattered into the output; internal slices
+/// are summed. Candidates must reduce peak width, with ties decided by total
+/// time complexity and then greater width reduction.
 pub fn greedy_slice(
     ir: &NetworkIR,
     plan: &ContractionPlan,
     cost: &DenseCostModel,
     target_width: usize,
+    allow_output_slices: bool,
 ) -> SlicePlan {
     let shapes = step_shapes(ir, plan);
 
-    // Candidates are INTERNAL (contracted) indices only: dim > 1 and not an
-    // output/open label. A sliced internal index makes every per-slice result
-    // the same shape as the full output, so partials are summed (the simple
-    // case). Slicing output indices needs stack/chunk recombination
-    // (cotengra's `gather_slices` distinction) and is a later extension.
+    // Candidates are indices of dim > 1, including output labels when allowed.
     let mut candidates: BTreeSet<TemporaryLabel> = BTreeSet::new();
     for tensor in ir.tensors() {
         for label in tensor.labels() {
-            if cost.dim(label).unwrap_or(1) > 1 && !ir.output_labels().contains(label) {
-                candidates.insert(label.clone());
-            }
-        }
-    }
-
-    let mut sliced: BTreeSet<TemporaryLabel> = BTreeSet::new();
-    let unsliced_width = width_of(&shapes, cost, &sliced);
-
-    loop {
-        let width = width_of(&shapes, cost, &sliced);
-        if width <= target_width {
-            break;
-        }
-
-        let mut best: Option<(TemporaryLabel, f64, usize)> = None;
-        for candidate in candidates.iter() {
-            if sliced.contains(candidate) {
-                continue;
-            }
-            let mut trial = sliced.clone();
-            trial.insert(candidate.clone());
-            let trial_width = width_of(&shapes, cost, &trial);
-            if trial_width >= width {
-                continue; // no peak-memory progress
-            }
-            let total = per_slice_flops(&shapes, cost, &trial) * (nslices_of(cost, &trial) as f64);
-            let better = match &best {
-                None => true,
-                Some((_, best_total, best_width)) => {
-                    total < *best_total || (total == *best_total && trial_width < *best_width)
-                }
-            };
-            if better {
-                best = Some((candidate.clone(), total, trial_width));
-            }
-        }
-
-        match best {
-            Some((label, _, _)) => {
-                sliced.insert(label);
-            }
-            None => break, // cannot reduce peak further with available indices
-        }
-    }
-
-    let sliced_width = width_of(&shapes, cost, &sliced);
-    let per_slice_flops = per_slice_flops(&shapes, cost, &sliced);
-    let sliced: Vec<TemporaryLabel> = sliced.iter().cloned().collect();
-    let kinds = vec![SliceKind::Internal; sliced.len()];
-    SlicePlan {
-        nslices: nslices_of_labels(cost, &sliced),
-        kinds,
-        sliced,
-        sliced_width,
-        unsliced_width,
-        per_slice_flops,
-    }
-}
-
-/// Like [`greedy_slice`], but candidates **may** include output (open) indices.
-///
-/// Output indices reduce peak memory by shrinking the final-result shape (and any
-/// intermediate that carries them), but their per-slice partials must be
-/// *scattered* into output coordinates rather than summed (cotengra's
-/// `gather_slices`: internal → sum, output → stack). The returned [`SlicePlan`]
-/// marks each chosen label with its [`SliceKind`] so an output-aware sliced
-/// executor can handle both kinds.
-///
-/// The greedy objective (minimize total time complexity, ties toward larger peak
-/// reduction) is unchanged; only the candidate set is widened to include output
-/// labels of dim > 1.
-pub fn greedy_slice_with_output(
-    ir: &NetworkIR,
-    plan: &ContractionPlan,
-    cost: &DenseCostModel,
-    target_width: usize,
-) -> SlicePlan {
-    let shapes = step_shapes(ir, plan);
-
-    // Candidates: any index of dim > 1, INTERNAL or OUTPUT.
-    let mut candidates: BTreeSet<TemporaryLabel> = BTreeSet::new();
-    for tensor in ir.tensors() {
-        for label in tensor.labels() {
-            if cost.dim(label).unwrap_or(1) > 1 {
+            if cost.dim(label).unwrap_or(1) > 1
+                && (allow_output_slices || !ir.output_labels().contains(label))
+            {
                 candidates.insert(label.clone());
             }
         }
@@ -1157,6 +1067,7 @@ fn find_sliced_line(lines: &[&str], needle: &str) -> Result<usize> {
 mod tests {
     use super::*;
     use crate::parse::parse_einsum;
+    use crate::plan::dense_steps_from_active_pair_path;
     use crate::{ActivePair, DenseTensorInfo};
 
     #[test]
@@ -1185,7 +1096,11 @@ mod tests {
         ];
         let cost = DenseCostModel::from_network(&ir, &infos).unwrap();
         let path = vec![ActivePair::new(0, 1), ActivePair::new(0, 1)];
-        let plan = ContractionPlan::from_dense_active_pair_path(&ir, &path, &cost).unwrap();
+        let plan = ContractionPlan::from_steps(
+            &ir,
+            dense_steps_from_active_pair_path(&ir, &path, &cost).unwrap(),
+        )
+        .unwrap();
         (ir, plan, cost)
     }
 
@@ -1194,7 +1109,7 @@ mod tests {
         // Intermediate "ac" = a*c = 2*8 = 16 is the peak; output "ad" = 4.
         // target 8 forces slicing the internal index c.
         let (ir, plan, cost) = chain_abc(2, 2, 8, 2);
-        let sp = greedy_slice(&ir, &plan, &cost, 8);
+        let sp = greedy_slice(&ir, &plan, &cost, 8, false);
 
         assert_eq!(sp.unsliced_width(), 16);
         assert!(!sp.is_empty(), "expected slicing to be required");
@@ -1217,7 +1132,7 @@ mod tests {
     #[test]
     fn slice_plan_text_roundtrip_preserves_output_kinds() {
         let (ir, plan, cost) = chain_abc(6, 1, 1, 6);
-        let sp = greedy_slice_with_output(&ir, &plan, &cost, 6);
+        let sp = greedy_slice(&ir, &plan, &cost, 6, true);
         assert!(sp.has_output_slices());
 
         let text = sp.to_text();
@@ -1230,7 +1145,7 @@ mod tests {
         // a,d are output; only internal b,c are sliceable. Forcing slicing must
         // never pick an output label.
         let (ir, plan, cost) = chain_abc(2, 2, 8, 2);
-        let sp = greedy_slice(&ir, &plan, &cost, 8);
+        let sp = greedy_slice(&ir, &plan, &cost, 8, false);
         assert!(!sp.is_empty());
         assert!(!sp.sliced_indices().contains(&TemporaryLabel::new("a")));
         assert!(!sp.sliced_indices().contains(&TemporaryLabel::new("d")));
@@ -1276,7 +1191,11 @@ mod tests {
             ActivePair::new(0, 1),
             ActivePair::new(0, 1),
         ];
-        let plan = ContractionPlan::from_dense_active_pair_path(&ir, &path, &cost).unwrap();
+        let plan = ContractionPlan::from_steps(
+            &ir,
+            dense_steps_from_active_pair_path(&ir, &path, &cost).unwrap(),
+        )
+        .unwrap();
 
         let next = best_next_slice_index(&ir, &plan, &cost, false)
             .expect("an internal index should reduce the peak");

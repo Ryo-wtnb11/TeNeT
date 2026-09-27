@@ -66,9 +66,7 @@ where
     let expected = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
     let mut workspace = NetworkExecutionWorkspace::default();
     for _ in 0..2 {
-        let actual = planned
-            .execute_with_workspace(&tensors, &mut workspace)
-            .unwrap();
+        let actual = planned.execute(&tensors, &mut workspace).unwrap();
         numerics::assert_slices_close(
             "network vs direct contract",
             actual.data(),
@@ -233,8 +231,8 @@ where
         + SectorCodec,
     D: OracleScalar,
 {
-    let reused = plan.execute_with_workspace(&tensors, workspace).unwrap();
-    let fresh = plan.execute(&tensors).unwrap();
+    let reused = plan.execute(&tensors, workspace).unwrap();
+    let fresh = plan.execute(&tensors, &mut Default::default()).unwrap();
     assert_same(&reused, &fresh);
     assert_chain_oracle(&reused, tensors[0], tensors[1], tensors[2]);
     reused
@@ -351,7 +349,7 @@ fn run_shape_reuse_sequence<R, D>(
     let wrong_bond = make_space(&provider, &[(9, 1)]);
     let invalid_b = matrix(&runtime, &wrong_bond, &initial, 81.0, &sector_tag);
     assert!(plan
-        .execute_with_workspace(&[valid[0], &invalid_b, valid[2]], &mut workspace)
+        .execute(&[valid[0], &invalid_b, valid[2]], &mut workspace)
         .is_err());
     assert_chain_case(&plan, &mut workspace, valid);
 
@@ -361,7 +359,7 @@ fn run_shape_reuse_sequence<R, D>(
         })
         .unwrap();
     assert!(plan
-        .execute_with_workspace(&[valid[0], &wrong_split, valid[2]], &mut workspace)
+        .execute(&[valid[0], &wrong_split, valid[2]], &mut workspace)
         .is_err());
     assert_chain_case(&plan, &mut workspace, valid);
 
@@ -377,7 +375,7 @@ fn run_shape_reuse_sequence<R, D>(
         })
         .unwrap();
     assert!(plan
-        .execute_with_workspace(&[valid[0], &wrong_rank, valid[2]], &mut workspace)
+        .execute(&[valid[0], &wrong_rank, valid[2]], &mut workspace)
         .is_err());
     assert_chain_case(&plan, &mut workspace, valid);
 }
@@ -625,7 +623,7 @@ fn planning_conjugation_uses_checked_effective_duals_without_reading_storage() {
         let actual = network
             .plan(&refs, &GreedyDenseOptimizer)
             .unwrap()
-            .execute(&refs)
+            .execute(&refs, &mut Default::default())
             .unwrap();
         let expected = adjoint.contract(&b, &[2], &[0], &[0, 1, 2, 3]).unwrap();
         assert_eq!(actual.codomain(), vec![y.clone(), x0.try_dual().unwrap()]);
@@ -706,7 +704,9 @@ fn single_scalar_split_and_heterogeneous_final_permutation() {
     .unwrap();
     let single_plan = single.plan(&[&tensor], &GreedyDenseOptimizer).unwrap();
     assert_same(
-        &single_plan.execute(&[&tensor]).unwrap(),
+        &single_plan
+            .execute(&[&tensor], &mut Default::default())
+            .unwrap(),
         &tensor.permute(&[1], &[0]).unwrap(),
     );
 
@@ -722,7 +722,7 @@ fn single_scalar_split_and_heterogeneous_final_permutation() {
         .plan(&[&tensor, &tensor], &GreedyDenseOptimizer)
         .unwrap();
     let value = scalar_plan
-        .execute(&[&tensor, &tensor])
+        .execute(&[&tensor, &tensor], &mut Default::default())
         .unwrap()
         .scalar()
         .unwrap();
@@ -732,9 +732,13 @@ fn single_scalar_split_and_heterogeneous_final_permutation() {
     let other_v =
         GradedSpace::try_new(other_provider, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)]).unwrap();
     let other = TensorMap::rand_with_seed(&runtime, [&other_v], [&other_v], 13).unwrap();
-    let scalar_from_lhs = scalar_plan.execute(&[&tensor, &other]).unwrap();
+    let scalar_from_lhs = scalar_plan
+        .execute(&[&tensor, &other], &mut Default::default())
+        .unwrap();
     assert!(std::ptr::eq(scalar_from_lhs.provider(), tensor.provider()));
-    let scalar_from_other_lhs = scalar_plan.execute(&[&other, &tensor]).unwrap();
+    let scalar_from_other_lhs = scalar_plan
+        .execute(&[&other, &tensor], &mut Default::default())
+        .unwrap();
     assert!(std::ptr::eq(
         scalar_from_other_lhs.provider(),
         other.provider()
@@ -761,14 +765,8 @@ fn single_scalar_split_and_heterogeneous_final_permutation() {
         .permute(&[3, 0], &[1, 2])
         .unwrap();
     let mut workspace = NetworkExecutionWorkspace::default();
-    assert_same(
-        &plan.execute_with_workspace(&refs, &mut workspace).unwrap(),
-        &expected,
-    );
-    assert_same(
-        &plan.execute_with_workspace(&refs, &mut workspace).unwrap(),
-        &expected,
-    );
+    assert_same(&plan.execute(&refs, &mut workspace).unwrap(), &expected);
+    assert_same(&plan.execute(&refs, &mut workspace).unwrap(), &expected);
 }
 
 #[test]
@@ -786,19 +784,9 @@ fn compact_and_lazy_representation_replay_stays_semantic() {
     .unwrap();
     let plan = identity.plan(&[&dense], &GreedyDenseOptimizer).unwrap();
     let mut workspace = NetworkExecutionWorkspace::default();
-    assert_same(
-        &plan
-            .execute_with_workspace(&[&dense], &mut workspace)
-            .unwrap(),
-        &dense,
-    );
+    assert_same(&plan.execute(&[&dense], &mut workspace).unwrap(), &dense);
     let lazy = dense.adjoint().unwrap();
-    assert_same(
-        &plan
-            .execute_with_workspace(&[&lazy], &mut workspace)
-            .unwrap(),
-        &lazy,
-    );
+    assert_same(&plan.execute(&[&lazy], &mut workspace).unwrap(), &lazy);
     let conjugate = Network::new(
         vec![labels(&["i", "j"])],
         vec![true],
@@ -810,9 +798,7 @@ fn compact_and_lazy_representation_replay_stays_semantic() {
     let lazy_conj_plan = conjugate.plan(&[&lazy], &GreedyDenseOptimizer).unwrap();
     for _ in 0..2 {
         assert_same(
-            &lazy_conj_plan
-                .execute_with_workspace(&[&lazy], &mut workspace)
-                .unwrap(),
+            &lazy_conj_plan.execute(&[&lazy], &mut workspace).unwrap(),
             &dense,
         );
     }
@@ -821,15 +807,11 @@ fn compact_and_lazy_representation_replay_stays_semantic() {
     let compact_plan = identity.plan(&[&compact], &GreedyDenseOptimizer).unwrap();
     let scaled = compact.scale(2.0);
     assert_same(
-        &compact_plan
-            .execute_with_workspace(&[&compact], &mut workspace)
-            .unwrap(),
+        &compact_plan.execute(&[&compact], &mut workspace).unwrap(),
         &compact,
     );
     assert_same(
-        &compact_plan
-            .execute_with_workspace(&[&scaled], &mut workspace)
-            .unwrap(),
+        &compact_plan.execute(&[&scaled], &mut workspace).unwrap(),
         &scaled,
     );
     let compact_conj_plan = conjugate.plan(&[&compact], &GreedyDenseOptimizer).unwrap();
@@ -838,7 +820,7 @@ fn compact_and_lazy_representation_replay_stays_semantic() {
         assert_eq!(
             tenet::expert::diagonal_spectrum(
                 &compact_conj_plan
-                    .execute_with_workspace(&[&compact], &mut workspace)
+                    .execute(&[&compact], &mut workspace)
                     .unwrap()
             )
             .unwrap(),
@@ -877,37 +859,27 @@ fn workspace_drift_and_provider_allocation_changes_do_not_leave_stale_results() 
         [&wide_a, &wide_b],
         [&foreign_a, &foreign_b],
     ] {
-        let actual = plan
-            .execute_with_workspace(&operands, &mut workspace)
-            .unwrap();
+        let actual = plan.execute(&operands, &mut workspace).unwrap();
         let expected = operands[0]
             .contract(operands[1], &[1], &[0], &[0, 1])
             .unwrap();
         assert_same(&actual, &expected);
     }
 
-    assert!(plan
-        .execute_with_workspace(&[&a1, &foreign_b], &mut workspace)
-        .is_err());
+    assert!(plan.execute(&[&a1, &foreign_b], &mut workspace).is_err());
     assert_same(
-        &plan
-            .execute_with_workspace(&[&a1, &b1], &mut workspace)
-            .unwrap(),
+        &plan.execute(&[&a1, &b1], &mut workspace).unwrap(),
         &a1.contract(&b1, &[1], &[0], &[0, 1]).unwrap(),
     );
 
     let incompatible = u1_space(&provider1, 4);
     let bad = make(&runtime1, &incompatible, 38);
-    assert!(plan
-        .execute_with_workspace(&[&a1, &bad], &mut workspace)
-        .is_err());
-    assert!(plan.execute_with_workspace(&[&a1], &mut workspace).is_err());
+    assert!(plan.execute(&[&a1, &bad], &mut workspace).is_err());
+    assert!(plan.execute(&[&a1], &mut workspace).is_err());
 
     let second_plan = network.plan(&[&a2, &b2], &GreedyDenseOptimizer).unwrap();
     assert_same(
-        &second_plan
-            .execute_with_workspace(&[&a2, &b2], &mut workspace)
-            .unwrap(),
+        &second_plan.execute(&[&a2, &b2], &mut workspace).unwrap(),
         &a2.contract(&b2, &[1], &[0], &[0, 1]).unwrap(),
     );
 }
@@ -928,8 +900,7 @@ fn one_plan_replays_concurrently_with_distinct_workspaces() {
             .map(|_| {
                 scope.spawn(|| {
                     let mut workspace = NetworkExecutionWorkspace::default();
-                    plan.execute_with_workspace(&[&lhs, &rhs], &mut workspace)
-                        .unwrap()
+                    plan.execute(&[&lhs, &rhs], &mut workspace).unwrap()
                 })
             })
             .collect::<Vec<_>>();
@@ -982,7 +953,10 @@ fn fermionic_greedy_chain_keeps_intermediate_on_the_expression_left() {
         .unwrap()
         .contract(&tensors[2], &[1], &[0], &[0, 1])
         .unwrap();
-    assert_same(&planned.execute(&refs).unwrap(), &manual);
+    assert_same(
+        &planned.execute(&refs, &mut Default::default()).unwrap(),
+        &manual,
+    );
 }
 
 #[test]
@@ -1028,7 +1002,10 @@ fn fermionic_interleaved_subtrees_keep_expression_order_and_signs() {
     let ac = a.contract(&c, &[1], &[0], &[0, 1]).unwrap();
     let bd = b.contract(&d, &[1], &[0], &[0, 1]).unwrap();
     let manual = ac.contract(&bd, &[], &[], &[0, 2, 1, 3]).unwrap();
-    assert_same(&planned.execute(&refs).unwrap(), &manual);
+    assert_same(
+        &planned.execute(&refs, &mut Default::default()).unwrap(),
+        &manual,
+    );
 }
 
 #[test]
@@ -1074,8 +1051,10 @@ fn greedy_order_and_four_site_ring_match_manual_typed_oracles() {
         (TensorId::new(2), TensorId::new(3))
     );
     assert!(greedy.plan().total_cost() < naive.plan().total_cost());
-    let greedy_result = greedy.execute(&chain_refs).unwrap();
-    let naive_result = naive.execute(&chain_refs).unwrap();
+    let greedy_result = greedy
+        .execute(&chain_refs, &mut Default::default())
+        .unwrap();
+    let naive_result = naive.execute(&chain_refs, &mut Default::default()).unwrap();
     assert_eq!(greedy_result.codomain(), naive_result.codomain());
     assert_eq!(greedy_result.domain(), naive_result.domain());
     assert!(greedy_result
@@ -1113,7 +1092,9 @@ fn greedy_order_and_four_site_ring_match_manual_typed_oracles() {
         .unwrap()
         .contract(&ring[3], &[1, 0], &[0, 1], &[])
         .unwrap();
-    let actual = planned.execute(&ring_refs).unwrap();
+    let actual = planned
+        .execute(&ring_refs, &mut Default::default())
+        .unwrap();
     assert_eq!(actual.codomain(), manual.codomain());
     assert_eq!(actual.domain(), manual.domain());
     assert!(actual

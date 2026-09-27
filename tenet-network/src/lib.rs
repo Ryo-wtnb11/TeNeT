@@ -17,7 +17,7 @@
 //!   -> NetworkIR + DenseCostModel        (per-label dimension map)
 //!   -> DenseContractionOptimizer         (greedy by default)
 //!   -> ContractionPlan                   (reusable, serializable)
-//!   -> PlannedNetwork::execute(&[&TensorMap<R, D>]) -> TensorMap<R, D>
+//!   -> PlannedNetwork::execute(&[&TensorMap<R, D>], &mut workspace) -> TensorMap<R, D>
 //! ```
 //!
 //! There is **no public einsum-string parser** (decision 4 in
@@ -76,10 +76,9 @@ pub use network::{
     StaticNetworkOperand, StaticTopologySpec, StaticTraceNetworkOperand, SymmetricSliceStats,
 };
 pub use optimizer::{
-    block_sparse_order_from_labels, greedy_order, greedy_order_block_sparse,
-    BlockSparseContractionOptimizer, ContractionStep, DenseContractionOptimizer,
-    DensePlanCostReport, GreedyBlockSparseOptimizer, GreedyDenseOptimizer,
-    LabelOrderDenseOptimizer,
+    block_sparse_order_from_labels, BlockSparseContractionOptimizer, ContractionStep,
+    DenseContractionOptimizer, DensePlanCostReport, GreedyBlockSparseOptimizer,
+    GreedyDenseOptimizer, LabelOrderDenseOptimizer,
 };
 #[cfg(feature = "opt-path")]
 pub use pathopt::{
@@ -96,8 +95,8 @@ pub use plancache::{
 };
 pub use slice::{
     best_next_internal_index, best_next_slice_index, contraction_width, greedy_slice,
-    greedy_slice_with_output, slice_plan_for, DegeneracyRange, SectorSlice, SliceKind, SlicePlan,
-    SlicedPlan, SymmetricIndexSlice, SymmetricSlicePlan, SymmetricSliceSpec, SymmetricSlicedPlan,
+    slice_plan_for, DegeneracyRange, SectorSlice, SliceKind, SlicePlan, SlicedPlan,
+    SymmetricIndexSlice, SymmetricSlicePlan, SymmetricSliceSpec, SymmetricSlicedPlan,
 };
 #[cfg(feature = "cotengra-python")]
 pub use tenet::plancache::{

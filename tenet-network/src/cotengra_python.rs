@@ -178,7 +178,10 @@ impl CotengraPythonOptimizer {
         let spec = cotengra_spec(ir, cost_model, &self.config);
         let result = run_cotengra_python(&self.config, &spec)?;
         let pairs = path_to_active_pairs(&result.path, ir.tensors().len())?;
-        let plan = ContractionPlan::from_dense_active_pair_path(ir, &pairs, cost_model)?;
+        let plan = ContractionPlan::from_steps(
+            ir,
+            crate::dense_steps_from_active_pair_path(ir, &pairs, cost_model)?,
+        )?;
         let sliced = parse_sliced_labels(ir, cost_model, &result.sliced)?;
         let slice = slice_plan_for_ordered(ir, &plan, cost_model, &sliced);
         Ok(SlicedPlan::new(plan, slice))

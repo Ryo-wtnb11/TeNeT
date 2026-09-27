@@ -62,7 +62,7 @@ struct ActiveTensor {
     first_input: usize,
 }
 
-pub fn greedy_order(ir: &NetworkIR, cost_model: &DenseCostModel) -> Result<Vec<ContractionStep>> {
+fn greedy_order(ir: &NetworkIR, cost_model: &DenseCostModel) -> Result<Vec<ContractionStep>> {
     if ir.tensors().len() < 2 {
         return Err(ContractError::NotEnoughTensors);
     }
@@ -141,7 +141,8 @@ pub fn greedy_order(ir: &NetworkIR, cost_model: &DenseCostModel) -> Result<Vec<C
 ///     DenseTensorInfo::new(vec![3, 4]),
 /// ];
 /// let cost = DenseCostModel::from_network(&ir, &infos)?;
-/// let plan = ContractionPlan::from_dense_optimizer(&ir, &GreedyDenseOptimizer, &cost)?;
+/// let steps = GreedyDenseOptimizer.optimize(&ir, &cost)?;
+/// let plan = ContractionPlan::from_steps(&ir, steps)?;
 /// assert_eq!(plan.active_pair_path()?, vec![ActivePair::new(0, 1)]);
 /// ```
 pub trait DenseContractionOptimizer {
@@ -215,7 +216,8 @@ impl<S: Ord + Clone> BlockSparseContractionOptimizer<S> for GreedyBlockSparseOpt
 ///     TemporaryLabel::new("b"),
 ///     TemporaryLabel::new("c"),
 /// ]);
-/// let plan = ContractionPlan::from_dense_optimizer(&ir, &optimizer, &cost)?;
+/// let steps = DenseContractionOptimizer::optimize(&optimizer, &ir, &cost)?;
+/// let plan = ContractionPlan::from_steps(&ir, steps)?;
 /// assert_eq!(plan.active_pair_path()?.len(), 2);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -661,7 +663,7 @@ struct ActiveBlockSparseTensor<S: Ord + Clone> {
     info: BlockSparseTensorInfo<S>,
 }
 
-pub fn greedy_order_block_sparse<S: Ord + Clone>(
+fn greedy_order_block_sparse<S: Ord + Clone>(
     ir: &NetworkIR,
     cost_model: &BlockSparseCostModel<S>,
 ) -> Result<Vec<ContractionStep>> {

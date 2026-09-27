@@ -35,9 +35,7 @@ fn planned_network_replays_through_the_current_public_api() {
     let mut workspace = NetworkExecutionWorkspace::default();
 
     for _ in 0..2 {
-        let actual = plan
-            .execute_with_workspace(&inputs, &mut workspace)
-            .unwrap();
+        let actual = plan.execute(&inputs, &mut workspace).unwrap();
         assert_close(actual.data(), expected.data());
     }
 }

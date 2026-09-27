@@ -31,13 +31,13 @@ fn common_lowering_is_atomic_and_reconstructs_after_dense_roundtrip() {
     .unwrap();
     let labels = vec![label("a"), label("b"), label("c")];
     let ir = NetworkIR::from_labels(vec![labels.clone()], labels.clone()).unwrap();
-    let order = ContractionPlan::new(1, labels.clone(), Vec::new()).unwrap();
+    let order = ContractionPlan::from_steps(&ir, Vec::new()).unwrap();
     let cost = DenseCostModel::from_network(&ir, &[DenseTensorInfo::new(vec![3, 3, 1])]).unwrap();
     let dense = SlicedPlan::new(
         order,
         slice_plan_for(
             &ir,
-            &ContractionPlan::new(1, labels.clone(), Vec::new()).unwrap(),
+            &ContractionPlan::from_steps(&ir, Vec::new()).unwrap(),
             &cost,
             &labels,
         ),
@@ -96,9 +96,8 @@ fn reconstruction_preserves_two_step_order_and_output_metadata() {
     ];
     let output = vec![label("d"), label("a")];
     let ir = NetworkIR::from_labels(inputs.clone(), output.clone()).unwrap();
-    let order = ContractionPlan::new(
-        3,
-        output.clone(),
+    let order = ContractionPlan::from_steps(
+        &ir,
         vec![
             ContractionStep::new(
                 TensorId::new(0),
