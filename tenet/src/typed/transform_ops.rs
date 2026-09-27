@@ -234,14 +234,16 @@ where
     /// reads the destination; nothing for `beta = 1`), then every trace term
     /// adds `alpha * coefficient * trace(block)`. That `beta` pass is the
     /// reference's own: several source blocks feed one destination block, so
-    /// no single term's write can carry it. An empty `pairs` is
-    /// [`Self::axpby_into`]. A lazy-adjoint source is read through its parent.
+    /// no single term's write can carry it. An empty `pairs` is exactly
+    /// [`Self::axpby_into`], with its rules and errors — including its
+    /// acceptance of a compact diagonal source. A lazy-adjoint source is read
+    /// through its parent.
     ///
     /// # Errors
     ///
     /// [`Error::RuntimeMismatch`], [`Error::RuleMismatch`], the pair-list and
     /// duality errors of [`Self::trace_pairs`], [`Error::Unsupported`] for a
-    /// compact (diagonal) source, [`Error::InvalidArgument`] for a destination
+    /// compact (diagonal) source with a non-empty `pairs`, [`Error::InvalidArgument`] for a destination
     /// that is not owned dense host storage, aliases the source, or has the
     /// wrong space, layout or length, and [`Error::DestinationShared`]. Every
     /// rejection happens before any write.

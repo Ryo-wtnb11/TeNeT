@@ -72,14 +72,18 @@ macro_rules! complex_scalar {
 complex_scalar!(Complex64, f64);
 complex_scalar!(Complex32, f32);
 
-/// Coefficient pairs: beta = 0, 1 and general, each with a general alpha,
-/// plus the unit-alpha overwrite every retained-destination caller uses.
-fn coefficients<D: Scalar>() -> [(D, D); 4] {
+/// Coefficient pairs: beta = 0, -0.0, 1 and general, each with a general
+/// alpha, the unit-alpha overwrite every retained-destination caller uses,
+/// and a zero alpha with a general beta (`dst <- beta * dst`, the source not
+/// read).
+fn coefficients<D: Scalar>() -> [(D, D); 6] {
     [
         (D::real(1.0), D::real(0.0)),
         (D::alpha(), D::real(0.0)),
+        (D::alpha(), D::real(-0.0)),
         (D::alpha(), D::real(1.0)),
         (D::alpha(), D::beta()),
+        (D::real(0.0), D::beta()),
     ]
 }
 
@@ -289,6 +293,53 @@ macro_rules! suite {
                 prior.dense_data().unwrap()[index].bits(),
                 "{}: beta = 1 wrote an unreached block at {index}",
                 $label
+            );
+        }
+
+        // alpha = 0 never reads the source: a NaN source leaves exactly
+        // `beta * dst` (VectorInterface's `scale(x, 0) = zero(x)`).
+        let nan_source = t.scale(D::real(f64::NAN));
+        let nan_lhs = lhs.scale(D::real(f64::NAN));
+        for beta in [D::beta(), D::real(0.0), D::real(1.0)] {
+            let zero = D::real(0.0);
+            let what = |op: &str| format!("{} NaN-source {op} beta={beta:?}", $label);
+            let before = t2.permute(&[2, 0], &[1, 3]).unwrap();
+            check_into!(
+                &what("permute_into"),
+                before.scale(zero),
+                before,
+                zero,
+                beta,
+                |d: &mut TensorMap<_, D>| nan_source.permute_into(&[2, 0], &[1, 3], d, zero, beta),
+                2
+            );
+            let before = t2.trace_pairs(&[(0, 2)]).unwrap();
+            check_into!(
+                &what("trace_pairs_into"),
+                before.scale(zero),
+                before,
+                zero,
+                beta,
+                |d: &mut TensorMap<_, D>| nan_source.trace_pairs_into(&[(0, 2)], d, zero, beta),
+                2
+            );
+            check_into!(
+                &what("axpby_into"),
+                t2.scale(zero),
+                t2,
+                zero,
+                beta,
+                |d: &mut TensorMap<_, D>| nan_source.axpby_into(d, zero, beta),
+                2
+            );
+            check_into!(
+                &what("contract_into"),
+                prior.scale(zero),
+                prior,
+                zero,
+                beta,
+                |d: &mut TensorMap<_, D>| nan_lhs.contract_into(&rhs, &spec, d, zero, beta),
+                2
             );
         }
 
@@ -595,6 +646,54 @@ macro_rules! device_suite {
                     8
                 );
                 same!(
+                    &what("NaN lazy contract_into"),
+                    lazy.contract(&rhs, &spec).unwrap().scale(nan),
+                    |d: &mut TensorMap<_, D>| lazy.contract_into(&rhs, &spec, d, alpha, beta),
+                    |d: &mut TensorMap<_, D, _>| dlazy.contract_into(&drhs, &spec, d, alpha, beta),
+                    32
+                );
+                same!(
+                    &what("NaN braid_into"),
+                    t2.braid(&[1, 0], &[3, 2], &levels).unwrap().scale(nan),
+                    |d: &mut TensorMap<_, D>| t.braid_into(
+                        &[1, 0],
+                        &[3, 2],
+                        &levels,
+                        d,
+                        alpha,
+                        beta
+                    ),
+                    |d: &mut TensorMap<_, D, _>| dt.braid_into(
+                        &[1, 0],
+                        &[3, 2],
+                        &levels,
+                        d,
+                        alpha,
+                        beta
+                    ),
+                    8
+                );
+                same!(
+                    &what("NaN transpose_into"),
+                    t2.transpose(&[1, 3], &[0, 2]).unwrap().scale(nan),
+                    |d: &mut TensorMap<_, D>| t.transpose_into(&[1, 3], &[0, 2], d, alpha, beta),
+                    |d: &mut TensorMap<_, D, _>| dt.transpose_into(
+                        &[1, 3],
+                        &[0, 2],
+                        d,
+                        alpha,
+                        beta
+                    ),
+                    8
+                );
+                same!(
+                    &what("NaN repartition_into"),
+                    t2.repartition(1).unwrap().scale(nan),
+                    |d: &mut TensorMap<_, D>| t.repartition_into(d, alpha, beta),
+                    |d: &mut TensorMap<_, D, _>| dt.repartition_into(d, alpha, beta),
+                    8
+                );
+                same!(
                     &what("NaN trace_pairs_into"),
                     t2.trace_pairs(&[(0, 2)]).unwrap().scale(nan),
                     |d: &mut TensorMap<_, D>| t.trace_pairs_into(&[(0, 2)], d, alpha, beta),
@@ -609,6 +708,36 @@ macro_rules! device_suite {
                     2
                 );
             }
+        }
+        // alpha = 0 on the device (the executor's zero-scale branch with a
+        // general beta): a NaN source is not read, `beta * dst` is left.
+        {
+            let zero = D::real(0.0);
+            let beta = D::beta();
+            let (nan_t, dnan_t) = (t.scale(nan), dt.scale(nan).unwrap());
+            let (nan_rhs, dnan_rhs) = (rhs.scale(nan), drhs.scale(nan).unwrap());
+            let what = |op: &str| format!("{} device NaN-source {op}", $label);
+            same!(
+                &what("permute_into"),
+                t2.permute(&[2, 0], &[1, 3]).unwrap(),
+                |d: &mut TensorMap<_, D>| nan_t.permute_into(&[2, 0], &[1, 3], d, zero, beta),
+                |d: &mut TensorMap<_, D, _>| dnan_t.permute_into(&[2, 0], &[1, 3], d, zero, beta),
+                2
+            );
+            same!(
+                &what("contract_into"),
+                t2.contract(&rhs, &spec).unwrap(),
+                |d: &mut TensorMap<_, D>| t.contract_into(&nan_rhs, &spec, d, zero, beta),
+                |d: &mut TensorMap<_, D, _>| dt.contract_into(&dnan_rhs, &spec, d, zero, beta),
+                2
+            );
+            same!(
+                &what("axpby_into"),
+                t2,
+                |d: &mut TensorMap<_, D>| nan_t.axpby_into(d, zero, beta),
+                |d: &mut TensorMap<_, D, _>| dnan_t.axpby_into(d, zero, beta),
+                2
+            );
         }
         // A lazy-adjoint axpby source is a device capability boundary, as for
         // the returning device `axpby` with mixed operands.
