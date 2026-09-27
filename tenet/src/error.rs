@@ -71,12 +71,15 @@ pub enum Error {
     /// The operation cannot consume this input without copying its payload,
     /// and it does not copy silently. `alternative` names the explicit remedy.
     Unsupported {
+        /// The refusing operation.
+        operation: &'static str,
         /// The explicit operation that makes the input consumable.
         alternative: Alternative,
     },
 }
 
-/// The explicit remedy an [`Error::Unsupported`] names.
+/// The explicit remedy an [`Error::Unsupported`] names. Its `Display` is the
+/// remedy's method name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Alternative {
     /// Copy the input into an owned dense tensor with
@@ -118,11 +121,20 @@ impl fmt::Display for Error {
                 write!(f, "member {member} is out of range for a stack of {len}")
             }
             Self::Unsupported {
-                alternative: Alternative::Materialize,
+                operation,
+                alternative,
             } => write!(
                 f,
-                "the operation would have to copy a borrowed adjoint view; materialize it first"
+                "{operation} cannot consume this input without copying it; call `{alternative}` on it first"
             ),
+        }
+    }
+}
+
+impl fmt::Display for Alternative {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Materialize => f.write_str("materialize"),
         }
     }
 }

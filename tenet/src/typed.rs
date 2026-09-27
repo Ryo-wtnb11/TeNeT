@@ -3103,6 +3103,14 @@ thread_local! {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Forces the conservative decline of an adjoint-oriented cat plan, which
+    /// no public geometry is known to reach, so its fallback can be tested.
+    pub(crate) static CAT_PLAN_DECLINES_ORIENTED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
 fn observe_cat_result_layout_build() {
     CAT_RESULT_LAYOUT_BUILDS.with(|observation| {
         if let Some(builds) = observation.get() {
@@ -3206,6 +3214,13 @@ pub(crate) fn compile_cat_plan(
 ) -> Result<Option<CatCopyPlan>, Error> {
     #[cfg(test)]
     observe_cat_result_layout_build();
+    #[cfg(test)]
+    if CAT_PLAN_DECLINES_ORIENTED.get()
+        && (matches!(operands[0].orientation, TensorOrientation::Adjoint)
+            || matches!(operands[1].orientation, TensorOrientation::Adjoint))
+    {
+        return Ok(None);
+    }
     {
         let sources = [operands[0].structure, operands[1].structure];
         let source_blocks = [
@@ -6344,6 +6359,8 @@ where
         if !tensor.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
+        // `checked_generic_solve_into` materializes every lazy `rhs`.
+        rhs.refuse_borrowed_view("solve")?;
         let _host_pool = tensor.runtime.enter_host_pool();
         if tensor.logical_space().space().admission().rule_identity()
             != rhs.logical_space().space().admission().rule_identity()
@@ -10371,7 +10388,25 @@ impl<'a, R, D, S> TensorRef<'a, R, D, S> {
     }
 }
 
+fn borrowed_view_unsupported(operation: &'static str) -> Error {
+    Error::Unsupported {
+        operation,
+        alternative: crate::error::Alternative::Materialize,
+    }
+}
+
 impl<R, D, S> TensorMap<R, D, S> {
+    /// Refuses a resolved adjoint view before `operation` does any work,
+    /// for operations whose only route for a lazy adjoint materializes it.
+    fn refuse_borrowed_view(&self, operation: &'static str) -> Result<(), Error> {
+        match &self.repr {
+            TypedTensorRepr::Adjoint(view) if view.borrowed => {
+                Err(borrowed_view_unsupported(operation))
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn into_borrowed_operand(mut self) -> Self {
         let TypedTensorRepr::Adjoint(view) = &mut self.repr else {
             return self;
@@ -11006,6 +11041,7 @@ where
     pub fn absorb<'a>(&self, source: impl Into<TensorRef<'a, R, D>>) -> Result<Self, Error> {
         let source = source.into().operand()?;
         let source = &*source;
+        source.refuse_borrowed_view("absorb")?;
         let destination_space = self.logical_space().space();
         let source_space = source.logical_space().space();
         if destination_space.nout() != source_space.nout()
@@ -14964,9 +15000,9 @@ where
             return Ok(self.clone());
         };
         if view.borrowed {
-            return Err(Error::Unsupported {
-                alternative: crate::error::Alternative::Materialize,
-            });
+            // Backstop: every refusing operation checks first, by name, with
+            // `refuse_borrowed_view`.
+            return Err(borrowed_view_unsupported("the operation"));
         }
         #[cfg(test)]
         observe_adjoint_materialization();
@@ -15078,7 +15114,12 @@ where
         } else {
             // Why not recurse through `cat`: output admission has succeeded,
             // so retry only the local copy plan and never query the provider
-            // or admit the same HomSpace a second time.
+            // or admit the same HomSpace a second time. Why the view is
+            // refused only here: whether the plan declines is known only
+            // after the output layout is admitted.
+            other
+                .refuse_borrowed_view("cat")
+                .map_err(TypedFacadeError::<R>::from)?;
             let lhs = self
                 .materialized_tensor_uncached()
                 .map_err(TypedFacadeError::<R>::from)?;
@@ -16880,6 +16921,7 @@ where
     ) -> Result<Self, TypedFacadeError<R>> {
         let other = other.into().operand()?;
         let other = &*other;
+        other.refuse_borrowed_view("otimes")?;
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
@@ -17206,6 +17248,7 @@ where
     {
         let other = other.into().operand()?;
         let other = &*other;
+        other.refuse_borrowed_view("deligne_product")?;
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -18410,6 +18453,11 @@ where
                     message: "solve requires an isomorphic divisor codomain and domain",
                 },
             ));
+        }
+        // Only a compact divisor reads a lazy `rhs` in place (through
+        // `compose`); the dense route materializes both operands.
+        if self.spectrum().is_none() {
+            rhs.refuse_borrowed_view("solve")?;
         }
 
         if let Some(spectrum) = self.spectrum() {
