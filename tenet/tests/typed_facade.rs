@@ -49,6 +49,41 @@ fn cache_lock() -> MutexGuard<'static, ()> {
     CACHE_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Re-executes exactly one test, alone, in a child process, for a test whose
+/// assertion cannot be phrased as a delta CACHE_LOCK-holding siblings cannot
+/// move: an absolute snapshot of the process-global fusion-tree-layout or
+/// complete-HomSpace-structure cache counters. `CACHE_LOCK` only serializes
+/// the tests that take it; this binary also has ordinary tests that build a
+/// fresh tensor (a cache mutation) without taking it, e.g.
+/// `graded_space_reports_labels_in_provider_sector_id_order` and
+/// `fibonacci_complex_tensor_reaches_all_checked_constructors` — confirmed by
+/// a forced-interleaving reproduction where such an unlocked build landing
+/// between this test's own reads changed its snapshot. Same technique as
+/// tenet-tensors #649/#650's `checked_bind_failure_preserves_subset_admission_and_caches`
+/// and tenet-core/tenet-tensors' #1598/#1606 fix.
+///
+/// Call at the top of the `#[test]` fn with a name-unique env var and the
+/// test's libtest path; when it returns `true`, the child already ran the
+/// real body and the caller must return immediately.
+fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> bool {
+    if std::env::var_os(isolated_env).is_some() {
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_path])
+        .env(isolated_env, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "isolated test did not execute exactly once: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+    true
+}
+
 // ---------------------------------------------------------------------------
 // External Unique-fusion provider: Z3 charges, addition mod 3.
 //
@@ -2556,6 +2591,21 @@ fn typed_deligne_product_prepares_both_embeddings_before_publishing_either() {
 
 #[test]
 fn a_failing_typed_operation_publishes_no_cache_state() {
+    // Isolated like tenet-tensors #649/#650's checked_bind_failure test:
+    // this asserts an absolute process-global cache snapshot. CACHE_LOCK
+    // only serializes tests that take it, and this binary has ordinary,
+    // unlocked tests that build a fresh tensor (e.g.
+    // graded_space_reports_labels_in_provider_sector_id_order,
+    // fibonacci_complex_tensor_reaches_all_checked_constructors) that can
+    // land in the same narrow window and move the same counters; a
+    // forced-interleaving reproduction confirmed this concretely. Reported
+    // failing 1 of 5 parallel runs on qg1 (#1606 comment).
+    if run_isolated_or_return(
+        "TENET_TYPED_FACADE_FAILING_OPERATION_PUBLISHES_NO_CACHE_STATE_ISOLATED",
+        "a_failing_typed_operation_publishes_no_cache_state",
+    ) {
+        return;
+    }
     // What: an operation rejected by the expert layer leaves both process-global
     // layout caches and the runtime's tree-transform cache exactly as they were,
     // the same transactional guarantee construction gives.
