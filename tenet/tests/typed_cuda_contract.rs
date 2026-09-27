@@ -45,6 +45,7 @@ use contract_cases::{
 };
 use num_complex::{Complex32, Complex64};
 use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
+use tenet::typed::Direction;
 use tenet::typed::{Runtime, TensorMap};
 
 /// Counts Host allocations made by the thread that set `COUNTING` (device
@@ -235,7 +236,9 @@ fn zero_copy_candidates_match_the_host_at_every_dtype() {
         for (case, _) in candidate_core_probes::<_, D>(runtime, &su2()) {
             check(case);
         }
-        let twist = |t: &TensorMap<FermionU1, D>, legs: &[usize]| t.twist(legs).unwrap();
+        let twist = |t: &TensorMap<FermionU1, D>, legs: &[usize]| {
+            t.twist(legs, Direction::Forward).unwrap()
+        };
         for (case, _) in candidate_core_probes::<_, D>(runtime, &fermion_u1()) {
             check_fermionic(case, twist);
         }

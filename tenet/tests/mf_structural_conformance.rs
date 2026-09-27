@@ -4,6 +4,7 @@
 //! and matrix functions have their own #1002 gates.
 
 use std::sync::Arc;
+use tenet::typed::{Direction, Duality, Side};
 
 use tenet::prelude::{
     product_sector, CU1FusionRule, CU1Irrep, Complex64, FermionParityFusionRule, GradedSpace,
@@ -41,7 +42,7 @@ fn zn3_index_flip_and_units_keep_the_original_provider() {
         vec![charge(0), charge(1), charge(2)]
     );
 
-    let flipped = source.flip(&[0]).unwrap();
+    let flipped = source.flip(&[0], Direction::Forward).unwrap();
     assert!(std::ptr::eq(flipped.provider(), provider.as_ref()));
     assert!(std::ptr::eq(
         flipped.codomain()[0].provider(),
@@ -53,9 +54,12 @@ fn zn3_index_flip_and_units_keep_the_original_provider() {
     ));
     assert!(flipped.codomain()[0].is_dual());
     assert_eq!(flipped.data(), source.data());
-    assert_eq!(flipped.flip_inverse(&[0]).unwrap().data(), source.data());
+    assert_eq!(
+        flipped.flip(&[0], Direction::Inverse).unwrap().data(),
+        source.data()
+    );
 
-    let inserted = source.insert_left_unit(1, true).unwrap();
+    let inserted = source.insert_unit(1, Side::Domain, Duality::Dual).unwrap();
     assert!(std::ptr::eq(inserted.provider(), provider.as_ref()));
     assert!(std::ptr::eq(
         inserted.domain()[0].provider(),
@@ -84,7 +88,7 @@ fn z2_cat_and_absorb_have_hand_computed_slabs() {
             (3 + i[0] + 2 * i[1]) as f64
         })
         .unwrap();
-    let joined = lhs.catdomain(&rhs).unwrap();
+    let joined = lhs.cat(&rhs, Side::Domain).unwrap();
     assert!(std::ptr::eq(joined.provider(), provider.as_ref()));
     assert!(std::ptr::eq(
         joined.domain()[0].provider(),
@@ -164,7 +168,10 @@ fn nested_fermionic_su2_product_and_complex_adjoint_are_publicly_conformant() {
         adjoint.domain()[0].provider(),
         provider.as_ref()
     ));
-    assert_eq!(source.twist(&[0, 1]).unwrap().data(), source.data());
+    assert_eq!(
+        source.twist(&[0, 1], Direction::Forward).unwrap().data(),
+        source.data()
+    );
     assert_eq!(adjoint.data(), &[Complex64::new(2.0, -3.0)]);
     assert_eq!(
         adjoint.codomain()[0].sectors().unwrap(),
@@ -207,15 +214,15 @@ fn zn3_extended_structural_paths_execute_on_the_original_arc() {
             source.subblock_fusion_trees(index).unwrap()
         );
     }
-    let twisted = source.twist(&[0, 1, 2]).unwrap();
+    let twisted = source.twist(&[0, 1, 2], Direction::Forward).unwrap();
     assert_eq!(twisted.data(), source.data(), "ZN(3) has trivial twist");
     assert_eq!(twisted.data().as_ptr(), source.data().as_ptr());
     for output in [
         source.adjoint().unwrap(),
-        source.transpose().unwrap(),
+        source.transpose(&[2], &[1, 0]).unwrap(),
         source.repartition(1).unwrap(),
         braided,
-        source.twist(&[0, 1, 2]).unwrap(),
+        source.twist(&[0, 1, 2], Direction::Forward).unwrap(),
     ] {
         assert!(std::ptr::eq(output.provider(), provider.as_ref()));
     }
@@ -241,9 +248,11 @@ fn cu1_charged_structural_paths_keep_the_original_arc() {
             .unwrap();
     for output in [
         source.adjoint().unwrap(),
-        source.twist(&[0, 1]).unwrap(),
-        source.flip(&[0]).unwrap(),
-        source.insert_right_unit(0, false).unwrap(),
+        source.twist(&[0, 1], Direction::Forward).unwrap(),
+        source.flip(&[0], Direction::Forward).unwrap(),
+        source
+            .insert_unit(0, Side::Codomain, Duality::Plain)
+            .unwrap(),
     ] {
         assert!(std::ptr::eq(output.provider(), provider.as_ref()));
         assert!(std::ptr::eq(
@@ -255,8 +264,14 @@ fn cu1_charged_structural_paths_keep_the_original_arc() {
         source.adjoint().unwrap().data(),
         &[Complex64::new(2.0, -3.0)]
     );
-    assert_eq!(source.twist(&[0, 1]).unwrap().data(), source.data());
-    assert_eq!(source.flip(&[0]).unwrap().data(), source.data());
+    assert_eq!(
+        source.twist(&[0, 1], Direction::Forward).unwrap().data(),
+        source.data()
+    );
+    assert_eq!(
+        source.flip(&[0], Direction::Forward).unwrap().data(),
+        source.data()
+    );
     let pseudo =
         GradedSpace::try_new(Arc::clone(&provider), [(CU1Irrep::PSEUDOSCALAR, 1)]).unwrap();
     let braid_source: TensorMap<_, f64> =
@@ -269,7 +284,9 @@ fn cu1_charged_structural_paths_keep_the_original_arc() {
     assert_eq!(permuted.data(), &[-1.0]);
     assert_eq!(braided.data(), &[-1.0]);
     assert!(std::ptr::eq(braided.provider(), provider.as_ref()));
-    let inserted = source.insert_right_unit(0, false).unwrap();
+    let inserted = source
+        .insert_unit(0, Side::Codomain, Duality::Plain)
+        .unwrap();
     assert!(inserted
         .codomain()
         .into_iter()
@@ -286,8 +303,8 @@ fn su2_and_exact_products_keep_their_provider_through_flip_and_units() {
             let leg = GradedSpace::try_new(Arc::clone(&provider), [($label, 1)]).unwrap();
             let source: TensorMap<_, f64> =
                 TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
-            let flipped = source.flip(&[1]).unwrap();
-            let inserted = source.insert_left_unit(1, true).unwrap();
+            let flipped = source.flip(&[1], Direction::Forward).unwrap();
+            let inserted = source.insert_unit(1, Side::Domain, Duality::Dual).unwrap();
             let restored = inserted.remove_unit(1).unwrap();
             for output in [&flipped, &inserted, &restored] {
                 assert!(std::ptr::eq(output.provider(), provider.as_ref()));
@@ -325,7 +342,7 @@ fn dual_nonabelian_flip_pins_the_pivotal_phase() {
             let dual = plain.try_dual().unwrap();
             let source: TensorMap<_, f64> =
                 TensorMap::from_subblock_fn(&runtime, [&dual], [&plain], |_, _| 1.0).unwrap();
-            let flipped = source.flip(&[$axis]).unwrap();
+            let flipped = source.flip(&[$axis], Direction::Forward).unwrap();
             assert!(std::ptr::eq(flipped.provider(), provider.as_ref()));
             assert!(std::ptr::eq(
                 flipped.codomain()[0].provider(),
@@ -370,11 +387,11 @@ fn covered_builtin_multiplicity_free_providers_have_cat_and_absorb_execution() {
                 TensorMap::from_subblock_fn(&runtime, [&codomain], [&left], |_, _| 1.0).unwrap();
             let b: TensorMap<_, f64> =
                 TensorMap::from_subblock_fn(&runtime, [&codomain], [&right], |_, _| 2.0).unwrap();
-            let domain = a.catdomain(&b).unwrap();
+            let domain = a.cat(&b, Side::Domain).unwrap();
             let codomain_join = a
                 .adjoint()
                 .unwrap()
-                .catcodomain(&b.adjoint().unwrap())
+                .cat(&b.adjoint().unwrap(), Side::Codomain)
                 .unwrap();
             let absorbed = a.absorb(&b).unwrap();
             for output in [&domain, &codomain_join, &absorbed] {

@@ -1,4 +1,4 @@
-//! Allocation gates for the typed `catdomain`/`catcodomain`/`absorb`
+//! Allocation gates for the typed `cat`/`absorb`
 //! (#580 PR 4), alongside the compact-storage gates in
 //! `typed_diagonal_allocations.rs`: bytes counted through a global allocator
 //! while one warmed operation runs.
@@ -12,6 +12,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::Arc;
+use tenet::typed::Side;
 
 use tenet::core::{U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep};
 use tenet::prelude::{Complex64, Runtime};
@@ -119,11 +120,11 @@ fn typed_cat_uses_one_output_allocation_without_scratch() {
             pseudo_random(&mut state)
         })
         .unwrap();
-    let warm: TensorMap<U1FusionRule, f64> = lhs.catdomain(&rhs).unwrap();
+    let warm: TensorMap<U1FusionRule, f64> = lhs.cat(&rhs, Side::Domain).unwrap();
     let output_payload = std::mem::size_of_val(warm.data());
 
     let (allocated, payload_allocations) =
-        measured_allocations(output_payload, || lhs.catdomain(&rhs).unwrap());
+        measured_allocations(output_payload, || lhs.cat(&rhs, Side::Domain).unwrap());
 
     assert_eq!(payload_allocations, 1);
     assert!(
@@ -183,13 +184,13 @@ fn typed_cat_materializes_a_compact_operand_exactly_once() {
     // Warm every layout cache with a throwaway spectrum factor, so the
     // measured handle below starts with warm layouts but a cold body cache.
     let warmup: TensorMap<Z2FusionRule, f64> = tensor.svd_compact().unwrap().s;
-    black_box(warmup.catdomain(&warmup).unwrap());
+    black_box(warmup.cat(&warmup, Side::Domain).unwrap());
 
     let s: TensorMap<Z2FusionRule, f64> = tensor.svd_compact().unwrap().s;
     let dense_payload = DEGENERACY * DEGENERACY * std::mem::size_of::<f64>();
     let output_payload = 2 * dense_payload;
 
-    let (cold, _) = measured_allocations(output_payload, || s.catdomain(&s).unwrap());
+    let (cold, _) = measured_allocations(output_payload, || s.cat(&s, Side::Domain).unwrap());
     assert!(
         cold >= (dense_payload + output_payload) as u64,
         "first cat on a compact operand allocated only {cold} B — the dense \
@@ -198,7 +199,7 @@ fn typed_cat_materializes_a_compact_operand_exactly_once() {
     );
 
     let (warm, payload_allocations) = measured_allocations(output_payload, || {
-        black_box(s.catdomain(&s).unwrap());
+        black_box(s.cat(&s, Side::Domain).unwrap());
     });
     assert_eq!(payload_allocations, 1);
     assert!(
@@ -222,22 +223,23 @@ fn typed_lazy_adjoint_cat_allocates_only_the_output_payload() {
 
     let warm_lhs = lhs_parent.adjoint().unwrap();
     let warm_rhs = rhs_parent.adjoint().unwrap();
-    let warm_output = warm_lhs.catdomain(&warm_rhs).unwrap();
+    let warm_output = warm_lhs.cat(&warm_rhs, Side::Domain).unwrap();
     let output_payload = std::mem::size_of_val(warm_output.data());
     let input_payload = (lhs_parent.data().len() + rhs_parent.data().len()) as u64
         * std::mem::size_of::<Complex64>() as u64;
 
     let fast_lhs = lhs_parent.adjoint().unwrap();
     let fast_rhs = rhs_parent.adjoint().unwrap();
-    let (fast_bytes, payload_allocations) =
-        measured_allocations(output_payload, || fast_lhs.catdomain(&fast_rhs).unwrap());
+    let (fast_bytes, payload_allocations) = measured_allocations(output_payload, || {
+        fast_lhs.cat(&fast_rhs, Side::Domain).unwrap()
+    });
 
     let eager_lhs = lhs_parent.adjoint().unwrap();
     let eager_rhs = rhs_parent.adjoint().unwrap();
     let (eager_bytes, _) = measured_allocations(output_payload, || {
         black_box(eager_lhs.data());
         black_box(eager_rhs.data());
-        eager_lhs.catdomain(&eager_rhs).unwrap()
+        eager_lhs.cat(&eager_rhs, Side::Domain).unwrap()
     });
 
     assert_eq!(payload_allocations, 1);
@@ -312,7 +314,7 @@ fn typed_lazy_adjoint_cat_matches_column_major_oracles_in_every_orientation() {
                 .collect(),
         ),
     ] {
-        assert_eq!(lhs.catdomain(rhs).unwrap().data(), expected);
+        assert_eq!(lhs.cat(rhs, Side::Domain).unwrap().data(), expected);
     }
 
     let upper_parent: TensorMap<U1FusionRule, Complex64> =
@@ -357,6 +359,6 @@ fn typed_lazy_adjoint_cat_matches_column_major_oracles_in_every_orientation() {
             ),
         ),
     ] {
-        assert_eq!(upper.catcodomain(lower).unwrap().data(), expected);
+        assert_eq!(upper.cat(lower, Side::Codomain).unwrap().data(), expected);
     }
 }

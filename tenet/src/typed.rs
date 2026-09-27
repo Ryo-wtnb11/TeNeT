@@ -90,7 +90,7 @@
 //! [`TensorMap::data`], [`TensorMap::runtime`]),
 //! the index-manipulation and contraction operations
 //! ([`TensorMap::permute`], [`TensorMap::braid`], [`TensorMap::transpose`],
-//! [`TensorMap::transpose_axes`], [`TensorMap::repartition`],
+//! [`TensorMap::repartition`],
 //! [`TensorMap::contract`],
 //! [`TensorMap::compose`]), the scalar operations
 //! ([`TensorMap::axpby`], [`TensorMap::scale`], [`TensorMap::norm`],
@@ -118,10 +118,9 @@
 //! [`TensorMap::codomain`], [`TensorMap::domain`],
 //! [`TensorMap::scalar`], [`TensorMap::zeros_like`], [`TensorMap::convert`],
 //! [`TensorMap::re`], [`TensorMap::im`]) and the **concatenation/absorb
-//! group** ([`TensorMap::catdomain`], [`TensorMap::catcodomain`],
-//! [`TensorMap::absorb`]) and the **index-unit group** ([`TensorMap::twist`],
-//! [`TensorMap::flip`], [`TensorMap::insert_left_unit`],
-//! [`TensorMap::insert_right_unit`], [`TensorMap::remove_unit`]) and — with
+//! group** ([`TensorMap::cat`], [`TensorMap::absorb`]) and the **index-unit
+//! group** ([`TensorMap::twist`], [`TensorMap::flip`],
+//! [`TensorMap::insert_unit`], [`TensorMap::remove_unit`]) and — with
 //! issue #1323 — the **explicit payload precision conversion**
 //! [`TensorMap::convert`] (exact widenings and the two lossy narrowings), with
 //! no implicit conversion anywhere.
@@ -3003,10 +3002,50 @@ where
     )
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum CatSide {
-    Domain,
+/// One side of a tensor map `codomain <- domain`.
+///
+/// Used where an operation acts on exactly one side, such as
+/// [`TensorMap::cat`] and the seam choice of [`TensorMap::insert_unit`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Side {
+    /// The codomain (output) legs.
     Codomain,
+    /// The domain (input) legs.
+    Domain,
+}
+
+/// Which of a pair of mutually inverse maps to apply.
+///
+/// Used by [`TensorMap::twist`] and [`TensorMap::flip`], whose inverse
+/// TensorKit spells with the `inv` keyword.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Direction {
+    /// The map itself.
+    Forward,
+    /// Its inverse.
+    Inverse,
+}
+
+impl Direction {
+    fn is_inverse(self) -> bool {
+        self == Self::Inverse
+    }
+}
+
+/// Duality flag of a leg created by an operation, such as the unit leg of
+/// [`TensorMap::insert_unit`] (TensorKit's `dual` keyword).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Duality {
+    /// A leg on the space itself.
+    Plain,
+    /// A leg on the dual space.
+    Dual,
+}
+
+impl Duality {
+    fn is_dual(self) -> bool {
+        self == Self::Dual
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3094,14 +3133,14 @@ impl<'a> CatOperandLayout<'a> {
 pub(crate) struct CatCopyPlan {
     required_len: usize,
     copies: Vec<OwnedCatCopy>,
-    side: CatSide,
+    side: Side,
 }
 
 impl CatCopyPlan {
     pub(crate) fn execute<D: ScalarOps>(&self, lhs: &[D], rhs: &[D]) -> Result<Vec<D>, Error> {
         let side = match self.side {
-            CatSide::Domain => OwnedCatSide::Domain,
-            CatSide::Codomain => OwnedCatSide::Codomain,
+            Side::Domain => OwnedCatSide::Domain,
+            Side::Codomain => OwnedCatSide::Codomain,
         };
         tenet_tensors::try_cat_owned_raw(self.required_len, side, &self.copies, [lhs, rhs])
             .ok_or_else(|| {
@@ -3121,7 +3160,7 @@ pub(crate) fn compile_cat_plan(
     destination_nout: usize,
     operands: [CatOperandLayout<'_>; 2],
     axis: usize,
-    side: CatSide,
+    side: Side,
 ) -> Result<Option<CatCopyPlan>, Error> {
     #[cfg(test)]
     observe_cat_result_layout_build();
@@ -3220,10 +3259,10 @@ pub(crate) fn compile_cat_plan(
                     TensorOrientation::Adjoint => (src.cols(), src.rows(), src.rows(), 1),
                 };
             let (rows, cols, destination_offset) = match side {
-                CatSide::Codomain => {
+                Side::Codomain => {
                     if source_cols != destination.cols() {
                         return Err(internal_layout_error(
-                            "catcodomain coupled-sector columns disagree",
+                            "cat(Side::Codomain) coupled-sector columns disagree",
                         ));
                     }
                     (
@@ -3234,14 +3273,16 @@ pub(crate) fn compile_cat_plan(
                             .start
                             .checked_add(changed_axis_offset)
                             .ok_or_else(|| {
-                                internal_layout_error("catcodomain destination row offset overflow")
+                                internal_layout_error(
+                                    "cat(Side::Codomain) destination row offset overflow",
+                                )
                             })?,
                     )
                 }
-                CatSide::Domain => {
+                Side::Domain => {
                     if source_rows != destination.rows() {
                         return Err(internal_layout_error(
-                            "catdomain coupled-sector rows disagree",
+                            "cat(Side::Domain) coupled-sector rows disagree",
                         ));
                     }
                     (
@@ -3253,7 +3294,7 @@ pub(crate) fn compile_cat_plan(
                             .and_then(|offset| destination.range().start.checked_add(offset))
                             .ok_or_else(|| {
                                 internal_layout_error(
-                                    "catdomain destination column offset overflow",
+                                    "cat(Side::Domain) destination column offset overflow",
                                 )
                             })?,
                     )
@@ -3271,14 +3312,14 @@ pub(crate) fn compile_cat_plan(
             ));
             changed_axis_offset = changed_axis_offset
                 .checked_add(match side {
-                    CatSide::Codomain => source_rows,
-                    CatSide::Domain => source_cols,
+                    Side::Codomain => source_rows,
+                    Side::Domain => source_cols,
                 })
                 .ok_or_else(|| internal_layout_error("concatenated region offset overflow"))?;
         }
         let expected = match side {
-            CatSide::Codomain => destination.rows(),
-            CatSide::Domain => destination.cols(),
+            Side::Codomain => destination.rows(),
+            Side::Domain => destination.cols(),
         };
         if changed_axis_offset != expected {
             return Err(internal_layout_error(
@@ -3438,7 +3479,7 @@ fn cat_region_tree_orders_match(
     sources: [&[CoupledSectorRegion]; 2],
     source_indices: [&[Option<usize>]; 2],
     orientations: [TensorOrientation; 2],
-    side: CatSide,
+    side: Side,
 ) -> bool {
     destination
         .iter()
@@ -3450,16 +3491,16 @@ fn cat_region_tree_orders_match(
                 };
                 let source_region = &sources[source][source_index];
                 match (side, orientations[source]) {
-                    (CatSide::Domain, TensorOrientation::Owned) => {
+                    (Side::Domain, TensorOrientation::Owned) => {
                         source_region.row_trees() == destination.row_trees()
                     }
-                    (CatSide::Domain, TensorOrientation::Adjoint) => {
+                    (Side::Domain, TensorOrientation::Adjoint) => {
                         source_region.col_trees() == destination.row_trees()
                     }
-                    (CatSide::Codomain, TensorOrientation::Owned) => {
+                    (Side::Codomain, TensorOrientation::Owned) => {
                         source_region.col_trees() == destination.col_trees()
                     }
-                    (CatSide::Codomain, TensorOrientation::Adjoint) => {
+                    (Side::Codomain, TensorOrientation::Adjoint) => {
                         source_region.row_trees() == destination.col_trees()
                     }
                 }
@@ -3481,7 +3522,7 @@ mod cat_plan_tests {
                 OwnedCatCopy::new(0, 0, 0, [2, 1], [1, 2], 2, 0..4, false),
                 OwnedCatCopy::new(1, 0, 2, [2, 1], [1, 2], 2, 0..4, false),
             ],
-            side: CatSide::Domain,
+            side: Side::Domain,
         };
         let error = plan
             .execute(&[1.0, 2.0, 3.0, 4.0], &[5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
@@ -3502,18 +3543,18 @@ pub(crate) fn cat_homspace(
     lhs_domain: &FusionProductSpace,
     rhs_codomain: &FusionProductSpace,
     rhs_domain: &FusionProductSpace,
-    side: CatSide,
+    side: Side,
 ) -> Result<(usize, FusionTreeHomSpace), Error> {
     match side {
-        CatSide::Domain => {
+        Side::Domain => {
             if lhs_domain.len() != 1 || rhs_domain.len() != 1 {
                 return Err(Error::InvalidArgument(
-                    "catdomain requires exactly one domain leg on each tensor".to_string(),
+                    "cat(Side::Domain) requires exactly one domain leg on each tensor".to_string(),
                 ));
             }
             if lhs_codomain != rhs_codomain {
                 return Err(Error::InvalidArgument(
-                    "catdomain requires identical codomain product spaces".to_string(),
+                    "cat(Side::Domain) requires identical codomain product spaces".to_string(),
                 ));
             }
             let leg = oplus_sector_legs(&lhs_domain.legs()[0], &rhs_domain.legs()[0])?;
@@ -3522,15 +3563,16 @@ pub(crate) fn cat_homspace(
                 FusionTreeHomSpace::new(lhs_codomain.clone(), FusionProductSpace::new([leg])),
             ))
         }
-        CatSide::Codomain => {
+        Side::Codomain => {
             if lhs_codomain.len() != 1 || rhs_codomain.len() != 1 {
                 return Err(Error::InvalidArgument(
-                    "catcodomain requires exactly one codomain leg on each tensor".to_string(),
+                    "cat(Side::Codomain) requires exactly one codomain leg on each tensor"
+                        .to_string(),
                 ));
             }
             if lhs_domain != rhs_domain {
                 return Err(Error::InvalidArgument(
-                    "catcodomain requires identical domain product spaces".to_string(),
+                    "cat(Side::Codomain) requires identical domain product spaces".to_string(),
                 ));
             }
             let leg = oplus_sector_legs(&lhs_codomain.legs()[0], &rhs_codomain.legs()[0])?;
@@ -3970,7 +4012,6 @@ pub(crate) fn check_flip_layout_identity(
 }
 
 pub(crate) enum PlanarRequestKind<'a> {
-    FullTranspose,
     Explicit {
         codomain_axes: &'a [usize],
         domain_axes: &'a [usize],
@@ -3997,14 +4038,6 @@ pub(crate) fn with_planar_axes<T>(
         apply(codomain_axes, domain_axes)
     };
     match kind {
-        PlanarRequestKind::FullTranspose => {
-            let axes = (source_codomain_rank..source_rank)
-                .rev()
-                .chain((0..source_codomain_rank).rev())
-                .collect::<Vec<_>>();
-            let (codomain_axes, domain_axes) = axes.split_at(source_domain_rank);
-            checked_apply(codomain_axes, domain_axes)
-        }
         PlanarRequestKind::Explicit {
             codomain_axes,
             domain_axes,
@@ -5274,7 +5307,7 @@ where
 ///             Mode = CheckedGenericAdmissionMode,
 ///         > + CheckedGenericRigidSymbols<Scalar = f64>,
 /// {
-///     let _ = tensor.transpose();
+///     let _ = tensor.transpose(&[1], &[0]);
 /// }
 /// ```
 #[doc(hidden)]
@@ -5348,9 +5381,10 @@ where
     R::Mode: TypedTensorTwistDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit `twist(t, inds)` (and its in-place `twist!`): multiplies each
-    /// fusion-tree block by the product over `legs` (flat leg indices,
-    /// codomain first) of that leg's ribbon-twist eigenvalue.
+    /// TensorKit `twist(t, inds; inv)` (and its in-place `twist!`): multiplies
+    /// each fusion-tree block by the product over `legs` (flat leg indices,
+    /// codomain first) of that leg's ribbon-twist eigenvalue, or by its
+    /// inverse for [`Direction::Inverse`].
     ///
     /// A bosonic provider, a NoBraiding provider restricted to unit legs, or
     /// selected sectors whose staged twists are all one returns a body-sharing
@@ -5366,13 +5400,8 @@ where
     /// Non-unit NoBraiding legs are invalid. Checked-Generic pivotal failures
     /// retain their typed provider error, and no result is published until all
     /// selected twist values have been staged successfully.
-    pub fn twist(&self, legs: &[usize]) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorTwistDispatch<R, D>>::twist(self, legs, false)
-    }
-
-    /// Applies the inverse TensorKit ribbon twist on the selected legs.
-    pub fn twist_inverse(&self, legs: &[usize]) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorTwistDispatch<R, D>>::twist(self, legs, true)
+    pub fn twist(&self, legs: &[usize], direction: Direction) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorTwistDispatch<R, D>>::twist(self, legs, direction.is_inverse())
     }
 }
 
@@ -5382,7 +5411,7 @@ where
     R::Mode: TypedTensorFlipDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit `flip(t, I)`:
+    /// TensorKit `flip(t, I; inv)`:
     /// return a tensor isomorphic to `self` where the duality flag of each
     /// leg in `legs` (flat indices, codomain first; a leg listed twice is
     /// flipped twice, sequentially) is toggled,
@@ -5397,7 +5426,7 @@ where
     /// Like TensorKit's, this `flip` is *not* an involution: flipping the
     /// same leg twice returns to the original spaces but can scale odd
     /// blocks (e.g. by θ = −1 on fermionic legs); only `flip⁴ = id` in
-    /// general.
+    /// general. [`Direction::Inverse`] applies the inverse isomorphism.
     ///
     /// One scaled copy of the dense payload into a fresh body, O(len); a
     /// compact spectrum factor materializes first (the flipped space is no
@@ -5415,13 +5444,8 @@ where
     /// [`Error::Core`] from the layout derivation of the toggled hom space.
     /// Checked-Generic admission and pivotal failures retain their typed
     /// [`GenericTensorError`] variants.
-    pub fn flip(&self, legs: &[usize]) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorFlipDispatch<R, D>>::flip(self, legs, false)
-    }
-
-    /// Applies the inverse TensorKit Z-isomorphism on the selected legs.
-    pub fn flip_inverse(&self, legs: &[usize]) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorFlipDispatch<R, D>>::flip(self, legs, true)
+    pub fn flip(&self, legs: &[usize], direction: Direction) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorFlipDispatch<R, D>>::flip(self, legs, direction.is_inverse())
     }
 }
 
@@ -7220,7 +7244,7 @@ where
     D: TensorScalar,
 {
     let rank = tensor.rank();
-    let name = if inverse { "flip_inverse" } else { "flip" };
+    let name = if inverse { "inverse flip" } else { "flip" };
     if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
         return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
             "{name} leg {leg} out of range for rank {rank}"
@@ -7399,7 +7423,7 @@ where
     D: TensorScalar,
 {
     let rank = tensor.rank();
-    let name = if inverse { "twist_inverse" } else { "twist" };
+    let name = if inverse { "inverse twist" } else { "twist" };
     if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
         return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
             "{name} leg {leg} out of range for rank {rank}"
@@ -13442,9 +13466,9 @@ where
     ///
     /// # Source compatibility
     ///
-    /// Enabling the `cuda` feature adds these five names to a second `impl`,
+    /// Enabling the `cuda` feature adds these four names to a second `impl`,
     /// so the *path* forms `TensorMap::permute`, `TensorMap::braid`,
-    /// `TensorMap::transpose`, `TensorMap::transpose_axes` and
+    /// `TensorMap::transpose` and
     /// `TensorMap::repartition` become ambiguous (`E0034`) where they were not
     /// before — the same non-additivity the device `adjoint`, `norm` and
     /// `scale` already have. Method-call syntax (`tensor.permute(..)`), a
@@ -13460,8 +13484,7 @@ where
     /// fn device_permute<D: CudaPayload>(tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>) {
     ///     let _ = tensor.permute(&[1], &[0]);
     ///     let _ = tensor.braid(&[1], &[0], &[0, 1]);
-    ///     let _ = tensor.transpose();
-    ///     let _ = tensor.transpose_axes(&[1], &[0]);
+    ///     let _ = tensor.transpose(&[1], &[0]);
     ///     let _ = tensor.repartition(0);
     /// }
     /// ```
@@ -13535,34 +13558,16 @@ where
         )
     }
 
-    /// TensorKit `transpose` on a device tensor: the Host
+    /// TensorKit `transpose(t, (p₁, p₂))` on a device tensor: the Host
     /// [`TensorMap::transpose`] semantics, executed on the device.
     ///
-    /// A rank-0 tensor returns a clone and does no device work.
-    ///
     /// Cost, numerics and provider boundary are [`Self::permute`]'s.
-    pub fn transpose(&self) -> Result<Self, Error> {
-        if self.rank() == 0 {
-            return Ok(self.clone());
-        }
-        self.planar_cuda("transpose", PlanarRequestKind::FullTranspose)
-    }
-
-    /// TensorKit `transpose` with an explicit cyclic axis map on a device
-    /// tensor: the Host [`TensorMap::transpose_axes`] semantics, executed on
-    /// the device.
-    ///
-    /// Cost, numerics and provider boundary are [`Self::permute`]'s.
-    pub fn transpose_axes(
-        &self,
-        codomain_axes: &[usize],
-        domain_axes: &[usize],
-    ) -> Result<Self, Error> {
+    pub fn transpose(&self, codomain_axes: &[usize], domain_axes: &[usize]) -> Result<Self, Error> {
         if self.axes_are_identity(codomain_axes, domain_axes) {
             return Ok(self.clone());
         }
         self.planar_cuda(
-            "transpose_axes",
+            "transpose",
             PlanarRequestKind::Explicit {
                 codomain_axes,
                 domain_axes,
@@ -13630,10 +13635,9 @@ where
     ///
     /// # Source compatibility
     ///
-    /// As for [`Self::permute`], the `cuda` feature adds these four names to a
+    /// As for [`Self::permute`], the `cuda` feature adds these three names to a
     /// second `impl`, so the *path* forms `TensorMap::permute_overwrite_into`,
-    /// `TensorMap::transpose_overwrite_into`,
-    /// `TensorMap::transpose_axes_overwrite_into` and
+    /// `TensorMap::transpose_overwrite_into` and
     /// `TensorMap::repartition_overwrite_into` become ambiguous (`E0034`).
     /// Method-call syntax and `TensorMap::<R, D>::permute_overwrite_into` keep
     /// working.
@@ -13664,49 +13668,11 @@ where
         )
     }
 
-    /// Overwrites `destination` with `alpha * self.transpose()` on the device.
-    /// Validation, cost, numerics and failure behavior are
-    /// [`Self::permute_overwrite_into`]'s.
-    pub fn transpose_overwrite_into(&self, destination: &mut Self, alpha: D) -> Result<(), Error> {
-        let source_codomain_rank = self.codomain_rank();
-        let source_rank = self.rank();
-        self.overwrite_tree_transform_cuda(
-            destination,
-            alpha,
-            |source, _| {
-                with_planar_axes(
-                    source.codomain_rank(),
-                    source.rank(),
-                    PlanarRequestKind::FullTranspose,
-                    |codomain_axes, domain_axes| {
-                        Ok(TreeTransformOperation::transpose(
-                            codomain_axes.iter().copied(),
-                            domain_axes.iter().copied(),
-                        ))
-                    },
-                )
-            },
-            |operation| {
-                operation.kind() == TreeTransformOperationKind::Transpose
-                    && operation
-                        .codomain_permutation()
-                        .iter()
-                        .copied()
-                        .eq((source_codomain_rank..source_rank).rev())
-                    && operation
-                        .domain_permutation()
-                        .iter()
-                        .copied()
-                        .eq((0..source_codomain_rank).rev())
-            },
-        )
-    }
-
     /// Overwrites `destination` with
-    /// `alpha * self.transpose_axes(codomain_axes, domain_axes)` on the
+    /// `alpha * self.transpose(codomain_axes, domain_axes)` on the
     /// device. Validation, cost, numerics and failure behavior are
     /// [`Self::permute_overwrite_into`]'s.
-    pub fn transpose_axes_overwrite_into(
+    pub fn transpose_overwrite_into(
         &self,
         destination: &mut Self,
         codomain_axes: &[usize],
@@ -14033,13 +13999,8 @@ where
     /// Under the `cuda` feature `TensorMap<R, D, CudaStorage<D>>` and the Host
     /// `TensorMap<R, D>` both have a `twist`; they are distinct inherent
     /// methods on distinct types, so a path-form call must name the storage.
-    pub fn twist(&self, legs: &[usize]) -> Result<Self, Error> {
-        self.twist_with_inverse_cuda(legs, false)
-    }
-
-    /// The inverse ribbon twist on `legs`; see [`Self::twist`].
-    pub fn twist_inverse(&self, legs: &[usize]) -> Result<Self, Error> {
-        self.twist_with_inverse_cuda(legs, true)
+    pub fn twist(&self, legs: &[usize], direction: Direction) -> Result<Self, Error> {
+        self.twist_with_inverse_cuda(legs, direction.is_inverse())
     }
 
     /// TensorKit `tensortrace!` on a device tensor: the Host
@@ -14180,7 +14141,7 @@ where
 
     fn twist_with_inverse_cuda(&self, legs: &[usize], inverse: bool) -> Result<Self, Error> {
         let rank = self.rank();
-        let name = if inverse { "twist_inverse" } else { "twist" };
+        let name = if inverse { "inverse twist" } else { "twist" };
         if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
             return Err(Error::InvalidArgument(format!(
                 "{name} leg {leg} out of range for rank {rank}"
@@ -14818,16 +14779,18 @@ where
     R::Mode: TypedTensorRootDispatch<R>,
     D: TensorScalar,
 {
-    /// TensorKit `catdomain(t1, t2)`:
-    /// concatenate two `N₁ <- 1` tensor maps along their sole domain leg. The
-    /// codomain product spaces must match exactly; the two domain legs must
-    /// share duality and are combined by direct sum `V = V1 ⊕ V2`; reduced
-    /// data is copied into adjacent column slabs per coupled sector, `self`
-    /// first.
+    /// TensorKit `catdomain(t1, t2)` (`side = Side::Domain`) and
+    /// `catcodomain(t1, t2)` (`side = Side::Codomain`): concatenate two tensor
+    /// maps along their sole leg on `side`. The product spaces on the other
+    /// side must match exactly; the two concatenated legs must share duality
+    /// and are combined by direct sum `V = V1 ⊕ V2`; reduced data is copied
+    /// into adjacent slabs per coupled sector (column slabs for the domain,
+    /// row slabs for the codomain), `self` first.
     ///
-    /// Rust uses a method (`t1.catdomain(&t2)`) because binary tensor
-    /// operations in this API are methods; the name and operand order match
-    /// TensorKit's free function.
+    /// Rust uses one method (`t1.cat(&t2, side)`) because binary tensor
+    /// operations in this API are methods and the two TensorKit functions are
+    /// one operation that differs only in the side; the operand order matches
+    /// TensorKit's free functions.
     ///
     /// Both operands share one `D`, so mixed-dtype widening is statically
     /// unrepresentable — widen with [`Self::convert`] first.
@@ -14847,28 +14810,11 @@ where
     ///
     /// [`Error::RuleMismatch`] on differing admitted rule identities and
     /// [`Error::RuntimeMismatch`] on differing runtimes, in that order; then
-    /// [`Error::InvalidArgument`] for a multi-leg domain, mismatched codomain
-    /// product spaces, or changed legs of opposite duality. Checked-Generic
-    /// output-admission failures retain their typed provider error.
-    pub fn catdomain(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
-        self.cat(other, CatSide::Domain)
-    }
-
-    /// TensorKit `catcodomain(t1, t2)`:
-    /// concatenate two `1 <- N₂` tensor maps along their sole codomain leg.
-    /// The domain product spaces must match exactly; the two codomain legs
-    /// must share duality and are combined by direct sum; reduced data is
-    /// copied into adjacent row slabs per coupled sector, `self` first.
-    ///
-    /// Method-vs-free-function note, narrowings, complexity and error
-    /// classes: exactly as [`Self::catdomain`], with the codomain and domain
-    /// roles swapped.
-    pub fn catcodomain(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
-        self.cat(other, CatSide::Codomain)
-    }
-
-    /// Shared route of [`Self::catdomain`] / [`Self::catcodomain`].
-    fn cat(&self, other: &Self, side: CatSide) -> Result<Self, TypedFacadeError<R>> {
+    /// [`Error::InvalidArgument`] for more than one leg on `side`, mismatched
+    /// product spaces on the other side, or concatenated legs of opposite
+    /// duality. Checked-Generic output-admission failures retain their typed
+    /// provider error.
+    pub fn cat(&self, other: &Self, side: Side) -> Result<Self, TypedFacadeError<R>> {
         let lhs_space = self.logical_space().space();
         let rhs_space = other.logical_space().space();
         if lhs_space.admission().rule_identity() != rhs_space.admission().rule_identity() {
@@ -16058,50 +16004,11 @@ where
         )
     }
 
-    /// Overwrites `destination` with `alpha * self.transpose()` while
-    /// preserving the destination's identities and allocation.
-    /// Validation and failure behavior matches
-    /// [`Self::permute_overwrite_into`].
-    pub fn transpose_overwrite_into(&self, destination: &mut Self, alpha: D) -> Result<(), Error> {
-        let source_codomain_rank = self.codomain_rank();
-        let source_rank = self.rank();
-        self.overwrite_tree_transform(
-            destination,
-            alpha,
-            |source, _| {
-                with_planar_axes(
-                    source.codomain_rank(),
-                    source.rank(),
-                    PlanarRequestKind::FullTranspose,
-                    |codomain_axes, domain_axes| {
-                        Ok(TreeTransformOperation::transpose(
-                            codomain_axes.iter().copied(),
-                            domain_axes.iter().copied(),
-                        ))
-                    },
-                )
-            },
-            |operation| {
-                operation.kind() == TreeTransformOperationKind::Transpose
-                    && operation
-                        .codomain_permutation()
-                        .iter()
-                        .copied()
-                        .eq((source_codomain_rank..source_rank).rev())
-                    && operation
-                        .domain_permutation()
-                        .iter()
-                        .copied()
-                        .eq((0..source_codomain_rank).rev())
-            },
-        )
-    }
-
     /// Overwrites `destination` with
-    /// `alpha * self.transpose_axes(codomain_axes, domain_axes)`.
+    /// `alpha * self.transpose(codomain_axes, domain_axes)`.
     /// Validation and failure behavior matches
     /// [`Self::permute_overwrite_into`].
-    pub fn transpose_axes_overwrite_into(
+    pub fn transpose_overwrite_into(
         &self,
         destination: &mut Self,
         codomain_axes: &[usize],
@@ -16476,8 +16383,8 @@ where
     ///
     /// A non-identity transform of a factor in compact diagonal storage
     /// ([`Self::svd_compact`]'s `s`, [`Self::eigh_full`]'s `d`) is
-    /// **materialized** here, and so by [`Self::braid`], [`Self::transpose`],
-    /// [`Self::transpose_axes`] and [`Self::repartition`] as well: the result
+    /// **materialized** here, and so by [`Self::braid`], [`Self::transpose`]
+    /// and [`Self::repartition`] as well: the result
     /// is a dense `Σ_c k_c²` buffer. An exact identity returns the source body
     /// unchanged and preserves compact storage.
     /// TensorKit draws the line in the same place — its `DiagonalTensorMap`
@@ -16615,43 +16522,27 @@ where
         self.planar(PlanarRequestKind::Repartition { num_codomain })
     }
 
-    /// TensorKit `transpose`: the planar transpose of `codomain <- domain` to
-    /// `domain' <- codomain'`, i.e. a cyclic rotation of the legs round the
-    /// planar boundary by the codomain rank, which is what carries every
-    /// codomain leg across the boundary and every domain leg back.
-    ///
-    /// Planar means it **never braids**: legs are bent across the boundary, and
-    /// bending conjugates them, so the result's spaces carry flipped dual
-    /// flags. Spelling this as a [`Self::permute`] of the same axis order would
-    /// be wrong for any provider whose braiding is not symmetric — the two
-    /// agree only up to the R-symbols a permute inserts and this does not.
-    ///
-    /// It is its own inverse: transposing twice restores the source layout.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] from
-    /// the expert layer. The generated axis order is planar by construction, so
-    /// a failure here means the provider could not carry the bend.
-    pub fn transpose(&self) -> Result<Self, TypedFacadeError<R>> {
-        if self.rank() == 0 {
-            return Ok(self.clone());
-        }
-        self.planar(PlanarRequestKind::FullTranspose)
-    }
-
-    /// TensorKit `transpose` with an explicit cyclic axis map.
-    ///
-    /// The name is Rust-only, disambiguating this from [`Self::transpose`]:
-    /// TensorKit has a single `transpose` taking an optional `Index2Tuple`,
-    /// which Rust cannot spell as one method. TensorKit's argument-free
-    /// `transpose` is [`Self::transpose`]; this is the explicit form.
+    /// TensorKit `transpose(t, (p₁, p₂))`: the planar transpose with an
+    /// explicit cyclic axis map.
     ///
     /// `codomain_axes` and `domain_axes` are flat source axis numbers
     /// (`0..rank`, codomain axes first), exactly as for [`Self::permute`], but
     /// together they must describe one **cyclic rotation** of the planar source
-    /// order (codomain axes followed by the domain axes reversed). Unlike
-    /// [`Self::permute`], this operation never braids.
+    /// order (codomain axes followed by the domain axes reversed).
+    ///
+    /// Planar means it **never braids**: legs are bent across the boundary, and
+    /// bending conjugates them, so legs that cross it carry flipped dual flags.
+    /// Spelling this as a [`Self::permute`] of the same axis order would be
+    /// wrong for any provider whose braiding is not symmetric — the two agree
+    /// only up to the R-symbols a permute inserts and this does not.
+    ///
+    /// TensorKit's argument-free `transpose(t)` is the full rotation
+    /// `codomain_axes = (nout..rank).rev()`, `domain_axes = (0..nout).rev()`,
+    /// which carries every codomain leg across the boundary and every domain
+    /// leg back; it is its own inverse. There is no argument-free overload:
+    /// the axes are the operation's leg roles and are always stated.
+    /// [`Self::repartition`] is the other planar parameterization, by the
+    /// target codomain rank.
     ///
     /// # Errors
     ///
@@ -16660,7 +16551,7 @@ where
     /// order — a re-arrangement that would need a braid is refused rather than
     /// silently braided. As everywhere in this
     /// facade the expert layer owns that validation; it is not repeated here.
-    pub fn transpose_axes(
+    pub fn transpose(
         &self,
         codomain_axes: &[usize],
         domain_axes: &[usize],
@@ -19160,7 +19051,7 @@ where
 
     fn twist_with_inverse(&self, legs: &[usize], inverse: bool) -> Result<Self, Error> {
         let rank = self.rank();
-        let name = if inverse { "twist_inverse" } else { "twist" };
+        let name = if inverse { "inverse twist" } else { "twist" };
         if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
             return Err(Error::InvalidArgument(format!(
                 "{name} leg {leg} out of range for rank {rank}"
@@ -19248,7 +19139,7 @@ where
         inverse: bool,
     ) -> Result<Self, Error> {
         let rank = self.rank();
-        let name = if inverse { "flip_inverse" } else { "flip" };
+        let name = if inverse { "inverse flip" } else { "flip" };
         if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
             return Err(Error::InvalidArgument(format!(
                 "{name} leg {leg} out of range for rank {rank}"
@@ -19451,61 +19342,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    /// TensorKit `insertleftunit(t, i; dual)`: inserts the canonical unit
-    /// leg — the vacuum with degeneracy one, or its dual — at zero-based
-    /// external slot `position`, following TensorKit's left seam convention
-    /// (the codomain/domain seam belongs to the domain side). The trivial
-    /// sector adds no block and reorders nothing, so the stored values are
-    /// untouched.
-    ///
-    /// O(1) for a dense payload: the new body shares the payload allocation,
-    /// exactly as TensorKit's `copy = false` default shares `t.data` for an
-    /// ordinary `TensorMap`. A compact
-    /// spectrum factor materializes into a fresh dense payload first (one
-    /// copy) — the #613 Group 4 contract; TensorKit routes its
-    /// `DiagonalTensorMap` through the generic similar+block-copy branch
-    /// for the same reason.
-    ///
-    /// The `where R: CanonicalUnitFusionRule` bound is the provider's
-    /// certification that its vacuum obeys the canonical unit laws — the
-    /// hom-space transform and the layout validator both demand it, so an
-    /// external provider opts in with one marker impl. No adjoint/device
-    /// arms; Generic fusion is dead at the admission bound (see [`Self::twist`]).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidArgument`] when `position` exceeds the rank. Otherwise
-    /// the layout derivation's and unit-correspondence validator's own classes.
-    pub fn insert_left_unit(&self, position: usize, dual: bool) -> Result<Self, Error>
-    where
-        R: CanonicalUnitFusionRule,
-    {
-        self.insert_unit(
-            UnitLegInsertion::Left { position, dual },
-            "TensorMap::insert_left_unit",
-        )
-    }
-
-    /// TensorKit `insertrightunit(t, i; dual)`: inserts the canonical unit
-    /// leg at zero-based external slot `position`, following TensorKit's
-    /// right seam convention (the codomain/domain seam belongs to the
-    /// codomain side). Everything else — sharing, compact materialization,
-    /// bounds, errors — exactly as [`Self::insert_left_unit`].
-    pub fn insert_right_unit(&self, position: usize, dual: bool) -> Result<Self, Error>
-    where
-        R: CanonicalUnitFusionRule,
-    {
-        self.insert_unit(
-            UnitLegInsertion::Right { position, dual },
-            "TensorMap::insert_right_unit",
-        )
-    }
-
-    /// Shared route of [`Self::insert_left_unit`] /
-    /// [`Self::insert_right_unit`]: the tenet-core hom-space transform, checked
-    /// layout correspondence, then a new body over the shared (or
-    /// once-materialized) payload.
-    fn insert_unit(&self, insertion: UnitLegInsertion, operation: &str) -> Result<Self, Error>
+    fn insert_unit_multiplicity_free(&self, insertion: UnitLegInsertion) -> Result<Self, Error>
     where
         R: CanonicalUnitFusionRule,
     {
@@ -19513,7 +19350,7 @@ where
             insertion;
         if position > self.rank() {
             return Err(Error::InvalidArgument(format!(
-                "{operation}: position {position} exceeds rank {}",
+                "TensorMap::insert_unit: position {position} exceeds rank {}",
                 self.rank()
             )));
         }
@@ -19545,20 +19382,7 @@ where
         })
     }
 
-    /// TensorKit `removeunit(t, i)`: removes the canonical unit
-    /// leg at flat external axis `axis`. The selected leg must contain
-    /// exactly the vacuum sector with degeneracy one. This undoes
-    /// [`Self::insert_left_unit`] / [`Self::insert_right_unit`]; sharing and
-    /// compact materialization exactly as there — a dense insert→remove
-    /// round trip returns to the original spaces on the original payload
-    /// allocation.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidArgument`] when `axis` is out of range or the leg is
-    /// not a canonical unit leg. Otherwise the layout derivation's and
-    /// validator's own classes.
-    pub fn remove_unit(&self, axis: usize) -> Result<Self, Error>
+    fn remove_unit_multiplicity_free(&self, axis: usize) -> Result<Self, Error>
     where
         R: CanonicalUnitFusionRule,
     {
@@ -19615,75 +19439,142 @@ where
     }
 }
 
-/// Canonical-unit leg operations for checked Generic providers.
-///
-/// Insertion adds the provider's vacuum sector with degeneracy one; removal
-/// accepts only such a leg. These operations change the tensor's external
-/// spaces without changing its numerical map. An owned dense tensor shares its
-/// payload allocation with the result. A lazy dense adjoint is first converted
-/// to a fresh uncached dense tensor. A compact diagonal tensor is converted to
-/// a fresh dense payload because compact storage is tied to its original bond
-/// space.
-///
-/// Positions are zero-based in the flat external-axis order. The left and
-/// right methods differ only at the codomain/domain boundary: left assigns the
-/// boundary position to the domain, while right assigns it to the codomain.
-///
-/// Results retain the same provider instance. Invalid positions or non-unit
-/// legs, provider failures, and output-space validation failures return
-/// [`Self::Error`] and no tensor.
-pub trait GenericUnitTensorMapExt {
-    /// Error returned when an operation fails.
-    type Error;
-
-    /// Inserts a canonical unit using the left boundary convention described
-    /// by this trait.
-    fn insert_left_unit(&self, position: usize, dual: bool) -> Result<Self, Self::Error>
-    where
-        Self: Sized;
-    /// Inserts a canonical unit using the right boundary convention described
-    /// by this trait.
-    fn insert_right_unit(&self, position: usize, dual: bool) -> Result<Self, Self::Error>
-    where
-        Self: Sized;
-    /// Removes the canonical unit leg at flat external `axis`.
-    fn remove_unit(&self, axis: usize) -> Result<Self, Self::Error>
-    where
-        Self: Sized;
-}
-
-impl<R, D> GenericUnitTensorMapExt for TensorMap<R, D>
+/// Canonical-unit leg execution selected by the admitted provider mode.
+#[doc(hidden)]
+pub trait TypedTensorUnitDispatch<R, D>: TypedTensorModeDispatch<R>
 where
-    R: CheckedCanonicalUnitFusionRule,
+    R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    type Error = GenericTensorError<R::Error>;
+    fn insert_unit(
+        tensor: &TensorMap<R, D>,
+        insertion: UnitLegInsertion,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 
-    fn insert_left_unit(&self, position: usize, dual: bool) -> Result<Self, Self::Error> {
-        generic_insert_unit(
-            self,
-            UnitLegInsertion::Left { position, dual },
-            "TensorMap::insert_left_unit",
-        )
+    fn remove_unit(
+        tensor: &TensorMap<R, D>,
+        axis: usize,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+impl<R, D> TypedTensorUnitDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + CanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    fn insert_unit(
+        tensor: &TensorMap<R, D>,
+        insertion: UnitLegInsertion,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        tensor.insert_unit_multiplicity_free(insertion)
     }
 
-    fn insert_right_unit(&self, position: usize, dual: bool) -> Result<Self, Self::Error> {
-        generic_insert_unit(
-            self,
-            UnitLegInsertion::Right { position, dual },
-            "TensorMap::insert_right_unit",
-        )
+    fn remove_unit(
+        tensor: &TensorMap<R, D>,
+        axis: usize,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        tensor.remove_unit_multiplicity_free(axis)
+    }
+}
+
+impl<R, D> TypedTensorUnitDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedCanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    fn insert_unit(
+        tensor: &TensorMap<R, D>,
+        insertion: UnitLegInsertion,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        generic_insert_unit(tensor, insertion)
     }
 
-    fn remove_unit(&self, axis: usize) -> Result<Self, Self::Error> {
-        generic_remove_unit(self, axis)
+    fn remove_unit(
+        tensor: &TensorMap<R, D>,
+        axis: usize,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        generic_remove_unit(tensor, axis)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorUnitDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit `insertleftunit(t, i; dual)` (`seam = Side::Domain`) and
+    /// `insertrightunit(t, i; dual)` (`seam = Side::Codomain`): inserts the
+    /// canonical unit leg — the vacuum with degeneracy one, on the dual space
+    /// for [`Duality::Dual`] — at zero-based flat external slot `position`.
+    ///
+    /// `seam` decides only the codomain/domain boundary slot
+    /// `position == self.codomain_rank()`: the unit joins the side `seam`
+    /// names. Every other position lies strictly inside one side, and both
+    /// seams insert there identically. The trivial sector adds no block and
+    /// reorders nothing, so the stored values are untouched.
+    ///
+    /// O(1) for a dense payload: the new body shares the payload allocation,
+    /// exactly as TensorKit's `copy = false` default shares `t.data` for an
+    /// ordinary `TensorMap`. A lazy dense adjoint is first converted to a
+    /// fresh uncached dense tensor. A compact spectrum factor materializes
+    /// into a fresh dense payload first (one copy) — the #613 Group 4
+    /// contract; TensorKit routes its `DiagonalTensorMap` through the generic
+    /// similar+block-copy branch for the same reason. No device arm.
+    ///
+    /// The provider must certify that its vacuum obeys the canonical unit
+    /// laws (`CanonicalUnitFusionRule`, or `CheckedCanonicalUnitFusionRule`
+    /// for checked Generic); the hom-space transform and the layout validator
+    /// both demand it. Results retain the same provider instance.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `position` exceeds the rank. Otherwise
+    /// the layout derivation's and unit-correspondence validator's own
+    /// classes; checked-Generic failures retain their typed
+    /// [`GenericTensorError`] variants.
+    pub fn insert_unit(
+        &self,
+        position: usize,
+        seam: Side,
+        dual: Duality,
+    ) -> Result<Self, TypedFacadeError<R>> {
+        let dual = dual.is_dual();
+        let insertion = match seam {
+            Side::Domain => UnitLegInsertion::Left { position, dual },
+            Side::Codomain => UnitLegInsertion::Right { position, dual },
+        };
+        <R::Mode as TypedTensorUnitDispatch<R, D>>::insert_unit(self, insertion)
+    }
+
+    /// TensorKit `removeunit(t, i)`: removes the canonical unit leg at flat
+    /// external axis `axis`. The selected leg must contain exactly the vacuum
+    /// sector with degeneracy one. This undoes [`Self::insert_unit`]; sharing
+    /// and compact materialization exactly as there — a dense insert→remove
+    /// round trip returns to the original spaces on the original payload
+    /// allocation.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `axis` is out of range or the leg is
+    /// not a canonical unit leg. Otherwise the layout derivation's and
+    /// validator's own classes; checked-Generic failures retain their typed
+    /// [`GenericTensorError`] variants.
+    pub fn remove_unit(&self, axis: usize) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorUnitDispatch<R, D>>::remove_unit(self, axis)
     }
 }
 
 fn generic_insert_unit<R, D>(
     tensor: &TensorMap<R, D>,
     insertion: UnitLegInsertion,
-    operation: &str,
 ) -> Result<TensorMap<R, D>, GenericTensorError<R::Error>>
 where
     R: CheckedCanonicalUnitFusionRule,
@@ -19693,7 +19584,7 @@ where
         insertion;
     if position > tensor.rank() {
         return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
-            "{operation}: position {position} exceeds rank {}",
+            "TensorMap::insert_unit: position {position} exceeds rank {}",
             tensor.rank()
         ))));
     }
@@ -20134,10 +20025,13 @@ mod representation_gates {
                 eager.braid(&[0, 2], &[1], &[0, 1, 2]).unwrap(),
             ),
             (lazy.repartition(2).unwrap(), eager.repartition(2).unwrap()),
-            (lazy.transpose().unwrap(), eager.transpose().unwrap()),
             (
-                lazy.transpose_axes(&[0, 2], &[1]).unwrap(),
-                eager.transpose_axes(&[0, 2], &[1]).unwrap(),
+                lazy.transpose(&[2, 1], &[0]).unwrap(),
+                eager.transpose(&[2, 1], &[0]).unwrap(),
+            ),
+            (
+                lazy.transpose(&[0, 2], &[1]).unwrap(),
+                eager.transpose(&[0, 2], &[1]).unwrap(),
             ),
         ];
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
@@ -22760,12 +22654,16 @@ mod representation_gates {
         let lazy = source.adjoint().unwrap();
 
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
-        let flipped = lazy.flip(&[1]).unwrap();
+        let flipped = lazy.flip(&[1], Direction::Forward).unwrap();
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         assert_eq!(materialized_adjoint_builds(&flipped), 0);
         assert_eq!(flipped.domain()[0].is_dual(), !lazy.domain()[0].is_dual());
 
-        let expected = source.flip_inverse(&[0]).unwrap().adjoint().unwrap();
+        let expected = source
+            .flip(&[0], Direction::Inverse)
+            .unwrap()
+            .adjoint()
+            .unwrap();
         assert_eq!(flipped.data(), expected.data());
         assert_eq!(flipped.codomain(), expected.codomain());
         assert_eq!(flipped.domain(), expected.domain());
@@ -24882,14 +24780,14 @@ mod representation_gates {
 
         let lazy_twist = source.adjoint().unwrap();
         assert_eq!(
-            lazy_twist.twist_inverse(&[0]).unwrap().data(),
-            eager.twist_inverse(&[0]).unwrap().data()
+            lazy_twist.twist(&[0], Direction::Inverse).unwrap().data(),
+            eager.twist(&[0], Direction::Inverse).unwrap().data()
         );
         assert_eq!(materialized_adjoint_builds(&lazy_twist), 0);
 
         let lazy_flip = source.adjoint().unwrap();
-        let actual = lazy_flip.flip_inverse(&[1]).unwrap();
-        let expected = eager.flip_inverse(&[1]).unwrap();
+        let actual = lazy_flip.flip(&[1], Direction::Inverse).unwrap();
+        let expected = eager.flip(&[1], Direction::Inverse).unwrap();
         assert_eq!(actual.data(), expected.data());
         assert_eq!(
             actual.logical_space().space(),
@@ -24919,8 +24817,13 @@ mod representation_gates {
             eager.convert::<Complex64>().im().data()
         );
         assert_eq!(
-            lazy.insert_left_unit(0, false).unwrap().data(),
-            eager.insert_left_unit(0, false).unwrap().data()
+            lazy.insert_unit(0, Side::Domain, Duality::Plain)
+                .unwrap()
+                .data(),
+            eager
+                .insert_unit(0, Side::Domain, Duality::Plain)
+                .unwrap()
+                .data()
         );
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
@@ -25055,8 +24958,7 @@ mod representation_gates {
     {
         assert_parent_native_transform(source, |tensor| tensor.permute(&[2, 0], &[1]));
         assert_parent_native_transform(source, |tensor| tensor.braid(&[2, 0], &[1], &[17, 3, 11]));
-        assert_parent_native_transform(source, |tensor| tensor.transpose());
-        assert_parent_native_transform(source, |tensor| tensor.transpose_axes(&[2, 1], &[0]));
+        assert_parent_native_transform(source, |tensor| tensor.transpose(&[2, 1], &[0]));
         assert_parent_native_transform(source, |tensor| tensor.repartition(2));
     }
 
@@ -25703,7 +25605,7 @@ mod representation_gates {
         let outputs = [
             adjoint.permute(&[0], &[1, 2]).unwrap(),
             adjoint.braid(&[0], &[1, 2], &[0, 1, 2]).unwrap(),
-            adjoint.transpose_axes(&[0], &[1, 2]).unwrap(),
+            adjoint.transpose(&[0], &[1, 2]).unwrap(),
             adjoint.repartition(1).unwrap(),
         ];
         for output in &outputs {
@@ -25715,7 +25617,7 @@ mod representation_gates {
         assert!(adjoint.braid(&[0], &[1, 2], &[]).is_err());
         assert!(adjoint.permute(&[0, 0], &[1]).is_err());
         assert!(adjoint.braid(&[0, 0], &[1], &[0, 1, 2]).is_err());
-        assert!(adjoint.transpose_axes(&[0, 0], &[1]).is_err());
+        assert!(adjoint.transpose(&[0, 0], &[1]).is_err());
         assert!(adjoint.repartition(4).is_err());
         assert_eq!(materialized_adjoint_builds(&adjoint), 0);
         assert!(view.materialized.get().is_none());
@@ -25725,7 +25627,7 @@ mod representation_gates {
         let TypedTensorRepr::Adjoint(scalar_view) = &scalar_adjoint.repr else {
             unreachable!()
         };
-        let scalar_transpose = scalar_adjoint.transpose().unwrap();
+        let scalar_transpose = scalar_adjoint.transpose(&[], &[]).unwrap();
         let TypedTensorRepr::Adjoint(transpose_view) = &scalar_transpose.repr else {
             panic!("rank-zero transpose must preserve the lazy representation");
         };
@@ -25878,7 +25780,7 @@ mod representation_gates {
         // rewritten space) minus the hand-built struct shape, which the real
         // operations now compile against anyway.
         let tensor = fixture();
-        let inserted = tensor.insert_left_unit(1, false).unwrap();
+        let inserted = tensor.insert_unit(1, Side::Domain, Duality::Plain).unwrap();
         assert!(!Arc::ptr_eq(owned(&tensor), owned(&inserted)));
         assert!(Arc::ptr_eq(&owned(&tensor).data, &owned(&inserted).data));
         assert!(owned(&inserted).dense_cache.get().is_none());
@@ -25898,7 +25800,7 @@ mod representation_gates {
         // than copying again.
         let s = fixture().svd_compact().unwrap().s;
         let warmed = s.data().as_ptr(); // warm the body-local cache first
-        let inserted = s.insert_left_unit(0, false).unwrap();
+        let inserted = s.insert_unit(0, Side::Domain, Duality::Plain).unwrap();
         assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&inserted).data));
         assert!(matches!(&*owned(&inserted).data, TypedData::Dense(_)));
         // Fresh buffer, not the cache the warm-up populated.
@@ -25915,13 +25817,13 @@ mod representation_gates {
         // return a body-sharing clone; a leg that does touch the odd sector
         // publishes a new body.
         let tensor = fixture();
-        let twisted = tensor.twist(&[0, 1]).unwrap();
+        let twisted = tensor.twist(&[0, 1], Direction::Forward).unwrap();
         assert!(Arc::ptr_eq(owned(&tensor), owned(&twisted)));
 
         let fermionic = fz2_fixture();
-        let untouched = fermionic.twist(&[0]).unwrap();
+        let untouched = fermionic.twist(&[0], Direction::Forward).unwrap();
         assert!(Arc::ptr_eq(owned(&fermionic), owned(&untouched)));
-        let touched = fermionic.twist(&[1]).unwrap();
+        let touched = fermionic.twist(&[1], Direction::Forward).unwrap();
         assert!(!Arc::ptr_eq(owned(&fermionic), owned(&touched)));
     }
 
@@ -26181,16 +26083,17 @@ mod representation_gates {
             .unwrap();
         let alpha = -1.25;
 
-        assert_overwrite_matches(&source, source.transpose().unwrap(), alpha, |destination| {
-            source.transpose_overwrite_into(destination, alpha)
-        });
         assert_overwrite_matches(
             &source,
-            source.transpose_axes(&[1, 3], &[0, 2]).unwrap(),
+            source.transpose(&[3, 2], &[1, 0]).unwrap(),
             alpha,
-            |destination| {
-                source.transpose_axes_overwrite_into(destination, &[1, 3], &[0, 2], alpha)
-            },
+            |destination| source.transpose_overwrite_into(destination, &[3, 2], &[1, 0], alpha),
+        );
+        assert_overwrite_matches(
+            &source,
+            source.transpose(&[1, 3], &[0, 2]).unwrap(),
+            alpha,
+            |destination| source.transpose_overwrite_into(destination, &[1, 3], &[0, 2], alpha),
         );
         let right = source.repartition(3).unwrap();
         assert_overwrite_matches(&source, right, alpha, |destination| {
@@ -26264,11 +26167,11 @@ mod representation_gates {
             assert_unchanged(&destination, &before);
         }
 
-        let mut nonplanar = source.transpose().unwrap().zeros_like();
+        let mut nonplanar = source.transpose(&[2], &[1, 0]).unwrap().zeros_like();
         poison_destination(&mut nonplanar);
         let before = f64_bits(&nonplanar);
         assert!(source
-            .transpose_axes_overwrite_into(&mut nonplanar, &[0, 2], &[1], 1.0)
+            .transpose_overwrite_into(&mut nonplanar, &[0, 2], &[1], 1.0)
             .is_err());
         assert_unchanged(&nonplanar, &before);
 
@@ -26298,7 +26201,9 @@ mod representation_gates {
         let mut shared_payload = expected.zeros_like();
         poison_destination(&mut shared_payload);
         let before = f64_bits(&shared_payload);
-        let payload_handle = shared_payload.insert_left_unit(0, false).unwrap();
+        let payload_handle = shared_payload
+            .insert_unit(0, Side::Domain, Duality::Plain)
+            .unwrap();
         assert!(source
             .permute_overwrite_into(&mut shared_payload, &[1], &[2, 0], 1.0)
             .is_err());
@@ -26306,7 +26211,7 @@ mod representation_gates {
         drop(payload_handle);
 
         let mut alias = source
-            .insert_left_unit(0, false)
+            .insert_unit(0, Side::Domain, Duality::Plain)
             .unwrap()
             .remove_unit(0)
             .unwrap();
@@ -26401,9 +26306,9 @@ mod representation_gates {
 
         let square = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 4.0).unwrap();
         let scalar = square.trace_pairs(&[(0, 1)]).unwrap();
-        let scalar_destination = scalar.transpose().unwrap();
+        let scalar_destination = scalar.transpose(&[], &[]).unwrap();
         assert_overwrite_matches(&scalar, scalar_destination, -0.5, |destination| {
-            scalar.transpose_overwrite_into(destination, -0.5)
+            scalar.transpose_overwrite_into(destination, &[], &[], -0.5)
         });
 
         let high_rank = TensorMap::from_subblock_fn(
@@ -26772,7 +26677,10 @@ mod representation_gates {
             .is_err());
         assert_eq!(f64_destination_state(&rejected), before);
 
-        let mut wrong_layout = lhs.insert_left_unit(0, false).unwrap().zeros_like();
+        let mut wrong_layout = lhs
+            .insert_unit(0, Side::Domain, Duality::Plain)
+            .unwrap()
+            .zeros_like();
         poison_destination(&mut wrong_layout);
         let before = f64_destination_state(&wrong_layout);
         assert!(lhs
@@ -26798,7 +26706,7 @@ mod representation_gates {
         }
 
         let mut lhs_alias = lhs
-            .insert_left_unit(0, false)
+            .insert_unit(0, Side::Domain, Duality::Plain)
             .unwrap()
             .remove_unit(0)
             .unwrap();
@@ -26809,7 +26717,7 @@ mod representation_gates {
         assert_eq!(f64_destination_state(&lhs_alias), before);
 
         let mut rhs_alias = rhs
-            .insert_left_unit(0, false)
+            .insert_unit(0, Side::Domain, Duality::Plain)
             .unwrap()
             .remove_unit(0)
             .unwrap();
@@ -26829,7 +26737,9 @@ mod representation_gates {
         drop(shared_body_handle);
 
         let mut shared_payload = destination();
-        let shared_payload_handle = shared_payload.insert_left_unit(0, false).unwrap();
+        let shared_payload_handle = shared_payload
+            .insert_unit(0, Side::Domain, Duality::Plain)
+            .unwrap();
         let before = f64_destination_state(&shared_payload);
         assert!(lhs
             .contract_overwrite_into(&rhs, &mut shared_payload, &[1], &[0], &[0, 1], 1.0,)
@@ -27011,7 +26921,7 @@ mod representation_gates {
                     for output in [
                         tensor.permute(&[0, 1], &[2]).unwrap(),
                         tensor.braid(&[0, 1], &[2], &[5, 3, 1]).unwrap(),
-                        tensor.transpose_axes(&[0, 1], &[2]).unwrap(),
+                        tensor.transpose(&[0, 1], &[2]).unwrap(),
                         tensor.repartition(2).unwrap(),
                     ] {
                         assert!(Arc::ptr_eq(owned(tensor), owned(&output)));
@@ -27034,7 +26944,7 @@ mod representation_gates {
         });
         assert_eq!(calls, 0);
         assert!(u1_f64.permute(&[0, 1], &[2, 3]).is_err());
-        assert!(u1_f64.transpose_axes(&[0, 1], &[2, 3]).is_err());
+        assert!(u1_f64.transpose(&[0, 1], &[2, 3]).is_err());
         assert!(u1_f64.repartition(4).is_err());
 
         // Negative control: the counter observes a real transform.
@@ -27060,7 +26970,7 @@ mod representation_gates {
             for output in [
                 tensor.permute(&codomain_axes, &domain_axes).unwrap(),
                 tensor.braid(&codomain_axes, &domain_axes, &levels).unwrap(),
-                tensor.transpose_axes(&codomain_axes, &domain_axes).unwrap(),
+                tensor.transpose(&codomain_axes, &domain_axes).unwrap(),
             ] {
                 assert!(Arc::ptr_eq(owned(&tensor), owned(&output)));
             }
@@ -27078,7 +26988,7 @@ mod representation_gates {
             for output in [
                 factor.permute(&[0], &[1]).unwrap(),
                 factor.braid(&[0], &[1], &[2, 1]).unwrap(),
-                factor.transpose_axes(&[0], &[1]).unwrap(),
+                factor.transpose(&[0], &[1]).unwrap(),
                 factor.repartition(1).unwrap(),
             ] {
                 assert!(Arc::ptr_eq(owned(&factor), owned(&output)));
@@ -27095,7 +27005,7 @@ mod representation_gates {
         let scalar = fixture().trace_pairs(&[(0, 1)]).unwrap();
         assert_eq!(scalar.rank(), 0);
         let calls = transform_seam_calls(|| {
-            let transposed = scalar.transpose().unwrap();
+            let transposed = scalar.transpose(&[], &[]).unwrap();
             assert!(Arc::ptr_eq(owned(&scalar), owned(&transposed)));
         });
         assert_eq!(calls, 0);
@@ -27109,17 +27019,17 @@ mod representation_gates {
         // answer (θ ≡ 1 across the spectrum's sectors) is a body-sharing
         // clone.
         let s = fz2_fixture().svd_compact().unwrap().s;
-        let twisted = s.twist(&[0]).unwrap();
+        let twisted = s.twist(&[0], Direction::Forward).unwrap();
         assert!(matches!(&*owned(&twisted).data, TypedData::Diagonal(_)));
         assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&twisted).data));
-        let inverse = s.twist_inverse(&[0]).unwrap();
+        let inverse = s.twist(&[0], Direction::Inverse).unwrap();
         assert!(matches!(&*owned(&inverse).data, TypedData::Diagonal(_)));
         assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&inverse).data));
 
         let bosonic_s = fixture().svd_compact().unwrap().s;
-        let untouched = bosonic_s.twist(&[0]).unwrap();
+        let untouched = bosonic_s.twist(&[0], Direction::Forward).unwrap();
         assert!(Arc::ptr_eq(owned(&bosonic_s), owned(&untouched)));
-        let untouched_inverse = bosonic_s.twist_inverse(&[0]).unwrap();
+        let untouched_inverse = bosonic_s.twist(&[0], Direction::Inverse).unwrap();
         assert!(Arc::ptr_eq(owned(&bosonic_s), owned(&untouched_inverse)));
     }
 
@@ -27146,7 +27056,7 @@ mod representation_gates {
 
         assert_eq!(materialized_adjoint_builds(&lhs), 0);
         assert_eq!(materialized_adjoint_builds(&rhs), 0);
-        let _ = lhs.catdomain(&rhs).unwrap();
+        let _ = lhs.cat(&rhs, Side::Domain).unwrap();
         assert_eq!(materialized_adjoint_builds(&lhs), 0);
         assert_eq!(materialized_adjoint_builds(&rhs), 0);
 
@@ -27160,7 +27070,7 @@ mod representation_gates {
                 .unwrap()
                 .adjoint()
                 .unwrap();
-        upper.catcodomain(&lower).unwrap();
+        upper.cat(&lower, Side::Codomain).unwrap();
         assert_eq!(materialized_adjoint_builds(&upper), 0);
         assert_eq!(materialized_adjoint_builds(&lower), 0);
     }

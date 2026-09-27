@@ -2705,7 +2705,7 @@ macro_rules! run_provider {
                         $min_time,
                         || match operation {
                             "permute" => source.permute(&[1], &[2, 0]),
-                            "transpose" => source.transpose(),
+                            "transpose" => source.transpose(&[2], &[1, 0]),
                             "repartition" => source.repartition(1),
                             _ => unreachable!("fixed tree-operation table"),
                         },
@@ -2713,7 +2713,7 @@ macro_rules! run_provider {
                     assert!(cold.norm(2.0)?.is_finite());
                     let expected = match operation {
                         "permute" => source.permute(&[1], &[2, 0])?,
-                        "transpose" => source.transpose()?,
+                        "transpose" => source.transpose(&[2], &[1, 0])?,
                         "repartition" => source.repartition(1)?,
                         _ => unreachable!("fixed tree-operation table"),
                     };
@@ -2721,7 +2721,7 @@ macro_rules! run_provider {
                 } else {
                     let expected = match operation {
                         "permute" => source.permute(&[1], &[2, 0])?,
-                        "transpose" => source.transpose()?,
+                        "transpose" => source.transpose(&[2], &[1, 0])?,
                         "repartition" => source.repartition(1)?,
                         _ => unreachable!("fixed tree-operation table"),
                     };
@@ -2738,7 +2738,12 @@ macro_rules! run_provider {
                             "permute" => {
                                 source.permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
                             }
-                            "transpose" => source.transpose_overwrite_into(&mut destination, 1.0),
+                            "transpose" => source.transpose_overwrite_into(
+                                &mut destination,
+                                &[2],
+                                &[1, 0],
+                                1.0,
+                            ),
                             "repartition" => {
                                 source.repartition_overwrite_into(&mut destination, 1.0)
                             }
@@ -3012,14 +3017,14 @@ fn run_checked_sun(
             min_time,
             || match operation {
                 "permute" => source.permute(&[1], &[2, 0]),
-                "transpose" => source.transpose(),
+                "transpose" => source.transpose(&[2], &[1, 0]),
                 "repartition" => source.repartition(1),
                 _ => unreachable!("fixed tree-operation table"),
             },
         )?;
         let expected = match operation {
             "permute" => source.permute(&[1], &[2, 0])?,
-            "transpose" => source.transpose()?,
+            "transpose" => source.transpose(&[2], &[1, 0])?,
             "repartition" => source.repartition(1)?,
             _ => unreachable!("fixed tree-operation table"),
         };

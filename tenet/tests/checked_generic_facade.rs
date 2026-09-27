@@ -5,6 +5,7 @@ mod numerics;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use tenet::typed::Side;
 
 use tenet::core::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
@@ -1980,7 +1981,6 @@ fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_unit_insert_remove_preserves_authority_and_payload() {
-    use tenet::prelude::GenericUnitTensorMapExt;
     use tenet::typed::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -1992,13 +1992,30 @@ fn sun_checked_generic_unit_insert_remove_preserves_authority_and_payload() {
             TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
 
         assert!(source.remove_unit(0).is_err());
-        let inserted = source.insert_left_unit(0, false).unwrap();
+        let inserted = source
+            .insert_unit(0, Side::Domain, tenet::typed::Duality::Plain)
+            .unwrap();
         assert!(std::ptr::eq(inserted.provider(), provider.as_ref()));
         assert_eq!(inserted.data().as_ptr(), source.data().as_ptr());
         let removed = inserted.remove_unit(0).unwrap();
         assert!(std::ptr::eq(removed.provider(), provider.as_ref()));
         assert_eq!(removed.data().as_ptr(), source.data().as_ptr());
         assert_eq!(removed.data(), source.data());
+
+        // The seam decides only the boundary slot `position == codomain_rank`.
+        for (seam, codomain_rank) in [(Side::Codomain, 2), (Side::Domain, 1)] {
+            let inserted = source
+                .insert_unit(1, seam, tenet::typed::Duality::Dual)
+                .unwrap();
+            assert_eq!(inserted.codomain_rank(), codomain_rank, "{seam:?}");
+            let unit = match seam {
+                Side::Codomain => inserted.codomain()[1].clone(),
+                Side::Domain => inserted.domain()[0].clone(),
+            };
+            assert!(unit.is_dual(), "{seam:?}");
+            assert!(std::ptr::eq(inserted.provider(), provider.as_ref()));
+            assert_eq!(inserted.data().as_ptr(), source.data().as_ptr());
+        }
     }
 }
 
@@ -5706,7 +5723,7 @@ fn checked_only_identity_transforms_make_no_provider_queries() {
     for output in [
         source.permute(&[0, 1], &[2]).unwrap(),
         source.braid(&[0, 1], &[2], &[2, 1, 0]).unwrap(),
-        source.transpose_axes(&[0, 1], &[2]).unwrap(),
+        source.transpose(&[0, 1], &[2]).unwrap(),
         source.repartition(2).unwrap(),
     ] {
         assert!(std::ptr::eq(output.provider(), provider.as_ref()));
@@ -6110,7 +6127,7 @@ fn checked_generic_cat_admits_once_and_queries_only_left_before_commit() {
     }
     left_provider.arm_commit_spy_after_queries(admission_query_count);
 
-    let output = lhs.catdomain(&rhs).unwrap();
+    let output = lhs.cat(&rhs, Side::Domain).unwrap();
 
     assert!(std::ptr::eq(output.provider(), left_provider.as_ref()));
     assert!(!std::ptr::eq(output.provider(), right_provider.as_ref()));
@@ -6190,19 +6207,19 @@ fn checked_generic_cat_precedence_and_admission_failure_are_typed_nonpublishing(
     provider.reset_commit_spy();
 
     assert!(matches!(
-        lhs.catdomain(&wrong_identity),
+        lhs.cat(&wrong_identity, Side::Domain),
         Err(GenericTensorError::Facade(
             tenet::prelude::Error::RuleMismatch
         ))
     ));
     assert!(matches!(
-        lhs.catdomain(&wrong_runtime),
+        lhs.cat(&wrong_runtime, Side::Domain),
         Err(GenericTensorError::Facade(
             tenet::prelude::Error::RuntimeMismatch
         ))
     ));
     assert!(matches!(
-        lhs.catdomain(&bad_arguments),
+        lhs.cat(&bad_arguments, Side::Domain),
         Err(GenericTensorError::Facade(
             tenet::prelude::Error::InvalidArgument(_)
         ))
@@ -6211,7 +6228,7 @@ fn checked_generic_cat_precedence_and_admission_failure_are_typed_nonpublishing(
     assert_eq!(provider.algebra_queries.load(Ordering::Relaxed), 0);
 
     assert!(matches!(
-        lhs.catdomain(&valid_rhs),
+        lhs.cat(&valid_rhs, Side::Domain),
         Err(GenericTensorError::Structure(
             CheckedGenericStructureError::Provider(ToyError::Algebra)
         ))
@@ -6336,7 +6353,7 @@ where
         |trees, indices| fill(20_000, trees, indices),
     )
     .unwrap();
-    let domain = domain_lhs.catdomain(&domain_rhs).unwrap();
+    let domain = domain_lhs.cat(&domain_rhs, Side::Domain).unwrap();
     assert!(std::ptr::eq(domain.provider(), left_provider.as_ref()));
     assert!(!std::ptr::eq(domain.provider(), right_provider.as_ref()));
     assert_eq!(domain.domain()[0].degeneracy(&label).unwrap(), 3);
@@ -6344,7 +6361,7 @@ where
     let lazy_domain = domain_lhs
         .adjoint()
         .unwrap()
-        .catcodomain(&domain_rhs.adjoint().unwrap())
+        .cat(&domain_rhs.adjoint().unwrap(), Side::Codomain)
         .unwrap();
     assert_eq!(lazy_domain.data(), domain.adjoint().unwrap().data());
 
@@ -6362,14 +6379,14 @@ where
         |trees, indices| fill(20_000, trees, indices),
     )
     .unwrap();
-    let codomain = codomain_lhs.catcodomain(&codomain_rhs).unwrap();
+    let codomain = codomain_lhs.cat(&codomain_rhs, Side::Codomain).unwrap();
     assert!(std::ptr::eq(codomain.provider(), left_provider.as_ref()));
     assert_eq!(codomain.codomain()[0].degeneracy(&label).unwrap(), 3);
     assert_sun_cat_values(&codomain, &codomain_lhs, &codomain_rhs, 0, 1, value);
     let lazy_codomain = codomain_lhs
         .adjoint()
         .unwrap()
-        .catdomain(&codomain_rhs.adjoint().unwrap())
+        .cat(&codomain_rhs.adjoint().unwrap(), Side::Domain)
         .unwrap();
     assert_eq!(lazy_codomain.data(), codomain.adjoint().unwrap().data());
 }
@@ -6525,7 +6542,11 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
                 .braid(&[0, 2], &[1], &[0, 1, 2])
                 .unwrap(),
             tensor.repartition(1).unwrap().repartition(2).unwrap(),
-            tensor.transpose().unwrap().transpose().unwrap(),
+            tensor
+                .transpose(&[2], &[1, 0])
+                .unwrap()
+                .transpose(&[2, 1], &[0])
+                .unwrap(),
         ] {
             assert!(std::ptr::eq(restored.provider(), provider.as_ref()));
             assert_eq!(snapshot(&restored), source_snapshot);
@@ -6751,11 +6772,15 @@ fn checked_multiplicity_lazy_adjoint_matches_the_literal_kernel_for_real_and_com
                 owned.braid(&[1, 0], &[2, 3], &[1, 0, 2, 3]),
             ),
             ("repartition", lazy.repartition(1), owned.repartition(1)),
-            ("transpose", lazy.transpose(), owned.transpose()),
             (
-                "transpose_axes",
-                lazy.transpose_axes(&[1, 3], &[0, 2]),
-                owned.transpose_axes(&[1, 3], &[0, 2]),
+                "full transpose",
+                lazy.transpose(&[3, 2], &[1, 0]),
+                owned.transpose(&[3, 2], &[1, 0]),
+            ),
+            (
+                "transpose",
+                lazy.transpose(&[1, 3], &[0, 2]),
+                owned.transpose(&[1, 3], &[0, 2]),
             ),
         ]
     }
@@ -6776,11 +6801,15 @@ fn checked_multiplicity_lazy_adjoint_matches_the_literal_kernel_for_real_and_com
                 owned.braid(&[], &[1, 0, 2], &[0, 1, 2]),
             ),
             ("repartition", lazy.repartition(1), owned.repartition(1)),
-            ("transpose", lazy.transpose(), owned.transpose()),
             (
-                "transpose_axes",
-                lazy.transpose_axes(&[2], &[0, 1]),
-                owned.transpose_axes(&[2], &[0, 1]),
+                "full transpose",
+                lazy.transpose(&[2, 1, 0], &[]),
+                owned.transpose(&[2, 1, 0], &[]),
+            ),
+            (
+                "transpose",
+                lazy.transpose(&[2], &[0, 1]),
+                owned.transpose(&[2], &[0, 1]),
             ),
         ]
     }
@@ -6882,11 +6911,15 @@ fn sun_lazy_adjoint_matches_the_literal_kernel_under_all_transforms() {
                 owned.braid(&[1, 3], &[0, 2], &[3, 1, 2, 0]),
             ),
             ("repartition", lazy.repartition(1), owned.repartition(1)),
-            ("transpose", lazy.transpose(), owned.transpose()),
             (
-                "transpose_axes",
-                lazy.transpose_axes(&[1, 3], &[0, 2]),
-                owned.transpose_axes(&[1, 3], &[0, 2]),
+                "full transpose",
+                lazy.transpose(&[3, 2], &[1, 0]),
+                owned.transpose(&[3, 2], &[1, 0]),
+            ),
+            (
+                "transpose",
+                lazy.transpose(&[1, 3], &[0, 2]),
+                owned.transpose(&[1, 3], &[0, 2]),
             ),
         ]
     }

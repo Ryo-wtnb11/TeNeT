@@ -119,8 +119,7 @@ upstream location (the note says why).
 | `typed::TensorMap::svd_vals` | MatrixAlgebraKit | 0.6.9 | `interface/svd.jl:144-156` | typed facade |
 | `typed::TensorMap::tr` | TensorKit | 0.17.0 | `tensors/linalg.jl:319-327` | typed facade |
 | `typed::TensorMap::trace_pairs` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:72-87` | `TO.tensortrace!` |
-| `typed::TensorMap::transpose` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:401-411` | typed facade |
-| `typed::TensorMap::transpose_axes` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:401-411` | the same TK `transpose`, reached with an explicit cyclic `Index2Tuple` |
+| `typed::TensorMap::transpose` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:401-411` | TK `transpose` with its cyclic `Index2Tuple` always explicit; TK's argument-free default is the full rotation |
 | `typed::TensorMap::twist` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:62-97` | `twist!` (62-78) and `twist` (90-97) |
 | `typed::TensorMap::zeros` | TensorKit | 0.17.0 | `tensors/tensor.jl:283-318` | the generated `zeros`/`ones` constructor pair |
 | `typed` (module doc) | TensorKitSectors | 0.3.4 | `product.jl:245-294` | `ProductSector` / Deligne product `⊠` |
@@ -141,8 +140,8 @@ upstream location (the note says why).
 | `typed::TensorMap::blocks` | TensorKit | 0.17.0 | `tensors/tensor.jl:449,455-460`, `tensors/abstracttensor.jl:380-385` | `c => block(t, c)` pairs, in storage sector order |
 | `typed::TensorMap::subblock_count` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:346-352` | `length(fusiontrees(t))`, the subblock count, not `blocksectors` |
 | `typed::TensorMap::subblocks` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:415`, `tensors/tensor.jl:480-491` | `subblocks(t)` / `subblock(t, (f₁, f₂))` |
-| `typed::TensorMap::catcodomain` | TensorKit | 0.17.0 | `tensors/linalg.jl:498-514` | domain match 499-500; codomain duality 503-504; direct sum `V = V1 ⊕ V2` 506; per-sector row slabs, `t1` first, 509-512 |
-| `typed::TensorMap::catdomain` | TensorKit | 0.17.0 | `tensors/linalg.jl:479-497` | codomain match 480-483; domain duality 486-487; direct sum `V = V1 ⊕ V2` 489; per-sector column slabs, `t1` first, 492-495 |
+| `typed::TensorMap::cat` | TensorKit | 0.17.0 | `tensors/linalg.jl:498-514` | `catcodomain` (`Side::Codomain`): domain match 499-500; codomain duality 503-504; direct sum `V = V1 ⊕ V2` 506; per-sector row slabs, `t1` first, 509-512 |
+| `typed::TensorMap::cat` | TensorKit | 0.17.0 | `tensors/linalg.jl:479-497` | `catdomain` (`Side::Domain`): codomain match 480-483; domain duality 486-487; direct sum `V = V1 ⊕ V2` 489; per-sector column slabs, `t1` first, 492-495 |
 | `typed::TensorMap::codomain_rank` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:239-241` | `numout` |
 | `typed::TensorMap::codomain` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:204-214` | `codomain(t)` |
 | `typed::TensorMap::contract` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:159-167` | destination structure `permute(compose(sA, sB), pAB)` |
@@ -153,10 +152,10 @@ upstream location (the note says why).
 | `typed::TensorMap::flip` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:21-29` | |
 | `typed::TensorMap::flip` | TensorKit | 0.17.0 | `fusiontrees/braiding_manipulations.jl:384-413` | per-leg Z-isomorphism phase (χ, θ) of the fusion-tree `flip` |
 | `typed::TensorMap::im` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:718-728` | `Base.imag` |
-| `typed::TensorMap::insert_left_unit` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:124-138` | typed facade |
-| `typed::TensorMap::insert_left_unit` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:129-130` | `TensorMap` arm: payload reused, space rewrapped |
-| `typed::TensorMap::insert_left_unit` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:132-137` | non-`TensorMap` arm: `similar` + blockwise copy |
-| `typed::TensorMap::insert_right_unit` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:158-172` | typed facade |
+| `typed::TensorMap::insert_unit` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:124-138` | `insertleftunit` (`seam = Side::Domain`) |
+| `typed::TensorMap::insert_unit` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:129-130` | `TensorMap` arm: payload reused, space rewrapped |
+| `typed::TensorMap::insert_unit` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:132-137` | non-`TensorMap` arm: `similar` + blockwise copy |
+| `typed::TensorMap::insert_unit` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:158-172` | `insertrightunit` (`seam = Side::Codomain`) |
 | `typed::TensorMap::isometry` | TensorKit | 0.17.0 | `tensors/linalg.jl:149-158` | |
 | `typed::TensorMap::isomorphism` | TensorKit | 0.17.0 | `tensors/linalg.jl:102-109` | also TK `id(V)` (75-82) as `isomorphism(V, V)` and `unitary` (129-132), whose extra Euclidean check every TeNeT provider satisfies |
 | `typed::TensorMap::left_polar` | TensorKit | 0.17.0 | `factorizations/matrixalgebrakit.jl:204-208` | factor spaces: `w` on the input's homspace, `p` on `domain ← domain` |

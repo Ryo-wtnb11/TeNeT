@@ -25,6 +25,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::Mutex;
+use tenet::typed::Direction;
 
 use contract_cases::{
     assert_close, blas_contract_oracle, candidate_core_probes as probes, dense_oracle, fermion_u1,
@@ -182,7 +183,8 @@ fn zero_copy_candidates_match_the_tensorkit_blas_contract_sequence() {
 
 fn fermionic_values<D: Payload>() {
     let runtime = Runtime::builder().build().unwrap();
-    let twist = |t: &TensorMap<FermionU1, D>, legs: &[usize]| t.twist(legs).unwrap();
+    let twist =
+        |t: &TensorMap<FermionU1, D>, legs: &[usize]| t.twist(legs, Direction::Forward).unwrap();
     // The literal sequence of C2 and L5 contracts B legs that are dual, so
     // `blas_contract!` twists there even though the selected swapped
     // candidate needs no twist; either twist role is the oracle.
@@ -614,7 +616,8 @@ fn uneven_swapped_candidate_with_an_output_permute_runs_one_transform() {
 
 fn fermionic_output_permute_values<D: Payload>() {
     let runtime = Runtime::builder().build().unwrap();
-    let twist = |t: &TensorMap<FermionU1, D>, legs: &[usize]| t.twist(legs).unwrap();
+    let twist =
+        |t: &TensorMap<FermionU1, D>, legs: &[usize]| t.twist(legs, Direction::Forward).unwrap();
     // As for the identity-output probes, the literal sequence of the swapped
     // probes twists dual `B` legs that the selected candidate does not, so
     // either twist role is the oracle.

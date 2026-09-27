@@ -40,9 +40,7 @@ macro_rules! check_rule {
             ("braid", &|t| {
                 t.braid(&[1, 3], &[0, 2], &[0, 1, 2, 3]).unwrap()
             }),
-            ("transpose", &|t| {
-                t.transpose_axes(&[1, 3], &[0, 2]).unwrap()
-            }),
+            ("transpose", &|t| t.transpose(&[1, 3], &[0, 2]).unwrap()),
             // A lazy adjoint source reads its parent's storage through the
             // adjoint orientation.
             ("adjoint permute", &|t| {

@@ -14,7 +14,36 @@
 
 #![cfg(feature = "cuda")]
 
+/// TensorKit's argument-free `transpose(t)`: the full planar rotation, which
+/// carries every codomain leg across the boundary and every domain leg back.
+macro_rules! full_rotation {
+    ($tensor:expr) => {{
+        let tensor = &$tensor;
+        let codomain_rank = tensor.codomain_rank();
+        let codomain_axes: Vec<usize> = (codomain_rank..tensor.rank()).rev().collect();
+        let domain_axes: Vec<usize> = (0..codomain_rank).rev().collect();
+        (codomain_axes, domain_axes)
+    }};
+}
+
+macro_rules! full_transpose_overwrite_into {
+    ($tensor:expr, $destination:expr, $alpha:expr) => {{
+        let tensor = &$tensor;
+        let (codomain_axes, domain_axes) = full_rotation!(tensor);
+        tensor.transpose_overwrite_into($destination, &codomain_axes, &domain_axes, $alpha)
+    }};
+}
+
+macro_rules! full_transpose {
+    ($tensor:expr) => {{
+        let tensor = &$tensor;
+        let (codomain_axes, domain_axes) = full_rotation!(tensor);
+        tensor.transpose(&codomain_axes, &domain_axes)
+    }};
+}
+
 use std::sync::Arc;
+use tenet::typed::Direction;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
@@ -120,7 +149,7 @@ fn clearing_the_transform_cache_releases_the_device_executor_state() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let device = fixture(&runtime).to_cuda().unwrap();
     let _ = device.permute(&[2, 0], &[1, 3]).unwrap();
-    let _ = device.transpose().unwrap();
+    let _ = full_transpose!(device).unwrap();
     let before = runtime.cuda_tree_transform_stats().unwrap();
     assert!(before.prepared_structures >= 2, "{before:?}");
     assert!(before.executor_bytes > 0, "{before:?}");
@@ -156,7 +185,7 @@ fn clearing_and_re_preparing_does_not_creep_the_plan_reservation() {
     let device = fixture(&runtime).to_cuda().unwrap();
     let prepare = || {
         let _ = device.permute(&[2, 0], &[1, 3]).unwrap();
-        let _ = device.transpose().unwrap();
+        let _ = full_transpose!(device).unwrap();
     };
     prepare();
     let reserved = runtime
@@ -193,7 +222,7 @@ fn device_transform_short_circuits_do_no_device_work() {
             // Identity axis lists, the same split, and a rank-0 transpose all
             // return a clone of the receiver.
             device.permute(&[0, 1], &[2, 3]).unwrap(),
-            device.transpose_axes(&[0, 1], &[2, 3]).unwrap(),
+            device.transpose(&[0, 1], &[2, 3]).unwrap(),
             device.braid(&[0, 1], &[2, 3], &[1, 2, 3, 4]).unwrap(),
             device.repartition(2).unwrap(),
         ]
@@ -216,7 +245,7 @@ fn device_transform_short_circuits_do_no_device_work() {
     let rank_zero = endomorphism.trace_pairs(&[(0, 1)]).unwrap();
     assert_eq!(rank_zero.rank(), 0);
     let device_zero = rank_zero.to_cuda().unwrap();
-    let (transposed, counters) = delta(|| device_zero.transpose().unwrap());
+    let (transposed, counters) = delta(|| full_transpose!(device_zero).unwrap());
     assert_eq!(counters, CudaTransferStats::default(), "{counters:?}");
     assert_eq!(transposed.to_host().unwrap().data(), rank_zero.data());
 }
@@ -263,7 +292,7 @@ fn device_transform_rejections_happen_before_any_device_work() {
             // Malformed axes come back from the expert layer.
             rejects_like_host!(|t| t.permute(&[0, 0], &[2, 3])),
             // A non-planar re-arrangement is refused rather than braided.
-            rejects_like_host!(|t| t.transpose_axes(&[1, 2], &[3, 0])),
+            rejects_like_host!(|t| t.transpose(&[1, 2], &[3, 0])),
             // A split beyond the rank has no planar reading.
             rejects_like_host!(|t| t.repartition(5)),
         ]
@@ -438,15 +467,12 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
     assert_eq!(zero.device_allocs, 0, "{zero:?}");
 
     // And the other three methods are warm on their own structures.
-    let mut transposed = fixture(&runtime).transpose().unwrap().to_cuda().unwrap();
-    source
-        .transpose_overwrite_into(&mut transposed, 1.0)
+    let mut transposed = full_transpose!(fixture(&runtime))
+        .unwrap()
+        .to_cuda()
         .unwrap();
-    let (_, warm) = delta(|| {
-        source
-            .transpose_overwrite_into(&mut transposed, 1.0)
-            .unwrap()
-    });
+    full_transpose_overwrite_into!(source, &mut transposed, 1.0).unwrap();
+    let (_, warm) = delta(|| full_transpose_overwrite_into!(source, &mut transposed, 1.0).unwrap());
     assert_transfer_free(&warm);
 
     let mut bent = fixture(&runtime).repartition(1).unwrap().to_cuda().unwrap();
@@ -455,16 +481,16 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
     assert_transfer_free(&warm);
 
     let mut cyclic = fixture(&runtime)
-        .transpose_axes(&[1, 3], &[0, 2])
+        .transpose(&[1, 3], &[0, 2])
         .unwrap()
         .to_cuda()
         .unwrap();
     source
-        .transpose_axes_overwrite_into(&mut cyclic, &[1, 3], &[0, 2], 1.0)
+        .transpose_overwrite_into(&mut cyclic, &[1, 3], &[0, 2], 1.0)
         .unwrap();
     let (_, warm) = delta(|| {
         source
-            .transpose_axes_overwrite_into(&mut cyclic, &[1, 3], &[0, 2], 1.0)
+            .transpose_overwrite_into(&mut cyclic, &[1, 3], &[0, 2], 1.0)
             .unwrap()
     });
     assert_transfer_free(&warm);
@@ -510,7 +536,7 @@ fn device_overwrite_into_admits_the_exact_layout_on_the_shared_runtime_store() {
 
     // Admission is keyed on the layout pair, so a destination that is *not*
     // this operation's result still misses the lookup and is still rejected.
-    let mut wrong = host.transpose().unwrap().to_cuda().unwrap();
+    let mut wrong = full_transpose!(host).unwrap().to_cuda().unwrap();
     let error = source
         .permute_overwrite_into(&mut wrong, &[2, 0], &[1, 3], 1.0)
         .unwrap_err()
@@ -665,9 +691,9 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
 
     // 6. A destination on the wrong space, held shared: the space check
     //    precedes the unique-ownership check.
-    let mut wrong_space = host.transpose().unwrap().to_cuda().unwrap();
+    let mut wrong_space = full_transpose!(host).unwrap().to_cuda().unwrap();
     let wrong_space_handle = wrong_space.clone();
-    let mut host_wrong_space = host.transpose().unwrap();
+    let mut host_wrong_space = full_transpose!(host).unwrap();
     let host_wrong_space_handle = host_wrong_space.clone();
     {
         let witness = wrong_space.clone();
@@ -718,10 +744,10 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
         source.permute_overwrite_into(&mut destination, &[0, 0], &[1, 3], 1.0)
     );
     rejects_like_host!(
-        "non-planar transpose_axes",
-        host.transpose_axes_overwrite_into(&mut host_dst, &[1, 2], &[3, 0], 1.0),
+        "non-planar transpose",
+        host.transpose_overwrite_into(&mut host_dst, &[1, 2], &[3, 0], 1.0),
         witness,
-        source.transpose_axes_overwrite_into(&mut destination, &[1, 2], &[3, 0], 1.0)
+        source.transpose_overwrite_into(&mut destination, &[1, 2], &[3, 0], 1.0)
     );
 
     let v = leg();
@@ -750,7 +776,7 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
 }
 
 // ---------------------------------------------------------------------------
-// `twist` / `twist_inverse` contracts (issue #1330, G2b-t)
+// `twist` in both directions contracts (issue #1330, G2b-t)
 // ---------------------------------------------------------------------------
 
 /// fZ2 with both parities on every leg, so a twist really scales blocks.
@@ -782,7 +808,7 @@ fn a_warm_device_twist_uploads_only_its_output_and_downloads_nothing() {
     // A twist compiles no structure, so its only cold cost is the context's
     // shared `1` coefficient operand, created once per dtype per context.
     let before = runtime.cuda_tree_transform_stats().unwrap();
-    let _ = device.twist(&[0, 3]).unwrap();
+    let _ = device.twist(&[0, 3], Direction::Forward).unwrap();
     let after = runtime.cuda_tree_transform_stats().unwrap();
     assert_eq!(
         after.prepared_structures, before.prepared_structures,
@@ -794,7 +820,7 @@ fn a_warm_device_twist_uploads_only_its_output_and_downloads_nothing() {
     // Warm: the #740 output initialisation and nothing else, with exactly one
     // submission per block — no coefficient table is ever uploaded, because
     // the twist factor rides the contraction descriptor's own scale.
-    let (twisted, warm) = delta(|| device.twist(&[0, 3]).unwrap());
+    let (twisted, warm) = delta(|| device.twist(&[0, 3], Direction::Forward).unwrap());
     assert_eq!(warm.h2d_calls, 1, "{warm:?}");
     assert_eq!(warm.h2d_bytes, output_bytes, "{warm:?}");
     assert_eq!(warm.d2h_calls, 0, "{warm:?}");
@@ -806,14 +832,14 @@ fn a_warm_device_twist_uploads_only_its_output_and_downloads_nothing() {
     );
     assert_eq!(
         twisted.to_host().unwrap().data(),
-        host.twist(&[0, 3]).unwrap().data(),
+        host.twist(&[0, 3], Direction::Forward).unwrap().data(),
         "the measured call must still be the Host's answer"
     );
 
-    let (_, warm_inverse) = delta(|| device.twist_inverse(&[0, 3]).unwrap());
+    let (_, warm_inverse) = delta(|| device.twist(&[0, 3], Direction::Inverse).unwrap());
     assert_eq!(
         warm_inverse, warm,
-        "twist_inverse has the same cost profile"
+        "inverse twist has the same cost profile"
     );
 }
 
@@ -830,9 +856,9 @@ fn device_twist_short_circuits_do_no_device_work() {
         [
             // An empty leg list, and a bosonic provider whose every twist is
             // one, both return a clone of the receiver.
-            bosonic.twist(&[]).unwrap(),
-            bosonic.twist(&[0, 2]).unwrap(),
-            bosonic.twist_inverse(&[1]).unwrap(),
+            bosonic.twist(&[], Direction::Forward).unwrap(),
+            bosonic.twist(&[0, 2], Direction::Forward).unwrap(),
+            bosonic.twist(&[1], Direction::Inverse).unwrap(),
         ]
     });
     assert_eq!(
@@ -849,8 +875,9 @@ fn device_twist_short_circuits_do_no_device_work() {
     // circuit: Host's detection tests each leg's own factor, not the product,
     // so it publishes a fresh unscaled copy. The device does exactly the same
     // work rather than inventing a cheaper answer.
-    let _ = fermionic.twist(&[0, 3]).unwrap();
-    let (all_legs, counters) = delta(|| fermionic.twist(&[0, 1, 2, 3]).unwrap());
+    let _ = fermionic.twist(&[0, 3], Direction::Forward).unwrap();
+    let (all_legs, counters) =
+        delta(|| fermionic.twist(&[0, 1, 2, 3], Direction::Forward).unwrap());
     assert_eq!(counters.h2d_calls, 1, "{counters:?}");
     assert_eq!(counters.device_allocs, 1, "{counters:?}");
     assert_eq!(
@@ -869,7 +896,7 @@ fn device_twist_rejections_happen_before_any_device_work() {
     let device = host.to_cuda().unwrap();
     // Warm the shared coefficient operand first, so a rejection cannot be
     // confused with a cold-path upload.
-    let _ = device.twist(&[0, 3]).unwrap();
+    let _ = device.twist(&[0, 3], Direction::Forward).unwrap();
     let before = runtime.cuda_tree_transform_stats().unwrap();
 
     let (errors, counters) = delta(|| {
@@ -877,12 +904,22 @@ fn device_twist_rejections_happen_before_any_device_work() {
             // The range check precedes the empty-list short circuit and every
             // categorical step, exactly as on Host.
             (
-                device.twist(&[4]).unwrap_err().to_string(),
-                host.twist(&[4]).unwrap_err().to_string(),
+                device
+                    .twist(&[4], Direction::Forward)
+                    .unwrap_err()
+                    .to_string(),
+                host.twist(&[4], Direction::Forward)
+                    .unwrap_err()
+                    .to_string(),
             ),
             (
-                device.twist_inverse(&[1, 9]).unwrap_err().to_string(),
-                host.twist_inverse(&[1, 9]).unwrap_err().to_string(),
+                device
+                    .twist(&[1, 9], Direction::Inverse)
+                    .unwrap_err()
+                    .to_string(),
+                host.twist(&[1, 9], Direction::Inverse)
+                    .unwrap_err()
+                    .to_string(),
             ),
         ]
     });

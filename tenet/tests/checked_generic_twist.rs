@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tenet::typed::Direction;
 
 use tenet::core::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericPivotal,
@@ -443,7 +444,7 @@ where
     assert!(saw_vertex_two);
 
     provider.reset_ledger(2);
-    let codomain = source.twist(&[0]).unwrap();
+    let codomain = source.twist(&[0], Direction::Forward).unwrap();
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 1);
     assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 2);
     assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
@@ -466,7 +467,7 @@ where
     });
 
     provider.reset_ledger(1);
-    let domain = source.twist_inverse(&[2]).unwrap();
+    let domain = source.twist(&[2], Direction::Inverse).unwrap();
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 1);
     assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 1);
     assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
@@ -474,7 +475,7 @@ where
     assert_values(&domain, value, |_| -1.0);
 
     provider.reset_ledger(2);
-    let repeated = source.twist(&[0, 0]).unwrap();
+    let repeated = source.twist(&[0, 0], Direction::Forward).unwrap();
     assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
     provider.finish_observation();
     assert_values(&repeated, value, |_| 1.0);
@@ -483,12 +484,16 @@ where
     // What: logical adjoint axis 1 maps to parent codomain axis 0; logical
     // axis 0 would instead map to the uniformly-X parent domain axis 2.
     provider.reset_ledger(2);
-    let lazy_twisted = lazy.twist(&[1]).unwrap();
+    let lazy_twisted = lazy.twist(&[1], Direction::Forward).unwrap();
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 1);
     assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 2);
     assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
     provider.finish_observation();
-    let direct = source.twist_inverse(&[0]).unwrap().adjoint().unwrap();
+    let direct = source
+        .twist(&[0], Direction::Inverse)
+        .unwrap()
+        .adjoint()
+        .unwrap();
     assert_eq!(lazy_twisted.data(), direct.data());
     assert!(std::ptr::eq(lazy_twisted.provider(), provider.as_ref()));
     assert_eq!(source.data(), before);
@@ -515,7 +520,7 @@ fn checked_generic_twist_precedence_and_late_failure_are_typed_and_nonpublishing
 
     provider.reset_ledger(0);
     assert!(matches!(
-        source.twist(&[source.rank()]),
+        source.twist(&[source.rank()], Direction::Forward),
         Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
     ));
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 0);
@@ -523,7 +528,7 @@ fn checked_generic_twist_precedence_and_late_failure_are_typed_and_nonpublishing
     assert_eq!(provider.other_queries.load(Ordering::Relaxed), 0);
 
     provider.reset_ledger(0);
-    let empty = source.twist(&[]).unwrap();
+    let empty = source.twist(&[], Direction::Forward).unwrap();
     assert_eq!(empty.data().as_ptr(), source.data().as_ptr());
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 0);
     assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 0);
@@ -532,7 +537,7 @@ fn checked_generic_twist_precedence_and_late_failure_are_typed_and_nonpublishing
     provider.reset_ledger(2);
     provider.fail_twist_on.store(2, Ordering::Relaxed);
     assert!(matches!(
-        source.twist(&[0]),
+        source.twist(&[0], Direction::Forward),
         Err(GenericTensorError::Plan(CheckedGenericPlanError::Provider(
             PivotalError::Twist
         )))
@@ -559,7 +564,7 @@ fn checked_generic_twist_handles_nobraiding_bosonic_and_staged_identity_sharing(
     let unit_tensor: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&unit], [&unit], |_, _| 3.0).unwrap();
     no_braiding.reset_ledger(0);
-    let unit_twist = unit_tensor.twist(&[0, 1]).unwrap();
+    let unit_twist = unit_tensor.twist(&[0, 1], Direction::Forward).unwrap();
     assert_eq!(unit_twist.data().as_ptr(), unit_tensor.data().as_ptr());
     assert_eq!(no_braiding.style_queries.load(Ordering::Relaxed), 1);
     assert_eq!(no_braiding.vacuum_queries.load(Ordering::Relaxed), 1);
@@ -569,7 +574,7 @@ fn checked_generic_twist_handles_nobraiding_bosonic_and_staged_identity_sharing(
     let before = nonunit.data().to_vec();
     no_braiding.reset_ledger(0);
     assert!(matches!(
-        nonunit.twist(&[0]),
+        nonunit.twist(&[0], Direction::Forward),
         Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
     ));
     assert_eq!(no_braiding.style_queries.load(Ordering::Relaxed), 1);
@@ -580,7 +585,7 @@ fn checked_generic_twist_handles_nobraiding_bosonic_and_staged_identity_sharing(
     let bosonic = Arc::new(CheckedPivotalToy::new(4, BraidingStyleKind::Bosonic, -1.0));
     let bosonic_tensor = fixture(&runtime, &bosonic, |marker| marker as f64);
     bosonic.reset_ledger(0);
-    let bosonic_twist = bosonic_tensor.twist(&[0]).unwrap();
+    let bosonic_twist = bosonic_tensor.twist(&[0], Direction::Forward).unwrap();
     assert_eq!(
         bosonic_twist.data().as_ptr(),
         bosonic_tensor.data().as_ptr()
@@ -592,7 +597,7 @@ fn checked_generic_twist_handles_nobraiding_bosonic_and_staged_identity_sharing(
     let identity = Arc::new(CheckedPivotalToy::new(5, BraidingStyleKind::Anyonic, 1.0));
     let identity_tensor = fixture(&runtime, &identity, |marker| marker as f64);
     identity.reset_ledger(2);
-    let identity_twist = identity_tensor.twist(&[0]).unwrap();
+    let identity_twist = identity_tensor.twist(&[0], Direction::Forward).unwrap();
     assert_eq!(identity.post_stage_queries.load(Ordering::Relaxed), 0);
     assert_eq!(identity.twist_queries.load(Ordering::Relaxed), 2);
     identity.finish_observation();
@@ -615,7 +620,7 @@ where
     let source_domain = source.domain();
 
     provider.reset_ledger(2);
-    let codomain = source.flip_inverse(&[0]).unwrap();
+    let codomain = source.flip(&[0], Direction::Inverse).unwrap();
     assert_eq!(provider.fs_queries.load(Ordering::Relaxed), 2);
     assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 2);
     assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
@@ -634,14 +639,14 @@ where
     });
 
     provider.reset_ledger(2);
-    let domain = source.flip(&[2]).unwrap();
+    let domain = source.flip(&[2], Direction::Forward).unwrap();
     assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
     provider.finish_observation();
     assert_eq!(domain.domain()[0].is_dual(), !source.domain()[0].is_dual());
     assert_values(&domain, value, |_| -1.0);
 
     provider.reset_ledger(2);
-    let repeated = source.flip(&[0, 0]).unwrap();
+    let repeated = source.flip(&[0, 0], Direction::Forward).unwrap();
     assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
     provider.finish_observation();
     assert_eq!(
@@ -658,7 +663,7 @@ where
 
     let lazy = source.adjoint().unwrap();
     provider.reset_ledger(2);
-    let lazy_flipped = lazy.flip(&[1]).unwrap();
+    let lazy_flipped = lazy.flip(&[1], Direction::Forward).unwrap();
     assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
     provider.finish_observation();
     assert_eq!(
@@ -666,7 +671,11 @@ where
         !lazy.domain()[0].is_dual()
     );
     provider.reset_ledger(2);
-    let direct = source.flip_inverse(&[0]).unwrap().adjoint().unwrap();
+    let direct = source
+        .flip(&[0], Direction::Inverse)
+        .unwrap()
+        .adjoint()
+        .unwrap();
     provider.finish_observation();
     assert_eq!(lazy_flipped.data(), direct.data());
     assert_eq!(lazy_flipped.codomain(), direct.codomain());
@@ -698,7 +707,7 @@ fn checked_generic_flip_rejects_nobraiding_before_pivotal_queries() {
 
     provider.reset_ledger(0);
     assert!(matches!(
-        source.flip(&[0]),
+        source.flip(&[0], Direction::Forward),
         Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
     ));
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 1);
@@ -716,7 +725,7 @@ fn checked_generic_flip_precedence_and_staged_failures_are_nonpublishing() {
 
     provider.reset_ledger(0);
     assert!(matches!(
-        source.flip(&[source.rank()]),
+        source.flip(&[source.rank()], Direction::Forward),
         Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
     ));
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 0);
@@ -724,7 +733,7 @@ fn checked_generic_flip_precedence_and_staged_failures_are_nonpublishing() {
     assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 0);
 
     provider.reset_ledger(0);
-    let empty = source.flip(&[]).unwrap();
+    let empty = source.flip(&[], Direction::Forward).unwrap();
     assert_eq!(empty.data().as_ptr(), source.data().as_ptr());
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 0);
     assert_eq!(provider.fs_queries.load(Ordering::Relaxed), 0);
@@ -733,7 +742,7 @@ fn checked_generic_flip_precedence_and_staged_failures_are_nonpublishing() {
     provider.reset_ledger(0);
     provider.fail_fs_on.store(2, Ordering::Relaxed);
     assert!(matches!(
-        source.flip(&[0]),
+        source.flip(&[0], Direction::Forward),
         Err(GenericTensorError::Plan(CheckedGenericPlanError::Provider(
             PivotalError::FrobeniusSchur
         )))
@@ -743,7 +752,7 @@ fn checked_generic_flip_precedence_and_staged_failures_are_nonpublishing() {
     provider.reset_ledger(0);
     provider.fail_twist_on.store(2, Ordering::Relaxed);
     assert!(matches!(
-        source.flip(&[0]),
+        source.flip(&[0], Direction::Forward),
         Err(GenericTensorError::Plan(CheckedGenericPlanError::Provider(
             PivotalError::Twist
         )))
@@ -766,11 +775,11 @@ fn checked_generic_flip_uses_staged_nontrivial_fs_and_twist_factors() {
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&x_dual], [&x_dual], |_, _| 3.0).unwrap();
 
-    let codomain = source.flip(&[0]).unwrap();
-    let domain = source.flip(&[1]).unwrap();
+    let codomain = source.flip(&[0], Direction::Forward).unwrap();
+    let domain = source.flip(&[1], Direction::Forward).unwrap();
     assert_eq!(codomain.data(), &[-3.0]);
     assert_eq!(domain.data(), &[-3.0]);
-    let roundtrip = codomain.flip_inverse(&[0]).unwrap();
+    let roundtrip = codomain.flip(&[0], Direction::Inverse).unwrap();
     assert_eq!(roundtrip.data(), source.data());
     assert_eq!(roundtrip.codomain(), source.codomain());
     assert_eq!(roundtrip.domain(), source.domain());
@@ -797,7 +806,7 @@ where
         },
     )
     .unwrap();
-    let twisted = source.twist(&[0, 1, 2]).unwrap();
+    let twisted = source.twist(&[0, 1, 2], Direction::Forward).unwrap();
     assert_eq!(twisted.data().as_ptr(), source.data().as_ptr());
     assert_eq!(twisted.data(), source.data());
     assert!(std::ptr::eq(twisted.provider(), provider.as_ref()));
@@ -850,7 +859,7 @@ where
         },
     )
     .unwrap();
-    let flipped = source.flip(&[0, 2]).unwrap();
+    let flipped = source.flip(&[0, 2], Direction::Forward).unwrap();
     assert!(std::ptr::eq(flipped.provider(), provider.as_ref()));
     assert!(flipped.codomain()[0].is_dual());
     assert!(flipped.codomain()[2].is_dual());
@@ -871,7 +880,7 @@ where
         assert_eq!(after.offset(), before.offset());
     }
     assert!(saw_vertex_two);
-    let roundtrip = flipped.flip_inverse(&[0, 2]).unwrap();
+    let roundtrip = flipped.flip(&[0, 2], Direction::Inverse).unwrap();
     assert_eq!(roundtrip.data(), source.data());
     assert_eq!(roundtrip.codomain(), source.codomain());
 }

@@ -150,11 +150,8 @@ macro_rules! transforms {
             ("permute", $source.permute(&[1], &[2, 0]).unwrap()),
             ("braid", $source.braid(&[1, 0], &[2], &[0, 2, 1]).unwrap()),
             ("repartition", $source.repartition(1).unwrap()),
-            ("transpose", $source.transpose().unwrap()),
-            (
-                "transpose_axes",
-                $source.transpose_axes(&[1, 2], &[0]).unwrap(),
-            ),
+            ("full transpose", $source.transpose(&[2], &[1, 0]).unwrap()),
+            ("transpose", $source.transpose(&[1, 2], &[0]).unwrap()),
         ]
     };
 }

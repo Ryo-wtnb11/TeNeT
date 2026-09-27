@@ -515,10 +515,9 @@ fn the_rank_one_swap_keeps_its_source_and_its_result_compact() {
 
     for (name, bytes) in [
         ("permute", warmed_bytes(|| d.permute(&[1], &[0]).unwrap())),
-        ("transpose", warmed_bytes(|| d.transpose().unwrap())),
         (
-            "transpose_axes",
-            warmed_bytes(|| d.transpose_axes(&[1], &[0]).unwrap()),
+            "transpose",
+            warmed_bytes(|| d.transpose(&[1], &[0]).unwrap()),
         ),
     ] {
         assert!(
@@ -531,7 +530,7 @@ fn the_rank_one_swap_keeps_its_source_and_its_result_compact() {
         measured_bytes(|| d.data().len()) >= ceiling,
         "the rank-one swap materialized its source"
     );
-    let swapped = d.transpose().unwrap();
+    let swapped = d.transpose(&[1], &[0]).unwrap();
     assert!(
         measured_bytes(|| swapped.data().len()) >= ceiling,
         "the rank-one swap built a dense result"
