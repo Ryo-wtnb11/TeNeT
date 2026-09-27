@@ -336,18 +336,18 @@ where
 /// labels and the operands' ranks alone: the reduced network's operand
 /// labels, and per traced operand whether it is read through its adjoint and
 /// its intra-operand pairs. Host and device execute the same lowering.
-struct StaticTraceLowering {
-    inputs: Vec<Vec<TemporaryLabel>>,
-    conj: Vec<bool>,
-    splits: Vec<Option<usize>>,
-    traces: Vec<Option<StaticTrace>>,
+pub(super) struct StaticTraceLowering {
+    pub(super) inputs: Vec<Vec<TemporaryLabel>>,
+    pub(super) conj: Vec<bool>,
+    pub(super) splits: Vec<Option<usize>>,
+    pub(super) traces: Vec<Option<StaticTrace>>,
 }
 
 /// One operand's trace: whether it is read through its adjoint, and its pairs.
-type StaticTrace = (bool, Vec<(usize, usize)>);
+pub(super) type StaticTrace = (bool, Vec<(usize, usize)>);
 
 impl StaticTraceLowering {
-    fn new<R, D, S>(
+    pub(super) fn new<R, D, S>(
         tensors: &[&TensorMap<R, D, S>],
         spec: &StaticTopologySpec,
     ) -> Result<Self, Error>

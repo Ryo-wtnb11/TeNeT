@@ -84,7 +84,7 @@ pub enum StepOutput<T> {
 }
 
 impl<T> StepOutput<T> {
-    fn get<'a>(&'a self, destination: &'a Option<T>) -> &'a T {
+    pub(super) fn get<'a>(&'a self, destination: &'a Option<T>) -> &'a T {
         match self {
             Self::Returned(value) => value,
             Self::Overwritten => destination
@@ -93,7 +93,7 @@ impl<T> StepOutput<T> {
         }
     }
 
-    fn take(self, destination: &mut Option<T>) -> T {
+    pub(super) fn take(self, destination: &mut Option<T>) -> T {
         match self {
             Self::Returned(value) => value,
             Self::Overwritten => destination
@@ -102,7 +102,7 @@ impl<T> StepOutput<T> {
         }
     }
 
-    fn retain(self, destination: &mut Option<T>) {
+    pub(super) fn retain(self, destination: &mut Option<T>) {
         if let Self::Returned(value) = self {
             *destination = Some(value);
         }

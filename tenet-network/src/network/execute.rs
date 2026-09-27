@@ -4,35 +4,35 @@ use super::*;
 /// shapes. Inspect the order via [`Self::plan`], run it via
 /// [`Self::execute`].
 pub struct PlannedNetwork {
-    owner_token: u64,
-    plan: ContractionPlan,
-    conj: Vec<bool>,
-    input_codomain_ranks: Vec<usize>,
-    schedule: CompiledSchedule,
+    pub(super) owner_token: u64,
+    pub(super) plan: ContractionPlan,
+    pub(super) conj: Vec<bool>,
+    pub(super) input_codomain_ranks: Vec<usize>,
+    pub(super) schedule: CompiledSchedule,
 }
 
-struct CompiledSchedule {
-    slot_count: usize,
-    input_ranks: Vec<usize>,
-    contracted_input_pairs: Vec<InputLegPair>,
-    steps: Vec<CompiledStep>,
-    final_slot: usize,
-    final_permutation: Option<(Vec<usize>, Vec<usize>)>,
+pub(super) struct CompiledSchedule {
+    pub(super) slot_count: usize,
+    pub(super) input_ranks: Vec<usize>,
+    pub(super) contracted_input_pairs: Vec<InputLegPair>,
+    pub(super) steps: Vec<CompiledStep>,
+    pub(super) final_slot: usize,
+    pub(super) final_permutation: Option<(Vec<usize>, Vec<usize>)>,
 }
 
-type InputLegPair = ((usize, usize), (usize, usize));
+pub(super) type InputLegPair = ((usize, usize), (usize, usize));
 
 #[doc(hidden)]
 pub struct CompiledStep {
-    lhs_slot: usize,
-    rhs_slot: usize,
-    result_slot: usize,
-    lhs_contract_axes: Vec<usize>,
-    rhs_contract_axes: Vec<usize>,
-    result_permutation: Option<(Vec<usize>, Vec<usize>)>,
-    result_output_axes: Option<Vec<usize>>,
-    contract_output_axes: Vec<usize>,
-    authority_input_slot: usize,
+    pub(super) lhs_slot: usize,
+    pub(super) rhs_slot: usize,
+    pub(super) result_slot: usize,
+    pub(super) lhs_contract_axes: Vec<usize>,
+    pub(super) rhs_contract_axes: Vec<usize>,
+    pub(super) result_permutation: Option<(Vec<usize>, Vec<usize>)>,
+    pub(super) result_output_axes: Option<Vec<usize>>,
+    pub(super) contract_output_axes: Vec<usize>,
+    pub(super) authority_input_slot: usize,
 }
 
 /// Caller-owned replay state for one planned network at a time.
@@ -50,10 +50,10 @@ pub struct NetworkExecutionWorkspace<R, D, S = Vec<D>>
 where
     S: NetworkPayloadStorage<D>,
 {
-    slots: Vec<Option<TensorMap<R, D, S>>>,
-    producers: Vec<Option<(usize, bool)>>,
-    intermediates: Vec<TypedIntermediateBuffers<R, D, S>>,
-    owner_token: Option<u64>,
+    pub(super) slots: Vec<Option<TensorMap<R, D, S>>>,
+    pub(super) producers: Vec<Option<(usize, bool)>>,
+    pub(super) intermediates: Vec<TypedIntermediateBuffers<R, D, S>>,
+    pub(super) owner_token: Option<u64>,
     runtime: Option<RuntimeIdentity>,
     rule_identity: Option<RuleIdentity>,
     input_snapshot: Vec<TypedInputSnapshot>,
@@ -64,14 +64,14 @@ struct TypedInputSnapshot {
     reuse_class: NetworkReuseClass,
 }
 
-struct TypedIntermediateBuffers<R, D, S = Vec<D>> {
-    contracted: Option<TensorMap<R, D, S>>,
-    oriented: Option<TensorMap<R, D, S>>,
-    parked_contracted: Option<RuntimeDetachedTensorMap<D, S>>,
-    parked_oriented: Option<RuntimeDetachedTensorMap<D, S>>,
+pub(super) struct TypedIntermediateBuffers<R, D, S = Vec<D>> {
+    pub(super) contracted: Option<TensorMap<R, D, S>>,
+    pub(super) oriented: Option<TensorMap<R, D, S>>,
+    pub(super) parked_contracted: Option<RuntimeDetachedTensorMap<D, S>>,
+    pub(super) parked_oriented: Option<RuntimeDetachedTensorMap<D, S>>,
 }
 
-struct PayloadMeter {
+pub(super) struct PayloadMeter {
     limit: usize,
     destination: (usize, usize),
     peak_workspace: usize,
@@ -80,13 +80,13 @@ struct PayloadMeter {
 }
 
 #[derive(Debug)]
-enum PayloadMeterError {
+pub(super) enum PayloadMeterError {
     Limit { limit: usize, required: usize },
     ArithmeticOverflow,
 }
 
 impl PayloadMeter {
-    fn new<R, D: TensorScalar, S: NetworkPayloadStorage<D>>(
+    pub(super) fn new<R, D: TensorScalar, S: NetworkPayloadStorage<D>>(
         limit: usize,
         destination: &TensorMap<R, D, S>,
     ) -> std::result::Result<Self, PayloadMeterError> {
@@ -102,7 +102,7 @@ impl PayloadMeter {
         })
     }
 
-    fn stats(&self) -> SymmetricSliceStats {
+    pub(super) fn stats(&self) -> SymmetricSliceStats {
         SymmetricSliceStats {
             destination_bytes: self.destination.1,
             peak_workspace_bytes: self.peak_workspace,
@@ -110,7 +110,7 @@ impl PayloadMeter {
         }
     }
 
-    fn set_base<'a, R: 'a, D: TensorScalar + 'a, S: NetworkPayloadStorage<D> + 'a>(
+    pub(super) fn set_base<'a, R: 'a, D: TensorScalar + 'a, S: NetworkPayloadStorage<D> + 'a>(
         &mut self,
         tensors: impl IntoIterator<Item = &'a TensorMap<R, D, S>>,
     ) {
@@ -122,7 +122,7 @@ impl PayloadMeter {
         );
     }
 
-    fn observe<R, D: TensorScalar, S: NetworkPayloadStorage<D>>(
+    pub(super) fn observe<R, D: TensorScalar, S: NetworkPayloadStorage<D>>(
         &mut self,
         slots: &[Option<TensorMap<R, D, S>>],
         producers: &[Option<(usize, bool)>],
@@ -169,7 +169,7 @@ impl PayloadMeter {
     }
 }
 
-fn intermediate_payloads<R, D: TensorScalar, S: NetworkPayloadStorage<D>>(
+pub(super) fn intermediate_payloads<R, D: TensorScalar, S: NetworkPayloadStorage<D>>(
     intermediates: &[TypedIntermediateBuffers<R, D, S>],
 ) -> Vec<Option<(usize, usize)>> {
     #[cfg(test)]
@@ -186,7 +186,7 @@ fn intermediate_payloads<R, D: TensorScalar, S: NetworkPayloadStorage<D>>(
         .collect()
 }
 
-enum MeteredNetworkError<E> {
+pub(super) enum MeteredNetworkError<E> {
     Tensor(E),
     Payload(PayloadMeterError),
 }
@@ -197,7 +197,7 @@ impl<E> From<E> for MeteredNetworkError<E> {
     }
 }
 
-fn map_payload_error<E>(error: PayloadMeterError) -> SymmetricSliceExecutionError<E> {
+pub(super) fn map_payload_error<E>(error: PayloadMeterError) -> SymmetricSliceExecutionError<E> {
     match error {
         PayloadMeterError::Limit { limit, required } => {
             SymmetricSliceExecutionError::WorkspaceLimitExceeded { limit, required }
@@ -208,7 +208,9 @@ fn map_payload_error<E>(error: PayloadMeterError) -> SymmetricSliceExecutionErro
     }
 }
 
-fn map_metered_network_error<E>(error: MeteredNetworkError<E>) -> SymmetricSliceExecutionError<E> {
+pub(super) fn map_metered_network_error<E>(
+    error: MeteredNetworkError<E>,
+) -> SymmetricSliceExecutionError<E> {
     match error {
         MeteredNetworkError::Tensor(error) => SymmetricSliceExecutionError::Tensor(error),
         MeteredNetworkError::Payload(error) => map_payload_error(error),
@@ -347,7 +349,7 @@ where
         }
     }
 
-    fn activate_parked(
+    pub(super) fn activate_parked(
         &mut self,
         runtime: &Runtime,
         tensors: &[&TensorMap<R, D, S>],
@@ -473,7 +475,7 @@ impl PlannedNetwork {
 /// Runtime with a device, every operand on it, then
 /// [`device_operand_admission`].
 #[cfg(feature = "cuda")]
-fn cuda_operand_admission<R, D>(
+pub(super) fn cuda_operand_admission<R, D>(
     tensors: &[&TensorMap<R, D, CudaStorage<D>>],
     contracts: bool,
 ) -> Result<(), Error>
@@ -515,7 +517,7 @@ where
 /// (TensorKit `blas_contract!` requires symmetric braiding);
 /// deciding it here, not at the step, keeps earlier steps from allocating.
 #[cfg(any(feature = "cuda", test))]
-fn device_operand_admission(
+pub(super) fn device_operand_admission(
     contracts: bool,
     braiding: tenet::core::BraidingStyleKind,
     representations: impl IntoIterator<Item = NetworkReuseClass>,
@@ -559,7 +561,7 @@ impl PlannedNetwork {
         }
     }
 
-    fn execute_with_workspace_meter<R, D, S>(
+    pub(super) fn execute_with_workspace_meter<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
         workspace: &mut NetworkExecutionWorkspace<R, D, S>,

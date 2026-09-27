@@ -15,7 +15,7 @@ fn contracted_input_pairs(ir: &NetworkIR) -> Vec<InputLegPair> {
     pairs
 }
 
-fn compile_schedule(
+pub(super) fn compile_schedule(
     ir: &NetworkIR,
     plan: &ContractionPlan,
     output_codomain_rank: Option<usize>,

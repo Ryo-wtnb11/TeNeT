@@ -2,7 +2,7 @@ use super::*;
 
 /// Runtime and rule identity of a network's operands, the first check of
 /// every lowering and preflight; `None` for no operand.
-fn typed_operand_identity<R, D, S>(
+pub(super) fn typed_operand_identity<R, D, S>(
     tensors: &[&TensorMap<R, D, S>],
 ) -> Result<Option<RuleIdentity>, HostNetworkError<R>>
 where
@@ -47,7 +47,7 @@ type ContractedAxisPairs<'a> = &'a [&'a [Option<(usize, usize)>]];
 /// total lowered legs N. Without it — a runtime [`Network`], or a traced
 /// lowering, whose pairs are not static — each axis rediscovers its partner
 /// by a scan over the earlier axes, which is O(N²) overall.
-fn static_operand_preflight<R, D, S, L>(
+pub(super) fn static_operand_preflight<R, D, S, L>(
     tensors: &[&TensorMap<R, D, S>],
     inputs: &[impl AsRef<[L]>],
     conj: &[bool],
@@ -216,7 +216,7 @@ where
 /// dualisations matters: when exactly one side is dualised the stored legs
 /// must be equal, which is TensorKit's `space(A, i) == space(B, j)'` with a
 /// structural dual.
-fn legs_contract<R>(
+pub(super) fn legs_contract<R>(
     provider: &R,
     (lhs, lhs_dualised): (&SectorLeg, bool),
     (rhs, rhs_dualised): (&SectorLeg, bool),
@@ -298,7 +298,7 @@ where
 /// contracts: the same error the first contraction step would raise, without
 /// the permutes, trace pre-step, sliced accumulator or plan lookup that would
 /// otherwise run before it.
-fn reject_non_symmetric_network<R, D, S>(
+pub(super) fn reject_non_symmetric_network<R, D, S>(
     tensors: &[&TensorMap<R, D, S>],
     contracts: bool,
 ) -> Result<(), HostNetworkError<R>>
@@ -316,7 +316,7 @@ where
         .map_err(|error| HostNetworkError::<R>::from(Error::from(error)))
 }
 
-fn validate_typed_contracted_pairs<R, D, S>(
+pub(super) fn validate_typed_contracted_pairs<R, D, S>(
     tensors: &[TensorMap<R, D, S>],
     pairs: &[InputLegPair],
 ) -> Result<(), HostNetworkError<R>>
@@ -361,7 +361,7 @@ where
     Ok(spaces)
 }
 
-fn typed_effective_spaces<R, D, S>(
+pub(super) fn typed_effective_spaces<R, D, S>(
     tensor: &TensorMap<R, D, S>,
     adjoint: bool,
 ) -> Result<Vec<GradedSpace<R>>, HostNetworkError<R>>
@@ -385,7 +385,7 @@ where
     Ok(spaces)
 }
 
-fn rotate<T: Clone>(items: &[T], split: usize) -> Vec<T> {
+pub(super) fn rotate<T: Clone>(items: &[T], split: usize) -> Vec<T> {
     items[split..]
         .iter()
         .chain(items[..split].iter())
