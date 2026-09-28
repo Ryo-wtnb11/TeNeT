@@ -1,7 +1,7 @@
 //! #1626: an eager `contract(spec)` that takes TensorKit `blas_contract!`'s
 //! `copyC` route (a zero-copy contraction into a temporary, then one permute
 //! into the result) keeps that temporary in the Runtime's pooled execution
-//! scratch, as `contract_overwrite_into` keeps its own. A warm call therefore
+//! scratch, as `contract_into` keeps its own. A warm call therefore
 //! allocates exactly one output-sized buffer: the returned tensor.
 
 use std::alloc::{GlobalAlloc, Layout, System};
