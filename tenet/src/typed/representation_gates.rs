@@ -6539,6 +6539,36 @@ fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
 }
 
 #[test]
+fn mixed_compact_dense_inner_does_not_materialize_the_diagonal() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let bond = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)]).unwrap();
+    let dense = TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |_, indices| {
+        match (indices[0], indices[1]) {
+            (0, 0) => Complex64::new(1.0, 2.0),
+            (1, 1) => Complex64::new(4.0, -1.0),
+            _ => Complex64::new(6.0, 7.0),
+        }
+    })
+    .unwrap();
+    let lazy = dense.adjoint().unwrap();
+    let diagonal = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![Complex64::new(2.0, 3.0), Complex64::new(-1.0, 0.5)],
+        }],
+    )
+    .unwrap();
+
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_close(diagonal.inner(&lazy).unwrap(), Complex64::new(-7.5, -10.0));
+    assert_close(lazy.inner(&diagonal).unwrap(), Complex64::new(-7.5, 10.0));
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+}
+
+#[test]
 fn identity_transforms_preserve_the_cold_lazy_view() {
     let adjoint = u1_lazy_fixture().adjoint().unwrap();
     let TypedTensorRepr::Adjoint(view) = &adjoint.repr else {
