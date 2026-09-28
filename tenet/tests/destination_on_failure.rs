@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use num_complex::Complex64;
 use tenet::core::{U1FusionRule, U1Irrep, ZNFusionRule};
-use tenet::typed::{ContractSpec, Error, GradedSpace, Runtime, SectorSpectrum, TensorMap};
+use tenet::typed::{
+    ContractSpec, Duality, Error, GradedSpace, Runtime, SectorSpectrum, Side, TensorMap,
+};
 
 /// A fresh tensor on `like`'s legs filled with distinct sentinels,
 /// alternating quiet NaNs with distinct finite values. Overwriting a NaN
@@ -793,6 +795,19 @@ fn scale_assign_is_in_place_or_refuses_a_shared_receiver() {
     assert_eq!(clone.dense_data().unwrap(), before.as_slice());
     drop(clone);
 
+    // A unique body whose payload is shared: a unit-leg insertion reuses the
+    // payload allocation under a new body.
+    let before = dense.dense_data().unwrap().to_vec();
+    let mut unit = dense.insert_unit(0, Side::Domain, Duality::Plain).unwrap();
+    assert_eq!(
+        unit.dense_data().unwrap().as_ptr(),
+        dense.dense_data().unwrap().as_ptr()
+    );
+    assert_eq!(unit.scale_assign(factor), Err(Error::DestinationShared));
+    assert_eq!(unit.dense_data().unwrap(), before.as_slice());
+    assert_eq!(dense.dense_data().unwrap(), before.as_slice());
+    drop(unit);
+
     // Compact diagonal: scaled in place, still compact.
     let values = [vec![1.0, -2.0], vec![3.0], vec![0.25, 5.0]];
     let sectors = [U1Irrep::new(0), U1Irrep::new(1), U1Irrep::new(-1)];
@@ -831,6 +846,14 @@ fn scale_assign_is_in_place_or_refuses_a_shared_receiver() {
     assert_eq!(lazy.scale_assign(factor), Err(Error::DestinationShared));
     assert_eq!(parent.dense_data().unwrap(), before.as_slice());
     drop(parent);
+    // A cloned lazy view shares the adjoint header.
+    let view = lazy.clone();
+    assert_eq!(lazy.scale_assign(factor), Err(Error::DestinationShared));
+    assert_eq!(
+        lazy.materialize().unwrap().dense_data().unwrap(),
+        logical.dense_data().unwrap()
+    );
+    drop(view);
     lazy.scale_assign(factor).unwrap();
     assert!(lazy.dense_data().is_err(), "a lazy adjoint stays lazy");
     let got = lazy.materialize().unwrap();

@@ -1486,8 +1486,7 @@ where
     /// storage, or one that aliases `self`; [`Error::UnsupportedOnDevice`] for
     /// a lazy-adjoint or compact `self`, as for the returning
     /// [`Self::axpby`] with mixed operands; [`Error::DestinationShared`];
-    /// [`Error::PlacementMismatch`]. Every rejection happens before any device
-    /// work.
+    /// [`Error::PlacementMismatch`].
     ///
     /// # Failure
     ///
@@ -2047,9 +2046,7 @@ where
     /// contraction's fusion space and block layout (malformed axes report the
     /// Host's errors here), exact operand and destination lengths, unique
     /// destination ownership ([`Error::DestinationShared`]), then the compile
-    /// of the Host route and placement. Every rejection — including a compile
-    /// error — happens before any device work, so a rejected call leaves
-    /// `destination` untouched.
+    /// of the Host route and placement. A compile error counts as validation.
     ///
     /// `alpha` and `beta` ride the epilogue of whatever writes each element:
     /// the core GEMMs (`alpha * job_alpha`, `beta`) when they write the
@@ -2672,10 +2669,7 @@ where
     /// The Host variants and messages, with the storage noun naming the
     /// placement (as for [`Self::contract_into`]), plus
     /// [`Error::PlacementMismatch`] for a payload on another device.
-    /// Validation and plan-construction failures leave `destination`
-    /// untouched — no byte of it is written before the last rejection is
-    /// decided. A backend error after replay begins may leave it partially
-    /// written.
+    /// Plan-construction failures count as validation.
     ///
     /// # Source compatibility
     ///
@@ -3177,13 +3171,12 @@ where
     ///
     /// # Errors
     ///
-    /// [`Self::trace_pairs`]'s, all before any device work, then
+    /// [`Self::trace_pairs`]'s, then
     /// [`Error::RuntimeMismatch`] / [`Error::RuleMismatch`] against the
     /// destination, [`Error::InvalidArgument`] for a destination that is not
     /// owned dense CUDA storage, aliases the source, or has the wrong space,
     /// layout or length, [`Error::DestinationShared`] and
-    /// [`Error::PlacementMismatch`]. A rejected call leaves `destination`
-    /// untouched.
+    /// [`Error::PlacementMismatch`].
     ///
     /// # Failure
     ///

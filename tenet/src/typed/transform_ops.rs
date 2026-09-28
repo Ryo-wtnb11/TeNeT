@@ -62,9 +62,7 @@ where
     /// destination that is not owned dense host storage, one that aliases
     /// the source, or one whose space, block layout or length does not match
     /// the result; [`Error::DestinationShared`] when `destination` shares its
-    /// storage with a clone. Every rejection happens before any write, and so
-    /// do plan-construction failures. A backend error after replay begins may
-    /// leave `destination` partially written.
+    /// storage with a clone. Plan-construction failures count as validation.
     ///
     /// # Failure
     ///
@@ -277,8 +275,7 @@ where
     /// duality errors of [`Self::trace_pairs`], [`Error::Unsupported`] for a
     /// compact (diagonal) source with a non-empty `pairs`, [`Error::InvalidArgument`] for a destination
     /// that is not owned dense host storage, aliases the source, or has the
-    /// wrong space, layout or length, and [`Error::DestinationShared`]. Every
-    /// rejection happens before any write.
+    /// wrong space, layout or length, and [`Error::DestinationShared`].
     ///
     /// # Failure
     ///
@@ -549,9 +546,7 @@ where
     /// for a destination that is not owned dense host storage, aliases an
     /// operand, or has the wrong space, layout or length;
     /// [`Error::DestinationShared`] when `destination` shares its storage
-    /// with a clone. These, and runtime-context leasing, leave `destination`
-    /// unchanged; an engine error during replay may leave it partially
-    /// written.
+    /// with a clone. Runtime-context leasing counts as validation.
     ///
     /// # Failure
     ///

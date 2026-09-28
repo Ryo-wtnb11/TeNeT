@@ -1113,7 +1113,7 @@ where
     /// tensors live on different spaces or block layouts, when `destination`
     /// is not owned dense host storage, or when it aliases `self`;
     /// [`Error::DestinationShared`] when `destination` shares its storage with
-    /// a clone. Every rejection happens before any write.
+    /// a clone.
     ///
     /// # Failure
     ///
