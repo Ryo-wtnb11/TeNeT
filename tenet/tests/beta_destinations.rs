@@ -5,8 +5,9 @@
 //! eager returning `axpby` on fresh tensors (TensorKit `tensorcontract!`,
 //! `permute!`, `tensortrace!`, `add!` with `α, β`). Covered: beta in
 //! {0, 1, general} and general alpha, a NaN destination under beta = 0,
-//! coupled sectors a contraction cannot reach (left bitwise untouched under
-//! beta = 1 — the old full zero-fill would clear them), U(1), SU(2) and
+//! coupled sectors a contraction cannot reach (on the core route, left
+//! bitwise untouched under beta = 1 — the old full zero-fill would clear
+//! them), U(1), SU(2) and
 //! fZ2×U(1) with dual legs, f64/c64/f32/c32, lazy-adjoint inputs, the
 //! shared-destination error, and (with `--features cuda -- --ignored`) the
 //! device against the Host.
@@ -283,7 +284,9 @@ macro_rules! suite {
                 8
             );
         }
-        // beta = 1 leaves the unreached blocks bit for bit as they were.
+        // beta = 1 leaves the unreached blocks bit for bit as they were: this
+        // spec takes the core route, whose GEMMs write the destination
+        // directly and never the sectors they miss.
         let mut destination = prior.materialize().unwrap();
         lhs.contract_into(&rhs, &spec, &mut destination, D::alpha(), D::real(1.0))
             .unwrap();

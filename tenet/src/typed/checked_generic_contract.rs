@@ -854,7 +854,19 @@ mod copy_c_scratch_tests {
 
     use tenet_core::{U1FusionRule, U1Irrep};
 
-    use crate::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
+    use crate::typed::{ContractSpec, GradedSpace, Runtime, TensorMap, TypedData, TypedTensorRepr};
+
+    /// Grows the pooled copyC scratch to a length no temporary here reaches;
+    /// a shorter length afterwards proves the copyC route ran.
+    const MARKER_LEN: usize = 100_000;
+
+    fn mark_scratch(runtime: &Runtime) {
+        let mut lease = runtime.lease_context().unwrap();
+        let lane = lease.context().multiplicity_free_lane::<f64>().unwrap();
+        let mut scratch = lane.take_copy_c_scratch();
+        scratch.resize_filled(MARKER_LEN, 0.0);
+        lane.restore_copy_c_scratch(scratch);
+    }
 
     fn retained_len(runtime: &Runtime) -> usize {
         let mut lease = runtime.lease_context().unwrap();
@@ -946,5 +958,130 @@ mod copy_c_scratch_tests {
         assert_eq!(actual.codomain(), expected.codomain());
         assert_eq!(actual.domain(), expected.domain());
         assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
+    }
+
+    /// The partial-coverage fixture of `stale_copy_c_scratch_never_reaches_the_result`:
+    /// `c` carries charge 0 only, so the result's coupled-charge-1 block of
+    /// `(p, r | q)` is reached by no GEMM.
+    fn partial_copy_c_fixture(
+        runtime: &Runtime,
+    ) -> (TensorMap<U1FusionRule, f64>, TensorMap<U1FusionRule, f64>) {
+        let provider = Arc::new(U1FusionRule);
+        let open = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
+        )
+        .unwrap();
+        let bond = GradedSpace::try_new(provider, [(U1Irrep::new(0), 4)]).unwrap();
+        (
+            TensorMap::rand_with_seed(runtime, [&open, &open], [&bond], 3).unwrap(),
+            TensorMap::rand_with_seed(runtime, [&bond], [&open], 4).unwrap(),
+        )
+    }
+
+    const MOVED: ContractSpec<'static> = ContractSpec {
+        lhs: &[2],
+        rhs: &[0],
+        codomain: &[0, 2],
+        domain: &[1],
+    };
+
+    /// #1631: on the copyC route the output transform writes every element,
+    /// so an unreached one becomes `alpha * (+0) + beta * dst` — a `-0.0`
+    /// becomes `+0.0` under `beta = 1` and an infinite `alpha` gives NaN, as
+    /// TensorKit's `tensoradd!` — while `alpha = 0` still never reads the
+    /// operands.
+    #[test]
+    fn copy_c_contract_into_writes_unreached_elements_through_the_transform() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let (a, b) = partial_copy_c_fixture(&runtime);
+        let result = a.contract(&b, &MOVED).unwrap();
+        let unreached: Vec<usize> = result
+            .dense_data()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| **value == 0.0)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!unreached.is_empty(), "the fixture must miss a sector");
+        let run =
+            |seed: f64, alpha: f64, beta: f64, operands: (&TensorMap<_, _>, &TensorMap<_, _>)| {
+                let mut destination = result.scale(0.0);
+                let TypedTensorRepr::Owned(body) = &mut destination.repr else {
+                    unreachable!("a scaled dense tensor is owned")
+                };
+                let Some(TypedData::Dense(data)) =
+                    Arc::get_mut(body).and_then(|body| Arc::get_mut(&mut body.data))
+                else {
+                    unreachable!("a fresh scaled tensor is uniquely owned and dense")
+                };
+                data.fill(seed);
+                mark_scratch(&runtime);
+                operands
+                    .0
+                    .contract_into(operands.1, &MOVED, &mut destination, alpha, beta)
+                    .unwrap();
+                assert!(
+                    retained_len(&runtime) < MARKER_LEN,
+                    "the copyC route must run"
+                );
+                destination
+            };
+        let negative_zero = run(-0.0, 1.0, 1.0, (&a, &b));
+        for &index in &unreached {
+            let value = negative_zero.dense_data().unwrap()[index];
+            assert_eq!(value.to_bits(), 0.0f64.to_bits(), "-0.0 at {index}");
+        }
+        let infinite = run(1.0, f64::INFINITY, 1.0, (&a, &b));
+        for &index in &unreached {
+            assert!(infinite.dense_data().unwrap()[index].is_nan(), "{index}");
+        }
+        let (nan_a, nan_b) = (a.scale(f64::NAN), b.scale(f64::NAN));
+        let silent = run(0.5, 0.0, 2.0, (&nan_a, &nan_b));
+        assert!(silent
+            .dense_data()
+            .unwrap()
+            .iter()
+            .all(|&value| value == 1.0));
+    }
+
+    /// #1631: a compact diagonal operand on the copyC route is densified
+    /// once, for the temporary's contraction; the length check reads the
+    /// stored representation.
+    #[test]
+    fn copy_c_contract_into_densifies_a_compact_operand_once() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let space =
+            |n| GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), n)]).unwrap();
+        let (p, q, c) = (space(2), space(3), space(4));
+        let t =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&p, &q], [&c], 5).unwrap();
+        let spectra = c
+            .sectors()
+            .unwrap()
+            .into_iter()
+            .map(|sector| crate::typed::SectorSpectrum {
+                values: vec![1.5; c.degeneracy(&sector).unwrap()],
+                sector,
+            })
+            .collect::<Vec<_>>();
+        let d = TensorMap::diagonal(&runtime, &c, spectra).unwrap();
+        let mut destination = t.contract(&d, &MOVED).unwrap().scale(1.0);
+        mark_scratch(&runtime);
+        crate::typed::DIAGONAL_MATERIALIZATIONS.set(0);
+        t.contract_into(&d, &MOVED, &mut destination, 1.0, 0.0)
+            .unwrap();
+        assert_eq!(crate::typed::DIAGONAL_MATERIALIZATIONS.get(), 1);
+        assert!(
+            retained_len(&runtime) < MARKER_LEN,
+            "the copyC route must run"
+        );
+        let expected = t.contract(&d.materialize().unwrap(), &MOVED).unwrap();
+        assert_eq!(
+            destination.dense_data().unwrap(),
+            expected.dense_data().unwrap()
+        );
     }
 }
