@@ -283,8 +283,9 @@ use crate::runtime::{Ctx, Ctxs};
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
     internal_layout_error, oriented_contract_destination, tensorcompose_owned_multiplicity_free,
-    tensorcontract_oriented_multiplicity_free, tensorcontract_oriented_multiplicity_free_into,
-    tensorcontract_owned_multiplicity_free_into, tensorproduct_owned_checked_generic,
+    tensorcontract_oriented_multiplicity_free,
+    tensorcontract_oriented_multiplicity_free_into_slice,
+    tensorcontract_owned_multiplicity_free_into_slice, tensorproduct_owned_checked_generic,
     tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
     tree_transform_owned_multiplicity_free_into, OrientedContractionKind,
 };
@@ -417,9 +418,9 @@ pub(crate) use checked_generic_contract::TypedFacadeError;
 #[allow(unused_imports)]
 use checked_generic_contract::{
     compose_multiplicity_free, compose_multiplicity_free_with_lane, contract_destination,
-    contract_multiplicity_free, contract_multiplicity_free_into,
-    contract_multiplicity_free_ordered, trace_pair_axes, trace_pairs_checked_generic,
-    write_dense_identity_blocks, write_identity_blocks_generic, TracePairAxes,
+    contract_multiplicity_free, contract_multiplicity_free_into, trace_pair_axes,
+    trace_pairs_checked_generic, write_dense_identity_blocks, write_identity_blocks_generic,
+    TracePairAxes,
 };
 pub use checked_generic_contract::{
     reject_non_symmetric_contraction, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED,

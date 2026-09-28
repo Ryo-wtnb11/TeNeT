@@ -618,6 +618,38 @@ fn zero_copy_candidates_with_an_output_permute_match_tensorkit_and_the_dense_exp
     at::<Complex32>();
 }
 
+/// #1626: the pooled copyC temporary changes no arithmetic. Every probe
+/// equals its literal zero-copy contraction then permute, bit for bit.
+fn output_permute_bits<R, D>(v: &GradedSpace<R>, w: &GradedSpace<R>, symmetry: &str)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload + PartialEq,
+{
+    let runtime = Runtime::builder().build().unwrap();
+    let cases = output_permute_probes::<R, D>(&runtime, v)
+        .into_iter()
+        .chain([(uneven_swap::<R, D>(&runtime, v, w), true)]);
+    for (case, swapped) in cases {
+        let what = format!("{symmetry} {} [{}]", case.name, D::NAME);
+        let expected = contract_then_permute(&case, swapped);
+        for _ in 0..2 {
+            let actual = case.host();
+            assert_eq!(actual.codomain(), expected.codomain(), "{what}");
+            assert_eq!(actual.domain(), expected.domain(), "{what}");
+            assert!(
+                actual.dense_data().unwrap() == expected.dense_data().unwrap(),
+                "{what}"
+            );
+        }
+    }
+}
+
+#[test]
+fn zero_copy_candidates_with_an_output_permute_equal_contract_then_permute_bitwise() {
+    output_permute_bits::<_, f64>(&u1_non_self_dual(), &u1_second(), "U(1)");
+    output_permute_bits::<_, Complex64>(&su2(), &su2_second(), "SU(2)");
+}
+
 #[test]
 fn uneven_swapped_candidate_with_an_output_permute_runs_one_transform() {
     let _guard = MEASUREMENT_LOCK

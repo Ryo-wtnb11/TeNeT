@@ -288,21 +288,22 @@ where
     // adjoint always), while the zero-copy candidate borrows both operands
     // and only `C` moves. This is TensorKit `blas_contract!`'s `copyC`: a
     // temporary, then a permuting `tensoradd!` into `destination`.
+    //
+    // TensorKit allocates `Cnew` as a temporary (`tensoralloc_add(...,
+    // Val(true), allocator)`) and frees it after the permute; here it is the
+    // leased context's pooled `copyC` scratch, so the returned tensor is the
+    // only output-sized allocation of a warm call.
     let lhs_open = lhs.rank() - lhs_axes.len();
     let rhs_open = rhs.rank() - rhs_axes.len();
     let identity = OutputAxisOrder::identity();
-    let (temporary, lhs_offset, rhs_offset) = match order {
-        tenet_tensors::FusionContractOrientation::LhsRhs => (
-            contract_multiplicity_free_ordered(lhs, rhs, lhs_axes, rhs_axes, identity)?,
-            0,
-            0,
-        ),
-        tenet_tensors::FusionContractOrientation::RhsLhs => (
-            contract_multiplicity_free_ordered(rhs, lhs, rhs_axes, lhs_axes, identity)?,
-            rhs_open,
-            lhs_open,
-        ),
+    let (first, second, first_axes, second_axes, lhs_offset, rhs_offset) = match order {
+        tenet_tensors::FusionContractOrientation::LhsRhs => (lhs, rhs, lhs_axes, rhs_axes, 0, 0),
+        tenet_tensors::FusionContractOrientation::RhsLhs => {
+            (rhs, lhs, rhs_axes, lhs_axes, rhs_open, lhs_open)
+        }
     };
+    let temporary_space =
+        contract_destination(first, second, first_axes, second_axes, identity, None)?;
     // `temporary` lists the rhs open axes first under `RhsLhs`.
     let position = |axis: usize| {
         if axis < lhs_open {
@@ -312,19 +313,34 @@ where
         }
     };
     let (codomain, domain) = output_axes.split_at(codomain_rank);
-    let body = temporary
-        .owned_body()
-        .expect("contraction results are owned");
+    let temporary_len = temporary_space.space().required_len()?;
     let mut lease = lhs.runtime.lease_context()?;
+    let lane = lease.context().multiplicity_free_lane::<D>()?;
+    let mut temporary = lane.take_copy_c_scratch();
+    // Stale pooled values are never read: `Axpby(0)` is a strong zero that
+    // assigns every destination block, inactive ones included.
+    temporary.resize_filled(temporary_len, D::from_real(0.0));
+    contract_multiplicity_free_into_slice(
+        lane,
+        first,
+        second,
+        first_axes,
+        second_axes,
+        identity,
+        &temporary_space,
+        temporary.as_mut_slice(),
+        tenet_tensors::ContractDestinationInit::Axpby(D::from_real(0.0)),
+    )?;
     let data = tree_transform_owned_multiplicity_free_into(
-        lease.context().multiplicity_free_lane::<D>()?,
-        BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())?,
+        lane,
+        BoundDynamicTensorRef::try_new(&temporary_space, temporary.as_slice())?,
         TreeTransformOperation::permute(
             codomain.iter().copied().map(position),
             domain.iter().copied().map(position),
         ),
         &destination,
     )?;
+    lane.restore_copy_c_scratch(temporary);
     Ok(TensorMap {
         runtime: lhs.runtime.clone(),
         repr: owned_repr(TypedTensorBody::dense(destination, data)),
@@ -385,21 +401,6 @@ where
     )
 }
 
-pub(super) fn contract_multiplicity_free_ordered<R, D>(
-    lhs: &TensorMap<R, D>,
-    rhs: &TensorMap<R, D>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_order: OutputAxisOrder<'_>,
-) -> Result<TensorMap<R, D>, Error>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: TensorScalar,
-{
-    let destination = contract_destination(lhs, rhs, lhs_axes, rhs_axes, output_order, None)?;
-    contract_multiplicity_free_into(lhs, rhs, lhs_axes, rhs_axes, output_order, destination)
-}
-
 /// Contracts into `destination`, which [`contract_destination`] derived for
 /// the same operands, axes and order.
 pub(super) fn contract_multiplicity_free_into<R, D>(
@@ -415,12 +416,49 @@ where
     D: TensorScalar,
 {
     let mut lease = lhs.runtime.lease_context()?;
-    let data = if let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
+    let mut data = tenet_tensors::zeroed_payload(destination.space().required_len()?);
+    contract_multiplicity_free_into_slice(
+        lease.context().multiplicity_free_lane::<D>()?,
+        lhs,
+        rhs,
+        lhs_axes,
+        rhs_axes,
+        output_order,
+        &destination,
+        &mut data,
+        tenet_tensors::ContractDestinationInit::Zeroed,
+    )?;
+    Ok(TensorMap {
+        runtime: lhs.runtime.clone(),
+        repr: owned_repr(TypedTensorBody::dense(destination, data)),
+    })
+}
+
+/// [`contract_multiplicity_free_into`] writing the caller's `data`, initialized
+/// per `init`, through the caller's lane.
+#[allow(clippy::too_many_arguments)]
+fn contract_multiplicity_free_into_slice<R, D>(
+    context: &mut crate::runtime::Ctx<D, tenet_core::RuleIdentity>,
+    lhs: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_order: OutputAxisOrder<'_>,
+    destination: &BoundDynamicFusionMapSpace<R>,
+    data: &mut [D],
+    init: tenet_tensors::ContractDestinationInit<D>,
+) -> Result<(), Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
+    if let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
         (&lhs.repr, &rhs.repr)
     {
-        tensorcontract_owned_multiplicity_free_into(
-            lease.context().multiplicity_free_lane::<D>()?,
-            &destination,
+        tensorcontract_owned_multiplicity_free_into_slice(
+            context,
+            destination,
+            data,
             BoundDynamicTensorRef::try_new(
                 &lhs_body.space,
                 lhs_body.materialized_dense_data().as_ref(),
@@ -432,13 +470,15 @@ where
             lhs_axes,
             rhs_axes,
             output_order,
-        )?
+            init,
+        )?;
     } else {
         let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
         let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
-        tensorcontract_oriented_multiplicity_free_into(
-            lease.context().multiplicity_free_lane::<D>()?,
-            &destination,
+        tensorcontract_oriented_multiplicity_free_into_slice(
+            context,
+            destination,
+            data,
             lhs_operand,
             &lhs_data,
             rhs_operand,
@@ -447,12 +487,10 @@ where
             rhs_axes,
             output_order,
             OrientedContractionKind::Contract,
-        )?
-    };
-    Ok(TensorMap {
-        runtime: lhs.runtime.clone(),
-        repr: owned_repr(TypedTensorBody::dense(destination, data)),
-    })
+            init,
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn compose_multiplicity_free<R, D>(
@@ -742,5 +780,106 @@ where
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn exp(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
         self.with_leg_roles(rows, cols, <R::Mode as TypedTensorExpDispatch<R, D>>::exp)
+    }
+}
+
+#[cfg(test)]
+mod copy_c_scratch_tests {
+    use std::sync::Arc;
+
+    use tenet_core::{U1FusionRule, U1Irrep};
+
+    use crate::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
+
+    fn retained_len(runtime: &Runtime) -> usize {
+        let mut lease = runtime.lease_context().unwrap();
+        lease
+            .context()
+            .multiplicity_free_lane::<f64>()
+            .unwrap()
+            .copy_c_scratch_len()
+    }
+
+    /// The copyC temporary lives in the leased context and is sized by the
+    /// latest temporary, so a Runtime retains at most one largest temporary
+    /// per idle context — the same bound as the context's other scratch.
+    #[test]
+    fn copy_c_scratch_holds_the_latest_temporary_only() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space =
+            |n| GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), n)]).unwrap();
+        let spec = ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[0, 2],
+            domain: &[1],
+        };
+        let run = |n: usize| {
+            let (p, c) = (space(n), space(3));
+            let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&p, &p], [&c], 1)
+                .unwrap();
+            let b = TensorMap::rand_with_seed(&runtime, [&c], [&p], 2).unwrap();
+            drop(a.contract(&b, &spec).unwrap());
+            retained_len(&runtime)
+        };
+        assert_eq!(retained_len(&runtime), 0);
+        assert_eq!(run(5), 125);
+        assert_eq!(run(7), 343);
+        assert_eq!(run(5), 125);
+    }
+
+    /// The pooled temporary is written with a strong-zero `Axpby(0)`, so a
+    /// stale buffer never leaks: a NaN-poisoned buffer longer than the
+    /// temporary (so resizing writes nothing) still gives exactly the
+    /// contract-then-permute result, including the temporary's inactive block.
+    #[test]
+    fn stale_copy_c_scratch_never_reaches_the_result() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        // `c` carries charge 0 only, so the temporary `p ⊗ q ← r` block of
+        // coupled charge 1 receives no GEMM contribution.
+        let open = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
+        )
+        .unwrap();
+        let bond = GradedSpace::try_new(provider, [(U1Irrep::new(0), 4)]).unwrap();
+        let a =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&open, &open], [&bond], 3)
+                .unwrap();
+        let b = TensorMap::rand_with_seed(&runtime, [&bond], [&open], 4).unwrap();
+        let spec = ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[0, 2],
+            domain: &[1],
+        };
+        let expected = a
+            .contract(
+                &b,
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2],
+                },
+            )
+            .unwrap()
+            .permute(&[0, 2], &[1])
+            .unwrap();
+        const POISONED_LEN: usize = 100_000;
+        {
+            let mut lease = runtime.lease_context().unwrap();
+            let lane = lease.context().multiplicity_free_lane::<f64>().unwrap();
+            let mut scratch = lane.take_copy_c_scratch();
+            scratch.resize_filled(POISONED_LEN, f64::NAN);
+            lane.restore_copy_c_scratch(scratch);
+        }
+        let actual = a.contract(&b, &spec).unwrap();
+        // What: the copyC route ran on the poisoned buffer.
+        assert!(retained_len(&runtime) < POISONED_LEN);
+        assert_eq!(actual.codomain(), expected.codomain());
+        assert_eq!(actual.domain(), expected.domain());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
     }
 }
