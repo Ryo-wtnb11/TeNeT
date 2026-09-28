@@ -36,7 +36,7 @@
 //! spectrum downloads) therefore stalls
 //! every Runtime on that device. Opening a device also pins CubeCL to one
 //! stream per device for the whole process (#1391), so every device write,
-//! including `*_overwrite_into` destinations and reused scratch, is ordered
+//! including `*_into` destinations and reused scratch, is ordered
 //! before every later read or write from any thread; building a device
 //! Runtime fails if CubeCL was already configured with more streams. GPU work
 //! of different threads therefore never overlaps. The setting is

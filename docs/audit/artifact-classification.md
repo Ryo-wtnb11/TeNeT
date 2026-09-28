@@ -48,7 +48,7 @@ the source, dependency graph, and result.
 | `benchmarks/issue_118_warm_cache.md` | Historical | Explicit baseline/candidate SHA evidence for #118. Keep only as historical measurement record. |
 | `benchmarks/issue_124_allocation_evidence.md` | Historical | Issue-specific allocator evidence and future API proposal; not a current general cache/memory contract. Keep with #124 history. |
 | `benchmarks/issue_245_layout_cache.md` | Historical | Explicit noisy-machine comparison between old main and branch SHAs. It already says it is not formal proof. Archive with #245. |
-| `benchmarks/operation_matrix.md` | Valid | Describes the current typed `permute_overwrite_into`/`contract_overwrite_into` harness, its cold/warm limits and unavailable counters without inventing data. |
+| `benchmarks/operation_matrix.md` | Valid | Describes the current typed `permute_into`/`contract_into` harness, its cold/warm limits and unavailable counters without inventing data. |
 | `benchmarks/operation_matrix.sh` | Valid | Runs the current typed executable, records TeNeT/Tenferro authority and fixes thread settings. It remains diagnostic rather than required CI. |
 | `benchmarks/tensorkit_microbench.jl` | Salvageable | Useful equivalent TensorKit workloads, but the surrounding baseline is TensorKit 0.16.2 and old TeNeT expert execution. Repin and pair with the new harness before reuse. |
 | `benchmarks/tensorkit_oracle/Project.toml` | Valid | Pins the public TensorKit dependency to current-main revision `f87ca7f`. |

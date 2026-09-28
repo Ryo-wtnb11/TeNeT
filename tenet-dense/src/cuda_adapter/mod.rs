@@ -50,7 +50,7 @@ mod tests;
 pub use context::{CudaDenseContext, CudaPlanCacheStats};
 pub use elementwise::{
     cuda_conj, cuda_copy_region_into, cuda_copy_strided_into, cuda_gather_elements,
-    cuda_gather_member_elements, cuda_gather_members, cuda_region_axpby,
+    cuda_gather_member_elements, cuda_gather_members, cuda_region_axpby, cuda_region_scale,
     cuda_region_trace_accumulate, cuda_region_zero, cuda_widen, CudaRegionBeta,
     CudaRegionCoefficient,
 };

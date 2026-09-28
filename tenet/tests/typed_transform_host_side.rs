@@ -129,7 +129,7 @@ fn a_runtime_without_a_device_reports_no_device_transform_state_and_still_clears
 }
 
 // ---------------------------------------------------------------------------
-// The Host contract the device `*_overwrite_into` mirrors (issue #1329)
+// The Host contract the device `*_into` mirrors (issue #1329)
 // ---------------------------------------------------------------------------
 
 /// The positions that hold a NaN, so a NaN *pattern* can be compared rather
@@ -150,7 +150,7 @@ fn nan_positions(data: &[f64]) -> Vec<usize> {
 /// Only the two storage nouns differ on device ("host" becomes "CUDA"), which
 /// is why this test spells them out.
 #[test]
-fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
+fn the_host_into_preconditions_have_a_fixed_order_and_wording() {
     let runtime = Runtime::builder().build().unwrap();
     let v = u1_leg();
     let source: TensorMap<_, f64> =
@@ -173,7 +173,7 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
         TensorMap::from_subblock_fn(&other, [&z3_leg], [&z3_leg], |_, _| f64::NAN).unwrap();
     assert_eq!(
         z2_source
-            .permute_overwrite_into(&mut foreign, &[0], &[1], 1.0)
+            .permute_into(&[0], &[1], &mut foreign, 1.0, 0.0)
             .unwrap_err(),
         tenet::prelude::Error::RuntimeMismatch
     );
@@ -185,7 +185,7 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
         z2_source
             .adjoint()
             .unwrap()
-            .permute_overwrite_into(&mut z3_destination, &[0], &[1], 1.0)
+            .permute_into(&[0], &[1], &mut z3_destination, 1.0, 0.0)
             .unwrap_err(),
         tenet::prelude::Error::RuleMismatch
     );
@@ -197,7 +197,7 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
     assert_eq!(
         message(
             lazy_source
-                .permute_overwrite_into(&mut lazy_destination, &[2, 0], &[1, 3], 1.0)
+                .permute_into(&[2, 0], &[1, 3], &mut lazy_destination, 1.0, 0.0)
                 .unwrap_err()
         ),
         "invalid argument: typed destination tree transform requires an ordinary \
@@ -206,7 +206,7 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
     assert_eq!(
         message(
             source
-                .permute_overwrite_into(&mut lazy_destination, &[2, 0], &[1, 3], 1.0)
+                .permute_into(&[2, 0], &[1, 3], &mut lazy_destination, 1.0, 0.0)
                 .unwrap_err()
         ),
         "invalid argument: destination must use ordinary dense host storage"
@@ -218,7 +218,7 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
     assert_eq!(
         message(
             source
-                .permute_overwrite_into(&mut alias, &[0, 0], &[1, 3], 1.0)
+                .permute_into(&[0, 0], &[1, 3], &mut alias, 1.0, 0.0)
                 .unwrap_err()
         ),
         "invalid argument: destination storage must not alias an input"
@@ -230,7 +230,7 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
     assert_eq!(
         message(
             source
-                .permute_overwrite_into(&mut wrong_space, &[2, 0], &[1, 3], 1.0)
+                .permute_into(&[2, 0], &[1, 3], &mut wrong_space, 1.0, 0.0)
                 .unwrap_err()
         ),
         "invalid argument: destination fusion space or block layout does not match \
@@ -243,20 +243,20 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
     assert_eq!(
         message(
             source
-                .permute_overwrite_into(&mut shared, &[2, 0], &[1, 3], 1.0)
+                .permute_into(&[2, 0], &[1, 3], &mut shared, 1.0, 0.0)
                 .unwrap_err()
         ),
-        "invalid argument: destination storage must be uniquely owned"
+        "the destination shares its storage with another tensor handle"
     );
     drop(shared_handle);
 
-    // `repartition_overwrite_into` onto a destination of another rank.
+    // `repartition_into` onto a destination of another rank.
     let mut rank_three =
         TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v], |_, _| f64::NAN).unwrap();
     assert_eq!(
         message(
             source
-                .repartition_overwrite_into(&mut rank_three, 1.0)
+                .repartition_into(&mut rank_three, 1.0, 0.0)
                 .unwrap_err()
         ),
         "invalid argument: repartition destination rank 3 does not match source rank 4"
@@ -264,7 +264,7 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
 }
 
 #[test]
-fn host_overwrite_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() {
+fn host_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() {
     // The three Host destination semantics: Overwrite clears whatever the
     // destination held, `alpha == 0` writes zeros whatever the source holds
     // (#1438), and an identity axis list is still written rather than short
@@ -281,7 +281,7 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() 
         .iter()
         .all(|value| value.is_nan()));
     source
-        .permute_overwrite_into(&mut poisoned, &[2, 0], &[1, 3], 1.0)
+        .permute_into(&[2, 0], &[1, 3], &mut poisoned, 1.0, 0.0)
         .unwrap();
     assert!(
         poisoned
@@ -303,16 +303,14 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() 
     // No identity short circuit: `alpha * self` is written.
     let mut identity = source.scale(f64::NAN);
     source
-        .permute_overwrite_into(&mut identity, &[0, 1], &[2, 3], -2.5)
+        .permute_into(&[0, 1], &[2, 3], &mut identity, -2.5, 0.0)
         .unwrap();
     assert_eq!(
         identity.dense_data().unwrap(),
         source.scale(-2.5).dense_data().unwrap()
     );
     let mut same_split = source.scale(f64::NAN);
-    source
-        .repartition_overwrite_into(&mut same_split, 2.0)
-        .unwrap();
+    source.repartition_into(&mut same_split, 2.0, 0.0).unwrap();
     assert_eq!(
         same_split.dense_data().unwrap(),
         source.scale(2.0).dense_data().unwrap()
@@ -340,7 +338,7 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() 
     for alpha in [0.0, -0.0] {
         let mut destination = nan_source.permute(&[1, 2], &[3, 0]).unwrap();
         nan_source
-            .permute_overwrite_into(&mut destination, &[1, 2], &[3, 0], alpha)
+            .permute_into(&[1, 2], &[3, 0], &mut destination, alpha, 0.0)
             .unwrap();
         assert!(
             destination

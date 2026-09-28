@@ -145,4 +145,30 @@ pub trait StorageGemm<D, DDst, DLhs, DRhs> {
             message: "storage GEMM backend does not implement scaled replay",
         })
     }
+
+    /// `dst = alpha * op(lhs) op(rhs) + beta * dst` for one job: the scaled
+    /// entry with the caller's `beta` in the GEMM epilogue. A backend without
+    /// it rejects the call before writing, so the first job of a replay
+    /// decides the capability for all of them.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_range_axpby_with_ops_into(
+        &mut self,
+        _dst: &mut DDst,
+        _dst_offset: usize,
+        _lhs: &DLhs,
+        _lhs_offset: usize,
+        _rhs: &DRhs,
+        _rhs_offset: usize,
+        _rows: usize,
+        _contracted: usize,
+        _cols: usize,
+        _lhs_op: MatrixOp,
+        _rhs_op: MatrixOp,
+        _alpha: D,
+        _beta: D,
+    ) -> Result<(), OperationError> {
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "storage GEMM backend does not implement a beta-accumulating replay",
+        })
+    }
 }

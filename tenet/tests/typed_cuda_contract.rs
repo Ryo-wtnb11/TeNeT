@@ -18,7 +18,7 @@
 //! 4. fermionic providers (G2c-2, #1347): device == Host == TensorKit's
 //!    sequence with the twist on either role, and the TensorKit-valued FZ2
 //!    loops as explicit device `contract` calls;
-//! 5. `contract_overwrite_into` (G2c-1b, #1346): into a NaN-poisoned device
+//! 5. `contract_into` (G2c-1b, #1346): into a NaN-poisoned device
 //!    destination, device == Host eager `contract` (whose overwrite twin is
 //!    pinned ungated) == the same independent oracles, on every fixture
 //!    above plus destinations with blocks no GEMM writes; warm calls transfer
@@ -549,8 +549,14 @@ fn check_splits<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
                 &label,
             );
             let mut destination = host.scale(D::entry(7.5, 0.0)).to_cuda().unwrap();
-            lhs.contract_overwrite_into(&rhs, &mut destination, &spec, D::entry(1.0, 0.0))
-                .unwrap();
+            lhs.contract_into(
+                &rhs,
+                &spec,
+                &mut destination,
+                D::entry(1.0, 0.0),
+                D::entry(0.0, 0.0),
+            )
+            .unwrap();
             assert_close(
                 destination.to_host().unwrap().dense_data().unwrap(),
                 host.dense_data().unwrap(),
@@ -610,21 +616,22 @@ fn malformed_rank_five_specs() -> [ContractSpec<'static>; 4] {
 }
 
 // ---------------------------------------------------------------------------
-// `contract_overwrite_into` (G2c-1b, #1346)
+// `contract_into` (G2c-1b, #1346)
 // ---------------------------------------------------------------------------
 
-/// Device `contract_overwrite_into` of `case` into a NaN-poisoned device
+/// Device `contract_into` of `case` into a NaN-poisoned device
 /// destination, downloaded.
 fn device_overwrite<R: DeviceRule, D: DevicePayload>(case: &Case<R, D>) -> TensorMap<R, D> {
     let mut destination = poisoned_destination(case).to_cuda().unwrap();
     case.lhs
         .to_cuda()
         .unwrap()
-        .contract_overwrite_into(
+        .contract_into(
             &case.rhs.to_cuda().unwrap(),
-            &mut destination,
             &case.spec(),
+            &mut destination,
             D::entry(1.0, 0.0),
+            D::entry(0.0, 0.0),
         )
         .unwrap();
     destination.to_host().unwrap()
@@ -700,7 +707,7 @@ fn every_overwrite_fixture<D: DevicePayload>(runtime: &Runtime) {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn overwrite_into_a_poisoned_destination_matches_the_host_and_the_oracles_at_every_dtype() {
+fn contract_into_a_poisoned_destination_matches_the_host_and_the_oracles_at_every_dtype() {
     // What: general axes, lazy adjoints, the Host-`Structure` class, both
     // fermionic twist roles, and destinations with blocks no GEMM writes —
     // by the core route, by an identity output and under an output transform
@@ -725,7 +732,7 @@ fn a_warm_overwrite_transfers_and_allocates_nothing() {
         let rhs = case.rhs.to_cuda().unwrap();
         let mut destination = poisoned_destination(&case).to_cuda().unwrap();
         let mut call = || {
-            lhs.contract_overwrite_into(&rhs, &mut destination, &case.spec(), 1.0)
+            lhs.contract_into(&rhs, &case.spec(), &mut destination, 1.0, 0.0)
                 .unwrap()
         };
         call();
@@ -821,11 +828,11 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
         let mut destination = host_destination.to_cuda().unwrap();
         let mut host_destination = host_destination;
         let expected = host_lhs
-            .contract_overwrite_into(host_rhs, &mut host_destination, &spec, 1.0)
+            .contract_into(host_rhs, &spec, &mut host_destination, 1.0, 0.0)
             .unwrap_err()
             .to_string();
         let (actual, counters) = delta(|| {
-            lhs.contract_overwrite_into(&rhs, &mut destination, &spec, 1.0)
+            lhs.contract_into(&rhs, &spec, &mut destination, 1.0, 0.0)
                 .unwrap_err()
                 .to_string()
         });
@@ -837,22 +844,22 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
         );
     }
 
-    // Runtime, shared ownership and alias, then the device's own alpha
-    // boundary.
+    // Runtime, shared ownership and alias. Every alpha and beta is supported
+    // (#1550), so there is no device scale boundary left to reject.
     let mut destination = poison().to_cuda().unwrap();
     let stranger = u1_rank_five::<f64>(&other).rhs.to_cuda().unwrap();
     let shared = destination.clone();
     let (errors, counters) = delta(|| {
         let spec = case.spec();
         let mut errors = vec![
-            lhs.contract_overwrite_into(&stranger, &mut destination, &spec, 1.0)
+            lhs.contract_into(&stranger, &spec, &mut destination, 1.0, 0.0)
                 .unwrap_err(),
-            lhs.contract_overwrite_into(&rhs, &mut destination, &spec, 1.0)
+            lhs.contract_into(&rhs, &spec, &mut destination, 1.0, 0.0)
                 .unwrap_err(),
         ];
         let mut lhs_alias = lhs.clone();
         errors.push(
-            lhs.contract_overwrite_into(&rhs, &mut lhs_alias, &spec, 1.0)
+            lhs.contract_into(&rhs, &spec, &mut lhs_alias, 1.0, 0.0)
                 .unwrap_err(),
         );
         errors
@@ -863,26 +870,13 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
         errors[0]
     );
     assert!(
-        errors[1].to_string().contains("uniquely owned"),
+        errors[1].to_string().contains("shares its storage"),
         "{}",
         errors[1]
     );
     assert!(errors[2].to_string().contains("alias"), "{}", errors[2]);
     drop(shared);
-    let (alpha, alpha_counters) = delta(|| {
-        lhs.contract_overwrite_into(&rhs, &mut destination, &case.spec(), 2.0)
-            .unwrap_err()
-    });
-    assert!(
-        matches!(alpha, tenet::prelude::Error::UnsupportedOnDevice(_)),
-        "{alpha:?}"
-    );
     assert_eq!(counters, CudaTransferStats::default(), "{counters:?}");
-    assert_eq!(
-        alpha_counters,
-        CudaTransferStats::default(),
-        "{alpha_counters:?}"
-    );
     assert_eq!(
         destination.to_host().unwrap().dense_data().unwrap(),
         poison_data.as_slice()

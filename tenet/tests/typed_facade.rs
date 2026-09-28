@@ -10911,30 +10911,32 @@ fn assert_host_contract_entries_reject_but_compose_admits<const ANYONIC: bool>()
         )
         .unwrap_err();
     let overwrite = lhs
-        .contract_overwrite_into(
+        .contract_into(
             &rhs,
-            &mut destination,
             &ContractSpec {
                 lhs: &[1],
                 rhs: &[0],
                 codomain: &[0],
                 domain: &[1],
             },
+            &mut destination,
             1.0,
+            0.0,
         )
         .unwrap_err();
     #[allow(deprecated)]
     let ordered_overwrite = lhs
-        .contract_overwrite_into(
+        .contract_into(
             &rhs,
-            &mut destination,
             &ContractSpec {
                 lhs: &[1],
                 rhs: &[0],
                 codomain: &[0],
                 domain: &[1],
             },
+            &mut destination,
             1.0,
+            0.0,
         )
         .unwrap_err();
     for error in [&ordered, &overwrite, &ordered_overwrite] {
@@ -11075,16 +11077,17 @@ fn assert_device_contract_entries_reject_but_compose_admits<const ANYONIC: bool>
         )
         .unwrap_err();
     let overwrite = lhs
-        .contract_overwrite_into(
+        .contract_into(
             &rhs,
-            &mut destination,
             &ContractSpec {
                 lhs: &[1],
                 rhs: &[0],
                 codomain: &[0],
                 domain: &[1],
             },
+            &mut destination,
             1.0,
+            0.0,
         )
         .unwrap_err();
     assert_eq!(tenet::dense::cuda_transfer_stats(), transfers);

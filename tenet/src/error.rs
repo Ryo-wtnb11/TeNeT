@@ -41,6 +41,11 @@ pub enum Error {
     UnsupportedOnDevice(String),
     /// Invalid user input (axes, sectors, spaces); the message says what.
     InvalidArgument(String),
+    /// A destination passed to an `*_into` operation shares its storage with
+    /// another handle (a shallow `Clone`). Writing it would change that clone
+    /// too, and replacing it would silently allocate, so the operation does
+    /// neither; drop the other handles or pass a tensor of its own.
+    DestinationShared,
     /// [`crate::prelude::RuntimeBuilder::build`] rejected contradictory or
     /// invalid settings.
     RuntimeConfig(RuntimeConfigError),
@@ -104,6 +109,10 @@ impl fmt::Display for Error {
                 write!(f, "unsupported on device: {message}")
             }
             Self::InvalidArgument(message) => write!(f, "invalid argument: {message}"),
+            Self::DestinationShared => write!(
+                f,
+                "the destination shares its storage with another tensor handle"
+            ),
             Self::RuntimeConfig(err) => write!(f, "invalid runtime configuration: {err}"),
             Self::BatchSignatureMismatch {
                 member: Some(member),

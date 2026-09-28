@@ -763,7 +763,7 @@ struct CudaHome {
 /// waits on a fresh event) or after it (the event already covers every write
 /// into `O`). No host synchronization is added: the lock orders enqueue only.
 /// A buffer bound in one lease and written in a later one
-/// (`*_overwrite_into` destinations, `CudaContractScratch`, pooled `tensor!`
+/// (`*_into` destinations, `CudaContractScratch`, pooled `tensor!`
 /// network intermediates) spans two leases and is ordered instead by the
 /// single CubeCL stream `CudaDenseContext::new` pins (#1391).
 ///
@@ -1035,7 +1035,7 @@ pub(crate) struct RuntimeExecutionConfig {
 /// tensor, safe to read through another Runtime on the same device (#1384).
 ///
 /// A buffer bound in an earlier lease and written again later (a
-/// `*_overwrite_into` destination, or reused scratch) is ordered by the
+/// `*_into` destination, or reused scratch) is ordered by the
 /// device's single CubeCL stream instead (#1391): the first device Runtime of
 /// the process sets CubeCL's `streaming.max_streams` to 1, so all device work
 /// of every thread, TeNeT or not, runs in enqueue order and never overlaps on

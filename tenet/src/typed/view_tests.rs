@@ -113,11 +113,14 @@ macro_rules! shared_suite {
 
         let mut view = a.materialize().unwrap();
         let mut owned = a.materialize().unwrap();
-        let (result, entries) = probe(|| view.axpby_assign($alpha, b.adjoint_view(), $beta));
-        assert_eq!(entries, 0, "{what}: axpby_assign");
+        let (result, entries) = probe(|| lazy.axpby_into(&mut view, $beta, $alpha));
+        assert_eq!(entries, 0, "{what}: axpby_into");
         result.unwrap();
-        owned.axpby_assign($alpha, &lazy, $beta).unwrap();
-        assert_same_tensor!(view, owned, format!("{what}: axpby_assign"));
+        lazy.materialize()
+            .unwrap()
+            .axpby_into(&mut owned, $beta, $alpha)
+            .unwrap();
+        assert_same_tensor!(view, owned, format!("{what}: axpby_into"));
 
         let (view, owned) = direct!(
             "cat",
@@ -195,37 +198,35 @@ macro_rules! mf_suite {
         let mut destination = owned.zeros_like();
         let mut expected = owned.zeros_like();
         let (result, entries) = probe(|| {
-            a.contract_overwrite_into(
+            a.contract_into(
                 b.adjoint_view(),
-                &mut destination,
                 &ContractSpec {
                     lhs: &[2],
                     rhs: &[0],
                     codomain: &[0, 1],
                     domain: &[2, 3],
                 },
+                &mut destination,
                 $alpha,
+                $alpha * 0.0,
             )
         });
-        assert_eq!(entries, 0, "{what}: contract_overwrite_into");
+        assert_eq!(entries, 0, "{what}: contract_into");
         result.unwrap();
-        a.contract_overwrite_into(
+        a.contract_into(
             &lazy,
-            &mut expected,
             &ContractSpec {
                 lhs: &[2],
                 rhs: &[0],
                 codomain: &[0, 1],
                 domain: &[2, 3],
             },
+            &mut expected,
             $alpha,
+            $alpha * 0.0,
         )
         .unwrap();
-        assert_same_tensor!(
-            destination,
-            expected,
-            format!("{what}: contract_overwrite_into")
-        );
+        assert_same_tensor!(destination, expected, format!("{what}: contract_into"));
 
         let (view, owned) = direct!("compose", b.compose(b.adjoint_view()), b.compose(&lazy));
         assert_same_tensor!(view, owned, format!("{what}: compose"));
@@ -439,36 +440,38 @@ mod cuda {
             let mut expected = owned.zeros_like().unwrap();
             let one = <$dtype>::from(1.0);
             let (result, entries) = probe(|| {
-                a.contract_overwrite_into(
+                a.contract_into(
                     b.adjoint_view(),
-                    &mut destination,
                     &ContractSpec {
                         lhs: &[2],
                         rhs: &[0],
                         codomain: &[0, 1],
                         domain: &[2, 3],
                     },
+                    &mut destination,
                     one,
+                    one * 0.0,
                 )
             });
-            assert_eq!(entries, 0, "{what}: contract_overwrite_into");
+            assert_eq!(entries, 0, "{what}: contract_into");
             result.unwrap();
-            a.contract_overwrite_into(
+            a.contract_into(
                 &lazy,
-                &mut expected,
                 &ContractSpec {
                     lhs: &[2],
                     rhs: &[0],
                     codomain: &[0, 1],
                     domain: &[2, 3],
                 },
+                &mut expected,
                 one,
+                one * 0.0,
             )
             .unwrap();
             assert_same_tensor!(
                 destination.to_host().unwrap(),
                 expected.to_host().unwrap(),
-                format!("{what}: contract_overwrite_into")
+                format!("{what}: contract_into")
             );
 
             let (view, owned) = direct!(

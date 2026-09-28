@@ -2745,17 +2745,12 @@ macro_rules! run_provider {
                         $min_time,
                         || match operation {
                             "permute" => {
-                                source.permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
+                                source.permute_into(&[1], &[2, 0], &mut destination, 1.0, 0.0)
                             }
-                            "transpose" => source.transpose_overwrite_into(
-                                &mut destination,
-                                &[2],
-                                &[1, 0],
-                                1.0,
-                            ),
-                            "repartition" => {
-                                source.repartition_overwrite_into(&mut destination, 1.0)
+                            "transpose" => {
+                                source.transpose_into(&[2], &[1, 0], &mut destination, 1.0, 0.0)
                             }
+                            "repartition" => source.repartition_into(&mut destination, 1.0, 0.0),
                             _ => unreachable!("fixed tree-operation table"),
                         },
                     )?;
@@ -2988,7 +2983,7 @@ macro_rules! run_provider {
                         "first_after_setup",
                         "warm_after_setup",
                         $min_time,
-                        || lhs.contract_overwrite_into(&rhs, &mut destination, &spec, 1.0),
+                        || lhs.contract_into(&rhs, &spec, &mut destination, 1.0, 0.0),
                     )?;
                     assert_same_tensor!(destination, expected, lhs);
                 }

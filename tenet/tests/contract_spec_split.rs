@@ -39,7 +39,7 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
 
 /// Checks every order and split of the open legs of `lhs · rhs` over the
 /// contracted `lhs_axes` / `rhs_axes`, through both `contract` and
-/// `contract_overwrite_into`, and returns how many specs it checked. A
+/// `contract_into`, and returns how many specs it checked. A
 /// destination of another split is rejected and left bit-identical.
 fn check_every_spec<R, D>(
     what: &str,
@@ -86,8 +86,14 @@ where
                 &label,
             );
             let mut destination = expected.scale(D::entry(7.5, 0.0));
-            lhs.contract_overwrite_into(rhs, &mut destination, &spec, D::entry(1.0, 0.0))
-                .unwrap();
+            lhs.contract_into(
+                rhs,
+                &spec,
+                &mut destination,
+                D::entry(1.0, 0.0),
+                D::entry(0.0, 0.0),
+            )
+            .unwrap();
             assert_eq!(destination.codomain(), expected.codomain(), "{label}");
             assert_close(
                 destination.dense_data().unwrap(),
@@ -108,8 +114,14 @@ where
         ..default
     };
     assert!(
-        lhs.contract_overwrite_into(rhs, &mut mismatched, &moved, D::entry(1.0, 0.0))
-            .is_err(),
+        lhs.contract_into(
+            rhs,
+            &moved,
+            &mut mismatched,
+            D::entry(1.0, 0.0),
+            D::entry(0.0, 0.0)
+        )
+        .is_err(),
         "{what}: a destination of another split must be rejected"
     );
     assert_eq!(

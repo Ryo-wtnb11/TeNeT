@@ -1164,7 +1164,7 @@ fn narrow_leg(dual: bool) -> SectorLeg {
 }
 
 /// One geometry per way the device completes a destination it did not
-/// allocate (`contract_overwrite_into`), with the core plan's inactive
+/// allocate (`contract_into`), with the core plan's inactive
 /// destination-block count when the core GEMMs write that destination
 /// directly (`None`: an output transform writes it).
 fn overwrite_cases() -> Vec<(&'static str, Case<U1FusionRule>, Option<usize>)> {
@@ -1385,7 +1385,7 @@ mod device {
 
         /// Replays `resolution` into a fresh zero destination and into a
         /// retained NaN-poisoned one (`dst_is_zeroed = false`, the
-        /// `contract_overwrite_into` mode), asserts the two agree, and
+        /// `contract_into` mode), asserts the two agree, and
         /// returns the first.
         fn execute<R>(
             &mut self,
@@ -1399,7 +1399,10 @@ mod device {
             let rhs = CudaStorage::<D>::upload(ctx, rhs).unwrap();
             let len = dst.space().required_len().unwrap();
             let mut results = Vec::new();
-            for (fill, dst_is_zeroed) in [(D::ZERO, true), (D::nan(), false)] {
+            for (fill, init) in [
+                (D::ZERO, crate::ContractDestinationInit::Zeroed),
+                (D::nan(), crate::ContractDestinationInit::Axpby(D::ZERO)),
+            ] {
                 let mut out = CudaStorage::<D>::upload_owned(ctx, vec![fill; len]).unwrap();
                 crate::execute_storage_contract_resolution_on_cuda(
                     ctx,
@@ -1408,9 +1411,10 @@ mod device {
                     resolution,
                     dst.space().structure(),
                     &mut out,
-                    dst_is_zeroed,
                     &lhs,
                     &rhs,
+                    D::ONE,
+                    init,
                 )
                 .unwrap();
                 results.push(out.download(ctx).unwrap());

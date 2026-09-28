@@ -3355,7 +3355,7 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
 /// destination's bytes untouched.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
+fn typed_cuda_contract_into_matches_the_returning_contraction() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     // `k` carries only charge 0, so the destination's charge-1 block has no
     // contributing GEMM and must come out as exactly `+0.0` from the zeroing
@@ -3399,16 +3399,17 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
             .unwrap()
     };
     let mut destination = poisoned();
-    lhs.contract_overwrite_into(
+    lhs.contract_into(
         &rhs,
-        &mut destination,
         &ContractSpec {
             lhs: &[1],
             rhs: &[0],
             codomain: &[0],
             domain: &[1],
         },
+        &mut destination,
         1.0,
+        0.0,
     )
     .unwrap();
     let written = destination
@@ -3422,7 +3423,7 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     // accumulate differently: within the tolerance rule. Unreached entries
     // are the zero fill, which is exact.
     numerics::assert_slices_close(
-        "overwrite_into against contract",
+        "contract_into against contract",
         &written,
         &expected_data,
         2,
@@ -3457,16 +3458,17 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     let lhs_data = lhs.to_host().unwrap().dense_data().unwrap().to_vec();
     let mut lhs_alias = lhs.clone();
     assert!(
-        lhs.contract_overwrite_into(
+        lhs.contract_into(
             &rhs,
-            &mut lhs_alias,
             &ContractSpec {
                 lhs: &[1],
                 rhs: &[0],
                 codomain: &[0],
                 domain: &[1]
             },
-            1.0
+            &mut lhs_alias,
+            1.0,
+            0.0,
         )
         .is_err(),
         "an lhs alias must be rejected"
@@ -3479,16 +3481,17 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     assert!(lhs
         .adjoint()
         .unwrap()
-        .contract_overwrite_into(
+        .contract_into(
             &rhs,
-            &mut adjoint_alias,
             &ContractSpec {
                 lhs: &[0],
                 rhs: &[0],
                 codomain: &[0],
                 domain: &[1]
             },
-            1.0
+            &mut adjoint_alias,
+            1.0,
+            0.0,
         )
         .is_err());
     assert_eq!(
@@ -3524,16 +3527,17 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
         "the drifted destination must have the same required length"
     );
     assert!(
-        lhs.contract_overwrite_into(
+        lhs.contract_into(
             &rhs,
-            &mut wrong_space,
             &ContractSpec {
                 lhs: &[1],
                 rhs: &[0],
                 codomain: &[0],
                 domain: &[1]
             },
-            1.0
+            &mut wrong_space,
+            1.0,
+            0.0,
         )
         .is_err(),
         "a destination whose block layout differs must be rejected"
@@ -3550,16 +3554,17 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
             .unwrap();
     let short_before = short.to_host().unwrap().dense_data().unwrap().to_vec();
     assert!(
-        lhs.contract_overwrite_into(
+        lhs.contract_into(
             &rhs,
-            &mut short,
             &ContractSpec {
                 lhs: &[1],
                 rhs: &[0],
                 codomain: &[0],
                 domain: &[1]
             },
-            1.0
+            &mut short,
+            1.0,
+            0.0,
         )
         .is_err(),
         "a destination of the wrong length must be rejected"
@@ -3573,34 +3578,46 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     let shared = destination.clone();
     assert_rejected(
         "shared ownership",
-        lhs.contract_overwrite_into(
+        lhs.contract_into(
             &rhs,
-            &mut destination,
             &ContractSpec {
                 lhs: &[1],
                 rhs: &[0],
                 codomain: &[0],
                 domain: &[1],
             },
+            &mut destination,
             1.0,
+            0.0,
         ),
         &destination,
     );
     drop(shared);
-    assert_rejected(
-        "alpha other than one",
-        lhs.contract_overwrite_into(
-            &rhs,
-            &mut destination,
-            &ContractSpec {
-                lhs: &[1],
-                rhs: &[0],
-                codomain: &[0],
-                domain: &[1],
-            },
-            2.0,
-        ),
-        &destination,
+    // Every alpha and beta is supported (#1550): `2 * contract + 0.5 * dst`,
+    // with the unreached block scaled rather than cleared.
+    lhs.contract_into(
+        &rhs,
+        &ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[0],
+            domain: &[1],
+        },
+        &mut destination,
+        2.0,
+        0.5,
+    )
+    .unwrap();
+    let accumulated: Vec<f64> = expected_data
+        .iter()
+        .zip(&poison_data)
+        .map(|(&value, &prior)| 2.0 * value + 0.5 * prior)
+        .collect();
+    numerics::assert_slices_close(
+        "contract_into alpha = 2, beta = 0.5",
+        destination.to_host().unwrap().dense_data().unwrap(),
+        &accumulated,
+        3,
     );
 
     // A destination whose blocks all exist but none of which any GEMM reaches:
@@ -3629,16 +3646,17 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
         .unwrap();
     let mut empty_destination = poisoned();
     empty_lhs
-        .contract_overwrite_into(
+        .contract_into(
             &empty_rhs,
-            &mut empty_destination,
             &ContractSpec {
                 lhs: &[1],
                 rhs: &[0],
                 codomain: &[0],
                 domain: &[1],
             },
+            &mut empty_destination,
             1.0,
+            0.0,
         )
         .unwrap();
     assert_eq!(
@@ -3678,16 +3696,17 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
         "the fixture must have a zero-length destination"
     );
     zero_lhs
-        .contract_overwrite_into(
+        .contract_into(
             &zero_rhs,
-            &mut zero_destination,
             &ContractSpec {
                 lhs: &[1],
                 rhs: &[0],
                 codomain: &[0],
                 domain: &[1],
             },
+            &mut zero_destination,
             1.0,
+            0.0,
         )
         .unwrap();
     assert_eq!(

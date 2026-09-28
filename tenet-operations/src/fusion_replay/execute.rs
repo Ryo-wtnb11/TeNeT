@@ -816,6 +816,65 @@ where
         Ok(())
     }
 
+    /// `dst = alpha * (lhs · rhs) + beta * dst` over the blocks the GEMM jobs
+    /// write, purely over storage handles: each job's GEMM carries
+    /// `alpha * job_alpha` and `beta` in its own epilogue, so `beta` is applied
+    /// once per written element and never as a separate pass (TensorKit
+    /// `mul!(C, A, B, α, β)` per coupled sector). The jobs write disjoint
+    /// destination blocks, as [`Self::execute_direct_on_storage_prezeroed`]
+    /// already relies on. Blocks no job writes are the caller's: they are
+    /// [`Self::inactive_destination_regions`], which it scales by `beta`.
+    ///
+    /// Every job goes through the scaled GEMM entry; a caller with
+    /// `alpha = 1, beta = 0` keeps [`Self::execute_direct_on_storage_prezeroed`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_direct_on_storage_axpby<G, D, DDst, DLhs, DRhs>(
+        &self,
+        gemm: &mut G,
+        dst: &mut DDst,
+        lhs: &DLhs,
+        rhs: &DRhs,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        G: StorageGemm<D, DDst, DLhs, DRhs>,
+        D: RecouplingCoefficientAction<C>,
+        DDst: TensorStorage<D>,
+        DLhs: TensorStorage<D>,
+        DRhs: TensorStorage<D>,
+    {
+        self.require_fully_direct_storage()?;
+        if self.direct_batch.len() != self.direct_batch_alpha.len() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "storage-direct plan has misaligned GEMM coefficients",
+            });
+        }
+        for job in &self.direct_batch {
+            validate_storage_range(lhs.len(), job.lhs_offset, job.rows, job.contracted)?;
+            validate_storage_range(rhs.len(), job.rhs_offset, job.contracted, job.cols)?;
+            validate_storage_range(dst.len(), job.dst_offset, job.rows, job.cols)?;
+        }
+        for (job, &job_alpha) in self.direct_batch.iter().zip(&self.direct_batch_alpha) {
+            gemm.matmul_range_axpby_with_ops_into(
+                dst,
+                job.dst_offset,
+                lhs,
+                job.lhs_offset,
+                rhs,
+                job.rhs_offset,
+                job.rows,
+                job.contracted,
+                job.cols,
+                self.lhs_op,
+                self.rhs_op,
+                alpha.scale_by_coefficient(job_alpha),
+                beta,
+            )?;
+        }
+        Ok(())
+    }
+
     fn validate_replay_structures(
         &self,
         dst_structure: &Arc<BlockStructure>,

@@ -14,7 +14,7 @@
 //!   with each other and with the Host — and a twist-free control the Host
 //!   must *not* match, so every fixture really exercises the twist;
 //! * the TensorKit-valued FZ2 closed loops as explicit `contract` calls;
-//! * `contract_overwrite_into` over a NaN-poisoned destination equals the
+//! * `contract_into` over a NaN-poisoned destination equals the
 //!   returning contraction on every fixture (G2c-1b, #1346), so the Host
 //!   overwrite is the same oracle the device overwrite is gated against.
 
@@ -179,11 +179,12 @@ where
 {
     let mut destination = poisoned_destination(&case);
     case.lhs
-        .contract_overwrite_into(
+        .contract_into(
             &case.rhs,
-            &mut destination,
             &case.spec(),
+            &mut destination,
             D::entry(1.0, 0.0),
+            D::entry(0.0, 0.0),
         )
         .unwrap();
     assert_close(
@@ -229,7 +230,7 @@ fn every_overwrite_fixture<D: Payload>() {
 }
 
 #[test]
-fn host_overwrite_into_a_poisoned_destination_matches_the_returning_contraction() {
+fn host_into_a_poisoned_destination_matches_the_returning_contraction() {
     every_overwrite_fixture::<f64>();
     every_overwrite_fixture::<Complex64>();
     every_overwrite_fixture::<f32>();

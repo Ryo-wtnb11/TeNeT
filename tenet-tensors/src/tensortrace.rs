@@ -34,7 +34,7 @@ use tenet_operations::{ConjugateValue, RealStructuralCoefficient, RecouplingCoef
 mod cuda;
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
-pub use cuda::tensortrace_fusion_structure_accumulate_on_cuda;
+pub use cuda::tensortrace_fusion_structure_into_on_cuda;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TensorTraceStructure {

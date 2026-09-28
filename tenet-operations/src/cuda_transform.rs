@@ -30,7 +30,7 @@ use std::sync::Arc;
 use tenet_core::{BlockStructure, Placement, TensorStorage};
 pub use tenet_dense::DEFAULT_PLAN_CACHE_BUDGET_BYTES;
 use tenet_dense::{
-    cuda_matmul_region_into, cuda_region_axpby, cuda_region_zero, plan_cache_entries_for,
+    cuda_matmul_region_into, cuda_region_axpby, cuda_region_scale, plan_cache_entries_for,
     CudaDenseContext, CudaDenseStorage, CudaRegion, CudaRegionBeta, CudaRegionCoefficient,
     CudaScalar, DenseError,
 };
@@ -49,11 +49,12 @@ use crate::{OperationError, RecouplingCoefficientAction, TreeTransformStructure}
 
 /// How a device replay treats the destination it writes.
 ///
-/// [`Self::Overwrite`] is the destination-independent mode the typed
-/// `*_overwrite_into` APIs run in: every inactive destination layout is zeroed
-/// and every active one is assigned, so a destination holding NaN comes back
-/// clean. [`Self::Axpby`] accumulates into the destination and is supported for
-/// `beta == 1` only — see [`CudaTreeTransformExecutor::replay`].
+/// [`Self::Overwrite`] is the destination-independent mode: every inactive
+/// destination layout is zeroed and every active one is assigned, so a
+/// destination holding NaN comes back clean. [`Self::Axpby`] is
+/// `dst = alpha * T(src) + beta * dst` for any `beta`, the mode the typed
+/// `*_into` APIs run in; `Axpby(0)` is `Overwrite` — see
+/// [`CudaTreeTransformExecutor::replay`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CudaTreeTransformDestination<D> {
     Overwrite,
@@ -68,8 +69,8 @@ pub enum CudaTreeTransformDestination<D> {
 /// vector, or `None` where the host copies unscaled and the context's shared
 /// `1` is the operand. `zero_coefficient` marks a Single block whose
 /// coefficient is zero: like the host (VectorInterface's `scale(x, 0) = 0`)
-/// it writes zeros under `Overwrite` and adds nothing under `Axpby(1)`,
-/// without reading the source.
+/// it leaves `beta * dst` (zeros under `Overwrite`), without reading the
+/// source.
 struct PreparedMove {
     source: CudaRegion,
     destination: CudaRegion,
@@ -377,18 +378,25 @@ impl CudaTreeTransformExecutor {
     ///
     /// `alpha` is the caller's scale on the transformed source, the host's own
     /// `alpha` argument (`dst = alpha * T(src)` under [`Overwrite`], plus
-    /// `1 * dst` under [`Axpby(1)`]). It reaches exactly where the host applies
+    /// `beta * dst` under [`Axpby(beta)`]). It reaches exactly where the host applies
     /// it: every Single-block move and every Multi-block *scatter*, never the
     /// pack columns and never the recoupling GEMM, which the host runs with
-    /// `1`. Zero fills of inactive destination layouts ignore it, as they do on
-    /// the host, so [`Overwrite`] still cleans a poisoned destination.
+    /// `1`. The inactive destination layouts ignore it, as they do on the
+    /// host: they become `beta * dst` through a zero-source move with `beta`
+    /// in its epilogue (a zero fill for `beta = 0`, so [`Overwrite`] still
+    /// cleans a poisoned destination, and nothing for `beta = 1`).
+    ///
+    /// `beta` rides the epilogue of the move or scatter that writes each
+    /// active layout; every destination layout is written by exactly one of
+    /// them, so `beta` is applied once per element and never as a separate
+    /// pass.
     ///
     /// `alpha == 0` (IEEE comparison, so `-0.0` is a zero scale) follows
     /// VectorInterface's `scale(x, 0) = zero(x) * 0`, as the host does
-    /// (#1438): whatever the source holds, `Overwrite` writes zeros over every
-    /// written and inactive layout (region zero fills; no pack, GEMM or source
-    /// read) and `Axpby(1)` leaves the destination as it is. A Single block
-    /// whose structural coefficient is zero is treated the same way.
+    /// (#1438): whatever the source holds, every written and inactive layout
+    /// becomes `beta * dst` (region zero fills under `Overwrite`, nothing under
+    /// `Axpby(1)`; no pack, GEMM or source read). A Single block whose
+    /// structural coefficient is zero is treated the same way.
     ///
     /// Disclosed differences from the host's arithmetic, all within dtype
     /// tolerance and none of them a change of the written block set:
@@ -405,16 +413,13 @@ impl CudaTreeTransformExecutor {
     ///
     /// [`Overwrite`]: CudaTreeTransformDestination::Overwrite
     /// [`Axpby(1)`]: CudaTreeTransformDestination::Axpby
+    /// [`Axpby(beta)`]: CudaTreeTransformDestination::Axpby
     ///
     /// # Capability boundaries
     ///
     /// All of these are reported before any device work — no upload, no
     /// allocation, no plan-cache change:
     ///
-    /// - `Axpby(beta)` with `beta` neither `0` nor `1`. Tenferro (0.5.0 and
-    ///   0.6.0) has no in-place strided scale, so a general `beta` is
-    ///   inexpressible. `beta == 0` is `Overwrite`: the host's `scale(dst, 0)`
-    ///   is zero even for a NaN destination (#1438);
     /// - a layout the device region primitive cannot express (a negative
     ///   stride or offset, or a destination that is not proven injective).
     ///
@@ -423,9 +428,10 @@ impl CudaTreeTransformExecutor {
     /// One `dot_general` submission per non-empty Single block, per pack and
     /// scatter column and per inactive destination layout, plus one GEMM per
     /// recoupling job — the same counts as the host's strided passes and its
-    /// `matmul_batch_axpby_into` jobs. A zero `alpha` submits only the zero
-    /// fills under `Overwrite` (the first one may grow the zero template to
-    /// the largest written layout, one upload) and nothing under `Axpby(1)`. The first replay of a structure uploads
+    /// `matmul_batch_axpby_into` jobs. A zero `alpha` submits only the
+    /// zero-source moves over the written layouts (the first one may grow the
+    /// zero template to the largest written layout, one upload) and nothing
+    /// under `Axpby(1)`. The first replay of a structure uploads
     /// its coefficient vector, sizes the context zero template and grows the
     /// transform workspace to `Σ_b element_count_b × (src_count_b + dst_count_b)`
     /// elements; every later replay of the same structure on the same context
@@ -491,8 +497,8 @@ impl CudaTreeTransformExecutor {
     /// replay uploads nothing more: θ is a descriptor scalar, not an operand.
     ///
     /// `alpha == 0` takes the zero route of [`Self::replay`] and ignores θ:
-    /// zeros under `Overwrite`, the destination unchanged under `Axpby(1)`, as
-    /// on the host (#1438). A fermionic twist is `±1`, so `alpha * θ_b` is
+    /// `beta * dst` everywhere — zeros under `Overwrite`, the destination
+    /// unchanged under `Axpby(1)` — as on the host (#1438). A fermionic twist is `±1`, so `alpha * θ_b` is
     /// non-zero for every non-zero `alpha`; a θ that would make it zero is
     /// rejected.
     ///
@@ -551,11 +557,7 @@ impl CudaTreeTransformExecutor {
             CudaTreeTransformDestination::Axpby(beta) if beta == D::ONE => {
                 CudaRegionBeta::Accumulate
             }
-            CudaTreeTransformDestination::Axpby(_) => {
-                return Err(OperationError::UnsupportedDeviceTreeTransform {
-                    message: "device tree transform accumulates with beta = 1 only",
-                })
-            }
+            CudaTreeTransformDestination::Axpby(beta) => CudaRegionBeta::Scale(beta),
         };
         let task = structure.task_view()?;
         let context = ContextIdentity(ctx.identity());
@@ -600,7 +602,8 @@ impl CudaTreeTransformExecutor {
             }
         };
         // Before any submission, so the fills below find their plans covered.
-        if matches!(beta, CudaRegionBeta::Overwrite) {
+        // A scaling fill has the zero fill's region signature.
+        if !matches!(beta, CudaRegionBeta::Accumulate) {
             if let Some(entry) = self.prepared.value_mut(index) {
                 if !entry.zero_fills_reserved && (alpha == D::ZERO || entry.zero_coefficient_moves)
                 {
@@ -643,11 +646,17 @@ impl CudaTreeTransformExecutor {
         )?;
 
         // VectorInterface's `scale(x, 0) = zero(x) * 0`, as on the host: a
-        // zero caller scale writes zeros over every written layout under
-        // Overwrite and adds nothing under Axpby(1), without reading the
-        // source. `-0.0 == 0.0` under IEEE comparison, so `-0.0` is zero too.
+        // zero caller scale leaves `beta * dst` over every written layout —
+        // zeros under Overwrite, the destination as it is under Axpby(1) —
+        // without reading the source. `-0.0 == 0.0` under IEEE comparison, so
+        // `-0.0` is zero too.
         let zero_scale = alpha == D::ZERO;
-        let overwrite = matches!(beta, CudaRegionBeta::Overwrite);
+        let accumulate = matches!(beta, CudaRegionBeta::Accumulate);
+        let destination_beta = match beta {
+            CudaRegionBeta::Overwrite => D::ZERO,
+            CudaRegionBeta::Accumulate => D::ONE,
+            CudaRegionBeta::Scale(beta) => beta,
+        };
 
         // Idempotent once the template is long enough, so a warm replay uploads
         // nothing; sized from the structure's longest inactive layout rather
@@ -656,7 +665,7 @@ impl CudaTreeTransformExecutor {
         // Stage C" wording would upload ahead of a verdict that can still
         // reject, which the rejection-order contract forbids; reserving here is
         // still before every submission.
-        let template_len = if zero_scale && overwrite {
+        let template_len = if zero_scale && !accumulate {
             prepared.max_zero_len.max(prepared.max_write_len)
         } else {
             prepared.max_zero_len
@@ -665,32 +674,30 @@ impl CudaTreeTransformExecutor {
             .map_err(OperationError::Dense)?;
 
         let conjugate = task.storage_conjugate();
-        if overwrite {
-            for zero in &prepared.zeros {
-                cuda_region_zero::<D>(ctx, &mut dst.0, zero).map_err(OperationError::Dense)?;
-            }
+        // Inactive layouts receive no move to carry `beta`, so they take the
+        // zero-source move with `beta` in its epilogue (a zero fill for
+        // `beta = 0`, nothing for `beta = 1`).
+        for zero in &prepared.zeros {
+            cuda_region_scale::<D>(ctx, &mut dst.0, zero, destination_beta)
+                .map_err(OperationError::Dense)?;
         }
         if zero_scale {
-            if overwrite {
-                let written = prepared.moves.iter().chain(
-                    prepared
-                        .recouplings
-                        .iter()
-                        .flat_map(|recoupling| &recoupling.scatters),
-                );
-                for entry in written {
-                    cuda_region_zero::<D>(ctx, &mut dst.0, &entry.destination)
-                        .map_err(OperationError::Dense)?;
-                }
+            let written = prepared.moves.iter().chain(
+                prepared
+                    .recouplings
+                    .iter()
+                    .flat_map(|recoupling| &recoupling.scatters),
+            );
+            for entry in written {
+                cuda_region_scale::<D>(ctx, &mut dst.0, &entry.destination, destination_beta)
+                    .map_err(OperationError::Dense)?;
             }
             return Ok(());
         }
         for entry in &prepared.moves {
             if entry.zero_coefficient {
-                if overwrite {
-                    cuda_region_zero::<D>(ctx, &mut dst.0, &entry.destination)
-                        .map_err(OperationError::Dense)?;
-                }
+                cuda_region_scale::<D>(ctx, &mut dst.0, &entry.destination, destination_beta)
+                    .map_err(OperationError::Dense)?;
                 continue;
             }
             submit_move::<D>(
@@ -1082,7 +1089,7 @@ fn submit_move<D: CudaScalar>(
     entry: &PreparedMove,
     conjugate: bool,
     alpha: D,
-    beta: CudaRegionBeta,
+    beta: CudaRegionBeta<D>,
     dst: &mut CudaDenseStorage,
 ) -> Result<(), OperationError> {
     let coefficient = match entry.coefficient {

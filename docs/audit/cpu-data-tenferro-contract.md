@@ -68,7 +68,7 @@ not a Tenferro requirement. Removing it would be a narrow local ownership
 simplification, outside #1141 unless measurements or a needed move boundary
 justify the change.
 
-`contract_overwrite_into` admits only the exact expected fusion space/layout,
+`contract_into` admits only the exact expected fusion space/layout,
 ordinary dense Host storage, no input alias, and unique destination ownership
 before mutation. Context-lease admission errors leave the destination
 unchanged; after clearing, a later engine error may leave it zeroed or partially

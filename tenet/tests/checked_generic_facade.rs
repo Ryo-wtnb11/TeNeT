@@ -2002,7 +2002,7 @@ fn checked_generic_add_assign_rejects_runtime_before_layout_and_preserves_receiv
         .map(|index| left.subblock_fusion_trees(index).unwrap())
         .collect::<Vec<_>>();
     reset_provider_queries(&provider);
-    let error = left.axpby_assign(1.0, &right, 1.0).unwrap_err();
+    let error = right.axpby_into(&mut left, 1.0, 1.0).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Facade(tenet::prelude::Error::RuntimeMismatch)
@@ -2033,7 +2033,7 @@ fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
         .map(|index| left.subblock_fusion_trees(index).unwrap())
         .collect::<Vec<_>>();
     reset_provider_queries(&provider);
-    let error = left.axpby_assign(1.0, &right, 1.0).unwrap_err();
+    let error = right.axpby_into(&mut left, 1.0, 1.0).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(_))
@@ -7704,8 +7704,8 @@ fn checked_generic_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
             x.axpby(alpha, &y, beta).unwrap().dense_data().unwrap(),
             &want,
         );
-        let mut assigned = x.clone();
-        assigned.axpby_assign(alpha, &y, beta).unwrap();
+        let mut assigned = x.materialize().unwrap();
+        y.axpby_into(&mut assigned, beta, alpha).unwrap();
         same(assigned.dense_data().unwrap(), &want);
     }
     for factor in [0.0, 2.0] {

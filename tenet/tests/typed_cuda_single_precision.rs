@@ -768,7 +768,7 @@ fn a_warm_single_precision_reduction_costs_one_extra_device_allocation_per_opera
 }
 
 /// Carried from the #1336 review: `alpha = 0` (and `-0`) on an
-/// `*_overwrite_into` transform must **overwrite**, not scale-and-accumulate.
+/// `*_into` transform must **overwrite**, not scale-and-accumulate.
 ///
 /// The finite-poison loop in `assert_transforms_match_host` cannot tell the
 /// two apart — `0 * 7 == 0` either way. A `NaN`-poisoned destination can:
@@ -776,7 +776,7 @@ fn a_warm_single_precision_reduction_costs_one_extra_device_allocation_per_opera
 /// leaves `NaN` behind, while a true overwrite leaves an exact `+0`.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_zero_scale_overwrite_into_clears_a_nan_poisoned_destination() {
+fn a_zero_scale_into_clears_a_nan_poisoned_destination() {
     fn assert_cleared<R, D>(runtime: &Runtime, leg: &GradedSpace<R>)
     where
         R: DeviceRule,
@@ -802,7 +802,7 @@ fn a_zero_scale_overwrite_into_clears_a_nan_poisoned_destination() {
         for alpha in [D::entry(0.0, 0.0), D::entry(-0.0, -0.0)] {
             let mut destination = poisoned.to_cuda().unwrap();
             device
-                .permute_overwrite_into(&mut destination, &[1, 2], &[0], alpha)
+                .permute_into(&[1, 2], &[0], &mut destination, alpha, D::from_real(0.0))
                 .unwrap();
             for (index, &value) in destination
                 .to_host()
@@ -815,7 +815,7 @@ fn a_zero_scale_overwrite_into_clears_a_nan_poisoned_destination() {
                 assert_eq!(
                     value,
                     D::entry(0.0, 0.0),
-                    "permute_overwrite_into [{}] at alpha {alpha:?} left entry {index} as \
+                    "permute_into [{}] at alpha {alpha:?} left entry {index} as \
                      {value:?}",
                     D::NAME
                 );
@@ -911,7 +911,7 @@ where
         "lazy adjoint compose",
     );
 
-    // `contract_overwrite_into` writes the same values the returning form does.
+    // `contract_into` writes the same values the returning form does.
     let mut destination = device_a
         .contract(
             &device_b,
@@ -926,45 +926,47 @@ where
         .zeros_like()
         .unwrap();
     device_a
-        .contract_overwrite_into(
+        .contract_into(
             &device_b,
-            &mut destination,
             &ContractSpec {
                 lhs: &[1],
                 rhs: &[0],
                 codomain: &[0],
                 domain: &[1],
             },
+            &mut destination,
             D::entry(1.0, 0.0),
+            D::entry(0.0, 0.0),
         )
         .unwrap();
     assert_close(
         destination.to_host().unwrap().dense_data().unwrap(),
         host_contract.dense_data().unwrap(),
         tolerance,
-        "contract_overwrite_into",
+        "contract_into",
     );
 
     // A second write over the same destination overwrites rather than
     // accumulates, at every dtype.
     device_a
-        .contract_overwrite_into(
+        .contract_into(
             &device_b,
-            &mut destination,
             &ContractSpec {
                 lhs: &[1],
                 rhs: &[0],
                 codomain: &[0],
                 domain: &[1],
             },
+            &mut destination,
             D::entry(1.0, 0.0),
+            D::entry(0.0, 0.0),
         )
         .unwrap();
     assert_close(
         destination.to_host().unwrap().dense_data().unwrap(),
         host_contract.dense_data().unwrap(),
         tolerance,
-        "contract_overwrite_into is idempotent",
+        "contract_into is idempotent",
     );
 }
 
@@ -1147,7 +1149,7 @@ where
         "transpose",
     );
 
-    // The `*_overwrite_into` forms of the same three planar-or-permute transforms (#1339) write
+    // The `*_into` forms of the same three planar-or-permute transforms (#1339) write
     // what their returning twins return, at every caller scale.
     // Each destination starts poisoned with a different multiple of the
     // expected payload, so an implementation that wrote nothing at `alpha = 1`
@@ -1161,35 +1163,37 @@ where
     ] {
         let mut destination = host_permuted.scale(poison).to_cuda().unwrap();
         device
-            .permute_overwrite_into(&mut destination, &[1, 2], &[0], alpha)
+            .permute_into(&[1, 2], &[0], &mut destination, alpha, D::from_real(0.0))
             .unwrap();
         assert_close(
             destination.to_host().unwrap().dense_data().unwrap(),
             host_permuted.scale(alpha).dense_data().unwrap(),
             tolerance,
-            "permute_overwrite_into",
+            "permute_into",
         );
 
         let host_bent = host.repartition(1).unwrap();
         let mut bent = host_bent.scale(poison).to_cuda().unwrap();
-        device.repartition_overwrite_into(&mut bent, alpha).unwrap();
+        device
+            .repartition_into(&mut bent, alpha, D::from_real(0.0))
+            .unwrap();
         assert_close(
             bent.to_host().unwrap().dense_data().unwrap(),
             host_bent.scale(alpha).dense_data().unwrap(),
             tolerance,
-            "repartition_overwrite_into",
+            "repartition_into",
         );
 
         let host_cyclic = host.transpose(&[2], &[1, 0]).unwrap();
         let mut cyclic = host_cyclic.scale(poison).to_cuda().unwrap();
         device
-            .transpose_overwrite_into(&mut cyclic, &[2], &[1, 0], alpha)
+            .transpose_into(&[2], &[1, 0], &mut cyclic, alpha, D::from_real(0.0))
             .unwrap();
         assert_close(
             cyclic.to_host().unwrap().dense_data().unwrap(),
             host_cyclic.scale(alpha).dense_data().unwrap(),
             tolerance,
-            "transpose_overwrite_into",
+            "transpose_into",
         );
     }
 
@@ -1231,14 +1235,14 @@ fn device_transforms_match_the_host_at_every_payload() {
     assert_transforms_match_host::<_, Complex32>(&runtime, &fz2su2);
 }
 
-/// The warm `*_overwrite_into` contract of #1339 does not depend on the
+/// The warm `*_into` contract of #1339 does not depend on the
 /// payload dtype: a warm replay over a caller-owned destination transfers
 /// nothing and allocates nothing at single precision too. The zero-scale route
 /// uploads at most one *element* of the payload's own zero template, once per
 /// context — half the bytes of the double-precision template, never a buffer.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_warm_single_precision_overwrite_into_transfers_nothing() {
+fn a_warm_single_precision_into_transfers_nothing() {
     let runtime = runtime();
     let leg = u1_leg();
 
@@ -1255,13 +1259,25 @@ fn a_warm_single_precision_overwrite_into_transfers_nothing() {
 
         // Cold: prepares the structure for this pair and this dtype.
         device
-            .permute_overwrite_into(&mut destination, &[1, 2], &[0], D::entry(1.0, 0.0))
+            .permute_into(
+                &[1, 2],
+                &[0],
+                &mut destination,
+                D::entry(1.0, 0.0),
+                D::entry(0.0, 0.0),
+            )
             .unwrap();
         let cold = runtime.cuda_tree_transform_stats().unwrap();
 
         let before = cuda_transfer_stats();
         device
-            .permute_overwrite_into(&mut destination, &[1, 2], &[0], D::entry(-2.5, 0.5))
+            .permute_into(
+                &[1, 2],
+                &[0],
+                &mut destination,
+                D::entry(-2.5, 0.5),
+                D::entry(0.0, 0.0),
+            )
             .unwrap();
         let after = cuda_transfer_stats();
         assert_eq!(
@@ -1288,7 +1304,13 @@ fn a_warm_single_precision_overwrite_into_transfers_nothing() {
         // once: at most two uploads, bounded by the destination.
         let before = cuda_transfer_stats();
         device
-            .permute_overwrite_into(&mut destination, &[1, 2], &[0], D::entry(0.0, 0.0))
+            .permute_into(
+                &[1, 2],
+                &[0],
+                &mut destination,
+                D::entry(0.0, 0.0),
+                D::entry(0.0, 0.0),
+            )
             .unwrap();
         let after = cuda_transfer_stats();
         let destination_len = host
@@ -1306,7 +1328,13 @@ fn a_warm_single_precision_overwrite_into_transfers_nothing() {
 
         let before = cuda_transfer_stats();
         device
-            .permute_overwrite_into(&mut destination, &[1, 2], &[0], D::entry(-0.0, -0.0))
+            .permute_into(
+                &[1, 2],
+                &[0],
+                &mut destination,
+                D::entry(-0.0, -0.0),
+                D::entry(0.0, 0.0),
+            )
             .unwrap();
         let after = cuda_transfer_stats();
         assert_eq!(

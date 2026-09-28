@@ -78,9 +78,10 @@ pub use facade::{
 };
 #[doc(hidden)]
 pub use oriented_elementwise::{
-    fusion_scatter_add_assign, oriented_fusion_add_owned, oriented_fusion_inner,
-    oriented_fusion_inner_with, oriented_fusion_restrict_owned, stacked_fusion_restrict_owned,
-    validate_oriented_fusion_layout, SectorRangeTable, SectorStartTable,
+    fusion_scatter_add_assign, oriented_fusion_add_owned, oriented_fusion_axpby_into,
+    oriented_fusion_inner, oriented_fusion_inner_with, oriented_fusion_restrict_owned,
+    stacked_fusion_restrict_owned, validate_oriented_fusion_layout, SectorRangeTable,
+    SectorStartTable,
 };
 // Stage B3a: Generic-fusion (outer-multiplicity) facade siblings.
 pub use adjoint::adjoint_bound_space_dyn_generic_checked;
@@ -143,7 +144,7 @@ pub use tenet_operations::{HostTreeTransformWorkspace, TreeTransformWorkspace};
 pub use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec};
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
-pub use tensortrace::tensortrace_fusion_structure_accumulate_on_cuda;
+pub use tensortrace::tensortrace_fusion_structure_into_on_cuda;
 #[doc(hidden)]
 pub use tensortrace::FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING;
 pub use tensortrace::{

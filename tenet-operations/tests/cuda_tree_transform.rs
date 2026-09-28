@@ -875,18 +875,14 @@ fn a_coefficient_of_one_moves_f64_payloads_bitwise() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn unsupported_modes_are_rejected_before_any_device_work() {
-    // What: a beta and a destination layout the device cannot express are typed
-    // capability errors reported before any upload, allocation, submission or
+    // What: a destination layout the device cannot express is a typed
+    // capability error reported before any upload, allocation, submission or
     // plan-cache change — for a Single-block structure and for a recoupling
     // structure, whose pack columns and coefficient upload must not happen on
-    // the strength of one unwritable scatter region.
+    // the strength of one unwritable scatter region. Every `beta` is
+    // supported (#1550), so it is no longer a rejection input.
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
-    let fixture = interleaved();
-    let source = fixture.source::<f64>();
-    let destination = vec![0.0_f64; fixture.dst_len()];
-    let mut dst = CudaStorage::<f64>::upload(&ctx, &destination).unwrap();
-    let src = CudaStorage::<f64>::upload(&ctx, &source).unwrap();
 
     // A structure whose destination layout the host proves injective only
     // through its exact overlap fallback, which the device region primitive
@@ -909,25 +905,6 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
     let before = cuda_transfer_stats();
     let plans_before = ctx.plan_cache_stats().unwrap();
 
-    // `beta = 0` is `Overwrite` (#1438) and is exercised below, not rejected.
-    for beta in [2.0_f64, -1.0] {
-        let error = executor
-            .replay(
-                &mut ctx,
-                &fixture.compile(),
-                &fixture.dst_structure(),
-                &fixture.src_structure(),
-                &mut dst,
-                &src,
-                1.0,
-                CudaTreeTransformDestination::Axpby(beta),
-            )
-            .unwrap_err();
-        assert!(
-            matches!(error, OperationError::UnsupportedDeviceTreeTransform { .. }),
-            "beta {beta} gave {error:?}"
-        );
-    }
     let layout = executor
         .replay(
             &mut ctx,
@@ -1000,10 +977,13 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
     assert_eq!(executor.prepared_structures(), 0);
     assert_eq!(executor.required_plan_entries(), 0);
 
-    // Negative control: the same structure with beta = 1 is accepted, and a
-    // recoupling structure whose destinations *are* writable replays, so the
-    // rejections above are about the mode and the layout, not about Multi
+    // Negative control: a writable structure replays, with a general beta
+    // too, and a recoupling structure whose destinations *are* writable
+    // replays, so the rejections above are about the layout, not about Multi
     // blocks or about the fixtures.
+    let fixture = interleaved();
+    let mut dst = CudaStorage::<f64>::upload(&ctx, &vec![0.0_f64; fixture.dst_len()]).unwrap();
+    let src = CudaStorage::<f64>::upload(&ctx, &fixture.source::<f64>()).unwrap();
     executor
         .replay(
             &mut ctx,
@@ -1013,7 +993,7 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
             &mut dst,
             &src,
             1.0,
-            CudaTreeTransformDestination::Axpby(1.0),
+            CudaTreeTransformDestination::Axpby(2.0),
         )
         .unwrap();
     assert_eq!(executor.prepared_structures(), 1);
@@ -1990,19 +1970,13 @@ fn warm_scale_sweep<T: DeviceScalar>() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_zero_caller_scale_is_rejected_in_the_same_order() {
-    // What: the caller scale is not an admission input — an unsupported beta and
-    // an unwritable destination layout are still reported before any device
-    // work, with a zero scale exactly as with a unit one.
+    // What: the caller scale is not an admission input — an unwritable
+    // destination layout is still reported before any device work, with a
+    // zero scale exactly as with a unit one.
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
-    let fixture = mixed_single_and_multi();
     let expert = expert_interleaved_destination();
-    let structure = fixture.compile();
     let expert_structure = expert.compile();
-    let source = fixture.source::<f64>();
-    let destination = vec![0.0_f64; fixture.dst_len()];
-    let mut dst = CudaStorage::<f64>::upload(&ctx, &destination).unwrap();
-    let src = CudaStorage::<f64>::upload(&ctx, &source).unwrap();
     let mut expert_dst =
         CudaStorage::<f64>::upload(&ctx, &vec![0.0_f64; expert.dst_len()]).unwrap();
     let expert_src = CudaStorage::<f64>::upload(&ctx, &expert.source::<f64>()).unwrap();
@@ -2011,22 +1985,6 @@ fn a_zero_caller_scale_is_rejected_in_the_same_order() {
     let before = cuda_transfer_stats();
     let plans_before = ctx.plan_cache_stats().unwrap();
 
-    let beta = executor
-        .replay(
-            &mut ctx,
-            &structure,
-            &fixture.dst_structure(),
-            &fixture.src_structure(),
-            &mut dst,
-            &src,
-            0.0,
-            CudaTreeTransformDestination::Axpby(2.0),
-        )
-        .unwrap_err();
-    assert!(
-        matches!(beta, OperationError::UnsupportedDeviceTreeTransform { .. }),
-        "{beta:?}"
-    );
     let layout = executor
         .replay(
             &mut ctx,
