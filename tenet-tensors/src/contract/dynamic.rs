@@ -3042,7 +3042,24 @@ mod tests {
         );
         let mut actual = vec![0.0; expected.len()];
         execute(&mut tree_context, scratch, &mut actual);
-        assert_eq!(actual, expected);
+        assert!(
+            scratch
+                .dst_data_mut()
+                .expect("replay retains destination scratch")
+                .iter()
+                .all(|value| value.is_finite()),
+            "strong zero must initialize active and inactive core blocks"
+        );
+        assert_eq!(
+            actual
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
         (actual, core_len, inactive)
     }
 
@@ -3053,6 +3070,15 @@ mod tests {
         scratch
             .dst_data_mut()
             .expect("first replay retains destination scratch")
+            .fill(f64::NAN);
+        let (same_shape, same_len, same_inactive) =
+            run_nan_poisoned_destination_case(&mut scratch, 4);
+        assert_eq!(first_len, same_len);
+        assert!(same_inactive > 0);
+        assert!(same_shape.iter().all(|value| value.is_finite()));
+        scratch
+            .dst_data_mut()
+            .expect("same-shape replay retains destination scratch")
             .fill(f64::NAN);
 
         let (actual, second_len, inactive) = run_nan_poisoned_destination_case(&mut scratch, 2);
