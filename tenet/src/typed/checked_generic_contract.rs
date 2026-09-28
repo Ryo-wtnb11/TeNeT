@@ -265,15 +265,7 @@ where
         output_order,
         Some(codomain_rank),
     )?;
-    let Some(order) = tenet_tensors::zero_copy_contract_order_for_output_permute(
-        lhs.logical_space().provider(),
-        destination.space(),
-        lhs.fusion_operand(),
-        rhs.fusion_operand(),
-        lhs_axes,
-        rhs_axes,
-        output_axes,
-    ) else {
+    let Some(copy_c) = CopyC::plan(lhs, rhs, spec, destination.space())? else {
         return contract_multiplicity_free_into(
             lhs,
             rhs,
@@ -283,61 +275,13 @@ where
             destination,
         );
     };
-    // Why not the one-call ordered route here: the predicate found it
-    // costlier under TensorKit's memcost. It would copy a source (a lazy
-    // adjoint always), while the zero-copy candidate borrows both operands
-    // and only `C` moves. This is TensorKit `blas_contract!`'s `copyC`: a
-    // temporary, then a permuting `tensoradd!` into `destination`.
-    //
-    // TensorKit allocates `Cnew` as a temporary (`tensoralloc_add(...,
-    // Val(true), allocator)`) and frees it after the permute; here it is the
-    // leased context's pooled `copyC` scratch, so the returned tensor is the
-    // only output-sized allocation of a warm call.
-    let lhs_open = lhs.rank() - lhs_axes.len();
-    let rhs_open = rhs.rank() - rhs_axes.len();
-    let identity = OutputAxisOrder::identity();
-    let (first, second, first_axes, second_axes, lhs_offset, rhs_offset) = match order {
-        tenet_tensors::FusionContractOrientation::LhsRhs => (lhs, rhs, lhs_axes, rhs_axes, 0, 0),
-        tenet_tensors::FusionContractOrientation::RhsLhs => {
-            (rhs, lhs, rhs_axes, lhs_axes, rhs_open, lhs_open)
-        }
-    };
-    let temporary_space =
-        contract_destination(first, second, first_axes, second_axes, identity, None)?;
-    // `temporary` lists the rhs open axes first under `RhsLhs`.
-    let position = |axis: usize| {
-        if axis < lhs_open {
-            axis + lhs_offset
-        } else {
-            axis - rhs_offset
-        }
-    };
-    let (codomain, domain) = output_axes.split_at(codomain_rank);
-    let temporary_len = temporary_space.space().required_len()?;
     let mut lease = lhs.runtime.lease_context()?;
     let lane = lease.context().multiplicity_free_lane::<D>()?;
-    let mut temporary = lane.take_copy_c_scratch();
-    // Stale pooled values are never read: `Axpby(0)` is a strong zero that
-    // assigns every destination block, inactive ones included.
-    temporary.resize_filled(temporary_len, D::from_real(0.0));
-    contract_multiplicity_free_into_slice(
-        lane,
-        first,
-        second,
-        first_axes,
-        second_axes,
-        identity,
-        &temporary_space,
-        temporary.as_mut_slice(),
-        tenet_tensors::ContractDestinationInit::Axpby(D::from_real(0.0)),
-    )?;
+    let temporary = copy_c.contract_temporary(lane)?;
     let data = tree_transform_owned_multiplicity_free_into(
         lane,
-        BoundDynamicTensorRef::try_new(&temporary_space, temporary.as_slice())?,
-        TreeTransformOperation::permute(
-            codomain.iter().copied().map(position),
-            domain.iter().copied().map(position),
-        ),
+        BoundDynamicTensorRef::try_new(&copy_c.temporary_space, temporary.as_slice())?,
+        copy_c.operation.clone(),
         &destination,
     )?;
     lane.restore_copy_c_scratch(temporary);
@@ -345,6 +289,127 @@ where
         runtime: lhs.runtime.clone(),
         repr: owned_repr(TypedTensorBody::dense(destination, data)),
     })
+}
+
+/// TensorKit `blas_contract!`'s `copyC` for `lhs·rhs` under `spec`: the
+/// zero-copy candidate contraction with its own default output into a
+/// temporary, then one permuting transform (`tensoradd!(C, Cnew, pAB, false,
+/// α, β)`) into the result. Shared by the owned [`TensorMap::contract`] and
+/// the destination [`TensorMap::contract_into`] routes, so both make the same
+/// choice.
+///
+/// Why not the one-call ordered route when this applies: the predicate found
+/// it costlier under TensorKit's memcost. It would copy a source (a lazy
+/// adjoint always), while the zero-copy candidate borrows both operands and
+/// only `C` moves.
+pub(super) struct CopyC<'a, R, D> {
+    first: &'a TensorMap<R, D>,
+    second: &'a TensorMap<R, D>,
+    first_axes: &'a [usize],
+    second_axes: &'a [usize],
+    pub(super) temporary_space: BoundDynamicFusionMapSpace<R>,
+    temporary_len: usize,
+    /// Permutes the temporary into the requested output order and split.
+    pub(super) operation: TreeTransformOperation,
+}
+
+impl<'a, R, D> CopyC<'a, R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
+    /// The copyC plan when TensorKit's memcost choice takes it for a result
+    /// of space `destination`, else `None`. Metadata only: no lease, no
+    /// scratch, no write.
+    pub(super) fn plan(
+        lhs: &'a TensorMap<R, D>,
+        rhs: &'a TensorMap<R, D>,
+        spec: &'a ContractSpec<'_>,
+        destination: &DynamicFusionMapSpace,
+    ) -> Result<Option<Self>, Error> {
+        let (lhs_axes, rhs_axes) = (spec.lhs, spec.rhs);
+        let output_axes = &spec.output_axes()[..];
+        let Some(order) = tenet_tensors::zero_copy_contract_order_for_output_permute(
+            lhs.logical_space().provider(),
+            destination,
+            lhs.fusion_operand(),
+            rhs.fusion_operand(),
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+        ) else {
+            return Ok(None);
+        };
+        let lhs_open = lhs.rank() - lhs_axes.len();
+        let rhs_open = rhs.rank() - rhs_axes.len();
+        let (first, second, first_axes, second_axes, lhs_offset, rhs_offset) = match order {
+            tenet_tensors::FusionContractOrientation::LhsRhs => {
+                (lhs, rhs, lhs_axes, rhs_axes, 0, 0)
+            }
+            tenet_tensors::FusionContractOrientation::RhsLhs => {
+                (rhs, lhs, rhs_axes, lhs_axes, rhs_open, lhs_open)
+            }
+        };
+        let temporary_space = contract_destination(
+            first,
+            second,
+            first_axes,
+            second_axes,
+            OutputAxisOrder::identity(),
+            None,
+        )?;
+        let temporary_len = temporary_space.space().required_len()?;
+        // The temporary lists the rhs open axes first under `RhsLhs`.
+        let position = |axis: usize| {
+            if axis < lhs_open {
+                axis + lhs_offset
+            } else {
+                axis - rhs_offset
+            }
+        };
+        let (codomain, domain) = output_axes.split_at(spec.codomain.len());
+        Ok(Some(Self {
+            first,
+            second,
+            first_axes,
+            second_axes,
+            temporary_space,
+            temporary_len,
+            operation: TreeTransformOperation::permute(
+                codomain.iter().copied().map(position),
+                domain.iter().copied().map(position),
+            ),
+        }))
+    }
+
+    /// Contracts into the lane's pooled `copyC` scratch and lends it out; the
+    /// caller transforms it into its result and hands it back with
+    /// `restore_copy_c_scratch`.
+    ///
+    /// TensorKit allocates `Cnew` as a temporary (`tensoralloc_add(...,
+    /// Val(true), allocator)`) and frees it after the permute; the pooled
+    /// scratch plays that role, so a warm call allocates no output-sized
+    /// temporary. Stale pooled values are never read: `Axpby(0)` is a strong
+    /// zero that assigns every block, inactive ones included.
+    pub(super) fn contract_temporary(
+        &self,
+        lane: &mut crate::runtime::Ctx<D, tenet_core::RuleIdentity>,
+    ) -> Result<tenet_operations::host_scratch::HostScratchBuffer<D>, Error> {
+        let mut temporary = lane.take_copy_c_scratch();
+        temporary.resize_filled(self.temporary_len, D::from_real(0.0));
+        contract_multiplicity_free_into_slice(
+            lane,
+            self.first,
+            self.second,
+            self.first_axes,
+            self.second_axes,
+            OutputAxisOrder::identity(),
+            &self.temporary_space,
+            temporary.as_mut_slice(),
+            tenet_tensors::ContractDestinationInit::Axpby(D::from_real(0.0)),
+        )?;
+        Ok(temporary)
+    }
 }
 
 /// The destination space of `lhs·rhs` in `output_order`, split after

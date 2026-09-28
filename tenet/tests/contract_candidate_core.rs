@@ -450,6 +450,18 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: Payload,
 {
+    let (temporary, codomain, domain) = copy_c_steps(case, swapped);
+    temporary.permute(&codomain, &domain).unwrap()
+}
+
+/// TensorKit `copyC`'s two steps spelled with public operations: the
+/// zero-copy candidate contraction with its own output order, and the
+/// permutation (codomain, domain) that places it in the requested order.
+fn copy_c_steps<R, D>(case: &Case<R, D>, swapped: bool) -> (TensorMap<R, D>, Vec<usize>, Vec<usize>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
     let lhs_open = case.lhs.rank() - case.lhs_axes.len();
     let rhs_open = case.rhs.rank() - case.rhs_axes.len();
     let (temporary, position): (_, Box<dyn Fn(usize) -> usize>) = if swapped {
@@ -491,14 +503,13 @@ where
             Box::new(|axis| axis),
         )
     };
-    let permutation: Vec<usize> = case
+    let mut codomain: Vec<usize> = case
         .output_axes
         .iter()
         .map(|&axis| position(axis))
         .collect();
-    temporary
-        .permute(&permutation[..lhs_open], &permutation[lhs_open..])
-        .unwrap()
+    let domain = codomain.split_off(lhs_open);
+    (temporary, codomain, domain)
 }
 
 fn assert_output_permute_budget<R>(v: &GradedSpace<R>, symmetry: &str)
@@ -642,6 +653,90 @@ where
             );
         }
     }
+}
+
+/// #1631: `contract_into` takes the same copyC route as `contract`, so it
+/// equals the two copyC steps with the caller's α/β on the permute
+/// (`tensoradd!(C, Cnew, pAB, false, α, β)`), bit for bit, for β = 0 (over a
+/// NaN destination), β = 1 and a general β, with owned and lazy operands.
+/// A warm call looks up one transform, the output permute, and no more than
+/// a warm `contract` does.
+fn into_copy_c_bits<R, D>(v: &GradedSpace<R>, w: &GradedSpace<R>, symmetry: &str)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload + PartialEq,
+{
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let cases = output_permute_probes::<R, D>(&runtime, v)
+        .into_iter()
+        .chain([(uneven_swap::<R, D>(&runtime, v, w), true)]);
+    let alpha = D::entry(1.25, -0.5);
+    for (case, swapped) in cases {
+        let (temporary, codomain, domain) = copy_c_steps(&case, swapped);
+        let result = case.host();
+        for (beta, seed) in [
+            (D::entry(0.0, 0.0), D::entry(f64::NAN, 0.0)),
+            (D::entry(1.0, 0.0), D::entry(0.75, 0.125)),
+            (D::entry(-0.625, 0.25), D::entry(0.75, 0.125)),
+        ] {
+            let what = format!("{symmetry} {} [{}] beta {beta:?}", case.name, D::NAME);
+            let mut expected = result.scale(seed);
+            temporary
+                .permute_into(&codomain, &domain, &mut expected, alpha, beta)
+                .unwrap();
+            let mut actual = result.scale(seed);
+            case.lhs
+                .contract_into(&case.rhs, &case.spec(), &mut actual, alpha, beta)
+                .unwrap();
+            assert!(
+                actual.dense_data().unwrap() == expected.dense_data().unwrap(),
+                "{what}"
+            );
+        }
+
+        let mut destination = result.scale(D::entry(1.0, 0.0));
+        let into = |destination: &mut TensorMap<R, D>| {
+            case.lhs
+                .contract_into(
+                    &case.rhs,
+                    &case.spec(),
+                    destination,
+                    D::entry(1.0, 0.0),
+                    D::entry(0.0, 0.0),
+                )
+                .unwrap();
+        };
+        into(&mut destination);
+        into(&mut destination);
+        let before = transform_lookups(&runtime);
+        into(&mut destination);
+        let into_lookups = transform_lookups(&runtime) - before;
+        drop(case.host());
+        let before = transform_lookups(&runtime);
+        drop(case.host());
+        let contract_lookups = transform_lookups(&runtime) - before;
+        // What: the output permute is the only transform (no operand is
+        // rebuilt), and never more lookups than the owned route, whose owned
+        // overwrite probe may add one.
+        assert!(
+            into_lookups == 1 && into_lookups <= contract_lookups,
+            "{symmetry} {} [{}]: warm contract_into {into_lookups} vs contract \
+             {contract_lookups} lookups",
+            case.name,
+            D::NAME
+        );
+    }
+}
+
+#[test]
+fn contract_into_takes_the_copy_c_route_of_contract() {
+    into_copy_c_bits::<_, f64>(&u1_non_self_dual(), &u1_second(), "U(1)");
+    into_copy_c_bits::<_, Complex64>(&u1_non_self_dual(), &u1_second(), "U(1)");
+    into_copy_c_bits::<_, f64>(&su2(), &su2_second(), "SU(2)");
+    into_copy_c_bits::<_, Complex64>(&su2(), &su2_second(), "SU(2)");
 }
 
 #[test]

@@ -2,7 +2,8 @@
 //! `copyC` route (a zero-copy contraction into a temporary, then one permute
 //! into the result) keeps that temporary in the Runtime's pooled execution
 //! scratch, as `contract_into` keeps its own. A warm call therefore
-//! allocates exactly one output-sized buffer: the returned tensor.
+//! allocates exactly one output-sized buffer: the returned tensor, and a warm
+//! `contract_into` (#1631), which takes the same route, allocates none.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -95,6 +96,22 @@ fn warm_split_moving_eager_contract_allocates_only_its_result() {
         assert_eq!(
             sized_allocs(output_bytes, || a.contract(&b, &spec).unwrap()),
             1
+        );
+    }
+
+    // What: `contract_into` takes the same route (#1631) with the same pooled
+    // temporary, so a warm call allocates nothing output-sized at all.
+    let mut destination = a.contract(&b, &spec).unwrap();
+    for _ in 0..2 {
+        a.contract_into(&b, &spec, &mut destination, 1.0, 0.0)
+            .unwrap();
+    }
+    for _ in 0..3 {
+        assert_eq!(
+            sized_allocs(output_bytes, || a
+                .contract_into(&b, &spec, &mut destination, 1.0, 0.0)
+                .unwrap()),
+            0
         );
     }
 
