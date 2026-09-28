@@ -1132,9 +1132,15 @@ mod device {
                                     device_first
                                         .to_host()
                                         .expect("download")
+                                        .materialize()
+                                        .expect("materialize")
                                         .dense_data()
                                         .unwrap(),
-                                    host_first.dense_data().unwrap(),
+                                    host_first
+                                        .materialize()
+                                        .expect("materialize")
+                                        .dense_data()
+                                        .unwrap(),
                                     tolerance,
                                 ),
                                 "host_value_equality",

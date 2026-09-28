@@ -1,9 +1,9 @@
-//! What: a contraction whose output codomain takes legs from both operands
-//! costs one output-sized intermediate plus a permute pass, by the eager
-//! route and by `tensor!` alike. Neither produces that partition in one pass
-//! (TensorKit `blas_contract!` takes the same `copyC` path when `C` is not a
-//! BLAS destination). The warm `tensor!` pool reuses the intermediate, so only
-//! its data movement remains.
+//! What: a warm contraction whose output codomain takes legs from both
+//! operands costs one output-sized allocation, by the eager `contract(spec)`
+//! and by `tensor!` alike: the network step passes the output split as its
+//! `ContractSpec` (TensorOperations `pAB`), so no separate permute pass and no
+//! second output-sized buffer follow the contraction. Spelling the same result
+//! as contract-then-permute still costs two.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -63,7 +63,7 @@ fn operands() -> (Map, Map) {
 }
 
 #[test]
-fn mixed_output_partition_costs_one_extra_output_sized_pass() {
+fn mixed_output_partition_costs_one_output_sized_allocation() {
     PAYLOAD_BYTES.store(13 * 17 * 23 * size_of::<f64>(), Ordering::SeqCst);
 
     let (a, b) = operands();
@@ -101,13 +101,32 @@ fn mixed_output_partition_costs_one_extra_output_sized_pass() {
     );
 
     let (a, b) = operands();
+    let moved = || {
+        a.contract(
+            &b,
+            &ContractSpec {
+                lhs: &[2],
+                rhs: &[0],
+                codomain: &[0, 2],
+                domain: &[1],
+            },
+        )
+        .unwrap()
+    };
+    // Cold: the result and the Runtime-pooled copyC temporary (#1626).
+    assert_eq!(output_sized_allocs(moved), 2);
+    assert_eq!(output_sized_allocs(moved), 1);
+
+    let (a, b) = operands();
     assert_eq!(
         output_sized_allocs(|| tensor!([p, q; r] = a[p, q; c] * b[c; r]).unwrap()),
         1
     );
     let (a, b) = operands();
     let mixed = || tensor!([p, r; q] = a[p, q; c] * b[c; r]).unwrap();
+    // The step's spec is that same contract: cold it pools its temporary,
+    // warm only the result is output-sized — no permute pass follows.
     assert_eq!(output_sized_allocs(mixed), 2);
-    // Warm: the pooled intermediate is reused; the permute pass still runs.
+    assert_eq!(output_sized_allocs(mixed), 1);
     assert_eq!(output_sized_allocs(mixed), 1);
 }

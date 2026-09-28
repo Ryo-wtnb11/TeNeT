@@ -17,6 +17,8 @@ pub(super) struct CompiledSchedule {
     pub(super) contracted_input_pairs: Vec<InputLegPair>,
     pub(super) steps: Vec<CompiledStep>,
     pub(super) final_slot: usize,
+    /// Only a zero-step schedule carries one: every contraction step writes
+    /// its own output orientation.
     pub(super) final_permutation: Option<(Vec<usize>, Vec<usize>)>,
 }
 
@@ -29,9 +31,9 @@ pub struct CompiledStep {
     pub(super) result_slot: usize,
     pub(super) lhs_contract_axes: Vec<usize>,
     pub(super) rhs_contract_axes: Vec<usize>,
-    pub(super) result_permutation: Option<(Vec<usize>, Vec<usize>)>,
-    pub(super) result_output_axes: Option<Vec<usize>>,
-    pub(super) contract_output_axes: Vec<usize>,
+    /// The step's `ContractSpec` output orientation (TensorOperations `pAB`).
+    pub(super) codomain: Vec<usize>,
+    pub(super) domain: Vec<usize>,
     pub(super) authority_input_slot: usize,
 }
 
@@ -51,7 +53,7 @@ where
     S: NetworkPayloadStorage<D>,
 {
     pub(super) slots: Vec<Option<TensorMap<R, D, S>>>,
-    pub(super) producers: Vec<Option<(usize, bool)>>,
+    pub(super) producers: Vec<Option<usize>>,
     pub(super) intermediates: Vec<TypedIntermediateBuffers<R, D, S>>,
     pub(super) owner_token: Option<u64>,
     runtime: Option<RuntimeIdentity>,
@@ -65,10 +67,8 @@ struct TypedInputSnapshot {
 }
 
 pub(super) struct TypedIntermediateBuffers<R, D, S = Vec<D>> {
-    pub(super) contracted: Option<TensorMap<R, D, S>>,
-    pub(super) oriented: Option<TensorMap<R, D, S>>,
-    pub(super) parked_contracted: Option<RuntimeDetachedTensorMap<D, S>>,
-    pub(super) parked_oriented: Option<RuntimeDetachedTensorMap<D, S>>,
+    pub(super) output: Option<TensorMap<R, D, S>>,
+    pub(super) parked: Option<RuntimeDetachedTensorMap<D, S>>,
 }
 
 pub(super) struct PayloadMeter {
@@ -125,7 +125,7 @@ impl PayloadMeter {
     pub(super) fn observe<R, D: TensorScalar, S: NetworkPayloadStorage<D>>(
         &mut self,
         slots: &[Option<TensorMap<R, D, S>>],
-        producers: &[Option<(usize, bool)>],
+        producers: &[Option<usize>],
         extra: &[Option<(usize, usize)>],
     ) -> std::result::Result<(), PayloadMeterError> {
         let mut seen = HashSet::from([self.destination.0]);
@@ -180,8 +180,7 @@ pub(super) fn intermediate_payloads<R, D: TensorScalar, S: NetworkPayloadStorage
     });
     intermediates
         .iter()
-        .flat_map(|buffers| [buffers.contracted.as_ref(), buffers.oriented.as_ref()])
-        .flatten()
+        .filter_map(|buffers| buffers.output.as_ref())
         .map(TensorMap::network_owned_payload)
         .collect()
 }
@@ -220,10 +219,8 @@ pub(super) fn map_metered_network_error<E>(
 impl<R, D, S> Default for TypedIntermediateBuffers<R, D, S> {
     fn default() -> Self {
         Self {
-            contracted: None,
-            oriented: None,
-            parked_contracted: None,
-            parked_oriented: None,
+            output: None,
+            parked: None,
         }
     }
 }
@@ -292,7 +289,7 @@ where
             .saturating_add(
                 self.producers
                     .capacity()
-                    .saturating_mul(std::mem::size_of::<Option<(usize, bool)>>()),
+                    .saturating_mul(std::mem::size_of::<Option<usize>>()),
             )
             .saturating_add(
                 self.intermediates
@@ -320,16 +317,12 @@ where
                 bytes.saturating_add(leg.charged_retained_bytes())
             });
         }
-        for buffers in &self.intermediates {
-            for parked in [
-                buffers.parked_contracted.as_ref(),
-                buffers.parked_oriented.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                bytes = bytes.saturating_add(parked.retained_dense_capacity_bytes());
-            }
+        for parked in self
+            .intermediates
+            .iter()
+            .filter_map(|buffers| buffers.parked.as_ref())
+        {
+            bytes = bytes.saturating_add(parked.retained_dense_capacity_bytes());
         }
         bytes
     }
@@ -339,13 +332,8 @@ where
         R: tenet::core::FusionRule,
     {
         for buffers in &mut self.intermediates {
-            debug_assert!(buffers.parked_contracted.is_none());
-            debug_assert!(buffers.parked_oriented.is_none());
-            buffers.parked_contracted = buffers
-                .contracted
-                .take()
-                .and_then(TensorMap::detach_runtime);
-            buffers.parked_oriented = buffers.oriented.take().and_then(TensorMap::detach_runtime);
+            debug_assert!(buffers.parked.is_none());
+            buffers.parked = buffers.output.take().and_then(TensorMap::detach_runtime);
         }
     }
 
@@ -365,28 +353,20 @@ where
         let reusable = self.intermediates.iter().zip(steps).all(|(buffers, step)| {
             let authority = tensors[step.authority_input_slot];
             buffers
-                .parked_contracted
+                .parked
                 .as_ref()
                 .is_none_or(|tensor| tensor.can_attach(runtime, authority).is_ok())
-                && buffers
-                    .parked_oriented
-                    .as_ref()
-                    .is_none_or(|tensor| tensor.can_attach(runtime, authority).is_ok())
         });
         if !reusable {
             for buffers in &mut self.intermediates {
-                buffers.parked_contracted = None;
-                buffers.parked_oriented = None;
+                buffers.parked = None;
             }
             return Ok(());
         }
         for (buffers, step) in self.intermediates.iter_mut().zip(steps) {
             let authority = tensors[step.authority_input_slot];
-            if let Some(tensor) = buffers.parked_contracted.take() {
-                buffers.contracted = Some(tensor.attach_runtime(runtime, authority)?);
-            }
-            if let Some(tensor) = buffers.parked_oriented.take() {
-                buffers.oriented = Some(tensor.attach_runtime(runtime, authority)?);
+            if let Some(tensor) = buffers.parked.take() {
+                buffers.output = Some(tensor.attach_runtime(runtime, authority)?);
             }
         }
         Ok(())
@@ -712,18 +692,11 @@ impl PlannedNetwork {
         for (step, buffers) in self.schedule.steps.iter().zip(&mut workspace.intermediates) {
             let provider = tensors[step.authority_input_slot].provider();
             if buffers
-                .contracted
+                .output
                 .as_ref()
                 .is_some_and(|tensor| !std::ptr::eq(tensor.provider(), provider))
             {
-                buffers.contracted = None;
-            }
-            if buffers
-                .oriented
-                .as_ref()
-                .is_some_and(|tensor| !std::ptr::eq(tensor.provider(), provider))
-            {
-                buffers.oriented = None;
+                buffers.output = None;
             }
         }
         workspace.slots.fill(None);
@@ -748,78 +721,25 @@ impl PlannedNetwork {
             let rhs = slots[step.rhs_slot].as_ref().ok_or_else(|| {
                 HostNetworkError::<R>::from(invalid("rhs operand already consumed"))
             })?;
-            let fused = step.result_output_axes.is_some();
-            let TypedIntermediateBuffers {
-                contracted: contracted_buffer,
-                oriented: oriented_buffer,
-                ..
-            } = &mut intermediates[step_index];
-            let contract_buffer = if fused {
-                &mut *oriented_buffer
-            } else {
-                &mut *contracted_buffer
-            };
-            // The step keeps TensorOperations' split, every open lhs leg in
-            // the codomain; `result_permutation` moves it afterwards.
-            let (codomain, domain) = lhs
-                .rank()
-                .checked_sub(step.lhs_contract_axes.len())
-                .and_then(|lhs_open| step.contract_output_axes.split_at_checked(lhs_open))
-                .ok_or_else(|| {
-                    HostNetworkError::<R>::from(invalid(
-                        "contraction step axes exceed its lhs rank",
-                    ))
-                })?;
+            let buffer = &mut intermediates[step_index].output;
             let spec = ContractSpec {
                 lhs: &step.lhs_contract_axes,
                 rhs: &step.rhs_contract_axes,
-                codomain,
-                domain,
+                codomain: &step.codomain,
+                domain: &step.domain,
             };
             let contracted = <R::Mode as HostNetworkModeDispatch<R, D, S>>::contract_step(
-                lhs,
-                rhs,
-                contract_buffer,
-                &spec,
+                lhs, rhs, buffer, &spec,
             )?;
             if let Some(meter) = meter.as_deref_mut() {
-                let payload = contracted.get(contract_buffer).network_owned_payload();
-                let mut payloads = retained_payloads
-                    .as_ref()
-                    .expect("meter requires retained payload snapshot")
-                    .clone();
-                payloads.push(payload);
+                let mut payloads =
+                    retained_payloads.expect("meter requires retained payload snapshot");
+                payloads.push(contracted.get(buffer).network_owned_payload());
                 meter
                     .observe(slots, producers, &payloads)
                     .map_err(MeteredNetworkError::Payload)?;
             }
-            let result = if fused {
-                contracted.take(oriented_buffer)
-            } else if let Some((codomain, domain)) = &step.result_permutation {
-                let oriented = <R::Mode as HostNetworkModeDispatch<R, D, S>>::permute_step(
-                    contracted.get(contracted_buffer),
-                    oriented_buffer,
-                    codomain,
-                    domain,
-                )?;
-                if let Some(meter) = meter.as_deref_mut() {
-                    let mut payloads = retained_payloads
-                        .as_ref()
-                        .expect("meter requires retained payload snapshot")
-                        .clone();
-                    payloads.extend([
-                        contracted.get(contracted_buffer).network_owned_payload(),
-                        oriented.get(oriented_buffer).network_owned_payload(),
-                    ]);
-                    meter
-                        .observe(slots, producers, &payloads)
-                        .map_err(MeteredNetworkError::Payload)?;
-                }
-                contracted.retain(contracted_buffer);
-                oriented.take(oriented_buffer)
-            } else {
-                contracted.take(contracted_buffer)
-            };
+            let result = contracted.take(buffer);
             let lhs = slots[step.lhs_slot]
                 .take()
                 .expect("validated lhs remains until step success");
@@ -831,8 +751,7 @@ impl PlannedNetwork {
             return_typed_intermediate(intermediates, lhs, lhs_producer, reuse_enabled);
             return_typed_intermediate(intermediates, rhs, rhs_producer, reuse_enabled);
             slots[step.result_slot] = Some(result);
-            producers[step.result_slot] =
-                Some((step_index, fused || step.result_permutation.is_some()));
+            producers[step.result_slot] = Some(step_index);
             if let Some(meter) = meter.as_deref_mut() {
                 let payloads = intermediate_payloads(intermediates);
                 meter
@@ -871,18 +790,12 @@ impl PlannedNetwork {
 fn return_typed_intermediate<R, D, S>(
     intermediates: &mut [TypedIntermediateBuffers<R, D, S>],
     tensor: TensorMap<R, D, S>,
-    producer: Option<(usize, bool)>,
+    producer: Option<usize>,
     reuse_enabled: bool,
 ) {
-    if !reuse_enabled {
-        return;
-    }
-    if let Some((step, oriented)) = producer {
-        let destination = if oriented {
-            &mut intermediates[step].oriented
-        } else {
-            &mut intermediates[step].contracted
-        };
-        *destination = Some(tensor);
+    if reuse_enabled {
+        if let Some(step) = producer {
+            intermediates[step].output = Some(tensor);
+        }
     }
 }
