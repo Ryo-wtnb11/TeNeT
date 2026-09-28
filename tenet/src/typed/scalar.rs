@@ -967,12 +967,16 @@ where
     ///
     /// The product is conjugate-linear in `self`, and `self.inner(&self)` is
     /// `self.norm(2.0)^2` up to floating-point error. Both tensors must share the
-    /// same runtime, hom space, and block layout. Two multiplicity-free compact
-    /// diagonal tensors reduce without materialization; a compact operand
-    /// paired with a dense one is densified into an operation-local buffer
-    /// (TensorKit reads only the diagonal there); checked-Generic
-    /// reductions currently require dense payloads. See [`Self::norm`] for the
-    /// weighting, complexity, lazy behavior, and example.
+    /// same runtime, hom space, and block layout. A multiplicity-free compact
+    /// diagonal operand is reduced directly from its stored spectrum in
+    /// `O(sum_c k_c)` payload reads, including against a dense lazy adjoint;
+    /// it is never densified. Its off-diagonal entries are structural zeros,
+    /// so matching dense off-diagonal values are not read even when they are
+    /// `NaN` or infinite. This deliberately differs from TensorKit 0.17's
+    /// current generic mixed-block reduction, which visits those stored dense
+    /// positions and therefore propagates their non-finite values.
+    /// Checked-Generic reductions currently require dense payloads. See
+    /// [`Self::norm`] for the weighting, lazy behavior, and example.
     #[doc(alias = "dot")]
     pub fn inner<'a>(
         &self,

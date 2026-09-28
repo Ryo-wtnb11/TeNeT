@@ -450,6 +450,63 @@ fn wide_sum(n: usize) -> f64 {
 }
 
 #[test]
+fn mixed_compact_dense_single_precision_cancellation_accumulates_wide() {
+    let runtime = runtime();
+    let leg = wide_leg();
+    let large = PEAK * PEAK;
+    let mut narrow = large;
+    for _ in 1..31 {
+        narrow += 1.0;
+    }
+    narrow -= large;
+    assert_ne!(narrow, 30.0, "fixture must distinguish narrow accumulation");
+
+    let real_dense: TensorMap<U1FusionRule, f32> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
+            if index[0] != index[1] {
+                0.0
+            } else if index[0] == 0 {
+                large
+            } else if index[0] == 31 {
+                -large
+            } else {
+                1.0
+            }
+        })
+        .unwrap();
+    let real_compact: TensorMap<U1FusionRule, f32> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![1.0; 32],
+        }],
+    )
+    .unwrap();
+    let real_lazy = real_dense.adjoint().unwrap();
+    for value in [
+        real_compact.inner(&real_dense).unwrap(),
+        real_dense.inner(&real_compact).unwrap(),
+        real_compact.inner(&real_lazy).unwrap(),
+        real_lazy.inner(&real_compact).unwrap(),
+    ] {
+        assert_eq!(value, 30.0);
+    }
+
+    let complex_dense = real_dense.convert::<Complex32>();
+    let complex_compact = real_compact.convert::<Complex32>();
+    let complex_lazy = complex_dense.adjoint().unwrap();
+    for value in [
+        complex_compact.inner(&complex_dense).unwrap(),
+        complex_dense.inner(&complex_compact).unwrap(),
+        complex_compact.inner(&complex_lazy).unwrap(),
+        complex_lazy.inner(&complex_compact).unwrap(),
+    ] {
+        assert_eq!(value, Complex32::new(30.0, 0.0));
+    }
+}
+
+#[test]
 fn single_precision_reductions_accumulate_in_double() {
     let runtime = runtime();
     let leg = wide_leg();

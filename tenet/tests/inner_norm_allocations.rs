@@ -16,7 +16,7 @@ use tenet::sector::{
     TypedSectorAdmission, U1SectorLayout,
 };
 use tenet::typed::TensorScalar;
-use tenet::typed::{Complex32, Complex64, GradedSpace, Runtime, TensorMap};
+use tenet::typed::{Complex32, Complex64, GradedSpace, Runtime, SectorSpectrum, TensorMap};
 
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
@@ -176,6 +176,43 @@ fn warmed_lazy_adjoint_inner_does_not_allocate_in_mixed_or_double_orientation() 
     ] {
         black_box(value);
         // Zero allocations also rules out an operation-local materialization.
+        assert_eq!(allocations, 0);
+    }
+}
+
+#[test]
+fn warmed_compact_dense_inner_does_not_allocate() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let spin0 = SU2Irrep::from_twice_spin(0);
+    let spin_half = SU2Irrep::from_twice_spin(1);
+    let space =
+        GradedSpace::try_new(Arc::new(SU2FusionRule), [(spin0, 3), (spin_half, 2)]).unwrap();
+    let compact = TensorMap::diagonal(
+        &runtime,
+        &space,
+        [
+            SectorSpectrum {
+                sector: spin0,
+                values: vec![Complex64::new(1.0, 0.5); 3],
+            },
+            SectorSpectrum {
+                sector: spin_half,
+                values: vec![Complex64::new(2.0, -0.5); 2],
+            },
+        ],
+    )
+    .unwrap();
+    let dense: TensorMap<_, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&space], [&space], 1_616).unwrap();
+    let lazy = dense.adjoint().unwrap();
+
+    for (value, allocations) in [
+        measured(|| compact.inner(&dense).unwrap()),
+        measured(|| dense.inner(&compact).unwrap()),
+        measured(|| compact.inner(&lazy).unwrap()),
+        measured(|| lazy.inner(&compact).unwrap()),
+    ] {
+        black_box(value);
         assert_eq!(allocations, 0);
     }
 }
