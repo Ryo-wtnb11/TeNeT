@@ -21,7 +21,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{Complex32, Complex64, GradedSpace, Runtime, TensorMap, Truncation};
@@ -63,6 +63,20 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
+/// This file had no cross-test lock at all: its three tests can run
+/// concurrently under cargo's default in-binary test threading. The
+/// factorization and the plain-pipeline tests both build `u1_space()` — the
+/// same sectors and degeneracies, hence the same key into tenet-core's
+/// process-global fusion-tree-layout and complete-HomSpace-structure caches
+/// (`tenet-core/src/fusion_space/layout_cache.rs`). One test's concurrent
+/// admission or (weakly held, #1610) eviction of that shared entry between
+/// another test's warm-up and measured call changes the measured call's own
+/// allocation count without changing what it computes: reported as 218 f32
+/// allocations against 202 f64 under a full parallel workspace run. Take this
+/// lock for the whole body of every test in this file, the same technique
+/// `transform_owned_parallel.rs` uses.
+static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+
 fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
     ALLOCATIONS.set(0);
     BYTES.set(0);
@@ -88,6 +102,7 @@ macro_rules! permuted {
 
 #[test]
 fn runtime_construction_does_not_build_unused_dtype_lanes() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Warm anything the process initialises once (thread pools, env parsing)
     // so every build measured below is steady state.
     black_box(build_runtime());
@@ -178,6 +193,7 @@ macro_rules! measure_pipeline {
 
 #[test]
 fn single_precision_allocates_as_often_as_double_and_half_the_payload_bytes() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = u1_space();
 
@@ -287,6 +303,7 @@ macro_rules! measure_factorizations {
 
 #[test]
 fn single_precision_factorizations_allocate_like_double() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = u1_space();
 

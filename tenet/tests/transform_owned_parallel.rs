@@ -65,6 +65,41 @@ unsafe impl GlobalAlloc for CountingAllocator {
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
 
+/// Re-executes exactly one test, alone, in a child process. `MEASUREMENT_LOCK`
+/// only serializes this file's own three tests against each other; it does
+/// not stop a preceding test's dropped `Runtime`/pool from leaving
+/// process-global structural-cache work (tenet-core's fusion-tree-layout and
+/// complete-HomSpace caches) still in flight when the lock is re-acquired.
+/// `parallel_owned_permute_allocates_like_the_serial_owned_path` shares its
+/// `u1_su2_space` fixture (same sectors and degeneracies) with
+/// `u1_su2_owned_transforms_are_bit_identical_across_thread_counts`, so a
+/// rebuild landing in that window changes this thread's allocation count (8
+/// against 6, reported during #1570 verification even with the lock held).
+/// Same technique as tenet-tensors #649/#650 and tenet-core/tenet-tensors'
+/// #1598/#1606 fix.
+///
+/// Call at the top of the `#[test]` fn with a name-unique env var and the
+/// test's libtest path; when it returns `true`, the child already ran the
+/// real body and the caller must return immediately.
+fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> bool {
+    if std::env::var_os(isolated_env).is_some() {
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_path])
+        .env(isolated_env, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "isolated test did not execute exactly once: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+    true
+}
+
 /// (allocations, bytes, zeroed allocations) on the caller thread.
 fn measure<T>(f: impl FnOnce() -> T) -> (T, usize, usize, usize) {
     ALLOCATIONS.set(0);
@@ -234,6 +269,12 @@ fn u1_owned_transforms_are_bit_identical_across_thread_counts() {
 
 #[test]
 fn parallel_owned_permute_allocates_like_the_serial_owned_path() {
+    if run_isolated_or_return(
+        "TENET_PARALLEL_OWNED_PERMUTE_ALLOCATES_LIKE_SERIAL_ISOLATED",
+        "parallel_owned_permute_allocates_like_the_serial_owned_path",
+    ) {
+        return;
+    }
     let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // What: with `recoupling_threads > 1` a warmed owned permute makes the
     // same caller-thread allocations as the serial owned path and none of them

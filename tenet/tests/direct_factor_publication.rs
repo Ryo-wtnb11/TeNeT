@@ -236,6 +236,7 @@ fn compact_lq_requests_no_zeroed_output_storage() {
 #[cfg(feature = "racah-generated")]
 mod checked_generic {
     use super::*;
+    use std::sync::Mutex;
     use tenet::typed::SUNFusionRule;
     use tenet::typed::{LeftPolar, RightPolar, Svd};
 
@@ -269,6 +270,19 @@ mod checked_generic {
     fn payload_bytes(tensor: &TensorMap<SUNFusionRule, f64>) -> usize {
         std::mem::size_of_val(tensor.dense_data().unwrap())
     }
+
+    /// This module has no other cross-test lock.
+    /// `checked_generic_polar_allocates_no_per_sector_temporaries` compares
+    /// two `measured` calls' byte growth against each other and shares its
+    /// `tall_legs(&provider, 1)` fixture with
+    /// `checked_generic_polar_and_lq_match_reconstruction_oracles`'s `cases!`
+    /// invocation (same rows/cols sectors and degeneracies, hence the same
+    /// key into tenet-core's process-global fusion-tree-layout and
+    /// complete-HomSpace-structure caches). Either test running unlocked
+    /// beside the other can warm or (weakly held, #1610) evict that shared
+    /// entry mid-measurement, moving the scratch-byte delta the assertion
+    /// compares. Take this lock in both.
+    static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
 
     /// Left: `A = W P`, right: `A = P W`, with `W` an isometry (`Wᴴ W = 1`
     /// left, `W Wᴴ = 1` right: every eigenvalue of the Gram matrix is one)
@@ -342,6 +356,7 @@ mod checked_generic {
 
     #[test]
     fn checked_generic_polar_and_lq_match_reconstruction_oracles() {
+        let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         cases!(f64, &runtime);
         cases!(Complex64, &runtime);
@@ -359,6 +374,7 @@ mod checked_generic {
     // which it would by the size of the temporaries before #1478.
     #[test]
     fn checked_generic_polar_allocates_no_per_sector_temporaries() {
+        let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
         let scratch = |scale| {

@@ -15,7 +15,7 @@ mod single_precision_oracle;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use num_complex::{Complex32, Complex64};
 use tenet::core::{U1FusionRule, U1Irrep};
@@ -67,6 +67,20 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+/// This file has no other cross-test lock. `conversion_payload_allocations`
+/// compares two `measured` calls against each other (handle cost, byte delta,
+/// payload-sized-allocation count) on a tensor built from `u1_leg_with([2, 3,
+/// 2])`, which is exactly `u1_leg()` (`single_precision_oracle::u1_leg()`
+/// returns that same tiling). `u1_dense_conversions_are_exact_and_keep_structure`,
+/// `lazy_adjoint_conversions_match_the_converted_logical_payload`,
+/// `compact_diagonal_stays_compact` and `converted_lazy_adjoints_are_owned`
+/// all build the identical `u1_leg()` space, unlocked, in the same binary, so
+/// any of them can run concurrently with the measurement and warm or (weakly
+/// held, #1610) evict the shared fusion-tree-layout/complete-HomSpace cache
+/// entry between `conversion_payload_allocations`'s two calls. Take this lock
+/// in every test that builds that shared space.
+static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Allocation calls, bytes, and calls of at least `large` bytes.
 fn measured<T>(large: usize, operation: impl FnOnce() -> T) -> (T, usize, usize, usize) {
@@ -463,6 +477,7 @@ macro_rules! filled {
 
 #[test]
 fn u1_dense_conversions_are_exact_and_keep_structure() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let leg = u1_leg();
     let (source, _) = assert_all_conversions!("u1 dense", filled!([&leg, &leg], [&leg]));
     assert!(source
@@ -499,6 +514,7 @@ fn fermionic_su2_dense_conversions_are_exact_and_keep_structure() {
 
 #[test]
 fn lazy_adjoint_conversions_match_the_converted_logical_payload() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let leg = fermion_su2_leg();
     let source = filled!([&leg, &leg], [&leg]);
     // The logical payload of the lazy view is what gets converted.
@@ -548,6 +564,7 @@ fn lazy_adjoint_conversions_match_the_converted_logical_payload() {
 
 #[test]
 fn compact_diagonal_stays_compact() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let leg = u1_leg();
     let mut next = 0usize;
     let spectra = [(-1, 2), (0, 3), (1, 2)].map(|(charge, degeneracy)| SectorSpectrum {
@@ -715,6 +732,7 @@ fn assert_payload_allocations<T, O>(
 
 #[test]
 fn conversion_payload_allocations() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (small_leg, large_leg) = (u1_leg_with([2, 3, 2]), u1_leg_with([9, 10, 9]));
     let small = filled!([&small_leg, &small_leg], [&small_leg]);
     let large = filled!([&large_leg, &large_leg], [&large_leg]);
@@ -802,6 +820,7 @@ fn conversion_payload_allocations() {
 /// and must keep doing so).
 #[test]
 fn converted_lazy_adjoints_are_owned() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let leg = u1_leg();
     let bond: TensorMap<U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime(), [&leg], [&leg], 11).unwrap();
