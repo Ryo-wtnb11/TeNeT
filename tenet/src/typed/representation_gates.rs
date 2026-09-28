@@ -6534,8 +6534,7 @@ fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
         lazy.inner(&diagonal).unwrap(),
         eager.inner(&diagonal).unwrap(),
     );
-    // Positive control: `inner` densifies the compact operand locally.
-    assert!(DIAGONAL_MATERIALIZATIONS.get() > 0);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
 #[test]
@@ -6563,8 +6562,146 @@ fn mixed_compact_dense_inner_does_not_materialize_the_diagonal() {
     .unwrap();
 
     DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_close(diagonal.inner(&dense).unwrap(), Complex64::new(3.5, 0.0));
+    assert_close(dense.inner(&diagonal).unwrap(), Complex64::new(3.5, 0.0));
     assert_close(diagonal.inner(&lazy).unwrap(), Complex64::new(-7.5, -10.0));
     assert_close(lazy.inner(&diagonal).unwrap(), Complex64::new(-7.5, 10.0));
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+}
+
+#[test]
+fn mixed_compact_dense_inner_weights_sectors_and_skips_structural_zeros() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let spin0 = SU2Irrep::from_twice_spin(0);
+    let spin_half = SU2Irrep::from_twice_spin(1);
+    let bond = GradedSpace::try_new(Arc::new(SU2FusionRule), [(spin0, 2), (spin_half, 1)]).unwrap();
+    let diagonal = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: spin0,
+                values: vec![1.0, 2.0],
+            },
+            SectorSpectrum {
+                sector: spin_half,
+                values: vec![3.0],
+            },
+        ],
+    )
+    .unwrap();
+    let dense = TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |trees, indices| {
+        if indices[0] != indices[1] {
+            if indices[0] == 0 {
+                f64::NAN
+            } else {
+                f64::INFINITY
+            }
+        } else if *trees.coupled() == spin0 {
+            [4.0, 5.0][indices[0]]
+        } else {
+            6.0
+        }
+    })
+    .unwrap();
+    let lazy = dense.adjoint().unwrap();
+
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    for dense in [&dense, &lazy] {
+        assert_eq!(diagonal.inner(dense).unwrap(), 50.0);
+        assert_eq!(dense.inner(&diagonal).unwrap(), 50.0);
+    }
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+
+    let nonfinite_diagonal =
+        TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |trees, indices| {
+            if indices == [0, 0] && *trees.coupled() == spin0 {
+                f64::NAN
+            } else {
+                1.0
+            }
+        })
+        .unwrap();
+    assert!(diagonal.inner(&nonfinite_diagonal).unwrap().is_nan());
+    assert!(nonfinite_diagonal.inner(&diagonal).unwrap().is_nan());
+
+    let infinite_diagonal =
+        TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |trees, indices| {
+            if indices == [0, 0] && *trees.coupled() == spin0 {
+                f64::INFINITY
+            } else {
+                1.0
+            }
+        })
+        .unwrap();
+    assert!(diagonal.inner(&infinite_diagonal).unwrap().is_infinite());
+    assert!(infinite_diagonal.inner(&diagonal).unwrap().is_infinite());
+}
+
+#[test]
+fn mixed_compact_dense_inner_accepts_an_empty_bond() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let bond = GradedSpace::try_new(Arc::new(U1FusionRule), []).unwrap();
+    let diagonal: TensorMap<_, f64> =
+        TensorMap::diagonal(&runtime, &bond, Vec::<SectorSpectrum<_, f64>>::new()).unwrap();
+    let dense: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |_, _| unreachable!()).unwrap();
+
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(diagonal.inner(&dense).unwrap(), 0.0);
+    assert_eq!(dense.inner(&diagonal).unwrap(), 0.0);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+}
+
+#[test]
+fn mixed_compact_lazy_inner_maps_non_self_dual_parent_blocks() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let bond = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(-1), 1),
+            (U1Irrep::new(0), 2),
+            (U1Irrep::new(2), 1),
+        ],
+    )
+    .unwrap();
+    let diagonal = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(2),
+                values: vec![6.0],
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(-1),
+                values: vec![5.0],
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![3.0, 4.0],
+            },
+        ],
+    )
+    .unwrap();
+    let dense = TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |trees, indices| {
+        if indices[0] != indices[1] {
+            -1000.0
+        } else {
+            match trees.coupled().charge() {
+                -1 => 30.0,
+                0 => [10.0, 20.0][indices[0]],
+                2 => 40.0,
+                charge => panic!("unexpected charge {charge}"),
+            }
+        }
+    })
+    .unwrap();
+    let lazy = dense.adjoint().unwrap();
+
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(diagonal.inner(&lazy).unwrap(), 500.0);
+    assert_eq!(lazy.inner(&diagonal).unwrap(), 500.0);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 

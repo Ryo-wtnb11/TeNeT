@@ -2825,6 +2825,90 @@ where
         Ok(total)
     }
 
+    /// Mixed compact/dense inner over the stored diagonal only. A compact
+    /// operand defines structural zeros off diagonal, so those dense entries
+    /// are not part of this reduction (including non-finite values).
+    fn compact_dense_inner(
+        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+        dense: &Self,
+        compact_is_lhs: bool,
+    ) -> Result<num_complex::Complex64, Error> {
+        let logical_structure = dense.logical_space().space().structure();
+        let (data_structure, data, dense_is_adjoint) = match &dense.repr {
+            TypedTensorRepr::Owned(body) => {
+                let TypedData::Dense(data) = body.data.as_ref() else {
+                    unreachable!("mixed compact/dense dispatch requires a dense operand")
+                };
+                (body.space.space().structure(), data.as_slice(), false)
+            }
+            TypedTensorRepr::Adjoint(view) => (
+                view.parent.space.space().structure(),
+                view.parent_data(),
+                true,
+            ),
+        };
+        if logical_structure.block_count() != spectrum.len()
+            || data_structure.required_len()? != data.len()
+        {
+            return Err(spectra_disagree());
+        }
+
+        let mut total = num_complex::Complex64::new(0.0, 0.0);
+        for (index, entry) in spectrum.iter().enumerate() {
+            let logical_block = logical_structure.block(index)?;
+            let Some(pair) = logical_block.key().as_fusion_tree_pair() else {
+                return Err(spectra_disagree());
+            };
+            if pair.codomain_tree().coupled() != entry.sector
+                || logical_block.shape().len() != 2
+                || logical_block.shape()[0] != logical_block.shape()[1]
+                || logical_block.shape()[0] != entry.values.len()
+            {
+                return Err(spectra_disagree());
+            }
+            let data_block = if dense_is_adjoint {
+                let parent_index = data_structure
+                    .find_block_index_by_adjoint_fusion_tree_pair(pair)
+                    .ok_or_else(|| {
+                        internal_layout_error(
+                            "compact/dense inner cannot map a logical block to the adjoint parent",
+                        )
+                    })?;
+                data_structure.block(parent_index)?
+            } else {
+                data_structure.block(index)?
+            };
+            if data_block.shape().len() != 2
+                || data_block.shape()[0] != data_block.shape()[1]
+                || data_block.shape()[0] != entry.values.len()
+            {
+                return Err(spectra_disagree());
+            }
+            let stride = data_block.strides()[0] + data_block.strides()[1];
+            let mut partial = D::Wide::from_real(0.0);
+            for (i, &compact_value) in entry.values.iter().enumerate() {
+                let dense_value = *data.get(data_block.offset() + i * stride).ok_or_else(|| {
+                    internal_layout_error("compact/dense inner diagonal exceeds scalar storage")
+                })?;
+                let compact_value = compact_value.widen();
+                let dense_value = dense_value.widen();
+                partial = partial
+                    + match (compact_is_lhs, dense_is_adjoint) {
+                        (true, false) => FactorScalar::adjoint(compact_value) * dense_value,
+                        (true, true) => {
+                            FactorScalar::adjoint(compact_value)
+                                * FactorScalar::adjoint(dense_value)
+                        }
+                        (false, false) => FactorScalar::adjoint(dense_value) * compact_value,
+                        (false, true) => dense_value * compact_value,
+                    };
+            }
+            total +=
+                partial.widen_complex() * dense.logical_space().provider().dim_scalar(entry.sector);
+        }
+        Ok(total)
+    }
+
     /// The linear combination `alpha * self + beta * other`.
     ///
     /// Both operands must live on the same runtime and on the same space —
@@ -3425,6 +3509,8 @@ where
     /// TensorKit `dot(x, y)`: the quantum-dimension-weighted Frobenius inner
     /// product `Σ_c dim(c) * <a_c, b_c>` with **`self` conjugated** — the
     /// product is conjugate-linear in its first argument.
+    /// A compact diagonal operand contributes structural zeros off diagonal;
+    /// those positions of a dense operand are not read, even when non-finite.
     ///
     /// `t.inner(&t)?` is `t.norm(2.0)?²` up to floating point, and for `D = f64`
     /// the result is exactly real.
@@ -3444,12 +3530,20 @@ where
                 "tensors live on different spaces or block layouts".to_string(),
             ));
         }
-        // Two compact spectra reduce without either being materialized. A
-        // compact/dense pair densifies the compact factor for this call, while
-        // a lazy dense operand remains parent-oriented.
+        // Compact operands reduce without materializing their structural zeros.
         if let (Some(lhs), Some(rhs)) = (self.spectrum(), other.spectrum()) {
             let provider = self.logical_space().provider();
             return Ok(D::from_complex64(Self::compact_inner(lhs, rhs, provider)?));
+        }
+        if let Some(lhs) = self.spectrum() {
+            return Ok(D::from_complex64(Self::compact_dense_inner(
+                lhs, other, true,
+            )?));
+        }
+        if let Some(rhs) = other.spectrum() {
+            return Ok(D::from_complex64(Self::compact_dense_inner(
+                rhs, self, false,
+            )?));
         }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
             || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
