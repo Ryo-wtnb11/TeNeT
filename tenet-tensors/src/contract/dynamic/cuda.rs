@@ -487,9 +487,8 @@ where
 }
 
 /// The core plan's inactive destination blocks as device regions: the exact
-/// set a retained core-destination buffer must zero (the host clears the
-/// whole buffer instead, `prepare_zeroed_scratch_slot`), written into
-/// `regions` in place.
+/// set a retained core-destination buffer must zero. Host `execute_raw` applies
+/// the same strong-zero rule when beta is zero. Writes the regions in place.
 fn fill_inactive_regions<'a, C>(
     regions: &'a mut Vec<CudaRegion>,
     plan: &tenet_operations::FusionBlockContractPlan<C>,

@@ -2894,7 +2894,7 @@ mod tests {
     };
 
     use crate::tree_context::TreeTransformExecutionContext;
-    use crate::DenseTreeTransformOperations;
+    use crate::{BoundDynamicFusionMapSpace, DenseTreeTransformOperations};
     use tenet_operations::OutputAxisOrder;
 
     use super::super::dynamic_space::{
@@ -2929,6 +2929,163 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    fn run_nan_poisoned_destination_case(
+        scratch: &mut DynamicFusionScratchWorkspace<f64>,
+        open_degeneracy: usize,
+    ) -> (Vec<f64>, usize, usize) {
+        let provider = Arc::new(U1FusionRule);
+        let wide = || {
+            SectorLeg::new(
+                [
+                    (U1Irrep::new(0).sector_id(), 1),
+                    (U1Irrep::new(1).sector_id(), open_degeneracy),
+                    (U1Irrep::new(2).sector_id(), 1),
+                ],
+                false,
+            )
+        };
+        let narrow = || {
+            SectorLeg::new(
+                [
+                    (U1Irrep::new(0).sector_id(), 2),
+                    (U1Irrep::new(1).sector_id(), 1),
+                ],
+                false,
+            )
+        };
+        let space = |codomain, domain| {
+            BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+                Arc::clone(&provider),
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new(codomain),
+                    FusionProductSpace::new(domain),
+                ),
+            )
+            .unwrap()
+        };
+        let lhs = space(vec![wide(), wide()], vec![narrow()]);
+        let rhs = space(vec![narrow()], vec![wide()]);
+        let output_order = OutputAxisOrder::from_axes(&[1, 0, 2]);
+        let axes = TensorContractSpec::new(&[2], &[0], output_order);
+        let dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+            &lhs,
+            &rhs,
+            &[2],
+            &[0],
+            output_order,
+        )
+        .unwrap();
+        let plan = super::super::fusion::prepare_tensorcontract_fusion_plan_dyn_raw(
+            provider.as_ref(),
+            dst.space(),
+            lhs.space(),
+            rhs.space(),
+            axes,
+        )
+        .unwrap();
+        assert!(!plan.output_transform_is_identity());
+
+        let mut tree_context =
+            TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
+        let mut cache = DynamicFusionSpaceCache::default();
+        let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, f64, _, false>(
+            &mut tree_context,
+            &mut cache,
+            provider.as_ref(),
+            encoded_layout_primer::<U1FusionRule>,
+            &plan,
+            dst.space(),
+            lhs.space(),
+            lhs.space().structure(),
+            rhs.space(),
+            rhs.space().structure(),
+            None,
+        )
+        .unwrap();
+        let core_dst = artifact.core_dst.as_ref().unwrap();
+        let core_len = core_dst.space.required_len().unwrap();
+        let inactive = artifact.block_plan.inactive_destination_regions().len();
+        assert!(inactive > 0, "fixture must include an inactive core block");
+        let lhs_data = (0..lhs.space().required_len().unwrap())
+            .map(|index| (index as f64 * 0.37 + 0.1).sin())
+            .collect::<Vec<_>>();
+        let rhs_data = (0..rhs.space().required_len().unwrap())
+            .map(|index| (index as f64 * 0.23 + 0.2).cos())
+            .collect::<Vec<_>>();
+        let execute =
+            |tree_context: &mut TreeTransformExecutionContext<f64, crate::RuleIdentity>,
+             scratch: &mut DynamicFusionScratchWorkspace<f64>,
+             output: &mut [f64]| {
+                execute_dynamic_tree_execution_artifact(
+                    tree_context,
+                    &mut DenseTreeTransformOperations::default(),
+                    &mut super::super::backend::TensorContractWorkspace::default(),
+                    &mut FusionBlockContractWorkspace::default(),
+                    scratch,
+                    &artifact,
+                    dst.space().structure(),
+                    output,
+                    &lhs_data,
+                    &rhs_data,
+                    1.0,
+                    0.0,
+                )
+                .unwrap();
+            };
+        let mut expected = vec![0.0; dst.space().required_len().unwrap()];
+        execute(
+            &mut tree_context,
+            &mut DynamicFusionScratchWorkspace::default(),
+            &mut expected,
+        );
+        let mut actual = vec![0.0; expected.len()];
+        execute(&mut tree_context, scratch, &mut actual);
+        assert!(
+            scratch
+                .dst_data_mut()
+                .expect("replay retains destination scratch")
+                .iter()
+                .all(|value| value.is_finite()),
+            "strong zero must initialize active and inactive core blocks"
+        );
+        assert_eq!(
+            actual
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        (actual, core_len, inactive)
+    }
+
+    #[test]
+    fn dynamic_core_strong_zero_overwrites_nan_scratch_after_shape_change() {
+        let mut scratch = DynamicFusionScratchWorkspace::default();
+        let (_, first_len, _) = run_nan_poisoned_destination_case(&mut scratch, 4);
+        scratch
+            .dst_data_mut()
+            .expect("first replay retains destination scratch")
+            .fill(f64::NAN);
+        let (same_shape, same_len, same_inactive) =
+            run_nan_poisoned_destination_case(&mut scratch, 4);
+        assert_eq!(first_len, same_len);
+        assert!(same_inactive > 0);
+        assert!(same_shape.iter().all(|value| value.is_finite()));
+        scratch
+            .dst_data_mut()
+            .expect("same-shape replay retains destination scratch")
+            .fill(f64::NAN);
+
+        let (actual, second_len, inactive) = run_nan_poisoned_destination_case(&mut scratch, 2);
+
+        assert_ne!(first_len, second_len, "fixture must change scratch shape");
+        assert!(inactive > 0);
+        assert!(actual.iter().all(|value| value.is_finite()));
     }
 
     #[test]

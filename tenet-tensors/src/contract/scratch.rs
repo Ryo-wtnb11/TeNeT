@@ -29,10 +29,6 @@ where
         })
     }
 
-    pub(crate) fn fill_zero(&mut self) {
-        self.data.fill(T::zero());
-    }
-
     /// Re-points an overwrite-only source scratch at a different space while
     /// preserving initialized storage and filling only a newly grown tail.
     pub(crate) fn reset_for_overwrite(
@@ -42,18 +38,6 @@ where
         let len = space.required_len()?;
         self.space = space;
         self.data.resize_filled(len, T::zero());
-        Ok(())
-    }
-
-    /// Re-points accumulation scratch and restores a logical zero destination.
-    pub(crate) fn reset(
-        &mut self,
-        space: Arc<DynamicFusionMapSpace>,
-    ) -> Result<(), OperationError> {
-        let len = space.required_len()?;
-        self.space = space;
-        self.data.resize_filled(len, T::zero());
-        self.data.fill(T::zero());
         Ok(())
     }
 }
@@ -72,6 +56,13 @@ impl<T> HostDynamicFusionScratch<T> {
     #[inline]
     pub(crate) fn data_mut(&mut self) -> &mut [T] {
         self.data.as_mut_slice()
+    }
+
+    #[inline]
+    fn retained_bytes(&self) -> usize {
+        self.data
+            .capacity()
+            .saturating_mul(std::mem::size_of::<T>())
     }
 }
 
@@ -126,7 +117,7 @@ where
         &mut self,
         space: Arc<DynamicFusionMapSpace>,
     ) -> Result<&mut DynamicFusionScratch<T>, OperationError> {
-        prepare_zeroed_scratch_slot(&mut self.dst, space)
+        prepare_overwrite_scratch_slot(&mut self.dst, space)
     }
 
     pub(crate) fn lhs(&self) -> &DynamicFusionScratch<T> {
@@ -164,6 +155,24 @@ where
                 .expect("dst dynamic scratch prepared before replay"),
         )
     }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        [&self.lhs, &self.rhs, &self.dst]
+            .into_iter()
+            .flatten()
+            .fold(0usize, |bytes, scratch| {
+                bytes.saturating_add(scratch.retained_bytes())
+            })
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dst_data_mut(&mut self) -> Option<&mut [T]> {
+        self.dst.as_mut().map(DynamicFusionScratch::data_mut)
+    }
 }
 
 impl<T> ReportsPlacement for HostDynamicFusionScratchWorkspace<T> {
@@ -191,29 +200,6 @@ where
         None => {
             *slot = Some(DynamicFusionScratch::zeroed(space)?);
         }
-    }
-    Ok(slot
-        .as_mut()
-        .expect("dynamic scratch slot prepared before return"))
-}
-
-fn prepare_zeroed_scratch_slot<T>(
-    slot: &mut Option<DynamicFusionScratch<T>>,
-    space: Arc<DynamicFusionMapSpace>,
-) -> Result<&mut DynamicFusionScratch<T>, OperationError>
-where
-    T: Clone + Zero,
-{
-    // Why not share the source helper: contraction accumulates into this slot,
-    // so stale initialized values are part of the arithmetic unless cleared.
-    match slot {
-        Some(scratch)
-            if Arc::ptr_eq(&scratch.space, &space) || scratch.space.as_ref() == space.as_ref() =>
-        {
-            scratch.fill_zero();
-        }
-        Some(scratch) => scratch.reset(space)?,
-        None => *slot = Some(DynamicFusionScratch::zeroed(space)?),
     }
     Ok(slot
         .as_mut()
@@ -280,8 +266,9 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_fusion_destination_scratch_reuse_clears_dirty_contents() {
-        // What: accumulation destination scratch still clears every reused element.
+    fn dynamic_fusion_destination_scratch_reuse_preserves_initialized_contents() {
+        // What: preparation skips the whole-buffer clear; the core replay owns
+        // strong-zero initialization of active and inactive blocks.
         let space = scratch_space(3);
         let mut workspace = HostDynamicFusionScratchWorkspace::<f64>::default();
         workspace
@@ -292,6 +279,24 @@ mod tests {
 
         let scratch = workspace.prepare_dst(space).unwrap();
 
-        assert_eq!(scratch.data(), &[0.0, 0.0, 0.0]);
+        assert!(scratch.data().iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
+    fn dynamic_fusion_scratch_retained_bytes_use_capacity_and_clear_releases_it() {
+        let mut workspace = HostDynamicFusionScratchWorkspace::<f64>::default();
+        workspace.prepare_lhs(scratch_space(3)).unwrap();
+        workspace.prepare_rhs(scratch_space(5)).unwrap();
+        workspace.prepare_dst(scratch_space(7)).unwrap();
+        let expected: usize = [&workspace.lhs, &workspace.rhs, &workspace.dst]
+            .into_iter()
+            .flatten()
+            .map(HostDynamicFusionScratch::retained_bytes)
+            .sum();
+
+        assert_eq!(workspace.retained_bytes(), expected);
+        assert!(expected >= (3 + 5 + 7) * std::mem::size_of::<f64>());
+        workspace.clear();
+        assert_eq!(workspace.retained_bytes(), 0);
     }
 }

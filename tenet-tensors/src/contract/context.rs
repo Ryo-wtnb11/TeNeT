@@ -608,6 +608,24 @@ where
         self.copy_c_scratch.len()
     }
 
+    /// Allocated Host capacity retained by fusion lhs/rhs/destination scratch
+    /// and the `copyC` temporary.
+    #[doc(hidden)]
+    pub fn retained_host_scratch_bytes(&self) -> usize {
+        self.fusion_scratch.retained_bytes().saturating_add(
+            self.copy_c_scratch
+                .capacity()
+                .saturating_mul(std::mem::size_of::<D>()),
+        )
+    }
+
+    /// Releases this context's retained Host fusion and `copyC` buffers.
+    #[doc(hidden)]
+    pub fn trim_host_scratch(&mut self) {
+        self.fusion_scratch.clear();
+        self.copy_c_scratch = HostScratchBuffer::default();
+    }
+
     pub(crate) fn checked_generic_resources_mut(
         &mut self,
     ) -> (
