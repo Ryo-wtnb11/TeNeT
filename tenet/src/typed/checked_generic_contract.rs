@@ -265,15 +265,7 @@ where
         output_order,
         Some(codomain_rank),
     )?;
-    let Some(order) = tenet_tensors::zero_copy_contract_order_for_output_permute(
-        lhs.logical_space().provider(),
-        destination.space(),
-        lhs.fusion_operand(),
-        rhs.fusion_operand(),
-        lhs_axes,
-        rhs_axes,
-        output_axes,
-    ) else {
+    let Some(copy_c) = CopyC::plan(lhs, rhs, spec, destination.space())? else {
         return contract_multiplicity_free_into(
             lhs,
             rhs,
@@ -283,61 +275,13 @@ where
             destination,
         );
     };
-    // Why not the one-call ordered route here: the predicate found it
-    // costlier under TensorKit's memcost. It would copy a source (a lazy
-    // adjoint always), while the zero-copy candidate borrows both operands
-    // and only `C` moves. This is TensorKit `blas_contract!`'s `copyC`: a
-    // temporary, then a permuting `tensoradd!` into `destination`.
-    //
-    // TensorKit allocates `Cnew` as a temporary (`tensoralloc_add(...,
-    // Val(true), allocator)`) and frees it after the permute; here it is the
-    // leased context's pooled `copyC` scratch, so the returned tensor is the
-    // only output-sized allocation of a warm call.
-    let lhs_open = lhs.rank() - lhs_axes.len();
-    let rhs_open = rhs.rank() - rhs_axes.len();
-    let identity = OutputAxisOrder::identity();
-    let (first, second, first_axes, second_axes, lhs_offset, rhs_offset) = match order {
-        tenet_tensors::FusionContractOrientation::LhsRhs => (lhs, rhs, lhs_axes, rhs_axes, 0, 0),
-        tenet_tensors::FusionContractOrientation::RhsLhs => {
-            (rhs, lhs, rhs_axes, lhs_axes, rhs_open, lhs_open)
-        }
-    };
-    let temporary_space =
-        contract_destination(first, second, first_axes, second_axes, identity, None)?;
-    // `temporary` lists the rhs open axes first under `RhsLhs`.
-    let position = |axis: usize| {
-        if axis < lhs_open {
-            axis + lhs_offset
-        } else {
-            axis - rhs_offset
-        }
-    };
-    let (codomain, domain) = output_axes.split_at(codomain_rank);
-    let temporary_len = temporary_space.space().required_len()?;
     let mut lease = lhs.runtime.lease_context()?;
     let lane = lease.context().multiplicity_free_lane::<D>()?;
-    let mut temporary = lane.take_copy_c_scratch();
-    // Stale pooled values are never read: `Axpby(0)` is a strong zero that
-    // assigns every destination block, inactive ones included.
-    temporary.resize_filled(temporary_len, D::from_real(0.0));
-    contract_multiplicity_free_into_slice(
-        lane,
-        first,
-        second,
-        first_axes,
-        second_axes,
-        identity,
-        &temporary_space,
-        temporary.as_mut_slice(),
-        tenet_tensors::ContractDestinationInit::Axpby(D::from_real(0.0)),
-    )?;
+    let temporary = copy_c.contract_temporary(lane)?;
     let data = tree_transform_owned_multiplicity_free_into(
         lane,
-        BoundDynamicTensorRef::try_new(&temporary_space, temporary.as_slice())?,
-        TreeTransformOperation::permute(
-            codomain.iter().copied().map(position),
-            domain.iter().copied().map(position),
-        ),
+        BoundDynamicTensorRef::try_new(&copy_c.temporary_space, temporary.as_slice())?,
+        copy_c.operation.clone(),
         &destination,
     )?;
     lane.restore_copy_c_scratch(temporary);
@@ -345,6 +289,127 @@ where
         runtime: lhs.runtime.clone(),
         repr: owned_repr(TypedTensorBody::dense(destination, data)),
     })
+}
+
+/// TensorKit `blas_contract!`'s `copyC` for `lhs·rhs` under `spec`: the
+/// zero-copy candidate contraction with its own default output into a
+/// temporary, then one permuting transform (`tensoradd!(C, Cnew, pAB, false,
+/// α, β)`) into the result. Shared by the owned [`TensorMap::contract`] and
+/// the destination [`TensorMap::contract_into`] routes, so both make the same
+/// choice.
+///
+/// Why not the one-call ordered route when this applies: the predicate found
+/// it costlier under TensorKit's memcost. It would copy a source (a lazy
+/// adjoint always), while the zero-copy candidate borrows both operands and
+/// only `C` moves.
+pub(super) struct CopyC<'a, R, D> {
+    first: &'a TensorMap<R, D>,
+    second: &'a TensorMap<R, D>,
+    first_axes: &'a [usize],
+    second_axes: &'a [usize],
+    pub(super) temporary_space: BoundDynamicFusionMapSpace<R>,
+    temporary_len: usize,
+    /// Permutes the temporary into the requested output order and split.
+    pub(super) operation: TreeTransformOperation,
+}
+
+impl<'a, R, D> CopyC<'a, R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
+    /// The copyC plan when TensorKit's memcost choice takes it for a result
+    /// of space `destination`, else `None`. Metadata only: no lease, no
+    /// scratch, no write.
+    pub(super) fn plan(
+        lhs: &'a TensorMap<R, D>,
+        rhs: &'a TensorMap<R, D>,
+        spec: &'a ContractSpec<'_>,
+        destination: &DynamicFusionMapSpace,
+    ) -> Result<Option<Self>, Error> {
+        let (lhs_axes, rhs_axes) = (spec.lhs, spec.rhs);
+        let output_axes = &spec.output_axes()[..];
+        let Some(order) = tenet_tensors::zero_copy_contract_order_for_output_permute(
+            lhs.logical_space().provider(),
+            destination,
+            lhs.fusion_operand(),
+            rhs.fusion_operand(),
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+        ) else {
+            return Ok(None);
+        };
+        let lhs_open = lhs.rank() - lhs_axes.len();
+        let rhs_open = rhs.rank() - rhs_axes.len();
+        let (first, second, first_axes, second_axes, lhs_offset, rhs_offset) = match order {
+            tenet_tensors::FusionContractOrientation::LhsRhs => {
+                (lhs, rhs, lhs_axes, rhs_axes, 0, 0)
+            }
+            tenet_tensors::FusionContractOrientation::RhsLhs => {
+                (rhs, lhs, rhs_axes, lhs_axes, rhs_open, lhs_open)
+            }
+        };
+        let temporary_space = contract_destination(
+            first,
+            second,
+            first_axes,
+            second_axes,
+            OutputAxisOrder::identity(),
+            None,
+        )?;
+        let temporary_len = temporary_space.space().required_len()?;
+        // The temporary lists the rhs open axes first under `RhsLhs`.
+        let position = |axis: usize| {
+            if axis < lhs_open {
+                axis + lhs_offset
+            } else {
+                axis - rhs_offset
+            }
+        };
+        let (codomain, domain) = output_axes.split_at(spec.codomain.len());
+        Ok(Some(Self {
+            first,
+            second,
+            first_axes,
+            second_axes,
+            temporary_space,
+            temporary_len,
+            operation: TreeTransformOperation::permute(
+                codomain.iter().copied().map(position),
+                domain.iter().copied().map(position),
+            ),
+        }))
+    }
+
+    /// Contracts into the lane's pooled `copyC` scratch and lends it out; the
+    /// caller transforms it into its result and hands it back with
+    /// `restore_copy_c_scratch`.
+    ///
+    /// TensorKit allocates `Cnew` as a temporary (`tensoralloc_add(...,
+    /// Val(true), allocator)`) and frees it after the permute; the pooled
+    /// scratch plays that role, so a warm call allocates no output-sized
+    /// temporary. Stale pooled values are never read: `Axpby(0)` is a strong
+    /// zero that assigns every block, inactive ones included.
+    pub(super) fn contract_temporary(
+        &self,
+        lane: &mut crate::runtime::Ctx<D, tenet_core::RuleIdentity>,
+    ) -> Result<tenet_operations::host_scratch::HostScratchBuffer<D>, Error> {
+        let mut temporary = lane.take_copy_c_scratch();
+        temporary.resize_filled(self.temporary_len, D::from_real(0.0));
+        contract_multiplicity_free_into_slice(
+            lane,
+            self.first,
+            self.second,
+            self.first_axes,
+            self.second_axes,
+            OutputAxisOrder::identity(),
+            &self.temporary_space,
+            temporary.as_mut_slice(),
+            tenet_tensors::ContractDestinationInit::Axpby(D::from_real(0.0)),
+        )?;
+        Ok(temporary)
+    }
 }
 
 /// The destination space of `lhs·rhs` in `output_order`, split after
@@ -789,7 +854,19 @@ mod copy_c_scratch_tests {
 
     use tenet_core::{U1FusionRule, U1Irrep};
 
-    use crate::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
+    use crate::typed::{ContractSpec, GradedSpace, Runtime, TensorMap, TypedData, TypedTensorRepr};
+
+    /// Grows the pooled copyC scratch to a length no temporary here reaches;
+    /// a shorter length afterwards proves the copyC route ran.
+    const MARKER_LEN: usize = 100_000;
+
+    fn mark_scratch(runtime: &Runtime) {
+        let mut lease = runtime.lease_context().unwrap();
+        let lane = lease.context().multiplicity_free_lane::<f64>().unwrap();
+        let mut scratch = lane.take_copy_c_scratch();
+        scratch.resize_filled(MARKER_LEN, 0.0);
+        lane.restore_copy_c_scratch(scratch);
+    }
 
     fn retained_len(runtime: &Runtime) -> usize {
         let mut lease = runtime.lease_context().unwrap();
@@ -881,5 +958,130 @@ mod copy_c_scratch_tests {
         assert_eq!(actual.codomain(), expected.codomain());
         assert_eq!(actual.domain(), expected.domain());
         assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
+    }
+
+    /// The partial-coverage fixture of `stale_copy_c_scratch_never_reaches_the_result`:
+    /// `c` carries charge 0 only, so the result's coupled-charge-1 block of
+    /// `(p, r | q)` is reached by no GEMM.
+    fn partial_copy_c_fixture(
+        runtime: &Runtime,
+    ) -> (TensorMap<U1FusionRule, f64>, TensorMap<U1FusionRule, f64>) {
+        let provider = Arc::new(U1FusionRule);
+        let open = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
+        )
+        .unwrap();
+        let bond = GradedSpace::try_new(provider, [(U1Irrep::new(0), 4)]).unwrap();
+        (
+            TensorMap::rand_with_seed(runtime, [&open, &open], [&bond], 3).unwrap(),
+            TensorMap::rand_with_seed(runtime, [&bond], [&open], 4).unwrap(),
+        )
+    }
+
+    const MOVED: ContractSpec<'static> = ContractSpec {
+        lhs: &[2],
+        rhs: &[0],
+        codomain: &[0, 2],
+        domain: &[1],
+    };
+
+    /// #1631: on the copyC route the output transform writes every element,
+    /// so an unreached one becomes `alpha * (+0) + beta * dst` — a `-0.0`
+    /// becomes `+0.0` under `beta = 1` and an infinite `alpha` gives NaN, as
+    /// TensorKit's `tensoradd!` — while `alpha = 0` still never reads the
+    /// operands.
+    #[test]
+    fn copy_c_contract_into_writes_unreached_elements_through_the_transform() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let (a, b) = partial_copy_c_fixture(&runtime);
+        let result = a.contract(&b, &MOVED).unwrap();
+        let unreached: Vec<usize> = result
+            .dense_data()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| **value == 0.0)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!unreached.is_empty(), "the fixture must miss a sector");
+        let run =
+            |seed: f64, alpha: f64, beta: f64, operands: (&TensorMap<_, _>, &TensorMap<_, _>)| {
+                let mut destination = result.scale(0.0);
+                let TypedTensorRepr::Owned(body) = &mut destination.repr else {
+                    unreachable!("a scaled dense tensor is owned")
+                };
+                let Some(TypedData::Dense(data)) =
+                    Arc::get_mut(body).and_then(|body| Arc::get_mut(&mut body.data))
+                else {
+                    unreachable!("a fresh scaled tensor is uniquely owned and dense")
+                };
+                data.fill(seed);
+                mark_scratch(&runtime);
+                operands
+                    .0
+                    .contract_into(operands.1, &MOVED, &mut destination, alpha, beta)
+                    .unwrap();
+                assert!(
+                    retained_len(&runtime) < MARKER_LEN,
+                    "the copyC route must run"
+                );
+                destination
+            };
+        let negative_zero = run(-0.0, 1.0, 1.0, (&a, &b));
+        for &index in &unreached {
+            let value = negative_zero.dense_data().unwrap()[index];
+            assert_eq!(value.to_bits(), 0.0f64.to_bits(), "-0.0 at {index}");
+        }
+        let infinite = run(1.0, f64::INFINITY, 1.0, (&a, &b));
+        for &index in &unreached {
+            assert!(infinite.dense_data().unwrap()[index].is_nan(), "{index}");
+        }
+        let (nan_a, nan_b) = (a.scale(f64::NAN), b.scale(f64::NAN));
+        let silent = run(0.5, 0.0, 2.0, (&nan_a, &nan_b));
+        assert!(silent
+            .dense_data()
+            .unwrap()
+            .iter()
+            .all(|&value| value == 1.0));
+    }
+
+    /// #1631: a compact diagonal operand on the copyC route is densified
+    /// once, for the temporary's contraction; the length check reads the
+    /// stored representation.
+    #[test]
+    fn copy_c_contract_into_densifies_a_compact_operand_once() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let space =
+            |n| GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), n)]).unwrap();
+        let (p, q, c) = (space(2), space(3), space(4));
+        let t =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&p, &q], [&c], 5).unwrap();
+        let spectra = c
+            .sectors()
+            .unwrap()
+            .into_iter()
+            .map(|sector| crate::typed::SectorSpectrum {
+                values: vec![1.5; c.degeneracy(&sector).unwrap()],
+                sector,
+            })
+            .collect::<Vec<_>>();
+        let d = TensorMap::diagonal(&runtime, &c, spectra).unwrap();
+        let mut destination = t.contract(&d, &MOVED).unwrap().scale(1.0);
+        mark_scratch(&runtime);
+        crate::typed::DIAGONAL_MATERIALIZATIONS.set(0);
+        t.contract_into(&d, &MOVED, &mut destination, 1.0, 0.0)
+            .unwrap();
+        assert_eq!(crate::typed::DIAGONAL_MATERIALIZATIONS.get(), 1);
+        assert!(
+            retained_len(&runtime) < MARKER_LEN,
+            "the copyC route must run"
+        );
+        let expected = t.contract(&d.materialize().unwrap(), &MOVED).unwrap();
+        assert_eq!(
+            destination.dense_data().unwrap(),
+            expected.dense_data().unwrap()
+        );
     }
 }

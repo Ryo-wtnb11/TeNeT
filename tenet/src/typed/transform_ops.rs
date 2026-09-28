@@ -530,12 +530,28 @@ where
     /// its codomain/domain split. A compact diagonal operand is densified into
     /// an operation-local buffer where [`Self::contract`] has no scaling arm.
     ///
-    /// `alpha` and `beta` ride the core GEMMs' epilogue (or the output
-    /// transform's add), TensorKit's `mul!(C, A, B, α, β)`; the coupled
-    /// sectors no GEMM reaches become `beta * destination`, TensorKit's
-    /// `rmul!(C, β)`. `beta == 0` never reads `destination` (NaN does not
-    /// survive; unreached blocks become `+0`) and `beta == 1` leaves the
-    /// unreached blocks untouched. Nothing clears the destination first.
+    /// `alpha` and `beta` ride the epilogue of whatever writes each element:
+    /// the core GEMMs (TensorKit's `mul!(C, A, B, α, β)`) or an output
+    /// transform's add (`tensoradd!(C, Cnew, pAB, false, α, β)`). `beta == 0`
+    /// never reads `destination` (NaN does not survive; unreached blocks
+    /// become `+0`), and `alpha == 0` never reads the operands. Nothing clears
+    /// the destination first.
+    ///
+    /// A coupled sector no GEMM reaches: on the core route, where the GEMMs
+    /// write the destination directly, it becomes `beta * destination`
+    /// (TensorKit's `rmul!(C, β)`), so `beta == 1` leaves it bit for bit. On a
+    /// route with an output transform (the one-call route's C transform, or
+    /// copyC below) the transform writes every element, so an unreached one
+    /// becomes `alpha * (+0) + beta * destination`: IEEE addition turns a
+    /// `-0.0` into `+0.0` even for `beta == 1`, and a non-finite `alpha`
+    /// gives NaN — as TensorKit's `tensoradd!`, and as the eager
+    /// [`Self::contract`] followed by [`Self::axpby`].
+    ///
+    /// **Route.** The same memcost choice as [`Self::contract`]: when a
+    /// zero-copy candidate plus one output permute is cheaper, the product is
+    /// written with its own output order into Runtime-pooled scratch and one
+    /// tree transform adds it into `destination` with `alpha`/`beta`
+    /// (TensorKit `blas_contract!`'s `copyC`); no operand is rebuilt.
     ///
     /// # Errors
     ///
@@ -617,18 +633,42 @@ where
             .logical_space()
             .rebind_validated(&destination_body.space.validated_layout())?;
 
-        let (lhs, lhs_data) = self.fusion_operand_and_data();
-        let (rhs, rhs_data) = other.fusion_operand_and_data();
+        // Why not measure `fusion_operand_and_data()`: it densifies a compact
+        // operand, and the copyC route densifies it again for its own
+        // contraction. A compact payload densifies to exactly the required
+        // length by construction, so only stored dense lengths are checked.
+        let stored_dense_len = |tensor: &Self| match &tensor.repr {
+            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+                TypedData::Dense(data) => Some(data.len()),
+                TypedData::Diagonal(_) => None,
+            },
+            TypedTensorRepr::Adjoint(view) => Some(view.parent_data().len()),
+        };
         let required_destination = destination_body.space.space().required_len()?;
         let actual_destination = match destination_body.data.as_ref() {
             TypedData::Dense(data) => data.len(),
             TypedData::Diagonal(_) => unreachable!("dense destination checked above"),
         };
         for (tensor, actual, required) in [
-            ("lhs", lhs_data.len(), lhs.storage_space().required_len()?),
-            ("rhs", rhs_data.len(), rhs.storage_space().required_len()?),
-            ("destination", actual_destination, required_destination),
+            (
+                "lhs",
+                stored_dense_len(self),
+                self.fusion_operand().storage_space().required_len()?,
+            ),
+            (
+                "rhs",
+                stored_dense_len(other),
+                other.fusion_operand().storage_space().required_len()?,
+            ),
+            (
+                "destination",
+                Some(actual_destination),
+                required_destination,
+            ),
         ] {
+            let Some(actual) = actual else {
+                continue;
+            };
             if actual != required {
                 return Err(Error::InvalidArgument(format!(
                     "{tensor} storage length {actual} does not match required length {required}"
@@ -640,6 +680,8 @@ where
         {
             return Err(Error::DestinationShared);
         }
+        let copy_c =
+            super::checked_generic_contract::CopyC::plan(self, other, spec, expected.space())?;
 
         let mut lease = self.runtime.lease_context()?;
         let context = lease.context().multiplicity_free_lane::<D>()?;
@@ -648,11 +690,33 @@ where
         };
         let destination_body =
             Arc::get_mut(destination_body).expect("unique destination body checked above");
+        let destination_provider = destination_body.space.provider();
+        let destination_structure = destination_body.space.space().structure();
         let destination_data = Arc::get_mut(&mut destination_body.data)
             .expect("unique destination payload checked above");
         let TypedData::Dense(destination_data) = destination_data else {
             unreachable!("dense destination checked above")
         };
+        if let Some(copy_c) = copy_c {
+            // TensorKit `blas_contract!` with `C` as the destination:
+            // `mul!(Cnew, A, B)`, then `tensoradd!(C, Cnew, pAB, false, α, β)`.
+            // The temporary is written before `destination` is touched.
+            let temporary = copy_c.contract_temporary(context)?;
+            context.tree_context_mut().tree_transform_dyn_into_ref(
+                destination_provider,
+                &copy_c.operation,
+                destination_structure,
+                copy_c.temporary_space.space().structure(),
+                destination_data.as_mut_slice(),
+                temporary.as_slice(),
+                alpha,
+                beta,
+            )?;
+            context.restore_copy_c_scratch(temporary);
+            return Ok(());
+        }
+        let (lhs, lhs_data) = self.fusion_operand_and_data();
+        let (rhs, rhs_data) = other.fusion_operand_and_data();
         context.tensorcontract_fusion_dyn_prelowered_into(
             &execution_destination,
             destination_data,

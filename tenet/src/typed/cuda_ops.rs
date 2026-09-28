@@ -2051,9 +2051,13 @@ where
     /// `alpha` and `beta` ride the epilogue of whatever writes each element:
     /// the core GEMMs (`alpha * job_alpha`, `beta`) when they write the
     /// destination directly, otherwise the output transform in `Axpby(beta)`
-    /// mode. The coupled sectors no GEMM reaches become `beta * destination`
-    /// through a zero-source region move — zeros for `beta = 0`, which never
-    /// reads the destination, and nothing for `beta = 1`.
+    /// mode. On the core route the coupled sectors no GEMM reaches become
+    /// `beta * destination` through a zero-source region move — zeros for
+    /// `beta = 0`, which never reads the destination, and nothing for
+    /// `beta = 1`. An element an output transform writes becomes
+    /// `alpha * source + beta * destination` even where the source is `+0`,
+    /// so there a `-0.0` turns into `+0.0` for `beta = 1`, as on the Host
+    /// ([`TensorMap::contract_into`]) and in TensorKit's `tensoradd!`.
     ///
     /// # Cost
     ///
