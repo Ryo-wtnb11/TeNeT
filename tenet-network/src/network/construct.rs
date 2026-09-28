@@ -293,9 +293,12 @@ impl Network {
     ///
     /// Counted payloads are compact sliced inputs, live planned contraction
     /// and permutation destinations, the current partial, the private
-    /// accumulator, and path-owned dense buffers. Small metadata and opaque
-    /// scratch inside an external backend are excluded because no accounting
-    /// hook exists at that boundary. The ceiling is checked against observed
+    /// accumulator, and path-owned dense buffers. Small metadata, external
+    /// backend scratch, and TeNeT Runtime context scratch are excluded. The
+    /// latter includes the pooled output-sized `copyC` temporary used by
+    /// split-moving and in-split reorder contractions, so
+    /// [`SymmetricSliceStats::peak_total_bytes`] can be below the process peak
+    /// by that temporary's capacity. The ceiling is checked against observed
     /// payloads after each tensor kernel returns and before publication; it is
     /// not an allocator reservation or an out-of-memory prevention guarantee.
     /// At every observation, total payload is checked as the full destination

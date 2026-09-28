@@ -32,6 +32,8 @@ use tenet_tensors::{
 use crate::error::Error;
 use crate::plancache::PlanCacheConfig;
 use crate::typed::ScalarOps;
+
+mod host_scratch;
 pub(crate) type CoefficientCtx<D, Key, C> = TensorContractFusionExecutionContext<
     D,
     Key,

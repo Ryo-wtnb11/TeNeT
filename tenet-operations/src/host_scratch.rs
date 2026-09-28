@@ -56,9 +56,10 @@ impl<T> HostScratchBuffer<T> {
         self.data.is_empty()
     }
 
-    #[cfg(test)]
+    /// Allocated element capacity retained by this buffer.
+    #[doc(hidden)]
     #[inline]
-    pub(crate) fn capacity(&self) -> usize {
+    pub fn capacity(&self) -> usize {
         self.data.capacity()
     }
 
