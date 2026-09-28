@@ -65,6 +65,14 @@ where
     /// storage with a clone. Every rejection happens before any write, and so
     /// do plan-construction failures. A backend error after replay begins may
     /// leave `destination` partially written.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn permute_into(
         &self,
         codomain_axes: &[usize],
@@ -99,6 +107,14 @@ where
     /// `levels` must list one level per source axis, as for
     /// [`Self::braid`]; otherwise destination rules and errors are
     /// [`Self::permute_into`]'s.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn braid_into(
         &self,
         codomain_axes: &[usize],
@@ -128,6 +144,14 @@ where
     /// `destination = alpha * self.transpose(codomain_axes, domain_axes) +
     /// beta * destination`, TensorKit `transpose!(tdst, tsrc, p, α, β)`.
     /// Destination rules and errors are [`Self::permute_into`]'s.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn transpose_into(
         &self,
         codomain_axes: &[usize],
@@ -171,6 +195,14 @@ where
     /// beta * destination`, TensorKit `repartition!(tdst, tsrc, α, β)`: the
     /// target split is the destination's own. Destination rules and errors
     /// are [`Self::permute_into`]'s.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn repartition_into(&self, destination: &mut Self, alpha: D, beta: D) -> Result<(), Error> {
         let source_codomain_rank = self.codomain_rank();
         let source_rank = self.rank();
@@ -247,6 +279,14 @@ where
     /// that is not owned dense host storage, aliases the source, or has the
     /// wrong space, layout or length, and [`Error::DestinationShared`]. Every
     /// rejection happens before any write.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn trace_pairs_into(
         &self,
         pairs: &[(usize, usize)],
@@ -512,6 +552,14 @@ where
     /// with a clone. These, and runtime-context leasing, leave `destination`
     /// unchanged; an engine error during replay may leave it partially
     /// written.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn contract_into<'a>(
         &self,
         other: impl Into<TensorRef<'a, R, D>>,

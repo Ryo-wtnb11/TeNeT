@@ -1488,6 +1488,14 @@ where
     /// [`Self::axpby`] with mixed operands; [`Error::DestinationShared`];
     /// [`Error::PlacementMismatch`]. Every rejection happens before any device
     /// work.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn axpby_into(&self, destination: &mut Self, alpha: D, beta: D) -> Result<(), Error> {
         if !self.runtime.same_runtime(&destination.runtime) {
             return Err(Error::RuntimeMismatch);
@@ -2055,6 +2063,14 @@ where
     /// No destination reset or separate `beta` pass over written blocks. A
     /// warm call transfers nothing and allocates nothing on the device;
     /// scratch and coefficient payloads are as for [`Self::contract`].
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn contract_into<'a>(
         &self,
         other: impl Into<TensorRef<'a, R, D, CudaStorage<D>>>,
@@ -2667,6 +2683,14 @@ where
     /// second `impl`, so the *path* forms such as `TensorMap::permute_into`
     /// become ambiguous (`E0034`). Method-call syntax and
     /// `TensorMap::<R, D>::permute_into` keep working.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn permute_into(
         &self,
         codomain_axes: &[usize],
@@ -2700,6 +2724,14 @@ where
     /// beta * destination` on the device: the Host [`TensorMap::braid_into`].
     /// Validation, cost, numerics and failure behavior are
     /// [`Self::permute_into`]'s.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn braid_into(
         &self,
         codomain_axes: &[usize],
@@ -2729,6 +2761,14 @@ where
     /// `destination = alpha * self.transpose(codomain_axes, domain_axes) +
     /// beta * destination` on the device. Validation, cost, numerics and
     /// failure behavior are [`Self::permute_into`]'s.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn transpose_into(
         &self,
         codomain_axes: &[usize],
@@ -2771,6 +2811,14 @@ where
     /// `destination = alpha * self.repartition(destination.codomain_rank()) +
     /// beta * destination` on the device. Validation, cost, numerics and
     /// failure behavior are [`Self::permute_into`]'s.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn repartition_into(&self, destination: &mut Self, alpha: D, beta: D) -> Result<(), Error> {
         let source_codomain_rank = self.codomain_rank();
         let source_rank = self.rank();
@@ -3136,6 +3184,14 @@ where
     /// layout or length, [`Error::DestinationShared`] and
     /// [`Error::PlacementMismatch`]. A rejected call leaves `destination`
     /// untouched.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     pub fn trace_pairs_into(
         &self,
         pairs: &[(usize, usize)],
@@ -3889,7 +3945,7 @@ where
     /// let adjoint = t.adjoint()?;
     /// let mut owned = adjoint.materialize()?;
     /// assert_eq!(owned.dense_data()?, adjoint.materialize()?.dense_data()?);
-    /// owned.scale_assign(2.0);
+    /// owned.scale_assign(2.0)?;
     /// assert_ne!(owned.dense_data()?, adjoint.materialize()?.dense_data()?);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```

@@ -167,8 +167,8 @@ macro_rules! check_dense {
                 x.scale(f).dense_data().unwrap(),
                 &want,
             );
-            let mut assigned = x.clone();
-            assigned.scale_assign(f);
+            let mut assigned = x.materialize().unwrap();
+            assigned.scale_assign(f).unwrap();
             assert_same(
                 &format!("{what} scale_assign"),
                 assigned.dense_data().unwrap(),

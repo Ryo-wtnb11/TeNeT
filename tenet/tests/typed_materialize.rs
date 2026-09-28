@@ -114,7 +114,7 @@ macro_rules! assert_independent_owned_copy {
         let before = input.materialize().unwrap().dense_data().unwrap().to_vec();
         let mut written = result;
         let pointer = written.dense_data().unwrap().as_ptr();
-        written.scale_assign(2.0.into());
+        written.scale_assign(2.0.into()).unwrap();
         // In place means uniquely owned: nothing else holds this payload.
         assert_eq!(
             written.dense_data().unwrap().as_ptr(),

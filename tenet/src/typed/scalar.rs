@@ -1041,24 +1041,59 @@ where
         <R::Mode as TypedTensorAddScaleDispatch<R, D>>::scale(self, factor)
     }
 
-    /// Scales this host tensor in place when its dense payload is uniquely
-    /// owned. Shared or compact representations use the existing allocating
-    /// path and replace the receiver, preserving copy-on-write semantics.
-    pub fn scale_assign(&mut self, factor: D) {
-        let Some(body) = (match &mut self.repr {
-            TypedTensorRepr::Owned(body) => Arc::get_mut(body),
-            TypedTensorRepr::Adjoint(_) => None,
-        }) else {
-            *self = self.scale(factor);
-            return;
+    /// `self = factor * self` in place, VectorInterface `scale!(t, α)`, on
+    /// the receiver's own storage: a dense payload element by element, a
+    /// compact diagonal on its stored values (it stays compact, TensorKit's
+    /// `scale!` over a `DiagonalTensorMap`'s blocks), and a lazy adjoint on
+    /// its parent with the conjugated factor (it stays lazy, as
+    /// [`Self::scale`] does). Nothing is allocated.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::DestinationShared`] when the receiver shares its storage
+    /// with another handle (a shallow `Clone`, or the parent of a lazy
+    /// adjoint): writing it would change that handle too, and replacing it
+    /// would silently allocate, so the call does neither and leaves the
+    /// receiver unchanged. The scaling itself cannot fail.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
+    /// let mut t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 1)?;
+    /// let expected = t.scale(2.0);
+    /// t.scale_assign(2.0)?;
+    /// assert_eq!(t.dense_data()?, expected.dense_data()?);
+    ///
+    /// let shared = t.clone();
+    /// assert_eq!(t.scale_assign(2.0), Err(Error::DestinationShared));
+    /// drop(shared);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
+    pub fn scale_assign(&mut self, factor: D) -> Result<(), TypedFacadeError<R>> {
+        let (body, factor) = match &mut self.repr {
+            TypedTensorRepr::Owned(body) => (Arc::get_mut(body), factor),
+            TypedTensorRepr::Adjoint(view) => (
+                Arc::get_mut(view).and_then(|view| Arc::get_mut(&mut view.parent)),
+                FactorScalar::adjoint(factor),
+            ),
         };
-        let Some(TypedData::Dense(data)) = Arc::get_mut(&mut body.data) else {
-            *self = self.scale(factor);
-            return;
-        };
-        for value in data.iter_mut() {
-            *value = scale_value(*value, factor);
+        let data = body
+            .and_then(|body| Arc::get_mut(&mut body.data))
+            .ok_or(Error::DestinationShared)?;
+        let scale = |value: &mut D| *value = scale_value(*value, factor);
+        match data {
+            TypedData::Dense(data) => data.iter_mut().for_each(scale),
+            TypedData::Diagonal(spectrum) => spectrum
+                .iter_mut()
+                .flat_map(|entry| entry.values.iter_mut())
+                .for_each(scale),
         }
+        Ok(())
     }
 
     /// `destination = alpha * self + beta * destination`: BLAS `axpby`,
@@ -1079,6 +1114,14 @@ where
     /// is not owned dense host storage, or when it aliases `self`;
     /// [`Error::DestinationShared`] when `destination` shares its storage with
     /// a clone. Every rejection happens before any write.
+    ///
+    /// # Failure
+    ///
+    /// A validation or capability error leaves `destination` bit-identical:
+    /// every check completes before the first write. On failure after
+    /// validation (a backend or other execution error) the destination's
+    /// contents are unspecified, while its space and block structure stay
+    /// intact.
     ///
     /// ```
     /// use std::sync::Arc;

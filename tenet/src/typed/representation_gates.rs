@@ -8598,3 +8598,105 @@ fn compact_arms_never_densify_their_spectrum_operand() {
     let _ = d.braid(&[1], &[0], &[0, 1]).unwrap();
     assert!(DIAGONAL_MATERIALIZATIONS.get() > 0);
 }
+
+/// A destination whose device is not the Runtime's is rejected before any
+/// device work, its bytes untouched (#1551). The public API cannot build
+/// one — a tensor's storage lives on its own Runtime's device, and the
+/// Runtime check comes first — so this in-crate gate forges it from a
+/// second device's tensor.
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires two real CUDA devices"]
+fn typed_cuda_into_rejects_a_foreign_device_destination_untouched() {
+    let rt0 = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let rt1 = Runtime::builder().cuda(1).dense_threads(1).build().unwrap();
+    let v = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(0), 2),
+            (U1Irrep::new(1), 1),
+            (U1Irrep::new(-1), 2),
+        ],
+    )
+    .unwrap();
+    let w = v.try_dual().unwrap();
+    let host_t = TensorMap::<_, f64>::rand_with_seed(&rt0, [&v, &w], [&v, &w], 1).unwrap();
+    let host_rhs = TensorMap::<_, f64>::rand_with_seed(&rt0, [&v, &w], [&v], 2).unwrap();
+    let (t, rhs) = (host_t.to_cuda().unwrap(), host_rhs.to_cuda().unwrap());
+    let spec = ContractSpec {
+        lhs: &[2, 3],
+        rhs: &[0, 1],
+        codomain: &[2, 0],
+        domain: &[1],
+    };
+    let foreign = |like: TensorMap<U1FusionRule, f64>| {
+        let (codomain, domain) = (like.codomain(), like.domain());
+        let mut next = 0u64;
+        let mut device = TensorMap::<_, f64>::from_subblock_fn(&rt1, &codomain, &domain, |_, _| {
+            next += 1;
+            std::f64::consts::PI * next as f64
+        })
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+        let before: Vec<u64> = device
+            .to_host()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect();
+        device.runtime = rt0.clone();
+        (device, before)
+    };
+    type Device = TensorMap<U1FusionRule, f64, CudaStorage<f64>>;
+    let check = |what: &str,
+                 (mut device, before): (Device, Vec<u64>),
+                 call: &dyn Fn(&mut Device) -> Result<(), Error>| {
+        assert_eq!(call(&mut device), Err(Error::PlacementMismatch), "{what}");
+        device.runtime = rt1.clone();
+        let after: Vec<u64> = device
+            .to_host()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect();
+        assert_eq!(after, before, "{what}: destination changed");
+    };
+    check(
+        "permute_into",
+        foreign(host_t.permute(&[2, 0], &[1, 3]).unwrap()),
+        &|d| t.permute_into(&[2, 0], &[1, 3], d, 1.0, 0.5),
+    );
+    check(
+        "braid_into",
+        foreign(host_t.braid(&[1, 0], &[3, 2], &[0, 1, 2, 3]).unwrap()),
+        &|d| t.braid_into(&[1, 0], &[3, 2], &[0, 1, 2, 3], d, 1.0, 0.5),
+    );
+    check(
+        "transpose_into",
+        foreign(host_t.transpose(&[1, 3], &[0, 2]).unwrap()),
+        &|d| t.transpose_into(&[1, 3], &[0, 2], d, 1.0, 0.5),
+    );
+    check(
+        "repartition_into",
+        foreign(host_t.repartition(1).unwrap()),
+        &|d| t.repartition_into(d, 1.0, 0.5),
+    );
+    check(
+        "trace_pairs_into",
+        foreign(host_t.trace_pairs(&[(0, 2)]).unwrap()),
+        &|d| t.trace_pairs_into(&[(0, 2)], d, 1.0, 0.5),
+    );
+    check(
+        "contract_into",
+        foreign(host_t.contract(&host_rhs, &spec).unwrap()),
+        &|d| t.contract_into(&rhs, &spec, d, 1.0, 0.5),
+    );
+    check("axpby_into", foreign(host_t.clone()), &|d| {
+        t.axpby_into(d, 1.0, 0.5)
+    });
+}
