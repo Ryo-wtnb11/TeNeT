@@ -428,7 +428,7 @@ where
     D: ScalarOps,
 {
     let mut data = zeroed_payload(destination.space().required_len()?);
-    tensorcontract_owned_multiplicity_free_into_zeroed(
+    tensorcontract_owned_multiplicity_free_into_slice(
         context,
         destination,
         &mut data,
@@ -437,14 +437,15 @@ where
         lhs_axes,
         rhs_axes,
         output_order,
+        ContractDestinationInit::Zeroed,
     )?;
     Ok(data)
 }
 
-/// [`tensorcontract_owned_multiplicity_free_into`] writing a caller-owned,
-/// already zeroed `data` of `destination`'s required length.
+/// [`tensorcontract_owned_multiplicity_free_into`] writing a caller-owned
+/// `data` of `destination`'s required length, initialized per `init`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_owned_multiplicity_free_into_zeroed<R, D>(
+pub(crate) fn tensorcontract_owned_multiplicity_free_into_slice<R, D>(
     context: &mut Ctx<D, RuleIdentity>,
     destination: &BoundDynamicFusionMapSpace<R>,
     data: &mut [D],
@@ -453,6 +454,7 @@ pub(crate) fn tensorcontract_owned_multiplicity_free_into_zeroed<R, D>(
     lhs_axes: &[usize],
     rhs_axes: &[usize],
     output_order: OutputAxisOrder<'_>,
+    init: ContractDestinationInit<D>,
 ) -> Result<(), tenet_tensors::OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
@@ -469,7 +471,7 @@ where
         rhs.data(),
         TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
         D::from_real(1.0),
-        ContractDestinationInit::Zeroed,
+        init,
     )
 }
 
@@ -663,7 +665,7 @@ where
     D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
 {
     let mut data = zeroed_payload(destination.space().required_len()?);
-    tensorcontract_oriented_multiplicity_free_into_zeroed(
+    tensorcontract_oriented_multiplicity_free_into_slice(
         context,
         destination,
         &mut data,
@@ -675,14 +677,15 @@ where
         rhs_axes,
         output_order,
         kind,
+        ContractDestinationInit::Zeroed,
     )?;
     Ok(data)
 }
 
-/// [`tensorcontract_oriented_multiplicity_free_into`] writing a caller-owned,
-/// already zeroed `data` of `destination`'s required length.
+/// [`tensorcontract_oriented_multiplicity_free_into`] writing a caller-owned
+/// `data` of `destination`'s required length, initialized per `init`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_oriented_multiplicity_free_into_zeroed<R, D>(
+pub(crate) fn tensorcontract_oriented_multiplicity_free_into_slice<R, D>(
     context: &mut CoefficientCtx<D, RuleIdentity, R::Scalar>,
     destination: &BoundDynamicFusionMapSpace<R>,
     data: &mut [D],
@@ -694,6 +697,7 @@ pub(crate) fn tensorcontract_oriented_multiplicity_free_into_zeroed<R, D>(
     rhs_axes: &[usize],
     output_order: OutputAxisOrder<'_>,
     kind: OrientedContractionKind,
+    init: ContractDestinationInit<D>,
 ) -> Result<(), tenet_tensors::OperationError>
 where
     R: MultiplicityFreeRigidSymbols
@@ -713,7 +717,7 @@ where
             lhs_axes,
             rhs_axes,
             D::from_real(1.0),
-            ContractDestinationInit::Zeroed,
+            init,
         ),
         OrientedContractionKind::Contract => context
             .tensorcontract_fusion_dyn_prelowered_into_with_init(
@@ -731,7 +735,7 @@ where
                     rhs.storage_conjugate(),
                 ),
                 D::from_real(1.0),
-                ContractDestinationInit::Zeroed,
+                init,
             ),
     }
 }

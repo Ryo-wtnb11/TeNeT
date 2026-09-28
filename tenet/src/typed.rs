@@ -284,8 +284,8 @@ pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
     internal_layout_error, oriented_contract_destination, tensorcompose_owned_multiplicity_free,
     tensorcontract_oriented_multiplicity_free,
-    tensorcontract_oriented_multiplicity_free_into_zeroed,
-    tensorcontract_owned_multiplicity_free_into_zeroed, tensorproduct_owned_checked_generic,
+    tensorcontract_oriented_multiplicity_free_into_slice,
+    tensorcontract_owned_multiplicity_free_into_slice, tensorproduct_owned_checked_generic,
     tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
     tree_transform_owned_multiplicity_free_into, OrientedContractionKind,
 };

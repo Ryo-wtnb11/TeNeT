@@ -313,14 +313,14 @@ where
         }
     };
     let (codomain, domain) = output_axes.split_at(codomain_rank);
+    let temporary_len = temporary_space.space().required_len()?;
     let mut lease = lhs.runtime.lease_context()?;
     let lane = lease.context().multiplicity_free_lane::<D>()?;
     let mut temporary = lane.take_copy_c_scratch();
-    // The zeroed-destination contraction leaves blocks it does not
-    // write at zero, exactly as a fresh zeroed payload does.
-    temporary.resize_filled(temporary_space.space().required_len()?, D::from_real(0.0));
-    temporary.fill(D::from_real(0.0));
-    contract_multiplicity_free_into_zeroed(
+    // Stale pooled values are never read: `Axpby(0)` is a strong zero that
+    // assigns every destination block, inactive ones included.
+    temporary.resize_filled(temporary_len, D::from_real(0.0));
+    contract_multiplicity_free_into_slice(
         lane,
         first,
         second,
@@ -329,6 +329,7 @@ where
         identity,
         &temporary_space,
         temporary.as_mut_slice(),
+        tenet_tensors::ContractDestinationInit::Axpby(D::from_real(0.0)),
     )?;
     let data = tree_transform_owned_multiplicity_free_into(
         lane,
@@ -416,7 +417,7 @@ where
 {
     let mut lease = lhs.runtime.lease_context()?;
     let mut data = tenet_tensors::zeroed_payload(destination.space().required_len()?);
-    contract_multiplicity_free_into_zeroed(
+    contract_multiplicity_free_into_slice(
         lease.context().multiplicity_free_lane::<D>()?,
         lhs,
         rhs,
@@ -425,6 +426,7 @@ where
         output_order,
         &destination,
         &mut data,
+        tenet_tensors::ContractDestinationInit::Zeroed,
     )?;
     Ok(TensorMap {
         runtime: lhs.runtime.clone(),
@@ -432,10 +434,10 @@ where
     })
 }
 
-/// [`contract_multiplicity_free_into`] writing the caller's zeroed `data`
-/// through the caller's lane.
+/// [`contract_multiplicity_free_into`] writing the caller's `data`, initialized
+/// per `init`, through the caller's lane.
 #[allow(clippy::too_many_arguments)]
-fn contract_multiplicity_free_into_zeroed<R, D>(
+fn contract_multiplicity_free_into_slice<R, D>(
     context: &mut crate::runtime::Ctx<D, tenet_core::RuleIdentity>,
     lhs: &TensorMap<R, D>,
     rhs: &TensorMap<R, D>,
@@ -444,6 +446,7 @@ fn contract_multiplicity_free_into_zeroed<R, D>(
     output_order: OutputAxisOrder<'_>,
     destination: &BoundDynamicFusionMapSpace<R>,
     data: &mut [D],
+    init: tenet_tensors::ContractDestinationInit<D>,
 ) -> Result<(), Error>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -452,7 +455,7 @@ where
     if let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
         (&lhs.repr, &rhs.repr)
     {
-        tensorcontract_owned_multiplicity_free_into_zeroed(
+        tensorcontract_owned_multiplicity_free_into_slice(
             context,
             destination,
             data,
@@ -467,11 +470,12 @@ where
             lhs_axes,
             rhs_axes,
             output_order,
+            init,
         )?;
     } else {
         let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
         let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
-        tensorcontract_oriented_multiplicity_free_into_zeroed(
+        tensorcontract_oriented_multiplicity_free_into_slice(
             context,
             destination,
             data,
@@ -483,6 +487,7 @@ where
             rhs_axes,
             output_order,
             OrientedContractionKind::Contract,
+            init,
         )?;
     }
     Ok(())
@@ -821,5 +826,60 @@ mod copy_c_scratch_tests {
         assert_eq!(run(5), 125);
         assert_eq!(run(7), 343);
         assert_eq!(run(5), 125);
+    }
+
+    /// The pooled temporary is written with a strong-zero `Axpby(0)`, so a
+    /// stale buffer never leaks: a NaN-poisoned buffer longer than the
+    /// temporary (so resizing writes nothing) still gives exactly the
+    /// contract-then-permute result, including the temporary's inactive block.
+    #[test]
+    fn stale_copy_c_scratch_never_reaches_the_result() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        // `c` carries charge 0 only, so the temporary `p ⊗ q ← r` block of
+        // coupled charge 1 receives no GEMM contribution.
+        let open = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
+        )
+        .unwrap();
+        let bond = GradedSpace::try_new(provider, [(U1Irrep::new(0), 4)]).unwrap();
+        let a =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&open, &open], [&bond], 3)
+                .unwrap();
+        let b = TensorMap::rand_with_seed(&runtime, [&bond], [&open], 4).unwrap();
+        let spec = ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[0, 2],
+            domain: &[1],
+        };
+        let expected = a
+            .contract(
+                &b,
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2],
+                },
+            )
+            .unwrap()
+            .permute(&[0, 2], &[1])
+            .unwrap();
+        const POISONED_LEN: usize = 100_000;
+        {
+            let mut lease = runtime.lease_context().unwrap();
+            let lane = lease.context().multiplicity_free_lane::<f64>().unwrap();
+            let mut scratch = lane.take_copy_c_scratch();
+            scratch.resize_filled(POISONED_LEN, f64::NAN);
+            lane.restore_copy_c_scratch(scratch);
+        }
+        let actual = a.contract(&b, &spec).unwrap();
+        // What: the copyC route ran on the poisoned buffer.
+        assert!(retained_len(&runtime) < POISONED_LEN);
+        assert_eq!(actual.codomain(), expected.codomain());
+        assert_eq!(actual.domain(), expected.domain());
+        assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
     }
 }
