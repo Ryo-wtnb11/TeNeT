@@ -6,18 +6,18 @@
 
 use std::sync::Arc;
 
-use tenet::core::{
+use tenet::sector::{
     product_sector, ProductFusionRuleExt, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep,
 };
-use tenet::prelude::{LegSelection, Runtime};
 use tenet::typed::{GradedSpace, TensorMap};
+use tenet::typed::{LegSelection, Runtime};
 use tenet_tensors::host_pool::{
     observe_host_pools, take_host_pool_observations, HostPoolObservation, HostPoolSite,
 };
 
 const GLOBAL_THREADS: usize = 5;
 
-type U1Su2 = tenet::core::ProductFusionRule<U1FusionRule, SU2FusionRule>;
+type U1Su2 = tenet::sector::ProductFusionRule<U1FusionRule, SU2FusionRule>;
 
 /// U(1) x SU(2) with degeneracies that put the payload past the replay
 /// parallel gate, so every permutation recouples in parallel. The extra

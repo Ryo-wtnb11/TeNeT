@@ -2,12 +2,16 @@ use std::cell::Cell;
 use std::sync::Arc;
 use tenet::typed::ContractSpec;
 
-use tenet::core::{
-    product_sector, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
-    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, ProductFusionRuleExt,
-    SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Complex32, Complex64, Error, TensorScalar};
+use tenet::sector::{
+    CheckedFusionAlgebra, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, SectorCodec,
+    TypedSectorAdmission,
+};
+use tenet::typed::FusionAlgebraError;
+use tenet::typed::{Complex32, Complex64, Error, TensorScalar};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{plan_cache_stats, tensor};
 
@@ -640,7 +644,7 @@ fn assert_host_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
             Error::Operation(operation)
                 if matches!(
                     **operation,
-                    tenet::operations::OperationError::UnsupportedTensorContractScope {
+                    tenet::typed::OperationError::UnsupportedTensorContractScope {
                         message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
                     }
                 )

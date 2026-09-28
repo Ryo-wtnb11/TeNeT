@@ -11,8 +11,9 @@
 
 use std::sync::Arc;
 
-use tenet::prelude::Runtime;
-use tenet::typed::{GradedSpace, LegSelection, SUNFusionRule, TensorMap};
+use tenet::sector::SUNFusionRule;
+use tenet::typed::Runtime;
+use tenet::typed::{GradedSpace, LegSelection, TensorMap};
 
 #[test]
 fn restrict_and_embed_preserve_su3_multiplicity_vertices() {

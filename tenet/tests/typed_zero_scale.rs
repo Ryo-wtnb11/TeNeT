@@ -14,7 +14,7 @@
 //! No fixture holds `-0.0`, so the sign of a zero cannot decide a comparison.
 
 use num_complex::Complex64;
-use tenet::core::{
+use tenet::sector::{
     FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::{GradedSpace, Runtime, SectorSpectrum, TensorMap, TensorScalar};

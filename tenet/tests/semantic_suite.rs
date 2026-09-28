@@ -12,12 +12,14 @@ use std::sync::Arc;
 use tenet::typed::ContractSpec;
 use tenet::typed::Direction;
 
-use tenet::core::{
-    product_sector, FermionParityFusionRule, Fz2SectorLayout, PackedProductCodec,
-    ProductFusionRule, ProductSector, ProductSectorLayout, SU2FusionRule, SU2Irrep,
-    Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule,
+    SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
 };
-use tenet::prelude::{Complex64, Runtime};
+use tenet::sector::{
+    Fz2SectorLayout, PackedProductCodec, ProductSectorLayout, Su2SectorLayout, U1SectorLayout,
+};
+use tenet::typed::{Complex64, Runtime};
 use tenet::typed::{GradedSpace, Qr, Svd, TensorMap, Truncation};
 
 /// The receiver's own split as leg roles: `rows = 0..nout`.

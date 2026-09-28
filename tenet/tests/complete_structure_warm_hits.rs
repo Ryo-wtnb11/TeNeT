@@ -2,8 +2,12 @@
 //! is a hit, never a miss, admission, or eviction, and returns bit-identical
 //! data. One test per process keeps the global cache statistics isolated.
 
-use tenet::prelude::*;
-use tenet_core::{complete_hom_space_structure_cache_info, CompleteHomSpaceStructureCacheInfo};
+use tenet::expert::{complete_hom_space_structure_cache_info, CompleteHomSpaceStructureCacheInfo};
+use tenet::sector::{
+    FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::typed::{ContractSpec, GradedSpace, LegSelection, Runtime, TensorMap};
 
 fn assert_warm_hits(label: &str, mut call: impl FnMut() -> Vec<u64>) {
     let cold = call();

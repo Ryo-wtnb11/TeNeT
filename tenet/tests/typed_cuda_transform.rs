@@ -69,13 +69,14 @@ use std::sync::Arc;
 use common::permute_dense;
 
 use num_complex::Complex64;
-use tenet::core::CheckedFusionAlgebra;
-use tenet::core::{
-    product_sector, FermionParityFusionRule, MultiplicityFreeRigidSymbols, ProductFusionRuleExt,
-    SU2FusionRule, SU2Irrep, SectorCodec, U1FusionRule, U1Irrep, Z2Irrep,
+use tenet::sector::CheckedFusionAlgebra;
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Runtime, TensorScalar};
+use tenet::sector::{MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::typed::{GradedSpace, TensorMap};
+use tenet::typed::{Runtime, TensorScalar};
 
 // ---------------------------------------------------------------------------
 // Payload comparison

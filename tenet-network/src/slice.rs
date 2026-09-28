@@ -14,7 +14,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use tenet::core::{RuleIdentity, SectorId, SectorLeg};
+use tenet::expert::SectorLeg;
+use tenet::sector::RuleIdentity;
+use tenet::sector::SectorId;
 
 use crate::cost::DenseCostModel;
 use crate::error::{ContractError, Result, SliceError, SliceResult};

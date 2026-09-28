@@ -329,7 +329,7 @@ where
 
     pub(crate) fn park_runtime_owners(&mut self)
     where
-        R: tenet::core::FusionRule,
+        R: tenet::sector::FusionRule,
     {
         for buffers in &mut self.intermediates {
             debug_assert!(buffers.parked.is_none());
@@ -344,7 +344,7 @@ where
         steps: &[CompiledStep],
     ) -> Result<(), Error>
     where
-        R: tenet::core::FusionRule,
+        R: tenet::sector::FusionRule,
     {
         // Validate the complete idle set before consuming any payload. A
         // runtime/layout drift makes the old destinations ineligible, but is
@@ -443,7 +443,7 @@ impl PlannedNetwork {
         tensors: &[&TensorMap<R, D, CudaStorage<D>>],
     ) -> Result<(), Error>
     where
-        R: TypedSectorAdmission + tenet::core::FusionRule,
+        R: TypedSectorAdmission + tenet::sector::FusionRule,
         D: CudaPayload,
     {
         cuda_operand_admission(tensors, !self.schedule.steps.is_empty())
@@ -460,7 +460,7 @@ pub(super) fn cuda_operand_admission<R, D>(
     contracts: bool,
 ) -> Result<(), Error>
 where
-    R: TypedSectorAdmission + tenet::core::FusionRule,
+    R: TypedSectorAdmission + tenet::sector::FusionRule,
     D: CudaPayload,
 {
     let device = tensors
@@ -499,7 +499,7 @@ where
 #[cfg(any(feature = "cuda", test))]
 pub(super) fn device_operand_admission(
     contracts: bool,
-    braiding: tenet::core::BraidingStyleKind,
+    braiding: tenet::sector::BraidingStyleKind,
     representations: impl IntoIterator<Item = NetworkReuseClass>,
 ) -> Result<(), Error> {
     if representations

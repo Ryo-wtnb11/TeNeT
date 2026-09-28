@@ -1,8 +1,10 @@
 # tenet
 
 `tenet-rs` is TeNeT's public package; its library is imported as `tenet`.
-Ordinary applications use `tenet::prelude::*` for `Runtime`, `RuntimeBuilder`,
-`GradedSpace`, `TensorMap`, `LinalgBackend`, and `Truncation`.
+Ordinary applications import `Runtime`, `RuntimeBuilder`, `GradedSpace`,
+`TensorMap`, `LinalgBackend`, and `Truncation` from `tenet::typed`, and the
+built-in symmetries such as `U1FusionRule` from `tenet::sector`. Every public
+item has exactly one path.
 
 Start with the [crate tutorial](src/tutorial.md#quick-start). For index
 notation and network planning, add `tenet-network` and run its

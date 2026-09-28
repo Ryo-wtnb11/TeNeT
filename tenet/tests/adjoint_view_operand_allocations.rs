@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use tenet::typed::ContractSpec;
 
 use num_complex::Complex64;
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::Runtime;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, TensorMap};
 
 struct CountingAllocator;

@@ -9,14 +9,18 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use tenet::core::{
-    block_structure_intern_cache_info, complete_hom_space_structure_cache_info, product_sector,
-    reset_core_intern_tables, BlockStructure, FermionParityFusionRule, Fz2SectorLayout,
-    PackedProductCodec, ProductFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep,
-    U1SectorLayout, Z2Irrep,
+use tenet::expert::{
+    block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
+    reset_core_intern_tables,
 };
-use tenet::prelude::Runtime;
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::sector::{Fz2SectorLayout, PackedProductCodec, U1SectorLayout};
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, StructureSignature, TensorMap};
+use tenet_core::BlockStructure;
 
 type Fz2U1Rule = ProductFusionRule<
     FermionParityFusionRule,
@@ -168,7 +172,7 @@ fn fixtures_are_equal_iff_structure_is_equal() {
     });
     #[cfg(feature = "racah-generated")]
     check_fixture!("SU3 checked Generic", |variant| {
-        let rule = Arc::new(tenet::typed::SUNFusionRule::new(3).unwrap());
+        let rule = Arc::new(tenet::sector::SUNFusionRule::new(3).unwrap());
         let pairs = match variant {
             0 => [(vec![0i64, 0], 1), (vec![1, 1], 2)],
             1 => [(vec![0i64, 0], 1), (vec![1, 1], 3)],
@@ -186,7 +190,7 @@ fn checked_generic_rule_instance_separates_signatures() {
     let _guard = lock();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let signature = |rank: usize, trivial: Vec<i64>| {
-        let rule = Arc::new(tenet::typed::SUNFusionRule::new(rank).unwrap());
+        let rule = Arc::new(tenet::sector::SUNFusionRule::new(rank).unwrap());
         let leg = GradedSpace::try_new(rule, [(trivial, 2)]).unwrap();
         TensorMap::<_, f64>::zeros(&runtime, [&leg], [&leg])
             .unwrap()

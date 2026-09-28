@@ -1,11 +1,11 @@
 //! Configuration of the topology-keyed contraction-plan cache owned by
-//! [`Runtime`](crate::prelude::Runtime).
+//! [`Runtime`](crate::typed::Runtime).
 //!
 //! The cache itself (keys and plan entries) lives in `tenet-network`, which
 //! depends on this crate; the runtime stores it behind a type-erased slot
 //! (see `Runtime::with_extension_slot`) and owns only the configuration
 //! value types defined here. Set the configuration on
-//! [`RuntimeBuilder`](crate::prelude::RuntimeBuilder) via
+//! [`RuntimeBuilder`](crate::typed::RuntimeBuilder) via
 //! `plan_cache`/`optimizer`, or later through `tenet-network`'s
 //! `configure_plan_cache`.
 //!
@@ -294,7 +294,7 @@ pub const DEFAULT_PLAN_CACHE_CAPACITY: usize = 256;
 pub const DEFAULT_WORKSPACE_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
 /// Plan-cache behavior; set on
-/// [`RuntimeBuilder`](crate::prelude::RuntimeBuilder) or with
+/// [`RuntimeBuilder`](crate::typed::RuntimeBuilder) or with
 /// `tenet-network`'s `configure_plan_cache`.
 #[derive(Clone, Debug)]
 pub struct PlanCacheConfig {

@@ -1,6 +1,6 @@
 mod u1 {
     use std::{hint::black_box, sync::Arc, time::Instant};
-    use tenet::core::{U1FusionRule, U1Irrep};
+    use tenet::sector::{U1FusionRule, U1Irrep};
     use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
     use tenet_network::{configure_plan_cache, plan_cache_stats, tensor, PlanCacheConfig};
 
@@ -153,7 +153,8 @@ mod checked_generic {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use tenet::typed::{ContractSpec, GradedSpace, Runtime, SUNFusionRule, TensorMap};
+    use tenet::sector::SUNFusionRule;
+    use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
     use tenet_network::{configure_plan_cache, plan_cache_stats, tensor, PlanCacheConfig};
 
     const ITERATIONS: usize = 20;

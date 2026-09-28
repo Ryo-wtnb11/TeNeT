@@ -13,11 +13,9 @@
 //! The helpers are never executed. They are instantiated as function items in
 //! the test below, which is what forces their bodies to be type-checked.
 
-use tenet::prelude::{
-    AdvancedLinalgScalar, FactorizationScalar, TensorMap, TensorScalar, U1FusionRule,
-};
+use tenet::sector::U1FusionRule;
 use tenet::typed::Direction;
-use tenet_matrixalgebra::FactorScalar;
+use tenet::typed::{AdvancedLinalgScalar, FactorizationScalar, TensorMap, TensorScalar};
 
 /// Base family: everything admitted by [`TensorScalar`] alone.
 fn base_family<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
@@ -69,7 +67,7 @@ fn advanced_family<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>)
 fn general_eig_family<D>(tensor: &TensorMap<U1FusionRule, D>)
 where
     D: AdvancedLinalgScalar,
-    <D as FactorScalar>::Eig: TensorScalar,
+    D::Eig: TensorScalar,
 {
     let _ = tensor.eig_full(&[0], &[1]);
     let _ = tensor.eig_vals(&[0], &[1]);

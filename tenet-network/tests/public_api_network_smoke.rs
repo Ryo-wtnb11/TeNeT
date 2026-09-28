@@ -1,5 +1,6 @@
-use tenet::prelude::{GradedSpace, Runtime, TensorMap, U1FusionRule, U1Irrep};
+use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::ContractSpec;
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, TemporaryLabel};
 
 fn assert_close(actual: &[f64], expected: &[f64]) {

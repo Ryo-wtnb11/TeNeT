@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex64, GradedSpace, Runtime, SectorSpectrum, TensorMap};
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::Eigh;
+use tenet::typed::{Complex64, GradedSpace, Runtime, SectorSpectrum, TensorMap};
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()

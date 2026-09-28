@@ -60,7 +60,7 @@ use super::*;
 ///
 /// ```
 /// use std::sync::Arc;
-/// use tenet::core::{U1FusionRule, U1Irrep};
+/// use tenet::sector::{U1FusionRule, U1Irrep};
 /// use tenet::typed::{GradedSpace, Runtime, SectorSpectrum, TensorMap};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -106,7 +106,7 @@ use super::*;
 #[cfg_attr(
     feature = "cuda",
     doc = "```
-use tenet::core::U1FusionRule;
+use tenet::sector::U1FusionRule;
 use tenet::typed::TensorMap;
 
 fn single_precision_upload(tensor: &TensorMap<U1FusionRule, f32>) {
@@ -208,7 +208,8 @@ impl TensorScalar for num_complex::Complex32 {}
 /// A caller generic over the base marker cannot reach a factorization:
 ///
 /// ```compile_fail
-/// use tenet::prelude::{TensorMap, TensorScalar, U1FusionRule};
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::{TensorMap, TensorScalar};
 ///
 /// fn base_only<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
 ///     let _ = tensor.svd_compact(&[0], &[1]);
@@ -219,7 +220,8 @@ impl TensorScalar for num_complex::Complex32 {}
 /// shows the rejection above is the bound and not an unrelated mistake:
 ///
 /// ```
-/// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::{FactorizationScalar, TensorMap};
 ///
 /// fn factorizing<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
 ///     let _ = tensor.svd_compact(&[0], &[1]);
@@ -229,7 +231,8 @@ impl TensorScalar for num_complex::Complex32 {}
 /// The same pair for `qr_compact`:
 ///
 /// ```compile_fail
-/// use tenet::prelude::{TensorMap, TensorScalar, U1FusionRule};
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::{TensorMap, TensorScalar};
 ///
 /// fn base_only<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
 ///     let _ = tensor.qr_compact(&[0], &[1]);
@@ -237,7 +240,8 @@ impl TensorScalar for num_complex::Complex32 {}
 /// ```
 ///
 /// ```
-/// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::{FactorizationScalar, TensorMap};
 ///
 /// fn factorizing<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
 ///     let _ = tensor.qr_compact(&[0], &[1]);
@@ -253,7 +257,7 @@ impl TensorScalar for num_complex::Complex32 {}
 #[cfg_attr(
     feature = "cuda",
     doc = "```
-use tenet::core::U1FusionRule;
+use tenet::sector::U1FusionRule;
 use tenet::typed::{CudaStorage, TensorMap};
 
 fn f32_device_svd(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
@@ -267,7 +271,7 @@ fn f64_device_svd(tensor: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>) {
 
 ```
 use num_complex::Complex32;
-use tenet::core::U1FusionRule;
+use tenet::sector::U1FusionRule;
 use tenet::typed::{CudaStorage, TensorMap};
 
 fn c32_device_qr(tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>) {
@@ -319,7 +323,8 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// function:
 ///
 /// ```compile_fail
-/// use tenet::prelude::{TensorMap, TensorScalar, U1FusionRule};
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::{TensorMap, TensorScalar};
 ///
 /// fn base_only<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
 ///     let _ = tensor.exp(&[0], &[1]);
@@ -327,7 +332,8 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// ```
 ///
 /// ```compile_fail
-/// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::{FactorizationScalar, TensorMap};
 ///
 /// fn factorizing_only<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
 ///     let _ = tensor.exp(&[0], &[1]);
@@ -337,7 +343,8 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// This marker does:
 ///
 /// ```
-/// use tenet::prelude::{AdvancedLinalgScalar, TensorMap, U1FusionRule};
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::{AdvancedLinalgScalar, TensorMap};
 ///
 /// fn advanced<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>) {
 ///     let _ = tensor.exp(&[0], &[1]);
@@ -349,7 +356,8 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// [`TensorMap::inv`] on its own, so the pair above cannot pass on `exp` alone:
 ///
 /// ```compile_fail
-/// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::{FactorizationScalar, TensorMap};
 ///
 /// fn factorizing_only<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
 ///     let _ = tensor.inv(&[0], &[1]);
@@ -357,7 +365,8 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// ```
 ///
 /// ```
-/// use tenet::prelude::{AdvancedLinalgScalar, TensorMap, U1FusionRule};
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::{AdvancedLinalgScalar, TensorMap};
 ///
 /// fn advanced<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>) {
 ///     let _ = tensor.inv(&[0], &[1]);
@@ -368,26 +377,26 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// held constant across the pair so that only the marker differs:
 ///
 /// ```compile_fail
-/// use tenet::prelude::{FactorizationScalar, TensorMap, TensorScalar, U1FusionRule};
-/// use tenet_matrixalgebra::FactorScalar;
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::{FactorizationScalar, TensorMap, TensorScalar};
 ///
 /// fn factorizing_only<D>(tensor: &TensorMap<U1FusionRule, D>)
 /// where
 ///     D: FactorizationScalar,
-///     <D as FactorScalar>::Eig: TensorScalar,
+///     D::Eig: TensorScalar,
 /// {
 ///     let _ = tensor.eig_full(&[0], &[1]);
 /// }
 /// ```
 ///
 /// ```
-/// use tenet::prelude::{AdvancedLinalgScalar, TensorMap, TensorScalar, U1FusionRule};
-/// use tenet_matrixalgebra::FactorScalar;
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::{AdvancedLinalgScalar, TensorMap, TensorScalar};
 ///
 /// fn advanced<D>(tensor: &TensorMap<U1FusionRule, D>)
 /// where
 ///     D: AdvancedLinalgScalar,
-///     <D as FactorScalar>::Eig: TensorScalar,
+///     D::Eig: TensorScalar,
 /// {
 ///     let _ = tensor.eig_full(&[0], &[1]);
 /// }
@@ -403,7 +412,7 @@ impl AdvancedLinalgScalar for num_complex::Complex32 {}
 ///
 /// This bundles the typed payload trait [`TensorScalar`] (whose `ScalarOps`
 /// half selects the matching multiplicity-free execution context) with the
-/// device dtype [`tenet_dense::CudaScalar`]. All four payload dtypes of the
+/// device dtype [`crate::typed::CudaScalar`]. All four payload dtypes of the
 /// base family are admitted: `f64`, [`num_complex::Complex64`], `f32` and
 /// [`num_complex::Complex32`].
 ///
@@ -684,7 +693,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -740,7 +749,8 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::prelude::*;
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
     ///
     /// let rt = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [-1, 0, 1].map(|q| (U1Irrep::new(q), 1)))?;
@@ -761,7 +771,8 @@ where
     /// [`PhysicalFusionBasis`]:
     ///
     /// ```compile_fail
-    /// use tenet::prelude::{TensorMap, Z2FusionRule};
+    /// use tenet::sector::Z2FusionRule;
+    /// use tenet::typed::TensorMap;
     ///
     /// fn unsupported(tensor: &TensorMap<Z2FusionRule, f64>) {
     ///     let _ = tensor.to_physical_dense();
@@ -935,7 +946,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -1014,7 +1025,8 @@ where
     /// producing a result. See [`Self::norm`] for a runnable example.
     ///
     /// ```compile_fail
-    /// use tenet::prelude::{TensorMap, U1FusionRule};
+    /// use tenet::sector::U1FusionRule;
+    /// use tenet::typed::TensorMap;
     ///
     /// fn removed(x: &TensorMap<U1FusionRule, f64>) {
     ///     let _ = x.add(x, 1.0, 2.0);
@@ -1059,7 +1071,7 @@ where
     /// ```
     /// use std::sync::Arc;
     ///
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -1126,7 +1138,7 @@ where
     /// ```
     /// use std::sync::Arc;
     ///
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -1557,7 +1569,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -1648,7 +1660,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Qr, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -1707,7 +1719,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -1797,7 +1809,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Lq, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -1980,7 +1992,7 @@ where
     /// ```
     /// use std::sync::Arc;
     ///
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, SectorSpectrum, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -2170,7 +2182,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{Eigh, GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -2267,7 +2279,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{Eig, GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;

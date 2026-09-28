@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use contract_cases::{assert_close, fermion_u1, fill, su2, u1_non_self_dual, Payload};
 use num_complex::Complex64;
-use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
-use tenet::prelude::{FibonacciFusionRule, FibonacciSector};
+use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+use tenet::sector::{FibonacciFusionRule, FibonacciSector};
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 
 fn permutations(n: usize) -> Vec<Vec<usize>> {
@@ -262,10 +262,10 @@ fn non_symmetric_braiding_is_unsupported_for_every_split() {
         assert!(
             matches!(
                 &error,
-                tenet::prelude::Error::Operation(operation)
+                tenet::typed::Error::Operation(operation)
                     if matches!(
                         **operation,
-                        tenet::operations::OperationError::UnsupportedTensorContractScope {
+                        tenet::typed::OperationError::UnsupportedTensorContractScope {
                             message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
                         }
                     )
@@ -280,7 +280,7 @@ fn non_symmetric_braiding_is_unsupported_for_every_split() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_split_matches_contract_then_permute() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());

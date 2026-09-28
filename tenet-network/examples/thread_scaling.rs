@@ -34,7 +34,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tenet::typed::ContractSpec;
 
-use tenet::prelude::{GradedSpace, Runtime, SU2FusionRule, SU2Irrep, TensorMap};
+use tenet::sector::{SU2FusionRule, SU2Irrep};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::tensor;
 
 fn env_usizes(key: &str, default: &[usize]) -> Vec<usize> {

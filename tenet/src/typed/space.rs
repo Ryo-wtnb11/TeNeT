@@ -12,7 +12,7 @@ use super::*;
 ///
 /// ```
 /// use std::sync::Arc;
-/// use tenet::core::{U1FusionRule, U1Irrep};
+/// use tenet::sector::{U1FusionRule, U1Irrep};
 /// use tenet::typed::{Error, GradedSpace};
 ///
 /// # fn main() -> Result<(), Error> {
@@ -77,7 +77,7 @@ where
     /// Creates a nondual space from `(sector label, degeneracy)` pairs.
     ///
     /// Input order does not affect the result: sectors are stored in the
-    /// provider's [`tenet_core::SectorId`] order, and zero-degeneracy entries
+    /// provider's [`crate::sector::SectorId`] order, and zero-degeneracy entries
     /// are omitted. Call [`Self::try_dual`] to construct the dual space.
     ///
     /// The space retains `provider`. Clone one [`Arc`] into several
@@ -88,7 +88,8 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::prelude::*;
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{Error, GradedSpace};
     ///
     /// let rule = Arc::new(U1FusionRule);
     /// let physical = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)])?;
@@ -379,7 +380,7 @@ where
     /// recipe truncates the `d` and `v` of `eigh_full` and `eig_full`.
     ///
     /// ```
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap, Truncation};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -614,7 +615,7 @@ where
     /// Validates `pairs` against `parent` and records the resulting subspace.
     ///
     /// Input order does not matter; entries are stored in the provider's
-    /// [`tenet_core::SectorId`] order, as the leg itself stores them.
+    /// [`crate::sector::SectorId`] order, as the leg itself stores them.
     ///
     /// # Complexity
     ///

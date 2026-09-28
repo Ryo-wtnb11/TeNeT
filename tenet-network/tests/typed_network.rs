@@ -2,13 +2,17 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use tenet::typed::ContractSpec;
 
-use tenet::core::{
-    product_sector, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
-    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, ProductFusionRuleExt,
-    SU2FusionRule, SU2Irrep, SectorCodec, TensorStorage, TypedSectorAdmission, U1FusionRule,
-    U1Irrep, Z2Irrep,
+use tenet::expert::TensorStorage;
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Complex32, Complex64, TensorScalar};
+use tenet::sector::{
+    CheckedFusionAlgebra, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, SectorCodec,
+    TypedSectorAdmission,
+};
+use tenet::typed::FusionAlgebraError;
+use tenet::typed::{Complex32, Complex64, TensorScalar};
 use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap};
 use tenet_network::{
     GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network, NetworkExecutionWorkspace,
@@ -442,7 +446,7 @@ fn fermion_u1_workspace_reuse_tracks_chain_values_and_sector_shapes() {
         )
         .unwrap()
     };
-    let sector_tag = |sector: &tenet::core::ProductSector<Z2Irrep, U1Irrep>| {
+    let sector_tag = |sector: &tenet::sector::ProductSector<Z2Irrep, U1Irrep>| {
         f64::from(sector.right().charge())
             + if *sector.left() == Z2Irrep::ODD {
                 0.5
@@ -573,7 +577,7 @@ fn contract_overwrite_reorders_non_self_dual_unequal_blocks() {
         ],
     )
     .unwrap();
-    let product_tag = |sector: &tenet::core::ProductSector<Z2Irrep, U1Irrep>| {
+    let product_tag = |sector: &tenet::sector::ProductSector<Z2Irrep, U1Irrep>| {
         f64::from(sector.right().charge())
             + if *sector.left() == Z2Irrep::ODD {
                 0.5
@@ -581,7 +585,7 @@ fn contract_overwrite_reorders_non_self_dual_unequal_blocks() {
                 0.0
             }
     };
-    let fermionic_factor = |sector: &tenet::core::ProductSector<Z2Irrep, U1Irrep>| {
+    let fermionic_factor = |sector: &tenet::sector::ProductSector<Z2Irrep, U1Irrep>| {
         if *sector.left() == Z2Irrep::ODD {
             -1.0
         } else {

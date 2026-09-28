@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 
-use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 use super::{block_matrix, members};

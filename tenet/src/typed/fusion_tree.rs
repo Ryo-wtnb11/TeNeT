@@ -3,7 +3,7 @@ use super::*;
 
 /// The provider-labelled identity of one stored block: the fusion tree on each
 /// side of the tensor map, decoded through the codec — the labelled
-/// counterpart of [`tenet_core::FusionTreePairKey`], named after TensorKit's
+/// counterpart of [`crate::typed::FusionTreePairKey`], named after TensorKit's
 /// `fusiontrees(t)`.
 ///
 /// Why not `BlockSectors` / `block_sectors`: TensorKit's `blocksectors(t)` is
@@ -503,7 +503,7 @@ where
 
 /// One coupled sector's factorization spectrum, labelled through the provider:
 /// the typed counterpart of [`tenet_matrixalgebra::SectorSpectrum`], whose
-/// `sector` is a raw [`tenet_core::SectorId`].
+/// `sector` is a raw [`crate::sector::SectorId`].
 ///
 /// Why decode rather than extend the raw-id exception that [`TensorMap::subblock`]
 /// carries: that exception is scoped to engine layout views, and a spectrum is
@@ -536,7 +536,7 @@ pub(super) enum TypedData<D, S = Vec<D>> {
     Dense(S),
     /// Compact O(Σ_c k_c) storage for a spectrum factor (SVD `s`, `eigh`/`eig`
     /// `d`): only the per-sector diagonal values, keyed by the engine's raw
-    /// [`tenet_core::SectorId`] — a stored payload never leaves this module, so
+    /// [`crate::sector::SectorId`] — a stored payload never leaves this module, so
     /// there is nothing here for the codec to label.
     Diagonal(Vec<tenet_matrixalgebra::SectorSpectrum<D>>),
 }

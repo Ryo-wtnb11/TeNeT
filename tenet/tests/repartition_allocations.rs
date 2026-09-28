@@ -3,8 +3,8 @@ use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::Arc;
 
-use tenet::core::{SU2FusionRule, SU2Irrep};
-use tenet::prelude::Runtime;
+use tenet::sector::{SU2FusionRule, SU2Irrep};
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, TensorMap};
 
 struct CountingAllocator;

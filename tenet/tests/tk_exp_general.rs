@@ -47,9 +47,9 @@
 
 use std::sync::Arc;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex64, Runtime};
+use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{BlockFusionTrees, GradedSpace, TensorMap};
+use tenet::typed::{Complex64, Runtime};
 
 /// Relative agreement with the TensorKit oracle. The two engines evaluate the
 /// same approximant at different Padé degrees for the small blocks (Julia drops

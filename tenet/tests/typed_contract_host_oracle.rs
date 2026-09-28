@@ -29,7 +29,7 @@ use contract_cases::{
     u1_reordered, u1_rhs_identity, Case, Payload, TwistRole,
 };
 use num_complex::{Complex32, Complex64};
-use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::typed::{Runtime, TensorMap};
 
 fn check_blas<R, D>(case: Case<R, D>)
@@ -89,7 +89,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec
-        + tenet::core::PhysicalFusionBasis<Scalar = f64>,
+        + tenet::sector::PhysicalFusionBasis<Scalar = f64>,
     D: Payload,
 {
     assert!(case.dense, "{}", case.name);

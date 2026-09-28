@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use tenet::typed::ContractSpec;
 
 use num_complex::{Complex32, Complex64};
-use tenet::prelude::{GradedSpace, Runtime, TensorMap};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_category_data::{CategoryDataFibonacci, CategoryObject};
 use tenet_sectors::{
     CheckedFusionAlgebra, FibonacciFusionRule, FibonacciSector, FusionAlgebraError, FusionRule,
@@ -759,8 +759,8 @@ where
         .unwrap_err();
     assert!(matches!(
         ordinary,
-        tenet::prelude::Error::Operation(operation)
-            if matches!(*operation, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
+        tenet::typed::Error::Operation(operation)
+            if matches!(*operation, tenet::typed::OperationError::UnsupportedTensorContractScope { .. })
     ));
     let dual_basis: [TensorMap<_, Complex64>; 2] = [vacuum, tau_sector].map(|channel| {
         TensorMap::from_subblock_fn(

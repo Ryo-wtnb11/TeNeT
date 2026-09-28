@@ -556,7 +556,7 @@ where
     /// # Errors
     ///
     /// [`Error::RuntimeMismatch`]; then
-    /// [`tenet_tensors::OperationError::UnsupportedTensorContractScope`] for
+    /// [`crate::typed::OperationError::UnsupportedTensorContractScope`] for
     /// non-symmetric (anyonic or `NoBraiding`) providers, as for
     /// [`Self::contract`]; [`Error::RuleMismatch`]; [`Error::InvalidArgument`]
     /// for a destination that is not owned dense host storage, aliases an
@@ -776,7 +776,7 @@ where
     /// ```
     /// use std::sync::Arc;
     ///
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -1009,7 +1009,7 @@ where
     /// [`GenericTensorError::TensorProduct`].
     ///
     /// ```compile_fail
-    /// use tenet::core::FibonacciFusionRule;
+    /// use tenet::sector::FibonacciFusionRule;
     /// use tenet::typed::TensorMap;
     /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, f64>) {
     ///     let _ = tensor.otimes(tensor);
@@ -1017,7 +1017,8 @@ where
     /// ```
     ///
     /// ```compile_fail
-    /// use tenet::prelude::{Complex64, FibonacciFusionRule};
+    /// use tenet::sector::FibonacciFusionRule;
+    /// use tenet::typed::Complex64;
     /// use tenet::typed::TensorMap;
     /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, Complex64>) {
     ///     let _ = tensor.tr();
@@ -1025,7 +1026,8 @@ where
     /// ```
     ///
     /// ```compile_fail
-    /// use tenet::prelude::{Complex64, FibonacciFusionRule};
+    /// use tenet::sector::FibonacciFusionRule;
+    /// use tenet::typed::Complex64;
     /// use tenet::typed::TensorMap;
     /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, Complex64>) {
     ///     let _ = tensor.svd_full(&[0], &[1]);
@@ -1298,7 +1300,7 @@ where
     /// The result is bound to `self`'s provider allocation, the same
     /// left-authority rule [`Self::zeros`] uses for its first leg: the two
     /// operands must agree on
-    /// [`tenet_core::FusionRule::rule_identity`], which makes the choice of
+    /// [`crate::sector::FusionRule::rule_identity`], which makes the choice of
     /// allocation immaterial to the algebra.
     ///
     /// # Errors
@@ -1306,7 +1308,7 @@ where
     /// - [`Error::RuntimeMismatch`] when the operands belong to different
     ///   runtimes.
     /// - [`Error::Operation`] with
-    ///   [`tenet_tensors::OperationError::UnsupportedTensorContractScope`] for
+    ///   [`crate::typed::OperationError::UnsupportedTensorContractScope`] for
     ///   non-symmetric (anyonic or `NoBraiding`) providers, whatever the axes.
     /// - [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] for
     ///   malformed axis lists, a `codomain ++ domain` that is not a
@@ -1320,7 +1322,7 @@ where
     /// ```
     /// use std::sync::Arc;
     ///
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -1371,7 +1373,7 @@ where
     ///
     /// This operation is typed-only and keeps the payload type `D` unchanged.
     /// The caller supplies the exact [`ProductFusionRule`], including its
-    /// component providers and codec; both component [`tenet_core::RuleIdentity`] values
+    /// component providers and codec; both component [`crate::sector::RuleIdentity`] values
     /// must match the operands, and the codec participates in the product
     /// identity. [`CanonicalUnitFusionRule`] is required for both components
     /// because TeNeT stores no separate unitor data. Factor order and nested
@@ -1472,7 +1474,7 @@ where
     /// runtime handle, because that space *is* the destination and rebuilding
     /// it under the left allocation would be a copy for nothing. The two
     /// allocations must already agree on
-    /// [`tenet_core::FusionRule::rule_identity`] for the composition to be
+    /// [`crate::sector::FusionRule::rule_identity`] for the composition to be
     /// legal at all, so the choice is immaterial to the algebra.
     ///
     /// # Compact fast paths
@@ -1502,7 +1504,7 @@ where
     ///   Checked Generic failures use [`GenericTensorError::Plan`].
     ///
     /// ```compile_fail
-    /// use tenet::core::FibonacciFusionRule;
+    /// use tenet::sector::FibonacciFusionRule;
     /// use tenet::typed::TensorMap;
     /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, f64>) {
     ///     let _ = tensor.compose(tensor);
@@ -1844,7 +1846,7 @@ where
     /// `Σ_c k_c` values rather than the `Σ_c k_c²` block-diagonal buffer they
     /// would fill (TensorKit's `DiagonalTensorMap`).
     ///
-    /// The spectrum is stored raw — engine [`tenet_core::SectorId`]s, values in
+    /// The spectrum is stored raw — engine [`crate::sector::SectorId`]s, values in
     /// the payload dtype `D`. Decoding belongs to the caller-facing spectrum
     /// fields, not to storage; a stored payload never leaves this module.
     ///
@@ -1919,7 +1921,7 @@ where
     /// ```
     /// use std::sync::Arc;
     ///
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -2848,7 +2850,7 @@ where
     /// ```
     /// use std::sync::Arc;
     ///
-    /// use tenet::core::{FermionParityFusionRule, Z2Irrep};
+    /// use tenet::sector::{FermionParityFusionRule, Z2Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -3791,7 +3793,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -3858,7 +3860,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, LeftPolar, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;

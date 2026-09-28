@@ -21,7 +21,7 @@
 
 #![allow(dead_code)]
 
-use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 
 use crate::contract_cases::{fermion_su2, fermion_u1, fill, su2, u1, u1_su2, Payload};
@@ -190,7 +190,7 @@ where
     ]
 }
 
-pub fn u1_cases<D: Payload>(runtime: &Runtime) -> Vec<TraceCase<tenet::core::U1FusionRule, D>> {
+pub fn u1_cases<D: Payload>(runtime: &Runtime) -> Vec<TraceCase<tenet::sector::U1FusionRule, D>> {
     let v = u1(&[(-1, 2), (0, 1), (1, 2)]);
     let w = u1(&[(0, 1), (1, 2)]);
     let mut cases: Vec<_> = unbent(
@@ -212,7 +212,7 @@ pub fn u1_cases<D: Payload>(runtime: &Runtime) -> Vec<TraceCase<tenet::core::U1F
     cases
 }
 
-pub fn su2_cases<D: Payload>(runtime: &Runtime) -> Vec<TraceCase<tenet::core::SU2FusionRule, D>> {
+pub fn su2_cases<D: Payload>(runtime: &Runtime) -> Vec<TraceCase<tenet::sector::SU2FusionRule, D>> {
     let s = su2();
     let mut cases: Vec<_> = unbent(
         runtime,
@@ -357,7 +357,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec
-        + tenet::core::PhysicalFusionBasis<Scalar = f64>,
+        + tenet::sector::PhysicalFusionBasis<Scalar = f64>,
     D: Payload,
 {
     let t = case.tensor.to_physical_dense().unwrap();

@@ -23,10 +23,12 @@
 
 use std::sync::Arc;
 
-use tenet::core::{
-    product_sector, CheckedFusionAlgebra, FermionParityFusionRule, MultiplicityFreeRigidSymbols,
-    PhysicalFusionBasis, ProductFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
-    SectorCodec, U1FusionRule, U1Irrep, Z2Irrep,
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRule, ProductFusionRuleExt,
+    SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::sector::{
+    CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, PhysicalFusionBasis, SectorCodec,
 };
 use tenet::typed::{BlockFusionTrees, ContractSpec, GradedSpace, Runtime, TensorMap};
 

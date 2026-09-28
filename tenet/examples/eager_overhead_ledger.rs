@@ -33,7 +33,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tenet::prelude::*;
+use tenet::sector::{
+    FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::typed::{Complex64, ContractSpec, GradedSpace, LegSelection, Runtime, TensorMap};
 
 struct CountingAllocator;
 

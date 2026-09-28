@@ -22,9 +22,9 @@ mod single_precision_oracle;
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::{GradedSpace, SectorSpectrum, TensorMap, Truncation};
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::{Eig, Svd};
+use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap, Truncation};
 
 use single_precision_oracle::{
     assert_payloads_agree_scaled, assert_scalars_agree_scaled, fermion_su2_leg_with, minus_one,
@@ -509,7 +509,7 @@ fn compact_complex32_reciprocal_does_not_underflow() {
 #[cfg(feature = "racah-generated")]
 mod checked_generic {
     use super::*;
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     fn su3_leg(degeneracy: usize) -> GradedSpace<SUNFusionRule> {
         GradedSpace::try_new(

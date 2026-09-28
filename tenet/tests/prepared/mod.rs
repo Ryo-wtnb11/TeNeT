@@ -16,10 +16,13 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use tenet::core::{
-    product_sector, CheckedFusionAlgebra, FermionParityFusionRule, Fz2SectorLayout,
-    MultiplicityFreeRigidSymbols, PackedProductCodec, ProductFusionRule, SU2FusionRule, SU2Irrep,
-    SectorCodec, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::sector::{
+    CheckedFusionAlgebra, Fz2SectorLayout, MultiplicityFreeRigidSymbols, PackedProductCodec,
+    SectorCodec, U1SectorLayout,
 };
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 

@@ -4,12 +4,13 @@
 use std::sync::Arc;
 use tenet::typed::ContractSpec;
 
-use tenet::core::{
-    CheckedFusionAlgebra, FusionAlgebraError, MultiplicityFreeAdmissionMode,
-    MultiplicityFreeRigidSymbols, SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission,
-    U1FusionRule, U1Irrep,
+use tenet::sector::{
+    CheckedFusionAlgebra, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, SectorCodec,
+    TypedSectorAdmission,
 };
-use tenet::prelude::{Complex64, Runtime};
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::FusionAlgebraError;
+use tenet::typed::{Complex64, Runtime};
 use tenet::typed::{GradedSpace, TensorMap};
 use tenet_network::tensor;
 

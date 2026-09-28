@@ -11,7 +11,7 @@ mod trace_cases;
 
 use contract_cases::{assert_close, Payload};
 use num_complex::{Complex32, Complex64};
-use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::typed::Runtime;
 use trace_cases::{
     dense_trace, fermion_su2_cases, fermion_u1_cases, su2_cases, u1_cases, u1_su2_cases, TraceCase,
@@ -44,7 +44,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec
-        + tenet::core::PhysicalFusionBasis<Scalar = f64>,
+        + tenet::sector::PhysicalFusionBasis<Scalar = f64>,
     D: Payload,
 {
     check_identity(case);

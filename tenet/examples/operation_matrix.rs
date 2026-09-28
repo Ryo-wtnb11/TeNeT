@@ -9,24 +9,35 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tenet::prelude::*;
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::{
+    Complex64, ContractSpec, Eig, Error, GradedSpace, LinalgBackend, Qr, Runtime,
+    RuntimeTreeTransformCacheInfo, TensorMap, TensorScalar,
+};
 
-use tenet::core::{
-    complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BlockRef, BlockSpec,
-    BlockStructure, BraidingStyleKind, CheckedGenericFusion, CompleteHomSpaceStructureCacheInfo,
-    FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreeKey, FusionTreeLayoutCacheInfo, RuleIdentity, SectorId, SectorLeg, SectorVec,
+use tenet::expert::CpuBackendKind;
+use tenet::expert::DefaultDenseExecutor;
+use tenet::expert::{
+    complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BlockRef,
+    CompleteHomSpaceStructureCacheInfo, FusionTreeLayoutCacheInfo, SectorLeg,
+};
+use tenet::expert::{DenseExecutor, DenseGemmBatchJob, MatrixOp};
+use tenet::expert::{DenseView, DenseViewMut};
+use tenet::sector::SectorId;
+use tenet::sector::{
+    BraidingStyleKind, CheckedGenericFusion, FusionRule, FusionStyleKind, RuleIdentity, SectorVec,
+};
+use tenet::typed::FactorScalar;
+use tenet::typed::FusionTreeKey;
+use tenet_core::{
+    BlockSpec, BlockStructure, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
     TensorMapSpace,
 };
-use tenet::dense::DefaultDenseExecutor;
-use tenet::dense::{
-    strided_batch_runs, CpuBackendKind, DenseExecutor, DenseGemmBatchJob, DenseView, DenseViewMut,
-    MatrixOp,
-};
+use tenet_dense::strided_batch_runs;
 use tenet_matrixalgebra::{
     eig_full_dyn_checked_generic, lq_compact_dyn_checked_generic, lq_full_dyn_checked_generic,
     qr_compact_dyn_checked_generic, qr_compact_dyn_generic, qr_full_dyn_checked_generic,
-    svd_compact_dyn_checked_generic, BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar,
+    svd_compact_dyn_checked_generic, BoundDynFactor, CheckedGenericFactorPlanError,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace};
 
@@ -259,12 +270,12 @@ fn benchmark_runtime() -> Result<Runtime, Error> {
     builder.build()
 }
 
-fn benchmark_dense_executor() -> Result<DefaultDenseExecutor, tenet::dense::DenseError> {
+fn benchmark_dense_executor() -> Result<DefaultDenseExecutor, tenet::expert::DenseError> {
     let kind = match std::env::var("OP_MATRIX_GEMM_BACKEND").as_deref() {
         Ok("blas") => CpuBackendKind::Blas,
         Ok("faer") | Err(_) => CpuBackendKind::Faer,
         Ok(other) => {
-            return Err(tenet::dense::DenseError::Unsupported {
+            return Err(tenet::expert::DenseError::Unsupported {
                 op: "oriented_uniform_run",
                 message: format!("OP_MATRIX_GEMM_BACKEND must be `faer` or `blas`, got `{other}`"),
             })
@@ -465,7 +476,7 @@ fn execute_adapter<T: OrientedScalar>(
     rhs_op: MatrixOp,
     alpha: T,
     beta: T,
-) -> Result<(T, usize), tenet::dense::DenseError> {
+) -> Result<(T, usize), tenet::expert::DenseError> {
     let lhs_shape = [fixture.lhs.len() - fixture.lhs_base];
     let rhs_shape = [fixture.rhs.len() - fixture.rhs_base];
     let dst_shape = [fixture.output.len() - fixture.dst_base];
@@ -515,8 +526,8 @@ fn bench_adapter<T: OrientedScalar>(
     form: &str,
     min_time: Duration,
     expected_marker: (T, usize),
-    mut operation: impl FnMut() -> Result<(T, usize), tenet::dense::DenseError>,
-) -> Result<(), tenet::dense::DenseError> {
+    mut operation: impl FnMut() -> Result<(T, usize), tenet::expert::DenseError>,
+) -> Result<(), tenet::expert::DenseError> {
     let started = Instant::now();
     let (marker, allocations) = measure_allocations(&mut operation)?;
     let elapsed = started.elapsed();
@@ -556,8 +567,8 @@ fn bench_adapter_shape<T: OrientedScalar>(
     form: &str,
     min_time: Duration,
     expected: &[(T, usize)],
-    mut operation: impl FnMut() -> Result<(usize, T, usize), tenet::dense::DenseError>,
-) -> Result<(), tenet::dense::DenseError> {
+    mut operation: impl FnMut() -> Result<(usize, T, usize), tenet::expert::DenseError>,
+) -> Result<(), tenet::expert::DenseError> {
     for _ in 0..expected.len() {
         let (case, first, len) = operation()?;
         assert_oriented_close(&[first], &[expected[case].0]);
@@ -573,7 +584,7 @@ fn bench_adapter_shape<T: OrientedScalar>(
                 iterations += 1;
             }
         }
-        Ok::<_, tenet::dense::DenseError>(marker.expect("shape cycle is nonempty"))
+        Ok::<_, tenet::expert::DenseError>(marker.expect("shape cycle is nonempty"))
     })?;
     let elapsed = started.elapsed();
     assert_eq!(iterations % expected.len() as u64, 0);
@@ -2995,13 +3006,13 @@ macro_rules! run_provider {
 #[cfg(feature = "racah-generated")]
 fn run_checked_sun(
     symmetry: &str,
-    provider: std::sync::Arc<tenet::typed::SUNFusionRule>,
+    provider: std::sync::Arc<tenet::sector::SUNFusionRule>,
     label: Vec<i64>,
     degeneracy: usize,
     min_time: Duration,
     qr_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let space = GradedSpace::try_new(provider, [(label, degeneracy)])?;
     if form_enabled("destination") {
@@ -3120,7 +3131,7 @@ fn run_checked_sun(
                     "warm",
                     min_time,
                     || {
-                        Ok::<_, tenet::typed::GenericTensorError<tenet::typed::SUNFusionRuleError>>(
+                        Ok::<_, tenet::typed::GenericTensorError<tenet::sector::SUNFusionRuleError>>(
                             lhs.scale(0.5),
                         )
                     },
@@ -3760,7 +3771,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "racah-generated")]
     {
         use std::sync::Arc;
-        use tenet::typed::SUNFusionRule;
+        use tenet::sector::SUNFusionRule;
 
         run_checked_sun(
             "SU3[0;0]",

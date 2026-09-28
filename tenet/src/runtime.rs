@@ -1009,7 +1009,7 @@ pub(crate) struct RuntimeExecutionConfig {
     pub(crate) shared_ctx: tenet_dense::SharedCpuContext,
 }
 
-/// Execution runtime for the user-layer [`crate::prelude::TensorMap`] API.
+/// Execution runtime for the user-layer [`crate::typed::TensorMap`] API.
 ///
 /// A `Runtime` is built once via [`Runtime::builder`] and then carried
 /// implicitly by every tensor created from it; operations reuse the
@@ -1052,7 +1052,8 @@ pub(crate) struct RuntimeExecutionConfig {
 ///
 /// ```
 /// use std::sync::Arc;
-/// use tenet::prelude::*;
+/// use tenet::sector::{Z2FusionRule, Z2Irrep};
+/// use tenet::typed::{GradedSpace, Runtime, TensorMap};
 ///
 /// let rt = Runtime::builder().build()?;
 /// let v = GradedSpace::try_new(
@@ -1061,7 +1062,7 @@ pub(crate) struct RuntimeExecutionConfig {
 /// )?;
 /// let a: TensorMap<_, f64> = TensorMap::zeros(&rt, [&v], [&v])?;
 /// assert_eq!(a.norm(2.0)?, 0.0);
-/// # Ok::<(), tenet::prelude::Error>(())
+/// # Ok::<(), tenet::typed::Error>(())
 /// ```
 #[derive(Clone)]
 pub struct Runtime {
@@ -1619,7 +1620,7 @@ impl std::fmt::Debug for RuntimeBuilder {
 impl RuntimeBuilder {
     /// Attaches a CUDA device (by ordinal) to the runtime. Tensors stay on
     /// the host until moved explicitly with
-    /// [`crate::prelude::TensorMap::to_cuda`]; there are no implicit
+    /// [`crate::typed::TensorMap::to_cuda`]; there are no implicit
     /// transfers. Device initialization happens in [`Self::build`].
     #[cfg(feature = "cuda")]
     pub fn cuda(mut self, device: usize) -> Self {
@@ -1652,7 +1653,7 @@ impl RuntimeBuilder {
     }
 
     /// Selects the CPU linear-algebra backend (SVD / QR / eigh / GEMM on the
-    /// coupled-sector matrices) by injecting a [`tenet_dense::DenseExecutor`].
+    /// coupled-sector matrices) by injecting a [`crate::expert::DenseExecutor`].
     /// When no executor is injected, the selected built-in `linalg_backend` is
     /// used; when it is unset, the provider follows Tenferro's resolved compiled
     /// default: BLAS when its CPU build enables `cpu-blas`, otherwise faer. This
@@ -1688,7 +1689,8 @@ impl RuntimeBuilder {
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::prelude::*;
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, LinalgBackend, Runtime, Svd, TensorMap};
     ///
     /// // Explicit faer provider. Every tensor created from this runtime
     /// // factorizes on the chosen backend — no per-call argument.
@@ -1711,7 +1713,7 @@ impl RuntimeBuilder {
     ///     .build()
     ///     .or_else(|_| Runtime::builder().build())?;
     /// # let _ = rt;
-    /// # Ok::<(), tenet::prelude::Error>(())
+    /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn linalg_backend(mut self, backend: LinalgBackend) -> Self {
         self.linalg_backend = Some(backend);
@@ -1732,14 +1734,14 @@ impl RuntimeBuilder {
     /// # Examples
     ///
     /// ```
-    /// use tenet::prelude::*;
+    /// use tenet::typed::{LinalgBackend, Runtime};
     ///
     /// // This explicitly selects faer, regardless of the compiled default.
     /// let rt = Runtime::builder()
     ///     .gemm_backend(LinalgBackend::Faer)
     ///     .build()?;
     /// # let _ = rt;
-    /// # Ok::<(), tenet::prelude::Error>(())
+    /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn gemm_backend(mut self, backend: LinalgBackend) -> Self {
         self.gemm_backend = Some(backend);

@@ -9,10 +9,10 @@ use tenet_tensors::OperationError;
 use crate::runtime::RuntimeConfigError;
 use crate::typed::{BatchMemberRepresentation, SignatureField};
 
-/// Error produced by the user-layer [`crate::prelude::TensorMap`] /
-/// [`crate::prelude::GradedSpace`] / [`crate::prelude::Runtime`] API.
+/// Error produced by the user-layer [`crate::typed::TensorMap`] /
+/// [`crate::typed::GradedSpace`] / [`crate::typed::Runtime`] API.
 ///
-/// Expert-layer errors ([`CoreError`], [`OperationError`]) are passed through
+/// Lower-layer errors ([`CoreError`], [`OperationError`]) are passed through
 /// unchanged; the remaining variants report user-level misuse (mixing rules
 /// or mixing runtimes).
 #[derive(Clone, Debug, PartialEq)]
@@ -29,7 +29,7 @@ pub enum Error {
     FusionAlgebra(Box<FusionAlgebraError>),
     /// The operands carry different fusion rules (e.g. U1 vs Z2).
     RuleMismatch,
-    /// The operands belong to different [`crate::prelude::Runtime`]s.
+    /// The operands belong to different [`crate::typed::Runtime`]s.
     RuntimeMismatch,
     /// The operands live on different placements (host vs device, or
     /// different devices); transfer explicitly with `to_cuda()` / `to_host()`
@@ -46,7 +46,7 @@ pub enum Error {
     /// too, and replacing it would silently allocate, so the operation does
     /// neither; drop the other handles or pass a tensor of its own.
     DestinationShared,
-    /// [`crate::prelude::RuntimeBuilder::build`] rejected contradictory or
+    /// [`crate::typed::RuntimeBuilder::build`] rejected contradictory or
     /// invalid settings.
     RuntimeConfig(RuntimeConfigError),
     /// A batch operand does not match one structure signature: `member` is
@@ -88,7 +88,7 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Alternative {
     /// Copy the input into an owned dense tensor with
-    /// [`crate::prelude::TensorMap::materialize`] and pass that instead; for
+    /// [`crate::typed::TensorMap::materialize`] and pass that instead; for
     /// an adjoint view of `t`, `&t.adjoint()?.materialize()?`.
     Materialize,
 }

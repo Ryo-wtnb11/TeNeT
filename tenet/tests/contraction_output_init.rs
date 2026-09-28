@@ -18,8 +18,8 @@ use num_complex::{Complex32, Complex64};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::Runtime;
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, TensorMap, TensorScalar};
 
 trait Bits: TensorScalar + Debug + numerics::Numeric {
@@ -57,7 +57,7 @@ fn su2(provider: &Arc<SU2FusionRule>, sectors: &[(usize, usize)]) -> GradedSpace
 }
 
 /// Every element of one block, walked through the view's own layout.
-fn block_values<D: Copy>(view: &tenet::core::BlockView<'_, D>) -> Vec<D> {
+fn block_values<D: Copy>(view: &tenet::expert::BlockView<'_, D>) -> Vec<D> {
     let shape = view.shape();
     let count: usize = shape.iter().product();
     let mut indices = vec![0usize; shape.len()];

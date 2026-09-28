@@ -22,8 +22,9 @@
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
-use tenet::prelude::{Runtime, TensorMap};
-use tenet::typed::{Eig, Eigh, GradedSpace, SUNFusionRule, Svd};
+use tenet::sector::SUNFusionRule;
+use tenet::typed::{Eig, Eigh, GradedSpace, Svd};
+use tenet::typed::{Runtime, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;

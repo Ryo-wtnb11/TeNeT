@@ -14,10 +14,9 @@ mod prepared;
 use std::fmt::Debug;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{
-    CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SU2FusionRule, SU2Irrep, SectorCodec,
-};
-use tenet::prelude::Error;
+use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+use tenet::sector::{SU2FusionRule, SU2Irrep};
+use tenet::typed::Error;
 use tenet::typed::{
     BatchError, Eigh, GradedSpace, MemberFault, PreparedEighFull, Runtime, SignatureField,
     StackedTensorMap, TensorMap,

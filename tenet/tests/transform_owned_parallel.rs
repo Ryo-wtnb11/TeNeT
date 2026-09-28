@@ -10,10 +10,10 @@ use std::hint::black_box;
 use std::sync::{Arc, Mutex};
 
 use num_complex::Complex64;
-use tenet::core::{
+use tenet::sector::{
     product_sector, ProductFusionRuleExt, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep,
 };
-use tenet::prelude::Runtime;
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, TensorMap};
 
 struct CountingAllocator;
@@ -137,7 +137,7 @@ fn runtimes() -> (Runtime, Runtime) {
     )
 }
 
-type U1Su2 = tenet::core::ProductFusionRule<U1FusionRule, SU2FusionRule>;
+type U1Su2 = tenet::sector::ProductFusionRule<U1FusionRule, SU2FusionRule>;
 
 /// U(1) x SU(2): every non-trivial permutation recouples (Multi scatter
 /// groups) and the degeneracies put the payload past the backend's parallel

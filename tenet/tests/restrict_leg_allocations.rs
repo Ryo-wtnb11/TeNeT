@@ -14,8 +14,9 @@ use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
 
-use tenet::core::{TypedSectorAdmission, U1FusionRule, U1Irrep};
-use tenet::prelude::{GradedSpace, LegSelection, Runtime, TensorMap};
+use tenet::sector::TypedSectorAdmission;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{GradedSpace, LegSelection, Runtime, TensorMap};
 use tenet::typed::{NetworkDegeneracyRestriction, StackedTensorMap, Svd};
 
 const ZEROED_LOG_CAPACITY: usize = 64;

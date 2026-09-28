@@ -21,11 +21,11 @@
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{
+use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRule, ProductFusionRuleExt,
     SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{GradedSpace, Runtime};
+use tenet::typed::{GradedSpace, Runtime};
 
 /// `K` of the `K * sqrt(n) * eps` bound in the module docs.
 pub const K: f64 = 32.0;
@@ -117,14 +117,14 @@ pub fn minus_one<D: Parts>() -> D {
 macro_rules! twin {
     ($rt:expr, $narrow:ty, $wide:ty, $codomain:expr, $domain:expr, $seed:expr) => {{
         let mut state = $seed;
-        let narrow: tenet::prelude::TensorMap<_, $narrow> =
-            tenet::prelude::TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, _| {
+        let narrow: tenet::typed::TensorMap<_, $narrow> =
+            tenet::typed::TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, _| {
                 $crate::single_precision_oracle::draw_parts(&mut state)
             })
             .unwrap();
         let mut state = $seed;
-        let wide: tenet::prelude::TensorMap<_, $wide> =
-            tenet::prelude::TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, _| {
+        let wide: tenet::typed::TensorMap<_, $wide> =
+            tenet::typed::TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, _| {
                 $crate::single_precision_oracle::draw_parts(&mut state)
             })
             .unwrap();
@@ -142,14 +142,14 @@ macro_rules! twin {
 macro_rules! twin_with {
     ($rt:expr, $narrow:ty, $wide:ty, $codomain:expr, $domain:expr, $entry:expr) => {{
         let entry = $entry;
-        let narrow: tenet::prelude::TensorMap<_, $narrow> =
-            tenet::prelude::TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, index| {
+        let narrow: tenet::typed::TensorMap<_, $narrow> =
+            tenet::typed::TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, index| {
                 let (re, im) = entry(index);
                 <$narrow as $crate::single_precision_oracle::Parts>::parts(re, im)
             })
             .unwrap();
-        let wide: tenet::prelude::TensorMap<_, $wide> =
-            tenet::prelude::TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, index| {
+        let wide: tenet::typed::TensorMap<_, $wide> =
+            tenet::typed::TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, index| {
                 let (re, im) = entry(index);
                 <$wide as $crate::single_precision_oracle::Parts>::parts(re, im)
             })

@@ -7,11 +7,12 @@
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use tenet::core::{
-    product_sector, FermionParityFusionRule, PackedProductCodec, ProductFusionRule, SU2FusionRule,
-    SU2Irrep, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{GradedSpace, Runtime, TensorMap};
+use tenet::sector::{PackedProductCodec, U1SectorLayout};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet::typed::{Lq, Qr, Svd};
 
 /// The receiver's own split as leg roles: `rows = 0..nout`.
@@ -26,7 +27,7 @@ fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
     (t.codomain_rank()..t.rank()).collect()
 }
 
-type Fz2U1Codec = PackedProductCodec<tenet::core::Fz2SectorLayout, U1SectorLayout>;
+type Fz2U1Codec = PackedProductCodec<tenet::sector::Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
 
 macro_rules! assert_close {
@@ -268,7 +269,7 @@ macro_rules! multiplicity_free_full_qr_lq_bonds {
 #[cfg(feature = "racah-generated")]
 mod checked_generic {
     use super::*;
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     /// SU(3), `a = 8^2 + 1`, `b = 8^2 + 1 + 6^2`: `a ⊗ a` holds 8 with
     /// multiplicity two and the codomain-only 10, 10̄, 27; `b` holds the

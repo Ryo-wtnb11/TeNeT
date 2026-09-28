@@ -3,14 +3,14 @@ use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
 
-use tenet::core::{
+use tenet::sector::{
     product_sector, ProductFusionRuleExt, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep,
 };
-use tenet::prelude::Runtime;
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, TensorMap};
 
 #[cfg(feature = "racah-generated")]
-use tenet::typed::SUNFusionRule;
+use tenet::sector::SUNFusionRule;
 
 struct CountingAllocator;
 

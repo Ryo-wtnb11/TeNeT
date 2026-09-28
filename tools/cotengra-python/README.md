@@ -24,7 +24,7 @@ uv run --project tools/cotengra-python python -c \
 Use it from Rust:
 
 ```rust
-use tenet::prelude::{CotengraPythonConfig, Optimizer};
+use tenet::plancache::{CotengraPythonConfig, Optimizer};
 
 let optimizer = Optimizer::CotengraPython(
     CotengraPythonConfig::with_uv_project("tools/cotengra-python"),

@@ -1,33 +1,32 @@
 //! Provider-typed facade: spaces and tensor maps that keep the concrete
 //! fusion-rule type `R` and speak the provider's own sector labels.
 //!
-//! This is the canonical user facade re-exported by [`crate::prelude`]. `R`
+//! This is the canonical user facade. `R`
 //! stays concrete through monomorphized construction, so any provider —
 //! including one defined downstream that implements the required admission and
 //! operation capability traits — can drive it, and the categorical
 //! identity of a tensor comes back as [`TypedSectorAdmission::Sector`] labels
-//! instead of opaque [`tenet_core::SectorId`] keys. The engine itself never
+//! instead of opaque [`crate::sector::SectorId`] keys. The engine itself never
 //! sees a label; the codec is the single boundary where one enters or leaves.
 //!
 //! The exception is deliberate: [`TensorMap::subblock`] is the engine-level
-//! layout view, and the [`tenet_core::BlockRef`] it returns carries the raw
-//! [`tenet_core::BlockKey`]. Labels are what [`TensorMap::subblock_fusion_trees`]
+//! layout view, and the [`crate::expert::BlockRef`] it returns carries the raw
+//! [`crate::typed::BlockKey`]. Labels are what [`TensorMap::subblock_fusion_trees`]
 //! is for.
 //!
 //! # Product symmetries
 //!
 //! A product symmetry needs no new constructor here, and no new type in the
 //! engine. A product of providers *is* a provider — build it with
-//! [`tenet_core::ProductFusionRuleExt::product`] and label it with
-//! [`tenet_core::product_sector`] — so this facade drives `fZ2 ⊠ U(1)`, or any
+//! [`crate::sector::ProductFusionRuleExt::product`] and label it with
+//! [`crate::sector::product_sector`] — so this facade drives `fZ2 ⊠ U(1)`, or any
 //! other ordered product of admitted components, through the same
 //! [`GradedSpace::try_new`] and [`TensorMap::zeros`] as a single symmetry:
 //!
 //! ```
 //! use std::sync::Arc;
-//! use tenet::core::{
-//!     product_sector, FermionParityFusionRule, ProductFusionRuleExt, U1FusionRule, U1Irrep,
-//!     Z2Irrep,
+//! use tenet::sector::{
+//!     product_sector, FermionParityFusionRule, ProductFusionRuleExt, U1FusionRule, U1Irrep, Z2Irrep,
 //! };
 //! use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
 //!
@@ -57,20 +56,20 @@
 //! `product_sector(product_sector(parity, charge), spin)` — the label nests in
 //! step with the provider. **Factor order and association are structure, not
 //! an equivalence.** `U(1) ⊠ fZ2` and `fZ2 ⊠ U(1)` are both legal, are
-//! different Rust types with different [`tenet_core::RuleIdentity`]s, and
+//! different Rust types with different [`crate::sector::RuleIdentity`]s, and
 //! converting between them is an explicit component swap; nothing here permutes
 //! factors for you. Association is where TeNeT diverges from TensorKit rather
 //! than mirrors it: TK's `⊠` flattens nested products into one
 //! `ProductSector{Tuple{…}}`, so association is unobservable there, while
 //! TeNeT keeps the nesting in the Rust type — see
-//! [`tenet_core::ProductFusionRule`] for the full statement.
+//! [`crate::sector::ProductFusionRule`] for the full statement.
 //!
 //! The product-provider claim is subject to the capability bounds of the
 //! operation being called. Host paths admit complex categorical scalars where
 //! the corresponding categorical-scalar and recoupling bounds are present;
 //! some decompositions, network paths, and CUDA remain narrower.
 //!
-//! **`ProductSector` is not `ProductSpace`.** [`tenet_core::ProductSector`] is
+//! **`ProductSector` is not `ProductSpace`.** [`crate::sector::ProductSector`] is
 //! a *sector label*: one irrep of a Deligne product category, TensorKit's
 //! `ProductSector` (from `TensorKitSectors`).
 //! TensorKit's `ProductSpace` is the unrelated leg-level notion — an ordered
@@ -173,7 +172,7 @@
 //!   carry a non-host `S` through [`TensorMap<R, D, S>`], while public
 //!   construction and arithmetic deliberately remain on the default `Vec<D>`
 //!   storage. Non-host operations wait for an explicit, [`Runtime`]-dependent
-//!   transfer/device leaf. [`tenet_core::Placement`] is diagnostic metadata;
+//!   transfer/device leaf. [`crate::expert::Placement`] is diagnostic metadata;
 //!   no operation dispatches on it.
 //! - The **operator overloads** (`impl Add`, `impl Mul`) are out because they
 //!   cannot return `Result`; panicking operators would contradict this
@@ -204,23 +203,15 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
 
-use num_complex::{Complex32, Complex64};
 use smallvec::SmallVec;
 use tenet_core::{
     validate_unit_layout_correspondence_checked,
-    validate_unit_layout_correspondence_generic_checked, BlockKey, BlockRef, BlockStructure,
-    BlockView, CanonicalUnitFusionRule, CategoricalScalar, CheckedCanonicalUnitFusionRule,
-    CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericStructureError,
-    CoupledSectorRegion, CoupledTreeExtent, FusionAlgebraError, FusionProductSpace,
-    FusionTreeHomSpace, FusionTreePairKey, MultiplicityFreeAdmissionMode,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, MultiplicityIndex,
-    PhysicalFusionBasis, PreparedTreePairOperation, ProductFusionRule, ProductSector,
-    ProductSectorCodec, SectorId, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
+    validate_unit_layout_correspondence_generic_checked, BlockRef, BlockStructure, BlockView,
+    CoupledSectorRegion, CoupledTreeExtent, FusionProductSpace, FusionTreeHomSpace,
+    PreparedTreePairOperation, ProductFusionRule, ProductSector, SectorId, SectorLeg,
+    UnitLegInsertion,
 };
-use tenet_core::{
-    CheckedGenericFusion, CheckedGenericPivotal, CheckedGenericRigidSymbols, HostReadableStorage,
-    Placement, TensorStorage,
-};
+use tenet_core::{HostReadableStorage, Placement, TensorStorage};
 #[cfg(feature = "cuda")]
 use tenet_dense::{
     cuda_copy_region_into, cuda_eigh_region, cuda_gemm_region_into,
@@ -240,27 +231,50 @@ use tenet_tensors::{
     TreeTransformOperationKind, ValidatedDynamicFusionLayout,
 };
 
-pub use tenet_core::SectorCodec;
-#[cfg(feature = "racah-generated")]
-pub use tenet_core::{SUNFusionRule, SUNFusionRuleError};
+use crate::sector::{
+    CanonicalUnitFusionRule, CategoricalScalar, CheckedCanonicalUnitFusionRule,
+    CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericPivotal,
+    CheckedGenericRigidSymbols, MultiplicityFreeAdmissionMode, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, PhysicalFusionBasis, ProductSectorCodec, SectorCodec,
+    TypedSectorAdmission,
+};
+/// Causes carried by [`Error`] and [`GenericTensorError`] variants.
+pub use tenet_core::{CheckedGenericStructureError, CoreError, FusionAlgebraError};
 /// Flat f64 CUDA storage used by explicit typed ownership transfer.
 #[cfg(feature = "cuda")]
 pub use tenet_tensors::cuda::CudaStorage;
 #[cfg(feature = "cuda")]
 use tenet_tensors::cuda::CudaStorageGemm;
 pub use tenet_tensors::CheckedGenericPlanError;
+pub use tenet_tensors::OperationError;
 
 /// Error returned by physical-basis expansion and projection.
 pub type PhysicalDenseError<E> = tenet_tensors::PhysicalConversionError<E>;
 
-/// Re-exported so `use tenet::typed::*` is self-sufficient apart from the
-/// provider: every fallible method here returns this error.
+/// Every fallible method here returns this error.
 pub use crate::error::{Alternative, Error};
-/// Re-exported for the same reason as [`Error`]: every constructor here takes
-/// a runtime. Both types are also in [`crate::prelude`]; re-exporting them
-/// here is what lets a caller glob-import this module alone. The canonical
-/// [`TensorMap`] and [`GradedSpace`] are also re-exported by [`crate::prelude`].
-pub use crate::runtime::Runtime;
+#[cfg(feature = "cuda")]
+pub use crate::runtime::CudaTreeTransformStats;
+/// The runtime every constructor here takes, its builder and configuration,
+/// and its cache observability.
+pub use crate::runtime::{
+    LinalgBackend, Runtime, RuntimeBuilder, RuntimeConfigError, RuntimeTreeTransformCacheInfo,
+    TreeTransformCacheInfo,
+};
+/// The complex payload scalars.
+pub use num_complex::{Complex32, Complex64};
+/// Block and fusion-tree keys and vertex labels read from a [`TensorMap`],
+/// and the error of a checked fusion-space query.
+pub use tenet_core::{
+    BlockKey, BlockKeyKind, CheckedFusionSpaceError, FusionTreeGroupKey, FusionTreeKey,
+    FusionTreePairKey, MultiplicityIndex, OpaqueBlockKey,
+};
+/// The device-scalar supertrait of [`CudaPayload`] and its real counterpart.
+#[cfg(feature = "cuda")]
+pub use tenet_dense::{CudaRealScalar, CudaScalar};
+/// The dense-scalar supertrait of the payload traits; its `Eig` is the
+/// payload of [`TensorMap::eig_full`].
+pub use tenet_matrixalgebra::FactorScalar;
 /// The spectrum-magnitude bound of [`GradedSpace::find_truncated`]. Concrete
 /// `f64`/`Complex64` callers never name it, but a caller generic over the
 /// payload must, so it is re-exported here rather than left unnameable
@@ -268,16 +282,16 @@ pub use crate::runtime::Runtime;
 pub use tenet_matrixalgebra::SpectrumMagnitude;
 /// Named factor sets returned by the factorization methods of [`TensorMap`].
 /// They are defined next to the expert factorizations in `tenet-matrixalgebra`,
-/// which return the same types, and re-exported here and in [`crate::prelude`].
+/// which return the same types, and re-exported here.
 pub use tenet_matrixalgebra::{Eig, Eigh, LeftPolar, Lq, Qr, RightPolar, Svd};
-/// Re-exported for the same reason as [`Error`] and [`Runtime`]:
-/// [`GradedSpace::find_truncated`] takes one, so `use tenet::typed::*` would
-/// not be self-sufficient without it.
-pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
+/// [`GradedSpace::find_truncated`] and the truncated factorizations take
+/// these.
+pub use tenet_matrixalgebra::{Truncation, TruncationError, TruncationSpace};
+/// The coefficient action a payload scalar supports; physical-basis
+/// expansion and projection name it as a bound.
+pub use tenet_tensors::RecouplingCoefficientAction;
 
-use tenet_matrixalgebra::{
-    rescaled_power_norm, BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar,
-};
+use tenet_matrixalgebra::{rescaled_power_norm, BoundDynFactor, CheckedGenericFactorPlanError};
 
 use crate::runtime::{Ctx, Ctxs};
 pub use crate::tensor_core::CheckedGenericTensorProductError;

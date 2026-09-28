@@ -1731,7 +1731,8 @@ where
     ///
     /// ```rust
     /// use std::{io, sync::Arc};
-    /// use tenet::prelude::*;
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{DecodeLimits, GradedSpace, Runtime, TensorMap, TypedPersistenceCodec};
     ///
     /// struct U1Codec(Arc<U1FusionRule>);
     ///

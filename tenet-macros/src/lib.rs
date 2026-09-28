@@ -245,7 +245,7 @@ fn contracted_pairs(inputs: &[Vec<String>]) -> Vec<Vec<Option<(usize, usize)>>> 
 
 /// @tensor-style contraction over homogeneous provider-typed TeNeT tensors;
 /// see the crate docs for the syntax. Evaluates to
-/// `Result<TensorMap<R, D, S>, tenet::prelude::Error>`.
+/// `Result<TensorMap<R, D, S>, tenet::typed::Error>`.
 #[proc_macro]
 pub fn tensor(input: TokenStream) -> TokenStream {
     let parsed = syn::parse_macro_input!(input as TensorExpr);

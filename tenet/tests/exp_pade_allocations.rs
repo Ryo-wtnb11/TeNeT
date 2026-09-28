@@ -12,8 +12,8 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex64, Runtime};
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Complex64, Runtime};
 use tenet::typed::{GradedSpace, TensorMap};
 
 struct CountingAllocator;

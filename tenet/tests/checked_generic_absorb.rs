@@ -3,8 +3,9 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use tenet::prelude::{Complex64, Error, Runtime};
-use tenet::typed::{GradedSpace, SUNFusionRule, TensorMap};
+use tenet::sector::SUNFusionRule;
+use tenet::typed::{Complex64, Error, Runtime};
+use tenet::typed::{GradedSpace, TensorMap};
 
 // Why not fewer args: this is a recursive N-dimensional shape-copy helper;
 // grouping the paired source/destination offset+shape+stride triples into a

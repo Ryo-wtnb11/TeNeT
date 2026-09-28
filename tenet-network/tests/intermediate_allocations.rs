@@ -6,8 +6,8 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tenet::typed::ContractSpec;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex32, Complex64, Runtime, TensorScalar};
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Complex32, Complex64, Runtime, TensorScalar};
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap as TypedTensorMap};
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;

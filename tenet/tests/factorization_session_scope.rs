@@ -15,8 +15,12 @@
 
 use std::sync::Mutex;
 
-use tenet::prelude::*;
-use tenet_dense::cpu_session_stats;
+use tenet::expert::cpu_session_stats;
+use tenet::sector::{
+    FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::typed::{Complex64, Eigh, GradedSpace, Lq, Runtime, TensorMap};
 
 /// The receiver's own split as leg roles: `rows = 0..nout`.
 fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {

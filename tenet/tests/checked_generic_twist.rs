@@ -4,15 +4,16 @@ use std::sync::{Arc, Mutex};
 use tenet::typed::ContractSpec;
 use tenet::typed::Direction;
 
-use tenet::core::{
+use tenet::sector::SectorId;
+use tenet::sector::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericPivotal,
     CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
-    SectorId, SectorVec, TypedSectorAdmission,
+    SectorVec, TypedSectorAdmission,
 };
-use tenet::prelude::{Complex64, Error, Runtime};
 use tenet::typed::{
     CheckedGenericPlanError, GenericTensorError, GradedSpace, TensorMap, TensorScalar,
 };
+use tenet::typed::{Complex64, Error, Runtime};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum Label {
@@ -812,7 +813,7 @@ fn assert_sun_identity_case<D>(n: usize, label: Vec<i64>, value: impl Fn(usize) 
 where
     D: TensorScalar + fmt::Debug + PartialEq,
 {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
@@ -868,7 +869,7 @@ fn assert_sun_flip_case<D>(n: usize, label: Vec<i64>, value: impl Fn(usize) -> D
 where
     D: TensorScalar + fmt::Debug + PartialEq,
 {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
@@ -1029,7 +1030,7 @@ fn assert_compose_any_braiding<D>(
     tag: u8,
     value: impl Fn(usize) -> D + Copy,
 ) where
-    D: TensorScalar + tenet::prelude::AdvancedLinalgScalar + Into<Complex64>,
+    D: TensorScalar + tenet::typed::AdvancedLinalgScalar + Into<Complex64>,
 {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedPivotalToy::new(tag, braiding, -1.0));
@@ -1182,7 +1183,7 @@ fn checked_generic_contract_keeps_its_braiding_boundaries() {
         assert!(
             matches!(
                 operation,
-                tenet::operations::OperationError::UnsupportedTensorContractScope { message }
+                tenet::typed::OperationError::UnsupportedTensorContractScope { message }
                     if *message == expected_message
             ),
             "{braiding:?}: {operation:?}"

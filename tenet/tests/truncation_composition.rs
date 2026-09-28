@@ -34,14 +34,14 @@
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{
+use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Error, Runtime, TensorMap, Truncation};
 use tenet::typed::{
     Eigh, GradedSpace, LegSelection, SectorSpectrum, SpectrumMagnitude, Svd, TruncatedSelection,
 };
+use tenet::typed::{Error, Runtime, TensorMap, Truncation};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -1040,10 +1040,10 @@ fn find_truncated_generically<R, D>(
     truncation: &Truncation,
 ) -> TruncatedSelection<R>
 where
-    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::core::CheckedFusionAlgebra
-        + tenet::typed::SectorCodec,
-    D: tenet::prelude::TensorScalar + SpectrumMagnitude,
+    R: tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::sector::CheckedFusionAlgebra
+        + tenet::sector::SectorCodec,
+    D: tenet::typed::TensorScalar + SpectrumMagnitude,
 {
     s.domain()[0]
         .find_truncated(&s.diagview().unwrap(), truncation)

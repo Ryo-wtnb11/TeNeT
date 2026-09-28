@@ -14,8 +14,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex32, Complex64};
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 use tenet_network::{plan_cache_stats, tensor};
 

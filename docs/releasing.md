@@ -3,7 +3,7 @@
 This is the checklist for a future registry release. The published facade is
 `tenet-rs` 0.1.1 and uses the published Tenferro 0.3.0 line. Its Rust library
 target remains `tenet`, so
-downstream code continues to write `use tenet::prelude::*`.
+downstream code imports from `tenet::typed` and `tenet::sector`.
 
 ## Publication order
 
@@ -45,7 +45,7 @@ After the complete closure is published, build a clean downstream fixture:
 tenet = { package = "tenet-rs", version = "0.1.1" }
 ```
 
-The fixture must compile `use tenet::prelude::*` without a sibling checkout,
+The fixture must compile `use tenet::typed::{Runtime, TensorMap}` without a sibling checkout,
 Tenferro source override, or Racah git override.
 
 ## External prerequisites

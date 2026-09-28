@@ -1,7 +1,11 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use tenet::prelude::*;
+use tenet::sector::{
+    FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::typed::{Complex64, Error, GradedSpace, Runtime, TensorMap};
 
 type Fz2U1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
 type Rule = ProductFusionRule<Fz2U1, SU2FusionRule>;

@@ -10,11 +10,13 @@
 
 use std::sync::Arc;
 
-use tenet::core::{
-    BraidingStyleKind, CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
+use tenet::sector::SectorId;
+use tenet::sector::{
+    BraidingStyleKind, CheckedFusionAlgebra, FusionRule, FusionStyleKind,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    RuleIdentity, SectorCodec, SectorId, SectorVec,
+    RuleIdentity, SectorCodec, SectorVec,
 };
+use tenet::typed::FusionAlgebraError;
 
 /// `ANYONIC` selects `Anyonic`, otherwise `NoBraiding`.
 pub struct RealBraidingProbe<const ANYONIC: bool>;

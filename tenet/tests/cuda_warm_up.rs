@@ -3,7 +3,7 @@
 //!
 //! Run with `cargo test -p tenet --features cuda,cpu-faer --test cuda_warm_up \
 //! -- --ignored` on a CUDA host. These assertions read the process-wide
-//! [`tenet::dense::cuda_transfer_stats`] counters, which is why they live in
+//! [`tenet::expert::cuda_transfer_stats`] counters, which is why they live in
 //! their own test binary: another test submitting device work in the same
 //! process would perturb the deltas.
 
@@ -11,8 +11,8 @@
 
 use std::sync::Arc;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::dense::cuda_transfer_stats;
+use tenet::expert::cuda_transfer_stats;
+use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 
 #[test]

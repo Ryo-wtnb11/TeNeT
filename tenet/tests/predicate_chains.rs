@@ -14,9 +14,9 @@ include!("common/predicate_chain_coefficients.rs");
 use num_complex::{Complex32, Complex64};
 use numerics::Numeric;
 use std::sync::Arc;
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::{GradedSpace, Runtime, TensorMap};
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::{Eigh, LeftPolar, Qr};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 /// Projection payloads `(re, im)` as `f64` bits, captured from the removed
 /// `project_hermitian` / `project_antihermitian` at 388d24a9 on these fixtures.
@@ -309,7 +309,7 @@ fn su2_chains_match_the_removed_methods() {
 fn checked_generic_su3_chains_decide_true_and_false_cases() {
     use std::cell::Cell;
 
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());

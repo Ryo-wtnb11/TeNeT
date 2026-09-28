@@ -5,8 +5,8 @@ use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::Arc;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::Runtime;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, TensorMap};
 
 struct CountingAllocator;

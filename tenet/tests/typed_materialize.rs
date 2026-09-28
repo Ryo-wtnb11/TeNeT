@@ -12,11 +12,11 @@
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use tenet::core::{
+use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::Runtime;
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, NetworkReuseClass, SectorSpectrum, TensorMap};
 
 trait Scalar: Copy + std::fmt::Debug + PartialEq {
@@ -536,7 +536,7 @@ fn materialize_is_the_remedy_for_apis_that_reject_lazy_adjoints() {
 #[cfg(feature = "racah-generated")]
 mod checked_generic {
     use super::*;
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     macro_rules! su3_case {
         ($dtype:ty, $value:expr, $what:expr) => {{

@@ -19,13 +19,13 @@
 //!   `u^H u = 1`, `t * v = v * d`, ...), so an exactly degenerate spectrum,
 //!   whose kept basis is a free choice, is covered by the same assertions.
 //! * [`select`] is a hand implementation of each policy's documented rule
-//!   (`tenet_matrixalgebra::Truncation`), written over a flat sorted candidate
+//!   (`tenet::typed::Truncation`), written over a flat sorted candidate
 //!   list rather than `select_truncation`'s heap.
 
 #![allow(dead_code)]
 
 use num_complex::Complex64;
-use tenet::core::{ProductSector, SU2Irrep, U1Irrep, Z2Irrep};
+use tenet::sector::{ProductSector, SU2Irrep, U1Irrep, Z2Irrep};
 use tenet::typed::{SectorSpectrum, SpectrumMagnitude};
 
 /// Closed-form quantum dimension of each multiplicity-free sector type these
@@ -520,7 +520,7 @@ macro_rules! singular_offers {
 #[macro_export]
 macro_rules! policies {
     ($target:expr) => {{
-        use tenet::prelude::Truncation;
+        use tenet::typed::Truncation;
         use $crate::truncation_oracle::Policy;
         let target = &$target;
         let pairs: Vec<_> = target
@@ -590,7 +590,7 @@ macro_rules! assert_kept_bond {
 macro_rules! assert_canonical_layout {
     ($tensor:expr, $what:expr) => {{
         let got = &$tensor;
-        let want: tenet::prelude::TensorMap<_, f64> = tenet::prelude::TensorMap::zeros(
+        let want: tenet::typed::TensorMap<_, f64> = tenet::typed::TensorMap::zeros(
             got.runtime(),
             got.codomain().iter(),
             got.domain().iter(),

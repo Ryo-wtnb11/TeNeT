@@ -6,7 +6,7 @@
 //! timer, environment header lines, a CSV table, and caller-thread allocation
 //! counters. It adds the device columns this leaf exists for: host/device
 //! transfer calls and bytes, device buffer allocations, GEMM submissions and
-//! cuSOLVER calls, read from `tenet::dense::cuda_transfer_stats`.
+//! cuSOLVER calls, read from `tenet::expert::cuda_transfer_stats`.
 //!
 //! This is a validation fixture. It never gates CI on wall clock, and no
 //! measured value feeds a dispatch decision.
@@ -72,13 +72,17 @@ mod device {
     use super::{ALLOCATION_CALLS, COUNTING, REQUESTED_BYTES};
     use std::{hint::black_box, sync::Arc, time::Instant};
 
-    use tenet::core::{
-        product_sector, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
-        MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, ProductFusionRuleExt,
-        SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
+    use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
+    use tenet::sector::{
+        product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+        U1FusionRule, U1Irrep, Z2Irrep,
     };
-    use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
-    use tenet::prelude::{Complex32, Complex64};
+    use tenet::sector::{
+        CheckedFusionAlgebra, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols,
+        SectorCodec, TypedSectorAdmission,
+    };
+    use tenet::typed::FusionAlgebraError;
+    use tenet::typed::{Complex32, Complex64};
     use tenet::typed::{
         ContractSpec, CudaStorage, Eigh, GradedSpace, Qr, Runtime, SpectrumMagnitude, Svd,
         TensorMap, Truncation,

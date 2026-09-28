@@ -16,7 +16,8 @@
 
 use std::time::Instant;
 
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Complex64, GradedSpace, Runtime, TensorMap};
 
 fn bench(label: &str, iters: usize, mut f: impl FnMut()) {
     // Warm up (plan caches, first-touch allocations).

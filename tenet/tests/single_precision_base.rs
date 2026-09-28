@@ -13,9 +13,9 @@
 mod single_precision_oracle;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{LegSelection, SectorSpectrum, TensorMap};
+use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{ContractSpec, Direction, Side};
+use tenet::typed::{LegSelection, SectorSpectrum, TensorMap};
 
 use single_precision_oracle::{
     assert_payloads_agree, assert_scalars_agree, draw_parts, fermion_su2_leg, one as wide_of_one,
@@ -378,8 +378,8 @@ mod checked_generic {
     use std::sync::Arc;
 
     use super::*;
-    use tenet::prelude::GradedSpace;
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
+    use tenet::typed::GradedSpace;
 
     macro_rules! checked_generic_suite {
         ($suite:ident, $narrow:ty, $wide:ty) => {

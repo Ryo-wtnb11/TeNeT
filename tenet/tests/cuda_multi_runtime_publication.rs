@@ -41,7 +41,7 @@
 use std::sync::{mpsc, Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use tenet::core::{U1FusionRule, U1Irrep};
+use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{CudaStorage, GradedSpace, Runtime, TensorMap};
 
 const SECTORS: i32 = 2;

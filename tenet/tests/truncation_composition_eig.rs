@@ -18,11 +18,11 @@
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{
+use tenet::sector::{
     FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Runtime, TensorMap};
 use tenet::typed::{Eig, GradedSpace};
+use tenet::typed::{Runtime, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -86,7 +86,7 @@ macro_rules! assert_eig_composition {
     ($source:expr, $complex:expr, $truncation:expr, $policy:expr, $case:expr) => {{
         let source = &$source;
         let case: &str = $case;
-        let truncation: &tenet::prelude::Truncation = &$truncation;
+        let truncation: &tenet::typed::Truncation = &$truncation;
 
         let Eig { d, v } = source
             .eig_full(&codomain_axes(&source), &domain_axes(&source))
@@ -198,10 +198,10 @@ fn triangular<R, D>(
     zero: D,
 ) -> TensorMap<R, D>
 where
-    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::core::CheckedFusionAlgebra
-        + tenet::typed::SectorCodec,
-    D: tenet::prelude::TensorScalar,
+    R: tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::sector::CheckedFusionAlgebra
+        + tenet::sector::SectorCodec,
+    D: tenet::typed::TensorScalar,
 {
     TensorMap::from_subblock_fn(&runtime(), [leg], [leg], |_, indices| {
         match indices[0].cmp(&indices[1]) {
@@ -215,9 +215,9 @@ where
 
 fn real_triangular<R>(leg: &GradedSpace<R>, seed: u64) -> TensorMap<R, f64>
 where
-    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::core::CheckedFusionAlgebra
-        + tenet::typed::SectorCodec,
+    R: tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::sector::CheckedFusionAlgebra
+        + tenet::sector::SectorCodec,
 {
     let state = std::cell::Cell::new(seed);
     let next = || {
@@ -231,9 +231,9 @@ where
 
 fn complex_triangular<R>(leg: &GradedSpace<R>, seed: u64) -> TensorMap<R, Complex64>
 where
-    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::core::CheckedFusionAlgebra
-        + tenet::typed::SectorCodec,
+    R: tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::sector::CheckedFusionAlgebra
+        + tenet::sector::SectorCodec,
 {
     let state = std::cell::Cell::new(seed);
     let next = || {
@@ -324,7 +324,7 @@ fn a_whole_sector_is_dropped_from_the_eig_bond() {
     let found = assert_eig_composition!(
         source,
         source.convert::<Complex64>(),
-        tenet::prelude::Truncation::relative_cutoff(1e-3).unwrap(),
+        tenet::typed::Truncation::relative_cutoff(1e-3).unwrap(),
         truncation_oracle::Policy::RelativeCutoff(1e-3),
         "drop"
     );
@@ -343,9 +343,9 @@ fn a_whole_sector_is_dropped_from_the_eig_bond() {
 /// shape).
 fn multi_tree_triangular<R>(codomain: [&GradedSpace<R>; 2], seed: u64) -> TensorMap<R, Complex64>
 where
-    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::core::CheckedFusionAlgebra
-        + tenet::typed::SectorCodec,
+    R: tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::sector::CheckedFusionAlgebra
+        + tenet::sector::SectorCodec,
     R::Sector: Ord + Clone,
 {
     let mut state = seed;

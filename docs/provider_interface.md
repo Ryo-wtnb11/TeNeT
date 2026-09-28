@@ -5,7 +5,8 @@ channels, duals, F/R symbols, and quantum dimensions. Tensor operations select
 the traits they need, so providers shipped by `tenet-sectors` and providers
 defined in another crate use the same public capability bounds. A provider that
 implements the required traits can use the ordinary `GradedSpace<R>` /
-`TensorMap<R, D, S>` API.
+`TensorMap<R, D, S>` API. Through the `tenet` facade, every trait and type
+named here is imported from `tenet::sector`.
 
 This document is the contract. It says what you must implement, what each trait
 owns, which laws the engine assumes without checking, and the current typed API

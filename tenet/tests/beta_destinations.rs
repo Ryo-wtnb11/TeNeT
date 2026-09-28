@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{
+use tenet::sector::{
     FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };

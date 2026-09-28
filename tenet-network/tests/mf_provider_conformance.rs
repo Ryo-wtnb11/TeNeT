@@ -7,13 +7,16 @@
 use std::sync::Arc;
 use tenet::typed::ContractSpec;
 
-use tenet::core::{
-    product_sector, CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule,
-    FusionAlgebraError, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols,
-    ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule,
-    U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
+use tenet::sector::{
+    product_sector, CU1FusionRule, CU1Irrep, FermionParityFusionRule, ProductFusionRuleExt,
+    SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
 };
-use tenet::prelude::{Complex32, Complex64};
+use tenet::sector::{
+    CheckedFusionAlgebra, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, SectorCodec,
+    TypedSectorAdmission,
+};
+use tenet::typed::FusionAlgebraError;
+use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     plan_cache_stats, tensor, GreedyDenseOptimizer, Network, NetworkExecutionWorkspace,

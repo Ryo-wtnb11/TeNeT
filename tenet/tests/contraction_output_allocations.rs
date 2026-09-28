@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use tenet::typed::ContractSpec;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::Runtime;
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, TensorMap, TensorScalar};
 
 struct CountingAllocator;

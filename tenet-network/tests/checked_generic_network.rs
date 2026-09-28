@@ -5,17 +5,18 @@ use std::fmt::{self, Debug};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use tenet::core::CheckedGenericStructureError;
-use tenet::core::{
+use tenet::sector::SUNFusionRule;
+use tenet::sector::SectorId;
+use tenet::sector::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericPivotal,
     CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
-    SectorId, SectorVec, TypedSectorAdmission,
+    SectorVec, TypedSectorAdmission,
 };
-use tenet::prelude::{Complex64, ContractSpec, Error, Runtime, TensorScalar};
+use tenet::typed::CheckedGenericStructureError;
 use tenet::typed::{
-    BlockFusionTrees, CheckedGenericPlanError, GenericTensorError, GradedSpace, SUNFusionRule,
-    TensorMap,
+    BlockFusionTrees, CheckedGenericPlanError, GenericTensorError, GradedSpace, TensorMap,
 };
+use tenet::typed::{Complex64, ContractSpec, Error, Runtime, TensorScalar};
 #[cfg(feature = "opt-path")]
 use tenet_network::Optimizer;
 use tenet_network::{

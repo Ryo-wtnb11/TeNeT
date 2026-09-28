@@ -40,8 +40,9 @@ use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
 
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::dense::{cuda_transfer_stats, CudaScalar};
+use tenet::expert::cuda_transfer_stats;
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::CudaScalar;
 use tenet::typed::{
     CudaFactorizationPayload, CudaStorage, Eigh, Error, GradedSpace, Qr, Runtime, Svd, TensorMap,
     Truncation,
@@ -312,7 +313,7 @@ fn assert_device_svd_matches_host<R, D>(
     let provider = source.provider() as *const R;
     for factor in [&device_u, &device_s, &device_vh] {
         assert!(std::ptr::eq(factor.provider(), provider));
-        assert_eq!(factor.placement(), tenet::core::Placement::Cuda(0));
+        assert_eq!(factor.placement(), tenet::expert::Placement::Cuda(0));
     }
 
     let u = device_u.to_host().unwrap();

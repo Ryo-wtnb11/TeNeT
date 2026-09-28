@@ -8,7 +8,7 @@
 use num_complex::Complex64;
 use std::sync::Arc;
 
-use tenet::prelude::Runtime;
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, LegSelection, StackedTensorMap, TensorMap};
 
 #[macro_use]
@@ -188,7 +188,7 @@ fn restrict_leg_rejects_what_eager_rejects() {
 fn a_selection_of_another_rule_instance_is_a_rule_mismatch() {
     let runtime = runtime();
     let leg = |rank: usize, trivial: Vec<i64>| {
-        let rule = Arc::new(tenet::typed::SUNFusionRule::new(rank).unwrap());
+        let rule = Arc::new(tenet::sector::SUNFusionRule::new(rank).unwrap());
         GradedSpace::try_new(rule, [(trivial, 2)]).unwrap()
     };
     let su3 = leg(3, vec![0, 0]);

@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::Truncation;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::Truncation;
 use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap};
 use tenet_network::tensor;
 

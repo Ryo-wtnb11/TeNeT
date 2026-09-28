@@ -15,13 +15,13 @@
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{
+use tenet::expert::cuda_transfer_stats;
+use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::dense::cuda_transfer_stats;
-use tenet::prelude::{Runtime, TensorScalar};
 use tenet::typed::{GradedSpace, NetworkReuseClass, TensorMap};
+use tenet::typed::{Runtime, TensorScalar};
 
 /// Value classes compared exactly: each real or imaginary part is its bit
 /// pattern, except that every NaN is one class. Tenferro's `conj` negates
@@ -85,10 +85,10 @@ fn bits<D: Bits>(data: &[D]) -> Vec<[Option<u64>; 2]> {
 /// download.
 fn check<R, D>(host: &TensorMap<R, D>, what: &str)
 where
-    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::core::CheckedFusionAlgebra
-        + tenet::core::SectorCodec
-        + tenet::core::TypedSectorAdmission,
+    R: tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::sector::CheckedFusionAlgebra
+        + tenet::sector::SectorCodec
+        + tenet::sector::TypedSectorAdmission,
     R::Mode: tenet::typed::TypedTensorAdjointDispatch<R, D>
         + tenet::typed::TypedTensorConstructionDispatch<R, D>,
     D: Bits + tenet::typed::CudaPayload,
@@ -205,10 +205,10 @@ where
 
 fn fixtures<R, D>(runtime: &Runtime, leg: &GradedSpace<R>, what: &str)
 where
-    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::core::CheckedFusionAlgebra
-        + tenet::core::SectorCodec
-        + tenet::core::TypedSectorAdmission,
+    R: tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::sector::CheckedFusionAlgebra
+        + tenet::sector::SectorCodec
+        + tenet::sector::TypedSectorAdmission,
     R::Mode: tenet::typed::TypedTensorAdjointDispatch<R, D>
         + tenet::typed::TypedTensorConstructionDispatch<R, D>,
     D: Bits + tenet::typed::CudaPayload,

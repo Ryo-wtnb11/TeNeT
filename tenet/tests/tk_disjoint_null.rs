@@ -6,7 +6,7 @@ include!("common/predicate_chain_coefficients.rs");
 
 use std::sync::Arc;
 
-use tenet::core::{U1FusionRule, U1Irrep};
+use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 #[test]

@@ -9,8 +9,8 @@ mod common;
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::Runtime;
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::Runtime;
 use tenet::typed::{BlockFusionTrees, GradedSpace, TensorMap};
 
 use common::{assert_same_tensor, literal_adjoint_payload, literal_weighted_trace};
@@ -303,12 +303,12 @@ fn su2_tr_matches_the_literal_weighted_diagonal_sum_and_conjugates_lazily() {
         TensorMap::from_subblock_fn(&runtime, [&leg, &other], [&leg, &leg], complex_value).unwrap();
     assert!(matches!(
         non_endomorphism.tr().unwrap_err(),
-        tenet::prelude::Error::InvalidArgument(message)
+        tenet::typed::Error::InvalidArgument(message)
             if message == "tr() requires an endomorphism (domain == codomain)"
     ));
     assert!(matches!(
         non_endomorphism.adjoint().unwrap().tr().unwrap_err(),
-        tenet::prelude::Error::InvalidArgument(_)
+        tenet::typed::Error::InvalidArgument(_)
     ));
 }
 

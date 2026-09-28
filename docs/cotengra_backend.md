@@ -56,7 +56,7 @@ tenet-network = { path = "...", features = ["cotengra-python"] }
 ## Using it from Rust
 
 ```rust
-use tenet::prelude::{CotengraPythonConfig, Optimizer, PlanCacheConfig};
+use tenet::plancache::{CotengraPythonConfig, Optimizer, PlanCacheConfig};
 use std::time::Duration;
 
 let optimizer = Optimizer::CotengraPython(

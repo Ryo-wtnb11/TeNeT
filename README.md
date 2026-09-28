@@ -49,7 +49,8 @@ or definitions of TeNeT's public contract.
 
 `tenet-sectors` defines the provider vocabulary — `FusionRule`,
 `CheckedFusionAlgebra`, `SectorCodec`, `MultiplicityFreeRigidSymbols`,
-`GenericRigidSymbols`, `RuleIdentity` — and ships `ZNFusionRule` (including
+`CheckedGenericRigidSymbols`, `RuleIdentity`, all exported from
+`tenet::sector` — and ships `ZNFusionRule` (including
 `Z2FusionRule`), `FermionParityFusionRule` (fZ2), `U1FusionRule`,
 `CU1FusionRule`, `SU2FusionRule`, `FibonacciFusionRule`, `ProductFusionRule`,
 and feature-gated `SUNFusionRule`. Operations select trait capabilities rather

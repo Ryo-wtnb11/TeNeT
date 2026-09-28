@@ -11,7 +11,7 @@ mod static_operand_sealed {
 /// network can be planned or executed:
 ///
 /// ```compile_fail
-/// use tenet::core::{SU2FusionRule, U1FusionRule};
+/// use tenet::sector::{SU2FusionRule, U1FusionRule};
 /// use tenet::typed::TensorMap;
 /// use tenet_network::tensor;
 ///
@@ -24,8 +24,8 @@ mod static_operand_sealed {
 /// ```
 ///
 /// ```compile_fail
-/// use tenet::core::U1FusionRule;
-/// use tenet::prelude::Complex64;
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::Complex64;
 /// use tenet::typed::TensorMap;
 /// use tenet_network::tensor;
 ///
@@ -38,7 +38,8 @@ mod static_operand_sealed {
 /// ```
 ///
 /// ```compile_fail
-/// use tenet::core::{Placement, TensorStorage, U1FusionRule};
+/// use tenet::expert::{Placement, TensorStorage};
+/// use tenet::sector::U1FusionRule;
 /// use tenet::typed::TensorMap;
 /// use tenet_network::tensor;
 ///
