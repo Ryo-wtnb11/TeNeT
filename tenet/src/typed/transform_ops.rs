@@ -2852,6 +2852,16 @@ where
         {
             return Err(spectra_disagree());
         }
+        // A compact operand proves a rank-(1,1) bond endomorphism. Its equal
+        // codomain and domain make the adjoint parent's admitted structure
+        // content-identical to the logical structure, including block order.
+        // Compare that contract once in O(G), then traverse both in lockstep;
+        // per-block indexed lookup would make this O(G log G).
+        if dense_is_adjoint && logical_structure != data_structure {
+            return Err(internal_layout_error(
+                "compact/dense inner adjoint parent has a different bond layout",
+            ));
+        }
 
         let mut total = num_complex::Complex64::new(0.0, 0.0);
         for (index, entry) in spectrum.iter().enumerate() {
@@ -2866,18 +2876,7 @@ where
             {
                 return Err(spectra_disagree());
             }
-            let data_block = if dense_is_adjoint {
-                let parent_index = data_structure
-                    .find_block_index_by_adjoint_fusion_tree_pair(pair)
-                    .ok_or_else(|| {
-                        internal_layout_error(
-                            "compact/dense inner cannot map a logical block to the adjoint parent",
-                        )
-                    })?;
-                data_structure.block(parent_index)?
-            } else {
-                data_structure.block(index)?
-            };
+            let data_block = data_structure.block(index)?;
             if data_block.shape().len() != 2
                 || data_block.shape()[0] != data_block.shape()[1]
                 || data_block.shape()[0] != entry.values.len()
