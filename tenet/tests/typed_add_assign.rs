@@ -55,7 +55,7 @@ fn tensor(runtime: &Runtime, n: usize, value: f64) -> TensorMap<U1FusionRule, f6
 fn scale_assign_mutates_unique_dense_payload() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let mut value = tensor(&runtime, 3, 2.0);
-    value.scale_assign(3.0);
+    value.scale_assign(3.0).unwrap();
     assert_eq!(
         value.dense_data().unwrap(),
         &[6.0, 0.0, 0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 6.0]
@@ -104,7 +104,7 @@ fn unique_dense_destinations_are_allocation_free() {
     let mut scaled = tensor(&runtime, 64, 2.0);
     ALLOCATIONS.set(0);
     COUNTING.set(true);
-    scaled.scale_assign(3.0);
+    scaled.scale_assign(3.0).unwrap();
     COUNTING.set(false);
     assert_eq!(ALLOCATIONS.get(), 0);
 }

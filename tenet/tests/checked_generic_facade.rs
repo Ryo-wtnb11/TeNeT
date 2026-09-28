@@ -7716,8 +7716,8 @@ fn checked_generic_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
             .map(|&a| scale(a, factor))
             .collect();
         same(x.scale(factor).dense_data().unwrap(), &want);
-        let mut assigned = x.clone();
-        assigned.scale_assign(factor);
+        let mut assigned = x.materialize().unwrap();
+        assigned.scale_assign(factor).unwrap();
         same(assigned.dense_data().unwrap(), &want);
     }
 }
