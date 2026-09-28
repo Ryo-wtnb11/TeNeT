@@ -202,13 +202,6 @@ impl FusionTreePairKey {
 
 }
 
-/// Deprecated name for [`FusionTreePairKey`].
-#[deprecated(
-    since = "0.1.0",
-    note = "renamed to FusionTreePairKey to distinguish categorical tree pairs from opaque block labels"
-)]
-pub type FusionTreeBlockKey = FusionTreePairKey;
-
 /// Application-defined block identity with no categorical interpretation.
 ///
 /// The number of words is independent of tensor rank. The inline capacity is

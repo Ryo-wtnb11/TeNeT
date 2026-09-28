@@ -1,11 +1,9 @@
-use tenet::operations::OperationError;
-use tenet::prelude::{
-    Complex64, GradedSpace, PhysicalDense, PhysicalDenseError, Runtime, SU2FusionRule, SU2Irrep,
-    TensorMap, U1FusionRule, U1Irrep,
-};
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::BlockFusionTrees;
+use tenet::typed::OperationError;
+use tenet::typed::{Complex64, GradedSpace, PhysicalDense, PhysicalDenseError, Runtime, TensorMap};
 
-fn su2_multitree<D: tenet::prelude::TensorScalar>(
+fn su2_multitree<D: tenet::typed::TensorScalar>(
     runtime: &Runtime,
     value: impl Fn(&[SU2Irrep]) -> D,
 ) -> TensorMap<SU2FusionRule, D> {

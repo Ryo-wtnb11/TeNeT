@@ -19,12 +19,12 @@ use num_complex::{Complex32, Complex64};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
-use tenet::core::{
+use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{GradedSpace, Runtime, TensorMap};
 use tenet::typed::BlockFusionTrees;
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 trait Exact:
     Copy + PartialEq + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self> + numerics::Numeric
@@ -379,7 +379,7 @@ fn lazy_adjoint_materialization_and_add_are_exact_on_fz2_u1_legs() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn lazy_adjoint_materialization_and_add_are_exact_on_su3_multiplicity_legs() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let adjoint = vec![2i64, 2];

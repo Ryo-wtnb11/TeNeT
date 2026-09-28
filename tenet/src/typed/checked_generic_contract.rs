@@ -211,7 +211,7 @@ where
     /// Dense input runs the sectorwise trace engine. A multiplicity-free
     /// compact rank-`(1, 1)` factor traced over its only pair reduces directly
     /// in `O(sum_c k_c)`; other compact cases materialize. Checked Generic
-    /// requires [`tenet_core::CheckedGenericPivotal`] and admits the output
+    /// requires [`crate::sector::CheckedGenericPivotal`] and admits the output
     /// with the source's exact provider `Arc`. Lazy adjoints are read through
     /// their parent without materializing.
     ///
@@ -225,7 +225,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -830,7 +830,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)])?;

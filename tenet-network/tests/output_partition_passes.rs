@@ -8,7 +8,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 use tenet_network::tensor;
 
 struct CountingAllocator;

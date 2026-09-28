@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::{Error, Runtime, Truncation};
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::{Error, Runtime, Truncation};
 use tenet::typed::{GradedSpace, Svd, TensorMap};
 
 fn runtime() -> Runtime {
@@ -52,9 +52,9 @@ fn truncated_svd<R>(
     truncation: &Truncation,
 ) -> Result<(TensorMap<R, f64>, f64), Error>
 where
-    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::core::CheckedFusionAlgebra
-        + tenet::typed::SectorCodec,
+    R: tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::sector::CheckedFusionAlgebra
+        + tenet::sector::SectorCodec,
 {
     let Svd { u, s, .. } = source.svd_compact(&[0], &[1])?;
     let found = s.domain()[0].find_truncated(&s.diagview()?, truncation)?;

@@ -8,15 +8,18 @@ include!("common/predicate_chain_coefficients.rs");
 
 use std::sync::Arc;
 
-use tenet::core::{
-    product_sector, FermionParityFusionRule, MultiplicityFreeRigidSymbols, PackedProductCodec,
-    ProductFusionRule, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorCodec, Su2SectorLayout,
-    U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep, ZNFusionRule,
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep, ZNFusionRule,
 };
-use tenet::prelude::{Complex64, GradedSpace, Runtime, TensorMap, Truncation};
+use tenet::sector::{
+    MultiplicityFreeRigidSymbols, PackedProductCodec, ProductSectorLayout, SectorCodec,
+    Su2SectorLayout, U1SectorLayout,
+};
+use tenet::typed::{Complex64, GradedSpace, Runtime, TensorMap, Truncation};
 use tenet::typed::{Eig, Eigh, LeftPolar, Lq, Qr, RightPolar, Svd};
 
-type Fz2SectorLayout = tenet::core::Fz2SectorLayout;
+type Fz2SectorLayout = tenet::sector::Fz2SectorLayout;
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Su2Codec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
@@ -361,11 +364,11 @@ fn public_multiplicity_free_linalg_conformance() {
     factor_conformance!("Z3", z3, z3_pairs);
     factor_conformance!(
         "CU1 vacuum/pseudo/charged",
-        tenet::core::CU1FusionRule,
+        tenet::sector::CU1FusionRule,
         [
-            (tenet::core::CU1Irrep::VACUUM, 2),
-            (tenet::core::CU1Irrep::PSEUDOSCALAR, 2),
-            (tenet::core::CU1Irrep::from_twice_charge(1), 2),
+            (tenet::sector::CU1Irrep::VACUUM, 2),
+            (tenet::sector::CU1Irrep::PSEUDOSCALAR, 2),
+            (tenet::sector::CU1Irrep::from_twice_charge(1), 2),
         ]
     );
     factor_conformance!("fZ2 odd", FermionParityFusionRule, [(Z2Irrep::ODD, 2)]);

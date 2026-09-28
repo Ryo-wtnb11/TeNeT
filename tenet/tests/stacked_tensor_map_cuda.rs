@@ -8,8 +8,8 @@
 
 use num_complex::Complex64;
 
-use tenet::dense::cuda_transfer_stats;
-use tenet::prelude::Runtime;
+use tenet::expert::cuda_transfer_stats;
+use tenet::typed::Runtime;
 use tenet::typed::StackedTensorMap;
 
 #[macro_use]

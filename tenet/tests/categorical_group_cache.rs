@@ -8,7 +8,10 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{
+    FibonacciFusionRule, FibonacciSector, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep,
+};
+use tenet::typed::{Complex32, Complex64, GradedSpace, Runtime, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -153,7 +156,7 @@ fn su2_sector_change_rebuilds_only_changed_groups() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_su3_sector_change_rebuilds_only_changed_groups() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let leg = |sectors: &[([i64; 2], usize)]| {

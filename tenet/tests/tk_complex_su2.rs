@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use tenet::core::{SU2FusionRule, SU2Irrep};
+use tenet::sector::{SU2FusionRule, SU2Irrep};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 fn close(got: f64, expected: f64) {

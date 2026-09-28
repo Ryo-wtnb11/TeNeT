@@ -8,8 +8,8 @@ use std::cell::Cell;
 use std::sync::Arc;
 use tenet::typed::ContractSpec;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::Runtime;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, TensorMap};
 use tenet_network::{
     slice_plan_for, static_network_operand_preflight, tensor, DenseCostModel, DenseTensorInfo,

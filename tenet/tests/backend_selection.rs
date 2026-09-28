@@ -6,15 +6,14 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use tenet::dense::{
+use tenet::expert::{
     DefaultDenseExecutor, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
     DenseScalar, DenseTensor, DenseWrite, MatrixOp,
 };
-use tenet::operations::OperationError;
-use tenet::prelude::{
-    GradedSpace, LinalgBackend, Runtime, RuntimeConfigError, TensorMap, U1FusionRule, U1Irrep,
-};
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::OperationError;
 use tenet::typed::{Error, Svd};
+use tenet::typed::{GradedSpace, LinalgBackend, Runtime, RuntimeConfigError, TensorMap};
 
 fn u1_space(entries: [(i32, usize); 3]) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(

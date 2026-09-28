@@ -12,16 +12,16 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "cuda")]
-use tenet::core::Placement;
-use tenet::core::{
+use tenet::expert::Placement;
+use tenet::expert::{SectorLeg, TensorStorage};
+use tenet::sector::{
     CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericFusion,
-    CheckedGenericRigidSymbols, FusionAlgebraError, MultiplicityFreeAdmissionMode,
-    MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorLeg, TensorStorage,
-    TypedSectorAdmission,
+    CheckedGenericRigidSymbols, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols,
+    RuleIdentity, SectorCodec, TypedSectorAdmission,
 };
+use tenet::typed::FusionAlgebraError;
 #[cfg(test)]
-use tenet::operations::OperationError;
-use tenet::prelude::{Error, Runtime, TensorScalar};
+use tenet::typed::OperationError;
 use tenet::typed::{
     ContractSpec, GradedSpace, NetworkDegeneracyRestriction, NetworkPayloadStorage,
     NetworkReuseClass, RuntimeDetachedTensorMap, TensorMap, TypedSpaceModeDispatch,
@@ -30,6 +30,7 @@ use tenet::typed::{
 };
 #[cfg(feature = "cuda")]
 use tenet::typed::{CudaPayload, CudaStorage};
+use tenet::typed::{Error, Runtime, TensorScalar};
 use tenet::RuntimeIdentity;
 
 use crate::cost::{DenseCostModel, DenseTensorInfo};

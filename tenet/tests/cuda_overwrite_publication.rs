@@ -39,7 +39,7 @@
 
 use std::sync::{mpsc, Arc};
 
-use tenet::core::{U1FusionRule, U1Irrep};
+use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{ContractSpec, CudaStorage, GradedSpace, Runtime, TensorMap};
 
 type Host = TensorMap<U1FusionRule, f64>;

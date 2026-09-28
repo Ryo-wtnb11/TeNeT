@@ -18,8 +18,8 @@ use std::hint::black_box;
 use std::sync::{Arc, Mutex};
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{GradedSpace, SectorSpectrum, TensorMap};
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
 use single_precision_oracle::{fermion_su2_leg, runtime, u1_leg, u1_leg_with};
 
@@ -869,7 +869,7 @@ fn converted_lazy_adjoints_are_owned() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_su3_conversions_are_exact_and_keep_structure() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let leg = GradedSpace::try_new(provider, [(vec![2i64, 2], 2)]).unwrap();
@@ -897,7 +897,7 @@ fn checked_generic_su3_conversions_are_exact_and_keep_structure() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let leg = GradedSpace::try_new(provider, [(vec![2i64, 1], 3), (vec![0, 0], 2)]).unwrap();

@@ -211,10 +211,9 @@ jobs:
   # execution lease or an explicit guard). `tenet_scope_audit` turns a Host
   # replay/compile/strided site reached with no entered pool on a caller
   # thread into a panic, so an operation that forgets the entry fails here
-  # instead of silently running on Rayon's global pool. The expert-API
-  # firewall test drives the lower-level crates with no runtime, which is
-  # ambient by design, so it is skipped. Own job: the cfg changes RUSTFLAGS
-  # and would otherwise invalidate the test job's build cache.
+  # instead of silently running on Rayon's global pool. Own job: the cfg
+  # changes RUSTFLAGS and would otherwise invalidate the test job's build
+  # cache.
   host-pool-audit:
     name: host pool entry audit
     needs: changes
@@ -235,7 +234,7 @@ jobs:
       - uses: ./tenet/.github/actions/cargo-build-script-cache
         with:
           key: host-pool-audit
-      - run: cargo test -p tenet-rs -p tenet-network -p tenet-krylov -- --skip curated_expert_facades_execute_externally
+      - run: cargo test -p tenet-rs -p tenet-network -p tenet-krylov
         working-directory: tenet
         env:
           RUSTFLAGS: --cfg tenet_scope_audit

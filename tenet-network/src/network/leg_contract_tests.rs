@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
-use tenet::core::{
-    BraidingStyleKind, CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
-    RuleIdentity, SectorCodec, SectorId, SectorLeg, SectorVec,
+use tenet::expert::SectorLeg;
+use tenet::sector::SectorId;
+use tenet::sector::{
+    BraidingStyleKind, CheckedFusionAlgebra, FusionRule, FusionStyleKind, RuleIdentity,
+    SectorCodec, SectorVec,
 };
+use tenet::typed::FusionAlgebraError;
 use tenet::typed::GradedSpace;
 
 /// A faulty rule whose dual is not an involution: `a* = b* = c`,

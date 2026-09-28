@@ -112,6 +112,6 @@ pub use tenet_macros::tensor;
 #[cfg(test)]
 #[path = "../../tests/support"]
 mod test_numerics {
-    use tenet::prelude::{Complex32, Complex64};
+    use tenet::typed::{Complex32, Complex64};
     pub(crate) mod numerics;
 }

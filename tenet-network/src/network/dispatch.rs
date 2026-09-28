@@ -3,8 +3,8 @@ use super::*;
 mod host_mode_sealed {
     pub trait Sealed {}
 
-    impl Sealed for tenet::core::MultiplicityFreeAdmissionMode {}
-    impl Sealed for tenet::core::CheckedGenericAdmissionMode {}
+    impl Sealed for tenet::sector::MultiplicityFreeAdmissionMode {}
+    impl Sealed for tenet::sector::CheckedGenericAdmissionMode {}
 }
 
 /// Internal network policy selected by the provider's admission mode and the
@@ -32,7 +32,7 @@ where
 
     /// The provider's braiding style, which decides whether a network that
     /// contracts is admitted at all.
-    fn braiding_style(provider: &R) -> tenet::core::BraidingStyleKind;
+    fn braiding_style(provider: &R) -> tenet::sector::BraidingStyleKind;
 
     fn leg_dims<B: TensorStorage<D>>(
         tensor: &TensorMap<R, D, B>,
@@ -104,8 +104,8 @@ where
 {
     const REUSE_DESTINATIONS: bool = true;
 
-    fn braiding_style(provider: &R) -> tenet::core::BraidingStyleKind {
-        tenet::core::FusionRule::braiding_style(provider)
+    fn braiding_style(provider: &R) -> tenet::sector::BraidingStyleKind {
+        tenet::sector::FusionRule::braiding_style(provider)
     }
 
     fn leg_dims<B: TensorStorage<D>>(tensor: &TensorMap<R, D, B>) -> Result<Vec<usize>, Error> {
@@ -162,7 +162,7 @@ where
 {
     const REUSE_DESTINATIONS: bool = false;
 
-    fn braiding_style(provider: &R) -> tenet::core::BraidingStyleKind {
+    fn braiding_style(provider: &R) -> tenet::sector::BraidingStyleKind {
         CheckedGenericFusion::braiding_style(provider)
     }
 
@@ -239,8 +239,8 @@ where
 {
     const REUSE_DESTINATIONS: bool = true;
 
-    fn braiding_style(provider: &R) -> tenet::core::BraidingStyleKind {
-        tenet::core::FusionRule::braiding_style(provider)
+    fn braiding_style(provider: &R) -> tenet::sector::BraidingStyleKind {
+        tenet::sector::FusionRule::braiding_style(provider)
     }
 
     fn leg_dims<B: TensorStorage<D>>(tensor: &TensorMap<R, D, B>) -> Result<Vec<usize>, Error> {

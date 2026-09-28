@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
+use tenet::expert::SectorLeg;
+use tenet::sector::FusionRule;
 #[cfg(feature = "cuda")]
-use tenet::core::{product_sector, ProductFusionRuleExt};
-use tenet::core::{
-    FermionParityFusionRule, FusionRule, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
-};
-use tenet::prelude::Complex64;
+use tenet::sector::{product_sector, ProductFusionRuleExt};
+use tenet::sector::{FermionParityFusionRule, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep};
+use tenet::typed::Complex64;
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap, TensorScalar};
 
 use super::*;
@@ -1166,7 +1166,7 @@ fn crossed_plan() -> PlannedNetwork {
 
 #[test]
 fn device_operand_admission_decides_each_class_from_metadata() {
-    use tenet::core::BraidingStyleKind;
+    use tenet::sector::BraidingStyleKind;
     let dense = [
         NetworkReuseClass::OwnedDense,
         NetworkReuseClass::LazyAdjoint,
@@ -1296,7 +1296,7 @@ fn host_diagonal_operands_classify_as_compact_for_device_admission() {
     let tenet::typed::Svd { s: compact, .. } = dense.svd_compact(&[0], &[1]).unwrap();
     assert!(device_operand_admission(
         true,
-        tenet::core::FusionRule::braiding_style(dense.provider()),
+        tenet::sector::FusionRule::braiding_style(dense.provider()),
         [
             dense.network_reuse_class(false),
             dense.network_reuse_class(true)
@@ -1306,7 +1306,7 @@ fn host_diagonal_operands_classify_as_compact_for_device_admission() {
     assert!(matches!(
         device_operand_admission(
             true,
-            tenet::core::FusionRule::braiding_style(compact.provider()),
+            tenet::sector::FusionRule::braiding_style(compact.provider()),
             [compact.network_reuse_class(false)],
         ),
         Err(Error::UnsupportedOnDevice(_))

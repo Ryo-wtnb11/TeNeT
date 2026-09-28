@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex32, Complex64, Error, Runtime};
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::{Complex32, Complex64, Error, Runtime};
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
 fn runtime() -> Runtime {

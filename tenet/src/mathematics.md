@@ -7,9 +7,9 @@ motivation, see the TensorKit paper
 
 The short version:
 
-- a [`crate::prelude::GradedSpace`] is a finite direct sum of sector irreps with
+- a [`crate::typed::GradedSpace`] is a finite direct sum of sector irreps with
   ordinary degeneracy spaces;
-- a [`crate::prelude::TensorMap`] is a morphism `codomain <- domain`;
+- a [`crate::typed::TensorMap`] is a morphism `codomain <- domain`;
 - a domain leg is oriented as a dual object during contractions;
 - leg rearrangements are morphisms in a braided rigid category;
 - storage is one dense column-major matrix per coupled sector;
@@ -123,7 +123,7 @@ For a graded space, duality acts on both the degeneracy space and the sector:
 </math>
 </div>
 
-In TeNeT, [`crate::prelude::GradedSpace::try_dual`] replaces every sector by its
+In TeNeT, [`crate::typed::GradedSpace::try_dual`] replaces every sector by its
 fusion-rule dual and flips the leg's dual flag. For U(1), charge `q` dualizes
 to `-q`; for Z2 and SU(2), the exposed sectors are self-dual, though SU(2)
 still has nontrivial fusion and Frobenius-Schur data internally. Degeneracy
@@ -271,10 +271,10 @@ under negation; dualization constructs the corresponding dual sector set.
 
 ## Leg Re-Arrangements
 
-The current user API exposes [`crate::prelude::TensorMap::permute`],
-[`crate::prelude::TensorMap::braid`], [`crate::prelude::TensorMap::transpose`],
-[`crate::prelude::TensorMap::adjoint`], [`crate::prelude::TensorMap::flip`], and
-[`crate::prelude::TensorMap::twist`]. The latter two act on fusion-tree legs:
+The current user API exposes [`crate::typed::TensorMap::permute`],
+[`crate::typed::TensorMap::braid`], [`crate::typed::TensorMap::transpose`],
+[`crate::typed::TensorMap::adjoint`], [`crate::typed::TensorMap::flip`], and
+[`crate::typed::TensorMap::twist`]. The latter two act on fusion-tree legs:
 `flip` changes leg duality, while `twist` applies ribbon-twist phases.
 
 Let
@@ -506,8 +506,8 @@ column count. The actual `BlockStructure` stores those sector matrices in
 column-major order; individual fusion-tree subblocks are strided views into
 the sector matrix.
 
-This is the layout behind [`crate::core::FusionTensorMapSpace`]. The
-user-layer [`crate::prelude::TensorMap::dense_data`] method borrows the same flat
+This is the layout of every [`crate::typed::TensorMap`]. The
+user-layer [`crate::typed::TensorMap::dense_data`] method borrows the same flat
 storage.
 
 ## Inner Products, Norms, And Truncation
@@ -537,8 +537,8 @@ Consequently,
 </math>
 </div>
 
-This is the norm used by [`crate::prelude::TensorMap::norm`] and
-[`crate::prelude::TensorMap::inner`]. It is also the norm used by SVD and
+This is the norm used by [`crate::typed::TensorMap::norm`] and
+[`crate::typed::TensorMap::inner`]. It is also the norm used by SVD and
 Hermitian eigentruncation errors.
 
 For a sectorwise SVD,

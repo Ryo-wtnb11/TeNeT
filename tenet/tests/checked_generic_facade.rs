@@ -8,22 +8,25 @@ use std::sync::Arc;
 use tenet::typed::ContractSpec;
 use tenet::typed::Side;
 
-use tenet::core::{
+use tenet::expert::DenseBackend;
+use tenet::expert::{
+    DefaultDenseExecutor, DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor,
+    DenseWrite,
+};
+use tenet::sector::SectorId;
+use tenet::sector::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
-    CheckedGenericRigidSymbols, CheckedGenericStructureError, FusionStyleKind, GenericFArray,
-    GenericRMatrix, RuleIdentity, SectorId, SectorVec, TypedSectorAdmission,
+    CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
+    SectorVec, TypedSectorAdmission,
 };
-use tenet::dense::{
-    DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead,
-    DenseTensor, DenseWrite,
-};
-use tenet::prelude::{Complex32, Complex64, GenericTensorError, Runtime, SectorSpectrum};
+use tenet::typed::CheckedGenericStructureError;
 #[cfg(feature = "racah-generated")]
 use tenet::typed::Qr;
 use tenet::typed::{
     CheckedGenericTensorProductError, Eig, Eigh, GradedSpace, LeftPolar, Lq, NetworkReuseClass,
     RightPolar, Svd, TensorMap, Truncation, TypedTensorConstructionDispatch,
 };
+use tenet::typed::{Complex32, Complex64, GenericTensorError, Runtime, SectorSpectrum};
 
 /// The receiver's own split as leg roles: `rows = 0..nout`.
 #[cfg(feature = "racah-generated")]
@@ -158,7 +161,7 @@ fn assert_sun_checked_generic_inverse_outer_multiplicity<D>(n: usize, adjoint: V
 where
     D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq + numerics::Numeric,
 {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
@@ -226,8 +229,8 @@ fn checked_generic_inv_sun_outer_multiplicity_satisfies_inverse_laws() {
 fn sun_endomorphism_row_and_column_tree_stacking_is_identical() {
     use std::collections::BTreeMap;
 
-    use tenet::core::MultiplicityIndex;
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
+    use tenet::typed::MultiplicityIndex;
 
     type TreePlacement = (
         Vec<Vec<i64>>,
@@ -315,7 +318,7 @@ fn assert_sun_checked_generic_eigh<D>(
 {
     use std::cell::Cell;
 
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
@@ -478,19 +481,17 @@ fn sun_checked_generic_eigh_cross_mu_projectors_for_both_dtypes() {
 }
 
 #[cfg(feature = "racah-generated")]
-trait SunEigInput:
-    tenet::typed::AdvancedLinalgScalar + tenet_matrixalgebra::FactorScalar<Eig = Complex64> + fmt::Debug
-{
+trait SunEigInput: tenet::typed::AdvancedLinalgScalar<Eig = Complex64> + fmt::Debug {
     fn to_complex(
-        source: &TensorMap<tenet::typed::SUNFusionRule, Self>,
-    ) -> TensorMap<tenet::typed::SUNFusionRule, Complex64>;
+        source: &TensorMap<tenet::sector::SUNFusionRule, Self>,
+    ) -> TensorMap<tenet::sector::SUNFusionRule, Complex64>;
 }
 
 #[cfg(feature = "racah-generated")]
 impl SunEigInput for f64 {
     fn to_complex(
-        source: &TensorMap<tenet::typed::SUNFusionRule, Self>,
-    ) -> TensorMap<tenet::typed::SUNFusionRule, Complex64> {
+        source: &TensorMap<tenet::sector::SUNFusionRule, Self>,
+    ) -> TensorMap<tenet::sector::SUNFusionRule, Complex64> {
         source.convert::<Complex64>()
     }
 }
@@ -498,8 +499,8 @@ impl SunEigInput for f64 {
 #[cfg(feature = "racah-generated")]
 impl SunEigInput for Complex64 {
     fn to_complex(
-        source: &TensorMap<tenet::typed::SUNFusionRule, Self>,
-    ) -> TensorMap<tenet::typed::SUNFusionRule, Complex64> {
+        source: &TensorMap<tenet::sector::SUNFusionRule, Self>,
+    ) -> TensorMap<tenet::sector::SUNFusionRule, Complex64> {
         source.clone()
     }
 }
@@ -509,7 +510,7 @@ fn assert_sun_checked_generic_eig<D>(n: usize, label: Vec<i64>)
 where
     D: SunEigInput,
 {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
@@ -1163,8 +1164,8 @@ fn checked_generic_diagonal_is_compact_canonical_and_provider_owned() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
-    use tenet::core::{U1FusionRule, U1Irrep};
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
+    use tenet::sector::{U1FusionRule, U1Irrep};
 
     fn bits<R: TypedSectorAdmission>(tensor: &TensorMap<R, Complex64>) -> Vec<(u64, u64)> {
         tensor
@@ -1535,7 +1536,7 @@ fn checked_generic_diagonal_rejects_before_layout_and_preserves_error_precedence
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_diagonal_constructs_standalone_compact_blocks() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
@@ -1599,13 +1600,13 @@ fn checked_generic_space_algebra_keeps_multiplicity_dimensions_and_failures_type
     assert!(matches!(
         left.oplus(&foreign),
         Err(GenericTensorError::Facade(
-            tenet::prelude::Error::RuleMismatch
+            tenet::typed::Error::RuleMismatch
         ))
     ));
     assert!(matches!(
         left.fuse(&foreign),
         Err(GenericTensorError::Facade(
-            tenet::prelude::Error::RuleMismatch
+            tenet::typed::Error::RuleMismatch
         ))
     ));
     assert_eq!(
@@ -1770,7 +1771,7 @@ fn checked_only_provider_roundtrips_through_typed_cuda_without_algebra_dispatch(
         for index in 0..tensor.subblock_count() {
             let block = tensor.subblock(index).unwrap();
             let trees = tensor.subblock_fusion_trees(index).unwrap();
-            let tenet::core::BlockKey::FusionTree(raw_trees) = block.key() else {
+            let tenet::typed::BlockKey::FusionTree(raw_trees) = block.key() else {
                 panic!("checked Generic tensors use fusion-tree block keys")
             };
             assert_eq!(trees.codomain_uncoupled().len(), 1);
@@ -1895,7 +1896,7 @@ fn checked_generic_reductions_cover_real_complex_dense_payloads() {
             matches!(
                 source.norm(p),
                 Err(GenericTensorError::Facade(
-                    tenet::prelude::Error::InvalidArgument(_)
+                    tenet::typed::Error::InvalidArgument(_)
                 ))
             ),
             "checked Generic norm({p})"
@@ -1957,7 +1958,7 @@ fn checked_generic_add_rejects_runtime_before_layout_without_queries() {
     let error = left.axpby(1.0, &right, 1.0).unwrap_err();
     assert!(matches!(
         error,
-        GenericTensorError::Facade(tenet::prelude::Error::RuntimeMismatch)
+        GenericTensorError::Facade(tenet::typed::Error::RuntimeMismatch)
     ));
     assert_eq!(left.dense_data().unwrap(), before.as_slice());
     assert_eq!(provider.algebra_queries.load(Ordering::Relaxed), 0);
@@ -1979,7 +1980,7 @@ fn checked_generic_add_rejects_layout_mismatch_without_queries() {
     let error = left.axpby(1.0, &right, 1.0).unwrap_err();
     assert!(matches!(
         error,
-        GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(_))
+        GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(_))
     ));
     assert_eq!(left.dense_data().unwrap(), before.as_slice());
     assert_eq!(provider.algebra_queries.load(Ordering::Relaxed), 0);
@@ -2005,7 +2006,7 @@ fn checked_generic_add_assign_rejects_runtime_before_layout_and_preserves_receiv
     let error = right.axpby_into(&mut left, 1.0, 1.0).unwrap_err();
     assert!(matches!(
         error,
-        GenericTensorError::Facade(tenet::prelude::Error::RuntimeMismatch)
+        GenericTensorError::Facade(tenet::typed::Error::RuntimeMismatch)
     ));
     assert_eq!(left.dense_data().unwrap(), before_data.as_slice());
     assert_eq!(
@@ -2036,7 +2037,7 @@ fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
     let error = right.axpby_into(&mut left, 1.0, 1.0).unwrap_err();
     assert!(matches!(
         error,
-        GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(_))
+        GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(_))
     ));
     assert_eq!(left.dense_data().unwrap(), before_data.as_slice());
     assert_eq!(
@@ -2052,7 +2053,7 @@ fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_unit_insert_remove_preserves_authority_and_payload() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for n in [3, 4] {
@@ -2102,7 +2103,7 @@ fn sun_checked_generic_unit_insert_remove_preserves_authority_and_payload() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_compact_qr_preserves_provider_and_reconstructs() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -2143,7 +2144,7 @@ fn sun_checked_generic_compact_qr_preserves_provider_and_reconstructs() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_compact_svd_preserves_provider_and_reconstructs() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -2194,7 +2195,7 @@ fn sun_checked_generic_map_diagonal_keeps_svd_bond_and_principal_branch() {
     // What: checked SVD publishes `s` densely, so the elementwise root goes
     // through `diagview` into a compact diagonal on the same bond; the result
     // keeps the provider, space and runtime, and `Complex64::sqrt` is principal.
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for n in [3, 4] {
@@ -2296,7 +2297,7 @@ fn checked_generic_map_diagonal_rejects_dense_before_queries_and_preserves_sourc
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -2349,7 +2350,7 @@ fn assert_sun_checked_generic_inv<D>(n: usize, label: Vec<i64>)
 where
     D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq + numerics::Numeric,
 {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
@@ -2414,7 +2415,7 @@ fn sun_checked_generic_inv_preserves_provider_outer_multiplicity_and_inverse_law
 
 #[cfg(feature = "racah-generated")]
 fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
@@ -2523,7 +2524,7 @@ fn sun_checked_generic_left_solve_preserves_outer_multiplicity() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_inv_preflight_counts_outer_multiplicity() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -2593,7 +2594,7 @@ fn sun_checked_generic_inv_preflight_counts_outer_multiplicity() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -2634,7 +2635,7 @@ fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_full_qr_preserves_provider_and_reconstructs() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -2675,7 +2676,7 @@ fn sun_checked_generic_full_qr_preserves_provider_and_reconstructs() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_svd_vals_matches_compact_spectrum() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -3661,7 +3662,7 @@ fn checked_generic_exp_rejects_early_and_late_nonfinite_sectors_without_publicat
 
 #[cfg(feature = "racah-generated")]
 fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>) {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
@@ -4219,7 +4220,7 @@ fn checked_generic_polar_lazy_redirects_to_the_opposite_parent_operation() {
         GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Operation(error))
             if matches!(
                 error,
-                tenet::operations::OperationError::InvalidArgument { message }
+                tenet::typed::OperationError::InvalidArgument { message }
                     if message == "left_polar requires rows >= columns in every coupled-sector matrix"
             )
     ));
@@ -4417,7 +4418,7 @@ fn sun_checked_generic_polar_and_pinv_accept_facade_layouts_of_rank_three_and_fo
     // outer multiplicity satisfy A = WP / PW, W isometric, and P Hermitian
     // PSD with P^2 = A^H A / A A^H (which fixes P uniquely), and the
     // Moore-Penrose laws for pinv.
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -4610,7 +4611,7 @@ macro_rules! assert_sun_compact_laws {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_compact_factors_and_spectra_on_facade_layouts() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -4943,7 +4944,7 @@ fn checked_generic_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
         match result {
             Err(GenericTensorError::Facade(tenet::typed::Error::Operation(error))) => {
                 assert!(
-                    matches!(*error, tenet::operations::OperationError::Dense(_)),
+                    matches!(*error, tenet::typed::OperationError::Dense(_)),
                     "{case}: {error:?}"
                 )
             }
@@ -5138,7 +5139,7 @@ fn assert_sun_checked_generic_null_projectors<D>(
 ) where
     D: tenet::typed::FactorizationScalar + fmt::Debug + PartialEq + numerics::Numeric,
 {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
@@ -5318,7 +5319,7 @@ fn assert_sun_checked_generic_pinv<D>(
 ) where
     D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq,
 {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
@@ -5483,7 +5484,7 @@ fn assert_sun_checked_generic_polar_qh<D>(
 ) where
     D: tenet::typed::FactorizationScalar + fmt::Debug + PartialEq,
 {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
@@ -5996,7 +5997,7 @@ fn checked_only_contract_and_compose_keep_left_authority() {
             }
         ),
         Err(GenericTensorError::Facade(
-            tenet::prelude::Error::RuntimeMismatch
+            tenet::typed::Error::RuntimeMismatch
         ))
     ));
     assert_eq!(left_provider.algebra_queries.load(Ordering::Relaxed), 0);
@@ -6567,19 +6568,19 @@ fn checked_generic_cat_precedence_and_admission_failure_are_typed_nonpublishing(
     assert!(matches!(
         lhs.cat(&wrong_identity, Side::Domain),
         Err(GenericTensorError::Facade(
-            tenet::prelude::Error::RuleMismatch
+            tenet::typed::Error::RuleMismatch
         ))
     ));
     assert!(matches!(
         lhs.cat(&wrong_runtime, Side::Domain),
         Err(GenericTensorError::Facade(
-            tenet::prelude::Error::RuntimeMismatch
+            tenet::typed::Error::RuntimeMismatch
         ))
     ));
     assert!(matches!(
         lhs.cat(&bad_arguments, Side::Domain),
         Err(GenericTensorError::Facade(
-            tenet::prelude::Error::InvalidArgument(_)
+            tenet::typed::Error::InvalidArgument(_)
         ))
     ));
     assert_eq!(provider.identity_queries.load(Ordering::Relaxed), 0);
@@ -6615,9 +6616,9 @@ fn sun_cat_marker(trees: &tenet::typed::BlockFusionTrees<Vec<i64>>) -> usize {
 
 #[cfg(feature = "racah-generated")]
 fn assert_sun_cat_values<D>(
-    output: &TensorMap<tenet::typed::SUNFusionRule, D>,
-    lhs: &TensorMap<tenet::typed::SUNFusionRule, D>,
-    rhs: &TensorMap<tenet::typed::SUNFusionRule, D>,
+    output: &TensorMap<tenet::sector::SUNFusionRule, D>,
+    lhs: &TensorMap<tenet::sector::SUNFusionRule, D>,
+    rhs: &TensorMap<tenet::sector::SUNFusionRule, D>,
     changed_axis: usize,
     lhs_extent: usize,
     value: impl Fn(usize) -> D,
@@ -6673,7 +6674,7 @@ fn assert_sun_cat_case<D>(n: usize, label: Vec<i64>, value: impl Fn(usize) -> D 
 where
     D: Copy + fmt::Debug + PartialEq + tenet::typed::TensorScalar,
 {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let left_provider = Arc::new(SUNFusionRule::new(n).unwrap());
@@ -6783,7 +6784,7 @@ fn sun_checked_generic_cat_covers_both_directions_dtypes_and_mu_two_keys() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
@@ -6953,8 +6954,8 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_adjoint_and_reductions_preserve_provider_and_errors() {
-    use tenet::core::SUNFusionRuleError;
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
+    use tenet::sector::SUNFusionRuleError;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
@@ -6990,7 +6991,7 @@ fn sun_checked_generic_adjoint_and_reductions_preserve_provider_and_errors() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_transforms_reuse_the_runtime_completed_store() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
@@ -7267,7 +7268,7 @@ fn checked_multiplicity_lazy_adjoint_matches_the_literal_kernel_for_real_and_com
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_lazy_adjoint_matches_the_literal_kernel_under_all_transforms() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -7299,8 +7300,8 @@ fn sun_lazy_adjoint_matches_the_literal_kernel_under_all_transforms() {
     }));
     type SunStep<D> = (
         &'static str,
-        Result<TensorMap<SUNFusionRule, D>, GenericTensorError<tenet::prelude::SUNFusionRuleError>>,
-        Result<TensorMap<SUNFusionRule, D>, GenericTensorError<tenet::prelude::SUNFusionRuleError>>,
+        Result<TensorMap<SUNFusionRule, D>, GenericTensorError<tenet::sector::SUNFusionRuleError>>,
+        Result<TensorMap<SUNFusionRule, D>, GenericTensorError<tenet::sector::SUNFusionRuleError>>,
     );
     fn ops<D: tenet::typed::TensorScalar>(
         lazy: &TensorMap<SUNFusionRule, D>,
@@ -7422,7 +7423,7 @@ fn checked_tr_matches_the_literal_weighted_sum_and_keeps_error_precedence() {
     ] {
         assert!(matches!(
             tensor.tr().unwrap_err(),
-            GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(message))
+            GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))
                 if message == "tr() requires an endomorphism (domain == codomain)"
         ));
     }
@@ -7628,18 +7629,18 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
     ] {
         assert!(matches!(
             a.inner(b).unwrap_err(),
-            GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(message))
+            GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))
                 if message == "tensors live on different spaces or block layouts"
         ));
     }
     assert!(matches!(
         diagonal.inner(&diagonal).unwrap_err(),
-        GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(message))
+        GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))
             if message == "checked Generic reductions require dense payloads"
     ));
     assert!(matches!(
         diagonal.norm(2.0).unwrap_err(),
-        GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(message))
+        GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))
             if message == "checked Generic reductions require dense payloads"
     ));
     assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
@@ -7835,7 +7836,7 @@ fn checked_generic_isomorphism_is_the_equal_tree_identity_with_multiplicity() {
 fn su3_isomorphism_is_the_equal_tree_identity_with_multiplicity() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     // 8 ⊗ 8 contains 8 twice.
-    let provider = Arc::new(tenet::typed::SUNFusionRule::new(3).unwrap());
+    let provider = Arc::new(tenet::sector::SUNFusionRule::new(3).unwrap());
     let leg = GradedSpace::try_new(provider, [(vec![1, 1], 2), (vec![0, 0], 1)]).unwrap();
     check_generic_structural_constructors(&runtime, &leg, |ij| {
         0.5 - (ij[0] * 7 + ij[1] * 2 + ij[2]) as f64 * 0.125

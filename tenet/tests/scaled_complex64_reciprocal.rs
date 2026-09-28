@@ -31,8 +31,8 @@
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{GradedSpace, Runtime, SectorSpectrum, TensorMap};
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{GradedSpace, Runtime, SectorSpectrum, TensorMap};
 
 fn runtime() -> Runtime {
     Runtime::builder().build().expect("runtime builds")

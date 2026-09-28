@@ -1,11 +1,12 @@
 //! Independent Phase A smoke program for the canonical typed public API.
 
-use tenet::core::TypedSectorAdmission;
-use tenet::prelude::{
-    product_sector, FermionParityFusionRule, GradedSpace, ProductFusionRuleExt, Runtime,
-    SU2FusionRule, SU2Irrep, TensorMap, Truncation, U1FusionRule, U1Irrep, Z2Irrep,
+use tenet::sector::TypedSectorAdmission;
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::ContractSpec;
+use tenet::typed::{GradedSpace, Runtime, TensorMap, Truncation};
 use tenet::typed::{
     Svd, TensorScalar, TypedTensorConstructionDispatch, TypedTensorModeDispatch,
     TypedTensorRootDispatch,

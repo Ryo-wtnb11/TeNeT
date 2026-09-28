@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use tenet::core::{SectorId, U1FusionRule, U1Irrep};
-use tenet::prelude::Runtime;
+use tenet::sector::{SectorId, U1FusionRule, U1Irrep};
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, TensorMap};
 use tenet_network::{
     slice_plan_for, ContractionPlan, ContractionStep, DenseCostModel, DenseTensorInfo, Network,

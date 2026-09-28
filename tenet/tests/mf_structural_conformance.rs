@@ -6,11 +6,11 @@
 use std::sync::Arc;
 use tenet::typed::{ContractSpec, Direction, Duality, Side};
 
-use tenet::prelude::{
-    product_sector, CU1FusionRule, CU1Irrep, Complex64, FermionParityFusionRule, GradedSpace,
-    ProductFusionRuleExt, Runtime, SU2FusionRule, SU2Irrep, TensorMap, U1FusionRule, U1Irrep,
-    Z2FusionRule, Z2Irrep, ZNFusionRule,
+use tenet::sector::{
+    product_sector, CU1FusionRule, CU1Irrep, FermionParityFusionRule, ProductFusionRuleExt,
+    SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
 };
+use tenet::typed::{Complex64, GradedSpace, Runtime, TensorMap};
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()

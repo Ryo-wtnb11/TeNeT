@@ -67,15 +67,13 @@ where
 /// Tensor-side tree-transform execution selected by a provider-owned mode.
 ///
 /// ```
-/// use tenet::core::{
-///     CheckedGenericAdmissionMode, CheckedGenericRigidSymbols, TypedSectorAdmission,
-/// };
+/// use tenet::sector::{CheckedGenericAdmissionMode, CheckedGenericRigidSymbols, TypedSectorAdmission};
 /// use tenet::typed::TensorMap;
 ///
 /// fn checked_transpose<R>(tensor: &TensorMap<R, f64>)
 /// where
 ///     R: TypedSectorAdmission<
-///             Error = <R as tenet::core::CheckedGenericFusion>::Error,
+///             Error = <R as tenet::sector::CheckedGenericFusion>::Error,
 ///             Mode = CheckedGenericAdmissionMode,
 ///         > + CheckedGenericRigidSymbols<Scalar = f64>,
 /// {

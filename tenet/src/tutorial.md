@@ -1,8 +1,10 @@
 # Tutorial
 
-Everyday TeNeT code starts with `use tenet::prelude::*;`. It provides
-[`prelude::Runtime`], [`prelude::GradedSpace`], [`prelude::TensorMap`], the
-built-in symmetries, and [`prelude::Truncation`]. Import the `tensor!` macro
+Every public item has one path. Tensor code imports [`typed::Runtime`],
+[`typed::GradedSpace`], [`typed::TensorMap`] and [`typed::Truncation`] from
+[`typed`], and the built-in symmetries such as [`sector::U1FusionRule`] from
+[`sector`]. A symmetry of your own implements the traits in [`sector`], which
+also holds the bounds generic code names. Import the `tensor!` macro
 separately from `tenet-network`.
 
 This page's Rust blocks are doctests unless marked as syntax-only. The
@@ -37,7 +39,8 @@ zero is often the clearest way to construct a sparse physical operator.
 
 ```rust
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
 
 let runtime = Runtime::builder().build()?;
 let spin = GradedSpace::try_new(
@@ -74,12 +77,13 @@ tensors.
 
 The scalar is the second type parameter: `TensorMap<R, f64>` or
 `TensorMap<R, Complex64>`. Mixed scalar operations are rejected; widen with
-[`prelude::TensorMap::convert`]. `GradedSpace::try_new` creates a nondual space.
-Call [`prelude::GradedSpace::try_dual`] when a dual leg is required.
+[`typed::TensorMap::convert`]. `GradedSpace::try_new` creates a nondual space.
+Call [`typed::GradedSpace::try_dual`] when a dual leg is required.
 
 ```rust
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Complex64, Error, GradedSpace, Runtime, TensorMap};
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
@@ -103,15 +107,15 @@ assert!(v.try_dual()?.try_dual()?.sectors()? == v.sectors()?);
 # Ok::<(), Error>(())
 ```
 
-Use `f64` when real arithmetic is sufficient. Use `Complex64` from the
-prelude for complex states and operators. A method returning a scalar, such as
+Use `f64` when real arithmetic is sufficient. Use [`typed::Complex64`] for
+complex states and operators. A method returning a scalar, such as
 `inner`, returns that same payload type. There is no implicit widening in a
 network: convert its operands before writing the contraction.
 
 ### Blocks and contraction orientation
 
-[`prelude::TensorMap::blocks`] reads the coupled-sector matrices, as
-TensorKit's `blocks(t)` does, and [`prelude::TensorMap::subblocks`] reads the
+[`typed::TensorMap::blocks`] reads the coupled-sector matrices, as
+TensorKit's `blocks(t)` does, and [`typed::TensorMap::subblocks`] reads the
 fusion-tree subblocks with their labels. To contract two legs, their oriented spaces must be dual. A codomain
 leg and a domain leg made from the same space pair directly. For two legs on
 the same side, construct one from `v.try_dual()?`. See [`mathematics`] for the
@@ -119,7 +123,8 @@ full convention.
 
 ```rust
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{ContractSpec, Error, GradedSpace, Runtime, TensorMap};
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
@@ -148,8 +153,8 @@ assert_eq!(count, a.subblock_count());
 
 Different Rust provider types and scalar types are compile-time mismatches.
 Two spaces with the same provider type but different rule identities return
-[`prelude::Error::RuleMismatch`]. Incompatible spaces and runtimes also return
-[`prelude::Error`].
+[`typed::Error::RuleMismatch`]. Incompatible spaces and runtimes also return
+[`typed::Error`].
 
 The block buffer is reduced data, so it is not a carrier-basis matrix. In
 particular, its length depends on fusion sectors and degeneracies, not just the
@@ -163,7 +168,7 @@ is the desired representation.
 
 `tensor!` is index notation for homogeneous `TensorMap` operands. Its output
 signature is `[codomain; domain]`; `[]` is a scalar output, read with
-[`prelude::TensorMap::scalar`]. A label shared by two operands is contracted;
+[`typed::TensorMap::scalar`]. A label shared by two operands is contracted;
 a label used once must occur in the output. `conj(x)` marks an adjoint operand.
 For three or more operands, the runtime's configured optimizer chooses the
 pairwise order. There are no einsum strings.
@@ -198,8 +203,8 @@ code.
 ### Method API
 
 Use methods when the contracted axes or output order are more direct than
-labels. [`prelude::TensorMap::compose`] is the categorical map composition.
-[`prelude::TensorMap::contract`] takes a [`prelude::ContractSpec`]: arbitrary
+labels. [`typed::TensorMap::compose`] is the categorical map composition.
+[`typed::TensorMap::contract`] takes a [`typed::ContractSpec`]: arbitrary
 axis pairs and the result's codomain and domain legs. Axes are zero-based, with
 codomain axes before domain axes.
 `permute`, `repartition`, `transpose`, `adjoint`, `twist`, and `flip` rearrange
@@ -211,7 +216,8 @@ contraction twist, so its result need not match `compose`.
 
 ```rust
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{ContractSpec, Error, GradedSpace, Runtime, TensorMap};
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
@@ -262,7 +268,8 @@ way round.
 
 ```rust
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
@@ -287,7 +294,8 @@ describes.
 
 ```rust
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Error, GradedSpace, Runtime, SectorSpectrum, TensorMap};
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
@@ -340,7 +348,8 @@ sector's quantum dimension.
 
 ```rust
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Error, GradedSpace};
 
 let v = GradedSpace::try_new(
     Arc::new(U1FusionRule),
@@ -368,7 +377,8 @@ general fusion.
 
 ```rust
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Error, GradedSpace, LegSelection, Runtime, TensorMap};
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
@@ -400,7 +410,10 @@ remains separate from the provider's categorical coefficient scalar.
 
 ```rust
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
 
 let rt = Runtime::builder().build()?;
 let rule = FermionParityFusionRule.product(U1FusionRule);
@@ -444,14 +457,15 @@ reports the discarded weighted Frobenius norm. `Truncation::rank(n)` bounds the
 weighted kept bond dimension; tolerance constructors and `and` combine
 additional limits. The same four steps truncate `eigh_full` and `eig_full`,
 whose factors are `d` and `v`. Each factorization returns a named result
-([`prelude::Svd`], [`prelude::Qr`], [`prelude::Lq`], [`prelude::Eigh`],
-[`prelude::Eig`], [`prelude::LeftPolar`], [`prelude::RightPolar`]); its
+([`typed::Svd`], [`typed::Qr`], [`typed::Lq`], [`typed::Eigh`],
+[`typed::Eig`], [`typed::LeftPolar`], [`typed::RightPolar`]); its
 documentation states the spectrum order and which routes store `s` or `d`
 compactly.
 
 ```rust
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Error, GradedSpace, Qr, Runtime, Svd, TensorMap, Truncation};
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
@@ -492,9 +506,9 @@ Check both that error and the observable relevant to the calculation.
 
 ## Physical entries
 
-[`prelude::TensorMap::dense_data`] is reduced fusion-tree storage, not ordinary
-carrier-basis data. Use [`prelude::TensorMap::to_physical_dense`] to expand to
-that basis and [`prelude::TensorMap::project_physical_dense`] to project into
+[`typed::TensorMap::dense_data`] is reduced fusion-tree storage, not ordinary
+carrier-basis data. Use [`typed::TensorMap::to_physical_dense`] to expand to
+that basis and [`typed::TensorMap::project_physical_dense`] to project into
 the exact schema of another tensor. Basis alignment is application-specific;
 TeNeT does not infer a conversion between different symmetry choices.
 
@@ -502,7 +516,7 @@ Each axis is laid out as in TensorKit's `convert(Array, t)`: sectors in
 TensorKit's order, and a dual space `V'` in `V`'s order. Moving a leg across the
 split therefore keeps its index order; for the built-in U(1) and SU(2)
 providers a `permute` is exactly an axis permutation of the physical array
-([`prelude::TensorMap::to_physical_dense`] has an example).
+([`typed::TensorMap::to_physical_dense`] has an example).
 
 Projection takes the receiver tensor as the target schema. It therefore makes
 the destination runtime, provider, leg order, and sector content explicit.
@@ -531,7 +545,8 @@ positive-diagonal gauge and is device-available for every device payload.
 
 ```rust
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
 
 let rt = Runtime::builder().dense_threads(4).build()?;
 let rt_for_worker = rt.clone();

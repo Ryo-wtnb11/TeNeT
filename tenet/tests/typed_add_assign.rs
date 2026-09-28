@@ -2,9 +2,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::Arc;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{GradedSpace, Runtime, TensorMap};
+use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::Error;
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 struct CountingAllocator;
 

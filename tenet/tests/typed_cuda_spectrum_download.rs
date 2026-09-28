@@ -20,8 +20,8 @@
 
 use std::sync::Arc;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
+use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
+use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{Eigh, GradedSpace, Runtime, Svd, TensorMap};
 
 /// The receiver's own split as leg roles: `rows = 0..nout`.

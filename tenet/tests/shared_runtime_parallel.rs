@@ -16,7 +16,8 @@ use std::sync::Arc;
 use std::thread;
 use tenet::typed::ContractSpec;
 
-use tenet::prelude::{GradedSpace, Runtime, SU2FusionRule, SU2Irrep, TensorMap};
+use tenet::sector::{SU2FusionRule, SU2Irrep};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 fn space() -> GradedSpace<SU2FusionRule> {
     GradedSpace::try_new(

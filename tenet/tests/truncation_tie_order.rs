@@ -15,13 +15,14 @@
 
 use std::sync::Arc;
 
-use tenet::core::{
-    product_sector, CheckedGenericFusion, FermionParityFusionRule, FusionRule, InfallibleGeneric,
-    ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorOrderKey, U1FusionRule, U1Irrep,
-    Z2FusionRule, Z2Irrep, ZNFusionRule,
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
 };
-use tenet::prelude::{Runtime, TensorMap, Truncation};
+use tenet::sector::{CheckedGenericFusion, FusionRule, SectorOrderKey};
 use tenet::typed::{Eigh, GradedSpace, SectorSpectrum, Svd};
+use tenet::typed::{Runtime, TensorMap, Truncation};
+use tenet_core::InfallibleGeneric;
 
 /// Kept count per entry, in entry order, from `GradedSpace::find_truncated`.
 macro_rules! kept {

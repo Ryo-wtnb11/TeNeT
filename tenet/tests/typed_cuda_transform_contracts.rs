@@ -1,7 +1,7 @@
 //! Transfer, allocation, statistics and rejection contracts of the typed
 //! device structural transforms (issue #1322, G2b-2).
 //!
-//! These read the calling thread's `tenet::dense::cuda_transfer_stats`
+//! These read the calling thread's `tenet::expert::cuda_transfer_stats`
 //! counters, so device work another test submits concurrently does not
 //! perturb their deltas.
 //!
@@ -51,9 +51,9 @@ macro_rules! full_transpose {
 use std::sync::Arc;
 use tenet::typed::Direction;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
-use tenet::prelude::Error;
+use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::Error;
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 fn leg() -> GradedSpace<U1FusionRule> {
@@ -335,11 +335,11 @@ fn a_cold_device_transform_uploads_one_coefficient_payload_per_structure() {
     // that structure, and never again while the Host store admits it.
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let v = GradedSpace::try_new(
-        Arc::new(tenet::core::SU2FusionRule),
+        Arc::new(tenet::sector::SU2FusionRule),
         [
-            (tenet::core::SU2Irrep::from_twice_spin(0), 2),
-            (tenet::core::SU2Irrep::from_twice_spin(1), 2),
-            (tenet::core::SU2Irrep::from_twice_spin(2), 1),
+            (tenet::sector::SU2Irrep::from_twice_spin(0), 2),
+            (tenet::sector::SU2Irrep::from_twice_spin(1), 2),
+            (tenet::sector::SU2Irrep::from_twice_spin(2), 1),
         ],
     )
     .unwrap();
@@ -409,9 +409,9 @@ fn assert_transfer_free(stats: &CudaTransferStats) {
 /// to itself.
 fn payload_bits<R>(tensor: &TensorMap<R, f64, tenet::typed::CudaStorage>) -> Vec<u64>
 where
-    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::core::CheckedFusionAlgebra
-        + tenet::core::SectorCodec,
+    R: tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::sector::CheckedFusionAlgebra
+        + tenet::sector::SectorCodec,
 {
     tensor
         .to_host()
@@ -622,8 +622,8 @@ fn device_into_rejections_happen_before_any_device_work() {
     // `permute_into` takes `&mut Self`, so a rule mismatch is only
     // reachable between two *instances* of the same rule type — Z2 against
     // Z3, exactly as the Host unit test builds it.
-    let z2 = Arc::new(tenet::core::ZNFusionRule::new(2).unwrap());
-    let z3 = Arc::new(tenet::core::ZNFusionRule::new(3).unwrap());
+    let z2 = Arc::new(tenet::sector::ZNFusionRule::new(2).unwrap());
+    let z3 = Arc::new(tenet::sector::ZNFusionRule::new(3).unwrap());
     let z2_leg = GradedSpace::try_new(Arc::clone(&z2), [(z2.irrep(0), 2)]).unwrap();
     let z3_leg = GradedSpace::try_new(Arc::clone(&z3), [(z3.irrep(0), 2)]).unwrap();
     let zn_fill = |_: &_, indices: &[usize]| indices.iter().map(|&i| i as f64 + 1.0).sum::<f64>();
@@ -802,12 +802,12 @@ fn device_into_rejections_happen_before_any_device_work() {
 // ---------------------------------------------------------------------------
 
 /// fZ2 with both parities on every leg, so a twist really scales blocks.
-fn fermionic_fixture(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
+fn fermionic_fixture(runtime: &Runtime) -> TensorMap<tenet::sector::FermionParityFusionRule, f64> {
     let leg = GradedSpace::try_new(
-        Arc::new(tenet::core::FermionParityFusionRule),
+        Arc::new(tenet::sector::FermionParityFusionRule),
         [
-            (tenet::core::Z2Irrep::EVEN, 2),
-            (tenet::core::Z2Irrep::ODD, 1),
+            (tenet::sector::Z2Irrep::EVEN, 2),
+            (tenet::sector::Z2Irrep::ODD, 1),
         ],
     )
     .unwrap();

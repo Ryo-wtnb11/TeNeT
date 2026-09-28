@@ -11,7 +11,11 @@
 use std::collections::HashMap;
 
 use num_complex::{Complex32, Complex64};
-use tenet::prelude::*;
+use tenet::sector::{
+    FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;

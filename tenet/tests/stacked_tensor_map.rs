@@ -3,11 +3,11 @@
 use num_complex::Complex64;
 use std::sync::Arc;
 
-use tenet::prelude::{Error, Runtime};
 use tenet::typed::{
     BatchMemberRepresentation, GradedSpace, SectorSpectrum, SignatureField, StackedTensorMap,
     TensorMap,
 };
+use tenet::typed::{Error, Runtime};
 
 #[macro_use]
 #[path = "stacked/fixtures.rs"]
@@ -107,7 +107,7 @@ fn runtime_drift_names_the_member_and_field() {
 fn rule_instance_drift_names_the_member_and_field() {
     let runtime = runtime();
     let tensor = |rank: usize, trivial: Vec<i64>| {
-        let rule = Arc::new(tenet::typed::SUNFusionRule::new(rank).unwrap());
+        let rule = Arc::new(tenet::sector::SUNFusionRule::new(rank).unwrap());
         let leg = GradedSpace::try_new(rule, [(trivial, 2)]).unwrap();
         TensorMap::<_, f64>::zeros(&runtime, [&leg], [&leg]).unwrap()
     };

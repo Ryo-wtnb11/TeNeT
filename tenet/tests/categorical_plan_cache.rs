@@ -9,7 +9,11 @@
 
 use num_complex::{Complex32, Complex64};
 use std::sync::Arc;
-use tenet::prelude::*;
+use tenet::sector::{
+    FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -172,7 +176,7 @@ fn fermion_u1_degeneracy_change_reuses_the_categorical_plan() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_su3_degeneracy_change_reuses_the_categorical_plan() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let leg = |sectors: &[([i64; 2], usize)]| {

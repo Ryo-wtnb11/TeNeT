@@ -23,9 +23,9 @@ use std::fmt::Debug;
 use std::sync::Mutex;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{SU2FusionRule, SU2Irrep};
-use tenet::dense::{cuda_transfer_stats, CudaPlanCacheStats, CudaTransferStats};
-use tenet::prelude::Error;
+use tenet::expert::{cuda_transfer_stats, CudaPlanCacheStats, CudaTransferStats};
+use tenet::sector::{SU2FusionRule, SU2Irrep};
+use tenet::typed::Error;
 use tenet::typed::{
     BatchError, Eigh, GradedSpace, MemberFault, PreparedEighFull, Runtime, StackedTensorMap,
     TensorMap,

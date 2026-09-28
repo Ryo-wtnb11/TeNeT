@@ -8,12 +8,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tenet::core::{
-    product_sector, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
-    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, ProductFusionRule,
-    ProductFusionRuleExt, SectorCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRule, ProductFusionRuleExt, U1FusionRule,
+    U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Complex64, TensorScalar};
+use tenet::sector::{
+    CheckedFusionAlgebra, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, SectorCodec,
+    TypedSectorAdmission,
+};
+use tenet::typed::FusionAlgebraError;
+use tenet::typed::{Complex64, TensorScalar};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     LabelOrderDenseOptimizer, Network, NetworkExecutionWorkspace, PlannedNetwork, TemporaryLabel,
@@ -574,7 +578,7 @@ fn u1_redistribution() -> Vec<Vec<(U1Irrep, usize)>> {
 
 type FermionU1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
 
-fn fermion_u1_patterns() -> Vec<Vec<(tenet::core::ProductSector<Z2Irrep, U1Irrep>, usize)>> {
+fn fermion_u1_patterns() -> Vec<Vec<(tenet::sector::ProductSector<Z2Irrep, U1Irrep>, usize)>> {
     let sector = product_sector;
     vec![
         vec![

@@ -5,15 +5,18 @@ use std::fmt;
 use std::hint::black_box;
 use std::sync::Arc;
 
-use tenet::core::{
-    product_sector, BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
-    CheckedGenericRigidSymbols, FermionParityFusionRule, FusionStyleKind, Fz2SectorLayout,
-    GenericFArray, GenericRMatrix, PackedProductCodec, ProductFusionRule, ProductSectorLayout,
-    RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorVec, Su2SectorLayout,
-    TypedSectorAdmission, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId,
+    U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Complex32, Complex64, GradedSpace, Runtime, TensorMap};
+use tenet::sector::{
+    BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
+    CheckedGenericRigidSymbols, FusionStyleKind, Fz2SectorLayout, GenericFArray, GenericRMatrix,
+    PackedProductCodec, ProductSectorLayout, RuleIdentity, SectorVec, Su2SectorLayout,
+    TypedSectorAdmission, U1SectorLayout,
+};
 use tenet::typed::TensorScalar;
+use tenet::typed::{Complex32, Complex64, GradedSpace, Runtime, TensorMap};
 
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
@@ -492,7 +495,7 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn warmed_su3_checked_inner_and_norm_allocate_only_through_the_provider() {
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());

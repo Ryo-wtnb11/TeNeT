@@ -34,7 +34,7 @@ use contract_cases::{
     TwistRole,
 };
 use num_complex::{Complex32, Complex64};
-use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 struct CountingAllocator;
@@ -327,7 +327,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec
-        + tenet::core::PhysicalFusionBasis<Scalar = f64>,
+        + tenet::sector::PhysicalFusionBasis<Scalar = f64>,
     D: Payload,
 {
     let runtime = Runtime::builder().build().unwrap();
@@ -364,16 +364,16 @@ where
     }
 }
 
-fn u1_second() -> GradedSpace<tenet::core::U1FusionRule> {
+fn u1_second() -> GradedSpace<tenet::sector::U1FusionRule> {
     u1(&[(0, 2), (1, 1), (2, 1)])
 }
 
-fn su2_second() -> GradedSpace<tenet::core::SU2FusionRule> {
+fn su2_second() -> GradedSpace<tenet::sector::SU2FusionRule> {
     GradedSpace::try_new(
-        std::sync::Arc::new(tenet::core::SU2FusionRule),
+        std::sync::Arc::new(tenet::sector::SU2FusionRule),
         [
-            (tenet::core::SU2Irrep::from_twice_spin(1), 1),
-            (tenet::core::SU2Irrep::from_twice_spin(2), 2),
+            (tenet::sector::SU2Irrep::from_twice_spin(1), 1),
+            (tenet::sector::SU2Irrep::from_twice_spin(2), 2),
         ],
     )
     .unwrap()
@@ -588,7 +588,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec
-        + tenet::core::PhysicalFusionBasis<Scalar = f64>,
+        + tenet::sector::PhysicalFusionBasis<Scalar = f64>,
     D: Payload,
 {
     let runtime = Runtime::builder().build().unwrap();
@@ -829,7 +829,7 @@ fn zero_copy_fermionic_candidates_with_an_output_permute_match_tensorkit() {
 ///   `B: c⊗c ← v⊗v`;
 /// - `R3` the owned sort `A[3,2]·B[1,0] → [2,3,0,1]`;
 /// - `R4` the #1466 core form `A[2,3]·B[0,1] → [2,3,0,1]`.
-fn large_output_cases(runtime: &Runtime) -> Vec<Case<tenet::core::U1FusionRule, f64>> {
+fn large_output_cases(runtime: &Runtime) -> Vec<Case<tenet::sector::U1FusionRule, f64>> {
     let v = u1(&[(-1, 16), (0, 16), (1, 16)]);
     let c = u1(&[(0, 1)]);
     let tensor = |codomain: [&GradedSpace<_>; 2], domain: [&GradedSpace<_>; 2], salt| {
@@ -868,7 +868,7 @@ fn large_output_cases(runtime: &Runtime) -> Vec<Case<tenet::core::U1FusionRule, 
 /// - `X3` `P'[3,2]·B[1,0]`, `P: w⊗w ← v⊗v`;
 /// - `X4` the #1466 core form `A[2]·B[0] → [2,3,0,1]` with
 ///   `A: v⊗v ← u`, `B: u ← v⊗v`, `u = u1{0:500}`.
-fn inactive_output_cases(runtime: &Runtime) -> Vec<Case<tenet::core::U1FusionRule, f64>> {
+fn inactive_output_cases(runtime: &Runtime) -> Vec<Case<tenet::sector::U1FusionRule, f64>> {
     let v = u1(&[(-3, 8), (-2, 8), (-1, 8), (0, 8), (1, 8), (2, 8), (3, 8)]);
     let w = u1(&[(0, 20)]);
     let u = u1(&[(0, 500)]);

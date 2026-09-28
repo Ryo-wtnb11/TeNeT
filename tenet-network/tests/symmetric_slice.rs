@@ -1,6 +1,7 @@
-use tenet::core::{
-    FermionParityFusionRule, FusionRule, SectorId, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule,
-    Z2Irrep,
+use tenet::expert::SectorLeg;
+use tenet::sector::FusionRule;
+use tenet::sector::{
+    FermionParityFusionRule, SectorId, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
 };
 use tenet_network::{
     DegeneracyRange, NetworkIR, SectorSlice, SliceError, SliceKind, SymmetricSlicePlan,

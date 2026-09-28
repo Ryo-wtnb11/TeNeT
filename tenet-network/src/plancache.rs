@@ -29,16 +29,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use lru::LruCache;
+use tenet::expert::TensorStorage;
+use tenet::sector::TypedSectorAdmission;
 #[cfg(feature = "cuda")]
-use tenet::core::{
-    CheckedFusionAlgebra, FusionAlgebraError, MultiplicityFreeAdmissionMode,
-    MultiplicityFreeRigidSymbols, SectorCodec,
+use tenet::sector::{
+    CheckedFusionAlgebra, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, SectorCodec,
 };
-use tenet::core::{TensorStorage, TypedSectorAdmission};
-use tenet::prelude::{Error, Runtime, TensorScalar};
 use tenet::typed::TensorMap;
 #[cfg(feature = "cuda")]
-use tenet::typed::{CudaPayload, CudaStorage};
+use tenet::typed::{CudaPayload, CudaStorage, FusionAlgebraError};
+use tenet::typed::{Error, Runtime, TensorScalar};
 
 pub use tenet::plancache::{
     Optimizer, PlanCacheConfig, PlanCacheStats, ReplanPolicy, DEFAULT_PLAN_CACHE_CAPACITY,
@@ -1376,8 +1376,8 @@ mod tests {
     use std::sync::{Arc, Barrier};
     #[cfg(feature = "cotengra-python")]
     use std::time::Duration;
-    use tenet::core::{SU2FusionRule, U1FusionRule};
-    use tenet::prelude::Complex64;
+    use tenet::sector::{SU2FusionRule, U1FusionRule};
+    use tenet::typed::Complex64;
     use tenet::typed::{ContractSpec, GradedSpace, TensorMap};
 
     #[cfg(feature = "cotengra-python")]
@@ -1409,7 +1409,7 @@ mod tests {
         aliases: Option<usize>,
     }
 
-    fn cache_state(runtime: &tenet::prelude::Runtime) -> CacheState {
+    fn cache_state(runtime: &tenet::typed::Runtime) -> CacheState {
         CacheState {
             stats: super::plan_cache_stats(runtime),
             aliases: runtime.with_extension_slot(|slot| {
@@ -1431,7 +1431,7 @@ mod tests {
     /// leaving [`CacheState`] and `extra` (device transfers) unchanged, with
     /// one error on every path, which is returned.
     fn assert_rejected_before_the_lookup<X: PartialEq + std::fmt::Debug>(
-        runtime: &tenet::prelude::Runtime,
+        runtime: &tenet::typed::Runtime,
         what: &str,
         accept: Call<'_>,
         reject: Call<'_>,
@@ -1534,10 +1534,10 @@ mod tests {
         TensorMap<crate::braiding_probe::RealBraidingProbe<ANYONIC>, f64>;
 
     fn rejections(
-        runtime: &tenet::prelude::Runtime,
+        runtime: &tenet::typed::Runtime,
     ) -> Rejections<TensorMap<U1FusionRule, f64>, ProbeMap<true>> {
         use crate::braiding_probe::{ProbeSector, RealBraidingProbe};
-        use tenet::core::U1Irrep;
+        use tenet::sector::U1Irrep;
         let provider = Arc::new(U1FusionRule);
         let v = GradedSpace::try_new(
             Arc::clone(&provider),
@@ -1611,7 +1611,7 @@ mod tests {
     /// injected through the executor `execute_leased` already takes.
     #[test]
     fn a_failed_execution_quarantines_its_lease() {
-        let runtime = tenet::prelude::Runtime::builder().build().unwrap();
+        let runtime = tenet::typed::Runtime::builder().build().unwrap();
         let o = rejections(&runtime);
         let tensors = [&o.a, &o.b];
         let spec: &'static super::StaticTopologySpec =
@@ -1633,7 +1633,7 @@ mod tests {
         assert_eq!(warm.idle_workspaces, 1, "a success recycles its lease");
 
         let failed = cached.execute_leased(&tensors, |_, _, _| {
-            Err(tenet::prelude::Error::InvalidArgument(
+            Err(tenet::typed::Error::InvalidArgument(
                 "injected fault".to_string(),
             ))
         });
@@ -1660,7 +1660,7 @@ mod tests {
     /// before its trace runs.
     #[test]
     fn host_metadata_rejections_leave_the_plan_cache_untouched_on_every_path() {
-        let runtime = tenet::prelude::Runtime::builder().build().unwrap();
+        let runtime = tenet::typed::Runtime::builder().build().unwrap();
         let o = rejections(&runtime);
         let none = || ();
         let accept_pair = || pair(&o.a, &o.b);
@@ -1744,7 +1744,7 @@ mod tests {
     #[test]
     #[ignore = "requires a real CUDA device"]
     fn device_metadata_rejections_leave_the_plan_cache_and_device_untouched_on_every_path() {
-        let runtime = tenet::prelude::Runtime::builder()
+        let runtime = tenet::typed::Runtime::builder()
             .cuda(0)
             .dense_threads(1)
             .build()
@@ -1758,7 +1758,7 @@ mod tests {
             h.probe_b.to_cuda().unwrap(),
             h.probe_t.to_cuda().unwrap(),
         );
-        let transfers = tenet::dense::cuda_transfer_stats;
+        let transfers = tenet::expert::cuda_transfer_stats;
         let accept_pair = || pair(&a, &b);
         let accept_traced = || traced(&t, &b);
         let (cc_a, cc_b, cc_degeneracy, cc_flag) = (

@@ -2,8 +2,9 @@
 //! ledger and of a sweep-like loop, so warm iterations never evict (#1365).
 //! One test per process keeps the global cache statistics isolated.
 
-use tenet::prelude::*;
-use tenet_core::{complete_hom_space_structure_cache_info, CompleteHomSpaceStructureCacheInfo};
+use tenet::expert::{complete_hom_space_structure_cache_info, CompleteHomSpaceStructureCacheInfo};
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 
 /// Activity between two snapshots: (hits, misses, admissions, evictions, bypasses).
 fn delta(

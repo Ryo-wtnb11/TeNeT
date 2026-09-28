@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tenet::typed::Direction;
 
 use common::permute_dense;
-use tenet::core::{ProductFusionRuleExt, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::sector::{ProductFusionRuleExt, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 fn assert_close(actual: &[f64], expected: &[f64], what: &str) {
@@ -159,12 +159,12 @@ fn the_host_into_preconditions_have_a_fixed_order_and_wording() {
     // and would trip the unique-ownership check instead.
     let destination = || source.permute(&[2, 0], &[1, 3]).unwrap();
 
-    let message = |error: tenet::prelude::Error| error.to_string();
+    let message = |error: tenet::typed::Error| error.to_string();
 
     // Runtime mismatch precedes a rule mismatch.
     let other = Runtime::builder().build().unwrap();
-    let z2 = Arc::new(tenet::core::ZNFusionRule::new(2).unwrap());
-    let z3 = Arc::new(tenet::core::ZNFusionRule::new(3).unwrap());
+    let z2 = Arc::new(tenet::sector::ZNFusionRule::new(2).unwrap());
+    let z3 = Arc::new(tenet::sector::ZNFusionRule::new(3).unwrap());
     let z2_leg = GradedSpace::try_new(Arc::clone(&z2), [(z2.irrep(0), 2)]).unwrap();
     let z3_leg = GradedSpace::try_new(Arc::clone(&z3), [(z3.irrep(0), 2)]).unwrap();
     let zn_fill = |_: &_, indices: &[usize]| indices.iter().map(|&i| i as f64 + 1.0).sum::<f64>();
@@ -175,7 +175,7 @@ fn the_host_into_preconditions_have_a_fixed_order_and_wording() {
         z2_source
             .permute_into(&[0], &[1], &mut foreign, 1.0, 0.0)
             .unwrap_err(),
-        tenet::prelude::Error::RuntimeMismatch
+        tenet::typed::Error::RuntimeMismatch
     );
 
     // Rule mismatch precedes a lazy-adjoint source.
@@ -187,7 +187,7 @@ fn the_host_into_preconditions_have_a_fixed_order_and_wording() {
             .unwrap()
             .permute_into(&[0], &[1], &mut z3_destination, 1.0, 0.0)
             .unwrap_err(),
-        tenet::prelude::Error::RuleMismatch
+        tenet::typed::Error::RuleMismatch
     );
 
     // A lazy-adjoint source is rejected — not lowered onto its parent — and
@@ -413,10 +413,10 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
     // The fixtures are the device gate's own: fZ2 with a dual leg, and the two
     // product providers, whose factors are products of the two rules' own.
     let leg = GradedSpace::try_new(
-        Arc::new(tenet::core::FermionParityFusionRule),
+        Arc::new(tenet::sector::FermionParityFusionRule),
         [
-            (tenet::core::Z2Irrep::EVEN, 2),
-            (tenet::core::Z2Irrep::ODD, 1),
+            (tenet::sector::Z2Irrep::EVEN, 2),
+            (tenet::sector::Z2Irrep::ODD, 1),
         ],
     )
     .unwrap();
@@ -436,20 +436,20 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
     );
 
     // fZ2 x U(1).
-    let rule = Arc::new(tenet::core::FermionParityFusionRule.product(U1FusionRule));
+    let rule = Arc::new(tenet::sector::FermionParityFusionRule.product(U1FusionRule));
     let leg_u1 = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (
-                tenet::core::product_sector(tenet::core::Z2Irrep::EVEN, U1Irrep::new(0)),
+                tenet::sector::product_sector(tenet::sector::Z2Irrep::EVEN, U1Irrep::new(0)),
                 2,
             ),
             (
-                tenet::core::product_sector(tenet::core::Z2Irrep::ODD, U1Irrep::new(1)),
+                tenet::sector::product_sector(tenet::sector::Z2Irrep::ODD, U1Irrep::new(1)),
                 1,
             ),
             (
-                tenet::core::product_sector(tenet::core::Z2Irrep::EVEN, U1Irrep::new(2)),
+                tenet::sector::product_sector(tenet::sector::Z2Irrep::EVEN, U1Irrep::new(2)),
                 1,
             ),
         ],
@@ -465,27 +465,27 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
     );
 
     // fZ2 (x) SU(2): the same sign domain with non-Abelian degeneracies.
-    let rule = Arc::new(tenet::core::FermionParityFusionRule.product(SU2FusionRule));
+    let rule = Arc::new(tenet::sector::FermionParityFusionRule.product(SU2FusionRule));
     let leg_su2 = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (
-                tenet::core::product_sector(
-                    tenet::core::Z2Irrep::EVEN,
+                tenet::sector::product_sector(
+                    tenet::sector::Z2Irrep::EVEN,
                     SU2Irrep::from_twice_spin(0),
                 ),
                 2,
             ),
             (
-                tenet::core::product_sector(
-                    tenet::core::Z2Irrep::ODD,
+                tenet::sector::product_sector(
+                    tenet::sector::Z2Irrep::ODD,
                     SU2Irrep::from_twice_spin(1),
                 ),
                 1,
             ),
             (
-                tenet::core::product_sector(
-                    tenet::core::Z2Irrep::EVEN,
+                tenet::sector::product_sector(
+                    tenet::sector::Z2Irrep::EVEN,
                     SU2Irrep::from_twice_spin(2),
                 ),
                 1,
@@ -553,13 +553,13 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
 fn a_twist_of_a_space_with_no_coupled_sector_is_the_identity_short_circuit() {
     let runtime = Runtime::builder().build().unwrap();
     let even = GradedSpace::try_new(
-        Arc::new(tenet::core::FermionParityFusionRule),
-        [(tenet::core::Z2Irrep::EVEN, 2)],
+        Arc::new(tenet::sector::FermionParityFusionRule),
+        [(tenet::sector::Z2Irrep::EVEN, 2)],
     )
     .unwrap();
     let odd = GradedSpace::try_new(
-        Arc::new(tenet::core::FermionParityFusionRule),
-        [(tenet::core::Z2Irrep::ODD, 1)],
+        Arc::new(tenet::sector::FermionParityFusionRule),
+        [(tenet::sector::Z2Irrep::ODD, 1)],
     )
     .unwrap();
     let empty: TensorMap<_, f64> =

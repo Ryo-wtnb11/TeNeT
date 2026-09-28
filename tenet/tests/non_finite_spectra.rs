@@ -11,9 +11,9 @@
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::operations::OperationError;
-use tenet::prelude::{Error, Runtime, TensorMap, Truncation};
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::OperationError;
+use tenet::typed::{Error, Runtime, TensorMap, Truncation};
 use tenet::typed::{GradedSpace, SectorSpectrum};
 
 fn runtime() -> Runtime {

@@ -9,8 +9,8 @@
 
 use num_complex::Complex64;
 
-use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
-use tenet::prelude::Runtime;
+use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
+use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, LegSelection, StackedTensorMap, TensorMap};
 
 #[macro_use]

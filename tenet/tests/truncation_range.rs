@@ -28,8 +28,8 @@
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{SU2FusionRule, SU2Irrep};
-use tenet::prelude::Truncation;
+use tenet::sector::{SU2FusionRule, SU2Irrep};
+use tenet::typed::Truncation;
 use tenet::typed::{GradedSpace, SectorSpectrum};
 
 #[path = "../../tests/support/numerics.rs"]

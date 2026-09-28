@@ -3,9 +3,9 @@ include!("common/predicate_chain_coefficients.rs");
 
 use std::sync::Arc;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Runtime, Truncation};
+use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{GradedSpace, Svd, TensorMap};
+use tenet::typed::{Runtime, Truncation};
 
 #[test]
 fn truncated_svd_runtime_reuse_tracks_data_dependent_rank() {

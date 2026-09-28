@@ -13,14 +13,17 @@ use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
 
-use tenet::core::{
-    product_sector, BraidingStyleKind, CheckedFusionAlgebra, FermionParityFusionRule,
-    FusionAlgebraError, FusionRule, FusionStyleKind, MultiplicityFreeFusionRule,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, ProductFusionRuleExt,
-    RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec, U1FusionRule, U1Irrep,
-    Z2Irrep, ZNFusionRule,
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    SectorId, U1FusionRule, U1Irrep, Z2Irrep, ZNFusionRule,
 };
-use tenet::prelude::TensorScalar;
+use tenet::sector::{
+    BraidingStyleKind, CheckedFusionAlgebra, FusionRule, FusionStyleKind,
+    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+    RuleIdentity, SectorCodec, SectorVec,
+};
+use tenet::typed::FusionAlgebraError;
+use tenet::typed::TensorScalar;
 use tenet::typed::{
     BlockFusionTrees, ContractSpec, CudaStorage, Eigh, GradedSpace, Qr, Runtime, Svd, TensorMap,
     Truncation,
@@ -47,7 +50,7 @@ fn host_svd_trunc<R, D>(
 ) -> HostSvdTrunc<R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: tenet::prelude::FactorizationScalar + tenet::typed::SpectrumMagnitude,
+    D: tenet::typed::FactorizationScalar + tenet::typed::SpectrumMagnitude,
 {
     let Svd { u, s, vh } = source
         .svd_compact(&codomain_axes(source), &domain_axes(source))
@@ -83,7 +86,7 @@ fn host_eigh_trunc<R, D>(
 ) -> HostEighTrunc<R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: tenet::prelude::FactorizationScalar + tenet::typed::SpectrumMagnitude,
+    D: tenet::typed::FactorizationScalar + tenet::typed::SpectrumMagnitude,
 {
     let Eigh { d, v } = source
         .eigh_full(&codomain_axes(source), &domain_axes(source))
@@ -133,7 +136,7 @@ struct LegSnapshot<S> {
 
 #[derive(Debug, Eq, PartialEq)]
 struct BlockSnapshot<S> {
-    key: tenet::core::BlockKey,
+    key: tenet::typed::BlockKey,
     fusion_trees: BlockFusionTrees<S>,
     offset: usize,
     shape: Vec<usize>,
@@ -317,7 +320,7 @@ where
     let expected = source.dense_data().unwrap().to_vec();
 
     let device = source.to_cuda().unwrap();
-    assert_eq!(device.placement(), tenet::core::Placement::Cuda(0));
+    assert_eq!(device.placement(), tenet::expert::Placement::Cuda(0));
     let device_clone = device.clone();
     let restored = device_clone.to_host().unwrap();
 
@@ -424,7 +427,7 @@ where
     for factor in [&left_device, &right_device] {
         assert!(std::ptr::eq(factor.provider(), provider));
         assert!(runtime.matches(factor.runtime()));
-        assert_eq!(factor.placement(), tenet::core::Placement::Cuda(0));
+        assert_eq!(factor.placement(), tenet::expert::Placement::Cuda(0));
     }
     let left = left_device.to_host().unwrap();
     let right = right_device.to_host().unwrap();
@@ -503,7 +506,7 @@ fn assert_cuda_svd_result<R>(
     for factor in [&factors.u, &factors.s, &factors.vh] {
         assert!(std::ptr::eq(factor.provider(), provider));
         assert!(runtime.matches(factor.runtime()));
-        assert_eq!(factor.placement(), tenet::core::Placement::Cuda(0));
+        assert_eq!(factor.placement(), tenet::expert::Placement::Cuda(0));
     }
     let actual = (
         factors.u.to_host().unwrap(),
@@ -574,7 +577,7 @@ fn assert_typed_cuda_svd_trunc_composition_matches_host<R>(
     for factor in [&u_device, &s_device, &vh_device] {
         assert!(std::ptr::eq(factor.provider(), provider));
         assert!(runtime.matches(factor.runtime()));
-        assert_eq!(factor.placement(), tenet::core::Placement::Cuda(0));
+        assert_eq!(factor.placement(), tenet::expert::Placement::Cuda(0));
     }
     let u = u_device.to_host().unwrap();
     let s = s_device.to_host().unwrap();
@@ -2279,7 +2282,7 @@ where
     );
 
     let device = source.to_cuda().unwrap();
-    assert_eq!(device.placement(), tenet::core::Placement::Cuda(0));
+    assert_eq!(device.placement(), tenet::expert::Placement::Cuda(0));
     let restored = device.clone().to_host().unwrap();
 
     assert!(std::ptr::eq(restored.provider(), provider));
@@ -2878,7 +2881,7 @@ fn assert_device_factor_handles<R, const N: usize>(
     for factor in factors {
         assert!(std::ptr::eq(factor.provider(), provider));
         assert!(runtime.matches(factor.runtime()));
-        assert_eq!(factor.placement(), tenet::core::Placement::Cuda(0));
+        assert_eq!(factor.placement(), tenet::expert::Placement::Cuda(0));
     }
 }
 
@@ -3293,7 +3296,7 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
             tenet::typed::Error::Operation(error)
                 if matches!(
                     **error,
-                    tenet::operations::OperationError::UnsupportedTensorContractScope { .. }
+                    tenet::typed::OperationError::UnsupportedTensorContractScope { .. }
                 )
         ),
         "unexpected error: {device_error:?}"
@@ -3443,7 +3446,7 @@ fn typed_cuda_contract_into_matches_the_returning_contraction() {
     let poison_data = poisoned().to_host().unwrap().dense_data().unwrap().to_vec();
     let assert_rejected =
         |label: &str,
-         result: Result<(), tenet::prelude::Error>,
+         result: Result<(), tenet::typed::Error>,
          dst: &TensorMap<U1FusionRule, f64, CudaStorage>| {
             assert!(result.is_err(), "{label} must be rejected");
             assert_eq!(

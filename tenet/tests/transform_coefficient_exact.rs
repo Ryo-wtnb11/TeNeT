@@ -17,12 +17,12 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{
+use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{GradedSpace, Runtime, TensorMap};
 use tenet::typed::BlockFusionTrees;
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 /// A deterministic component per `(tree pair, index, salt)`, with signed
 /// zeros, infinities, NaN payloads and subnormals mixed into ordinary values.

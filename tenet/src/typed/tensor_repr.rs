@@ -136,7 +136,7 @@ pub(super) fn observe_adjoint_materialization() {
 /// ```
 /// use std::sync::Arc;
 ///
-/// use tenet::core::{U1FusionRule, U1Irrep};
+/// use tenet::sector::{U1FusionRule, U1Irrep};
 /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
 ///
 /// let runtime = Runtime::builder().build()?;
@@ -276,7 +276,7 @@ pub(super) fn owned_repr<R, D, S>(body: TypedTensorBody<R, D, S>) -> TypedTensor
 /// [`HostReadableStorage`]:
 ///
 /// ```compile_fail
-/// use tenet::core::{Placement, TensorStorage};
+/// use tenet::expert::{Placement, TensorStorage};
 /// use tenet::typed::TensorMap;
 ///
 /// struct DeviceStorage(usize);
@@ -294,7 +294,8 @@ pub(super) fn owned_repr<R, D, S>(body: TypedTensorBody<R, D, S>) -> TypedTensor
 /// itself to implement [`Clone`]:
 ///
 /// ```
-/// use tenet::core::{Placement, TensorStorage, U1FusionRule};
+/// use tenet::expert::{Placement, TensorStorage};
+/// use tenet::sector::U1FusionRule;
 /// use tenet::typed::TensorMap;
 ///
 /// struct OpaqueStorage;
@@ -1125,7 +1126,7 @@ where
     /// ```
     /// use std::sync::Arc;
     /// use num_complex::Complex64;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -1148,7 +1149,7 @@ where
     /// implicitly:
     ///
     /// ```compile_fail
-    /// use tenet::core::U1FusionRule;
+    /// use tenet::sector::U1FusionRule;
     /// use tenet::typed::TensorMap;
     ///
     /// fn mixed(a: &TensorMap<U1FusionRule, f32>, b: &TensorMap<U1FusionRule, f64>) {
@@ -1159,7 +1160,7 @@ where
     /// and there is no `From`/`Into` between payload dtypes:
     ///
     /// ```compile_fail
-    /// use tenet::core::U1FusionRule;
+    /// use tenet::sector::U1FusionRule;
     /// use tenet::typed::TensorMap;
     ///
     /// fn into(a: TensorMap<U1FusionRule, f32>) -> TensorMap<U1FusionRule, f64> {
@@ -1171,7 +1172,7 @@ where
     ///
     /// ```compile_fail
     /// use num_complex::Complex64;
-    /// use tenet::core::U1FusionRule;
+    /// use tenet::sector::U1FusionRule;
     /// use tenet::typed::TensorMap;
     ///
     /// fn real(a: &TensorMap<U1FusionRule, Complex64>) -> TensorMap<U1FusionRule, f64> {
@@ -1183,7 +1184,8 @@ where
     /// `CudaStorage`) is converted after an explicit download.
     ///
     /// ```compile_fail
-    /// use tenet::core::{Placement, TensorStorage, U1FusionRule};
+    /// use tenet::expert::{Placement, TensorStorage};
+    /// use tenet::sector::U1FusionRule;
     /// use tenet::typed::TensorMap;
     ///
     /// struct DeviceStorage(usize);

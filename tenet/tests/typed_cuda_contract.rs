@@ -44,7 +44,7 @@ use contract_cases::{
     u1_rhs_identity, Case, FermionU1, TwistRole,
 };
 use num_complex::{Complex32, Complex64};
-use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
+use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
 use tenet::typed::Direction;
 use tenet::typed::{ContractSpec, Runtime, TensorMap};
 
@@ -186,7 +186,7 @@ fn general_axes_match_the_physical_basis_contraction() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     fn dense<R, D>(case: Case<R, D>)
     where
-        R: DeviceRule + tenet::core::PhysicalFusionBasis<Scalar = f64>,
+        R: DeviceRule + tenet::sector::PhysicalFusionBasis<Scalar = f64>,
         D: DevicePayload,
     {
         assert!(case.dense, "{}", case.name);
@@ -865,7 +865,7 @@ fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouc
         errors
     });
     assert!(
-        matches!(errors[0], tenet::prelude::Error::RuntimeMismatch),
+        matches!(errors[0], tenet::typed::Error::RuntimeMismatch),
         "{:?}",
         errors[0]
     );

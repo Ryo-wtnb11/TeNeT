@@ -28,12 +28,12 @@ use std::sync::Arc;
 use tenet::typed::Direction;
 
 use num_complex::Complex64;
-use tenet::core::{
+use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Runtime, TensorScalar};
 use tenet::typed::{GradedSpace, TensorMap};
+use tenet::typed::{Runtime, TensorScalar};
 
 trait Payload: TensorScalar + Copy + PartialEq + std::fmt::Debug {
     fn negated(self) -> Self;

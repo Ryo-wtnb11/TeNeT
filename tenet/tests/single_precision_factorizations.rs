@@ -35,9 +35,9 @@ include!("common/predicate_chains.rs");
 include!("common/predicate_chain_coefficients.rs");
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{TensorMap, Truncation};
+use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{Eigh, LeftPolar, Lq, Qr, RightPolar, Svd};
+use tenet::typed::{TensorMap, Truncation};
 
 use single_precision_oracle::{
     assert_payloads_agree_scaled, assert_scalars_agree, fermion_su2_leg_with, minus_one, one,
@@ -807,8 +807,8 @@ factorization_suite!(complex32_payload, Complex32, Complex64);
 mod checked_generic {
     use super::*;
     use std::sync::Arc;
-    use tenet::prelude::GradedSpace;
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
+    use tenet::typed::GradedSpace;
 
     fn su3_leg(degeneracy: usize) -> GradedSpace<SUNFusionRule> {
         GradedSpace::try_new(
@@ -947,7 +947,7 @@ mod checked_generic {
                         &d.diagview()
                             .unwrap()
                             .iter()
-                            .map(|entry| tenet::prelude::SectorSpectrum {
+                            .map(|entry| tenet::typed::SectorSpectrum {
                                 sector: entry.sector.clone(),
                                 values: entry
                                     .values
@@ -1064,7 +1064,7 @@ mod checked_generic {
 /// `t.diagview()` at single precision usable as a truncation input at all.
 mod compact_diagonal {
     use super::*;
-    use tenet::prelude::SectorSpectrum;
+    use tenet::typed::SectorSpectrum;
 
     /// Well-separated, exactly `f32`-representable values, descending in
     /// magnitude within each sector.
@@ -1171,7 +1171,7 @@ mod compact_diagonal {
 /// payload cannot represent, the subject of the next test.
 #[test]
 fn find_truncated_is_dtype_independent_on_an_exactly_representable_spectrum() {
-    use tenet::prelude::SectorSpectrum;
+    use tenet::typed::SectorSpectrum;
 
     let rt = runtime();
     let leg = u1_leg_with([2, 3, 2]);
@@ -1281,7 +1281,7 @@ fn a_rank_tie_the_single_precision_payload_cannot_resolve_keeps_the_other_sector
     let got = svd_trunc!(narrow, &policy);
     let expected = svd_trunc!(wide, &policy);
 
-    let kept = |t: &tenet::prelude::GradedSpace<U1FusionRule>| -> usize {
+    let kept = |t: &tenet::typed::GradedSpace<U1FusionRule>| -> usize {
         t.sectors()
             .unwrap()
             .iter()
@@ -1331,7 +1331,7 @@ fn a_rank_tie_the_single_precision_payload_cannot_resolve_keeps_the_other_sector
 /// workspace tolerance rule with the hand value of the discarded tail.
 #[test]
 fn double_precision_truncation_decisions_and_errors_match_hand_values() {
-    use tenet::prelude::SectorSpectrum;
+    use tenet::typed::SectorSpectrum;
 
     let rt = runtime();
     let leg = u1_leg_with([3, 3, 3]);

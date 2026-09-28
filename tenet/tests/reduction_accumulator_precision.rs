@@ -52,8 +52,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex32, Complex64, GradedSpace, Runtime, SectorSpectrum, TensorMap};
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::{Complex32, Complex64, GradedSpace, Runtime, SectorSpectrum, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -598,7 +598,7 @@ fn single_precision_norm_stays_finite_where_a_narrow_accumulator_overflows() {
 #[cfg(feature = "racah-generated")]
 mod checked_generic {
     use super::*;
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     /// Weyl dimension of the SU(3) irrep with Dynkin labels `(p, q)`:
     /// `(p + 1)(q + 1)(p + q + 2) / 2`.

@@ -14,8 +14,8 @@ mod prepared;
 use std::fmt::Debug;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
-use tenet::prelude::Error;
+use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+use tenet::typed::Error;
 use tenet::typed::{GradedSpace, PreparedCompose, Runtime, SignatureField, StackedTensorMap};
 
 use common::Payload;

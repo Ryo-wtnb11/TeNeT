@@ -1,4 +1,5 @@
-use tenet::prelude::*;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
 use tenet_network::tensor;
 
 fn main() -> Result<(), Error> {

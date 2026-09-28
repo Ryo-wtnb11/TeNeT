@@ -35,8 +35,9 @@ use std::sync::Arc;
 use common::{DevicePayload, DeviceRule};
 use contract_cases::{assert_close, fill, u1};
 use num_complex::{Complex32, Complex64};
-use tenet::core::{FermionParityFusionRule, PhysicalFusionBasis, U1Irrep, Z2Irrep};
-use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
+use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
+use tenet::sector::PhysicalFusionBasis;
+use tenet::sector::{FermionParityFusionRule, U1Irrep, Z2Irrep};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use trace_cases::{
     adjoint_pairs, dense_trace, fermion_su2_cases, fermion_u1_cases, su2_cases, u1_cases,

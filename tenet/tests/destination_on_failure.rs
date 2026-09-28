@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use tenet::core::{U1FusionRule, U1Irrep, ZNFusionRule};
+use tenet::sector::{U1FusionRule, U1Irrep, ZNFusionRule};
 use tenet::typed::{
     ContractSpec, Duality, Error, GradedSpace, Runtime, SectorSpectrum, Side, TensorMap,
 };

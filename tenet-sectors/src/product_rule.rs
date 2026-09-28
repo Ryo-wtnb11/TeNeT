@@ -156,7 +156,7 @@ pub const fn product_fusion_rule_with_codec<LeftRule, RightRule, Codec>(
 ///
 /// Blanket-implemented, so it applies to a provider defined outside this
 /// workspace exactly as it applies to a built-in one. Import the trait to use
-/// the method (`use tenet::core::ProductFusionRuleExt;`) — without it in
+/// the method (`use tenet::sector::ProductFusionRuleExt;`) — without it in
 /// scope, `.product(…)` resolves to [`Iterator::product`] and the error
 /// message is about iterators.
 pub trait ProductFusionRuleExt: FusionRule + Sized {

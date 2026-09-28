@@ -40,10 +40,10 @@
 
 use std::sync::Arc;
 
-use tenet::core::{
+use tenet::sector::{
     FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Complex32, Complex64, Runtime};
+use tenet::typed::{Complex32, Complex64, Runtime};
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]

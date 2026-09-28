@@ -1,8 +1,8 @@
 use std::sync::{Arc, Barrier};
 use tenet::typed::ContractSpec;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex32, Complex64};
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     clear_plan_cache, configure_plan_cache, load_plan_cache, plan_cache_stats, save_plan_cache,

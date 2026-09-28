@@ -23,10 +23,10 @@ use std::hint::black_box;
 
 use std::sync::{Arc, Mutex};
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex32, Complex64, GradedSpace, Runtime, TensorMap, Truncation};
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::FactorScalar;
+use tenet::typed::{Complex32, Complex64, GradedSpace, Runtime, TensorMap, Truncation};
 use tenet::typed::{Qr, Svd};
-use tenet_matrixalgebra::FactorScalar;
 
 struct CountingAllocator;
 

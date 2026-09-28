@@ -14,7 +14,8 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use tenet::prelude::*;
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 fn time_it(label: &str, iters: usize, mut f: impl FnMut()) {
     // warm up (plan caches, first-touch allocations)

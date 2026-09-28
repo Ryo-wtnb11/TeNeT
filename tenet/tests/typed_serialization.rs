@@ -2,13 +2,15 @@ use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use tenet::core::{
+use tenet::sector::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
-    CheckedGenericRigidSymbols, FermionParityFusionRule, FusionStyleKind, GenericFArray,
-    GenericRMatrix, RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorVec,
-    TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
+    CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
+    SectorVec, TypedSectorAdmission,
 };
-use tenet::prelude::{Complex32, Complex64, Runtime};
+use tenet::sector::{
+    FermionParityFusionRule, SU2FusionRule, SU2Irrep, SectorId, U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::typed::{Complex32, Complex64, Runtime};
 use tenet::typed::{
     DecodeError, DecodeLimits, GradedSpace, NetworkReuseClass, PersistedScalar, SectorSpectrum,
     TensorMap, TypedPersistenceCodec,

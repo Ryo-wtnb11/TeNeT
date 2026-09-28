@@ -154,7 +154,7 @@ The `blocks` column records the requested value.
 | `barrier_d2h_calls`, `barrier_d2h_bytes` | the completion barrier's own downloads, outside the timed region |
 | `check` | `ok:<oracle>`, `MISMATCH:<oracle>`, or the skip reason |
 
-The device columns come from `tenet::dense::cuda_transfer_stats()`, an
+The device columns come from `tenet::expert::cuda_transfer_stats()`, an
 always-compiled, `Relaxed`, backend-local counter set in
 `tenet-dense/src/cuda_adapter.rs`. They are observability only: nothing in the
 library reads them back, so no execution decision depends on them.

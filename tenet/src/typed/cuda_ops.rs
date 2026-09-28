@@ -19,7 +19,7 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
     ///
     /// ```
     /// use num_complex::Complex32;
-    /// use tenet::core::U1FusionRule;
+    /// use tenet::sector::U1FusionRule;
     /// use tenet::typed::TensorMap;
     ///
     /// fn c32_upload(tensor: &TensorMap<U1FusionRule, Complex32>) {
@@ -28,7 +28,7 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
     /// ```
     ///
     /// ```
-    /// use tenet::core::U1FusionRule;
+    /// use tenet::sector::U1FusionRule;
     /// use tenet::typed::TensorMap;
     ///
     /// fn f32_upload(tensor: &TensorMap<U1FusionRule, f32>) {
@@ -78,7 +78,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
     /// Device storage is never implicitly host-readable:
     ///
     /// ```compile_fail
-    /// use tenet::core::U1FusionRule;
+    /// use tenet::sector::U1FusionRule;
     /// use tenet::typed::{CudaStorage, TensorMap};
     ///
     /// fn no_device_slice(tensor: &TensorMap<U1FusionRule, f64, CudaStorage>) {
@@ -123,8 +123,9 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// ```no_run
 /// use std::sync::Arc;
 ///
-/// use tenet::core::U1Irrep;
-/// use tenet::prelude::{Runtime, Svd, TensorMap, Truncation, U1FusionRule};
+/// use tenet::sector::U1Irrep;
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::{Runtime, Svd, TensorMap, Truncation};
 /// use tenet::typed::GradedSpace;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -161,10 +162,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// compact SVD has the same deliberately narrow typed CUDA surface:
 ///
 /// ```compile_fail
-/// use tenet::core::{
-///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
-///     TypedSectorAdmission,
-/// };
+/// use tenet::sector::{CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols, TypedSectorAdmission};
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
 /// fn no_checked_generic_cuda_svd<R>(tensor: &TensorMap<R, f64, CudaStorage>)
@@ -185,7 +183,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// Hermitian rule.
 ///
 /// ```compile_fail
-/// use tenet::prelude::U1FusionRule;
+/// use tenet::sector::U1FusionRule;
 /// use tenet::typed::{CudaPayload, CudaStorage, TensorMap};
 ///
 /// fn device_payload_only<D: CudaPayload>(tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>) {
@@ -194,7 +192,8 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// ```
 ///
 /// ```compile_fail
-/// use tenet::prelude::{FactorizationScalar, U1FusionRule};
+/// use tenet::sector::U1FusionRule;
+/// use tenet::typed::FactorizationScalar;
 /// use tenet::typed::{CudaPayload, CudaStorage, TensorMap};
 ///
 /// fn device_payload_and_host_factorizing<D: CudaPayload + FactorizationScalar>(
@@ -205,7 +204,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// ```
 ///
 /// ```
-/// use tenet::prelude::U1FusionRule;
+/// use tenet::sector::U1FusionRule;
 /// use tenet::typed::{CudaFactorizationPayload, CudaStorage, TensorMap};
 ///
 /// fn device_factorizing<D: CudaFactorizationPayload>(
@@ -219,7 +218,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// pins #1336 left here, which differ only in the dtype:
 ///
 /// ```
-/// use tenet::prelude::U1FusionRule;
+/// use tenet::sector::U1FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
 /// fn f32_device_svd(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
@@ -233,7 +232,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 ///
 /// ```
 /// use num_complex::{Complex32, Complex64};
-/// use tenet::prelude::U1FusionRule;
+/// use tenet::sector::U1FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
 /// fn c32_device_eigh(tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>) {
@@ -321,7 +320,7 @@ where
     /// `k x k` diagonal selector that the non-aligned assembly GEMM
     /// multiplies by anyway (1 op) or a scaling of the aligned factor before
     /// its copy (2 ops), plus one `conj` for a complex left side. They are
-    /// counted in [`tenet_dense::CudaTransferStats::gauge_ops`].
+    /// counted in [`crate::expert::CudaTransferStats::gauge_ops`].
     ///
     /// `rows` and `cols` are the leg roles, as for the Host operation: it
     /// acts on the matrix view `self.permute(rows, cols)` (one device
@@ -816,10 +815,7 @@ where
 /// Checked Generic providers have no device QR:
 ///
 /// ```compile_fail
-/// use tenet::core::{
-///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
-///     TypedSectorAdmission,
-/// };
+/// use tenet::sector::{CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols, TypedSectorAdmission};
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
 /// fn no_checked_generic_cuda_qr<R>(tensor: &TensorMap<R, f64, CudaStorage>)
@@ -833,7 +829,7 @@ where
 /// ```
 ///
 /// ```
-/// use tenet::prelude::U1FusionRule;
+/// use tenet::sector::U1FusionRule;
 /// use tenet::typed::{CudaFactorizationPayload, CudaStorage, TensorMap};
 ///
 /// fn device_qr<D: CudaFactorizationPayload>(
@@ -1015,10 +1011,7 @@ where
 /// this leaf:
 ///
 /// ```compile_fail
-/// use tenet::core::{
-///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
-///     TypedSectorAdmission,
-/// };
+/// use tenet::sector::{CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols, TypedSectorAdmission};
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
 /// fn no_checked_generic_cuda_operations<R>(
@@ -1411,7 +1404,7 @@ where
     /// `add`); signed-zero bits are backend-local.
     ///
     /// ```compile_fail
-    /// use tenet::prelude::U1FusionRule;
+    /// use tenet::sector::U1FusionRule;
     /// use tenet::typed::{CudaStorage, TensorMap};
     ///
     /// fn removed(x: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>) {
@@ -1925,7 +1918,7 @@ where
     /// # Errors
     ///
     /// In this order, all before any device work: [`Error::RuntimeMismatch`];
-    /// [`tenet_tensors::OperationError::UnsupportedTensorContractScope`] for
+    /// [`crate::typed::OperationError::UnsupportedTensorContractScope`] for
     /// non-symmetric (anyonic or `NoBraiding`) providers whatever the axes,
     /// as on Host — a behaviour change: the canonical anyonic (before G2c-1a)
     /// and `NoBraiding` (before #1372) device contractions were accepted;
@@ -2465,10 +2458,7 @@ where
     /// by this impl's bound, so they are a compile-time boundary:
     ///
     /// ```compile_fail
-    /// use tenet::core::{
-    ///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
-    ///     TypedSectorAdmission,
-    /// };
+    /// use tenet::sector::{CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols, TypedSectorAdmission};
     /// use tenet::typed::{CudaStorage, TensorMap};
     ///
     /// fn no_checked_generic_cuda_permute<R>(tensor: &TensorMap<R, f64, CudaStorage>)
@@ -2482,7 +2472,7 @@ where
     /// ```
     ///
     /// ```compile_fail
-    /// use tenet::core::FibonacciFusionRule;
+    /// use tenet::sector::FibonacciFusionRule;
     /// use tenet::typed::{CudaStorage, TensorMap};
     ///
     /// fn no_generic_cuda_permute(tensor: &TensorMap<FibonacciFusionRule, f64, CudaStorage>) {
@@ -2504,7 +2494,7 @@ where
     /// The multiplicity-free twin compiles, for either device payload:
     ///
     /// ```
-    /// use tenet::prelude::U1FusionRule;
+    /// use tenet::sector::U1FusionRule;
     /// use tenet::typed::{CudaPayload, CudaStorage, TensorMap};
     ///
     /// fn device_permute<D: CudaPayload>(tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>) {
@@ -3136,7 +3126,7 @@ where
     /// prepared transforms; beyond it a warm call rebuilds plans). The first call whose
     /// largest traced extent `prod t_k` exceeds the resident ones or scaled
     /// template grows it once (one upload each, reported by
-    /// [`crate::prelude::CudaTreeTransformStats::context_scalar_operand_bytes`]).
+    /// [`crate::typed::CudaTreeTransformStats::context_scalar_operand_bytes`]).
     /// One submission per term with a non-zero coefficient, plus one device
     /// refill of the scaled template per distinct non-unit coefficient; FLOPs
     /// are the Host's `sum_terms |out| * prod t_k` multiply-adds.
@@ -3930,7 +3920,7 @@ where
     ///
     /// ```
     /// use std::sync::Arc;
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -4186,7 +4176,7 @@ where
     /// ```
     /// use std::sync::Arc;
     ///
-    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
@@ -4650,7 +4640,7 @@ where
     ///
     /// ```compile_fail
     /// use std::sync::Arc;
-    /// use tenet::core::{FibonacciFusionRule, FibonacciSector};
+    /// use tenet::sector::{FibonacciFusionRule, FibonacciSector};
     /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
     /// let runtime = Runtime::builder().build().unwrap();
     /// let tau = GradedSpace::try_new(
@@ -4930,7 +4920,7 @@ where
 
     /// Every stored coupled sector with its matrix: TensorKit `blocks(t)`.
     ///
-    /// Sectors come in ascending [`tenet_core::SectorId`] order, the storage
+    /// Sectors come in ascending [`crate::sector::SectorId`] order, the storage
     /// order [`GradedSpace::sectors`] also uses, which is not TensorKit's
     /// `blocksectors` order in general. Each view is the one [`Self::block`]
     /// returns. All labels are decoded before the iterator is returned, so

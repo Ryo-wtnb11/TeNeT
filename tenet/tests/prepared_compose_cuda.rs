@@ -17,8 +17,8 @@ use std::fmt::Debug;
 use std::sync::Mutex;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::U1FusionRule;
-use tenet::dense::{cuda_transfer_stats, CudaPlanCacheStats, CudaTransferStats};
+use tenet::expert::{cuda_transfer_stats, CudaPlanCacheStats, CudaTransferStats};
+use tenet::sector::U1FusionRule;
 use tenet::typed::{GradedSpace, PreparedCompose, Runtime, StackedTensorMap, TensorMap};
 
 use common::{DevicePayload, DeviceRule};
@@ -221,7 +221,7 @@ fn wide_permute_source(runtime: &Runtime) -> TensorMap<U1FusionRule, f64> {
             std::sync::Arc::new(U1FusionRule),
             charges
                 .into_iter()
-                .map(|(charge, degeneracy)| (tenet::core::U1Irrep::new(charge), degeneracy)),
+                .map(|(charge, degeneracy)| (tenet::sector::U1Irrep::new(charge), degeneracy)),
         )
         .unwrap()
     };

@@ -8,8 +8,8 @@
 
 use num_complex::Complex64;
 
-use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
-use tenet::prelude::{Error, Runtime};
+use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
+use tenet::typed::{Error, Runtime};
 use tenet::typed::{GradedSpace, StackedTensorMap, TensorMap};
 
 #[macro_use]

@@ -11,8 +11,8 @@ use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::Arc;
 
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex32, Complex64, Runtime};
+use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::{Complex32, Complex64, Runtime};
 use tenet::typed::{GradedSpace, Lq, TensorMap, TensorScalar};
 
 /// The receiver's own split as leg roles: `rows = 0..nout`.
@@ -237,7 +237,7 @@ fn compact_lq_requests_no_zeroed_output_storage() {
 mod checked_generic {
     use super::*;
     use std::sync::Mutex;
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
     use tenet::typed::{LeftPolar, RightPolar, Svd};
 
     fn su3_leg(

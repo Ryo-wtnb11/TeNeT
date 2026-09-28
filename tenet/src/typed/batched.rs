@@ -199,7 +199,8 @@ impl StructureSignature {
 /// `B * L` and would let an ordinary per-tensor kernel run on member 0 only:
 ///
 /// ```compile_fail
-/// use tenet::core::{TensorStorage, U1FusionRule};
+/// use tenet::expert::TensorStorage;
+/// use tenet::sector::U1FusionRule;
 /// use tenet::typed::StackedTensorMap;
 ///
 /// fn as_storage<S: TensorStorage<f64>>(_: &S) {}
@@ -211,7 +212,8 @@ impl StructureSignature {
 /// The same imports compile when the stack is used as a stack:
 ///
 /// ```
-/// use tenet::core::{TensorStorage, U1FusionRule};
+/// use tenet::expert::TensorStorage;
+/// use tenet::sector::U1FusionRule;
 /// use tenet::typed::StackedTensorMap;
 ///
 /// fn as_storage<S: TensorStorage<f64>>(_: &S) {}
@@ -2219,8 +2221,8 @@ mod tests {
     fn checked_generic_rule_instance_alone_separates_signatures() {
         // What: SU(3) and SU(4) trivial legs give the same hom space and
         // block structure content, so the rule identity alone separates them.
-        use super::super::SUNFusionRule;
         use std::sync::Arc;
+        use tenet_core::SUNFusionRule;
 
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let signature = |rank: usize, trivial: Vec<i64>| {

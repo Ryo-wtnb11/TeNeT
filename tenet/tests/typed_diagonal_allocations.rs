@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tenet::typed::ContractSpec;
 
-use tenet::core::{Z2FusionRule, Z2Irrep};
-use tenet::prelude::{Complex64, Runtime};
+use tenet::sector::{Z2FusionRule, Z2Irrep};
+use tenet::typed::{Complex64, Runtime};
 use tenet::typed::{GradedSpace, Svd, TensorMap};
 
 struct CountingAllocator;

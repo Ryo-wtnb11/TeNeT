@@ -4,10 +4,11 @@
 
 use num_complex::Complex64;
 
-pub use tenet::core::{
-    product_sector, FermionParityFusionRule, Fz2SectorLayout, PackedProductCodec,
-    ProductFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
+pub use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
 };
+pub use tenet::sector::{Fz2SectorLayout, PackedProductCodec, U1SectorLayout};
 
 pub type Fz2U1Rule = ProductFusionRule<
     FermionParityFusionRule,
@@ -113,7 +114,7 @@ macro_rules! for_each_symmetry {
         });
         #[cfg(feature = "racah-generated")]
         $check!("SU3 checked Generic", |variant: usize| {
-            let rule = Arc::new(tenet::typed::SUNFusionRule::new(3).unwrap());
+            let rule = Arc::new(tenet::sector::SUNFusionRule::new(3).unwrap());
             GradedSpace::try_new(rule, [(vec![0i64, 0], 1), (vec![1, 1], 2 + variant)]).unwrap()
         });
     }};
@@ -125,7 +126,7 @@ macro_rules! for_each_symmetry {
 /// the last sector (a one-dimensional charged leg).
 pub fn selections<R>(leg: &tenet::typed::GradedSpace<R>) -> Vec<tenet::typed::LegSelection<R>>
 where
-    R: tenet::core::TypedSectorAdmission,
+    R: tenet::sector::TypedSectorAdmission,
     R::Mode: tenet::typed::TypedTensorModeDispatch<R>,
 {
     let sectors = leg.sectors().unwrap();

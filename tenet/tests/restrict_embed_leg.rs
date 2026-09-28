@@ -17,12 +17,12 @@ use std::sync::Arc;
 use tenet::typed::ContractSpec;
 
 use num_complex::Complex64;
-use tenet::core::{
+use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep, ZNFusionRule,
 };
-use tenet::prelude::{GradedSpace, LegSelection, Runtime, TensorMap};
 use tenet::typed::BlockFusionTrees;
+use tenet::typed::{GradedSpace, LegSelection, Runtime, TensorMap};
 
 /// `(degeneracy, carrier dimension)` per sector, in the leg's physical order.
 type AxisLayout = Vec<(usize, usize)>;

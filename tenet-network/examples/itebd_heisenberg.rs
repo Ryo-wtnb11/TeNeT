@@ -25,8 +25,9 @@
 
 use std::time::Instant;
 
-use tenet::prelude::{Error, GradedSpace, Runtime, TensorMap, Truncation, U1FusionRule, U1Irrep};
+use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::Svd;
+use tenet::typed::{Error, GradedSpace, Runtime, TensorMap, Truncation};
 use tenet_network::tensor;
 
 const E_EXACT: f64 = 0.25 - std::f64::consts::LN_2;

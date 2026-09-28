@@ -19,9 +19,16 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use tenet::core::{HostReadableStorage, TypedSectorAdmission};
-use tenet::prelude::*;
+use tenet::expert::HostReadableStorage;
+use tenet::sector::TypedSectorAdmission;
+use tenet::sector::{
+    FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
+};
 use tenet::typed::{BlockFusionTrees, CoupledBlock, CoupledBlockPayload};
+use tenet::typed::{
+    GradedSpace, MultiplicityIndex, Runtime, SectorSpectrum, TensorMap, TensorScalar,
+};
 
 trait Val: TensorScalar + Copy + PartialEq + Debug {
     fn make(hash: u64) -> Self;
@@ -389,7 +396,7 @@ where
 /// adjoint's subblocks.
 fn adjoint_case<R, D>(what: &str, t: &TensorMap<R, D>)
 where
-    R: TypedSectorAdmission + tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: TypedSectorAdmission + tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>,
     R::Mode:
         tenet::typed::TypedTensorModeDispatch<R> + tenet::typed::TypedTensorAdjointDispatch<R, D>,
     D: Val,
@@ -670,7 +677,7 @@ fn absent_coupled_sector_is_tensorkits_empty_view() {
 mod su3 {
 
     use super::*;
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
 
     pub(super) fn legs() -> [GradedSpace<SUNFusionRule>; 3] {
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -756,7 +763,7 @@ mod cuda {
     where
         R: TypedSectorAdmission,
         R::Mode: tenet::typed::TypedTensorModeDispatch<R>,
-        D: Val + tenet::typed::CudaPayload + tenet::dense::CudaScalar,
+        D: Val + tenet::typed::CudaPayload + tenet::typed::CudaScalar,
     {
         let device: TensorMap<R, D, CudaStorage<D>> = host.to_cuda().unwrap();
         let back = device.to_host().unwrap();
@@ -791,7 +798,7 @@ mod cuda {
             };
             assert_eq!(
                 downloaded.len(),
-                tenet::core::TensorStorage::len(storage),
+                tenet::expert::TensorStorage::len(storage),
                 "{what}"
             );
             let data = downloaded.as_slice();
@@ -811,11 +818,11 @@ mod cuda {
 
     fn run<R, D>(what: &str, rt: &Runtime, v: &GradedSpace<R>, w: &GradedSpace<R>)
     where
-        R: TypedSectorAdmission + tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: TypedSectorAdmission + tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>,
         R::Mode: tenet::typed::TypedTensorModeDispatch<R>
             + tenet::typed::TypedTensorConstructionDispatch<R, D>
             + tenet::typed::TypedTensorAdjointDispatch<R, D>,
-        D: Val + tenet::typed::CudaPayload + tenet::dense::CudaScalar,
+        D: Val + tenet::typed::CudaPayload + tenet::typed::CudaScalar,
     {
         let t = label_case::<R, D>(what, rt, &[v, w], &[v]);
         device_case(what, &t);

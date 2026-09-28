@@ -230,7 +230,7 @@ pub fn permute_dense<D: Copy>(shape: &[usize], data: &[D], perm: &[usize]) -> (V
 /// `entry` never receives an un-suffixed float literal in a single-precision
 /// context: the caller passes `f64` and each impl performs its own conversion,
 /// which is also what keeps the fixtures dyadic and therefore exact.
-pub trait Payload: tenet::prelude::TensorScalar + Copy + PartialEq + std::fmt::Debug {
+pub trait Payload: tenet::typed::TensorScalar + Copy + PartialEq + std::fmt::Debug {
     const NAME: &'static str;
     /// `eps` of the payload's *real lane* — the precision the device sums in.
     const EPS: f64;
@@ -312,16 +312,16 @@ impl<D: Payload + tenet::typed::CudaPayload> DevicePayload for D {}
 /// Symmetry providers the device generic bodies are instantiated over.
 #[cfg(feature = "cuda")]
 pub trait DeviceRule:
-    tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
-    + tenet::core::CheckedFusionAlgebra
-    + tenet::core::SectorCodec
+    tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>
+    + tenet::sector::CheckedFusionAlgebra
+    + tenet::sector::SectorCodec
 {
 }
 
 #[cfg(feature = "cuda")]
 impl<R> DeviceRule for R where
-    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::core::CheckedFusionAlgebra
-        + tenet::core::SectorCodec
+    R: tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::sector::CheckedFusionAlgebra
+        + tenet::sector::SectorCodec
 {
 }

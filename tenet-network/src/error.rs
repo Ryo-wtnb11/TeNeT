@@ -1,6 +1,8 @@
 use std::fmt::{Display, Formatter};
 
-use tenet::core::{RuleIdentity, SectorId, SectorLeg};
+use tenet::expert::SectorLeg;
+use tenet::sector::RuleIdentity;
+use tenet::sector::SectorId;
 
 use crate::labels::{TemporaryLabel, TensorAxis};
 use crate::slice::SliceKind;

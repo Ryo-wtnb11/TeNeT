@@ -9,7 +9,11 @@ use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::Mutex;
 
-use tenet::prelude::*;
+use tenet::sector::{
+    FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 
 struct CountingAllocator;
 

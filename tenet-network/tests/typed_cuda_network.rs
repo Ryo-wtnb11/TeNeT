@@ -2,12 +2,16 @@
 
 use std::sync::Arc;
 
-use tenet::core::{
-    product_sector, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
-    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, ProductFusionRuleExt,
-    SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Complex32, Complex64};
+use tenet::sector::{
+    CheckedFusionAlgebra, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, SectorCodec,
+    TypedSectorAdmission,
+};
+use tenet::typed::FusionAlgebraError;
+use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{ContractSpec, CudaStorage, GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     clear_plan_cache, configure_plan_cache, plan_cache_stats, tensor, ContractionPlan,
@@ -921,7 +925,7 @@ fn warm_cuda_destination_reuse_matches_the_returning_chain_for_every_provider() 
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
-    use tenet::dense::cuda_transfer_stats;
+    use tenet::expert::cuda_transfer_stats;
 
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let u1 = GradedSpace::try_new(
@@ -1165,7 +1169,7 @@ fn single_precision_device_chains_match_the_host_and_reuse_their_destinations() 
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_warm_single_precision_chain_costs_the_same_calls_and_half_the_bytes() {
-    use tenet::dense::cuda_transfer_stats;
+    use tenet::expert::cuda_transfer_stats;
 
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let u1 = GradedSpace::try_new(
@@ -1445,7 +1449,7 @@ fn column_major_offset(shape: &[usize], index: &[usize]) -> usize {
 /// pairing is exact for codomain↔domain contractions and legs that stay on
 /// their side, which is all the dense-checked networks use.
 fn dense_einsum(
-    operands: &[(&tenet::prelude::PhysicalDense<Complex64>, &[&str])],
+    operands: &[(&tenet::typed::PhysicalDense<Complex64>, &[&str])],
     output: &[&str],
 ) -> (Vec<usize>, Vec<Complex64>) {
     let mut labels: Vec<&str> = Vec::new();
@@ -1489,8 +1493,8 @@ fn dense_einsum(
     (output_shape, result)
 }
 
-fn widened(dense: tenet::prelude::PhysicalDense<f64>) -> tenet::prelude::PhysicalDense<Complex64> {
-    tenet::prelude::PhysicalDense {
+fn widened(dense: tenet::typed::PhysicalDense<f64>) -> tenet::typed::PhysicalDense<Complex64> {
+    tenet::typed::PhysicalDense {
         shape: dense.shape,
         data: dense
             .data
@@ -1511,7 +1515,7 @@ fn assert_dense_oracle<R>(
 ) where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::core::PhysicalFusionBasis<Scalar = f64>
+        + tenet::sector::PhysicalFusionBasis<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec
         + Send
@@ -1531,7 +1535,7 @@ fn assert_dense_oracle<R>(
     let dense = |tensor: &TensorMap<R, f64>| widened(tensor.to_physical_dense().unwrap());
     let (a, b, c, e) = (dense(&o.a), dense(&o.b), dense(&o.c), dense(&o.e));
     let t_adjoint = dense(&o.t.adjoint().unwrap());
-    type DenseOperands<'a> = Vec<(&'a tenet::prelude::PhysicalDense<Complex64>, &'a [&'a str])>;
+    type DenseOperands<'a> = Vec<(&'a tenet::typed::PhysicalDense<Complex64>, &'a [&'a str])>;
     type DenseCase<'a, R> = (
         &'a str,
         [TensorMap<R, f64>; 3],
@@ -1812,16 +1816,16 @@ fn general_cuda_networks_match_host_and_dense_oracles() {
 #[derive(Debug, PartialEq)]
 struct DeviceState {
     plans: tenet_network::PlanCacheStats,
-    transfers: tenet::dense::CudaTransferStats,
-    cutensor: tenet::dense::CudaPlanCacheStats,
+    transfers: tenet::expert::CudaTransferStats,
+    cutensor: tenet::expert::CudaPlanCacheStats,
     scratch_bytes: usize,
-    transforms: tenet::prelude::CudaTreeTransformStats,
+    transforms: tenet::typed::CudaTreeTransformStats,
 }
 
 fn device_state(runtime: &Runtime) -> DeviceState {
     DeviceState {
         plans: plan_cache_stats(runtime),
-        transfers: tenet::dense::cuda_transfer_stats(),
+        transfers: tenet::expert::cuda_transfer_stats(),
         cutensor: runtime.cuda_plan_cache_stats().unwrap().unwrap(),
         scratch_bytes: runtime.cuda_contract_scratch_bytes().unwrap(),
         transforms: runtime.cuda_tree_transform_stats().unwrap(),
@@ -2122,7 +2126,7 @@ fn assert_trace_dense_oracle<R>(
 ) where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::core::PhysicalFusionBasis<Scalar = f64>
+        + tenet::sector::PhysicalFusionBasis<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec
         + Send
@@ -2140,7 +2144,7 @@ fn assert_trace_dense_oracle<R>(
     let dense = |tensor: &TensorMap<R, f64>| widened(tensor.to_physical_dense().unwrap());
     let (ta, tb, tt, c) = (dense(&o.ta), dense(&o.tb), dense(&o.tt), dense(&o.c));
     let ta_adjoint = dense(&o.ta.adjoint().unwrap());
-    type DenseOperands<'a> = Vec<(&'a tenet::prelude::PhysicalDense<Complex64>, &'a [&'a str])>;
+    type DenseOperands<'a> = Vec<(&'a tenet::typed::PhysicalDense<Complex64>, &'a [&'a str])>;
     type DenseCase<'a, R> = (
         &'a str,
         [TensorMap<R, f64>; 3],
@@ -2204,7 +2208,7 @@ fn assert_trace_dense_oracle<R>(
 }
 
 fn fermion_u1_trace_spaces(
-) -> [GradedSpace<tenet::core::ProductFusionRule<FermionParityFusionRule, U1FusionRule>>; 3] {
+) -> [GradedSpace<tenet::sector::ProductFusionRule<FermionParityFusionRule, U1FusionRule>>; 3] {
     let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let space = |sectors: &[(bool, i32, usize)]| {
         GradedSpace::try_new(
@@ -2230,7 +2234,7 @@ fn fermion_u1_trace_spaces(
 }
 
 fn fermion_su2_trace_spaces(
-) -> [GradedSpace<tenet::core::ProductFusionRule<FermionParityFusionRule, SU2FusionRule>>; 3] {
+) -> [GradedSpace<tenet::sector::ProductFusionRule<FermionParityFusionRule, SU2FusionRule>>; 3] {
     let rule = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
     let space = |sectors: &[(bool, usize, usize)]| {
         GradedSpace::try_new(
@@ -2480,7 +2484,7 @@ fn rejected_cuda_trace_prestep_leaves_every_device_state_unchanged() {
     let device_error = tensor!([a; x] = (o.tb)[j, a; j, w] * (o.c)[i, w; i, x]).unwrap_err();
     assert!(matches!(
         device_error,
-        tenet::prelude::Error::InvalidArgument(_)
+        tenet::typed::Error::InvalidArgument(_)
     ));
     assert_eq!(device_error.to_string(), host_error.to_string());
     assert_eq!(
@@ -2521,10 +2525,10 @@ fn anyonic_cuda_trace_prestep_rejects_like_host_before_device_work() {
     assert!(
         matches!(
             &device_error,
-            tenet::prelude::Error::Operation(operation)
+            tenet::typed::Error::Operation(operation)
                 if matches!(
                     **operation,
-                    tenet::operations::OperationError::UnsupportedTensorContractScope { .. }
+                    tenet::typed::OperationError::UnsupportedTensorContractScope { .. }
                 )
         ),
         "{device_error:?}"
@@ -2552,10 +2556,10 @@ fn assert_cuda_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
     assert!(
         matches!(
             &device_error,
-            tenet::prelude::Error::Operation(operation)
+            tenet::typed::Error::Operation(operation)
                 if matches!(
                     **operation,
-                    tenet::operations::OperationError::UnsupportedTensorContractScope {
+                    tenet::typed::OperationError::UnsupportedTensorContractScope {
                         message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
                     }
                 )

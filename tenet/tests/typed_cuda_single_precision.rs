@@ -36,11 +36,11 @@ use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
 
-use tenet::core::{
+use tenet::expert::cuda_transfer_stats;
+use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRule, ProductFusionRuleExt,
     SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::dense::cuda_transfer_stats;
 use tenet::typed::{BlockFusionTrees, ContractSpec, Error, GradedSpace, Runtime, TensorMap};
 
 mod common;

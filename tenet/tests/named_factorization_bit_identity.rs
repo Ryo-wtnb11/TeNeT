@@ -10,7 +10,7 @@
 
 use num_complex::Complex64;
 use std::sync::Arc;
-use tenet::core::{
+use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRule, ProductFusionRuleExt,
     SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
@@ -270,7 +270,7 @@ fn named_results_match_the_tuple_results() {
     {
         // Checked Generic rejects lazy-adjoint operands for most
         // factorizations; those entries fingerprint the error.
-        use tenet::typed::SUNFusionRule;
+        use tenet::sector::SUNFusionRule;
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
         let v = GradedSpace::try_new(
             provider,

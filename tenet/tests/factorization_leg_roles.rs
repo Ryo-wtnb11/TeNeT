@@ -15,12 +15,12 @@ use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 
 use num_complex::Complex64;
-use tenet::core::CoreError;
-use tenet::core::{
+use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::operations::OperationError;
+use tenet::typed::CoreError;
+use tenet::typed::OperationError;
 use tenet::typed::{
     Eig, Eigh, Error, GradedSpace, LeftPolar, Lq, Qr, RightPolar, Runtime, Svd, TensorMap,
 };
@@ -118,7 +118,7 @@ fn su2_legs() -> (GradedSpace<SU2FusionRule>, GradedSpace<SU2FusionRule>) {
     (v, w.try_dual().unwrap())
 }
 
-type Fz2U1 = tenet::core::ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+type Fz2U1 = tenet::sector::ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
 
 fn fz2_u1_legs() -> (GradedSpace<Fz2U1>, GradedSpace<Fz2U1>) {
     let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
@@ -359,7 +359,7 @@ fn leg_roles_equal_the_permute_composition() {
 #[test]
 fn checked_generic_leg_roles_equal_the_permute_composition() {
     let _serial = serial();
-    use tenet::typed::SUNFusionRule;
+    use tenet::sector::SUNFusionRule;
     let runtime = runtime();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let v =

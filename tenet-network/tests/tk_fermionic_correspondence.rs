@@ -12,8 +12,8 @@ use std::sync::Arc;
 use tenet::typed::ContractSpec;
 use tenet::typed::Direction;
 
-use tenet::core::{FermionParityFusionRule, Z2Irrep};
-use tenet::prelude::Complex64;
+use tenet::sector::{FermionParityFusionRule, Z2Irrep};
+use tenet::typed::Complex64;
 use tenet::typed::{Eig, GradedSpace, Runtime, Svd, TensorMap};
 use tenet_network::tensor;
 
