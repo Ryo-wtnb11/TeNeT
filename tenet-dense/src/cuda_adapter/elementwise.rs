@@ -169,10 +169,10 @@ fn submit_region_copy<D: CudaScalar>(
 /// The copy route allocates no buffer, builds no cuTENSOR plan, counts one
 /// `copy_calls`, and transports every payload bit-exactly.
 ///
-/// Transfer contract: a call with [`CudaRegionCoefficient::Buffer`] moves
-/// nothing across the host boundary, ever. A call with
-/// [`CudaRegionCoefficient::One`] uploads this context's one-element `1` the
-/// first time that dtype is used, and a call with
+/// Transfer contract: a call with [`CudaRegionCoefficient::Buffer`] and a
+/// copy-route call move nothing across the host boundary, ever. A GEMM-route
+/// call with [`CudaRegionCoefficient::One`] uploads this context's one-element
+/// `1` the first time that dtype is used, and a call with
 /// [`CudaRegionCoefficient::Zero`] its one-element zero template, and nothing
 /// afterwards (see [`CudaDenseContext::scalar_operand_bytes`] and
 /// [`CudaDenseContext::reserve_zero_template`]).
@@ -194,13 +194,12 @@ fn submit_region_copy<D: CudaScalar>(
 /// [`CudaRegionCoefficient::Zero`] the written zeros carry the sign of
 /// `0 * src` alone, not the sign of the caller's `-0.0` or of `c`.
 ///
-/// One numerical deviation from the host is disclosed and pinned by the device
-/// tests: the host copies bit-exactly when the coefficient is 1, while this
-/// path always multiplies, and an infinite complex payload is observed to come
-/// back as `NaN` in both components: `inf * 0` in the complex product already
-/// yields a `NaN` component, which the remaining multiply spreads across both.
-/// `f64` infinities and every finite payload are unaffected. See
-/// `benchmarks/history/cuda-region-axpby-2026-09-20.md`.
+/// The copy route matches the host bit-exactly, including complex infinities,
+/// signed zero and NaN payloads. Other routes retain the disclosed GEMM
+/// arithmetic: a complex non-finite input can produce NaN components where a
+/// host copy would preserve the original bits. See
+/// `benchmarks/history/cuda-region-axpby-2026-09-20.md` and
+/// `benchmarks/history/cuda-strided-copy-moves-2026-09-25.md`.
 ///
 /// Validation order, all of it before any device work:
 ///

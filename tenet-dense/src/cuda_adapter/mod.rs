@@ -367,7 +367,9 @@ std::thread_local! {
 ///   `cuda_gemm_region_strided_into` and from the region primitives
 ///   ([`cuda_region_axpby`], [`cuda_region_zero`]) alike.
 /// - `solver_calls`: cuSOLVER region calls (SVD, QR, EIGH).
-/// - `copy_calls`: `cuda_copy_region_into` calls that move data.
+/// - `copy_calls`: `cuda_copy_region_into` calls and unscaled,
+///   unconjugated overwrite [`cuda_region_axpby`] calls that take its typed
+///   strided-copy route.
 /// - `gauge_ops`: Tenferro op submissions of the compact-SVD sign/phase
 ///   gauge ([`cuda_svd_gauge_phases`] and [`CudaSvdPhases`]).
 ///

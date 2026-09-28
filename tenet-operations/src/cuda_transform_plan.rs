@@ -352,13 +352,12 @@ fn column_move<C: Copy>(
 /// three operand layouts, their alignments, the operand operators, workspace
 /// preference). Alignment is the constant `size_of::<D>()` for every view, so
 /// offsets do not multiply keys, and the accumulation scalars are not in the
-/// key at all. Conjugation *is* in the key, and a structure submits two values
-/// of it once `storage_conjugate` is set: the Single blocks and the pack
-/// columns read the conjugated source, while the scatter columns and the zero
-/// fills read the workspace and the zero template unconjugated. A pack and a
-/// scatter that normalise to the same triple — two contiguous columns are both
-/// `([N], [1], [1])` — are therefore two plans, and counting them once would
-/// under-raise the cap by exactly the amount a conjugated transform needs.
+/// key at all. Conjugation *is* in the key. Single blocks retain their
+/// signatures because later scaled or accumulating replays can use GEMM.
+/// Packs have fixed unit scale and overwrite mode, so an unconjugated pack is
+/// always a typed copy and has no cuTENSOR plan; a conjugated pack still uses
+/// GEMM. Scatters retain their signatures because caller scale and destination
+/// beta vary between replays.
 ///
 /// A zero caller scale writes each Single and scatter destination with a zero
 /// fill instead of its move (#1438). Those fills' signatures are returned
@@ -379,16 +378,23 @@ fn distinct_plan_signatures(
     storage_conjugate: bool,
 ) -> Result<PlanSignatures, OperationError> {
     let mut seen: HashSet<RegionSignature<'_>> = HashSet::new();
-    let conjugated = moves
-        .iter()
-        .chain(recouplings.iter().flat_map(|entry| entry.packs.iter()));
-    for entry in conjugated {
+    for entry in moves {
         seen.insert((
             entry.dims.as_slice(),
             entry.dst_strides.as_slice(),
             entry.src_strides.clone(),
             storage_conjugate,
         ));
+    }
+    if storage_conjugate {
+        for entry in recouplings.iter().flat_map(|entry| entry.packs.iter()) {
+            seen.insert((
+                entry.dims.as_slice(),
+                entry.dst_strides.as_slice(),
+                entry.src_strides.clone(),
+                true,
+            ));
+        }
     }
     for entry in recouplings.iter().flat_map(|entry| entry.scatters.iter()) {
         seen.insert((
@@ -844,8 +850,16 @@ mod tests {
             src_offset,
             coefficient: None,
         };
+        let pack = DeviceMoveSpec {
+            dims: vec![2, 2],
+            dst_strides: vec![1, 2],
+            src_strides: vec![3, 1],
+            dst_offset: 0,
+            src_offset: 0,
+            coefficient: None,
+        };
         let recoupling = DeviceRecouplingSpec {
-            packs: vec![column(0, 0), column(4, 8)],
+            packs: vec![pack],
             scatters: vec![column(0, 0), column(8, 4)],
             job: DenseGemmBatchJob {
                 dst_offset: 0,
@@ -858,7 +872,8 @@ mod tests {
             matrix_offset: 0,
         };
 
-        // Unconjugated: one column plan shared by both directions, plus the GEMM.
+        // Unconjugated: the pack is always a copy, so only the scatter and
+        // recoupling GEMM need plans.
         assert_eq!(
             distinct_plan_signatures(&[], std::slice::from_ref(&recoupling), &[], false).unwrap(),
             PlanSignatures {
@@ -866,7 +881,7 @@ mod tests {
                 zero_fill: 0
             }
         );
-        // Conjugated: the packs are their own plan.
+        // Conjugated: the pack takes GEMM and needs its distinct plan too.
         assert_eq!(
             distinct_plan_signatures(&[], &[recoupling], &[], true).unwrap(),
             PlanSignatures {
