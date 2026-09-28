@@ -288,7 +288,7 @@ mod tests {
         workspace.prepare_lhs(scratch_space(3)).unwrap();
         workspace.prepare_rhs(scratch_space(5)).unwrap();
         workspace.prepare_dst(scratch_space(7)).unwrap();
-        let expected = [&workspace.lhs, &workspace.rhs, &workspace.dst]
+        let expected: usize = [&workspace.lhs, &workspace.rhs, &workspace.dst]
             .into_iter()
             .flatten()
             .map(HostDynamicFusionScratch::retained_bytes)
