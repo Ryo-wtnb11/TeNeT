@@ -56,8 +56,8 @@ cargo run -p tenet-network --example quickstart
 
 TeNeT provides `permute`, `braid`, `contract`, `trace_pairs`, `qr_compact`,
 `svd_compact`, and other operations that an application can compose into its
-own algorithm. The [tutorial](tenet/src/tutorial.md) shows their use and the
-generated Rust documentation describes individual methods.
+own algorithm. The [tenet crate guide](tenet/README.md) maps these operations
+to methods and links to the tutorial.
 
 Supported operations depend on the symmetry provider, scalar type, and
 storage placement. Host has the broadest operation set; CUDA uses explicit
