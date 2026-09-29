@@ -15,9 +15,9 @@ impl<R> CopyCGeometryBinding<R>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    pub(super) fn new<D: TensorScalar>(
-        lhs: &StackedTensorMap<R, D>,
-        rhs: &StackedTensorMap<R, D>,
+    pub(super) fn new<D: TensorScalar, S>(
+        lhs: &StackedTensorMap<R, D, S>,
+        rhs: &StackedTensorMap<R, D, S>,
         spec: &crate::typed::ContractSpec<'_>,
         output_axes: &[usize],
         orientation: tenet_tensors::FusionContractOrientation,

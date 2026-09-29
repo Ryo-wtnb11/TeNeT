@@ -153,6 +153,28 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
         Ok(true)
     }
 
+    /// The existing unit-alpha direct core, with its physical operand order.
+    #[cfg(feature = "cuda")]
+    #[doc(hidden)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "the result keeps the core and operand orientation together"
+    )]
+    pub fn unit_direct_core_plan(
+        &self,
+    ) -> Result<Option<(Arc<FusionBlockContractPlan<C>>, bool)>, OperationError>
+    where
+        C: Copy + PartialEq + num_traits::One,
+    {
+        let (plan, swapped) = match &self.route {
+            StorageContractRoute::Core(plan) => (plan, false),
+            StorageContractRoute::SwappedCore(plan) => (plan, true),
+            StorageContractRoute::DynamicTree(_) => return Ok(None),
+        };
+        plan.require_identity_direct_replay()?;
+        Ok(Some((Arc::clone(plan), swapped)))
+    }
+
     /// Checks the B-independent exact-sign Host replay capability.
     #[doc(hidden)]
     pub fn admits_stacked_signed_direct_host_replay(&self) -> Result<bool, OperationError>
