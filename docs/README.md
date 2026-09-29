@@ -14,6 +14,7 @@ operation examples and function-level contracts.
 | Stable sector-label and storage expectations | [Sector ID compatibility](sector_id_compatibility.md) |
 | Building a complete example | [U(1) iTEBD guide](itebd_heisenberg.md) |
 | Optional path planning | [cotengra bridge](cotengra_backend.md) |
+| Revision-specific performance results | [Benchmark records](../benchmarks/README.md) |
 
 For contributors and coding agents, start with the repository's
 [AGENTS.md](../AGENTS.md) and [repository rules](../REPOSITORY_RULES.md).
