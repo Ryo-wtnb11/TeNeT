@@ -67,9 +67,9 @@ fn measure<T>(f: impl FnOnce() -> T) -> (T, Duration, usize, usize) {
     (value, elapsed, CALLS.get(), BYTES.get())
 }
 use contract_cases::{
-    assert_close, blas_contract_oracle, dense_oracle, fermion_u1, fermionic_twist_roles,
-    poisoned_destination, su2_bent, su2_reordered, u1, u1_inactive_cases, u1_reordered,
-    u1_rhs_identity, Case, Payload,
+    assert_close, blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_u1,
+    fermionic_twist_roles, fill, poisoned_destination, su2, su2_bent, su2_reordered, u1,
+    u1_inactive_cases, u1_non_self_dual, u1_reordered, u1_rhs_identity, Case, Payload,
 };
 use std::sync::Arc;
 use tenet::sector::{
@@ -178,9 +178,91 @@ fn public_host_batch_matches_reference_steps_and_applicable_physical_basis() {
 }
 
 #[test]
+fn public_host_batch_core_and_swapped_core_match_reference_steps() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    fn probes<R, D>(runtime: &Runtime, v: &GradedSpace<R>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + PhysicalFusionBasis<Scalar = f64>,
+        D: Payload,
+    {
+        for (mut case, _) in candidate_core_probes::<R, D>(runtime, v)
+            .into_iter()
+            .filter(|(case, _)| matches!(case.name, "C0" | "C2"))
+        {
+            case.dense = case.name == "C0";
+            check(case);
+        }
+    }
+    probes::<_, f64>(&runtime, &u1_non_self_dual());
+    probes::<_, tenet::typed::Complex64>(&runtime, &u1_non_self_dual());
+    probes::<_, f64>(&runtime, &su2());
+    probes::<_, tenet::typed::Complex64>(&runtime, &su2());
+    check(
+        u1_inactive_cases::<f64>(&runtime)
+            .into_iter()
+            .next()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn swapped_core_uses_rhs_member_length_and_nondefault_output_split() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let v = u1(&[(0, 2), (1, 1)]);
+    let w = u1(&[(0, 1), (1, 2)]);
+    let x = u1(&[(0, 2), (1, 3)]);
+    let lhs = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&v], [&w], fill(171)).unwrap();
+    let rhs = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&x, &x], [&v], fill(172)).unwrap();
+    let spec = ContractSpec {
+        lhs: &[0],
+        rhs: &[2],
+        codomain: &[1, 2],
+        domain: &[0],
+    };
+    let eager = lhs.contract(&rhs, &spec).unwrap();
+    let reference = rhs.compose(&lhs).unwrap();
+    assert_close(
+        eager.dense_data().unwrap(),
+        reference.dense_data().unwrap(),
+        64,
+        "swapped eager",
+    );
+    let left = StackedTensorMap::pack(&[&lhs, &lhs]).unwrap();
+    let right = StackedTensorMap::pack(&[&rhs, &rhs]).unwrap();
+    assert_ne!(
+        lhs.dense_data().unwrap().len(),
+        rhs.dense_data().unwrap().len()
+    );
+    let plan = ContractPlan::new(&left, &right, &spec).unwrap();
+    let mut workspace = plan.workspace();
+    let actual = plan.execute(&left, &right, &mut workspace).unwrap();
+    for i in 0..2 {
+        assert_eq!(actual.member(i).unwrap().codomain_rank(), 2);
+        assert_close(
+            actual.member(i).unwrap().dense_data().unwrap(),
+            reference.dense_data().unwrap(),
+            64,
+            "swapped batch",
+        );
+    }
+}
+
+#[test]
 fn binding_errors_do_not_write_destination_and_workspaces_are_independent() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let case = u1_reordered::<f64>(&runtime);
+    binding_errors_case(&runtime, u1_reordered::<f64>(&runtime));
+    let core = candidate_core_probes::<_, f64>(&runtime, &u1_non_self_dual())
+        .into_iter()
+        .find(|(case, _)| case.name == "C2")
+        .unwrap()
+        .0;
+    binding_errors_case(&runtime, core);
+}
+
+fn binding_errors_case(runtime: &Runtime, case: Case<tenet::sector::U1FusionRule, f64>) {
     let lhs = StackedTensorMap::pack(&[&case.lhs, &case.lhs]).unwrap();
     let rhs = StackedTensorMap::pack(&[&case.rhs, &case.rhs]).unwrap();
     let plan = ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap();
@@ -227,7 +309,7 @@ fn binding_errors_do_not_write_destination_and_workspaces_are_independent() {
         .is_err());
     assert_eq!(bits(&wrong_destination), wrong_before);
     let v = u1(&[(0, 1)]);
-    let wrong_member = TensorMap::<_, f64>::zeros(&runtime, [&v], [&v]).unwrap();
+    let wrong_member = TensorMap::<_, f64>::zeros(runtime, [&v], [&v]).unwrap();
     let wrong = StackedTensorMap::pack(&[wrong_member.clone(), wrong_member]).unwrap();
     assert!(plan
         .execute_into(&wrong, &rhs, &mut destination, &mut workspace)
@@ -257,22 +339,9 @@ fn binding_errors_do_not_write_destination_and_workspaces_are_independent() {
 }
 
 #[test]
-fn unsupported_core_and_copy_c_are_explicit() {
+fn unsupported_copy_c_is_explicit() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let v = u1(&[(0, 2), (1, 2)]);
-    let square = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v], [&v], 2).unwrap();
-    let lhs = StackedTensorMap::pack(&[&square]).unwrap();
-    let rhs = StackedTensorMap::pack(&[&square]).unwrap();
-    let canonical = ContractSpec {
-        lhs: &[1],
-        rhs: &[0],
-        codomain: &[0],
-        domain: &[1],
-    };
-    assert!(
-        matches!(ContractPlan::new(&lhs, &rhs, &canonical), Err(Error::Operation(error)) if matches!(*error, tenet::typed::OperationError::UnsupportedTensorContractScope { message: "Host batch contraction requires a twist-free transformed-tree route" }))
-    );
-
     let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 3).unwrap();
     let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 4).unwrap();
     let lhs = StackedTensorMap::pack(&[a]).unwrap();
@@ -311,12 +380,28 @@ fn twist_bearing_dynamic_tree_is_rejected() {
     for case in cases {
         let lhs = StackedTensorMap::pack(&[&case.lhs]).unwrap();
         let rhs = StackedTensorMap::pack(&[&case.rhs]).unwrap();
-        if matches!(ContractPlan::new(&lhs, &rhs, &case.spec()), Err(Error::Operation(error)) if matches!(*error, tenet::typed::OperationError::UnsupportedTensorContractScope { message: "Host batch contraction requires a twist-free transformed-tree route" }))
+        if matches!(ContractPlan::new(&lhs, &rhs, &case.spec()), Err(Error::Operation(error)) if matches!(*error, tenet::typed::OperationError::UnsupportedTensorContractScope { .. }))
         {
             found_twist = true;
         }
     }
     assert!(found_twist);
+}
+
+#[test]
+fn fermionic_unit_alpha_core_is_still_rejected() {
+    let runtime = Runtime::builder().build().unwrap();
+    let case = candidate_core_probes::<_, f64>(&runtime, &fermion_u1())
+        .into_iter()
+        .find(|(case, _)| case.name == "C0")
+        .unwrap()
+        .0;
+    let lhs = StackedTensorMap::pack(&[&case.lhs]).unwrap();
+    let rhs = StackedTensorMap::pack(&[&case.rhs]).unwrap();
+    assert!(matches!(ContractPlan::new(&lhs, &rhs, &case.spec()),
+        Err(Error::Operation(error)) if matches!(*error,
+            tenet::typed::OperationError::UnsupportedTensorContractScope { message }
+            if message.contains("bosonic"))));
 }
 
 #[test]
@@ -419,5 +504,56 @@ fn public_host_batch_cold_warm_measurement() {
     eprintln!(
         "eager B=1 warm median: {:?}, {} calls, {} bytes",
         eager[15].0, eager[15].1, eager[15].2
+    );
+}
+
+/// Release-only observation of the direct Core/SwappedCore stack path.
+#[test]
+#[ignore]
+fn public_host_swapped_core_release_measurement() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let case = candidate_core_probes::<_, f64>(&runtime, &su2())
+        .into_iter()
+        .find(|(case, _)| case.name == "C2")
+        .unwrap()
+        .0;
+    for count in [1, 2, 17] {
+        let ((lhs, rhs), pack_time, pack_calls, pack_bytes) = measure(|| {
+            let left = vec![&case.lhs; count];
+            let right = vec![&case.rhs; count];
+            (
+                StackedTensorMap::pack(&left).unwrap(),
+                StackedTensorMap::pack(&right).unwrap(),
+            )
+        });
+        let (plan, plan_time, plan_calls, plan_bytes) =
+            measure(|| ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap());
+        let (mut workspace, workspace_time, workspace_calls, workspace_bytes) =
+            measure(|| plan.workspace());
+        let (_, cold_time, cold_calls, cold_bytes) = measure(|| {
+            black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+        });
+        let mut samples = Vec::new();
+        for _ in 0..31 {
+            let (_, elapsed, calls, bytes) = measure(|| {
+                black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+            });
+            samples.push((elapsed, calls, bytes));
+        }
+        samples.sort_by_key(|sample| sample.0);
+        let (warm_time, warm_calls, warm_bytes) = samples[15];
+        eprintln!("SwappedCore B={count}: pack {pack_time:?}/{pack_calls}/{pack_bytes}; plan {plan_time:?}/{plan_calls}/{plan_bytes}; workspace {workspace_time:?}/{workspace_calls}/{workspace_bytes}; cold execute {cold_time:?}/{cold_calls}/{cold_bytes}; warm median {warm_time:?}/{warm_calls}/{warm_bytes}; retained {} bytes", workspace.retained_bytes());
+    }
+    let mut samples = Vec::new();
+    for _ in 0..31 {
+        let (_, elapsed, calls, bytes) = measure(|| {
+            black_box(case.host());
+        });
+        samples.push((elapsed, calls, bytes));
+    }
+    samples.sort_by_key(|sample| sample.0);
+    eprintln!(
+        "eager B=1 warm median: {:?}/{} calls/{} bytes",
+        samples[15].0, samples[15].1, samples[15].2
     );
 }

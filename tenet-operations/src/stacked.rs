@@ -254,6 +254,12 @@ where
         self.members
     }
 
+    /// Number of dense jobs staged for replay.
+    #[doc(hidden)]
+    pub fn job_count(&self) -> usize {
+        self.jobs.len()
+    }
+
     /// Host bytes this replay holds beyond the shared plan.
     pub fn retained_bytes(&self) -> usize {
         self.jobs.capacity() * std::mem::size_of::<Rank2GemmBatchJob>()

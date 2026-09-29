@@ -176,6 +176,14 @@ where
         .unwrap()
         .unwrap_or_else(|| panic!("{name}: device route declined Core"));
         assert!(!resolution.is_dynamic_tree(), "{name}");
+        assert_eq!(
+            resolution.is_swapped_core(),
+            orientation == RHS_LHS,
+            "{name}"
+        );
+        if name == "C0" {
+            assert!(resolution.admits_stacked_direct_host_replay().unwrap());
+        }
     }
 }
 
@@ -187,6 +195,82 @@ fn zero_copy_candidates_resolve_to_core_on_non_self_dual_u1() {
 #[test]
 fn zero_copy_candidates_resolve_to_core_on_su2() {
     assert_probes_resolve_to_core(&Arc::new(SU2FusionRule), &su2_leg());
+}
+
+#[test]
+fn asymmetric_owned_candidate_reaches_swapped_storage_core() {
+    let provider = Arc::new(U1FusionRule);
+    let (v, w, x) = (
+        u1_leg(),
+        SectorLeg::new(
+            [
+                (U1Irrep::new(0).sector_id(), 1),
+                (U1Irrep::new(1).sector_id(), 2),
+            ],
+            false,
+        ),
+        SectorLeg::new(
+            [
+                (U1Irrep::new(0).sector_id(), 2),
+                (U1Irrep::new(1).sector_id(), 3),
+            ],
+            false,
+        ),
+    );
+    let lhs = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([v.clone()]),
+            FusionProductSpace::new([w]),
+        ),
+    )
+    .unwrap();
+    let rhs = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        provider,
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([x.clone(), x]),
+            FusionProductSpace::new([v]),
+        ),
+    )
+    .unwrap();
+    let order = OutputAxisOrder::from_axes(&[1, 2, 0]);
+    let dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
+        &lhs,
+        &rhs,
+        &[0],
+        &[2],
+        order,
+        2,
+    )
+    .unwrap();
+    let route = Context::default()
+        .compile_storage_contract_resolution(
+            &dst,
+            FusionOperand::direct(lhs.space()),
+            FusionOperand::direct(rhs.space()),
+            TensorContractSpec::new(&[0], &[2], order),
+        )
+        .unwrap();
+    assert!(route.is_swapped_core());
+    let jobs = route
+        .stacked_direct_host_replay(1)
+        .unwrap()
+        .unwrap()
+        .0
+        .job_count();
+    assert_eq!(jobs, 2);
+    for members in [1, 2, 17] {
+        let replay = route
+            .stacked_direct_host_replay(members)
+            .unwrap()
+            .unwrap()
+            .0;
+        assert_eq!(replay.job_count(), jobs * members);
+    }
+    assert_ne!(
+        lhs.space().required_len().unwrap(),
+        rhs.space().required_len().unwrap()
+    );
 }
 
 #[test]

@@ -1,14 +1,15 @@
 //! Restricted Host binding for one ordinary contraction over owned-dense stacks.
 
 use super::*;
+use tenet_core::BraidingStyleKind;
 use tenet_tensors::{
     DynamicTreeMembersWorkspace, OutputAxisOrder, StorageContractResolution, TensorContractSpec,
 };
 
 /// Immutable Host contraction structure for owned-dense stacks.
 ///
-/// This binding admits symmetric-braiding, twist-free contractions whose
-/// canonical route transforms fusion trees. Direct composition is served by
+/// This binding admits twist-free transformed-tree routes and fully direct,
+/// unit-alpha bosonic core routes. Direct composition is served by
 /// [`ComposePlan`]. The plan fixes structure and axes, but not member count.
 pub struct ContractPlan<R, D> {
     runtime: Runtime,
@@ -26,6 +27,7 @@ pub struct ContractWorkspace<R, D> {
     binding: Arc<StorageContractResolution<f64>>,
     output: Option<StackedTensorMap<R, D>>,
     members: DynamicTreeMembersWorkspace<D>,
+    replay: Option<(StackedDirectReplay, bool)>,
 }
 
 impl<R, D> ContractPlan<R, D>
@@ -86,11 +88,17 @@ where
             .context()
             .multiplicity_free_lane::<D>()?
             .compile_storage_contract_resolution(&space, lhs_operand, rhs_operand, axes)?;
-        if !resolution.is_dynamic_tree() || resolution.requires_source_twist() {
+        let direct = !resolution.is_dynamic_tree();
+        if (direct && lhs.space.provider().braiding_style() != BraidingStyleKind::Bosonic)
+            || resolution.requires_source_twist()
+        {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "Host batch contraction requires a twist-free transformed-tree route",
+                message: "Host batch contraction requires a twist-free transformed-tree or bosonic direct core route",
             }
             .into());
+        }
+        if direct {
+            resolution.admits_stacked_direct_host_replay()?;
         }
         let member_len = space.space().required_len()?;
         Ok(Self {
@@ -111,6 +119,7 @@ where
             binding: Arc::clone(&self.resolution),
             output: None,
             members: DynamicTreeMembersWorkspace::default(),
+            replay: None,
         }
     }
 
@@ -170,10 +179,43 @@ where
         &self,
         lhs: &StackedTensorMap<R, D>,
         rhs: &StackedTensorMap<R, D>,
-        dst: &mut [D],
+        dst: &mut Vec<D>,
         members: usize,
         workspace: &mut ContractWorkspace<R, D>,
     ) -> Result<(), Error> {
+        if !self.resolution.is_dynamic_tree() {
+            if workspace
+                .replay
+                .as_ref()
+                .is_none_or(|(replay, _)| replay.members() != members)
+            {
+                workspace.replay = self.resolution.stacked_direct_host_replay(members)?;
+            }
+            let (replay, swapped) = workspace.replay.as_ref().ok_or_else(|| {
+                Error::InvalidArgument("direct Host replay is not prepared".into())
+            })?;
+            let (left, right) = if *swapped { (rhs, lhs) } else { (lhs, rhs) };
+            let left = StackedStorageView::new::<D>(
+                &left.storage,
+                left.member_len,
+                members,
+                left.member_len,
+            )?;
+            let right = StackedStorageView::new::<D>(
+                &right.storage,
+                right.member_len,
+                members,
+                right.member_len,
+            )?;
+            let mut destination =
+                StackedStorageViewMut::new::<D>(dst, self.member_len, members, self.member_len)?;
+            let mut lease = self.runtime.lease_context()?;
+            lease
+                .context()
+                .multiplicity_free_lane::<D>()?
+                .execute_stacked_direct_host(replay, &mut destination, &left, &right, true)?;
+            return Ok(());
+        }
         let mut lease = self.runtime.lease_context()?;
         lease
             .context()
@@ -259,6 +301,10 @@ impl<R, D> ContractWorkspace<R, D> {
     /// Retained payload and replay-scratch bytes, excluding Runtime resources.
     pub fn retained_bytes(&self) -> usize {
         self.members.retained_bytes()
+            + self
+                .replay
+                .as_ref()
+                .map_or(0, |(replay, _)| replay.retained_bytes())
             + self.output.as_ref().map_or(0, |output| {
                 output
                     .storage
