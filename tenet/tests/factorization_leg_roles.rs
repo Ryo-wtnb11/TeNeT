@@ -16,13 +16,14 @@ use std::sync::{Arc, Mutex};
 
 use num_complex::Complex64;
 use tenet::sector::{
-    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
-    U1FusionRule, U1Irrep, Z2Irrep,
+    product_sector, FermionParityFusionRule, MultiplicityFreeAdmissionMode, ProductFusionRuleExt,
+    SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::CoreError;
 use tenet::typed::OperationError;
 use tenet::typed::{
     Eig, Eigh, Error, GradedSpace, LeftPolar, Lq, Qr, RightPolar, Runtime, Svd, TensorMap,
+    TypedTensorSolveDispatch,
 };
 
 struct CountingAllocator;
@@ -478,6 +479,86 @@ fn leg_roles_cost_exactly_the_explicit_composition() {
         (
             permute_allocations + op_allocations,
             permute_bytes + op_bytes
+        )
+    );
+}
+
+#[test]
+fn solve_roles_cost_the_two_explicit_permutations() {
+    let _serial = serial();
+    let runtime = runtime();
+    let (v, w) = su2_legs();
+    let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v, &w], [&v, &w]).unwrap();
+    let b: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &w], [&v, &w], 77).unwrap();
+    let rows = [1, 0];
+    let cols = [3, 2];
+    let identity_rows = [0, 1];
+    let identity_cols = [2, 3];
+    let _ = a.solve(&rows, &cols, &b, &rows, &cols).unwrap();
+    let pa = a.permute(&rows, &cols).unwrap();
+    let pb = b.permute(&rows, &cols).unwrap();
+    let _ = pa
+        .solve(
+            &identity_rows,
+            &identity_cols,
+            &pb,
+            &identity_rows,
+            &identity_cols,
+        )
+        .unwrap();
+
+    let before = transforms(&runtime);
+    let (_, facade_calls, facade_bytes) = measure(|| {
+        a.solve(
+            &identity_rows,
+            &identity_cols,
+            &b,
+            &identity_rows,
+            &identity_cols,
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        transforms(&runtime),
+        before,
+        "identity roles ran a transform"
+    );
+    let (_, direct_calls, direct_bytes) = measure(|| {
+        <MultiplicityFreeAdmissionMode as TypedTensorSolveDispatch<SU2FusionRule, f64>>::solve(
+            &a, &b,
+        )
+        .unwrap()
+    });
+    assert_eq!(transforms(&runtime), before, "direct solve ran a transform");
+    assert_eq!(
+        (facade_calls, facade_bytes),
+        (direct_calls, direct_bytes),
+        "identity leg roles allocated beyond the existing solve"
+    );
+
+    let (_, fused_calls, fused_bytes) =
+        measure(|| a.solve(&rows, &cols, &b, &rows, &cols).unwrap());
+    let after_fused = transforms(&runtime);
+    let (pa, lhs_calls, lhs_bytes) = measure(|| a.permute(&rows, &cols).unwrap());
+    let (pb, rhs_calls, rhs_bytes) = measure(|| b.permute(&rows, &cols).unwrap());
+    let after_permutations = transforms(&runtime);
+    let (_, solve_calls, solve_bytes) = measure(|| {
+        pa.solve(
+            &identity_rows,
+            &identity_cols,
+            &pb,
+            &identity_rows,
+            &identity_cols,
+        )
+        .unwrap()
+    });
+    assert_eq!(transforms(&runtime), after_permutations);
+    assert_eq!(after_fused - before, after_permutations - after_fused);
+    assert_eq!(
+        (fused_calls, fused_bytes),
+        (
+            lhs_calls + rhs_calls + solve_calls,
+            lhs_bytes + rhs_bytes + solve_bytes
         )
     );
 }
