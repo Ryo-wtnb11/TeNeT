@@ -840,6 +840,7 @@ fn mixed_signed_fermionic_core_is_admitted() {
 fn check_mixed_signed_members<R, D>(
     runtime: &Runtime,
     v: &GradedSpace<R>,
+    swapped: bool,
     twist: impl Fn(&TensorMap<R, D>, &[usize]) -> TensorMap<R, D> + Copy,
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -849,12 +850,16 @@ fn check_mixed_signed_members<R, D>(
     let lhs = TensorMap::<R, D>::from_subblock_fn(runtime, [v], [&dual], fill(201)).unwrap();
     let rhs = TensorMap::<R, D>::from_subblock_fn(runtime, [&dual], [v], fill(202)).unwrap();
     let base = Case {
-        name: "mixed signed direct",
-        lhs,
-        rhs,
-        lhs_axes: vec![1],
-        rhs_axes: vec![0],
-        output_axes: vec![0, 1],
+        name: if swapped {
+            "mixed signed swapped"
+        } else {
+            "mixed signed direct"
+        },
+        lhs: if swapped { rhs.clone() } else { lhs.clone() },
+        rhs: if swapped { lhs } else { rhs },
+        lhs_axes: vec![usize::from(!swapped)],
+        rhs_axes: vec![usize::from(swapped)],
+        output_axes: if swapped { vec![1, 0] } else { vec![0, 1] },
         dense: false,
     };
     let first_lhs = StackedTensorMap::pack(&[&base.lhs]).unwrap();
@@ -887,7 +892,12 @@ fn check_mixed_signed_members<R, D>(
             StackedTensorMap::pack(&[&eager[0]]).unwrap().signature()
         );
         for (i, member) in members.iter().enumerate() {
-            let oracle = fermionic_blas_contract_oracle_partitioned(member, TwistRole::B, 1, twist);
+            let oracle = fermionic_blas_contract_oracle_partitioned(
+                member,
+                if swapped { TwistRole::A } else { TwistRole::B },
+                1,
+                twist,
+            );
             assert_close(
                 result.member(i).unwrap().dense_data().unwrap(),
                 oracle.dense_data().unwrap(),
@@ -935,15 +945,18 @@ fn mixed_signed_fermionic_members_match_literal_tensorkit_steps() {
     macro_rules! case {
         ($rule:ty, $dtype:ty, $space:expr) => {{
             let space = $space;
-            check_mixed_signed_members(
-                &runtime,
-                &space,
-                |tensor: &TensorMap<$rule, $dtype>, legs| {
-                    tensor
-                        .twist(legs, tenet::typed::Direction::Forward)
-                        .unwrap()
-                },
-            );
+            for swapped in [false, true] {
+                check_mixed_signed_members(
+                    &runtime,
+                    &space,
+                    swapped,
+                    |tensor: &TensorMap<$rule, $dtype>, legs| {
+                        tensor
+                            .twist(legs, tenet::typed::Direction::Forward)
+                            .unwrap()
+                    },
+                );
+            }
         }};
     }
     case!(contract_cases::FermionU1, f64, fermion_u1());

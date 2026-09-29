@@ -12,8 +12,8 @@ use copy_c::{CopyCPlan, CopyCWorkspace};
 /// Immutable Host contraction structure for owned-dense stacks.
 ///
 /// This binding admits twist-free transformed-tree routes, fully direct
-/// unit-alpha core routes, and CopyC when its temporary is such a
-/// direct core followed by one completed output transform.
+/// Core/SwappedCore routes with exact +1/-1 coefficients, and CopyC when its
+/// temporary is a unit-alpha direct core followed by one output transform.
 /// Direct composition is served by [`ComposePlan`]. The plan fixes structure
 /// and axes, but not member count.
 pub struct ContractPlan<R, D> {
@@ -115,14 +115,10 @@ where
             },
         )?;
         let direct = !resolution.is_dynamic_tree();
-        if copy_c.is_some()
-            && (!direct
-                || resolution
-                    .admits_stacked_signed_direct_host_replay()
-                    .is_err())
+        if copy_c.is_some() && (!direct || resolution.admits_stacked_direct_host_replay().is_err())
         {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "Host copyC batch requires an exact-sign direct temporary",
+                message: "Host copyC batch requires a unit-alpha direct temporary",
             }
             .into());
         }
@@ -569,9 +565,11 @@ mod fermionic_unit_tests {
             [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 2)],
         )
         .unwrap();
-        check_signed_classes(&runtime, &u1, 1, 2);
-        check_signed_classes(&runtime, &su2, 2, 1);
-        check_signed_classes(&runtime, &odd_only, 0, 1);
+        for swapped in [false, true] {
+            check_signed_classes(&runtime, &u1, 1, 2, swapped);
+            check_signed_classes(&runtime, &su2, 2, 1, swapped);
+            check_signed_classes(&runtime, &odd_only, 0, 1, swapped);
+        }
     }
 
     fn check_signed_classes<R>(
@@ -579,19 +577,24 @@ mod fermionic_unit_tests {
         v: &GradedSpace<R>,
         positive: usize,
         negative: usize,
+        swapped_expected: bool,
     ) where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     {
         let dual = v.try_dual().unwrap();
-        let lhs = TensorMap::<_, f64>::from_subblock_fn(runtime, [v], [&dual], |_, _| 1.0).unwrap();
-        let rhs = TensorMap::<_, f64>::from_subblock_fn(runtime, [&dual], [v], |_, _| 1.0).unwrap();
+        let a = TensorMap::<_, f64>::from_subblock_fn(runtime, [v], [&dual], |_, _| 1.0).unwrap();
+        let b = TensorMap::<_, f64>::from_subblock_fn(runtime, [&dual], [v], |_, _| 1.0).unwrap();
+        let (lhs, rhs) = if swapped_expected { (b, a) } else { (a, b) };
         let left = StackedTensorMap::pack(&[&lhs]).unwrap();
         let right = StackedTensorMap::pack(&[&rhs]).unwrap();
+        let lhs_axes = [usize::from(!swapped_expected)];
+        let rhs_axes = [usize::from(swapped_expected)];
+        let output = if swapped_expected { [1, 0] } else { [0, 1] };
         let spec = super::super::super::ContractSpec {
-            lhs: &[1],
-            rhs: &[0],
-            codomain: &[0],
-            domain: &[1],
+            lhs: &lhs_axes,
+            rhs: &rhs_axes,
+            codomain: &output[..1],
+            domain: &output[1..],
         };
         let plan = ContractPlan::new(&left, &right, &spec).unwrap();
         assert!(plan.copy_c.is_none());
@@ -610,7 +613,7 @@ mod fermionic_unit_tests {
                 .stacked_signed_direct_host_replay(members)
                 .unwrap()
                 .unwrap();
-            assert!(!swapped);
+            assert_eq!(swapped, swapped_expected);
             let [dst_len, lhs_len, rhs_len] = replay.member_lens();
             let mut dst = vec![f64::NAN; dst_len * members];
             let lhs = vec![1.0; lhs_len * members];
