@@ -43,7 +43,7 @@ pub use contract::{
     tensorcompose_owned_checked_generic_in_context,
     tensorcontract_fusion_dyn_prelowered_direct_on_storage, tensorcontract_owned_checked_generic,
     tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
-    StorageContractResolution,
+    DynamicTreeMembersWorkspace, StorageContractResolution,
 };
 #[cfg(test)]
 pub(crate) use contract::{

@@ -305,6 +305,8 @@ const TYPED: &[&str] = &[
     "MemberFault",
     "ComposePlan",
     "ComposeWorkspace",
+    "ContractPlan",
+    "ContractWorkspace",
     "MultiplicityIndex",
     "NON_SYMMETRIC_CONTRACTION_UNSUPPORTED",
     "NetworkDegeneracyRestriction",

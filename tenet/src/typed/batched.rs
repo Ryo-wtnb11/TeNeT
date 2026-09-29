@@ -31,6 +31,10 @@ use crate::error::Error;
 use crate::tensor_core::internal_layout_error;
 use crate::RuntimeIdentity;
 
+#[path = "contract_batch.rs"]
+mod contract_batch;
+pub use contract_batch::{ContractPlan, ContractWorkspace};
+
 /// Content identity of a tensor's structure, placement and Runtime.
 ///
 /// Two signatures are equal exactly when the fusion-rule identity, the hom

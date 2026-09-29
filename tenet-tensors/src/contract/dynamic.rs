@@ -70,12 +70,10 @@ pub(crate) fn profiled_artifact_compile_phases() -> (bool, bool, bool) {
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
-#[allow(dead_code)] // The public TensorMap binder is the next leaf.
 mod member;
-#[cfg(test)]
-pub(crate) use member::{
-    execute_dynamic_tree_execution_artifact_members_host, DynamicTreeMembersWorkspace,
-};
+pub(crate) use member::execute_dynamic_tree_execution_artifact_members_host;
+#[doc(hidden)]
+pub use member::DynamicTreeMembersWorkspace;
 
 #[derive(Clone, Copy)]
 struct CoreSource<'a, D> {

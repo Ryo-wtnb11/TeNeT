@@ -13,6 +13,8 @@ mod dynamic;
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub use dynamic::cuda::{execute_storage_contract_resolution_on_cuda, CudaContractScratch};
+#[doc(hidden)]
+pub use dynamic::DynamicTreeMembersWorkspace;
 #[cfg(test)]
 pub(crate) use dynamic::{
     execute_dynamic_tree_execution_artifact_for_test,

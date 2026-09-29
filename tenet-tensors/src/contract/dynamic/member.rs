@@ -8,8 +8,8 @@ use tenet_operations::{
 };
 
 /// Mutable Host payload and replay scratch for one artifact at varying B.
-#[derive(Default)]
-pub(crate) struct DynamicTreeMembersWorkspace<D, C = f64> {
+#[doc(hidden)]
+pub struct DynamicTreeMembersWorkspace<D, C = f64> {
     lhs: Vec<D>,
     rhs: Vec<D>,
     dst: Vec<D>,
@@ -21,8 +21,24 @@ pub(crate) struct DynamicTreeMembersWorkspace<D, C = f64> {
     core_replay_builds: usize,
 }
 
+impl<D, C> Default for DynamicTreeMembersWorkspace<D, C> {
+    fn default() -> Self {
+        Self {
+            lhs: Vec::new(),
+            rhs: Vec::new(),
+            dst: Vec::new(),
+            lhs_transform: TreeTransformWorkspace::default(),
+            rhs_transform: TreeTransformWorkspace::default(),
+            output_transform: TreeTransformWorkspace::default(),
+            core: None,
+            #[cfg(test)]
+            core_replay_builds: 0,
+        }
+    }
+}
+
 impl<D, C: Copy + PartialEq + num_traits::One> DynamicTreeMembersWorkspace<D, C> {
-    pub(crate) fn retained_bytes(&self) -> usize {
+    pub fn retained_bytes(&self) -> usize {
         (self.lhs.capacity() + self.rhs.capacity() + self.dst.capacity())
             .saturating_mul(std::mem::size_of::<D>())
             + self
