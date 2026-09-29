@@ -6,10 +6,15 @@ use tenet_tensors::{
     DynamicTreeMembersWorkspace, OutputAxisOrder, StorageContractResolution, TensorContractSpec,
 };
 
+#[path = "contract_batch_copy_c.rs"]
+mod copy_c;
+use copy_c::{CopyCPlan, CopyCWorkspace};
+
 /// Immutable Host contraction structure for owned-dense stacks.
 ///
-/// This binding admits twist-free transformed-tree routes and fully direct,
-/// unit-alpha bosonic core routes. Direct composition is served by
+/// This binding admits twist-free transformed-tree routes, fully direct
+/// unit-alpha bosonic core routes, and CopyC when its temporary is such a
+/// direct core followed by one completed output transform. Direct composition is served by
 /// [`ComposePlan`]. The plan fixes structure and axes, but not member count.
 pub struct ContractPlan<R, D> {
     runtime: Runtime,
@@ -18,6 +23,7 @@ pub struct ContractPlan<R, D> {
     output_signature: StructureSignature,
     space: BoundDynamicFusionMapSpace<R>,
     resolution: Arc<StorageContractResolution<f64>>,
+    copy_c: Option<CopyCPlan<R>>,
     member_len: usize,
     _payload: PhantomData<D>,
 }
@@ -28,6 +34,7 @@ pub struct ContractWorkspace<R, D> {
     output: Option<StackedTensorMap<R, D>>,
     members: DynamicTreeMembersWorkspace<D>,
     replay: Option<(StackedDirectReplay, bool)>,
+    copy_c: Option<CopyCWorkspace<D>>,
 }
 
 impl<R, D> ContractPlan<R, D>
@@ -66,7 +73,7 @@ where
         )?;
         let lhs_operand = FusionOperand::direct(lhs.space.space());
         let rhs_operand = FusionOperand::direct(rhs.space.space());
-        if tenet_tensors::zero_copy_contract_order_for_output_permute(
+        let copy_c_order = tenet_tensors::zero_copy_contract_order_for_output_permute(
             space.provider(),
             space.space(),
             lhs_operand,
@@ -74,21 +81,50 @@ where
             spec.lhs,
             spec.rhs,
             &output_axes,
-        )
-        .is_some()
+        );
+        let copy_c = copy_c_order
+            .map(|orientation| {
+                copy_c::CopyCGeometryBinding::new(lhs, rhs, spec, &output_axes, orientation)
+            })
+            .transpose()?;
+        let (contract_space, first, second, first_axes, second_axes) =
+            if let Some(binding) = &copy_c {
+                let (first, second, first_axes, second_axes) =
+                    binding.geometry.oriented(lhs, rhs, spec.lhs, spec.rhs);
+                (
+                    binding.temporary_space.clone(),
+                    first,
+                    second,
+                    first_axes,
+                    second_axes,
+                )
+            } else {
+                (space.clone(), lhs, rhs, spec.lhs, spec.rhs)
+            };
+        let axes = TensorContractSpec::new(first_axes, second_axes, OutputAxisOrder::identity());
+        let mut lease = lhs.runtime.lease_context()?;
+        let lane = lease.context().multiplicity_free_lane::<D>()?;
+        let resolution = lane.compile_storage_contract_resolution(
+            &contract_space,
+            FusionOperand::direct(first.space.space()),
+            FusionOperand::direct(second.space.space()),
+            if copy_c.is_some() {
+                axes
+            } else {
+                TensorContractSpec::new(spec.lhs, spec.rhs, order)
+            },
+        )?;
+        let direct = !resolution.is_dynamic_tree();
+        if copy_c.is_some()
+            && (!direct
+                || lhs.space.provider().braiding_style() != BraidingStyleKind::Bosonic
+                || resolution.admits_stacked_direct_host_replay().is_err())
         {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "Host batch contraction does not admit eager copyC output",
+                message: "Host copyC batch requires a bosonic unit-alpha direct temporary",
             }
             .into());
         }
-        let axes = TensorContractSpec::new(spec.lhs, spec.rhs, order);
-        let mut lease = lhs.runtime.lease_context()?;
-        let resolution = lease
-            .context()
-            .multiplicity_free_lane::<D>()?
-            .compile_storage_contract_resolution(&space, lhs_operand, rhs_operand, axes)?;
-        let direct = !resolution.is_dynamic_tree();
         if (direct && lhs.space.provider().braiding_style() != BraidingStyleKind::Bosonic)
             || resolution.requires_source_twist()
         {
@@ -100,6 +136,21 @@ where
         if direct {
             resolution.admits_stacked_direct_host_replay()?;
         }
+        let copy_c = if let Some(binding) = copy_c {
+            let transform = lane.tree_context_mut().compile_tree_pair_structure(
+                space.provider(),
+                &binding.geometry.operation,
+                space.space().structure(),
+                binding.temporary_space.space().structure(),
+            )?;
+            Some(CopyCPlan {
+                temporary_space: binding.temporary_space,
+                transform,
+                input_swapped: binding.geometry.is_swapped(),
+            })
+        } else {
+            None
+        };
         let member_len = space.space().required_len()?;
         Ok(Self {
             runtime: lhs.runtime.clone(),
@@ -108,6 +159,7 @@ where
             output_signature: StructureSignature::of_space(&space, Placement::Host, &lhs.runtime),
             space,
             resolution: Arc::new(resolution),
+            copy_c,
             member_len,
             _payload: PhantomData,
         })
@@ -120,6 +172,7 @@ where
             output: None,
             members: DynamicTreeMembersWorkspace::default(),
             replay: None,
+            copy_c: self.copy_c.as_ref().map(|_| CopyCWorkspace::default()),
         }
     }
 
@@ -183,6 +236,9 @@ where
         members: usize,
         workspace: &mut ContractWorkspace<R, D>,
     ) -> Result<(), Error> {
+        if let Some(copy_c) = &self.copy_c {
+            return copy_c.run(self, lhs, rhs, dst, members, workspace);
+        }
         if !self.resolution.is_dynamic_tree() {
             if workspace
                 .replay
@@ -301,6 +357,10 @@ impl<R, D> ContractWorkspace<R, D> {
     /// Retained payload and replay-scratch bytes, excluding Runtime resources.
     pub fn retained_bytes(&self) -> usize {
         self.members.retained_bytes()
+            + self
+                .copy_c
+                .as_ref()
+                .map_or(0, CopyCWorkspace::retained_bytes)
             + self
                 .replay
                 .as_ref()

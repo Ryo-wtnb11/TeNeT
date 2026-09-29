@@ -125,6 +125,13 @@ where
                 assert_close(&physical.data, &expected, case.terms(), case.name);
             }
             let eager = member_case.host();
+            assert_eq!(member.codomain_rank(), eager.codomain_rank());
+            assert_eq!(
+                result.signature(),
+                StackedTensorMap::pack(&[&eager]).unwrap().signature(),
+                "{} member {i}: full output structure differs",
+                case.name,
+            );
             assert_close(
                 member.dense_data().unwrap(),
                 eager.dense_data().unwrap(),
@@ -260,6 +267,21 @@ fn binding_errors_do_not_write_destination_and_workspaces_are_independent() {
         .unwrap()
         .0;
     binding_errors_case(&runtime, core);
+    let v = u1(&[(0, 2), (1, 2)]);
+    let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 3).unwrap();
+    let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 4).unwrap();
+    binding_errors_case(
+        &runtime,
+        Case {
+            name: "copyC bindings",
+            lhs: a,
+            rhs: b,
+            lhs_axes: vec![2, 3],
+            rhs_axes: vec![0, 1],
+            output_axes: vec![1, 0, 2, 3],
+            dense: false,
+        },
+    );
 }
 
 fn binding_errors_case(runtime: &Runtime, case: Case<tenet::sector::U1FusionRule, f64>) {
@@ -339,23 +361,178 @@ fn binding_errors_case(runtime: &Runtime, case: Case<tenet::sector::U1FusionRule
 }
 
 #[test]
-fn unsupported_copy_c_is_explicit() {
+fn public_copy_c_matches_eager() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let v = u1(&[(0, 2), (1, 2)]);
     let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 3).unwrap();
     let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 4).unwrap();
-    let lhs = StackedTensorMap::pack(&[a]).unwrap();
-    let rhs = StackedTensorMap::pack(&[b]).unwrap();
+    let lhs = StackedTensorMap::pack(&[&a]).unwrap();
+    let rhs = StackedTensorMap::pack(&[&b]).unwrap();
+    for split in [1, 2, 3] {
+        let output = [1, 0, 2, 3];
+        let (codomain, domain) = output.split_at(split);
+        let spec = ContractSpec {
+            lhs: &[2, 3],
+            rhs: &[0, 1],
+            codomain,
+            domain,
+        };
+        let expected = a.contract(&b, &spec).unwrap();
+        let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
+        let result = plan
+            .execute(&lhs, &rhs, &mut plan.workspace())
+            .unwrap()
+            .member(0)
+            .unwrap();
+        assert_eq!(result.codomain_rank(), split);
+        assert_eq!(
+            StackedTensorMap::pack(&[&expected]).unwrap().signature(),
+            StackedTensorMap::pack(&[&result]).unwrap().signature(),
+        );
+        assert_close(
+            result.dense_data().unwrap(),
+            expected.dense_data().unwrap(),
+            16,
+            "copyC",
+        );
+    }
+}
+
+#[test]
+fn public_copy_c_both_orientations_and_dtypes() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    fn cases<R, D>(runtime: &Runtime, v: &GradedSpace<R>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + PhysicalFusionBasis<Scalar = f64>,
+        D: Payload,
+    {
+        for (mut case, _) in candidate_core_probes::<R, D>(runtime, v) {
+            match case.name {
+                "C1" => {
+                    case.name = "C1p";
+                    case.output_axes = vec![1, 0, 3, 2];
+                }
+                "C2" => {
+                    case.name = "C2p";
+                    case.output_axes = vec![3, 2, 1, 0];
+                }
+                _ => continue,
+            }
+            check(case);
+        }
+    }
+    cases::<_, f64>(&runtime, &u1_non_self_dual());
+    cases::<_, tenet::typed::Complex64>(&runtime, &u1_non_self_dual());
+    cases::<_, f64>(&runtime, &su2());
+    cases::<_, tenet::typed::Complex64>(&runtime, &su2());
+}
+
+#[test]
+fn public_copy_c_small_output_winners() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    fn cases<R, D>(runtime: &Runtime, v: &GradedSpace<R>, c: &GradedSpace<R>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + PhysicalFusionBasis<Scalar = f64>,
+        D: Payload,
+    {
+        let tensor = |codomain: [&GradedSpace<R>; 2], domain: [&GradedSpace<R>; 2], salt| {
+            TensorMap::<R, D>::from_subblock_fn(runtime, codomain, domain, fill(salt)).unwrap()
+        };
+        check(Case {
+            name: "S1",
+            lhs: tensor([c, c], [v, v], 101),
+            rhs: tensor([v, v], [c, c], 102),
+            lhs_axes: vec![3, 2],
+            rhs_axes: vec![1, 0],
+            output_axes: vec![2, 3, 0, 1],
+            dense: false,
+        });
+        check(Case {
+            name: "S2",
+            lhs: tensor([v, v], [c, c], 103),
+            rhs: tensor([c, c], [v, v], 104),
+            lhs_axes: vec![0, 1],
+            rhs_axes: vec![2, 3],
+            output_axes: vec![3, 2, 1, 0],
+            dense: false,
+        });
+    }
+    let v = u1(&[(-1, 8), (0, 8), (1, 8)]);
+    let c = u1(&[(0, 2), (1, 1)]);
+    cases::<_, f64>(&runtime, &v, &c);
+    cases::<_, tenet::typed::Complex64>(&runtime, &v, &c);
+    let c_su2 = GradedSpace::try_new(
+        Arc::new(tenet::sector::SU2FusionRule),
+        [(tenet::sector::SU2Irrep::from_twice_spin(0), 1)],
+    )
+    .unwrap();
+    cases::<_, f64>(&runtime, &su2(), &c_su2);
+    cases::<_, tenet::typed::Complex64>(&runtime, &su2(), &c_su2);
+}
+
+/// Run with `cargo test --release --test typed_contract_batch -- --ignored --nocapture`.
+/// Timings and caller-thread allocations are measurements, not pass/fail gates.
+#[test]
+#[ignore]
+fn public_copy_c_batch_measurement() {
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .gemm_backend(tenet::typed::LinalgBackend::Faer)
+        .linalg_backend(tenet::typed::LinalgBackend::Faer)
+        .build()
+        .unwrap();
+    let v = u1(&[(0, 2), (1, 2)]);
+    let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 3).unwrap();
+    let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 4).unwrap();
     let spec = ContractSpec {
         lhs: &[2, 3],
         rhs: &[0, 1],
         codomain: &[1, 0],
         domain: &[2, 3],
     };
-    let result = ContractPlan::new(&lhs, &rhs, &spec);
-    assert!(
-        matches!(result, Err(Error::Operation(error)) if matches!(*error, tenet::typed::OperationError::UnsupportedTensorContractScope { message: "Host batch contraction does not admit eager copyC output" }))
+    let (_, eager_cold, calls, bytes) = measure(|| black_box(a.contract(&b, &spec).unwrap()));
+    eprintln!("copyC eager B=1 cold: {eager_cold:?}, {calls} calls, {bytes} bytes");
+    a.contract(&b, &spec).unwrap();
+    let (_, eager_warm, eager_warm_calls, eager_warm_bytes) =
+        measure(|| black_box(a.contract(&b, &spec).unwrap()));
+    eprintln!(
+        "copyC eager B=1 warm: {eager_warm:?}, {eager_warm_calls} calls, {eager_warm_bytes} bytes"
     );
+    for count in [1, 2, 17] {
+        let (_, eager_batch_time, eager_batch_calls, eager_batch_bytes) = measure(|| {
+            let results: Vec<_> = (0..count).map(|_| a.contract(&b, &spec).unwrap()).collect();
+            black_box(results)
+        });
+        let mut eager_destinations: Vec<_> =
+            (0..count).map(|_| a.contract(&b, &spec).unwrap()).collect();
+        let (_, eager_into_time, eager_into_calls, eager_into_bytes) = measure(|| {
+            for dst in &mut eager_destinations {
+                a.contract_into(&b, &spec, dst, 1.0, 0.0).unwrap();
+            }
+        });
+        let left = vec![&a; count];
+        let right = vec![&b; count];
+        let ((lhs, rhs), pack_time, pack_calls, pack_bytes) = measure(|| {
+            (
+                StackedTensorMap::pack(&left).unwrap(),
+                StackedTensorMap::pack(&right).unwrap(),
+            )
+        });
+        let (plan, plan_time, plan_calls, plan_bytes) =
+            measure(|| ContractPlan::new(&lhs, &rhs, &spec).unwrap());
+        let (mut workspace, ws_time, ws_calls, ws_bytes) = measure(|| plan.workspace());
+        let (_, cold_time, cold_calls, cold_bytes) =
+            measure(|| black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap()));
+        let (_, warm_time, warm_calls, warm_bytes) =
+            measure(|| black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap()));
+        eprintln!("copyC B={count}: eager returned {eager_batch_time:?}/{eager_batch_calls}/{eager_batch_bytes}, eager into {eager_into_time:?}/{eager_into_calls}/{eager_into_bytes}, pack {pack_time:?}/{pack_calls}/{pack_bytes}, plan {plan_time:?}/{plan_calls}/{plan_bytes}, workspace {ws_time:?}/{ws_calls}/{ws_bytes}, cold {cold_time:?}/{cold_calls}/{cold_bytes}, warm {warm_time:?}/{warm_calls}/{warm_bytes}, retained {} bytes", workspace.retained_bytes());
+    }
 }
 
 #[test]

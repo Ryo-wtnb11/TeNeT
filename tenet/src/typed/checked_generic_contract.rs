@@ -313,6 +313,63 @@ pub(super) struct CopyC<'a, R, D> {
     pub(super) operation: TreeTransformOperation,
 }
 
+/// The only CopyC decision shared by owned stacks and ordinary tensors.
+/// Axis pairing stays in the caller's original order after orientation.
+pub(super) struct CopyCGeometry {
+    orientation: tenet_tensors::FusionContractOrientation,
+    pub(super) operation: TreeTransformOperation,
+}
+
+impl CopyCGeometry {
+    pub(super) fn is_swapped(&self) -> bool {
+        self.orientation == tenet_tensors::FusionContractOrientation::RhsLhs
+    }
+    pub(super) fn new(
+        orientation: tenet_tensors::FusionContractOrientation,
+        lhs_rank: usize,
+        rhs_rank: usize,
+        lhs_contract: &[usize],
+        rhs_contract: &[usize],
+        output_axes: &[usize],
+        codomain_rank: usize,
+    ) -> Self {
+        let lhs_open = lhs_rank - lhs_contract.len();
+        let rhs_open = rhs_rank - rhs_contract.len();
+        let (lhs_offset, rhs_offset) = match orientation {
+            tenet_tensors::FusionContractOrientation::LhsRhs => (0, 0),
+            tenet_tensors::FusionContractOrientation::RhsLhs => (rhs_open, lhs_open),
+        };
+        let position = |axis: usize| {
+            if axis < lhs_open {
+                axis + lhs_offset
+            } else {
+                axis - rhs_offset
+            }
+        };
+        let (codomain, domain) = output_axes.split_at(codomain_rank);
+        Self {
+            orientation,
+            operation: TreeTransformOperation::permute(
+                codomain.iter().copied().map(position),
+                domain.iter().copied().map(position),
+            ),
+        }
+    }
+
+    pub(super) fn oriented<'a, T>(
+        &self,
+        lhs: &'a T,
+        rhs: &'a T,
+        lhs_axes: &'a [usize],
+        rhs_axes: &'a [usize],
+    ) -> (&'a T, &'a T, &'a [usize], &'a [usize]) {
+        match self.orientation {
+            tenet_tensors::FusionContractOrientation::LhsRhs => (lhs, rhs, lhs_axes, rhs_axes),
+            tenet_tensors::FusionContractOrientation::RhsLhs => (rhs, lhs, rhs_axes, lhs_axes),
+        }
+    }
+}
+
 impl<'a, R, D> CopyC<'a, R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -340,16 +397,17 @@ where
         ) else {
             return Ok(None);
         };
-        let lhs_open = lhs.rank() - lhs_axes.len();
-        let rhs_open = rhs.rank() - rhs_axes.len();
-        let (first, second, first_axes, second_axes, lhs_offset, rhs_offset) = match order {
-            tenet_tensors::FusionContractOrientation::LhsRhs => {
-                (lhs, rhs, lhs_axes, rhs_axes, 0, 0)
-            }
-            tenet_tensors::FusionContractOrientation::RhsLhs => {
-                (rhs, lhs, rhs_axes, lhs_axes, rhs_open, lhs_open)
-            }
-        };
+        let geometry = CopyCGeometry::new(
+            order,
+            lhs.rank(),
+            rhs.rank(),
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            spec.codomain.len(),
+        );
+        let (first, second, first_axes, second_axes) =
+            geometry.oriented(lhs, rhs, lhs_axes, rhs_axes);
         let temporary_space = contract_destination(
             first,
             second,
@@ -359,15 +417,6 @@ where
             None,
         )?;
         let temporary_len = temporary_space.space().required_len()?;
-        // The temporary lists the rhs open axes first under `RhsLhs`.
-        let position = |axis: usize| {
-            if axis < lhs_open {
-                axis + lhs_offset
-            } else {
-                axis - rhs_offset
-            }
-        };
-        let (codomain, domain) = output_axes.split_at(spec.codomain.len());
         Ok(Some(Self {
             first,
             second,
@@ -375,10 +424,7 @@ where
             second_axes,
             temporary_space,
             temporary_len,
-            operation: TreeTransformOperation::permute(
-                codomain.iter().copied().map(position),
-                domain.iter().copied().map(position),
-            ),
+            operation: geometry.operation,
         }))
     }
 
