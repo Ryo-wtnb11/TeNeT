@@ -1,5 +1,6 @@
 #![allow(deprecated)]
-//! Device gates of `PreparedCompose` (#1498, leaf L2 of #1287).
+//! Device gates of `ComposePlan`/`ComposeWorkspace` (#1639) and the deprecated
+//! `PreparedCompose` forwarding wrapper (#1498).
 //!
 //! Its own binary, with every test serialized, because `cuda_transfer_stats`
 //! and the plan-cache statistics are process- and context-wide. Run with

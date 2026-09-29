@@ -194,7 +194,7 @@ impl StructureSignature {
 /// payload length. There is no padding and no member leg; the member axis
 /// exists only as this stride.
 ///
-/// A stack is the operand of a prepared batched handle, not a tensor. It
+/// A stack is an operand of a batched operation, not a tensor. It
 /// deliberately does not implement `TensorStorage`, whose `len` would be
 /// `B * L` and would let an ordinary per-tensor kernel run on member 0 only:
 ///
@@ -327,8 +327,8 @@ where
     /// [`Error::BatchSignatureMismatch`] naming that member and the first
     /// differing field. An empty batch is an [`Error::InvalidArgument`].
     ///
-    /// Lazy adjoints are not packed: a handle consumes adjoint operands
-    /// through its orientation flag (#1287 leaf L8) instead.
+    /// Lazy adjoints are not packed. Materialize one before passing it to the
+    /// identity-oriented compose plan; oriented batching is outside this API.
     pub fn pack<T: AsRef<TensorMap<R, D>>>(members: &[T]) -> Result<Self, Error> {
         let first = members
             .first()
@@ -495,6 +495,34 @@ where
 /// [`Self::workspace`] creates the B-dependent state. On CUDA each workspace
 /// owns and releases its exact ledger claim, even if this plan is dropped
 /// first. Runtime-level zero templates remain shared context effects.
+///
+/// ```
+/// use std::sync::Arc;
+/// use tenet::sector::{U1FusionRule, U1Irrep};
+/// use tenet::typed::{ComposePlan, Error, GradedSpace, Runtime, StackedTensorMap, TensorMap};
+///
+/// # fn main() -> Result<(), Error> {
+/// let runtime = Runtime::builder().build()?;
+/// let rule = Arc::new(U1FusionRule);
+/// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)])?;
+/// let w = GradedSpace::try_new(rule, [(U1Irrep::new(0), 3)])?;
+/// let lhs = StackedTensorMap::pack(&[TensorMap::<_, f64>::zeros(
+///     &runtime, [&v, &v], [&w],
+/// )?])?;
+/// let rhs = StackedTensorMap::pack(&[TensorMap::<_, f64>::zeros(
+///     &runtime, [&w], [&v],
+/// )?])?;
+/// let mut destination = StackedTensorMap::pack(&[TensorMap::<_, f64>::zeros(
+///     &runtime, [&v, &v], [&v],
+/// )?])?;
+///
+/// let plan = ComposePlan::new(&lhs, &rhs)?;
+/// let mut workspace = plan.workspace()?;
+/// let _output = plan.execute(&lhs, &rhs, &mut workspace)?;
+/// plan.execute_into(&lhs, &rhs, &mut destination, &mut workspace)?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct ComposePlan<R, D, S = Vec<D>> {
     runtime: Runtime,
     lhs: StructureSignature,
@@ -525,7 +553,7 @@ struct DeviceComposeState {
     members: usize,
     /// Each inactive destination layout with a trailing member axis.
     zero_regions: Vec<tenet_dense::CudaRegion>,
-    /// Plan entries this handle holds in the device context's ledger.
+    /// Plan entries this workspace holds in the device context's ledger.
     reserved_plan_entries: usize,
 }
 
@@ -1007,6 +1035,29 @@ impl<R, D, S> Drop for ComposeWorkspace<R, D, S> {
 }
 
 /// Compatibility wrapper for the former combined compose handle.
+///
+/// ```
+/// #![allow(deprecated)]
+/// use std::sync::Arc;
+/// use tenet::sector::{U1FusionRule, U1Irrep};
+/// use tenet::typed::{Error, GradedSpace, PreparedCompose, Runtime, StackedTensorMap, TensorMap};
+///
+/// # fn main() -> Result<(), Error> {
+/// let runtime = Runtime::builder().build()?;
+/// let rule = Arc::new(U1FusionRule);
+/// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)])?;
+/// let w = GradedSpace::try_new(rule, [(U1Irrep::new(0), 3)])?;
+/// let lhs = StackedTensorMap::pack(&[TensorMap::<_, f64>::zeros(
+///     &runtime, [&v, &v], [&w],
+/// )?])?;
+/// let rhs = StackedTensorMap::pack(&[TensorMap::<_, f64>::zeros(
+///     &runtime, [&w], [&v],
+/// )?])?;
+/// let mut prepared = PreparedCompose::new(&lhs, &rhs)?;
+/// let _output = prepared.execute(&lhs, &rhs)?;
+/// # Ok(())
+/// # }
+/// ```
 #[deprecated(note = "use ComposePlan with a caller-owned ComposeWorkspace")]
 pub struct PreparedCompose<R, D, S = Vec<D>> {
     plan: ComposePlan<R, D, S>,

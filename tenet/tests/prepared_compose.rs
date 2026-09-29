@@ -1,5 +1,6 @@
 #![allow(deprecated)]
-//! Host gates of `PreparedCompose` (#1498, leaf L2 of #1287).
+//! Host gates of `ComposePlan`/`ComposeWorkspace` (#1639) and the deprecated
+//! `PreparedCompose` forwarding wrapper (#1498).
 //!
 //! Per member the handle must equal eager `compose` of the same placement,
 //! and both must equal the tree-keyed `mul!` oracle of `prepared/mod.rs`,
@@ -76,14 +77,25 @@ fn one_plan_supports_concurrent_independent_workspaces() {
     let rhs = StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&w], &[&v], 2, 31)).unwrap();
     let plan = std::sync::Arc::new(ComposePlan::new(&lhs, &rhs).unwrap());
     std::thread::scope(|scope| {
+        let mut threads = Vec::new();
         for _ in 0..2 {
             let plan = std::sync::Arc::clone(&plan);
             let (lhs, rhs) = (&lhs, &rhs);
-            scope.spawn(move || {
+            threads.push(scope.spawn(move || {
                 let mut workspace = plan.workspace().unwrap();
-                assert_eq!(plan.execute(lhs, rhs, &mut workspace).unwrap().len(), 2);
-            });
+                plan.execute(lhs, rhs, &mut workspace)
+                    .unwrap()
+                    .member(0)
+                    .unwrap()
+                    .dense_data()
+                    .unwrap()
+                    .to_vec()
+            }));
         }
+        let first = threads.remove(0).join().unwrap();
+        let second = threads.remove(0).join().unwrap();
+        assert_eq!(first, second);
+        assert!(first.iter().any(|&value| value != 0.0));
     });
 }
 
