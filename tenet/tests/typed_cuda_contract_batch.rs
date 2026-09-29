@@ -16,12 +16,129 @@ use contract_cases::{
     u1_inactive_cases, u1_non_self_dual, Case,
 };
 use num_complex::Complex64;
+use std::hint::black_box;
 use std::sync::Arc;
-use tenet::expert::cuda_transfer_stats;
+use std::time::{Duration, Instant};
+use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
 use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::typed::{ContractPlan, ContractSpec, Error, Runtime, StackedTensorMap, TensorMap};
+use tenet::typed::{
+    ContractPlan, ContractSpec, CudaStorage, Error, Runtime, StackedTensorMap, TensorMap,
+};
+
+fn payload_snapshot<R: DeviceRule, D: DevicePayload>(
+    stack: &StackedTensorMap<R, D, CudaStorage<D>>,
+) -> String {
+    let host = stack.to_host().unwrap();
+    format!(
+        "{:?}",
+        (0..host.len())
+            .map(|i| host.member(i).unwrap().dense_data().unwrap().to_vec())
+            .collect::<Vec<_>>()
+    )
+}
+
+mod host_allocations {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    thread_local! {
+        static ACTIVE: Cell<bool> = const { Cell::new(false) };
+        static CALLS: Cell<usize> = const { Cell::new(0) };
+        static BYTES: Cell<usize> = const { Cell::new(0) };
+    }
+    pub(super) struct Counting;
+    fn record(bytes: usize) {
+        let _ = ACTIVE.try_with(|active| {
+            if active.get() {
+                let _ = CALLS.try_with(|calls| calls.set(calls.get() + 1));
+                let _ = BYTES.try_with(|total| total.set(total.get() + bytes));
+            }
+        });
+    }
+    // SAFETY: all operations delegate unchanged to System; thread-local counting does not allocate.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record(layout.size());
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            record(size);
+            unsafe { System.realloc(ptr, layout, size) }
+        }
+    }
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+    pub(super) fn begin() {
+        CALLS.with(|calls| calls.set(0));
+        BYTES.with(|bytes| bytes.set(0));
+        ACTIVE.with(|active| active.set(true));
+    }
+    pub(super) fn end() -> (usize, usize) {
+        ACTIVE.with(|active| active.set(false));
+        (CALLS.with(Cell::get), BYTES.with(Cell::get))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Observation {
+    elapsed: Duration,
+    host_calls: usize,
+    host_bytes: usize,
+    cuda: CudaTransferStats,
+}
+
+impl std::fmt::Display for Observation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "host_elapsed={:?}/{} alloc/{} bytes/{:?}",
+            self.elapsed, self.host_calls, self.host_bytes, self.cuda
+        )
+    }
+}
+
+fn observe<T>(run: impl FnOnce() -> T) -> (T, Observation) {
+    host_allocations::begin();
+    let before = cuda_transfer_stats();
+    let start = Instant::now();
+    let value = run();
+    let elapsed = start.elapsed();
+    let after = cuda_transfer_stats();
+    let (host_calls, host_bytes) = host_allocations::end();
+    let cuda = CudaTransferStats {
+        h2d_calls: after.h2d_calls - before.h2d_calls,
+        h2d_bytes: after.h2d_bytes - before.h2d_bytes,
+        d2h_calls: after.d2h_calls - before.d2h_calls,
+        d2h_bytes: after.d2h_bytes - before.d2h_bytes,
+        device_allocs: after.device_allocs - before.device_allocs,
+        gemm_calls: after.gemm_calls - before.gemm_calls,
+        solver_calls: after.solver_calls - before.solver_calls,
+        copy_calls: after.copy_calls - before.copy_calls,
+        gauge_ops: after.gauge_ops - before.gauge_ops,
+    };
+    (
+        value,
+        Observation {
+            elapsed,
+            host_calls,
+            host_bytes,
+            cuda,
+        },
+    )
+}
+
+fn median(mut samples: Vec<Observation>) -> Observation {
+    samples.sort_by_key(|sample| sample.elapsed);
+    samples[samples.len() / 2]
+}
 
 fn check<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
     let first_lhs = StackedTensorMap::pack(&[&case.lhs])
@@ -132,33 +249,12 @@ fn check<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
         let wrong_indices: &[usize] = if count == 1 { &[0, 0] } else { &[0] };
         let mut wrong_dst = dst.select(wrong_indices).unwrap();
         assert_ne!(wrong_dst.len(), count);
-        let before = format!(
-            "{:?}",
-            wrong_dst
-                .to_host()
-                .unwrap()
-                .member(0)
-                .unwrap()
-                .dense_data()
-                .unwrap()
-        );
+        let before = payload_snapshot(&wrong_dst);
         assert!(matches!(
             plan.execute_into(&lhs, &rhs, &mut wrong_dst, &mut second),
             Err(Error::InvalidArgument(_))
         ));
-        assert_eq!(
-            format!(
-                "{:?}",
-                wrong_dst
-                    .to_host()
-                    .unwrap()
-                    .member(0)
-                    .unwrap()
-                    .dense_data()
-                    .unwrap()
-            ),
-            before
-        );
+        assert_eq!(payload_snapshot(&wrong_dst), before);
         assert!(workspace.retained_bytes() > 0);
     }
     drop(plan);
@@ -334,15 +430,7 @@ fn invalid_bindings_preserve_poisoned_destination() {
         .unwrap()
         .to_cuda()
         .unwrap();
-    let before = format!(
-        "{:?}",
-        dst.to_host()
-            .unwrap()
-            .member(0)
-            .unwrap()
-            .dense_data()
-            .unwrap()
-    );
+    let before = payload_snapshot(&dst);
     let short = lhs.select(&[0]).unwrap();
     assert!(plan
         .execute_into(&short, &rhs, &mut dst, &mut workspace)
@@ -376,18 +464,7 @@ fn invalid_bindings_preserve_poisoned_destination() {
     assert!(plan
         .execute_into(&lhs, &rhs, &mut dst, &mut foreign)
         .is_err());
-    assert_eq!(
-        format!(
-            "{:?}",
-            dst.to_host()
-                .unwrap()
-                .member(0)
-                .unwrap()
-                .dense_data()
-                .unwrap()
-        ),
-        before
-    );
+    assert_eq!(payload_snapshot(&dst), before);
     drop(plan);
     drop(other);
     drop(workspace);
@@ -483,4 +560,114 @@ fn nonsymmetric_braiding_is_rejected_before_cuda_execution() {
         tenet::typed::OperationError::UnsupportedTensorContractScope {
             message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
         })));
+}
+
+/// Release-only phase observations. Run with `--release --ignored --nocapture
+/// --test-threads=1`; timings are evidence, never a CI threshold. Host
+/// elapsed times bracket host calls without an explicit device synchronization;
+/// they are not end-to-end GPU kernel times. Host allocation counts cover the
+/// calling thread and CUDA counters cover TeNeT's submission boundary, not
+/// provider-internal kernels or allocations. Fresh output is already zeroed,
+/// so warm minus cold GEMM submissions counts inactive-region zero writes.
+#[test]
+#[ignore = "release-only A100 measurement"]
+fn direct_core_release_measurement() {
+    let runtime = Runtime::builder()
+        .cuda(0)
+        .dense_threads(1)
+        .gemm_backend(tenet::typed::LinalgBackend::Faer)
+        .linalg_backend(tenet::typed::LinalgBackend::Faer)
+        .build()
+        .unwrap();
+    for (case, _) in candidate_core_probes::<_, f64>(&runtime, &su2()) {
+        if !matches!(case.name, "C1" | "C2") {
+            continue;
+        }
+        for count in [1, 2, 17] {
+            let left: Vec<_> = (0..count)
+                .map(|i| case.lhs.scale(1.0 + i as f64 / 8.0))
+                .collect();
+            let right: Vec<_> = (0..count)
+                .map(|i| case.rhs.scale(1.0 - i as f64 / 32.0))
+                .collect();
+            let ((host_lhs, host_rhs), pack) = observe(|| {
+                (
+                    StackedTensorMap::pack(&left).unwrap(),
+                    StackedTensorMap::pack(&right).unwrap(),
+                )
+            });
+            let ((lhs, rhs), upload) =
+                observe(|| (host_lhs.to_cuda().unwrap(), host_rhs.to_cuda().unwrap()));
+            let (plan, compile) = observe(|| ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap());
+            let cache_before = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+            let (mut workspace, reserve) = observe(|| plan.workspace().unwrap());
+            let cache_held = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+            let (_, cold_returned) = observe(|| {
+                black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+            });
+            let warm_returned = median(
+                (0..11)
+                    .map(|_| {
+                        observe(|| {
+                            black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+                        })
+                        .1
+                    })
+                    .collect(),
+            );
+            let dest = case.host();
+            let mut dst = StackedTensorMap::pack(&vec![&dest; count])
+                .unwrap()
+                .to_cuda()
+                .unwrap();
+            let (_, first_into) = observe(|| {
+                plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+                    .unwrap();
+                black_box(&dst);
+            });
+            let warm_into = median(
+                (0..11)
+                    .map(|_| {
+                        observe(|| {
+                            plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+                                .unwrap();
+                            black_box(&dst);
+                        })
+                        .1
+                    })
+                    .collect(),
+            );
+            let eager_inputs: Vec<_> = left
+                .iter()
+                .zip(&right)
+                .map(|(a, b)| (a.to_cuda().unwrap(), b.to_cuda().unwrap()))
+                .collect();
+            let eager = median(
+                (0..11)
+                    .map(|_| {
+                        observe(|| {
+                            for (a, b) in &eager_inputs {
+                                black_box(a.contract(b, &case.spec()).unwrap());
+                            }
+                        })
+                        .1
+                    })
+                    .collect(),
+            );
+            let retained = workspace.retained_bytes();
+            let scalar_template_bytes = runtime
+                .cuda_tree_transform_stats()
+                .unwrap()
+                .context_scalar_operand_bytes;
+            let (_, teardown) = observe(|| {
+                drop(workspace);
+                drop(plan);
+            });
+            let cache_after = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+            let zero_submissions = warm_returned.cuda.gemm_calls - cold_returned.cuda.gemm_calls;
+            eprintln!("{} B={count} f64 CUDA0 Faer1: pack={pack}; upload={upload}; compile={compile}; workspace={reserve}; cold_returned={cold_returned}; warm_returned={warm_returned}; first_into={first_into}; warm_into={warm_into}; eager_members={eager}; zero_region_submissions_per_warm={zero_submissions}; retained_workspace_bytes={retained}; runtime_scalar_template_bytes={scalar_template_bytes}; plan_ledger={}/{}/{}; plan_cache_bytes={}/{}/{}; teardown={teardown}", case.name,
+                cache_before.reserved_entries, cache_held.reserved_entries, cache_after.reserved_entries,
+                cache_before.retained_bytes, cache_held.retained_bytes, cache_after.retained_bytes);
+        }
+    }
 }
