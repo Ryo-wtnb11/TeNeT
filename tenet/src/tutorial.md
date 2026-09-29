@@ -109,8 +109,10 @@ operation.
 
 Factorizations take `(rows, cols)`: the source axes that form each side of the
 matrix. TeNeT handles the required leg transformation. A compact SVD returns
-`u`, diagonal `s`, and `vh` on a new bond space. To truncate, inspect the
-spectrum, select a bond subspace, and restrict all three factors:
+`u`, `s`, and `vh` on a new bond space. In this U(1) example, `s` has compact
+diagonal storage; Checked Generic providers currently return a dense `s`.
+To truncate, inspect the spectrum, select a bond subspace, and restrict all
+three factors:
 
 ```rust
 use std::sync::Arc;
