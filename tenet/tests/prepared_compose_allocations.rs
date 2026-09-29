@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Warm Host `PreparedCompose` allocation contract (#1498): after one call at
 //! a fixed `B`, `execute` and `execute_into` allocate nothing of TeNeT's on
 //! the caller thread. The one remaining allocation is Tenferro 0.7.1's

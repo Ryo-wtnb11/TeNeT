@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Host gates of `PreparedCompose` (#1498, leaf L2 of #1287).
 //!
 //! Per member the handle must equal eager `compose` of the same placement,
@@ -16,12 +17,99 @@ use std::fmt::Debug;
 use num_complex::{Complex32, Complex64};
 use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::typed::Error;
-use tenet::typed::{GradedSpace, PreparedCompose, Runtime, SignatureField, StackedTensorMap};
+use tenet::typed::{
+    ComposePlan, GradedSpace, PreparedCompose, Runtime, SignatureField, StackedTensorMap,
+};
 
 use common::Payload;
 use prepared::{assert_close, compose_oracle, filled, fz2u1_legs, members, su2_legs, u1_legs};
 
 const MEMBER_COUNTS: [usize; 3] = [1, 2, 17];
+
+#[test]
+fn one_plan_has_isolated_workspaces_across_member_counts() {
+    let runtime = Runtime::builder().build().unwrap();
+    let (v, w) = u1_legs();
+    let stacks = |count, seed| {
+        (
+            StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&v, &v], &[&w], count, seed))
+                .unwrap(),
+            StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&w], &[&v], count, seed + 1))
+                .unwrap(),
+        )
+    };
+    let (lhs2, rhs2) = stacks(2, 10);
+    let (lhs17, rhs17) = stacks(17, 20);
+    let plan = ComposePlan::new(&lhs2, &rhs2).unwrap();
+    let mut first = plan.workspace().unwrap();
+    let mut second = plan.workspace().unwrap();
+
+    let first_values = plan
+        .execute(&lhs2, &rhs2, &mut first)
+        .unwrap()
+        .member(0)
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
+    let first_bytes = first.retained_bytes();
+    assert_eq!(plan.execute(&lhs17, &rhs17, &mut second).unwrap().len(), 17);
+    assert_eq!(
+        plan.execute(&lhs2, &rhs2, &mut first)
+            .unwrap()
+            .member(0)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        first_values
+    );
+    assert_eq!(first.retained_bytes(), first_bytes);
+    assert!(second.retained_bytes() > first.retained_bytes());
+}
+
+#[test]
+fn one_plan_supports_concurrent_independent_workspaces() {
+    let runtime = Runtime::builder().build().unwrap();
+    let (v, w) = u1_legs();
+    let lhs =
+        StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&v, &v], &[&w], 2, 30)).unwrap();
+    let rhs = StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&w], &[&v], 2, 31)).unwrap();
+    let plan = std::sync::Arc::new(ComposePlan::new(&lhs, &rhs).unwrap());
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            let plan = std::sync::Arc::clone(&plan);
+            let (lhs, rhs) = (&lhs, &rhs);
+            scope.spawn(move || {
+                let mut workspace = plan.workspace().unwrap();
+                assert_eq!(plan.execute(lhs, rhs, &mut workspace).unwrap().len(), 2);
+            });
+        }
+    });
+}
+
+#[test]
+fn foreign_workspace_is_rejected_before_destination_write() {
+    let runtime = Runtime::builder().build().unwrap();
+    let (v, w) = u1_legs();
+    let lhs =
+        StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&v, &v], &[&w], 2, 50)).unwrap();
+    let rhs = StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&w], &[&v], 2, 51)).unwrap();
+    let mut dst =
+        StackedTensorMap::pack(&filled::<_, f64>(&runtime, &[&v, &v], &[&v], 2, f64::NAN)).unwrap();
+    let plan = ComposePlan::new(&lhs, &rhs).unwrap();
+    let foreign = ComposePlan::new(&lhs, &rhs).unwrap();
+    let mut workspace = foreign.workspace().unwrap();
+    assert!(plan
+        .execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+        .is_err());
+    assert!(dst
+        .member(0)
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|value| value.is_nan()));
+}
 
 fn equivalence<R, D>(label: &str, (v, w): (GradedSpace<R>, GradedSpace<R>))
 where
