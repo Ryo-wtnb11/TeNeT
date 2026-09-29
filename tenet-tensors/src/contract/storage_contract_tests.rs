@@ -548,7 +548,7 @@ fn dynamic_artifact_overwrites_inactive_u1_members() {
 }
 
 #[test]
-fn dynamic_artifact_rejects_twist_before_writes() {
+fn dynamic_artifact_rejects_malformed_twisted_members_before_writes() {
     let (_, case) = fermionic_cases().into_iter().next().unwrap();
     let lhs_one = host_data(case.lhs.space(), 3);
     let rhs_one = host_data(case.rhs.space(), 7);
@@ -566,7 +566,7 @@ fn dynamic_artifact_rejects_twist_before_writes() {
     let destination = case.dst();
     let mut dst = vec![f64::NAN; 2 * destination.space().required_len().unwrap()];
     let lhs = [lhs_one.as_slice(), lhs_one.as_slice()].concat();
-    let rhs = [rhs_one.as_slice(), rhs_one.as_slice()].concat();
+    let rhs = rhs_one;
     let before = dst.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
     let mut dense = CountingDense::default();
     let mut backend = DenseTreeTransformOperations::new(CountingDense::default());
@@ -586,7 +586,7 @@ fn dynamic_artifact_rejects_twist_before_writes() {
     .unwrap_err();
     assert!(matches!(
         error,
-        crate::OperationError::UnsupportedTensorContractScope { .. }
+        crate::OperationError::ElementCountMismatch { .. }
     ));
     assert_eq!(dst.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), before);
     assert!(dense.submissions.is_empty());
@@ -1390,6 +1390,57 @@ where
                 && (replayed - production).abs() <= 1e-12 * (1.0 + scale),
             "{what}: element {index} is {forced}/{replayed}, eager Host {production}"
         );
+    }
+    let mut first_workspace = super::dynamic::DynamicTreeMembersWorkspace::default();
+    let mut first_dense = CountingDense::default();
+    let mut first_backend = DenseTreeTransformOperations::new(CountingDense::default());
+    let mut first_backend_workspace = crate::contract::backend::TensorContractWorkspace::default();
+    let mut first_result = vec![f64::NAN; eager.len()];
+    super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
+        &mut first_dense,
+        &mut first_backend,
+        &mut first_backend_workspace,
+        &artifact,
+        dst.space().structure(),
+        &mut first_workspace,
+        &mut first_result,
+        &lhs,
+        &rhs,
+        1,
+        1,
+    )
+    .unwrap();
+    assert_eq!(first_backend.dense_mut().submissions.len(), 1);
+    let jobs_per_member = first_backend.dense_mut().submissions[0];
+    let mut member_workspace = super::dynamic::DynamicTreeMembersWorkspace::default();
+    let mut dense = CountingDense::default();
+    let mut backend = DenseTreeTransformOperations::new(CountingDense::default());
+    let mut backend_workspace = crate::contract::backend::TensorContractWorkspace::default();
+    let lhs_members = [lhs.as_slice(), lhs.as_slice()].concat();
+    let rhs_members = [rhs.as_slice(), rhs.as_slice()].concat();
+    let mut member_result = vec![f64::NAN; 2 * eager.len()];
+    super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
+        &mut dense,
+        &mut backend,
+        &mut backend_workspace,
+        &artifact,
+        dst.space().structure(),
+        &mut member_workspace,
+        &mut member_result,
+        &lhs_members,
+        &rhs_members,
+        2,
+        1,
+    )
+    .unwrap();
+    assert_eq!(
+        member_workspace.twist_actions_applied(),
+        artifact.source_twist_action_count()
+    );
+    assert!(artifact.source_twist_action_count() > 0);
+    assert_eq!(backend.dense_mut().submissions, [2 * jobs_per_member]);
+    for (actual, expected) in member_result.iter().zip(eager.iter().cycle()) {
+        assert!((actual - expected).abs() <= 1e-12 * (1.0 + scale), "{what}");
     }
     (lhs_len + rhs_len, before)
 }
