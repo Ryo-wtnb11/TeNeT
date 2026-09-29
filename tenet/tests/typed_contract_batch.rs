@@ -748,7 +748,7 @@ fn fermionic_unit_direct_and_copy_c_match_tensorkit_steps() {
 }
 
 #[test]
-fn fermionic_uniform_negative_core_is_rejected_by_compiled_alpha() {
+fn fermionic_uniform_negative_core_is_admitted() {
     use tenet::sector::{product_sector, FermionParityFusionRule, U1FusionRule, U1Irrep, Z2Irrep};
 
     let runtime = Runtime::builder().build().unwrap();
@@ -774,10 +774,260 @@ fn fermionic_uniform_negative_core_is_rejected_by_compiled_alpha() {
     assert!(case.host().dense_data().unwrap().iter().any(|&x| x != 0.0));
     let left = StackedTensorMap::pack(&[&case.lhs]).unwrap();
     let right = StackedTensorMap::pack(&[&case.rhs]).unwrap();
-    assert!(matches!(ContractPlan::new(&left, &right, &case.spec()),
-        Err(Error::Operation(error)) if matches!(*error,
-            tenet::typed::OperationError::UnsupportedTensorContractScope { message }
-            if message.contains("scaled storage plan"))));
+    let plan = ContractPlan::new(&left, &right, &case.spec()).unwrap();
+    let actual = plan
+        .execute(&left, &right, &mut plan.workspace())
+        .unwrap()
+        .member(0)
+        .unwrap();
+    assert_close(
+        actual.dense_data().unwrap(),
+        case.host().dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
+}
+
+#[test]
+fn mixed_signed_fermionic_core_is_admitted() {
+    let runtime = Runtime::builder().build().unwrap();
+    let v = fermion_u1();
+    let v_dual = v.try_dual().unwrap();
+    let lhs = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&v], [&v_dual], |_, _| 1.0).unwrap();
+    let rhs = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&v_dual], [&v], |_, _| 1.0).unwrap();
+    let case = Case {
+        name: "mixed signed fZ2xU1",
+        lhs,
+        rhs,
+        lhs_axes: vec![1],
+        rhs_axes: vec![0],
+        output_axes: vec![0, 1],
+        dense: false,
+    };
+    let eager = case.host();
+    let oracle = fermionic_blas_contract_oracle_partitioned(
+        &case,
+        TwistRole::B,
+        1,
+        |tensor: &TensorMap<contract_cases::FermionU1, f64>, legs| {
+            tensor
+                .twist(legs, tenet::typed::Direction::Forward)
+                .unwrap()
+        },
+    );
+    assert_close(
+        eager.dense_data().unwrap(),
+        oracle.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
+    let lhs = StackedTensorMap::pack(&[&case.lhs]).unwrap();
+    let rhs = StackedTensorMap::pack(&[&case.rhs]).unwrap();
+    let plan = ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap();
+    let actual = plan
+        .execute(&lhs, &rhs, &mut plan.workspace())
+        .unwrap()
+        .member(0)
+        .unwrap();
+    assert_close(
+        actual.dense_data().unwrap(),
+        oracle.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
+}
+
+fn check_mixed_signed_members<R, D>(
+    runtime: &Runtime,
+    v: &GradedSpace<R>,
+    swapped: bool,
+    twist: impl Fn(&TensorMap<R, D>, &[usize]) -> TensorMap<R, D> + Copy,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let dual = v.try_dual().unwrap();
+    let lhs = TensorMap::<R, D>::from_subblock_fn(runtime, [v], [&dual], fill(201)).unwrap();
+    let rhs = TensorMap::<R, D>::from_subblock_fn(runtime, [&dual], [v], fill(202)).unwrap();
+    let base = Case {
+        name: if swapped {
+            "mixed signed swapped"
+        } else {
+            "mixed signed direct"
+        },
+        lhs: if swapped { rhs.clone() } else { lhs.clone() },
+        rhs: if swapped { lhs } else { rhs },
+        lhs_axes: vec![usize::from(!swapped)],
+        rhs_axes: vec![usize::from(swapped)],
+        output_axes: if swapped { vec![1, 0] } else { vec![0, 1] },
+        dense: false,
+    };
+    let first_lhs = StackedTensorMap::pack(&[&base.lhs]).unwrap();
+    let first_rhs = StackedTensorMap::pack(&[&base.rhs]).unwrap();
+    let plan = ContractPlan::new(&first_lhs, &first_rhs, &base.spec()).unwrap();
+    let mut workspace = plan.workspace();
+    let mut other_workspace = plan.workspace();
+    for count in [1, 2, 17] {
+        let members: Vec<_> = (0..count)
+            .map(|i| Case {
+                name: base.name,
+                lhs: base
+                    .lhs
+                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0)),
+                rhs: base.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0)),
+                lhs_axes: base.lhs_axes.clone(),
+                rhs_axes: base.rhs_axes.clone(),
+                output_axes: base.output_axes.clone(),
+                dense: false,
+            })
+            .collect();
+        let left: Vec<_> = members.iter().map(|member| &member.lhs).collect();
+        let right: Vec<_> = members.iter().map(|member| &member.rhs).collect();
+        let lhs = StackedTensorMap::pack(&left).unwrap();
+        let rhs = StackedTensorMap::pack(&right).unwrap();
+        let result = plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        let eager: Vec<_> = members.iter().map(Case::host).collect();
+        assert_eq!(
+            result.signature(),
+            StackedTensorMap::pack(&[&eager[0]]).unwrap().signature()
+        );
+        for (i, member) in members.iter().enumerate() {
+            let oracle = fermionic_blas_contract_oracle_partitioned(
+                member,
+                if swapped { TwistRole::A } else { TwistRole::B },
+                1,
+                twist,
+            );
+            assert_close(
+                result.member(i).unwrap().dense_data().unwrap(),
+                oracle.dense_data().unwrap(),
+                member.terms(),
+                member.name,
+            );
+            if swapped {
+                // The public A-side oracle alone cannot check the selected
+                // zero-copy dispatch, which exchanges operands and twists B.
+                let selected = Case {
+                    name: "selected signed swapped dispatch",
+                    lhs: member.rhs.clone(),
+                    rhs: member.lhs.clone(),
+                    lhs_axes: vec![1],
+                    rhs_axes: vec![0],
+                    output_axes: vec![0, 1],
+                    dense: false,
+                };
+                let selected_oracle =
+                    fermionic_blas_contract_oracle_partitioned(&selected, TwistRole::B, 1, twist);
+                assert_close(
+                    result.member(i).unwrap().dense_data().unwrap(),
+                    selected_oracle.dense_data().unwrap(),
+                    selected.terms(),
+                    selected.name,
+                );
+                let untwisted = fermionic_blas_contract_oracle_partitioned(
+                    &selected,
+                    TwistRole::None,
+                    1,
+                    twist,
+                );
+                let expected = selected_oracle.dense_data().unwrap();
+                let scale = expected
+                    .iter()
+                    .map(|value| value.magnitude())
+                    .fold(0.0, f64::max);
+                let tolerance =
+                    64.0 * (selected.terms().max(1) as f64).sqrt() * D::EPS * (1.0 + scale);
+                assert!(
+                    expected
+                        .iter()
+                        .zip(untwisted.dense_data().unwrap())
+                        .any(|(&a, &b)| a.distance(b) > tolerance),
+                    "{}: the selected B-side twist is vacuous for {}",
+                    selected.name,
+                    D::NAME,
+                );
+            }
+            assert_close(
+                result.member(i).unwrap().dense_data().unwrap(),
+                eager[i].dense_data().unwrap(),
+                member.terms(),
+                member.name,
+            );
+        }
+        let poisoned: Vec<_> = members.iter().map(poisoned_destination).collect();
+        let refs: Vec<_> = poisoned.iter().collect();
+        let mut dst = StackedTensorMap::pack(&refs).unwrap();
+        plan.execute_into(&lhs, &rhs, &mut dst, &mut other_workspace)
+            .unwrap();
+        for (i, expected) in eager.iter().enumerate() {
+            assert_close(
+                dst.member(i).unwrap().dense_data().unwrap(),
+                expected.dense_data().unwrap(),
+                base.terms(),
+                base.name,
+            );
+        }
+        if count == 2 {
+            let short_rhs = StackedTensorMap::pack(&[&members[0].rhs]).unwrap();
+            let snapshot: Vec<Vec<D>> = (0..count)
+                .map(|i| dst.member(i).unwrap().dense_data().unwrap().to_vec())
+                .collect();
+            assert!(plan
+                .execute_into(&lhs, &short_rhs, &mut dst, &mut other_workspace)
+                .is_err());
+            for (i, before) in snapshot.iter().enumerate() {
+                assert_eq!(dst.member(i).unwrap().dense_data().unwrap(), before);
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_signed_fermionic_members_match_literal_tensorkit_steps() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    macro_rules! case {
+        ($rule:ty, $dtype:ty, $space:expr) => {{
+            let space = $space;
+            for swapped in [false, true] {
+                check_mixed_signed_members(
+                    &runtime,
+                    &space,
+                    swapped,
+                    |tensor: &TensorMap<$rule, $dtype>, legs| {
+                        tensor
+                            .twist(legs, tenet::typed::Direction::Forward)
+                            .unwrap()
+                    },
+                );
+            }
+        }};
+    }
+    case!(contract_cases::FermionU1, f64, fermion_u1());
+    case!(
+        contract_cases::FermionU1,
+        tenet::typed::Complex64,
+        fermion_u1()
+    );
+    case!(contract_cases::FermionSu2, f64, fermion_su2());
+    case!(
+        contract_cases::FermionSu2,
+        tenet::typed::Complex64,
+        fermion_su2()
+    );
+    use tenet::sector::{product_sector, FermionParityFusionRule, U1FusionRule, U1Irrep, Z2Irrep};
+    let odd_only = || {
+        GradedSpace::try_new(
+            Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+            [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 2)],
+        )
+        .unwrap()
+    };
+    case!(contract_cases::FermionU1, f64, odd_only());
+    case!(
+        contract_cases::FermionU1,
+        tenet::typed::Complex64,
+        odd_only()
+    );
 }
 
 #[test]
@@ -932,4 +1182,79 @@ fn public_host_swapped_core_release_measurement() {
         "eager B=1 warm median: {:?}/{} calls/{} bytes",
         samples[15].0, samples[15].1, samples[15].2
     );
+}
+
+/// A one-run observation with explicit faer and one dense thread. No timing assertion.
+#[test]
+#[ignore]
+fn public_signed_direct_release_measurement() {
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .gemm_backend(tenet::typed::LinalgBackend::Faer)
+        .linalg_backend(tenet::typed::LinalgBackend::Faer)
+        .build()
+        .unwrap();
+    let v = fermion_u1();
+    let dual = v.try_dual().unwrap();
+    let lhs = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&v], [&dual], fill(201)).unwrap();
+    let rhs = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&dual], [&v], fill(202)).unwrap();
+    let case = Case {
+        name: "signed direct fZ2xU1",
+        lhs,
+        rhs,
+        lhs_axes: vec![1],
+        rhs_axes: vec![0],
+        output_axes: vec![0, 1],
+        dense: false,
+    };
+    for count in [1, 2, 17] {
+        let (pair, pack_time, pack_calls, pack_bytes) = measure(|| {
+            let left = vec![&case.lhs; count];
+            let right = vec![&case.rhs; count];
+            (
+                StackedTensorMap::pack(&left).unwrap(),
+                StackedTensorMap::pack(&right).unwrap(),
+            )
+        });
+        let (lhs, rhs) = pair;
+        let (plan, plan_time, plan_calls, plan_bytes) =
+            measure(|| ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap());
+        let (mut workspace, workspace_time, workspace_calls, workspace_bytes) =
+            measure(|| plan.workspace());
+        let (_, cold_time, cold_calls, cold_bytes) = measure(|| {
+            black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+        });
+        let mut returned = Vec::new();
+        for _ in 0..31 {
+            let (_, elapsed, calls, bytes) = measure(|| {
+                black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+            });
+            returned.push((elapsed, calls, bytes));
+        }
+        returned.sort_by_key(|sample| sample.0);
+        let dst_member = case.host();
+        let dst_refs = vec![&dst_member; count];
+        let mut dst = StackedTensorMap::pack(&dst_refs).unwrap();
+        let mut into = Vec::new();
+        for _ in 0..31 {
+            let (_, elapsed, calls, bytes) = measure(|| {
+                plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+                    .unwrap();
+                black_box(&dst);
+            });
+            into.push((elapsed, calls, bytes));
+        }
+        into.sort_by_key(|sample| sample.0);
+        let mut eager = Vec::new();
+        for _ in 0..31 {
+            let (_, elapsed, calls, bytes) = measure(|| {
+                for _ in 0..count {
+                    black_box(case.host());
+                }
+            });
+            eager.push((elapsed, calls, bytes));
+        }
+        eager.sort_by_key(|sample| sample.0);
+        eprintln!("SignedDirect B={count}: pack {pack_time:?}/{pack_calls}/{pack_bytes}; plan {plan_time:?}/{plan_calls}/{plan_bytes}; workspace {workspace_time:?}/{workspace_calls}/{workspace_bytes}; cold {cold_time:?}/{cold_calls}/{cold_bytes}; returned warm median {:?}; into warm median {:?}; eager warm median {:?}; retained {} bytes", returned[15], into[15], eager[15], workspace.retained_bytes());
+    }
 }

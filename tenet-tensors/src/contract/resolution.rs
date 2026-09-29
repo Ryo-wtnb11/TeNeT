@@ -153,6 +153,20 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
         Ok(true)
     }
 
+    /// Checks the B-independent exact-sign Host replay capability.
+    #[doc(hidden)]
+    pub fn admits_stacked_signed_direct_host_replay(&self) -> Result<bool, OperationError>
+    where
+        C: Copy + PartialEq + num_traits::One + std::ops::Neg<Output = C>,
+    {
+        let plan = match &self.route {
+            StorageContractRoute::Core(plan) | StorageContractRoute::SwappedCore(plan) => plan,
+            StorageContractRoute::DynamicTree(_) => return Ok(false),
+        };
+        plan.require_identity_signed_direct_replay()?;
+        Ok(true)
+    }
+
     /// Builds a caller-owned Host replay for a fully direct, unit-alpha core
     /// route. The boolean means the replay's left source is the caller's rhs.
     #[doc(hidden)]
@@ -170,6 +184,26 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
         };
         Ok(Some((
             StackedDirectReplay::new(Arc::clone(plan), members)?,
+            swapped,
+        )))
+    }
+
+    /// Builds a caller-owned exact-sign Host replay; the bool swaps sources.
+    #[doc(hidden)]
+    pub fn stacked_signed_direct_host_replay(
+        &self,
+        members: usize,
+    ) -> Result<Option<(StackedDirectReplay<C>, bool)>, OperationError>
+    where
+        C: Copy + PartialEq + num_traits::One + std::ops::Neg<Output = C>,
+    {
+        let (plan, swapped) = match &self.route {
+            StorageContractRoute::Core(plan) => (plan, false),
+            StorageContractRoute::SwappedCore(plan) => (plan, true),
+            StorageContractRoute::DynamicTree(_) => return Ok(None),
+        };
+        Ok(Some((
+            StackedDirectReplay::new_signed(Arc::clone(plan), members)?,
             swapped,
         )))
     }

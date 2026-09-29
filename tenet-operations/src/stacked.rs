@@ -12,6 +12,7 @@ use tenet_core::{HostReadableStorage, HostWritableStorage, Placement, TensorStor
 use tenet_dense::strided_batch_runs;
 
 use crate::fusion_replay::{FusionBlockContractPlan, Rank2Gemm, Rank2GemmBatchJob};
+use crate::RecouplingCoefficientAction;
 use crate::{HostKernelAdapter, OperationError};
 
 fn check_extent(
@@ -150,7 +151,7 @@ impl<D, S: TensorStorage<D>> TensorStorage<D> for StackedStorageViewMut<'_, S> {
     }
 }
 
-/// A fully-direct, identity-orientation, unit-coefficient plan expanded over
+/// A fully-direct, identity-orientation, unit- or signed-coefficient plan expanded over
 /// `B` unpadded members: every plan job repeated at `i · L` of each operand,
 /// job-major, so the `B` copies of one job are one affine run.
 #[doc(hidden)]
@@ -161,6 +162,8 @@ pub struct StackedDirectReplay<C = f64> {
     member_lens: [usize; 3],
     jobs: Vec<Rank2GemmBatchJob>,
     runs: Vec<usize>,
+    negative_jobs: Vec<Rank2GemmBatchJob>,
+    negative_runs: Vec<usize>,
     /// Each inactive destination layout with a trailing member axis.
     inactive: Vec<(Vec<usize>, Vec<isize>, isize)>,
     /// All-zero source strides as long as the longest inactive layout, so a
@@ -179,9 +182,34 @@ where
         members: usize,
     ) -> Result<Self, OperationError> {
         plan.require_identity_direct_replay()?;
+        Self::from_admitted(plan, members)
+    }
+
+    /// Accepts only exact +1 and -1 direct coefficients.
+    #[doc(hidden)]
+    pub fn new_signed(
+        plan: Arc<FusionBlockContractPlan<C>>,
+        members: usize,
+    ) -> Result<Self, OperationError>
+    where
+        C: std::ops::Neg<Output = C>,
+    {
+        plan.require_identity_signed_direct_replay()?;
+        Self::from_admitted(plan, members)
+    }
+
+    fn from_admitted(
+        plan: Arc<FusionBlockContractPlan<C>>,
+        members: usize,
+    ) -> Result<Self, OperationError> {
         if members == 0 {
             return Err(OperationError::InvalidArgument {
                 message: "a stacked replay needs at least one member",
+            });
+        }
+        if plan.direct_batch().len() != plan.direct_batch_alphas().len() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "storage-direct plan has misaligned GEMM coefficients",
             });
         }
         let member_lens = plan.member_lens()?;
@@ -192,15 +220,29 @@ where
                 .and_then(|start| start.checked_add(offset))
                 .ok_or(OperationError::ElementCountOverflow)
         };
-        let mut jobs = Vec::with_capacity(
-            plan.direct_batch()
-                .len()
+        let positive_count = plan
+            .direct_batch_alphas()
+            .iter()
+            .filter(|&&alpha| alpha == C::one())
+            .count();
+        let negative_count = plan.direct_batch().len() - positive_count;
+        let capacity = |count: usize| {
+            count
                 .checked_mul(members)
-                .ok_or(OperationError::ElementCountOverflow)?,
-        );
-        for job in plan.direct_batch() {
+                .ok_or(OperationError::ElementCountOverflow)
+        };
+        let mut jobs = Vec::with_capacity(capacity(positive_count)?);
+        let mut negative_jobs = Vec::with_capacity(capacity(negative_count)?);
+        // Compilation validates active/inactive destinations as a disjoint
+        // tiling. Stable sign partitioning cannot reorder writes to one block.
+        for (job, &alpha) in plan.direct_batch().iter().zip(plan.direct_batch_alphas()) {
+            let class = if alpha == C::one() {
+                &mut jobs
+            } else {
+                &mut negative_jobs
+            };
             for member in 0..members {
-                jobs.push(Rank2GemmBatchJob {
+                class.push(Rank2GemmBatchJob {
                     dst_offset: shift(job.dst_offset, dst_len, member)?,
                     lhs_offset: shift(job.lhs_offset, lhs_len, member)?,
                     rhs_offset: shift(job.rhs_offset, rhs_len, member)?,
@@ -209,6 +251,7 @@ where
             }
         }
         let runs = strided_batch_runs(&jobs);
+        let negative_runs = strided_batch_runs(&negative_jobs);
         let member_stride =
             isize::try_from(dst_len).map_err(|_| OperationError::ElementCountOverflow)?;
         let inactive = plan
@@ -236,6 +279,8 @@ where
             member_lens,
             jobs,
             runs,
+            negative_jobs,
+            negative_runs,
             inactive,
             zero_strides,
         })
@@ -258,6 +303,8 @@ where
     pub fn retained_bytes(&self) -> usize {
         self.jobs.capacity() * std::mem::size_of::<Rank2GemmBatchJob>()
             + self.runs.capacity() * std::mem::size_of::<usize>()
+            + self.negative_jobs.capacity() * std::mem::size_of::<Rank2GemmBatchJob>()
+            + self.negative_runs.capacity() * std::mem::size_of::<usize>()
             + self.zero_strides.capacity() * std::mem::size_of::<isize>()
             + self
                 .inactive
@@ -293,6 +340,65 @@ where
         SL: HostReadableStorage<D>,
         SR: HostReadableStorage<D>,
     {
+        self.execute_host_with_alpha(kernels, gemm, dst, lhs, rhs, zero_inactive, None)
+    }
+
+    /// Replays exact +1 and -1 classes in at most two batch submissions.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_signed_host<A, G, D, SD, SL, SR>(
+        &self,
+        kernels: &mut A,
+        gemm: &mut G,
+        dst: &mut StackedStorageViewMut<'_, SD>,
+        lhs: &StackedStorageView<'_, SL>,
+        rhs: &StackedStorageView<'_, SR>,
+        zero_inactive: bool,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<D>,
+        G: Rank2Gemm<D>,
+        D: Copy + Zero + One + RecouplingCoefficientAction<C>,
+        C: std::ops::Neg<Output = C>,
+        SD: HostWritableStorage<D>,
+        SL: HostReadableStorage<D>,
+        SR: HostReadableStorage<D>,
+    {
+        self.execute_host_with_alpha(
+            kernels,
+            gemm,
+            dst,
+            lhs,
+            rhs,
+            zero_inactive,
+            Some(D::coefficient_as_data(-C::one())),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_host_with_alpha<A, G, D, SD, SL, SR>(
+        &self,
+        kernels: &mut A,
+        gemm: &mut G,
+        dst: &mut StackedStorageViewMut<'_, SD>,
+        lhs: &StackedStorageView<'_, SL>,
+        rhs: &StackedStorageView<'_, SR>,
+        zero_inactive: bool,
+        negative_alpha: Option<D>,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<D>,
+        G: Rank2Gemm<D>,
+        D: Copy + Zero + One,
+        SD: HostWritableStorage<D>,
+        SL: HostReadableStorage<D>,
+        SR: HostReadableStorage<D>,
+    {
+        if !self.negative_jobs.is_empty() && negative_alpha.is_none() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "signed stacked replay requires signed Host execution",
+            });
+        }
         let [dst_len, lhs_len, rhs_len] = self.member_lens;
         for (members, len, stride, expected) in [
             (dst.members, dst.member_len, dst.member_stride, dst_len),
@@ -322,15 +428,29 @@ where
                 )?;
             }
         }
-        gemm.matmul_rank2_batch(
-            dst_data,
-            lhs.storage.as_slice(),
-            rhs.storage.as_slice(),
-            &self.jobs,
-            &self.runs,
-            D::one(),
-            D::zero(),
-        )
+        if !self.jobs.is_empty() {
+            gemm.matmul_rank2_batch(
+                dst_data,
+                lhs.storage.as_slice(),
+                rhs.storage.as_slice(),
+                &self.jobs,
+                &self.runs,
+                D::one(),
+                D::zero(),
+            )?;
+        }
+        if let Some(alpha) = negative_alpha.filter(|_| !self.negative_jobs.is_empty()) {
+            gemm.matmul_rank2_batch(
+                dst_data,
+                lhs.storage.as_slice(),
+                rhs.storage.as_slice(),
+                &self.negative_jobs,
+                &self.negative_runs,
+                alpha,
+                D::zero(),
+            )?;
+        }
+        Ok(())
     }
 }
 

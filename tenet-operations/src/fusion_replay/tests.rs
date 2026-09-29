@@ -1430,6 +1430,33 @@ fn scaled_storage_jobs_keep_canonical_coefficients_aligned_and_convert_payload()
     .unwrap()
     .unwrap();
     assert_eq!(plan.direct_batch_alpha, [1.0, -1.0]);
+    assert!(plan.require_identity_direct_replay().is_err());
+    plan.require_identity_signed_direct_replay().unwrap();
+    let non_sign = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_and_alpha(
+        &structure,
+        1,
+        &structure,
+        1,
+        &structure,
+        1,
+        MatrixOp::Identity,
+        MatrixOp::Identity,
+        |coupled| {
+            Ok(if coupled == SectorId::new(0) {
+                1.0
+            } else {
+                2.0
+            })
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        non_sign.require_identity_signed_direct_replay(),
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "signed stacked replay requires exact unit-magnitude coefficients"
+        })
+    ));
 
     let lhs = vec![1.0, 2.0, 3.0, 4.0, 5.0]
         .into_iter()
