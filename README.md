@@ -118,7 +118,7 @@ They do not replace TeNeT's execution engine.
 - CUDA supports a multiplicity-free `f64`/`Complex64` subset after explicit
   transfer. Supported device operations include contraction, transforms, trace,
   compact SVD and QR, and EIGH, subject to each method's bounds. Full and
-  values-only factorizations, `eig`, and matrix functions have no device path.
+  values-only SVD/QR, `eig`, and matrix functions have no device path.
   CUDA runtime tests require a CUDA runner; CI also checks that the feature
   compiles.
 - `ComposePlan` / `ComposeWorkspace` support stacked composition, and
