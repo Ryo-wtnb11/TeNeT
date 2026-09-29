@@ -1,332 +1,151 @@
 # TeNeT
 
-TeNeT is a Rust tensor-network library for symmetric tensors. It separates a
-generic symmetric-tensor engine from symmetry-specific fusion data. A tensor is
-a map `codomain <- domain` stored as fusion-tree-indexed reduced blocks.
-Fusion-rule *providers* supply sector labels and categorical data, while the
-engine handles block layouts and tensor operations; contraction-path planning
-remains separate from execution.
+**Symmetric tensor primitives for composable algorithms in Rust.**
 
-Design priority, in this order: Rust-native maintainability and extensibility;
-speed that survives dynamic-rank tensor networks; a usable high-level API.
+TeNeT provides small operations on block-sparse tensor maps: construct a space,
+build a tensor, permute or braid its legs, contract, trace, or factorize it.
+An algorithm written by a person or a coding agent can combine these operations
+without implementing fusion trees, sector bookkeeping, or dense block layouts.
 
-The public API is not stabilized and expert-layer types still move between
-crates as the layering settles.
+The caller chooses the algorithm, operation order, and when to move a tensor
+between Host and CUDA storage. Within each supported operation, TeNeT handles
+symmetry-aware decomposition, block layout and data movement, and submission of
+dense work. [Tenferro](https://github.com/tensor4all/tenferro-rs) supplies the
+dense kernels and provider resources. This division keeps individual operations
+optimizable without hiding the algorithm inside a large workflow API.
 
-Ordinary applications depend on the `tenet-rs` package and import the `tenet`
-library. Add `tenet-network` when using the `tensor!` frontend or explicit
-network planning.
+TeNeT is under active development; the public API is not yet stable. Ordinary
+applications use the `tenet-rs` package (imported as `tenet`). Add
+`tenet-network` for the `tensor!` notation and network planning.
 
-## Architecture
+## Start with a tensor
 
-The ordinary API keeps the symmetry provider, payload scalar, and storage type
-concrete as `TensorMap<R, D, S>`, while tensor rank and sector content remain
-runtime values. Operations dispatch on provider capabilities—fusion
-multiplicity, braiding, rigidity, and checked symbol access—rather than on a
-central symmetry enum.
+This example creates two U(1)-symmetric maps and composes them. A `GradedSpace`
+describes one leg by its charge sectors and degeneracies. A `TensorMap` is a map
+`codomain <- domain`; only symmetry-allowed reduced blocks are stored.
 
-Each tensor keeps the exact provider instance used to build it and a compiled
-block layout: fusion-tree keys, per-block shapes and strides, and offsets into
-one contiguous payload. Checked construction validates the complete structure
-before returning a space, tensor, plan, or result. Compiled layouts and
-recoupling data can then be reused only with matching categorical data and
-gauge conventions. Contraction-plan reuse follows network topology and the
-configured replan policy.
+```rust
+use std::sync::Arc;
+use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
 
-`Runtime` owns the bounded caches, workspace pools, and selectable dense
-backends used by those operations. Contraction-path planners consume network
-metadata and produce validated plans; TeNeT executes the plans locally over its
-reduced blocks. This keeps mathematical structure, resource ownership,
-planning, and kernel selection separate.
-
-External libraries and papers are cited in function documentation,
-[`tenet/references.md`](tenet/references.md), tests, or benchmark reports when
-they support a particular convention, divergence, oracle, or comparison.
-TensorKit and QSpace are comparison and oracle sources, not API dependencies
-or definitions of TeNeT's public contract.
-
-## Symmetries are providers
-
-`tenet-sectors` defines the provider vocabulary — `FusionRule`,
-`CheckedFusionAlgebra`, `SectorCodec`, `MultiplicityFreeRigidSymbols`,
-`CheckedGenericRigidSymbols`, `RuleIdentity`, all exported from
-`tenet::sector` — and ships `ZNFusionRule` (including
-`Z2FusionRule`), `FermionParityFusionRule` (fZ2), `U1FusionRule`,
-`CU1FusionRule`, `SU2FusionRule`, `FibonacciFusionRule`, `ProductFusionRule`,
-and feature-gated `SUNFusionRule`. Operations select trait capabilities rather
-than a provider enum or a named-group dispatch branch.
-[`docs/provider_interface.md`](docs/provider_interface.md) is the contract for
-writing one.
-
-`FibonacciFusionRule` supplies `FibonacciSector` labels and `Complex64`
-categorical coefficients. Its tested typed scope is construction,
-transformations including explicit planar braids, tensor products, and
-composition. Ordinary arbitrary-axis contraction, factorization, and general
-network execution are not supported or claimed.
-`tenet-category-data` separately ships the table-backed `CategoryDataFibonacci`.
-SUN is available only with `racah-generated` and uses the checked Generic path.
-
-A product of providers is itself a provider, so
-
-```text
-FermionParityFusionRule.product(U1FusionRule).product(SU2FusionRule)
+fn main() -> Result<(), Error> {
+    let runtime = Runtime::builder().build()?;
+    let leg = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+    )?;
+    let a: TensorMap<U1FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 1)?;
+    let b: TensorMap<U1FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 2)?;
+    let c = a.compose(&b)?;
+    println!("squared norm: {}", c.inner(&c)?);
+    Ok(())
+}
 ```
 
-is `(fZ2 ⊠ U(1)) ⊠ SU(2)` — an ordered product of components, recursively
-nested, without a central provider enum, dispatch arm or group-specific
-constructor. Factor order and association are structure of the Rust type and of
-the `ProductSector` label, never an automatic equivalence: `U(1) ⊠ fZ2` and
-`fZ2 ⊠ U(1)` are both legal and are different types.
-
-The product's coefficient scalar is promoted from its components', as in
-TensorKitSectors, so a component with complex topological data composes with a
-real-coefficient group provider: `Fibonacci ⊠ Z2` carries `Complex64`
-coefficients while `fZ2 ⊠ U(1)` stays real.
-
-The ordinary user API is `GradedSpace<R>` / `TensorMap<R, D, S>`. It keeps `R`
-concrete, returns the provider's own labels (`SectorCodec::Sector`), and keeps
-payload scalar `D` and storage `S` separate from the categorical coefficient
-scalar. Host typed operations use operation-specific categorical-scalar and
-capability bounds. Checked Generic providers have a separate Host-only path for
-construction, transforms, tensor products, owned composition and trace, static
-N-ary networks, and explicit sliced execution, subject to each operation's
-bounds. Supported typed CUDA paths are an explicit-transfer,
-multiplicity-free `f64` and `Complex64` subset, including compact SVD and
-EIGH in both payloads and compact QR in `f64`. A failed checked operation
-returns no output
-tensor or partial factor tuple.
-
-SU(2) representation algebra itself is not reimplemented here: `tenet-sectors`
-delegates 3j/6j, F/R and Frobenius-Schur coefficients plus their caches to the
-versioned [`racah`](https://github.com/Ryo-wtnb11/racah) dependency. The
-`tenet-sectors` manifest is the authority for the supported dependency line.
-
-## Current typed capabilities
-
-Current capability claims are backed by the public trait bounds and executable
-tests at this revision. Storage and device limits are summarized below;
-revision-pinned audits are retained only as historical evidence.
-
-## Quick Start
-
-Follow the [Quick Start tutorial source](tenet/src/tutorial.md#quick-start).
-That tutorial is rendered at the top of TeNeT's crate documentation.
-
-The runnable [U(1) example](tenet-network/examples/quickstart.rs) is the single source
-for the calculation. It builds two deterministic charge-preserving maps,
-contracts them with `tensor!`, and checks the result:
+For a runnable indexed contraction with `tensor!`, use
+[`tenet-network/examples/quickstart.rs`](tenet-network/examples/quickstart.rs):
 
 ```sh
 cargo run -p tenet-network --example quickstart
 ```
 
-For the full workspace checks and local API documentation, run:
+## Choose the next primitive
+
+| Task | Public entry point |
+| --- | --- |
+| Define legs and construct tensors | `GradedSpace`, `TensorMap::from_subblock_fn`, `zeros`, `isomorphism`, `rand_with_seed` |
+| Change leg order or orientation | `permute`, `braid`, `repartition`, `adjoint` |
+| Combine tensors | `compose`, `contract` with `ContractSpec`, `tensor!` for an indexed network |
+| Reduce or inspect | `trace_pairs`, `inner`, `norm`, `blocks`, `subblocks` |
+| Factorize | `qr_compact`, `svd_compact`, `eigh_full`, and their result types |
+| Reuse repeated work | Explicit plan/workspace APIs where supported; `ComposePlan` and `ComposeWorkspace` for stacked composition |
+
+These are operations, not a prescribed MPS, PEPS, or VMC algorithm. The caller
+can select a contraction order, choose destinations and reusable state where an
+API provides them, and combine calls into a larger computation. TeNeT remains
+responsible for the symmetry semantics and dense work *inside* each call.
+Available methods depend on the provider, scalar type, and storage placement;
+unsupported combinations return explicit errors or have no matching method.
+The [crate tutorial](tenet/src/tutorial.md) shows method signatures and
+examples. Generate the local function-level Rust documentation with:
+
+```sh
+cargo doc -p tenet-rs -p tenet-network --no-deps --open
+```
+
+For repeated computations, an application can organize tensor instances into
+batches and use an explicit prepared API when that operation provides one.
+For a new algorithm, start with the ordinary operations above; their types and
+errors expose the required spaces, axes, and supported placement to coding
+agents as well as human callers.
+
+## Symmetry and execution boundaries
+
+TeNeT's engine is generic over a fusion-rule provider. Built-in providers
+include ZN/Z2, fermion parity, U(1), CU(1), SU(2), Fibonacci, ordered products,
+and feature-gated SUN. Providers supply sector labels and categorical data;
+the engine owns fusion-tree-indexed reduced blocks, categorical transforms,
+contraction layouts, and validation. A product such as
+`FermionParityFusionRule.product(U1FusionRule)` is an ordered product, not an
+automatic equivalence with the reverse order. See the
+[provider interface](docs/provider_interface.md) for trait and capability
+requirements. SU(2) coefficient generation delegates to
+[`racah`](https://github.com/Ryo-wtnb11/racah).
+
+`Runtime` owns execution resources. Host dense factorizations and contraction
+GEMM can select faer or one compiled BLAS provider independently through
+`Runtime::builder().linalg_backend(...)` and `.gemm_backend(...)`. CUDA is an
+explicit feature and transfer path: `.cuda(device)` makes a device available,
+and `to_cuda()` / `to_host()` move tensor payloads. TeNeT does not silently
+transfer a tensor to make an unsupported device operation work. The
+[backend policy](docs/backend_policy.md) describes selection and resource
+ownership.
+
+For a tensor network, `tenet-network` can select and reuse a contraction path.
+The planner reads labels and dimensions, not payload data. TeNeT executes the
+chosen path on reduced blocks. Built-in greedy planning needs no external
+optimizer; optional `opt-path` and `cotengra-python` features add planners.
+They do not replace TeNeT's execution engine.
+
+## Current scope
+
+- Host is the broadest typed execution path. Checked Generic providers have a
+  narrower Host-only operation set. Fibonacci has a tested subset of typed
+  operations; arbitrary-axis contraction and factorization are not claimed.
+- CUDA supports a multiplicity-free `f64`/`Complex64` subset after explicit
+  transfer. Supported device operations include contraction, transforms, trace,
+  compact SVD and QR, and EIGH, subject to each method's bounds. Full and
+  values-only factorizations, `eig`, and matrix functions have no device path.
+  CUDA runtime tests require a CUDA runner; CI also checks that the feature
+  compiles.
+- `ComposePlan` / `ComposeWorkspace` support stacked composition, and
+  `PreparedEighFull` supports batched EIGH. General member-batched `contract`
+  is not public yet ([#1506](https://github.com/Ryo-wtnb11/TeNeT/issues/1506)).
+- The default `tenet-rs` feature is `cpu-faer`. `cpu-blas` needs one linked
+  `blas-accelerate`, `blas-openblas`, or `blas-mkl` feature. See the
+  [manifest](tenet/Cargo.toml) and [backend policy](docs/backend_policy.md) for
+  the full feature contract.
+
+## Read next
+
+- [Tutorial and API examples](tenet/src/tutorial.md): tensor construction,
+  axes, contraction, decomposition, and backends.
+- [Tensor-map mathematics](tenet/src/mathematics.md): duality, orientation, and
+  categorical conventions.
+- [U(1) iTEBD example](docs/itebd_heisenberg.md): a complete algorithm built
+  from these operations.
+- [Provider interface](docs/provider_interface.md): define another symmetry.
+- [Benchmark records](benchmarks/README.md): revision-specific performance
+  evidence; the README makes no general speed claim.
+- [Development and historical documents](docs/history.md): design decisions,
+  audits, and migration records.
+
+To check the workspace locally:
 
 ```sh
 cargo test --workspace
 cargo doc --workspace --no-deps
 ```
-
-For a complete tensor-network application, follow the guided
-[U(1) iTEBD Heisenberg tutorial](docs/itebd_heisenberg.md) alongside its
-runnable example.
-
-## Backend Philosophy
-
-**Operators say WHAT to compute; backends say WHICH kernel computes it.** The
-compiled block layout above is what the kernels run over. The currently
-selectable dense and planning backends have explicit selection points. Operator
-and user-layer code express spaces, axes, conjugate flags, and output order —
-whether that becomes a faer call, a BLAS `op='C'`, or a CUDA kernel is decided
-by the selected backend. The full policy is
-[`docs/backend_policy.md`](docs/backend_policy.md).
-
-Three consequences worth knowing before you build a `Runtime`:
-
-**Selection is runtime, at `Runtime::builder()`.** There are two independent
-dense-backend settings. When unset, each uses Tenferro's resolved compiled
-provider default: BLAS when its CPU build enables `cpu-blas`, otherwise faer:
-
-| builder call | picks the backend for |
-| --- | --- |
-| `.linalg_backend(LinalgBackend::Faer \| Blas)` | factorizations — SVD / QR / eigh / eig / inv / exp (LAPACK-style work). |
-| `.gemm_backend(LinalgBackend::Faer \| Blas)` | the coupled-block contraction GEMM used by `compose`, `contract`, and recoupling execution (BLAS-style work). |
-| `.with_dense_executor(Box<dyn DenseExecutor + Send>)` | a fully custom factorization backend; takes precedence over `linalg_backend`. |
-| `.cuda(device)` (feature `cuda`) | attaches CUDA capability and context; tensors remain on Host until `to_cuda()`. |
-| `.plan_cache(PlanCacheConfig { optimizer, .. })` | the contraction-path planner (see below). |
-
-Because OpenBLAS, MKL, and Accelerate cannot be linked simultaneously, *which*
-BLAS is a compile-time `blas-*` feature; choosing faer versus the one linked
-BLAS stays a runtime decision. `LinalgBackend::Blas` without a compiled
-`cpu-blas` / `blas-*` provider fails in `build()` rather than falling back
-silently.
-
-**Planning is a backend too.** Contraction-order search is pluggable the same
-way — built-in greedy, the pure-Rust `opt-einsum-path` optimizers, or Python
-`cotengra` — and it is strictly a planner: TeNeT always executes the resulting
-path itself. See [Contraction Planning](#contraction-planning).
-
-**Backend choice affects performance, not tensor semantics.** Every backend
-runs against the same oracle suite and is expected to produce the same tensor.
-The caveat is floating point, not semantics: BLAS/LAPACK providers differ in
-rounding and in decomposition gauge, so parity-sensitive workflows should pin
-and test the backend they ship with.
-
-Still hardcoded, and tracked as such in the policy doc: the transpose-free
-contraction kernels inside `DenseTreeTransformOperations` are not yet a builder
-choice.
-
-## Crates
-
-| crate | role |
-| --- | --- |
-| `tenet-rs` (library target `tenet`) | Public provider-typed `Runtime`, `GradedSpace<R>`, `TensorMap<R,D,S>`, tensor operations and decomposition results. |
-| `tenet-category-data` | Pinned category tables and provenance, currently exposed through `CategoryDataFibonacci`. |
-| `tenet-network` | `tensor!` frontend, `NetworkIR`, contraction-order optimizers, reusable `ContractionPlan`, plan cache, slicing metadata. |
-| `tenet-macros` | Procedural macro implementation for `tensor!`. |
-| `tenet-sectors` | Sector-algebra vocabulary and ready-to-use ZN/Z2, fZ2, U1, CU1, SU2, Fibonacci, product, and feature-gated SUN providers; re-exported by `tenet-core`. |
-| `tenet-core` | Fusion-tree spaces and keys, block structures, and low-level statically-ranked tensor-map storage. |
-| `tenet-tensors` | Symmetric tensor maps, tensor contraction/transform resolution, execution contexts, caches. |
-| `tenet-operations` | TensorOperations-style tensoradd/contract/trace/permute lowering and execution support. |
-| `tenet-dense` | Dense block execution boundary and CPU/GPU backend selection. |
-| `tenet-matrixalgebra` | SVD/eigh/eig/QR/LQ/polar/matrix-function operations. |
-| `tenet-krylov` | Matrix-free Krylov solvers for algorithm layers. v0: conjugate gradient over a `KrylovVector`/`LinearOperator` pair, real `f64` scalars, no dependencies. Not used by the tensor layer yet. |
-
-## Contraction Planning
-
-TeNeT separates path planning from tensor execution.
-
-```text
-tensor!(...) labels
-  -> NetworkIR + DenseCostModel
-  -> DenseContractionOptimizer
-  -> ContractionPlan
-  -> TensorMap::contract / TensorMap::permute execution
-```
-
-The planner sees only metadata:
-
-- input label lists, such as `[["a", "b"], ["b", "c"]]`;
-- output labels, such as `["a", "c"]`;
-- label dimensions, such as `{ "a": 2, "b": 16, "c": 4 }`;
-- optimizer configuration.
-
-It does not receive raw tensor storage, fusion-tree blocks, dense buffers, or
-tensor values. External optimizers return an active-pair path such as
-`[[0, 1], [0, 1]]`; TeNeT validates that path, builds a `ContractionPlan`, then
-executes the plan locally with `TensorMap::contract`.
-
-The plan cache is topology-keyed: labels, adjoint markers, codomain/domain
-splits, output labels, and optimizer choice are part of the key; concrete leg
-dimensions are tracked as a snapshot for replan policy. The default policy is
-`BakeOnce`, i.e. find a non-degenerate order once and reuse it across later
-dimension drift.
-
-## Planner Backends
-
-| feature | backend | purpose |
-| --- | --- | --- |
-| default | built-in greedy | Fast deterministic baseline, no external dependency. |
-| `opt-path` | `opt-einsum-path` crate | Pure-Rust path search: `auto`, `auto-hq`, `dp`, `optimal`, branch, random-greedy, memory limit. |
-| `cotengra-python` | Python `cotengra` subprocess | Optional high-quality external planner, including cotengra hyper optimization and slicing decisions. |
-
-`opt-einsum-path` receives a generated einsum equation plus shapes. This is for
-path search only; TeNeT still executes the contraction itself.
-
-The cotengra backend sends JSON over stdin/stdout to Python:
-
-```json
-{
-  "inputs": [["a", "b"], ["b", "c"]],
-  "output": ["a", "c"],
-  "size_dict": {"a": 2, "b": 16, "c": 4},
-  "config": {"method": "auto-hq", "minimize": "flops"}
-}
-```
-
-The Python side calls `cotengra.array_contract_tree(...)` and returns
-`tree.get_path()` plus optional sliced-index metadata.
-
-## Features
-
-| feature | effect |
-| --- | --- |
-| no default features | `tenet-sectors` and `tenet-core` build without a dense backend. Execution crates require a CPU backend or `provider-inject`; otherwise they fail with a backend-selection diagnostic. |
-| `cpu-faer` | Enable the pure-Rust faer CPU dense provider; it is the compiled default when the resolved Tenferro CPU build does not enable `cpu-blas`. |
-| `cpu-blas` | Enable the BLAS/LAPACK provider path selected through downstream backend features. |
-| `blas-accelerate` | Accelerate-backed BLAS/LAPACK feature wiring. |
-| `blas-openblas` | OpenBLAS-backed BLAS/LAPACK feature wiring. |
-| `blas-mkl` | MKL-backed BLAS/LAPACK feature wiring. |
-| `provider-inject` | Allow injecting a dense backend explicitly. |
-| `cuda` | Compile the supported typed CUDA paths: multiplicity-free `f64` and `Complex64` payloads, including compact SVD/EIGH/QR in both; a CPU feature is also required for Host-only execution used elsewhere. |
-| `racah-generated` | Enable Racah-generated coefficient data and the checked Generic SUN provider through `tenet-sectors`, `tenet-core`, `tenet`, and `tenet-network`. |
-| `opt-path` | Enable `opt-einsum-path` optimizers in `tenet-network`. Enable it on `tenet-network`, not on `tenet`: on `tenet` it is a marker that only adds the `Optimizer::{Optimal, DynamicProgramming, AutoHq}` variants. |
-| `cotengra-python` | Enable the Python cotengra planner bridge in `tenet-network`. Same marker relationship: on `tenet` it only adds `Optimizer::CotengraPython` and its config types. |
-
-For cotengra, create the Python environment with uv:
-
-```sh
-uv sync --project tools/cotengra-python
-TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
-  TENET_RUN_COTENGRA_PYTHON_TEST=1 \
-  cargo test -p tenet-network --features cotengra-python
-```
-
-## Current Limitations
-
-- Checked Generic providers are Host-only. Representative tested typed scope
-  includes construction, transforms, tensor products, owned composition and
-  trace, static N-ary networks, and explicit sliced execution. CUDA supports a
-  multiplicity-free `f64`/`Complex64` subset after explicit transfer,
-  including compact SVD, EIGH and QR in both payloads. Device SVD keeps the raw
-  backend gauge on `u`/`vh` rather than the Host largest-pivot gauge; device
-  `qr_compact` returns the Host positive-diagonal gauge. Full and values-only
-  factorizations, `eig`, and matrix functions have no device path.
-- Execution crates reject a no-default-features build because their convenience
-  APIs require a concrete executor. Use `tenet-sectors` / `tenet-core` for
-  backend-free types, or enable a CPU feature or `provider-inject` for the full
-  workspace. CUDA is an additional backend feature and still requires one of
-  those host backends.
-- CUDA is compile-checked in CI, but requires a CUDA runner for runtime smoke
-  tests; Host-only tree-transform execution is not used silently on a device.
-- `cotengra-python` is a planner backend, not an executor backend.
-- External planners use dense effective dimensions. Symmetric block execution,
-  fusion-tree bookkeeping, fermionic signs, and storage layout remain TeNeT
-  execution responsibilities.
-- `SectorId`, raw block order, and seeded random storage are internal
-  representations rather than cross-version formats. See
-  [`docs/sector_id_compatibility.md`](docs/sector_id_compatibility.md) for the
-  packed product-sector migration and cache/fixture guidance.
-
-## Documentation Map
-
-- [`docs/itebd_heisenberg.md`](docs/itebd_heisenberg.md): guided U(1) iTEBD
-  ground-state calculation for the infinite spin-1/2 Heisenberg chain.
-- [`tenet/src/tutorial.md`](tenet/src/tutorial.md): user-layer tutorial with
-  compiling examples.
-- [`tenet/src/mathematics.md`](tenet/src/mathematics.md): tensor-map
-  convention, duality, and categorical semantics.
-- [`docs/provider_interface.md`](docs/provider_interface.md): what a symmetry
-  provider must implement, which trait owns which data, and the current typed
-  capability boundaries.
-- [`docs/writing_style.md`](docs/writing_style.md): evidence and plain-language
-  rules for TeNeT documentation.
-- [`docs/sector_id_compatibility.md`](docs/sector_id_compatibility.md):
-  `SectorId`, product-codec, storage-order, seeded-random, and cache
-  compatibility contract.
-- [`docs/complexity_parity_policy.md`](docs/complexity_parity_policy.md): the
-  structured-operation FLOP and storage-order contract.
-- [`docs/backend_policy.md`](docs/backend_policy.md): backend selection and the
-  policy for performance evidence.
-- [`docs/cotengra_backend.md`](docs/cotengra_backend.md): cotengra setup,
-  planner protocol, and current limitations.
-- [`benchmarks/README.md`](benchmarks/README.md): current harnesses and
-  revision-specific result records.
-- [`docs/history.md`](docs/history.md): historical design, audit, migration,
-  and measurement records. These are not current capability authority.
-
-## Development Notes
-
-Follow the [writing style guide](docs/writing_style.md). Claims about behavior
-must match current source and tests; performance claims also need a current
-measurement recorded in the pull request.
