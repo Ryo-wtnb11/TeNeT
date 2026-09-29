@@ -904,6 +904,49 @@ fn check_mixed_signed_members<R, D>(
                 member.terms(),
                 member.name,
             );
+            if swapped {
+                // The public A-side oracle alone cannot check the selected
+                // zero-copy dispatch, which exchanges operands and twists B.
+                let selected = Case {
+                    name: "selected signed swapped dispatch",
+                    lhs: member.rhs.clone(),
+                    rhs: member.lhs.clone(),
+                    lhs_axes: vec![1],
+                    rhs_axes: vec![0],
+                    output_axes: vec![0, 1],
+                    dense: false,
+                };
+                let selected_oracle =
+                    fermionic_blas_contract_oracle_partitioned(&selected, TwistRole::B, 1, twist);
+                assert_close(
+                    result.member(i).unwrap().dense_data().unwrap(),
+                    selected_oracle.dense_data().unwrap(),
+                    selected.terms(),
+                    selected.name,
+                );
+                let untwisted = fermionic_blas_contract_oracle_partitioned(
+                    &selected,
+                    TwistRole::None,
+                    1,
+                    twist,
+                );
+                let expected = selected_oracle.dense_data().unwrap();
+                let scale = expected
+                    .iter()
+                    .map(|value| value.magnitude())
+                    .fold(0.0, f64::max);
+                let tolerance =
+                    64.0 * (selected.terms().max(1) as f64).sqrt() * D::EPS * (1.0 + scale);
+                assert!(
+                    expected
+                        .iter()
+                        .zip(untwisted.dense_data().unwrap())
+                        .any(|(&a, &b)| a.distance(b) > tolerance),
+                    "{}: the selected B-side twist is vacuous for {}",
+                    selected.name,
+                    D::NAME,
+                );
+            }
             assert_close(
                 result.member(i).unwrap().dense_data().unwrap(),
                 eager[i].dense_data().unwrap(),
