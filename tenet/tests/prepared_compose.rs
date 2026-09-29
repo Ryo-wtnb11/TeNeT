@@ -2,8 +2,8 @@
 //! Host gates of `ComposePlan`/`ComposeWorkspace` (#1639) and the deprecated
 //! `PreparedCompose` forwarding wrapper (#1498).
 //!
-//! Per member the handle must equal eager `compose` of the same placement,
-//! and both must equal the tree-keyed `mul!` oracle of `prepared/mod.rs`,
+//! Per member both public call shapes must equal eager `compose` of the same
+//! placement and the tree-keyed `mul!` oracle of `prepared/mod.rs`,
 //! over U(1), SU(2) and fZ2xU(1), f64 and c64, B in {1, 2, 17}, with inactive
 //! destination blocks. `execute_into` must give the same result over a
 //! destination prefilled with NaN or garbage (D2).

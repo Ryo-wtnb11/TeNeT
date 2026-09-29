@@ -1,5 +1,5 @@
-//! Shared fixtures and the independent oracle for the `PreparedCompose`
-//! gates (#1498, leaf L2 of #1287).
+//! Shared fixtures and the independent oracle for the compose plan/workspace
+//! gates (#1639) and the deprecated `PreparedCompose` forwarding wrapper.
 //!
 //! Every fixture composes `A: V ⊗ V ← W` with `B: W ← V`. `W` lacks a sector
 //! of `V` that `V ⊗ V` reaches, so the destination `V ⊗ V ← V` has coupled
