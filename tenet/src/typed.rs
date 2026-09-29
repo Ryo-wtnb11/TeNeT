@@ -306,9 +306,11 @@ use crate::tensor_core::{
 use crate::RuntimeIdentity;
 
 mod batched;
+#[allow(deprecated)]
 pub use batched::{
-    BatchError, BatchMemberRepresentation, EighStackOutput, MemberFault, PreparedCompose,
-    PreparedEighFull, SignatureField, StackedTensorMap, StructureSignature,
+    BatchError, BatchMemberRepresentation, ComposePlan, ComposeWorkspace, EighStackOutput,
+    MemberFault, PreparedCompose, PreparedEighFull, SignatureField, StackedTensorMap,
+    StructureSignature,
 };
 
 #[cfg(test)]

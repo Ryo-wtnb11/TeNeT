@@ -303,6 +303,8 @@ const TYPED: &[&str] = &[
     "LinalgBackend",
     "Lq",
     "MemberFault",
+    "ComposePlan",
+    "ComposeWorkspace",
     "MultiplicityIndex",
     "NON_SYMMETRIC_CONTRACTION_UNSUPPORTED",
     "NetworkDegeneracyRestriction",

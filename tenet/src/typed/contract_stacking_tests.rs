@@ -630,6 +630,7 @@ fn su2_mis_stacked_contractions_match_physical_dense_einsum() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn prepared_compose_rejects_a_non_direct_plan_at_new() {
     // What: an expert tiling whose column trees are stacked opposite to the
     // partner's rows has no canonical fully-direct plan, so the handle refuses

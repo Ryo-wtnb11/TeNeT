@@ -1,4 +1,6 @@
-//! Device gates of `PreparedCompose` (#1498, leaf L2 of #1287).
+#![allow(deprecated)]
+//! Device gates of `ComposePlan`/`ComposeWorkspace` (#1639) and the deprecated
+//! `PreparedCompose` forwarding wrapper (#1498).
 //!
 //! Its own binary, with every test serialized, because `cuda_transfer_stats`
 //! and the plan-cache statistics are process- and context-wide. Run with
@@ -19,7 +21,9 @@ use std::sync::Mutex;
 use num_complex::{Complex32, Complex64};
 use tenet::expert::{cuda_transfer_stats, CudaPlanCacheStats, CudaTransferStats};
 use tenet::sector::U1FusionRule;
-use tenet::typed::{GradedSpace, PreparedCompose, Runtime, StackedTensorMap, TensorMap};
+use tenet::typed::{
+    ComposePlan, GradedSpace, PreparedCompose, Runtime, StackedTensorMap, TensorMap,
+};
 
 use common::{DevicePayload, DeviceRule};
 use prepared::{
@@ -28,6 +32,29 @@ use prepared::{
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn workspace_releases_its_claim_after_plan_is_dropped() {
+    let _guard = serial();
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let (v, w) = u1_legs();
+    let lhs = device(&members::<_, f64>(&runtime, &[&v, &v], &[&w], 2, 41));
+    let rhs = device(&members::<_, f64>(&runtime, &[&w], &[&v], 2, 42));
+    let baseline = plans(&runtime).reserved_entries;
+    let plan = ComposePlan::new(&lhs, &rhs).unwrap();
+    let first = plan.workspace().unwrap();
+    let second = plan.workspace().unwrap();
+    let claimed = plans(&runtime).reserved_entries - baseline;
+    assert!(claimed > 0);
+    assert_eq!(claimed % 2, 0, "each workspace owns the same claim");
+    drop(plan);
+    assert_eq!(plans(&runtime).reserved_entries, baseline + claimed);
+    drop(first);
+    assert_eq!(plans(&runtime).reserved_entries, baseline + claimed / 2);
+    drop(second);
+    assert_eq!(plans(&runtime).reserved_entries, baseline);
+}
 
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     SERIAL
