@@ -879,11 +879,13 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
         &TreeTransformStructure<C>,
         &Arc<BlockStructure>,
         &Arc<BlockStructure>,
+        &DynamicFusionMapSpace,
     ) {
         (
             &self.lhs_transform.transform_structure,
             self.lhs_transform.space.structure(),
             &self.lhs_transform.replay_structure,
+            &self.lhs_transform.space,
         )
     }
 

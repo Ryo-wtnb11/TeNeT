@@ -125,7 +125,7 @@ fn su2_case() -> Case<SU2FusionRule> {
 }
 
 #[test]
-fn rank_five_su2_member_transform_matches_ordinary_replay() {
+fn rank_five_su2_member_transform_matches_physical_permutation_and_ordinary_replay() {
     let provider = Arc::new(SU2FusionRule);
     let s = su2_leg;
     let case = Case {
@@ -147,8 +147,28 @@ fn rank_five_su2_member_transform_matches_ordinary_replay() {
     let super::resolution::StorageContractRoute::DynamicTree(artifact) = resolution.route else {
         panic!("noncomposition SU(2) fixture must select DynamicTree");
     };
-    let (transform, dst_structure, src_structure) = artifact.test_lhs_transform();
+    let (transform, dst_structure, src_structure, transformed_space) =
+        artifact.test_lhs_transform();
     assert!(transform.has_pack_gemm_scatter_blocks());
+    let plan = super::fusion::prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
+        destination.provider(),
+        destination.space(),
+        case.lhs.space(),
+        case.rhs.space(),
+        case.axes(),
+    )
+    .unwrap();
+    let order: Vec<_> = plan
+        .lhs_transform()
+        .codomain_permutation()
+        .iter()
+        .chain(plan.lhs_transform().domain_permutation())
+        .copied()
+        .collect();
+    assert_eq!(order, [0, 2, 4, 1, 3]);
+    let transformed_bound =
+        BoundDynamicFusionMapSpace::from_derived_like(&case.lhs, transformed_space.clone())
+            .unwrap();
     let source_len = src_structure.required_len().unwrap();
     let destination_len = dst_structure.required_len().unwrap();
     let source = [
@@ -172,6 +192,60 @@ fn rank_five_su2_member_transform_matches_ordinary_replay() {
     )
     .unwrap();
     for member in 0..2 {
+        let (source_shape, source_physical) = crate::expand_physical_host(
+            crate::BoundDynamicTensorRef::try_new(
+                &case.lhs,
+                &source[member * source_len..(member + 1) * source_len],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let (target_shape, target_physical) = crate::expand_physical_host(
+            crate::BoundDynamicTensorRef::try_new(
+                &transformed_bound,
+                &batched[member * destination_len..(member + 1) * destination_len],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let strides = |shape: &[usize]| {
+            shape
+                .iter()
+                .scan(1usize, |stride, &dim| {
+                    let current = *stride;
+                    *stride *= dim;
+                    Some(current)
+                })
+                .collect::<Vec<_>>()
+        };
+        let source_strides = strides(&source_shape);
+        let target_strides = strides(&target_shape);
+        assert_eq!(
+            target_shape,
+            order
+                .iter()
+                .map(|&axis| source_shape[axis])
+                .collect::<Vec<_>>()
+        );
+        let scale = source_physical
+            .iter()
+            .fold(1.0_f64, |maximum, value| maximum.max(value.abs()));
+        let tolerance = 32.0 * (source_len as f64).sqrt() * f64::EPSILON * scale;
+        for (linear, &actual) in target_physical.iter().enumerate() {
+            let source_linear = order
+                .iter()
+                .enumerate()
+                .map(|(position, &axis)| {
+                    ((linear / target_strides[position]) % target_shape[position])
+                        * source_strides[axis]
+                })
+                .sum::<usize>();
+            assert!(
+                (actual - source_physical[source_linear]).abs() <= tolerance,
+                "physical member {member}, element {linear}: {actual} != {}",
+                source_physical[source_linear]
+            );
+        }
         let mut expected = vec![f64::NAN; destination_len];
         tenet_operations::tree_transform_structure_overwrite_with_structural_recoupling_raw(
             &mut tenet_operations::StridedHostKernelAdapter::default(),

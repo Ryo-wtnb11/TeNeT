@@ -1,5 +1,4 @@
 use super::*;
-use crate::validate_destination_layouts_injective;
 
 fn checked_len<D>(len: usize) -> Result<isize, OperationError> {
     core::alloc::Layout::array::<D>(len).map_err(|_| OperationError::ElementCountOverflow)?;
@@ -87,10 +86,9 @@ where
             return Err(OperationError::ElementCountMismatch { expected, actual });
         }
     }
-    validate_destination_layouts_injective(
-        dst_structure,
-        "member transform destination layouts overlap",
-    )?;
+    // Compilation already proves destination block injectivity. Exact
+    // structure admission above carries that proof to every member; the
+    // checked member stride keeps their physical ranges separate.
     let layouts = task.layouts();
     let plan = task.recoupling_plan();
     task.validate_workspace_requirements::<D>()?;
@@ -615,6 +613,24 @@ mod tests {
             .unwrap();
             assert_eq!(dense.submissions, 1);
             assert_eq!(dense.jobs, members);
+            if members > 1 {
+                let plan = transform.recoupling_plan();
+                let base = plan.jobs()[0];
+                assert_eq!(workspace.chunk_jobs.len(), members);
+                for (member, job) in workspace.chunk_jobs.iter().enumerate() {
+                    assert_eq!(
+                        job.dst_offset,
+                        member * plan.destination_len() + base.dst_offset
+                    );
+                    assert_eq!(job.lhs_offset, member * plan.source_len() + base.lhs_offset);
+                    assert_eq!(job.rhs_offset, base.rhs_offset);
+                }
+                assert!(workspace
+                    .chunk_jobs
+                    .windows(2)
+                    .all(|jobs| jobs[0].dst_offset + jobs[0].rows * jobs[0].cols
+                        <= jobs[1].dst_offset));
+            }
             for member in 0..members {
                 let [a, b, c, _] = source[4 * member..][..4].try_into().unwrap();
                 assert_eq!(
@@ -798,6 +814,53 @@ mod tests {
             destination,
             [Complex64::new(-2.0, 4.0), Complex64::new(6.0, 8.0)]
         );
+    }
+
+    #[test]
+    fn conjugated_complex_multi_pack_matches_hand_matrix_action() {
+        let blocks = Arc::new(BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap());
+        let transform = TreeTransformStructure::compile_structures_with_storage_conjugation(
+            &blocks,
+            &blocks,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                vec![1.0_f64, 2.0, 3.0, 4.0],
+            )],
+            true,
+        )
+        .unwrap();
+        let source = [
+            Complex64::new(1.0, 2.0),
+            Complex64::new(3.0, -1.0),
+            Complex64::new(-2.0, 4.0),
+            Complex64::new(5.0, 3.0),
+        ];
+        let mut destination = [Complex64::new(f64::NAN, f64::NAN); 4];
+        let mut dense = CountingDense::default();
+        tree_transform_members_overwrite_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut dense,
+            &mut TreeTransformWorkspace::default(),
+            &transform,
+            &blocks,
+            &blocks,
+            &mut destination,
+            &source,
+            2,
+            1,
+        )
+        .unwrap();
+        assert_eq!(dense.submissions, 1);
+        assert_eq!(dense.jobs, 2);
+        for member in 0..2 {
+            let a = source[2 * member].conj();
+            let b = source[2 * member + 1].conj();
+            assert_eq!(
+                &destination[2 * member..2 * member + 2],
+                &[a + 2.0 * b, 3.0 * a + 4.0 * b]
+            );
+        }
     }
 
     #[test]
