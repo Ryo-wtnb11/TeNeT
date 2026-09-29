@@ -426,8 +426,12 @@ fn public_copy_c_both_orientations_and_dtypes() {
     }
     cases::<_, f64>(&runtime, &u1_non_self_dual());
     cases::<_, tenet::typed::Complex64>(&runtime, &u1_non_self_dual());
+    cases::<_, f32>(&runtime, &u1_non_self_dual());
+    cases::<_, tenet::typed::Complex32>(&runtime, &u1_non_self_dual());
     cases::<_, f64>(&runtime, &su2());
     cases::<_, tenet::typed::Complex64>(&runtime, &su2());
+    cases::<_, f32>(&runtime, &su2());
+    cases::<_, tenet::typed::Complex32>(&runtime, &su2());
 }
 
 #[test]

@@ -14,8 +14,9 @@ use copy_c::{CopyCPlan, CopyCWorkspace};
 ///
 /// This binding admits twist-free transformed-tree routes, fully direct
 /// unit-alpha bosonic core routes, and CopyC when its temporary is such a
-/// direct core followed by one completed output transform. Direct composition is served by
-/// [`ComposePlan`]. The plan fixes structure and axes, but not member count.
+/// direct core followed by one completed output transform.
+/// Direct composition is served by [`ComposePlan`]. The plan fixes structure
+/// and axes, but not member count.
 pub struct ContractPlan<R, D> {
     runtime: Runtime,
     lhs: StructureSignature,
