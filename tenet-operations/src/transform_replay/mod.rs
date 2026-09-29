@@ -40,12 +40,14 @@ mod batched;
 mod coefficients;
 mod entry;
 mod kernels;
+mod member;
 mod owned;
 
 use batched::*;
 use coefficients::*;
 pub use entry::*;
 pub use kernels::*;
+pub use member::*;
 pub use owned::*;
 
 #[cfg(test)]
@@ -61,6 +63,7 @@ mod allocation_oracle {
     }
 
     static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+    static ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
     static JOINS: AtomicUsize = AtomicUsize::new(0);
     static SESSION: Mutex<()> = Mutex::new(());
 
@@ -70,13 +73,13 @@ mod allocation_oracle {
     unsafe impl GlobalAlloc for CountingAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             let pointer = unsafe { System.alloc(layout) };
-            record(pointer);
+            record(pointer, layout.size());
             pointer
         }
 
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
             let pointer = unsafe { System.alloc_zeroed(layout) };
-            record(pointer);
+            record(pointer, layout.size());
             pointer
         }
 
@@ -86,7 +89,7 @@ mod allocation_oracle {
 
         unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
             let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-            record(pointer);
+            record(pointer, new_size);
             pointer
         }
     }
@@ -94,9 +97,10 @@ mod allocation_oracle {
     #[global_allocator]
     static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-    fn record(pointer: *mut u8) {
+    fn record(pointer: *mut u8, bytes: usize) {
         if !pointer.is_null() && is_measured() {
             ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            ALLOCATED_BYTES.fetch_add(bytes, Ordering::Relaxed);
         }
     }
 
@@ -129,12 +133,17 @@ mod allocation_oracle {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         ALLOCATIONS.store(0, Ordering::Relaxed);
+        ALLOCATED_BYTES.store(0, Ordering::Relaxed);
         JOINS.store(0, Ordering::Relaxed);
         let result = action();
         let allocations = ALLOCATIONS.load(Ordering::Relaxed);
         drop(session);
         drop(restore);
         (result, allocations)
+    }
+
+    pub(super) fn allocated_bytes() -> usize {
+        ALLOCATED_BYTES.load(Ordering::Relaxed)
     }
 
     pub(super) fn with_measurement<R>(action: impl FnOnce() -> R) -> R {
@@ -251,6 +260,10 @@ pub struct HostTreeTransformWorkspace<T> {
     chunk_runs: Vec<usize>,
     chunk_scatter_groups: Vec<usize>,
     fused_indices: Vec<usize>,
+    member_shape: Vec<usize>,
+    member_dst_strides: Vec<isize>,
+    member_src_strides: Vec<isize>,
+    member_ranges: Vec<(usize, usize)>,
 }
 
 pub type TreeTransformWorkspace<T> = HostTreeTransformWorkspace<T>;
@@ -266,6 +279,10 @@ impl<T> Default for HostTreeTransformWorkspace<T> {
             chunk_runs: Vec::new(),
             chunk_scatter_groups: Vec::new(),
             fused_indices: Vec::new(),
+            member_shape: Vec::new(),
+            member_dst_strides: Vec::new(),
+            member_src_strides: Vec::new(),
+            member_ranges: Vec::new(),
         }
     }
 }
