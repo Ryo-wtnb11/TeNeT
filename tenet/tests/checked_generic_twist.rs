@@ -1193,7 +1193,7 @@ fn checked_generic_contract_keeps_its_braiding_boundaries() {
 
 #[test]
 fn factorization_leg_roles_keep_the_permute_braiding_boundary() {
-    // What (#1553): a factorization's leg roles are a `permute`, so a split
+    // What (#1553, #1620): factorization and solve leg roles are a `permute`, so a split
     // other than the current one needs a symmetric braiding. The anyonic
     // provider refuses it with the permute's typed error before any
     // factorization work, while its current split, which needs no braid,
@@ -1212,6 +1212,21 @@ fn factorization_leg_roles_keep_the_permute_braiding_boundary() {
         format!("{:?}", t.svd_compact(&[1], &[0]).err().unwrap()),
         format!("{:?}", t.qr_compact(&[1], &[0]).err().unwrap()),
         format!("{:?}", t.left_null(&[1], &[0]).err().unwrap()),
+    ] {
+        assert!(error.contains("UnsupportedBraidingStyle"), "{error}");
+    }
+
+    let square: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&unit], [&unit]).unwrap();
+    assert!(square.solve(&[0], &[1], &square, &[0], &[1]).is_ok());
+    for error in [
+        format!(
+            "{:?}",
+            square.solve(&[1], &[0], &square, &[0], &[1]).err().unwrap()
+        ),
+        format!(
+            "{:?}",
+            square.solve(&[0], &[1], &square, &[1], &[0]).err().unwrap()
+        ),
     ] {
         assert!(error.contains("UnsupportedBraidingStyle"), "{error}");
     }

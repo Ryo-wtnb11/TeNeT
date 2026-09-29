@@ -2465,7 +2465,9 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
         })
         .unwrap();
 
-    let solution = divisor.solve(&rhs).unwrap();
+    let solution = divisor
+        .solve(&[0, 1], &[2, 3], &rhs, &[0, 1], &[2, 3])
+        .unwrap();
     assert!(std::ptr::eq(solution.provider(), provider.as_ref()));
     let reconstructed = divisor.compose(&solution).unwrap();
     for index in 0..rhs.subblock_count() {
@@ -2491,9 +2493,21 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
         .zip(route_swapped_rhs.dense_data().unwrap())
         .any(|(actual, swapped)| (*actual - *swapped).abs() > 1e-7));
 
+    let moved = divisor
+        .solve(&[1, 0], &[3, 2], &rhs, &[1, 0], &[3, 2])
+        .unwrap();
+    let permuted_divisor = divisor.permute(&[1, 0], &[3, 2]).unwrap();
+    let permuted_rhs = rhs.permute(&[1, 0], &[3, 2]).unwrap();
+    let composed = permuted_divisor
+        .solve(&[0, 1], &[2, 3], &permuted_rhs, &[0, 1], &[2, 3])
+        .unwrap();
+    assert_eq!(moved.dense_data().unwrap(), composed.dense_data().unwrap());
+
     let complex_divisor = divisor.convert::<Complex64>();
     let complex_rhs = rhs.convert::<Complex64>().scale(Complex64::new(1.0, 0.25));
-    let complex_solution = complex_divisor.solve(&complex_rhs).unwrap();
+    let complex_solution = complex_divisor
+        .solve(&[0, 1], &[2, 3], &complex_rhs, &[0, 1], &[2, 3])
+        .unwrap();
     let complex_reconstructed = complex_divisor.compose(&complex_solution).unwrap();
     for index in 0..complex_rhs.subblock_count() {
         assert_eq!(
@@ -2511,6 +2525,16 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
         .iter()
         .zip(complex_rhs.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).norm() < 2e-10));
+
+    let moved = complex_divisor
+        .solve(&[1, 0], &[3, 2], &complex_rhs, &[1, 0], &[3, 2])
+        .unwrap();
+    let permuted_divisor = complex_divisor.permute(&[1, 0], &[3, 2]).unwrap();
+    let permuted_rhs = complex_rhs.permute(&[1, 0], &[3, 2]).unwrap();
+    let composed = permuted_divisor
+        .solve(&[0, 1], &[2, 3], &permuted_rhs, &[0, 1], &[2, 3])
+        .unwrap();
+    assert_eq!(moved.dense_data().unwrap(), composed.dense_data().unwrap());
 }
 
 #[cfg(feature = "racah-generated")]
@@ -5633,7 +5657,7 @@ fn checked_generic_left_solve_accepts_distinct_provider_arcs_and_rectangular_rhs
         })
         .unwrap();
 
-    let solution = divisor.solve(&rhs).unwrap();
+    let solution = divisor.solve(&[0], &[1, 2], &rhs, &[0], &[1]).unwrap();
     assert!(std::ptr::eq(solution.provider(), lhs_provider.as_ref()));
     assert_eq!(solution.codomain(), divisor.domain());
     assert_eq!(solution.domain(), rhs.domain());
@@ -5648,7 +5672,9 @@ fn checked_generic_left_solve_accepts_distinct_provider_arcs_and_rectangular_rhs
 
     let complex_divisor = divisor.convert::<Complex64>();
     let complex_rhs = rhs.convert::<Complex64>().scale(Complex64::new(1.0, 0.25));
-    let complex_solution = complex_divisor.solve(&complex_rhs).unwrap();
+    let complex_solution = complex_divisor
+        .solve(&[0], &[1, 2], &complex_rhs, &[0], &[1])
+        .unwrap();
     assert!(std::ptr::eq(
         complex_solution.provider(),
         lhs_provider.as_ref()
@@ -5675,7 +5701,7 @@ fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
         TensorMap::from_subblock_fn(&runtime, [&x], [&x], |_, _| 1.0).unwrap();
     let before = lhs.dense_data().unwrap().to_vec();
     assert!(matches!(
-        lhs.solve(&rhs),
+        lhs.solve(&[0], &[1], &rhs, &[0], &[1]),
         Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
             _
         )))
@@ -5687,7 +5713,7 @@ fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
         TensorMap::from_subblock_fn(&other_runtime, [&x], [&x], |_, _| 1.0).unwrap();
     reset_provider_queries(&provider);
     assert!(matches!(
-        lhs.solve(&runtime_rhs),
+        lhs.solve(&[0], &[1], &runtime_rhs, &[0], &[1]),
         Err(GenericTensorError::Facade(
             tenet::typed::Error::RuntimeMismatch
         ))
@@ -5701,7 +5727,7 @@ fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
     reset_provider_queries(&provider);
     reset_provider_queries(&foreign_provider);
     assert!(matches!(
-        lhs.solve(&foreign_rhs),
+        lhs.solve(&[0], &[1], &foreign_rhs, &[0], &[1]),
         Err(GenericTensorError::Facade(
             tenet::typed::Error::RuleMismatch
         ))
@@ -5714,7 +5740,7 @@ fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
         TensorMap::from_subblock_fn(&runtime, [&wrong_codomain], [&x], |_, _| 1.0).unwrap();
     reset_provider_queries(&provider);
     assert!(matches!(
-        lhs.solve(&codomain_rhs),
+        lhs.solve(&[0], &[1], &codomain_rhs, &[0], &[1]),
         Err(GenericTensorError::Facade(
             tenet::typed::Error::InvalidArgument(_)
         ))
@@ -5738,7 +5764,7 @@ fn checked_generic_left_solve_singular_sectors_are_nonpublishing() {
             .unwrap();
         let before = divisor.dense_data().unwrap().to_vec();
         assert!(matches!(
-            divisor.solve(&rhs),
+            divisor.solve(&[0], &[1], &rhs, &[0], &[1]),
             Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
                 _
             )))
@@ -5794,7 +5820,7 @@ fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
             rhs.clone()
         };
         reset_provider_queries(&provider);
-        let solution = lhs.solve(&right).unwrap();
+        let solution = lhs.solve(&[0], &[1], &right, &[0], &[1]).unwrap();
         assert!(std::ptr::eq(solution.provider(), provider.as_ref()));
         numerics::assert_slices_close(
             "solve",

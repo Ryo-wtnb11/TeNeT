@@ -192,8 +192,15 @@ macro_rules! advanced_checks {
         );
         assert_payloads_agree_scaled(
             &format!("{name}: solve (kappa {kappa_a:e})"),
-            a.solve(&b).unwrap().dense_data().unwrap(),
-            wide_a.solve(&wide_b).unwrap().dense_data().unwrap(),
+            a.solve(&[0], &[1], &b, &[0], &[1])
+                .unwrap()
+                .dense_data()
+                .unwrap(),
+            wide_a
+                .solve(&[0], &[1], &wide_b, &[0], &[1])
+                .unwrap()
+                .dense_data()
+                .unwrap(),
             n,
             kappa_a,
         );
@@ -201,7 +208,7 @@ macro_rules! advanced_checks {
             &format!("{name}: right solve (kappa {kappa_a:e})"),
             a.adjoint()
                 .unwrap()
-                .solve(&b.adjoint().unwrap())
+                .solve(&[0], &[1], &b.adjoint().unwrap(), &[0], &[1])
                 .unwrap()
                 .adjoint()
                 .unwrap()
@@ -212,7 +219,7 @@ macro_rules! advanced_checks {
             wide_a
                 .adjoint()
                 .unwrap()
-                .solve(&wide_b.adjoint().unwrap())
+                .solve(&[0], &[1], &wide_b.adjoint().unwrap(), &[0], &[1])
                 .unwrap()
                 .adjoint()
                 .unwrap()

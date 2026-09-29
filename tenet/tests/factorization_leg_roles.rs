@@ -483,6 +483,73 @@ fn leg_roles_cost_exactly_the_explicit_composition() {
 }
 
 #[test]
+fn solve_roles_cost_the_two_explicit_permutations() {
+    let _serial = serial();
+    let runtime = runtime();
+    let (v, w) = su2_legs();
+    let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v, &w], [&v, &w]).unwrap();
+    let b: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &w], [&v, &w], 77).unwrap();
+    let rows = [1, 0];
+    let cols = [3, 2];
+    let identity_rows = [0, 1];
+    let identity_cols = [2, 3];
+    let _ = a.solve(&rows, &cols, &b, &rows, &cols).unwrap();
+    let pa = a.permute(&rows, &cols).unwrap();
+    let pb = b.permute(&rows, &cols).unwrap();
+    let _ = pa
+        .solve(
+            &identity_rows,
+            &identity_cols,
+            &pb,
+            &identity_rows,
+            &identity_cols,
+        )
+        .unwrap();
+
+    let before = transforms(&runtime);
+    let _ = a
+        .solve(
+            &identity_rows,
+            &identity_cols,
+            &b,
+            &identity_rows,
+            &identity_cols,
+        )
+        .unwrap();
+    assert_eq!(
+        transforms(&runtime),
+        before,
+        "identity roles ran a transform"
+    );
+
+    let (_, fused_calls, fused_bytes) =
+        measure(|| a.solve(&rows, &cols, &b, &rows, &cols).unwrap());
+    let after_fused = transforms(&runtime);
+    let (pa, lhs_calls, lhs_bytes) = measure(|| a.permute(&rows, &cols).unwrap());
+    let (pb, rhs_calls, rhs_bytes) = measure(|| b.permute(&rows, &cols).unwrap());
+    let after_permutations = transforms(&runtime);
+    let (_, solve_calls, solve_bytes) = measure(|| {
+        pa.solve(
+            &identity_rows,
+            &identity_cols,
+            &pb,
+            &identity_rows,
+            &identity_cols,
+        )
+        .unwrap()
+    });
+    assert_eq!(transforms(&runtime), after_permutations);
+    assert_eq!(after_fused - before, after_permutations - after_fused);
+    assert_eq!(
+        (fused_calls, fused_bytes),
+        (
+            lhs_calls + rhs_calls + solve_calls,
+            lhs_bytes + rhs_bytes + solve_bytes
+        )
+    );
+}
+
+#[test]
 fn malformed_roles_are_rejected_before_the_operation() {
     let _serial = serial();
     let runtime = runtime();

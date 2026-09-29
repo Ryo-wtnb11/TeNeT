@@ -4569,7 +4569,7 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
         })
         .unwrap();
 
-    let solution = divisor.solve(&rhs).unwrap();
+    let solution = divisor.solve(&[0], &[1], &rhs, &[0], &[1]).unwrap();
     assert_typed_map_close(&divisor.compose(&solution).unwrap(), &rhs, 1e-11);
     assert!(Arc::ptr_eq(
         solution.logical_space().provider_arc(),
@@ -4580,7 +4580,9 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
     let complex_rhs = rhs
         .convert::<Complex64>()
         .scale(num_complex::Complex64::new(1.0, 0.25));
-    let complex_solution = complex_divisor.solve(&complex_rhs).unwrap();
+    let complex_solution = complex_divisor
+        .solve(&[0], &[1], &complex_rhs, &[0], &[1])
+        .unwrap();
     assert_typed_map_close(
         &complex_divisor.compose(&complex_solution).unwrap(),
         &complex_rhs,
@@ -4592,8 +4594,14 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
     ));
 
     let lazy = divisor.adjoint().unwrap();
-    let expected = eager_adjoint_oracle(&divisor).solve(&rhs).unwrap();
-    assert_typed_map_close(&lazy.solve(&rhs).unwrap(), &expected, 1e-11);
+    let expected = eager_adjoint_oracle(&divisor)
+        .solve(&[0], &[1], &rhs, &[0], &[1])
+        .unwrap();
+    assert_typed_map_close(
+        &lazy.solve(&[0], &[1], &rhs, &[0], &[1]).unwrap(),
+        &expected,
+        1e-11,
+    );
 
     let square_rhs =
         TensorMap::from_subblock_fn(&runtime, [&rhs_codomain], [&rhs_codomain], |_, indices| {
@@ -4601,19 +4609,28 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
         })
         .unwrap();
     let lazy_rhs = square_rhs.adjoint().unwrap();
-    let expected = divisor.solve(&eager_adjoint_oracle(&square_rhs)).unwrap();
-    assert_typed_map_close(&divisor.solve(&lazy_rhs).unwrap(), &expected, 1e-11);
+    let expected = divisor
+        .solve(&[0], &[1], &eager_adjoint_oracle(&square_rhs), &[0], &[1])
+        .unwrap();
+    assert_typed_map_close(
+        &divisor.solve(&[0], &[1], &lazy_rhs, &[0], &[1]).unwrap(),
+        &expected,
+        1e-11,
+    );
 
     let bad_leg = GradedSpace::try_new(Arc::clone(&lhs_provider), [(U1Irrep::new(7), 1)]).unwrap();
     let bad = TensorMap::from_subblock_fn(&runtime, [&bad_leg], [&bad_leg], |_, _| 1.0)
         .unwrap()
         .adjoint()
         .unwrap();
-    assert!(matches!(lazy.solve(&bad), Err(Error::InvalidArgument(_))));
+    assert!(matches!(
+        lazy.solve(&[0], &[1], &bad, &[0], &[1]),
+        Err(Error::InvalidArgument(_))
+    ));
 
     let singular_dense = divisor.scale(0.0).adjoint().unwrap();
     assert!(matches!(
-        singular_dense.solve(&lazy_rhs),
+        singular_dense.solve(&[0], &[1], &lazy_rhs, &[0], &[1]),
         Err(Error::Operation(_))
     ));
 
@@ -4632,7 +4649,7 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
         ],
     )
     .unwrap();
-    let compact_solution = divisor.solve(&compact_rhs).unwrap();
+    let compact_solution = divisor.solve(&[0], &[1], &compact_rhs, &[0], &[1]).unwrap();
     // A dense divisor densifies the compact RHS into its solve buffer once.
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
     DIAGONAL_MATERIALIZATIONS.set(0);
@@ -4652,7 +4669,9 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
         ],
     )
     .unwrap();
-    let compact_compact = compact_divisor.solve(&compact_rhs).unwrap();
+    let compact_compact = compact_divisor
+        .solve(&[0], &[1], &compact_rhs, &[0], &[1])
+        .unwrap();
     assert!(compact_compact.spectrum().is_some());
     assert_eq!(compact_compact.spectrum().unwrap()[0].values, [1.0, 0.75]);
     assert_eq!(compact_compact.spectrum().unwrap()[1].values, [0.625]);
@@ -4663,7 +4682,7 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
         1e-11,
     );
 
-    let scaled = compact_divisor.solve(&rhs).unwrap();
+    let scaled = compact_divisor.solve(&[0], &[1], &rhs, &[0], &[1]).unwrap();
     assert_typed_map_close(&compact_divisor.compose(&scaled).unwrap(), &rhs, 1e-11);
     assert!(Arc::ptr_eq(
         scaled.logical_space().provider_arc(),
@@ -4687,7 +4706,7 @@ fn solve_is_transactional_provider_native_and_cache_cold() {
     )
     .unwrap();
     assert!(matches!(
-        singular.solve(&rhs),
+        singular.solve(&[0], &[1], &rhs, &[0], &[1]),
         Err(Error::Operation(error))
             if matches!(*error, tenet_tensors::OperationError::Dense(
                 tenet_dense::DenseError::NumericalFailure { op: "solve_into", .. }
@@ -4755,7 +4774,9 @@ where
         let lhs_before = divisor.dense_data().unwrap().to_vec();
         let rhs_before = rhs.dense_data().unwrap().to_vec();
         calls.store(0, std::sync::atomic::Ordering::Relaxed);
-        let solution = lhs.solve(&right).unwrap();
+        let solution = lhs
+            .solve(&[0, 1], &[2, 3], &right, &[0, 1], &[2, 3])
+            .unwrap();
         assert!(matches!(solution.repr, TypedTensorRepr::Owned(_)));
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::Relaxed),
@@ -4816,7 +4837,7 @@ fn checked_generic_left_solve_preserves_injected_backend_provenance() {
     let before_lhs = lhs.dense_data().unwrap().to_vec();
     let before_rhs = rhs.dense_data().unwrap().to_vec();
     assert!(matches!(
-        lhs.solve(&rhs),
+        lhs.solve(&[0], &[1], &rhs, &[0], &[1]),
         Err(GenericTensorError::Facade(Error::Operation(error)))
             if matches!(*error, tenet_tensors::OperationError::Dense(
                 DenseError::Backend { op: "solve_into", ref message, .. }

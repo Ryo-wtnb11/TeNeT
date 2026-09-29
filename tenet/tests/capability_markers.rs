@@ -58,7 +58,7 @@ fn advanced_family<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>)
     let _ = tensor.exp(&[0], &[1]);
     let _ = tensor.inv(&[0], &[1]);
     let _ = tensor.pinv(&[0], &[1], 0.0);
-    let _ = tensor.solve(tensor);
+    let _ = tensor.solve(&[0], &[1], tensor, &[0], &[1]);
 }
 
 /// The general (non-Hermitian) eigendecomposition also needs its factor dtype

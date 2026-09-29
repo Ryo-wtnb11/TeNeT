@@ -131,9 +131,9 @@ macro_rules! shared_suite {
 
         refused!(
             "solve",
-            s.solve(b.adjoint_view()),
-            s.solve(&lazy),
-            s.solve(&lazy.materialize().unwrap())
+            s.solve(&[0, 1], &[2, 3], b.adjoint_view(), &[0, 1], &[2]),
+            s.solve(&[0, 1], &[2, 3], &lazy, &[0, 1], &[2]),
+            s.solve(&[0, 1], &[2, 3], &lazy.materialize().unwrap(), &[0, 1], &[2])
         );
         refused!(
             "otimes",
@@ -155,7 +155,7 @@ macro_rules! shared_suite {
         assert_eq!(entries, 0, "{what}: otimes on a lazy receiver");
         assert!(is_unsupported(&view.err().unwrap(), "otimes"));
         let s_lazy = s.adjoint().unwrap();
-        let (view, entries) = probe(|| s_lazy.solve(b.adjoint_view()));
+        let (view, entries) = probe(|| s_lazy.solve(&[0, 1], &[2, 3], b.adjoint_view(), &[0, 1], &[2]));
         assert_eq!(entries, 0, "{what}: solve on a lazy receiver");
         assert!(is_unsupported(&view.err().unwrap(), "solve"));
 
@@ -617,7 +617,11 @@ macro_rules! compact_suite {
             )
         );
         assert_same_tensor!(view, owned, format!("{what}: D.contract(x')"));
-        let (view, owned) = direct!("compact solve", d.solve(x.adjoint_view()), d.solve(&x_lazy));
+        let (view, owned) = direct!(
+            "compact solve",
+            d.solve(&[0], &[1], x.adjoint_view(), &[0], &[1]),
+            d.solve(&[0], &[1], &x_lazy, &[0], &[1])
+        );
         assert_same_tensor!(view, owned, format!("{what}: compact solve"));
 
         // e: [bond] <- [bond] dense, so e' has D's hom space.

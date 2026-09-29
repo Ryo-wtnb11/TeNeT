@@ -121,7 +121,7 @@ fn right_solve_composes_adjoints_around_left_solve_for_real_and_complex_u1() {
     let solved = rhs
         .adjoint()
         .unwrap()
-        .solve(&lhs.adjoint().unwrap())
+        .solve(&[0], &[1], &lhs.adjoint().unwrap(), &[0], &[1])
         .unwrap()
         .adjoint()
         .unwrap();
@@ -135,7 +135,7 @@ fn right_solve_composes_adjoints_around_left_solve_for_real_and_complex_u1() {
     let solved_c = rhs_c
         .adjoint()
         .unwrap()
-        .solve(&lhs_c.adjoint().unwrap())
+        .solve(&[0], &[1], &lhs_c.adjoint().unwrap(), &[0], &[1])
         .unwrap()
         .adjoint()
         .unwrap();

@@ -299,13 +299,13 @@ macro_rules! factor_conformance {
                 .unwrap(),
             &id
         );
-        let solved = h.solve(&id).unwrap();
+        let solved = h.solve(&[0], &[1], &id, &[0], &[1]).unwrap();
         assert_provider!(provider; solved);
         assert_close!(&solved, &inverse);
         let solved_right = h
             .adjoint()
             .unwrap()
-            .solve(&id.adjoint().unwrap())
+            .solve(&[0], &[1], &id.adjoint().unwrap(), &[0], &[1])
             .unwrap()
             .adjoint()
             .unwrap();

@@ -349,7 +349,7 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// fn advanced<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>) {
 ///     let _ = tensor.exp(&[0], &[1]);
 ///     let _ = tensor.inv(&[0], &[1]);
-///     let _ = tensor.solve(tensor);
+///     let _ = tensor.solve(&[0], &[1], tensor, &[0], &[1]);
 /// }
 /// ```
 ///
@@ -661,19 +661,24 @@ pub(super) type CheckedGenericSpectrumResult<R, V> = Result<
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorSolveDispatch<R, D>,
+    R::Mode: TypedTensorSolveDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: AdvancedLinalgScalar,
 {
     /// Solves `self * x = rhs` independently in every coupled sector, without
     /// forming an inverse.
     ///
-    /// The operands must share a runtime and fusion-rule identity, their
-    /// codomains must be exactly equal, and `self` must have isomorphic
+    /// `rows` and `cols` select the receiver's matrix view, while
+    /// `rhs_rows` and `rhs_cols` select the right-hand side's matrix view.
+    /// Each pair names source axes in [`Self::permute`] order. The current
+    /// split borrows its operand without a transform.
+    ///
+    /// The permuted operands must share a runtime and fusion-rule identity,
+    /// their codomains must be exactly equal, and `self` must have isomorphic
     /// codomain and domain. The result has space
-    /// `domain(self) <- domain(rhs)` and keeps `self`'s exact provider `Arc`.
+    /// `domain(permuted self) <- domain(permuted rhs)` and keeps `self`'s exact provider `Arc`.
     /// This is TensorKit's left solve `self \\ rhs`.
-    /// TensorKit's right solve `self / rhs` is the composition
-    /// `rhs.adjoint()?.solve(&self.adjoint()?)?.adjoint()`.
+    /// TensorKit's right solve `self / rhs` can be composed from adjoints
+    /// and this left solve with roles chosen in the adjointed axis order.
     ///
     /// Dense input uses one linear solve per coupled sector. A
     /// multiplicity-free compact diagonal divisor instead applies its
@@ -690,6 +695,8 @@ where
     /// a sector is singular. If a checked provider rejects the output space,
     /// its original error is available as the source. If any preflight, sector
     /// solve, or output-space creation fails, no result tensor is returned.
+    /// Non-identity roles also return the existing [`Self::permute`] errors
+    /// for malformed axes or unsupported braiding.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -700,20 +707,38 @@ where
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?;
     /// let b: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 1)?;
-    /// assert_eq!(a.solve(&b)?.dense_data()?, b.dense_data()?);
+    /// assert_eq!(a.solve(&[0], &[1], &b, &[0], &[1])?.dense_data()?, b.dense_data()?);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     ///
-    /// An adjoint view `rhs` (`t.adjoint_view()`) returns
-    /// [`Error::Unsupported`]: this operation would copy it. Pass
-    /// `&t.adjoint()?.materialize()?` instead.
+    /// An adjoint view `rhs` (`t.adjoint_view()`) is accepted by the current
+    /// split of a compact divisor, which reads it directly. A dense divisor
+    /// or either moved role pair would copy the view and returns
+    /// [`Error::Unsupported`]. Pass `&t.adjoint()?.materialize()?` instead.
     pub fn solve<'a>(
         &self,
+        rows: &[usize],
+        cols: &[usize],
         rhs: impl Into<TensorRef<'a, R, D>>,
+        rhs_rows: &[usize],
+        rhs_cols: &[usize],
     ) -> Result<Self, TypedFacadeError<R>> {
         let rhs = rhs.into().operand()?;
         let rhs = &*rhs;
-        <R::Mode as TypedTensorSolveDispatch<R, D>>::solve(self, rhs)
+        // Permuting a borrowed view would copy it before the solve dispatch
+        // reaches its own view guard. A moved compact divisor also becomes dense.
+        if !self.axes_are_identity(rows, cols) || !rhs.axes_are_identity(rhs_rows, rhs_cols) {
+            let refusal = rhs.refuse_borrowed_view("solve");
+            if refusal.is_err() && !self.runtime.same_runtime(&rhs.runtime) {
+                return Err(Error::RuntimeMismatch.into());
+            }
+            refusal?;
+        }
+        self.with_leg_roles(rows, cols, |lhs| {
+            rhs.with_leg_roles(rhs_rows, rhs_cols, |right| {
+                <R::Mode as TypedTensorSolveDispatch<R, D>>::solve(lhs, right)
+            })
+        })
     }
 }
 
