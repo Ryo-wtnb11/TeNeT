@@ -191,6 +191,8 @@ where
     }
 
     /// Overwrites the workspace-owned output and borrows it until the next call.
+    /// Validation errors preserve any previous output. After a backend error,
+    /// its payload may be partially overwritten while its metadata stays valid.
     pub fn execute<'a>(
         &self,
         lhs: &StackedTensorMap<R, D>,
@@ -207,7 +209,7 @@ where
                 runtime: self.runtime.clone(),
                 space: self.space.clone(),
                 signature: self.output_signature.clone(),
-                storage: vec![D::from_real(0.0); total],
+                storage: zeroed_payload(total),
                 members,
                 member_len: self.member_len,
                 _payload: PhantomData,
@@ -217,7 +219,9 @@ where
         result.map(|()| &*output)
     }
 
-    /// Overwrites a checked caller destination. Admission errors leave it unchanged.
+    /// Overwrites a checked caller destination. Validation and capability
+    /// errors leave it unchanged. After a backend error, its payload may be
+    /// partially overwritten while its metadata stays valid.
     pub fn execute_into(
         &self,
         lhs: &StackedTensorMap<R, D>,
