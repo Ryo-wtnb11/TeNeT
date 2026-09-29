@@ -245,6 +245,11 @@ where
         &self.plan
     }
 
+    /// Per-member destination, left and right lengths admitted by the plan.
+    pub fn member_lens(&self) -> [usize; 3] {
+        self.member_lens
+    }
+
     pub fn members(&self) -> usize {
         self.members
     }

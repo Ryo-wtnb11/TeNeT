@@ -288,6 +288,36 @@ impl<T> Default for HostTreeTransformWorkspace<T> {
 }
 
 impl<T> HostTreeTransformWorkspace<T> {
+    /// Host capacity retained by member replay and ordinary transform scratch.
+    #[doc(hidden)]
+    pub fn retained_bytes(&self) -> usize {
+        let bytes = |capacity: usize, item: usize| capacity.saturating_mul(item);
+        bytes(
+            self.packed.source().capacity() + self.packed.destination().capacity(),
+            std::mem::size_of::<T>(),
+        ) + bytes(
+            self.coefficient_scratch.capacity(),
+            std::mem::size_of::<T>(),
+        ) + bytes(
+            self.chunk_jobs.capacity(),
+            std::mem::size_of::<DenseGemmBatchJob>(),
+        ) + bytes(
+            self.chunk_runs.capacity()
+                + self.chunk_scatter_groups.capacity()
+                + self.fused_indices.capacity()
+                + self.member_shape.capacity(),
+            std::mem::size_of::<usize>(),
+        ) + bytes(
+            self.zero_strides.capacity()
+                + self.member_dst_strides.capacity()
+                + self.member_src_strides.capacity(),
+            std::mem::size_of::<isize>(),
+        ) + bytes(
+            self.member_ranges.capacity(),
+            std::mem::size_of::<(usize, usize)>(),
+        )
+    }
+
     #[inline]
     pub fn placement(&self) -> Placement {
         Placement::Host
