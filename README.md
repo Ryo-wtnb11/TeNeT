@@ -140,8 +140,11 @@ They do not replace TeNeT's execution engine.
 - [Provider interface](docs/provider_interface.md): define another symmetry.
 - [Benchmark records](benchmarks/README.md): revision-specific performance
   evidence; the README makes no general speed claim.
-- [Development and historical documents](docs/history.md): design decisions,
-  audits, and migration records.
+- [Design](docs/design.md): structural ownership, execution, reuse, and
+  placement boundaries.
+- [Coding agent rules](AGENTS.md): how to verify and change TeNeT.
+- [Documentation map](docs/README.md): current guides and revision-pinned
+  evidence.
 
 To check the workspace locally:
 
