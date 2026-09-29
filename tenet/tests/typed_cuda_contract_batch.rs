@@ -129,7 +129,9 @@ fn check<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
                 case.name,
             );
         }
-        let mut wrong_dst = dst.select(&[0]).unwrap();
+        let wrong_indices: &[usize] = if count == 1 { &[0, 0] } else { &[0] };
+        let mut wrong_dst = dst.select(wrong_indices).unwrap();
+        assert_ne!(wrong_dst.len(), count);
         let before = format!(
             "{:?}",
             wrong_dst

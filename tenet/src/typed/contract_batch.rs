@@ -524,6 +524,10 @@ where
                 .ok_or_else(|| Error::InvalidArgument("zero template length overflows".into()))?,
         )
         .map_err(tenet_operations::OperationError::Dense)?;
+        if !regions.is_empty() {
+            ctx.reserve_ones_template::<D>(1)
+                .map_err(tenet_operations::OperationError::Dense)?;
+        }
         workspace.device.zero_regions = regions;
         workspace.device.members = members;
         Ok(())
