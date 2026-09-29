@@ -11,6 +11,8 @@ use tenet_core::{
     ProductFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
     U1FusionRule, U1Irrep,
 };
+use tenet_operations::fusion_replay::{Rank2Gemm, Rank2GemmBatchJob};
+use tenet_operations::stacked::{StackedStorageView, StackedStorageViewMut};
 use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
 use crate::contract::fusion::FusionContractOrientation;
@@ -18,6 +20,88 @@ use crate::{BoundDynamicFusionMapSpace, FusionOperand, RuleIdentity};
 
 type Context = crate::TensorContractFusionExecutionContext<f64, RuleIdentity>;
 type FermionU1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+
+#[derive(Default)]
+struct CountBatchCalls {
+    calls: usize,
+    jobs: usize,
+}
+
+impl Rank2Gemm<f64> for CountBatchCalls {
+    fn matmul_rank2(
+        &mut self,
+        _: &mut [f64],
+        _: &[f64],
+        _: &[f64],
+        _: usize,
+        _: usize,
+        _: usize,
+        _: f64,
+        _: f64,
+    ) -> Result<(), crate::OperationError> {
+        panic!("stacked direct replay must submit one batch")
+    }
+
+    fn matmul_rank2_batch(
+        &mut self,
+        _: &mut [f64],
+        _: &[f64],
+        _: &[f64],
+        jobs: &[Rank2GemmBatchJob],
+        _: &[usize],
+        alpha: f64,
+        beta: f64,
+    ) -> Result<(), crate::OperationError> {
+        assert_eq!((alpha, beta), (1.0, 0.0));
+        self.calls += 1;
+        self.jobs += jobs.len();
+        Ok(())
+    }
+}
+
+fn assert_one_batch_submission(
+    route: &crate::StorageContractResolution<f64>,
+    dst_len: usize,
+    lhs_len: usize,
+    rhs_len: usize,
+    swapped: bool,
+) -> usize {
+    let mut jobs_per_member = 0;
+    for members in [1, 2, 17] {
+        let (replay, actual_swapped) = route.stacked_direct_host_replay(members).unwrap().unwrap();
+        assert_eq!(actual_swapped, swapped);
+        let mut dst = vec![f64::NAN; dst_len * members];
+        let lhs = vec![1.0; lhs_len * members];
+        let rhs = vec![1.0; rhs_len * members];
+        let (left, right) = if swapped { (&rhs, &lhs) } else { (&lhs, &rhs) };
+        let (left_len, right_len) = if swapped {
+            (rhs_len, lhs_len)
+        } else {
+            (lhs_len, rhs_len)
+        };
+        let left = StackedStorageView::new::<f64>(left, left_len, members, left_len).unwrap();
+        let right = StackedStorageView::new::<f64>(right, right_len, members, right_len).unwrap();
+        let mut dst =
+            StackedStorageViewMut::new::<f64>(&mut dst, dst_len, members, dst_len).unwrap();
+        let mut gemm = CountBatchCalls::default();
+        replay
+            .execute_host(
+                &mut crate::StridedHostKernelAdapter::default(),
+                &mut gemm,
+                &mut dst,
+                &left,
+                &right,
+                true,
+            )
+            .unwrap();
+        if members == 1 {
+            jobs_per_member = gemm.jobs;
+            assert!(jobs_per_member > 0);
+        }
+        assert_eq!((gemm.calls, gemm.jobs), (1, jobs_per_member * members));
+    }
+    jobs_per_member
+}
 
 fn square<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
     provider: &Arc<R>,
@@ -176,6 +260,19 @@ where
         .unwrap()
         .unwrap_or_else(|| panic!("{name}: device route declined Core"));
         assert!(!resolution.is_dynamic_tree(), "{name}");
+        assert_eq!(
+            resolution.is_swapped_core(),
+            orientation == RHS_LHS,
+            "{name}"
+        );
+        if name == "C0" {
+            assert!(resolution.admits_stacked_direct_host_replay().unwrap());
+        }
+        if provider.braiding_style() == tenet_core::BraidingStyleKind::Bosonic
+            && matches!(name, "C0" | "C2")
+        {
+            assert_one_batch_submission(&resolution, len, len, len, orientation == RHS_LHS);
+        }
     }
 }
 
@@ -187,6 +284,75 @@ fn zero_copy_candidates_resolve_to_core_on_non_self_dual_u1() {
 #[test]
 fn zero_copy_candidates_resolve_to_core_on_su2() {
     assert_probes_resolve_to_core(&Arc::new(SU2FusionRule), &su2_leg());
+}
+
+#[test]
+fn asymmetric_owned_candidate_reaches_swapped_storage_core() {
+    let provider = Arc::new(U1FusionRule);
+    let (v, w, x) = (
+        u1_leg(),
+        SectorLeg::new(
+            [
+                (U1Irrep::new(0).sector_id(), 1),
+                (U1Irrep::new(1).sector_id(), 2),
+            ],
+            false,
+        ),
+        SectorLeg::new(
+            [
+                (U1Irrep::new(0).sector_id(), 2),
+                (U1Irrep::new(1).sector_id(), 3),
+            ],
+            false,
+        ),
+    );
+    let lhs = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([v.clone()]),
+            FusionProductSpace::new([w]),
+        ),
+    )
+    .unwrap();
+    let rhs = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        provider,
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([x.clone(), x]),
+            FusionProductSpace::new([v]),
+        ),
+    )
+    .unwrap();
+    let order = OutputAxisOrder::from_axes(&[1, 2, 0]);
+    let dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
+        &lhs,
+        &rhs,
+        &[0],
+        &[2],
+        order,
+        2,
+    )
+    .unwrap();
+    let route = Context::default()
+        .compile_storage_contract_resolution(
+            &dst,
+            FusionOperand::direct(lhs.space()),
+            FusionOperand::direct(rhs.space()),
+            TensorContractSpec::new(&[0], &[2], order),
+        )
+        .unwrap();
+    assert!(route.is_swapped_core());
+    let jobs = assert_one_batch_submission(
+        &route,
+        dst.space().required_len().unwrap(),
+        lhs.space().required_len().unwrap(),
+        rhs.space().required_len().unwrap(),
+        true,
+    );
+    assert_eq!(jobs, 2);
+    assert_ne!(
+        lhs.space().required_len().unwrap(),
+        rhs.space().required_len().unwrap()
+    );
 }
 
 #[test]

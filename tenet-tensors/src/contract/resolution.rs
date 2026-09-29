@@ -16,6 +16,7 @@ use super::structure::TensorContractStructure;
 use crate::{DenseBlockScalar, OperationError};
 use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec};
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
+use tenet_operations::stacked::StackedDirectReplay;
 use tenet_operations::TensorContractFusionProfile;
 
 use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, FusionOperandLayout};
@@ -136,6 +137,46 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
     /// True when the route runs source/output tree transforms around the core.
     pub fn is_dynamic_tree(&self) -> bool {
         matches!(self.route, StorageContractRoute::DynamicTree(_))
+    }
+
+    /// Checks the B-independent direct Host replay capability.
+    #[doc(hidden)]
+    pub fn admits_stacked_direct_host_replay(&self) -> Result<bool, OperationError>
+    where
+        C: Copy + PartialEq + num_traits::One,
+    {
+        let plan = match &self.route {
+            StorageContractRoute::Core(plan) | StorageContractRoute::SwappedCore(plan) => plan,
+            StorageContractRoute::DynamicTree(_) => return Ok(false),
+        };
+        plan.require_identity_direct_replay()?;
+        Ok(true)
+    }
+
+    /// Builds a caller-owned Host replay for a fully direct, unit-alpha core
+    /// route. The boolean means the replay's left source is the caller's rhs.
+    #[doc(hidden)]
+    pub fn stacked_direct_host_replay(
+        &self,
+        members: usize,
+    ) -> Result<Option<(StackedDirectReplay<C>, bool)>, OperationError>
+    where
+        C: Copy + PartialEq + num_traits::One,
+    {
+        let (plan, swapped) = match &self.route {
+            StorageContractRoute::Core(plan) => (plan, false),
+            StorageContractRoute::SwappedCore(plan) => (plan, true),
+            StorageContractRoute::DynamicTree(_) => return Ok(None),
+        };
+        Ok(Some((
+            StackedDirectReplay::new(Arc::clone(plan), members)?,
+            swapped,
+        )))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_swapped_core(&self) -> bool {
+        matches!(self.route, StorageContractRoute::SwappedCore(_))
     }
 }
 
