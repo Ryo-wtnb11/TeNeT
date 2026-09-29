@@ -946,6 +946,11 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
         scales
     }
 
+    #[cfg(test)]
+    pub(crate) fn source_twist_action_count(&self) -> usize {
+        self.source_twist.len()
+    }
+
     /// The destination space of the physical lhs (`true`) or rhs source
     /// transform, whichever orientation the artifact has.
     #[cfg(test)]

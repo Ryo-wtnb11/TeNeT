@@ -68,9 +68,10 @@ fn measure<T>(f: impl FnOnce() -> T) -> (T, Duration, usize, usize) {
 }
 use contract_cases::{
     assert_close, blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_su2,
-    fermion_u1, fermionic_blas_contract_oracle_partitioned, fermionic_twist_roles, fill,
-    poisoned_destination, su2, su2_bent, su2_reordered, u1, u1_inactive_cases, u1_non_self_dual,
-    u1_reordered, u1_rhs_identity, Case, Payload, TwistRole,
+    fermion_u1, fermionic_blas_contract_oracle, fermionic_blas_contract_oracle_partitioned,
+    fermionic_canonical_nonuniform, fermionic_twist_roles, fill, poisoned_destination, su2,
+    su2_bent, su2_reordered, u1, u1_inactive_cases, u1_non_self_dual, u1_reordered,
+    u1_rhs_identity, Case, Payload, TwistRole,
 };
 use std::sync::Arc;
 use tenet::sector::{
@@ -555,24 +556,192 @@ fn non_symmetric_braiding_is_rejected_before_plan_compile() {
 }
 
 #[test]
-fn twist_bearing_dynamic_tree_is_rejected() {
-    let runtime = Runtime::builder().build().unwrap();
+fn twist_bearing_dynamic_tree_matches_literal_tensorkit_steps() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    macro_rules! cases {
+        ($rule:ty, $dtype:ty, $space:expr) => {{
+            let space = $space;
+            let twist = |tensor: &TensorMap<$rule, $dtype>, legs: &[usize]| {
+                tensor
+                    .twist(legs, tenet::typed::Direction::Forward)
+                    .unwrap()
+            };
+            for (case, role) in fermionic_twist_roles::<$rule, $dtype>(
+                &runtime,
+                &space,
+                ["A", "canonical", "B", "both"],
+                71,
+            )
+            .into_iter()
+            .zip([TwistRole::A, TwistRole::A, TwistRole::B, TwistRole::A])
+            {
+                check_twisted_members(case, role, twist);
+            }
+            check_twisted_members(
+                fermionic_canonical_nonuniform::<$rule, $dtype>(
+                    &runtime,
+                    &space,
+                    "canonical nonuniform",
+                    39,
+                ),
+                TwistRole::A,
+                twist,
+            );
+        }};
+    }
+    cases!(contract_cases::FermionU1, f64, fermion_u1());
+    cases!(
+        contract_cases::FermionU1,
+        tenet::typed::Complex64,
+        fermion_u1()
+    );
+    cases!(contract_cases::FermionSu2, f64, fermion_su2());
+    cases!(
+        contract_cases::FermionSu2,
+        tenet::typed::Complex64,
+        fermion_su2()
+    );
+}
+
+fn check_twisted_members<R, D>(
+    case: Case<R, D>,
+    role: TwistRole,
+    twist: impl Fn(&TensorMap<R, D>, &[usize]) -> TensorMap<R, D> + Copy,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    fn compare<D: Payload>(actual: &[D], expected: &[D], terms: usize, what: &str) {
+        assert_eq!(actual.len(), expected.len(), "{what}: payload length");
+        let scale = expected
+            .iter()
+            .map(|value| value.magnitude())
+            .fold(1.0, f64::max);
+        let tolerance = 32.0 * (terms.max(1) as f64).sqrt() * D::EPS * scale;
+        for (index, (&a, &b)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                a.distance(b) <= tolerance,
+                "{what} [{}] element {index}: {a:?} versus {b:?}, tolerance {tolerance:e}",
+                D::NAME
+            );
+        }
+    }
+    let first_lhs = StackedTensorMap::pack(&[&case.lhs]).unwrap();
+    let first_rhs = StackedTensorMap::pack(&[&case.rhs]).unwrap();
+    let plan = ContractPlan::new(&first_lhs, &first_rhs, &case.spec()).unwrap();
+    let mut workspace = plan.workspace();
+    let mut independent = plan.workspace();
+    for count in [1, 2, 17] {
+        let members: Vec<_> = (0..count)
+            .map(|i| Case {
+                name: case.name,
+                lhs: case
+                    .lhs
+                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0)),
+                rhs: case.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0)),
+                lhs_axes: case.lhs_axes.clone(),
+                rhs_axes: case.rhs_axes.clone(),
+                output_axes: case.output_axes.clone(),
+                dense: false,
+            })
+            .collect();
+        let lhs_refs: Vec<_> = members.iter().map(|member| &member.lhs).collect();
+        let rhs_refs: Vec<_> = members.iter().map(|member| &member.rhs).collect();
+        let lhs = StackedTensorMap::pack(&lhs_refs).unwrap();
+        let rhs = StackedTensorMap::pack(&rhs_refs).unwrap();
+        let output = plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        for (i, member) in members.iter().enumerate() {
+            let actual = output.member(i).unwrap();
+            let eager = member.host();
+            let oracle = fermionic_blas_contract_oracle(member, role, twist);
+            // Every output entry is bilinear, so the product of reduced source
+            // lengths bounds all contracted and recoupled floating terms.
+            let terms =
+                member.lhs.dense_data().unwrap().len() * member.rhs.dense_data().unwrap().len();
+            assert_eq!(
+                output.signature(),
+                StackedTensorMap::pack(&[&eager]).unwrap().signature(),
+                "{}: output structure",
+                case.name
+            );
+            compare(
+                actual.dense_data().unwrap(),
+                eager.dense_data().unwrap(),
+                terms,
+                case.name,
+            );
+            compare(
+                actual.dense_data().unwrap(),
+                oracle.dense_data().unwrap(),
+                terms,
+                case.name,
+            );
+            if i == 0 {
+                let untwisted = fermionic_blas_contract_oracle(member, TwistRole::None, twist);
+                let expected = oracle.dense_data().unwrap();
+                let scale = expected
+                    .iter()
+                    .map(|value| value.magnitude())
+                    .fold(0.0, f64::max);
+                let tolerance = 32.0 * (terms.max(1) as f64).sqrt() * D::EPS * scale.max(1.0);
+                assert!(
+                    expected
+                        .iter()
+                        .zip(untwisted.dense_data().unwrap())
+                        .any(|(&a, &b)| a.distance(b) > tolerance),
+                    "{}: twist is vacuous",
+                    case.name
+                );
+            }
+        }
+        let poisoned: Vec<_> = members.iter().map(poisoned_destination).collect();
+        let refs: Vec<_> = poisoned.iter().collect();
+        let mut dst = StackedTensorMap::pack(&refs).unwrap();
+        plan.execute_into(&lhs, &rhs, &mut dst, &mut independent)
+            .unwrap();
+        for (i, member) in members.iter().enumerate() {
+            compare(
+                dst.member(i).unwrap().dense_data().unwrap(),
+                member.host().dense_data().unwrap(),
+                member.lhs.dense_data().unwrap().len() * member.rhs.dense_data().unwrap().len(),
+                case.name,
+            );
+        }
+        if count == 2 {
+            let before: Vec<_> = (0..count)
+                .map(|i| dst.member(i).unwrap().dense_data().unwrap().to_vec())
+                .collect();
+            let short_rhs = StackedTensorMap::pack(&[&members[0].rhs]).unwrap();
+            assert!(plan
+                .execute_into(&lhs, &short_rhs, &mut dst, &mut independent)
+                .is_err());
+            for (i, data) in before.iter().enumerate() {
+                assert_eq!(dst.member(i).unwrap().dense_data().unwrap(), data);
+            }
+        }
+    }
+}
+
+#[test]
+fn copied_a_source_twist_batch_is_admitted() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     fn check<R>(runtime: &Runtime, v: &GradedSpace<R>)
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     {
-        for case in fermionic_twist_roles::<_, f64>(runtime, v, ["A", "canonical", "B", "both"], 71)
-        {
-            let lhs = StackedTensorMap::pack(&[&case.lhs]).unwrap();
-            let rhs = StackedTensorMap::pack(&[&case.rhs]).unwrap();
-            assert!(
-                matches!(ContractPlan::new(&lhs, &rhs, &case.spec()),
-                Err(Error::Operation(error)) if matches!(*error,
-                    tenet::typed::OperationError::UnsupportedTensorContractScope { .. })),
-                "{} must reject before a destination exists",
-                case.name
-            );
-        }
+        let case = fermionic_twist_roles::<_, f64>(runtime, v, ["A", "canonical", "B", "both"], 71)
+            .into_iter()
+            .find(|case| case.name == "A")
+            .unwrap();
+        assert!(case
+            .host()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .any(|&value| value != 0.0));
+        let lhs = StackedTensorMap::pack(&[&case.lhs]).unwrap();
+        let rhs = StackedTensorMap::pack(&[&case.rhs]).unwrap();
+        ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap();
     }
     check(&runtime, &fermion_u1());
     check(&runtime, &fermion_su2());
@@ -1256,5 +1425,75 @@ fn public_signed_direct_release_measurement() {
         }
         eager.sort_by_key(|sample| sample.0);
         eprintln!("SignedDirect B={count}: pack {pack_time:?}/{pack_calls}/{pack_bytes}; plan {plan_time:?}/{plan_calls}/{plan_bytes}; workspace {workspace_time:?}/{workspace_calls}/{workspace_bytes}; cold {cold_time:?}/{cold_calls}/{cold_bytes}; returned warm median {:?}; into warm median {:?}; eager warm median {:?}; retained {} bytes", returned[15], into[15], eager[15], workspace.retained_bytes());
+    }
+}
+
+/// Run explicitly in release mode. This records one pinned Host sweep, not a CI timing gate.
+#[test]
+#[ignore]
+fn public_dynamic_source_twist_release_measurement() {
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .gemm_backend(tenet::typed::LinalgBackend::Faer)
+        .linalg_backend(tenet::typed::LinalgBackend::Faer)
+        .build()
+        .unwrap();
+    let case = fermionic_twist_roles::<_, f64>(
+        &runtime,
+        &fermion_u1(),
+        ["A", "canonical", "B", "both"],
+        71,
+    )
+    .into_iter()
+    .next()
+    .unwrap();
+    for count in [1, 2, 17] {
+        let ((lhs, rhs), pack_time, pack_calls, pack_bytes) = measure(|| {
+            let left = vec![&case.lhs; count];
+            let right = vec![&case.rhs; count];
+            (
+                StackedTensorMap::pack(&left).unwrap(),
+                StackedTensorMap::pack(&right).unwrap(),
+            )
+        });
+        let (plan, plan_time, plan_calls, plan_bytes) =
+            measure(|| ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap());
+        let (mut workspace, workspace_time, workspace_calls, workspace_bytes) =
+            measure(|| plan.workspace());
+        let (_, cold_time, cold_calls, cold_bytes) = measure(|| {
+            black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+        });
+        let mut returned = Vec::new();
+        for _ in 0..31 {
+            let (_, elapsed, calls, bytes) = measure(|| {
+                black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+            });
+            returned.push((elapsed, calls, bytes));
+        }
+        returned.sort_by_key(|sample| sample.0);
+        let dest_member = case.host();
+        let dest_refs = vec![&dest_member; count];
+        let mut destination = StackedTensorMap::pack(&dest_refs).unwrap();
+        let mut into = Vec::new();
+        for _ in 0..31 {
+            let (_, elapsed, calls, bytes) = measure(|| {
+                plan.execute_into(&lhs, &rhs, &mut destination, &mut workspace)
+                    .unwrap();
+                black_box(&destination);
+            });
+            into.push((elapsed, calls, bytes));
+        }
+        into.sort_by_key(|sample| sample.0);
+        let mut eager = Vec::new();
+        for _ in 0..31 {
+            let (_, elapsed, calls, bytes) = measure(|| {
+                for _ in 0..count {
+                    black_box(case.host());
+                }
+            });
+            eager.push((elapsed, calls, bytes));
+        }
+        eager.sort_by_key(|sample| sample.0);
+        eprintln!("DynamicSourceTwist B={count}: pack {pack_time:?}/{pack_calls}/{pack_bytes}; plan {plan_time:?}/{plan_calls}/{plan_bytes}; workspace {workspace_time:?}/{workspace_calls}/{workspace_bytes}; cold {cold_time:?}/{cold_calls}/{cold_bytes}; returned warm median {:?}; into warm median {:?}; eager warm median {:?}; retained {} bytes", returned[15], into[15], eager[15], workspace.retained_bytes());
     }
 }

@@ -11,7 +11,7 @@ use copy_c::{CopyCPlan, CopyCWorkspace};
 
 /// Immutable Host contraction structure for owned-dense stacks.
 ///
-/// This binding admits twist-free transformed-tree routes, fully direct
+/// This binding admits owned-source transformed-tree routes, fully direct
 /// Core/SwappedCore routes with exact +1/-1 coefficients, and CopyC when its
 /// temporary is a unit-alpha direct core followed by one output transform.
 /// Direct composition is served by [`ComposePlan`]. The plan fixes structure
@@ -119,12 +119,6 @@ where
         {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "Host copyC batch requires a unit-alpha direct temporary",
-            }
-            .into());
-        }
-        if resolution.requires_source_twist() {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "Host batch contraction requires a twist-free transformed-tree or direct core route",
             }
             .into());
         }

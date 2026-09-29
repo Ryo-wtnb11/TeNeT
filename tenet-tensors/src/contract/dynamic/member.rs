@@ -1,10 +1,10 @@
 use super::*;
-use tenet_core::{Placement, TensorStorage};
+use tenet_core::{validate_block_storage_injective, BlockStructure, Placement, TensorStorage};
 use tenet_dense::DenseExecutor;
 use tenet_operations::stacked::{StackedDirectReplay, StackedStorageView, StackedStorageViewMut};
 use tenet_operations::{
     admit_tree_transform_members_overwrite_raw, tree_transform_members_overwrite_raw,
-    TreeTransformWorkspace,
+    HostKernelAdapter, TreeTransformWorkspace,
 };
 
 /// Mutable Host payload and replay scratch for one artifact at varying B.
@@ -17,8 +17,12 @@ pub struct DynamicTreeMembersWorkspace<D, C = f64> {
     rhs_transform: TreeTransformWorkspace<D>,
     output_transform: TreeTransformWorkspace<D>,
     core: Option<StackedDirectReplay<C>>,
+    twist_shape: Vec<usize>,
+    twist_strides: Vec<isize>,
     #[cfg(test)]
     core_replay_builds: usize,
+    #[cfg(test)]
+    twist_actions_applied: usize,
 }
 
 impl<D, C> Default for DynamicTreeMembersWorkspace<D, C> {
@@ -31,8 +35,12 @@ impl<D, C> Default for DynamicTreeMembersWorkspace<D, C> {
             rhs_transform: TreeTransformWorkspace::default(),
             output_transform: TreeTransformWorkspace::default(),
             core: None,
+            twist_shape: Vec::new(),
+            twist_strides: Vec::new(),
             #[cfg(test)]
             core_replay_builds: 0,
+            #[cfg(test)]
+            twist_actions_applied: 0,
         }
     }
 }
@@ -48,11 +56,18 @@ impl<D, C: Copy + PartialEq + num_traits::One> DynamicTreeMembersWorkspace<D, C>
             + self.lhs_transform.retained_bytes()
             + self.rhs_transform.retained_bytes()
             + self.output_transform.retained_bytes()
+            + self.twist_shape.capacity() * std::mem::size_of::<usize>()
+            + self.twist_strides.capacity() * std::mem::size_of::<isize>()
     }
 
     #[cfg(test)]
     pub(crate) fn core_replay_builds(&self) -> usize {
         self.core_replay_builds
+    }
+
+    #[cfg(test)]
+    pub(crate) fn twist_actions_applied(&self) -> usize {
+        self.twist_actions_applied
     }
 }
 
@@ -111,7 +126,115 @@ fn exact_len(actual: usize, member: usize, members: usize) -> Result<(), Operati
     }
 }
 
-/// Execute one immutable, twist-free artifact over uniform owned-dense Host
+fn admit_member_twist<C>(
+    structure: &BlockStructure,
+    actions: &[RhsTwistAction<C>],
+    member_len: usize,
+    members: usize,
+    shape: &mut Vec<usize>,
+    strides: &mut Vec<isize>,
+) -> Result<(), OperationError> {
+    if actions.is_empty() {
+        return Ok(());
+    }
+    if members == 0 {
+        return Err(OperationError::InvalidArgument {
+            message: "member source twist requires at least one member",
+        });
+    }
+    validate_block_storage_injective(structure)
+        .map_err(OperationError::from_core_preserving_context)?;
+    let member_stride =
+        isize::try_from(member_len).map_err(|_| OperationError::ElementCountOverflow)?;
+    let total = member_len
+        .checked_mul(members)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let mut block_index = 0;
+    for action in actions {
+        let mut admitted = None;
+        while block_index < structure.block_count() {
+            let block = structure
+                .block(block_index)
+                .map_err(OperationError::from_core_preserving_context)?;
+            block_index += 1;
+            if usize::try_from(action.offset).ok() == Some(block.offset())
+                && action.shape == block.shape()
+                && action.strides.len() == block.strides().len()
+                && action
+                    .strides
+                    .iter()
+                    .zip(block.strides())
+                    .all(|(&actual, &expected)| isize::try_from(expected) == Ok(actual))
+            {
+                admitted = Some(block);
+                break;
+            }
+        }
+        let block = admitted.ok_or(OperationError::InvalidArgument {
+            message: "member source twist does not match transformed block structure",
+        })?;
+        if !action.shape.contains(&0) {
+            let end = block
+                .storage_end_exclusive()
+                .map_err(OperationError::from_core_preserving_context)?;
+            if end > member_len {
+                return Err(OperationError::InvalidArgument {
+                    message: "member source twist exceeds one transformed source",
+                });
+            }
+            let expanded_end = (members - 1)
+                .checked_mul(member_len)
+                .and_then(|start| start.checked_add(end))
+                .ok_or(OperationError::ElementCountOverflow)?;
+            if expanded_end > total || isize::try_from(expanded_end - 1).is_err() {
+                return Err(OperationError::ElementCountOverflow);
+            }
+        }
+        shape.clear();
+        shape.extend_from_slice(&action.shape);
+        shape.push(members);
+        strides.clear();
+        strides.extend_from_slice(&action.strides);
+        strides.push(member_stride);
+    }
+    Ok(())
+}
+
+fn replay_member_twist<A, D, C>(
+    kernels: &mut A,
+    scratch: &mut [D],
+    actions: &[RhsTwistAction<C>],
+    members: usize,
+    member_len: usize,
+    shape: &mut Vec<usize>,
+    strides: &mut Vec<isize>,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    let member_stride =
+        isize::try_from(member_len).map_err(|_| OperationError::ElementCountOverflow)?;
+    for action in actions {
+        shape.clear();
+        shape.extend_from_slice(&action.shape);
+        shape.push(members);
+        strides.clear();
+        strides.extend_from_slice(&action.strides);
+        strides.push(member_stride);
+        kernels.scale_strided(
+            scratch,
+            shape,
+            strides,
+            action.offset,
+            D::coefficient_as_data(action.factor),
+        )?;
+    }
+    Ok(())
+}
+
+/// Execute one immutable artifact over uniform owned-dense Host
 /// payloads. The caller binds semantic tensor metadata; this raw seam admits
 /// only the artifact's structures and checked, disjoint member spans. TeNeT
 /// submits grouped batches to the dense executors; their provider kernel
@@ -137,9 +260,15 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     C: DenseBlockScalar,
 {
-    if artifact.requires_source_twist() {
+    if artifact.requires_source_twist()
+        && if artifact.twist_lhs {
+            artifact.lhs_borrowed
+        } else {
+            artifact.rhs_borrowed
+        }
+    {
         return Err(OperationError::UnsupportedTensorContractScope {
-            message: "member artifact replay does not support source twist",
+            message: "member source twist requires transformed owned scratch",
         });
     }
     let lhs_src = &artifact.lhs_transform.replay_structure;
@@ -194,6 +323,21 @@ where
             message: "member artifact core structure does not match its replay",
         });
     }
+    if artifact.requires_source_twist() {
+        let (structure, len) = if artifact.twist_lhs {
+            (lhs_core, lhs_core_len)
+        } else {
+            (rhs_core, rhs_core_len)
+        };
+        admit_member_twist(
+            structure,
+            &artifact.source_twist,
+            len,
+            members,
+            &mut workspace.twist_shape,
+            &mut workspace.twist_strides,
+        )?;
+    }
     if !artifact.lhs_borrowed {
         admit_tree_transform_members_overwrite_raw::<D, C>(
             &mut workspace.lhs_transform,
@@ -227,7 +371,6 @@ where
             members,
         )?;
     }
-
     // All fallible structural and span checks finish before scratch growth or
     // dense work. The raw binder cannot inspect per-member TensorMap metadata.
     if !artifact.lhs_borrowed {
@@ -275,6 +418,26 @@ where
             members,
             threads,
         )?;
+    }
+    if artifact.requires_source_twist() {
+        let (scratch, len) = if artifact.twist_lhs {
+            (&mut workspace.lhs[..], lhs_core_len)
+        } else {
+            (&mut workspace.rhs[..], rhs_core_len)
+        };
+        replay_member_twist(
+            &mut kernels,
+            scratch,
+            &artifact.source_twist,
+            members,
+            len,
+            &mut workspace.twist_shape,
+            &mut workspace.twist_strides,
+        )?;
+        #[cfg(test)]
+        {
+            workspace.twist_actions_applied += artifact.source_twist.len();
+        }
     }
     let physical_lhs = if artifact.lhs_borrowed {
         lhs_data
@@ -328,4 +491,30 @@ where
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tenet_core::BlockSpec;
+
+    #[test]
+    fn twist_preflight_rejects_a_view_spilling_into_the_next_member() {
+        let structure =
+            BlockStructure::from_blocks(vec![BlockSpec::new(vec![2], vec![1], 1).unwrap()])
+                .unwrap();
+        let actions = [RhsTwistAction {
+            shape: vec![2],
+            strides: vec![1],
+            offset: 1,
+            factor: -1.0_f64,
+        }];
+        let mut shape = Vec::new();
+        let mut strides = Vec::new();
+        assert!(admit_member_twist(&structure, &actions, 2, 2, &mut shape, &mut strides,).is_err());
+        admit_member_twist(&structure, &actions, 3, 2, &mut shape, &mut strides).unwrap();
+        assert_eq!(shape, [2, 2]);
+        assert_eq!(strides, [1, 3]);
+        assert!(admit_member_twist(&structure, &actions, 3, 0, &mut shape, &mut strides).is_err());
+    }
 }
