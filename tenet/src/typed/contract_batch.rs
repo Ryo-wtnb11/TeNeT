@@ -536,6 +536,7 @@ where
         lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
         rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
         dst: &mut CudaStorage<D>,
+        zero_inactive: bool,
     ) -> Result<(), Error> {
         let (plan, swapped) = self.core();
         let (left, right) = if *swapped { (rhs, lhs) } else { (lhs, rhs) };
@@ -553,9 +554,11 @@ where
         )?;
         let mut dst =
             StackedStorageViewMut::new::<D>(dst, self.member_len, lhs.members, self.member_len)?;
-        for region in &workspace.device.zero_regions {
-            tenet_dense::cuda_region_zero::<D>(ctx, &mut dst.storage_mut().0, region)
-                .map_err(tenet_operations::OperationError::Dense)?;
+        if zero_inactive {
+            for region in &workspace.device.zero_regions {
+                tenet_dense::cuda_region_zero::<D>(ctx, &mut dst.storage_mut().0, region)
+                    .map_err(tenet_operations::OperationError::Dense)?;
+            }
         }
         plan.execute_direct_on_storage_prezeroed(
             &mut tenet_operations::cuda::CudaStackedStorageGemm::new(ctx),
@@ -567,6 +570,9 @@ where
     }
 
     /// Overwrites workspace-owned device output; validation leaves it unchanged.
+    /// A new member count uploads one zeroed output buffer (#740); that
+    /// buffer already has zero inactive regions. A warm call zeroes those
+    /// regions in place and transfers no payload.
     pub fn execute<'a>(
         &self,
         lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
@@ -575,6 +581,10 @@ where
     ) -> Result<&'a StackedTensorMap<R, D, CudaStorage<D>>, Error> {
         let members = self.check(lhs, rhs, workspace)?;
         let total = self.total_len(self.member_len, members)?;
+        let fresh = workspace
+            .output
+            .as_ref()
+            .is_none_or(|output| output.members != members);
         let runtime = self.runtime.clone();
         let mut lease = runtime.lease_cuda()?;
         self.prepare_zero_regions(workspace, &mut lease, members)?;
@@ -599,12 +609,14 @@ where
                 _payload: PhantomData,
             },
         };
-        let result = self.run_cuda(workspace, &mut lease, lhs, rhs, &mut output.storage);
+        let result = self.run_cuda(workspace, &mut lease, lhs, rhs, &mut output.storage, !fresh);
         let output = workspace.output.insert(output);
         result.map(|()| &*output)
     }
 
-    /// Overwrites a checked caller device destination.
+    /// Overwrites a checked caller device destination. After the zero
+    /// template has been reserved for this member count, replay transfers no
+    /// payload and zeroes each inactive region across all members.
     pub fn execute_into(
         &self,
         lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
@@ -629,7 +641,7 @@ where
         let runtime = self.runtime.clone();
         let mut lease = runtime.lease_cuda()?;
         self.prepare_zero_regions(workspace, &mut lease, members)?;
-        self.run_cuda(workspace, &mut lease, lhs, rhs, &mut dst.storage)
+        self.run_cuda(workspace, &mut lease, lhs, rhs, &mut dst.storage, true)
     }
 }
 

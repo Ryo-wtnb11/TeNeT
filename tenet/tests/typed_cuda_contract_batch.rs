@@ -3,15 +3,17 @@
 //! --test typed_cuda_contract_batch -- --ignored --test-threads=1`.
 #![cfg(feature = "cuda")]
 
+mod braiding_probe;
 mod common;
 #[macro_use]
 #[allow(unused_macros)]
 mod contract_cases;
 
+use braiding_probe::{ProbeSector, RealBraidingProbe};
 use common::{DevicePayload, DeviceRule};
 use contract_cases::{
     assert_close, blas_contract_oracle, candidate_core_probes, fill, poisoned_destination, su2, u1,
-    u1_non_self_dual, Case,
+    u1_inactive_cases, u1_non_self_dual, Case,
 };
 use num_complex::Complex64;
 use std::sync::Arc;
@@ -22,6 +24,18 @@ use tenet::sector::{
 use tenet::typed::{ContractPlan, ContractSpec, Error, Runtime, StackedTensorMap, TensorMap};
 
 fn check<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
+    let first_lhs = StackedTensorMap::pack(&[&case.lhs])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let first_rhs = StackedTensorMap::pack(&[&case.rhs])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let plan = ContractPlan::new(&first_lhs, &first_rhs, &case.spec()).unwrap();
+    let mut workspace = plan.workspace().unwrap();
+    let mut second = plan.workspace().unwrap();
+    let mut warm_gemms = None;
     for count in [1, 2, 17] {
         let members: Vec<_> = (0..count)
             .map(|i| {
@@ -36,14 +50,33 @@ fn check<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
         let right: Vec<_> = members.iter().map(|(_, rhs)| rhs).collect();
         let lhs = StackedTensorMap::pack(&left).unwrap().to_cuda().unwrap();
         let rhs = StackedTensorMap::pack(&right).unwrap().to_cuda().unwrap();
-        let plan = ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap();
-        let mut workspace = plan.workspace().unwrap();
-        let mut second = plan.workspace().unwrap();
-        let output = plan
-            .execute(&lhs, &rhs, &mut workspace)
-            .unwrap()
-            .to_host()
-            .unwrap();
+        let cold_before = cuda_transfer_stats();
+        let device_output = plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        let cold_after = cuda_transfer_stats();
+        let cold_h2d = cold_after.h2d_calls - cold_before.h2d_calls;
+        let cold_bytes = cold_after.h2d_bytes - cold_before.h2d_bytes;
+        let cold_gemms = cold_after.gemm_calls - cold_before.gemm_calls;
+        assert!(cold_h2d >= 1, "new B needs #740 output zero upload");
+        assert!(cold_gemms > 0, "direct core must submit work");
+        let output = device_output.to_host().unwrap();
+        assert!(
+            cold_bytes
+                >= (output.member(0).unwrap().dense_data().unwrap().len()
+                    * count
+                    * std::mem::size_of::<D>()) as u64
+        );
+        let warm_before = cuda_transfer_stats();
+        plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        let warm_after = cuda_transfer_stats();
+        assert_eq!(warm_after.h2d_calls - warm_before.h2d_calls, 0);
+        assert_eq!(warm_after.d2h_calls - warm_before.d2h_calls, 0);
+        let submitted = warm_after.gemm_calls - warm_before.gemm_calls;
+        assert!(submitted >= cold_gemms);
+        if let Some(expected) = warm_gemms {
+            assert_eq!(submitted, expected, "one submission count for every B");
+        } else {
+            warm_gemms = Some(submitted);
+        }
         for (i, (left, right)) in members.iter().enumerate() {
             let member_case = Case {
                 name: case.name,
@@ -85,6 +118,8 @@ fn check<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
         let after = cuda_transfer_stats();
         assert_eq!(after.h2d_calls - before.h2d_calls, 0);
         assert_eq!(after.d2h_calls - before.d2h_calls, 0);
+        assert_eq!(after.gemm_calls - before.gemm_calls, submitted);
+        assert_eq!(after.copy_calls - before.copy_calls, 0);
         let result = dst.to_host().unwrap();
         for i in 0..count {
             assert_close(
@@ -123,10 +158,10 @@ fn check<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
             before
         );
         assert!(workspace.retained_bytes() > 0);
-        drop(plan);
-        drop(workspace);
-        drop(second);
     }
+    drop(plan);
+    drop(workspace);
+    drop(second);
 }
 
 #[test]
@@ -134,6 +169,16 @@ fn check<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
 fn public_core_and_swapped_core_match_independent_oracle() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     for (case, _) in candidate_core_probes::<_, f64>(&runtime, &u1_non_self_dual()) {
+        if matches!(case.name, "C1" | "C2") {
+            check(case);
+        }
+    }
+    for (case, _) in candidate_core_probes::<_, Complex64>(&runtime, &u1_non_self_dual()) {
+        if matches!(case.name, "C1" | "C2") {
+            check(case);
+        }
+    }
+    for (case, _) in candidate_core_probes::<_, f64>(&runtime, &su2()) {
         if matches!(case.name, "C1" | "C2") {
             check(case);
         }
@@ -185,6 +230,73 @@ fn swapped_core_uses_rhs_stride_and_nondefault_split() {
             64,
             "swapped stride",
         );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn inactive_core_zeroes_each_poisoned_member_with_one_extra_submission() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let case = u1_inactive_cases::<f64>(&runtime)
+        .into_iter()
+        .next()
+        .unwrap();
+    let first_lhs = StackedTensorMap::pack(&[&case.lhs])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let first_rhs = StackedTensorMap::pack(&[&case.rhs])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let plan = ContractPlan::new(&first_lhs, &first_rhs, &case.spec()).unwrap();
+    let mut workspace = plan.workspace().unwrap();
+    let oracle = blas_contract_oracle(&case);
+    for count in [1, 2, 17, 1] {
+        let left = StackedTensorMap::pack(&vec![&case.lhs; count])
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        let right = StackedTensorMap::pack(&vec![&case.rhs; count])
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        let poison = poisoned_destination(&case);
+        let mut dst = StackedTensorMap::pack(&vec![&poison; count])
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        let before = cuda_transfer_stats();
+        plan.execute(&left, &right, &mut workspace).unwrap();
+        let after = cuda_transfer_stats();
+        let core_calls = after.gemm_calls - before.gemm_calls;
+        assert!(core_calls > 0);
+        let before = cuda_transfer_stats();
+        plan.execute(&left, &right, &mut workspace).unwrap();
+        let after = cuda_transfer_stats();
+        assert_eq!(after.gemm_calls - before.gemm_calls, core_calls + 1);
+        assert_eq!(after.h2d_calls - before.h2d_calls, 0);
+        assert_eq!(after.d2h_calls - before.d2h_calls, 0);
+        let before = cuda_transfer_stats();
+        plan.execute_into(&left, &right, &mut dst, &mut workspace)
+            .unwrap();
+        let after = cuda_transfer_stats();
+        assert_eq!(
+            after.gemm_calls - before.gemm_calls,
+            core_calls + 1,
+            "one inactive region is zeroed once over all B members"
+        );
+        assert_eq!(after.h2d_calls - before.h2d_calls, 0);
+        assert_eq!(after.d2h_calls - before.d2h_calls, 0);
+        let actual = dst.to_host().unwrap();
+        for i in 0..count {
+            assert_close(
+                actual.member(i).unwrap().dense_data().unwrap(),
+                oracle.dense_data().unwrap(),
+                case.terms(),
+                case.name,
+            );
+        }
     }
 }
 
@@ -291,7 +403,7 @@ fn invalid_bindings_preserve_poisoned_destination() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn signed_and_copy_c_routes_are_explicitly_unsupported() {
+fn signed_copy_c_and_dynamic_routes_are_explicitly_unsupported() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let odd = tenet::typed::GradedSpace::try_new(
         Arc::new(FermionParityFusionRule.product(U1FusionRule)),
@@ -327,4 +439,46 @@ fn signed_and_copy_c_routes_are_explicitly_unsupported() {
     };
     assert!(matches!(ContractPlan::new(&left, &right, &spec),
         Err(Error::Operation(error)) if matches!(*error, tenet::typed::OperationError::UnsupportedTensorContractScope { .. })));
+
+    // The second inactive fixture has a source transform and is pinned as
+    // DynamicTree by storage_contract_tests::each_way_a_device_overwrite.
+    let dynamic = u1_inactive_cases::<f64>(&runtime)
+        .into_iter()
+        .nth(1)
+        .unwrap();
+    let left = StackedTensorMap::pack(&[&dynamic.lhs])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let right = StackedTensorMap::pack(&[&dynamic.rhs])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    assert!(matches!(ContractPlan::new(&left, &right, &dynamic.spec()),
+        Err(Error::Operation(error)) if matches!(*error, tenet::typed::OperationError::UnsupportedTensorContractScope { .. })));
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn nonsymmetric_braiding_is_rejected_before_cuda_execution() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let leg =
+        tenet::typed::GradedSpace::try_new(Arc::new(RealBraidingProbe::<true>), [(ProbeSector, 2)])
+            .unwrap();
+    let tensor = TensorMap::<_, f64>::zeros(&runtime, [&leg], [&leg]).unwrap();
+    let stack = StackedTensorMap::pack(&[tensor])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let spec = ContractSpec {
+        lhs: &[1],
+        rhs: &[0],
+        codomain: &[0],
+        domain: &[1],
+    };
+    assert!(matches!(ContractPlan::new(&stack, &stack, &spec),
+    Err(Error::Operation(error)) if matches!(*error,
+        tenet::typed::OperationError::UnsupportedTensorContractScope {
+            message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
+        })));
 }
