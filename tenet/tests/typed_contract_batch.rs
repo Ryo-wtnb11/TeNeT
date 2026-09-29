@@ -67,8 +67,9 @@ fn measure<T>(f: impl FnOnce() -> T) -> (T, Duration, usize, usize) {
     (value, elapsed, CALLS.get(), BYTES.get())
 }
 use contract_cases::{
-    assert_close, dense_oracle, fermion_u1, fermionic_twist_roles, poisoned_destination, su2_bent,
-    su2_reordered, u1, u1_inactive_cases, u1_reordered, u1_rhs_identity, Case, Payload,
+    assert_close, blas_contract_oracle, dense_oracle, fermion_u1, fermionic_twist_roles,
+    poisoned_destination, su2_bent, su2_reordered, u1, u1_inactive_cases, u1_reordered,
+    u1_rhs_identity, Case, Payload,
 };
 use std::sync::Arc;
 use tenet::sector::{
@@ -98,7 +99,7 @@ where
                     lhs_axes: case.lhs_axes.clone(),
                     rhs_axes: case.rhs_axes.clone(),
                     output_axes: case.output_axes.clone(),
-                    dense: true,
+                    dense: case.dense,
                 }
             })
             .collect();
@@ -110,10 +111,19 @@ where
         let mut workspace = plan.workspace();
         let result = plan.execute(&lhs, &rhs, &mut workspace).unwrap();
         for (i, member_case) in members.iter().enumerate() {
-            let (_, expected) = dense_oracle(member_case);
             let member = result.member(i).unwrap();
-            let physical = member.to_physical_dense().unwrap();
-            assert_close(&physical.data, &expected, case.terms(), case.name);
+            let reference = blas_contract_oracle(member_case);
+            assert_close(
+                member.dense_data().unwrap(),
+                reference.dense_data().unwrap(),
+                case.terms(),
+                case.name,
+            );
+            if member_case.dense {
+                let (_, expected) = dense_oracle(member_case);
+                let physical = member.to_physical_dense().unwrap();
+                assert_close(&physical.data, &expected, case.terms(), case.name);
+            }
             let eager = member_case.host();
             assert_close(
                 member.dense_data().unwrap(),
@@ -127,29 +137,36 @@ where
         plan.execute_into(&lhs, &rhs, &mut destination, &mut workspace)
             .unwrap();
         for (i, member_case) in members.iter().enumerate() {
-            let (_, expected) = dense_oracle(member_case);
+            let member = destination.member(i).unwrap();
+            let reference = blas_contract_oracle(member_case);
             assert_close(
-                &destination
-                    .member(i)
-                    .unwrap()
-                    .to_physical_dense()
-                    .unwrap()
-                    .data,
-                &expected,
+                member.dense_data().unwrap(),
+                reference.dense_data().unwrap(),
                 case.terms(),
                 case.name,
             );
+            if member_case.dense {
+                let (_, expected) = dense_oracle(member_case);
+                assert_close(
+                    &member.to_physical_dense().unwrap().data,
+                    &expected,
+                    case.terms(),
+                    case.name,
+                );
+            }
         }
     }
 }
 
 #[test]
-fn public_host_batch_matches_physical_basis() {
+fn public_host_batch_matches_reference_steps_and_applicable_physical_basis() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     check(u1_reordered::<f64>(&runtime));
     check(su2_reordered::<f64>(&runtime));
     check(u1_reordered::<tenet::typed::Complex64>(&runtime));
     check(su2_reordered::<tenet::typed::Complex64>(&runtime));
+    check(u1_reordered::<f32>(&runtime));
+    check(su2_reordered::<tenet::typed::Complex32>(&runtime));
     check(
         u1_inactive_cases::<f64>(&runtime)
             .into_iter()
