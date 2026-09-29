@@ -8,7 +8,7 @@ by `artifact-classification.md` and must not be hand-edited.
 
 | Artifact | Authority | Later outcome |
 | --- | --- | --- |
-| [Artifact classification](artifact-classification.md) | `8999ec3678b7f894a3547b1a930802a1adfe90a0` | Documentation reconciliation: [history index](../history.md). |
+| [Artifact classification](artifact-classification.md) | `8999ec3678b7f894a3547b1a930802a1adfe90a0` | Documentation reconciliation: [current documentation index](../README.md). |
 | [Operation matrix](operation-matrix.md) | `eb99cc405bc57c24c9755d4a9c30b2fcc5aeec2b` | No automatic current-main claim; rerun the matrix for a new authority. |
 | [Edge-case matrix](phase-b-edge-matrix.md) | `e9c5d35c45b022f93999bf8be63c27cd08fda1a3` | No automatic current-main claim; use current tests for current support. |
 | [Runtime architecture review](symmetric-runtime-architecture-review.md) | TeNeT `5390f64a4e58b76f011f58e1576f632bfd569cf0` and the reference revisions listed in the report | Checked-Generic resource reuse: [#1079](https://github.com/Ryo-wtnb11/TeNeT/pull/1079); replay boundary: [#1080](https://github.com/Ryo-wtnb11/TeNeT/issues/1080); subsequent investigations: [#1081](https://github.com/Ryo-wtnb11/TeNeT/issues/1081), [#1082](https://github.com/Ryo-wtnb11/TeNeT/issues/1082), [#1083](https://github.com/Ryo-wtnb11/TeNeT/issues/1083), and [#1084](https://github.com/Ryo-wtnb11/TeNeT/issues/1084). |
