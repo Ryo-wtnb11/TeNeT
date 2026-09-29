@@ -1,7 +1,6 @@
 //! Restricted Host binding for one ordinary contraction over owned-dense stacks.
 
 use super::*;
-use tenet_core::BraidingStyleKind;
 use tenet_tensors::{
     DynamicTreeMembersWorkspace, OutputAxisOrder, StorageContractResolution, TensorContractSpec,
 };
@@ -13,7 +12,7 @@ use copy_c::{CopyCPlan, CopyCWorkspace};
 /// Immutable Host contraction structure for owned-dense stacks.
 ///
 /// This binding admits twist-free transformed-tree routes, fully direct
-/// unit-alpha bosonic core routes, and CopyC when its temporary is such a
+/// unit-alpha core routes, and CopyC when its temporary is such a
 /// direct core followed by one completed output transform.
 /// Direct composition is served by [`ComposePlan`]. The plan fixes structure
 /// and axes, but not member count.
@@ -116,21 +115,16 @@ where
             },
         )?;
         let direct = !resolution.is_dynamic_tree();
-        if copy_c.is_some()
-            && (!direct
-                || lhs.space.provider().braiding_style() != BraidingStyleKind::Bosonic
-                || resolution.admits_stacked_direct_host_replay().is_err())
+        if copy_c.is_some() && (!direct || resolution.admits_stacked_direct_host_replay().is_err())
         {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "Host copyC batch requires a bosonic unit-alpha direct temporary",
+                message: "Host copyC batch requires a unit-alpha direct temporary",
             }
             .into());
         }
-        if (direct && lhs.space.provider().braiding_style() != BraidingStyleKind::Bosonic)
-            || resolution.requires_source_twist()
-        {
+        if resolution.requires_source_twist() {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "Host batch contraction requires a twist-free transformed-tree or bosonic direct core route",
+                message: "Host batch contraction requires a twist-free transformed-tree or direct core route",
             }
             .into());
         }
@@ -372,5 +366,152 @@ impl<R, D> ContractWorkspace<R, D> {
                     .capacity()
                     .saturating_mul(std::mem::size_of::<D>())
             })
+    }
+}
+
+#[cfg(test)]
+mod fermionic_unit_tests {
+    use super::*;
+    use crate::sector::{
+        product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+        U1FusionRule, U1Irrep, Z2Irrep,
+    };
+    use crate::typed::GradedSpace;
+    use tenet_operations::{fusion_replay::Rank2GemmBatchJob, Rank2Gemm, StridedHostKernelAdapter};
+
+    #[derive(Default)]
+    struct Count {
+        calls: usize,
+        jobs: usize,
+    }
+
+    impl Rank2Gemm<f64> for Count {
+        fn matmul_rank2(
+            &mut self,
+            _: &mut [f64],
+            _: &[f64],
+            _: &[f64],
+            _: usize,
+            _: usize,
+            _: usize,
+            _: f64,
+            _: f64,
+        ) -> Result<(), OperationError> {
+            panic!("direct member replay must submit one batch")
+        }
+
+        fn matmul_rank2_batch(
+            &mut self,
+            _: &mut [f64],
+            _: &[f64],
+            _: &[f64],
+            jobs: &[Rank2GemmBatchJob],
+            _: &[usize],
+            alpha: f64,
+            beta: f64,
+        ) -> Result<(), OperationError> {
+            assert_eq!((alpha, beta), (1.0, 0.0));
+            self.calls += 1;
+            self.jobs += jobs.len();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn fermionic_unit_routes_submit_one_member_expanded_core_batch() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let u1 = GradedSpace::try_new(
+            Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+            [
+                (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(-1)), 1),
+            ],
+        )
+        .unwrap();
+        let su2 = GradedSpace::try_new(
+            Arc::new(FermionParityFusionRule.product(SU2FusionRule)),
+            [
+                (
+                    product_sector(Z2Irrep::EVEN, SU2Irrep::from_twice_spin(0)),
+                    2,
+                ),
+                (
+                    product_sector(Z2Irrep::ODD, SU2Irrep::from_twice_spin(1)),
+                    2,
+                ),
+                (
+                    product_sector(Z2Irrep::EVEN, SU2Irrep::from_twice_spin(2)),
+                    1,
+                ),
+            ],
+        )
+        .unwrap();
+        check_routes(&runtime, &u1);
+        check_routes(&runtime, &su2);
+    }
+
+    fn check_routes<R>(runtime: &Runtime, v: &GradedSpace<R>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        let a = TensorMap::<_, f64>::rand_with_seed(runtime, [v, v], [v, v], 61).unwrap();
+        let b = TensorMap::<_, f64>::rand_with_seed(runtime, [v, v], [v, v], 62).unwrap();
+        let cases = [
+            ("C0", [2, 3], [0, 1], [0, 1, 2, 3], 2, false, false),
+            ("C1", [3, 2], [1, 0], [0, 1, 2, 3], 2, false, false),
+            ("C2", [0, 1], [2, 3], [2, 3, 0, 1], 2, false, true),
+            ("C1p", [3, 2], [1, 0], [1, 0, 3, 2], 1, true, false),
+            ("C2p", [0, 1], [2, 3], [3, 2, 1, 0], 1, true, false),
+        ];
+        for (name, lhs_axes, rhs_axes, output, split, copy_c, swapped_expected) in cases {
+            let spec = super::super::super::ContractSpec {
+                lhs: &lhs_axes,
+                rhs: &rhs_axes,
+                codomain: &output[..split],
+                domain: &output[split..],
+            };
+            let left = StackedTensorMap::pack(&[&a]).unwrap();
+            let right = StackedTensorMap::pack(&[&b]).unwrap();
+            let plan = ContractPlan::new(&left, &right, &spec).unwrap();
+            assert_eq!(plan.copy_c.is_some(), copy_c, "{name}");
+            assert!(!plan.resolution.is_dynamic_tree(), "{name}");
+            let mut jobs_per_member = 0;
+            for members in [1, 2, 17] {
+                let (replay, swapped) = plan
+                    .resolution
+                    .stacked_direct_host_replay(members)
+                    .unwrap()
+                    .expect("unit direct core");
+                if !copy_c {
+                    assert_eq!(swapped, swapped_expected, "{name}");
+                }
+                let [dst_len, lhs_len, rhs_len] = replay.member_lens();
+                let mut dst = vec![f64::NAN; dst_len * members];
+                let lhs = vec![1.0; lhs_len * members];
+                let rhs = vec![1.0; rhs_len * members];
+                let mut count = Count::default();
+                replay
+                    .execute_host(
+                        &mut StridedHostKernelAdapter::default(),
+                        &mut count,
+                        &mut StackedStorageViewMut::new::<f64>(&mut dst, dst_len, members, dst_len)
+                            .unwrap(),
+                        &StackedStorageView::new::<f64>(&lhs, lhs_len, members, lhs_len).unwrap(),
+                        &StackedStorageView::new::<f64>(&rhs, rhs_len, members, rhs_len).unwrap(),
+                        true,
+                    )
+                    .unwrap();
+                if members == 1 {
+                    jobs_per_member = count.jobs;
+                    assert!(jobs_per_member > 0, "{name}");
+                }
+                assert_eq!(
+                    (count.calls, count.jobs),
+                    (1, jobs_per_member * members),
+                    "{name}"
+                );
+            }
+        }
     }
 }

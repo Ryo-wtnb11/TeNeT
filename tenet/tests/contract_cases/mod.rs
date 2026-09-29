@@ -650,6 +650,20 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: Payload,
 {
+    let split = case.lhs.rank() - case.lhs_axes.len();
+    fermionic_blas_contract_oracle_partitioned(case, role, split, twist)
+}
+
+pub fn fermionic_blas_contract_oracle_partitioned<R, D>(
+    case: &Case<R, D>,
+    role: TwistRole,
+    split: usize,
+    twist: impl Fn(&TensorMap<R, D>, &[usize]) -> TensorMap<R, D>,
+) -> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
     let open = |rank: usize, contracted: &[usize]| -> Vec<usize> {
         (0..rank)
             .filter(|axis| !contracted.contains(axis))
@@ -684,7 +698,6 @@ where
         }
     }
     let c = a.compose(&b).unwrap();
-    let split = lhs_open.len();
     c.permute(&case.output_axes[..split], &case.output_axes[split..])
         .unwrap()
 }

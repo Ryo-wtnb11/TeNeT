@@ -67,13 +67,15 @@ fn measure<T>(f: impl FnOnce() -> T) -> (T, Duration, usize, usize) {
     (value, elapsed, CALLS.get(), BYTES.get())
 }
 use contract_cases::{
-    assert_close, blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_u1,
-    fermionic_twist_roles, fill, poisoned_destination, su2, su2_bent, su2_reordered, u1,
-    u1_inactive_cases, u1_non_self_dual, u1_reordered, u1_rhs_identity, Case, Payload,
+    assert_close, blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_su2,
+    fermion_u1, fermionic_blas_contract_oracle_partitioned, fermionic_twist_roles, fill,
+    poisoned_destination, su2, su2_bent, su2_reordered, u1, u1_inactive_cases, u1_non_self_dual,
+    u1_reordered, u1_rhs_identity, Case, Payload, TwistRole,
 };
 use std::sync::Arc;
 use tenet::sector::{
-    CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, PhysicalFusionBasis, SectorCodec,
+    CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, PhysicalFusionBasis, ProductFusionRuleExt,
+    SectorCodec,
 };
 use tenet::typed::GradedSpace;
 use tenet::typed::{ContractPlan, ContractSpec, Error, Runtime, StackedTensorMap, TensorMap};
@@ -555,34 +557,227 @@ fn non_symmetric_braiding_is_rejected_before_plan_compile() {
 #[test]
 fn twist_bearing_dynamic_tree_is_rejected() {
     let runtime = Runtime::builder().build().unwrap();
-    let v = fermion_u1();
-    let cases = fermionic_twist_roles::<_, f64>(&runtime, &v, ["A", "canonical", "B", "both"], 71);
-    let mut found_twist = false;
-    for case in cases {
-        let lhs = StackedTensorMap::pack(&[&case.lhs]).unwrap();
-        let rhs = StackedTensorMap::pack(&[&case.rhs]).unwrap();
-        if matches!(ContractPlan::new(&lhs, &rhs, &case.spec()), Err(Error::Operation(error)) if matches!(*error, tenet::typed::OperationError::UnsupportedTensorContractScope { .. }))
+    fn check<R>(runtime: &Runtime, v: &GradedSpace<R>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        for case in fermionic_twist_roles::<_, f64>(runtime, v, ["A", "canonical", "B", "both"], 71)
         {
-            found_twist = true;
+            let lhs = StackedTensorMap::pack(&[&case.lhs]).unwrap();
+            let rhs = StackedTensorMap::pack(&[&case.rhs]).unwrap();
+            assert!(
+                matches!(ContractPlan::new(&lhs, &rhs, &case.spec()),
+                Err(Error::Operation(error)) if matches!(*error,
+                    tenet::typed::OperationError::UnsupportedTensorContractScope { .. })),
+                "{} must reject before a destination exists",
+                case.name
+            );
         }
     }
-    assert!(found_twist);
+    check(&runtime, &fermion_u1());
+    check(&runtime, &fermion_su2());
+}
+
+fn check_fermionic_unit_batch<R, D>(
+    case: Case<R, D>,
+    split: usize,
+    twist: impl Fn(&TensorMap<R, D>, &[usize]) -> TensorMap<R, D> + Copy,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    for count in [1, 2, 17] {
+        let members: Vec<_> = (0..count)
+            .map(|i| Case {
+                name: case.name,
+                lhs: case
+                    .lhs
+                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0)),
+                rhs: case.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0)),
+                lhs_axes: case.lhs_axes.clone(),
+                rhs_axes: case.rhs_axes.clone(),
+                output_axes: case.output_axes.clone(),
+                dense: false,
+            })
+            .collect();
+        let left: Vec<_> = members.iter().map(|member| &member.lhs).collect();
+        let right: Vec<_> = members.iter().map(|member| &member.rhs).collect();
+        let lhs = StackedTensorMap::pack(&left).unwrap();
+        let rhs = StackedTensorMap::pack(&right).unwrap();
+        let spec = ContractSpec {
+            lhs: &case.lhs_axes,
+            rhs: &case.rhs_axes,
+            codomain: &case.output_axes[..split],
+            domain: &case.output_axes[split..],
+        };
+        let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
+        let mut workspace = plan.workspace();
+        let result = plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        for (index, member) in members.iter().enumerate() {
+            let actual = result.member(index).unwrap();
+            // The selected swapped core absorbs the orientation into its
+            // structural lowering. TensorKit's unswapped step sequence twists A.
+            let role = if case.name == "C2" {
+                TwistRole::A
+            } else {
+                TwistRole::None
+            };
+            let oracle = fermionic_blas_contract_oracle_partitioned(member, role, split, twist);
+            if case.name == "C2" && count == 1 {
+                let untwisted = fermionic_blas_contract_oracle_partitioned(
+                    member,
+                    TwistRole::None,
+                    split,
+                    twist,
+                );
+                let scale = oracle
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.magnitude())
+                    .fold(0.0_f64, f64::max);
+                assert!(oracle
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .zip(untwisted.dense_data().unwrap())
+                    .any(|(&a, &b)| a.distance(b) > 1e-3 * scale));
+            }
+            let eager = member.lhs.contract(&member.rhs, &spec).unwrap();
+            assert_eq!(actual.codomain_rank(), split);
+            assert_eq!(
+                result.signature(),
+                StackedTensorMap::pack(&[&eager]).unwrap().signature(),
+                "{} member {index}: output structure",
+                case.name
+            );
+            assert_close(
+                actual.dense_data().unwrap(),
+                oracle.dense_data().unwrap(),
+                case.terms(),
+                case.name,
+            );
+            assert_close(
+                actual.dense_data().unwrap(),
+                eager.dense_data().unwrap(),
+                case.terms(),
+                case.name,
+            );
+        }
+        if count == 2 {
+            let outputs: Vec<_> = members
+                .iter()
+                .map(|member| member.lhs.contract(&member.rhs, &spec).unwrap())
+                .collect();
+            let refs: Vec<_> = outputs.iter().collect();
+            let mut destination = StackedTensorMap::pack(&refs).unwrap();
+            let before: Vec<Vec<D>> = (0..count)
+                .map(|i| {
+                    destination
+                        .member(i)
+                        .unwrap()
+                        .dense_data()
+                        .unwrap()
+                        .to_vec()
+                })
+                .collect();
+            let short_rhs = StackedTensorMap::pack(&[&members[0].rhs]).unwrap();
+            assert!(plan
+                .execute_into(&lhs, &short_rhs, &mut destination, &mut workspace)
+                .is_err());
+            for (i, expected) in before.iter().enumerate() {
+                assert_eq!(
+                    destination.member(i).unwrap().dense_data().unwrap(),
+                    expected
+                );
+            }
+        }
+    }
 }
 
 #[test]
-fn fermionic_unit_alpha_core_is_still_rejected() {
+fn fermionic_unit_direct_and_copy_c_match_tensorkit_steps() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    macro_rules! cases {
+        ($rule:ty, $dtype:ty, $space:expr) => {{
+            let space = $space;
+            let twist = |t: &TensorMap<$rule, $dtype>, legs: &[usize]| {
+                t.twist(legs, tenet::typed::Direction::Forward).unwrap()
+            };
+            for (mut case, _) in candidate_core_probes::<$rule, $dtype>(&runtime, &space) {
+                if !matches!(case.name, "C0" | "C1" | "C2") {
+                    continue;
+                }
+                // The output transform owns fermionic permutation signs.
+                // A different codomain split also exercises destination space construction.
+                if matches!(case.name, "C1" | "C2") {
+                    let plain = Case {
+                        name: case.name,
+                        lhs: case.lhs.clone(),
+                        rhs: case.rhs.clone(),
+                        lhs_axes: case.lhs_axes.clone(),
+                        rhs_axes: case.rhs_axes.clone(),
+                        output_axes: case.output_axes.clone(),
+                        dense: false,
+                    };
+                    check_fermionic_unit_batch(plain, 2, twist);
+                    case.output_axes = if case.name == "C1" {
+                        vec![1, 0, 3, 2]
+                    } else {
+                        vec![3, 2, 1, 0]
+                    };
+                    check_fermionic_unit_batch(case, 1, twist);
+                } else {
+                    check_fermionic_unit_batch(case, 2, twist);
+                }
+            }
+        }};
+    }
+    cases!(contract_cases::FermionU1, f64, fermion_u1());
+    cases!(
+        contract_cases::FermionU1,
+        tenet::typed::Complex64,
+        fermion_u1()
+    );
+    cases!(contract_cases::FermionSu2, f64, fermion_su2());
+    cases!(
+        contract_cases::FermionSu2,
+        tenet::typed::Complex64,
+        fermion_su2()
+    );
+}
+
+#[test]
+fn fermionic_uniform_negative_core_is_rejected_by_compiled_alpha() {
+    use tenet::sector::{product_sector, FermionParityFusionRule, U1FusionRule, U1Irrep, Z2Irrep};
+
     let runtime = Runtime::builder().build().unwrap();
-    let case = candidate_core_probes::<_, f64>(&runtime, &fermion_u1())
-        .into_iter()
-        .find(|(case, _)| case.name == "C0")
-        .unwrap()
-        .0;
-    let lhs = StackedTensorMap::pack(&[&case.lhs]).unwrap();
-    let rhs = StackedTensorMap::pack(&[&case.rhs]).unwrap();
-    assert!(matches!(ContractPlan::new(&lhs, &rhs, &case.spec()),
+    let odd = GradedSpace::try_new(
+        Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+        [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 2)],
+    )
+    .unwrap();
+    let odd_dual = odd.try_dual().unwrap();
+    let lhs =
+        TensorMap::<_, f64>::from_subblock_fn(&runtime, [&odd], [&odd_dual], |_, _| 1.0).unwrap();
+    let rhs =
+        TensorMap::<_, f64>::from_subblock_fn(&runtime, [&odd_dual], [&odd], |_, _| 1.0).unwrap();
+    let case = Case {
+        name: "uniform negative direct core",
+        lhs,
+        rhs,
+        lhs_axes: vec![1],
+        rhs_axes: vec![0],
+        output_axes: vec![0, 1],
+        dense: false,
+    };
+    assert!(case.host().dense_data().unwrap().iter().any(|&x| x != 0.0));
+    let left = StackedTensorMap::pack(&[&case.lhs]).unwrap();
+    let right = StackedTensorMap::pack(&[&case.rhs]).unwrap();
+    assert!(matches!(ContractPlan::new(&left, &right, &case.spec()),
         Err(Error::Operation(error)) if matches!(*error,
             tenet::typed::OperationError::UnsupportedTensorContractScope { message }
-            if message.contains("bosonic"))));
+            if message.contains("scaled storage plan"))));
 }
 
 #[test]
