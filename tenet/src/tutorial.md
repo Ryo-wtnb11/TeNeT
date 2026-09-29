@@ -1,8 +1,8 @@
 # Tutorial
 
-TeNeT provides small operations on symmetric tensor maps. This page follows one
-workflow: define a space, construct a map, arrange and contract its legs, then
-factorize the result. For a complete program with index notation, run:
+TeNeT provides small operations on symmetric tensor maps. This page shows how
+to construct a map, contract its legs, and factorize it. For a complete program
+with index notation, run:
 
 ```sh
 cargo run -p tenet-network --example quickstart
@@ -64,9 +64,12 @@ basis, duality, and signs.
 ## Arrange and contract legs
 
 `compose` composes maps. `contract` uses a [`typed::ContractSpec`] to name the
-contracted axes and the codomain/domain order of the open axes. Axes are
-zero-based, with codomain axes before domain axes. The output split is part of
-the operation; it need not be a separate permutation afterward.
+contracted axes and the codomain/domain order of the open axes. Input axes are
+zero-based, with codomain axes before domain axes. Number the remaining open
+axes separately: first the left operand's open axes in input order, then the
+right operand's. `codomain` and `domain` list each of those open-axis numbers
+exactly once. The output split is part of the operation; it need not be a
+separate permutation afterward.
 
 ```rust
 use std::sync::Arc;
@@ -111,13 +114,11 @@ Factorizations take `(rows, cols)`: the source axes that form each side of the
 matrix. TeNeT handles the required leg transformation. A compact SVD returns
 `u`, `s`, and `vh` on a new bond space. In this U(1) example, `s` has compact
 diagonal storage; Checked Generic providers currently return a dense `s`.
-To truncate, inspect the spectrum, select a bond subspace, and restrict all
-three factors:
 
 ```rust
 use std::sync::Arc;
 use tenet::sector::{U1FusionRule, U1Irrep};
-use tenet::typed::{Error, GradedSpace, Runtime, Svd, TensorMap, Truncation};
+use tenet::typed::{Error, GradedSpace, Runtime, Svd, TensorMap};
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
@@ -126,21 +127,16 @@ let v = GradedSpace::try_new(
 )?;
 let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 10)?;
 let Svd { u, s, vh } = t.svd_compact(&[0, 1], &[2, 3])?;
-let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(6))?;
-let u = u.restrict_leg(&[(u.codomain_rank(), &found.selection)])?;
-let s = s.restrict_leg(&[(0, &found.selection), (1, &found.selection)])?;
-let vh = vh.restrict_leg(&[(0, &found.selection)])?;
-
 let reconstructed = u.compose(&s)?.compose(&vh)?;
 let error = reconstructed.axpby(1.0, &t, -1.0)?.norm(2.0)?;
-assert!((error - found.error).abs() <= 1e-8 * (1.0 + found.error));
+assert!(error < 1e-8);
 # Ok::<(), Error>(())
 ```
 
-`found.error` is the discarded weighted Frobenius norm for this truncation.
-It does not measure convergence of a larger algorithm. `qr_compact`,
-`eigh_full`, and their related methods have their own result types and
-contracts in rustdoc.
+Truncation is a separate choice made by the algorithm. The
+[U(1) iTEBD example](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/itebd_heisenberg.rs)
+shows spectrum selection and bond restriction in context. `qr_compact`,
+`eigh_full`, and the truncation methods have their own contracts in rustdoc.
 
 ## Storage and execution
 
