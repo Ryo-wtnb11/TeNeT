@@ -872,6 +872,21 @@ pub(crate) struct DynamicTreeExecutionArtifact<C = f64> {
 }
 
 impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
+    #[cfg(test)]
+    pub(crate) fn test_lhs_transform(
+        &self,
+    ) -> (
+        &TreeTransformStructure<C>,
+        &Arc<BlockStructure>,
+        &Arc<BlockStructure>,
+    ) {
+        (
+            &self.lhs_transform.transform_structure,
+            self.lhs_transform.space.structure(),
+            &self.lhs_transform.replay_structure,
+        )
+    }
+
     pub(crate) fn requires_source_twist(&self) -> bool {
         !self.source_twist.is_empty()
     }

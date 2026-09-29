@@ -124,6 +124,88 @@ fn su2_case() -> Case<SU2FusionRule> {
     }
 }
 
+#[test]
+fn rank_five_su2_member_transform_matches_ordinary_replay() {
+    let provider = Arc::new(SU2FusionRule);
+    let s = su2_leg;
+    let case = Case {
+        lhs: space(&provider, vec![s(), s(), s()], vec![s(), s()]),
+        rhs: space(&provider, vec![s(), s()], vec![s(), s()]),
+        lhs_axes: vec![3, 1],
+        rhs_axes: vec![0, 3],
+        output_axes: vec![2, 0, 4, 1, 3],
+    };
+    let destination = case.dst();
+    let resolution = Context::<f64>::default()
+        .compile_storage_contract_resolution(
+            &destination,
+            FusionOperand::direct(case.lhs.space()),
+            FusionOperand::direct(case.rhs.space()),
+            case.axes(),
+        )
+        .unwrap();
+    let super::resolution::StorageContractRoute::DynamicTree(artifact) = resolution.route else {
+        panic!("noncomposition SU(2) fixture must select DynamicTree");
+    };
+    let (transform, dst_structure, src_structure) = artifact.test_lhs_transform();
+    assert!(transform.has_pack_gemm_scatter_blocks());
+    let source_len = src_structure.required_len().unwrap();
+    let destination_len = dst_structure.required_len().unwrap();
+    let source = [
+        host_data(case.lhs.space(), 11),
+        host_data(case.lhs.space(), 19),
+    ]
+    .concat();
+    assert_eq!(source.len(), 2 * source_len);
+    let mut batched = vec![f64::NAN; 2 * destination_len];
+    tenet_operations::tree_transform_members_overwrite_raw(
+        &mut tenet_operations::StridedHostKernelAdapter::default(),
+        &mut tenet_dense::DefaultDenseExecutor::new(),
+        &mut tenet_operations::TreeTransformWorkspace::default(),
+        transform,
+        dst_structure,
+        src_structure,
+        &mut batched,
+        &source,
+        2,
+        1,
+    )
+    .unwrap();
+    for member in 0..2 {
+        let mut expected = vec![f64::NAN; destination_len];
+        tenet_operations::tree_transform_structure_overwrite_with_structural_recoupling_raw(
+            &mut tenet_operations::StridedHostKernelAdapter::default(),
+            &mut tenet_dense::DefaultDenseExecutor::new(),
+            &mut tenet_operations::TreeTransformWorkspace::default(),
+            transform,
+            dst_structure,
+            src_structure,
+            &mut expected,
+            &source[member * source_len..(member + 1) * source_len],
+            1.0,
+            1,
+        )
+        .unwrap();
+        // One linear source transform cannot sum more terms into an entry
+        // than its source payload length (docs/testing_numerics.md).
+        let scale = expected
+            .iter()
+            .fold(1.0_f64, |maximum, value| maximum.max(value.abs()));
+        let tolerance = 32.0 * (source_len as f64).sqrt() * f64::EPSILON * scale;
+        for (index, (&actual, &reference)) in batched
+            [member * destination_len..(member + 1) * destination_len]
+            .iter()
+            .zip(&expected)
+            .enumerate()
+        {
+            assert!(
+                (actual - reference).abs() <= tolerance,
+                "member {member} element {index}: {actual} != {reference}"
+            );
+        }
+    }
+}
+
 /// `lhs` already has its contracted leg as its whole domain: under LhsRhs
 /// its source transform is the identity and it is read in place; the output
 /// is permuted, so an output transform remains.
