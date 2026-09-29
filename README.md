@@ -52,103 +52,17 @@ For a runnable indexed contraction with `tensor!`, use
 cargo run -p tenet-network --example quickstart
 ```
 
-## Choose the next primitive
+## Operations and documentation
 
-| Task | Public entry point |
-| --- | --- |
-| Define legs and construct tensors | `GradedSpace`, `TensorMap::from_subblock_fn`, `zeros`, `isomorphism`, `rand_with_seed` |
-| Change leg order or orientation | `permute`, `braid`, `repartition`, `adjoint` |
-| Combine tensors | `compose`, `contract` with `ContractSpec`, `tensor!` for an indexed network |
-| Reduce or inspect | `trace_pairs`, `inner`, `norm`, `blocks`, `subblocks` |
-| Factorize | `qr_compact`, `svd_compact`, `eigh_full`, and their result types |
-| Reuse repeated work | Explicit plan/workspace APIs where supported; `ComposePlan` and `ComposeWorkspace` for stacked composition |
+TeNeT provides `permute`, `braid`, `contract`, `trace_pairs`, `qr_compact`,
+`svd_compact`, and other operations that an application can compose into its
+own algorithm. The [tenet crate guide](tenet/README.md) maps these operations
+to methods and links to the tutorial.
 
-These are operations, not a prescribed MPS, PEPS, or VMC algorithm. The caller
-can select a contraction order, choose destinations and reusable state where an
-API provides them, and combine calls into a larger computation. TeNeT remains
-responsible for the symmetry semantics and dense work *inside* each call.
-Available methods depend on the provider, scalar type, and storage placement;
-unsupported combinations return explicit errors or have no matching method.
-The [crate tutorial](tenet/src/tutorial.md) shows method signatures and
-examples. Generate the local function-level Rust documentation with:
+Supported operations depend on the symmetry provider, scalar type, and
+storage placement. Host has the broadest operation set; CUDA uses explicit
+`to_cuda()` and `to_host()` transfers and supports a smaller subset. See the
+[documentation index](docs/README.md) for mathematical conventions, backend
+capabilities, examples, and revision-specific evidence.
 
-```sh
-cargo doc -p tenet-rs -p tenet-network --no-deps --open
-```
-
-For repeated computations, an application can organize tensor instances into
-batches and use an explicit prepared API when that operation provides one.
-For a new algorithm, start with the ordinary operations above; their types and
-errors expose the required spaces, axes, and supported placement to coding
-agents as well as human callers.
-
-## Symmetry and execution boundaries
-
-TeNeT's engine is generic over a fusion-rule provider. Built-in providers
-include ZN/Z2, fermion parity, U(1), CU(1), SU(2), Fibonacci, ordered products,
-and feature-gated SUN. Providers supply sector labels and categorical data;
-the engine owns fusion-tree-indexed reduced blocks, categorical transforms,
-contraction layouts, and validation. A product such as
-`FermionParityFusionRule.product(U1FusionRule)` is an ordered product, not an
-automatic equivalence with the reverse order. See the
-[provider interface](docs/provider_interface.md) for trait and capability
-requirements. SU(2) coefficient generation delegates to
-[`racah`](https://github.com/Ryo-wtnb11/racah).
-
-`Runtime` owns execution resources. Host dense factorizations and contraction
-GEMM can select faer or one compiled BLAS provider independently through
-`Runtime::builder().linalg_backend(...)` and `.gemm_backend(...)`. CUDA is an
-explicit feature and transfer path: `.cuda(device)` makes a device available,
-and `to_cuda()` / `to_host()` move tensor payloads. TeNeT does not silently
-transfer a tensor to make an unsupported device operation work. The
-[backend policy](docs/backend_policy.md) describes selection and resource
-ownership.
-
-For a tensor network, `tenet-network` can select and reuse a contraction path.
-The planner reads labels and dimensions, not payload data. TeNeT executes the
-chosen path on reduced blocks. Built-in greedy planning needs no external
-optimizer; optional `opt-path` and `cotengra-python` features add planners.
-They do not replace TeNeT's execution engine.
-
-## Current scope
-
-- Host is the broadest typed execution path. Checked Generic providers have a
-  narrower Host-only operation set. Fibonacci has a tested subset of typed
-  operations; arbitrary-axis contraction and factorization are not claimed.
-- CUDA supports a multiplicity-free `f64`/`Complex64` subset after explicit
-  transfer. Supported device operations include contraction, transforms, trace,
-  compact SVD and QR, and EIGH, subject to each method's bounds. Full and
-  values-only SVD/QR, `eig`, and matrix functions have no device path.
-  CUDA runtime tests require a CUDA runner; CI also checks that the feature
-  compiles.
-- `ComposePlan` / `ComposeWorkspace` support stacked composition, and
-  `PreparedEighFull` supports batched EIGH. General member-batched `contract`
-  is not public yet ([#1506](https://github.com/Ryo-wtnb11/TeNeT/issues/1506)).
-- The default `tenet-rs` feature is `cpu-faer`. `cpu-blas` needs one linked
-  `blas-accelerate`, `blas-openblas`, or `blas-mkl` feature. See the
-  [manifest](tenet/Cargo.toml) and [backend policy](docs/backend_policy.md) for
-  the full feature contract.
-
-## Read next
-
-- [Tutorial and API examples](tenet/src/tutorial.md): tensor construction,
-  axes, contraction, decomposition, and backends.
-- [Tensor-map mathematics](tenet/src/mathematics.md): duality, orientation, and
-  categorical conventions.
-- [U(1) iTEBD example](docs/itebd_heisenberg.md): a complete algorithm built
-  from these operations.
-- [Provider interface](docs/provider_interface.md): define another symmetry.
-- [Benchmark records](benchmarks/README.md): revision-specific performance
-  evidence; the README makes no general speed claim.
-- [Design](docs/design.md): structural ownership, execution, reuse, and
-  placement boundaries.
-- [Coding agent rules](AGENTS.md): how to verify and change TeNeT.
-- [Documentation map](docs/README.md): current guides and revision-pinned
-  evidence.
-
-To check the workspace locally:
-
-```sh
-cargo test --workspace
-cargo doc --workspace --no-deps
-```
+For development, read the [design](docs/design.md) and [coding agent rules](AGENTS.md).
