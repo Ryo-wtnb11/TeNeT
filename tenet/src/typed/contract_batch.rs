@@ -115,10 +115,14 @@ where
             },
         )?;
         let direct = !resolution.is_dynamic_tree();
-        if copy_c.is_some() && (!direct || resolution.admits_stacked_direct_host_replay().is_err())
+        if copy_c.is_some()
+            && (!direct
+                || resolution
+                    .admits_stacked_signed_direct_host_replay()
+                    .is_err())
         {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "Host copyC batch requires a unit-alpha direct temporary",
+                message: "Host copyC batch requires an exact-sign direct temporary",
             }
             .into());
         }
@@ -129,7 +133,7 @@ where
             .into());
         }
         if direct {
-            resolution.admits_stacked_direct_host_replay()?;
+            resolution.admits_stacked_signed_direct_host_replay()?;
         }
         let copy_c = if let Some(binding) = copy_c {
             let transform = lane.tree_context_mut().compile_tree_pair_structure(
@@ -240,7 +244,7 @@ where
                 .as_ref()
                 .is_none_or(|(replay, _)| replay.members() != members)
             {
-                workspace.replay = self.resolution.stacked_direct_host_replay(members)?;
+                workspace.replay = self.resolution.stacked_signed_direct_host_replay(members)?;
             }
             let (replay, swapped) = workspace.replay.as_ref().ok_or_else(|| {
                 Error::InvalidArgument("direct Host replay is not prepared".into())
@@ -264,7 +268,13 @@ where
             lease
                 .context()
                 .multiplicity_free_lane::<D>()?
-                .execute_stacked_direct_host(replay, &mut destination, &left, &right, true)?;
+                .execute_stacked_signed_direct_host(
+                    replay,
+                    &mut destination,
+                    &left,
+                    &right,
+                    true,
+                )?;
             return Ok(());
         }
         let mut lease = self.runtime.lease_context()?;
@@ -383,6 +393,8 @@ mod fermionic_unit_tests {
     struct Count {
         calls: usize,
         jobs: usize,
+        classes: Vec<(f64, usize)>,
+        fail_negative: bool,
     }
 
     impl Rank2Gemm<f64> for Count {
@@ -410,9 +422,15 @@ mod fermionic_unit_tests {
             alpha: f64,
             beta: f64,
         ) -> Result<(), OperationError> {
-            assert_eq!((alpha, beta), (1.0, 0.0));
+            assert_eq!(beta, 0.0);
             self.calls += 1;
             self.jobs += jobs.len();
+            self.classes.push((alpha, jobs.len()));
+            if self.fail_negative && alpha < 0.0 {
+                return Err(OperationError::InvalidArgument {
+                    message: "recording negative-class backend failure",
+                });
+            }
             Ok(())
         }
     }
@@ -511,6 +529,149 @@ mod fermionic_unit_tests {
                     (1, jobs_per_member * members),
                     "{name}"
                 );
+                assert_eq!(count.classes, [(1.0, jobs_per_member * members)]);
+            }
+        }
+    }
+
+    #[test]
+    fn signed_direct_submits_one_batch_per_present_sign_class() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let u1 = GradedSpace::try_new(
+            Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+            [
+                (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(-1)), 1),
+            ],
+        )
+        .unwrap();
+        let su2 = GradedSpace::try_new(
+            Arc::new(FermionParityFusionRule.product(SU2FusionRule)),
+            [
+                (
+                    product_sector(Z2Irrep::EVEN, SU2Irrep::from_twice_spin(0)),
+                    2,
+                ),
+                (
+                    product_sector(Z2Irrep::ODD, SU2Irrep::from_twice_spin(1)),
+                    2,
+                ),
+                (
+                    product_sector(Z2Irrep::EVEN, SU2Irrep::from_twice_spin(2)),
+                    1,
+                ),
+            ],
+        )
+        .unwrap();
+        let odd_only = GradedSpace::try_new(
+            Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+            [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 2)],
+        )
+        .unwrap();
+        check_signed_classes(&runtime, &u1, 1, 2);
+        check_signed_classes(&runtime, &su2, 2, 1);
+        check_signed_classes(&runtime, &odd_only, 0, 1);
+    }
+
+    fn check_signed_classes<R>(
+        runtime: &Runtime,
+        v: &GradedSpace<R>,
+        positive: usize,
+        negative: usize,
+    ) where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        let dual = v.try_dual().unwrap();
+        let lhs = TensorMap::<_, f64>::from_subblock_fn(runtime, [v], [&dual], |_, _| 1.0).unwrap();
+        let rhs = TensorMap::<_, f64>::from_subblock_fn(runtime, [&dual], [v], |_, _| 1.0).unwrap();
+        let left = StackedTensorMap::pack(&[&lhs]).unwrap();
+        let right = StackedTensorMap::pack(&[&rhs]).unwrap();
+        let spec = super::super::super::ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[0],
+            domain: &[1],
+        };
+        let plan = ContractPlan::new(&left, &right, &spec).unwrap();
+        assert!(plan.copy_c.is_none());
+        assert!(!plan.resolution.is_dynamic_tree());
+        assert_eq!(
+            plan.resolution.admits_stacked_direct_host_replay().is_ok(),
+            negative == 0
+        );
+        assert!(plan
+            .resolution
+            .admits_stacked_signed_direct_host_replay()
+            .unwrap());
+        for members in [1, 2, 17] {
+            let (replay, swapped) = plan
+                .resolution
+                .stacked_signed_direct_host_replay(members)
+                .unwrap()
+                .unwrap();
+            assert!(!swapped);
+            let [dst_len, lhs_len, rhs_len] = replay.member_lens();
+            let mut dst = vec![f64::NAN; dst_len * members];
+            let lhs = vec![1.0; lhs_len * members];
+            let rhs = vec![1.0; rhs_len * members];
+            let mut count = Count::default();
+            if negative > 0 && members == 1 {
+                assert!(replay
+                    .execute_host(
+                        &mut StridedHostKernelAdapter::default(),
+                        &mut count,
+                        &mut StackedStorageViewMut::new::<f64>(&mut dst, dst_len, members, dst_len)
+                            .unwrap(),
+                        &StackedStorageView::new::<f64>(&lhs, lhs_len, members, lhs_len).unwrap(),
+                        &StackedStorageView::new::<f64>(&rhs, rhs_len, members, rhs_len).unwrap(),
+                        true,
+                    )
+                    .is_err());
+                assert!(dst.iter().all(|value| value.is_nan()));
+                assert_eq!(count.calls, 0);
+            }
+            replay
+                .execute_signed_host(
+                    &mut StridedHostKernelAdapter::default(),
+                    &mut count,
+                    &mut StackedStorageViewMut::new::<f64>(&mut dst, dst_len, members, dst_len)
+                        .unwrap(),
+                    &StackedStorageView::new::<f64>(&lhs, lhs_len, members, lhs_len).unwrap(),
+                    &StackedStorageView::new::<f64>(&rhs, rhs_len, members, rhs_len).unwrap(),
+                    true,
+                )
+                .unwrap();
+            let expected: Vec<_> = [(1.0, positive), (-1.0, negative)]
+                .into_iter()
+                .filter(|(_, jobs)| *jobs > 0)
+                .map(|(alpha, jobs)| (alpha, jobs * members))
+                .collect();
+            assert_eq!(count.classes, expected);
+            assert_eq!(
+                count.calls,
+                usize::from(positive > 0) + usize::from(negative > 0)
+            );
+            assert_eq!(count.jobs, (positive + negative) * members);
+            if negative > 0 && members == 1 {
+                count.fail_negative = true;
+                let error = replay
+                    .execute_signed_host(
+                        &mut StridedHostKernelAdapter::default(),
+                        &mut count,
+                        &mut StackedStorageViewMut::new::<f64>(&mut dst, dst_len, members, dst_len)
+                            .unwrap(),
+                        &StackedStorageView::new::<f64>(&lhs, lhs_len, members, lhs_len).unwrap(),
+                        &StackedStorageView::new::<f64>(&rhs, rhs_len, members, rhs_len).unwrap(),
+                        true,
+                    )
+                    .unwrap_err();
+                assert!(matches!(
+                    error,
+                    OperationError::InvalidArgument {
+                        message: "recording negative-class backend failure"
+                    }
+                ));
             }
         }
     }

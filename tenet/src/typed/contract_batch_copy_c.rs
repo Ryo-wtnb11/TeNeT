@@ -114,7 +114,7 @@ where
             .as_ref()
             .is_none_or(|(replay, _)| replay.members() != members)
         {
-            workspace.replay = plan.resolution.stacked_direct_host_replay(members)?;
+            workspace.replay = plan.resolution.stacked_signed_direct_host_replay(members)?;
         }
         let (replay, swapped) = workspace
             .replay
@@ -142,7 +142,7 @@ where
         )?;
         let mut lease = plan.runtime.lease_context()?;
         let lane = lease.context().multiplicity_free_lane::<D>()?;
-        lane.execute_stacked_direct_host(replay, &mut temporary, &left, &right, true)?;
+        lane.execute_stacked_signed_direct_host(replay, &mut temporary, &left, &right, true)?;
         let backend = lane.tree_context_mut().backend_mut();
         let threads = backend.recoupling_threads();
         tree_transform_members_overwrite_raw(

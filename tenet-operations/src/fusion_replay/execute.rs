@@ -516,6 +516,31 @@ where
         self.require_unit_direct_batch_alpha()
     }
 
+    /// The stacked Host route accepts only identity operands and exact signs.
+    #[doc(hidden)]
+    pub fn require_identity_signed_direct_replay(&self) -> Result<(), OperationError>
+    where
+        C: std::ops::Neg<Output = C>,
+    {
+        self.require_fully_direct_storage()?;
+        self.require_identity_storage_ops()?;
+        if self.direct_batch.len() == self.direct_batch_alpha.len()
+            && self
+                .direct_batch_alpha
+                .iter()
+                .all(|&alpha| alpha == C::one() || alpha == -C::one())
+        {
+            return Ok(());
+        }
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "signed stacked replay requires exact unit-magnitude coefficients",
+        })
+    }
+
+    pub(crate) fn direct_batch_alphas(&self) -> &[C] {
+        &self.direct_batch_alpha
+    }
+
     fn require_fully_direct_storage(&self) -> Result<(), OperationError> {
         if self.is_fully_direct() {
             Ok(())

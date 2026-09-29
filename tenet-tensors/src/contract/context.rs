@@ -731,6 +731,35 @@ where
         )
     }
 
+    /// Replays exact-sign direct jobs with one batch per nonempty sign class.
+    #[doc(hidden)]
+    pub fn execute_stacked_signed_direct_host<SD, SL, SR>(
+        &mut self,
+        replay: &tenet_operations::stacked::StackedDirectReplay<C>,
+        dst: &mut tenet_operations::stacked::StackedStorageViewMut<'_, SD>,
+        lhs: &tenet_operations::stacked::StackedStorageView<'_, SL>,
+        rhs: &tenet_operations::stacked::StackedStorageView<'_, SR>,
+        zero_inactive: bool,
+    ) -> Result<(), OperationError>
+    where
+        C: std::ops::Neg<Output = C>,
+        SD: tenet_core::HostWritableStorage<D>,
+        SL: tenet_core::HostReadableStorage<D>,
+        SR: tenet_core::HostReadableStorage<D>,
+    {
+        replay.execute_signed_host(
+            &mut crate::StridedHostKernelAdapter::default(),
+            &mut super::fusion_block::BackendRank2Gemm::<_, _, C>::new(
+                &mut self.contract_backend,
+                &mut self.contract_workspace,
+            ),
+            dst,
+            lhs,
+            rhs,
+            zero_inactive,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn last_resolution_is_core(&self) -> bool {
         self.last_top_level_resolution_was_core
