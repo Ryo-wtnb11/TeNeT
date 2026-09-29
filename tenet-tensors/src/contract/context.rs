@@ -523,8 +523,8 @@ where
     C: DenseBlockScalar,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
 {
-    /// Replays an admitted, twist-free Host member artifact using this lane's
-    /// existing tree and contract resources.
+    /// Replays an admitted Host member artifact, including owned-source twists,
+    /// using this lane's existing tree and contract resources.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn execute_storage_contract_members_host(
