@@ -510,6 +510,56 @@ pub type HostTreeFusionExecutionContext<D, RuleKey> = TensorContractFusionExecut
     DenseTreeTransformOperations,
 >;
 
+impl<D, RuleKey, C>
+    TensorContractFusionExecutionContext<
+        D,
+        RuleKey,
+        DenseTreeTransformOperations,
+        DenseTreeTransformOperations,
+        C,
+    >
+where
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+{
+    /// Replays an admitted, twist-free Host member artifact using this lane's
+    /// existing tree and contract resources.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_storage_contract_members_host(
+        &mut self,
+        resolution: &StorageContractResolution<C>,
+        dst_structure: &Arc<BlockStructure>,
+        workspace: &mut super::dynamic::DynamicTreeMembersWorkspace<D, C>,
+        dst: &mut [D],
+        lhs: &[D],
+        rhs: &[D],
+        members: usize,
+    ) -> Result<(), OperationError> {
+        let StorageContractRoute::DynamicTree(artifact) = &resolution.route else {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "Host member contraction requires transformed-tree route",
+            });
+        };
+        let threads = self.tree_context.backend().recoupling_threads();
+        let (tree_backend, _) = self.tree_context.backend_workspace_mut();
+        super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
+            tree_backend.dense_mut(),
+            &mut self.contract_backend,
+            &mut self.contract_workspace,
+            artifact,
+            dst_structure,
+            workspace,
+            dst,
+            lhs,
+            rhs,
+            members,
+            threads,
+        )
+    }
+}
+
 impl<D, RuleKey, BT, BC, C> TensorContractFusionExecutionContext<D, RuleKey, BT, BC, C>
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<C>,

@@ -104,6 +104,34 @@ fn raw_transform_rejects_a_different_rule_identity() {
     ));
 }
 
+#[test]
+fn partitioned_contract_destination_rejects_distinct_provider_identities() {
+    let bind = |rule: Arc<CountingRule>| {
+        let space = DynamicFusionMapSpace::from_degeneracy_shapes(
+            rule.as_ref(),
+            FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]),
+            [vec![1, 1]],
+        )
+        .unwrap();
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(space, rule).unwrap()
+    };
+    let lhs = bind(Arc::new(CountingRule::new()));
+    let rhs = bind(Arc::new(CountingRule::new()));
+    let error = BoundDynamicFusionMapSpace::contracted_multiplicity_free_partitioned(
+        &lhs,
+        &rhs,
+        &[1],
+        &[0],
+        OutputAxisOrder::identity(),
+        1,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        OperationError::Core(CoreError::FusionRuleMismatch { .. })
+    ));
+}
+
 // Single-charge U(1) source in a chosen bond dimension (the last leg of each
 // block shape); one coupled sector, block shape [deg, deg].
 fn u1_space(charge: i32, deg: usize) -> DynamicFusionMapSpace {
