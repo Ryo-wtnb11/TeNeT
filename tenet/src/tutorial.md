@@ -1,41 +1,24 @@
 # Tutorial
 
-Every public item has one path. Tensor code imports [`typed::Runtime`],
-[`typed::GradedSpace`], [`typed::TensorMap`] and [`typed::Truncation`] from
-[`typed`], and the built-in symmetries such as [`sector::U1FusionRule`] from
-[`sector`]. A symmetry of your own implements the traits in [`sector`], which
-also holds the bounds generic code names. Import the `tensor!` macro
-separately from `tenet-network`.
-
-This page's Rust blocks are doctests unless marked as syntax-only. The
-repository examples are compiled separately; use them for complete programs.
-
-## Quick start
-
-A `GradedSpace` describes one tensor leg. Each U(1) `(charge, degeneracy)` pair
-specifies the number of states at that charge. A `TensorMap` is a
-symmetry-preserving block-sparse map written `codomain <- domain`. A `Runtime`
-supplies the resources for its operations.
-
-Clone the repository and run its quickstart example:
+TeNeT provides small operations on symmetric tensor maps. This page follows one
+workflow: define a space, construct a map, arrange and contract its legs, then
+factorize the result. For a complete program with index notation, run:
 
 ```sh
-git clone https://github.com/Ryo-wtnb11/TeNeT.git
-cd TeNeT
 cargo run -p tenet-network --example quickstart
 ```
 
-`tenet-rs` is the published package; its Rust crate is named `tenet`. The
-command above runs a repository example owned by the `tenet-network` package.
-It constructs two U(1) maps and checks their contracted squared norm. Next,
-read the [iTEBD example](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/itebd_heisenberg.rs)
-and its [guide](https://github.com/Ryo-wtnb11/TeNeT/blob/main/docs/itebd_heisenberg.md).
+The package is `tenet-rs`, imported in Rust as `tenet`. The separate
+`tenet-network` package provides `tensor!` and network planning. The Rust
+blocks below are doctests; they use the built-in U(1) symmetry, but the tensor
+operations use the same API for other supported providers.
 
-### Constructing a map
+## Quick start
 
-`TensorMap::from_subblock_fn` visits every allowed reduced entry. Its closure gets
-the fused-tree labels and the index within the current dense block. Returning
-zero is often the clearest way to construct a sparse physical operator.
+A [`typed::GradedSpace`] describes one leg by its symmetry sectors and the
+number of states in each sector. A [`typed::TensorMap`] is a map
+`codomain <- domain`; TeNeT stores only its symmetry-allowed reduced blocks.
+A [`typed::Runtime`] owns execution resources and is shared by related maps.
 
 ```rust
 use std::sync::Arc;
@@ -62,157 +45,28 @@ let sz: TensorMap<U1FusionRule, f64> = TensorMap::from_subblock_fn(
         }
     },
 )?;
-assert_eq!(sz.codomain_rank(), 1);
-assert_eq!(sz.domain_rank(), 1);
+assert_eq!((sz.codomain_rank(), sz.domain_rank()), (1, 1));
 # Ok::<(), Error>(())
 ```
 
-`zeros`, `isomorphism` (the identity is `isomorphism(V, V)`), `isometry`, and
-`rand_with_seed` cover common initial values.
-The constructor validates the symmetry layout before it returns, so invalid
-spaces and invalid provider labels become `Error` values rather than partial
-tensors.
+`from_subblock_fn` visits each allowed reduced entry. For common initial
+values, use `zeros`, `isomorphism`, or `rand_with_seed`. The scalar is the
+second type parameter, such as `f64` or [`typed::Complex64`]; use `convert`
+when an operation needs a different scalar type. There is no implicit
+conversion in a contraction.
 
-### Scalars and dual spaces
+`GradedSpace::try_new` creates a nondual leg. Use `try_dual` when the operation
+requires a dual leg. In a contraction, a codomain and domain leg built from
+the same space pair directly; two legs on the same side require the appropriate
+dual orientation. [`mathematics`] explains the
+basis, duality, and signs.
 
-The scalar is the second type parameter: `TensorMap<R, f64>` or
-`TensorMap<R, Complex64>`. Mixed scalar operations are rejected; widen with
-[`typed::TensorMap::convert`]. `GradedSpace::try_new` creates a nondual space.
-Call [`typed::GradedSpace::try_dual`] when a dual leg is required.
+## Arrange and contract legs
 
-```rust
-use std::sync::Arc;
-use tenet::sector::{U1FusionRule, U1Irrep};
-use tenet::typed::{Complex64, Error, GradedSpace, Runtime, TensorMap};
-
-let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new(
-    Arc::new(U1FusionRule),
-    [
-        (U1Irrep::new(-1), 1),
-        (U1Irrep::new(0), 2),
-        (U1Irrep::new(1), 1),
-    ],
-)?;
-let re = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 1)?;
-let cx: TensorMap<U1FusionRule, Complex64> =
-    TensorMap::from_subblock_fn(&rt, [&v], [&v], |_, ij| {
-        Complex64::new(ij[0] as f64, -(ij[1] as f64))
-    })?;
-
-let inner = re.inner(&re)?;
-assert!((inner - re.norm(2.0)?.powi(2)).abs() <= 1e-10 * (1.0 + inner));
-assert!(re.convert::<Complex64>().compose(&cx).is_ok());
-assert!(v.try_dual()?.try_dual()?.sectors()? == v.sectors()?);
-# Ok::<(), Error>(())
-```
-
-Use `f64` when real arithmetic is sufficient. Use [`typed::Complex64`] for
-complex states and operators. A method returning a scalar, such as
-`inner`, returns that same payload type. There is no implicit widening in a
-network: convert its operands before writing the contraction.
-
-### Blocks and contraction orientation
-
-[`typed::TensorMap::blocks`] reads the coupled-sector matrices, as
-TensorKit's `blocks(t)` does, and [`typed::TensorMap::subblocks`] reads the
-fusion-tree subblocks with their labels. To contract two legs, their oriented spaces must be dual. A codomain
-leg and a domain leg made from the same space pair directly. For two legs on
-the same side, construct one from `v.try_dual()?`. See [`mathematics`] for the
-full convention.
-
-```rust
-use std::sync::Arc;
-use tenet::sector::{U1FusionRule, U1Irrep};
-use tenet::typed::{ContractSpec, Error, GradedSpace, Runtime, TensorMap};
-
-let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new(
-    Arc::new(U1FusionRule),
-    [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
-)?;
-let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 2)?;
-assert!(a.compose(&a).is_ok());
-
-let dual = v.try_dual()?;
-let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&dual], 3)?;
-let spec = ContractSpec { lhs: &[1], rhs: &[1], codomain: &[0], domain: &[1] };
-let _ = a.contract(&b, &spec)?;
-
-for (_coupled, matrix) in a.blocks()? {
-    assert_eq!(matrix.rows(), matrix.cols());
-}
-let mut count = 0;
-for (_trees, values) in a.subblocks()? {
-    assert_eq!(values.shape().len(), 2);
-    count += 1;
-}
-assert_eq!(count, a.subblock_count());
-# Ok::<(), Error>(())
-```
-
-Different Rust provider types and scalar types are compile-time mismatches.
-Two spaces with the same provider type but different rule identities return
-[`typed::Error::RuleMismatch`]. Incompatible spaces and runtimes also return
-[`typed::Error`].
-
-The block buffer is reduced data, so it is not a carrier-basis matrix. In
-particular, its length depends on fusion sectors and degeneracies, not just the
-product of leg dimensions. Prefer `blocks` for inspection and ordinary tensor
-methods for computation. `data` is useful only when the reduced layout itself
-is the desired representation.
-
-## Contraction
-
-### `tensor!`
-
-`tensor!` is index notation for homogeneous `TensorMap` operands. Its output
-signature is `[codomain; domain]`; `[]` is a scalar output, read with
-[`typed::TensorMap::scalar`]. A label shared by two operands is contracted;
-a label used once must occur in the output. `conj(x)` marks an adjoint operand.
-For three or more operands, the runtime's configured optimizer chooses the
-pairwise order. There are no einsum strings.
-
-The facade crate cannot use `tensor!` in its own rustdoc because the macro is
-owned by `tenet-network`. The compiled quickstart and iTEBD examples exercise
-it instead.
-
-```rust,ignore
-use tenet_network::tensor;
-
-// Syntax only: `a` and `b` are compatible TensorMap values.
-let c = tensor!([i; k] = a[i; j] * b[j; k])?;
-let expectation = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])?;
-```
-
-The macro reports malformed labels at compile time. A written `;` split that
-does not match a tensor's runtime rank is reported when the plan is built.
-
-Output labels also define their order. For example, `[i, k; m]` keeps `i` and
-`k` as codomain legs, in that order, then places `m` in the domain. A one-input
-macro call is therefore a permutation, and a scalar network has `[]` as its
-output signature. Write the result orientation deliberately; it determines
-the map on which following methods operate.
-
-The default optimizer is greedy. A `RuntimeBuilder` can select another
-available optimizer before tensors are constructed. This changes contraction
-planning, not the mathematical result. For a repeated network shape, reuse
-the same runtime rather than adding a separate planning layer in application
-code.
-
-### Method API
-
-Use methods when the contracted axes or output order are more direct than
-labels. [`typed::TensorMap::compose`] is the categorical map composition.
-[`typed::TensorMap::contract`] takes a [`typed::ContractSpec`]: arbitrary
-axis pairs and the result's codomain and domain legs. Axes are zero-based, with
-codomain axes before domain axes.
-`permute`, `repartition`, `transpose`, `adjoint`, `twist`, and `flip` rearrange
-legs; their conventions are specified in [`mathematics`].
-
-`compose` is the right operation for ordinary map composition. `contract` is
-the general operation; on fermionic rules its selected dual legs carry the
-contraction twist, so its result need not match `compose`.
+`compose` composes maps. `contract` uses a [`typed::ContractSpec`] to name the
+contracted axes and the codomain/domain order of the open axes. Axes are
+zero-based, with codomain axes before domain axes. The output split is part of
+the operation; it need not be a separate permutation afterward.
 
 ```rust
 use std::sync::Arc;
@@ -231,241 +85,39 @@ let spec = ContractSpec { lhs: &[2, 3], rhs: &[0, 1], codomain: &[0, 1], domain:
 let same = a.contract(&b, &spec)?;
 assert_eq!(c.dense_data()?, same.dense_data()?);
 
-// The output order and split are part of the contraction: this is `c`
-// permuted onto `[0, 2, 3] <- [1]`, without that separate permute.
+// Put open axes [0, 2, 3] in the codomain and [1] in the domain.
 let mixed = a.contract(&b, &ContractSpec { codomain: &[0, 2, 3], domain: &[1], ..spec })?;
-assert_eq!((mixed.codomain_rank(), mixed.domain_rank()), (3, 1));
 let reordered = c.permute(&[0, 2, 3], &[1])?;
 assert!(mixed.axpby(1.0, &reordered, -1.0)?.norm(2.0)? < 1e-12);
-assert_eq!(c.repartition(1)?.repartition(2)?.dense_data()?, c.dense_data()?);
 # Ok::<(), Error>(())
 ```
 
-A `ContractSpec` names the contracted legs of each operand and the result's
-`codomain ← domain` over the open legs, those of `self` first. The result is
-the contraction that puts the open legs of `self` in the codomain and those of
-`other` in the domain, followed by `permute(codomain, domain)`, computed in one
-call: as in TensorKit's `blas_contract!`, the GEMMs write the result directly
-when its layout allows, and otherwise write a pooled temporary that one
-transform moves into the result. There is never a second owned output.
-`tensor!` still contracts each pairwise step with the default split and
-permutes afterwards when its output signature moves legs across the split, so
-that route writes an output-sized intermediate first; it reuses the buffer on
-warm calls.
+Use `permute` to choose leg order and codomain/domain split; use `repartition`
+when only the split changes. `adjoint` reverses the map orientation and
+conjugates values; `braid` also accounts for the provider's braiding. These
+operations have different meanings even when a real U(1) example gives the
+same values. [`mathematics`] gives their precise
+definitions.
 
-For simple relabeling, use `permute`. Use `repartition` only to change where
-the existing ordered leg list is split between codomain and domain. `adjoint`
-swaps the orientation and conjugates entries; `transpose` is the planar
-operation. These are distinct operations even where a real, bosonic example
-makes their values look similar.
+For a network, `tenet_network::tensor!` names legs instead of listing axis
+numbers. Its [compiled quickstart](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/quickstart.rs)
+shows the syntax. The caller still decides the algorithm and may choose or
+reuse a network plan; TeNeT handles the symmetry-aware work inside each
+operation.
 
-## Tensor algebra and spaces
+## Factorize and truncate
 
-`TensorMap` has ordinary vector operations: `norm`, `inner`, `scale`, `axpby`,
-`tr`, and `zeros_like`. `x.axpby(alpha, &y, beta)` is `alpha * x + beta * y`;
-note that VectorInterface's `add(y, x, α, β)` binds the coefficients the other
-way round.
+Factorizations take `(rows, cols)`: the source axes that form each side of the
+matrix. TeNeT handles the required leg transformation. A compact SVD returns
+`u`, `s`, and `vh` on a new bond space. In this U(1) example, `s` has compact
+diagonal storage; Checked Generic providers currently return a dense `s`.
+To truncate, inspect the spectrum, select a bond subspace, and restrict all
+three factors:
 
 ```rust
 use std::sync::Arc;
 use tenet::sector::{U1FusionRule, U1Irrep};
-use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
-
-let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new(
-    Arc::new(U1FusionRule),
-    [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
-)?;
-let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 6)?;
-let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 7)?;
-let difference = a.axpby(1.0, &b, -1.0)?;
-assert!(difference.norm(2.0)? >= 0.0);
-let unit = a.scale(1.0 / a.norm(2.0)?);
-assert!((unit.norm(2.0)? - 1.0).abs() <= 1e-12);
-assert_eq!(a.zeros_like().norm(2.0)?, 0.0);
-# Ok::<(), Error>(())
-```
-
-TensorKit's `ishermitian`, `isisometric`, `isunitary`, `isposdef` and
-Hermitian projection are short chains of these operations, and TeNeT spells them
-as such rather than as extra methods. Each allocates the same intermediates the
-chain shows; scale `tol` to the payload dtype as `FactorizationScalar`
-describes.
-
-```rust
-use std::sync::Arc;
-use tenet::sector::{U1FusionRule, U1Irrep};
-use tenet::typed::{Error, GradedSpace, Runtime, SectorSpectrum, TensorMap};
-
-let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new(
-    Arc::new(U1FusionRule),
-    [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
-)?;
-let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 8)?;
-let tol = 1e-12;
-
-// Hermitian part: (t + t†)/2; the anti-Hermitian part uses -0.5.
-let h = t.axpby(0.5, &t.adjoint()?, 0.5)?;
-
-// ishermitian: ‖h - h†‖ <= tol·max(‖h‖, 1), for an endomorphism
-// (codomain == domain); isantihermitian uses `h + h†`.
-let hermitian = |h: &TensorMap<U1FusionRule, f64>| -> Result<bool, Error> {
-    Ok(h.codomain() == h.domain()
-        && h.axpby(1.0, &h.adjoint()?, -1.0)?.norm(2.0)? <= tol * h.norm(2.0)?.max(1.0))
-};
-assert!(hermitian(&h)?);
-
-// isisometric: ‖u†u - id‖ <= tol·max(‖u†u‖, 1). isunitary also checks u†.
-let u = t.left_polar(&[0], &[1])?.w;
-let gram = u.adjoint()?.compose(&u)?;
-let identity = TensorMap::isomorphism(&rt, &u.domain(), &u.domain())?;
-assert!(gram.axpby(1.0, &identity, -1.0)?.norm(2.0)? <= tol * gram.norm(2.0)?.max(1.0));
-
-// isposdef: Hermitian, and every eigenvalue strictly above tol·max(‖p‖, 1).
-let p = h.compose(&h)?.axpby(1.0, &TensorMap::isomorphism(&rt, [&v], [&v])?, 1.0)?;
-let threshold = tol * p.norm(2.0)?.max(1.0);
-let positive = |values: &[SectorSpectrum<U1Irrep, f64>]| {
-    values.iter().flat_map(|s| &s.values).all(|&x| x > threshold)
-};
-assert!(hermitian(&p)? && positive(&p.eigh_vals(&[0], &[1])?));
-// A compact spectrum factor already stores its eigenvalues: read them with
-// `diagview` instead of factorizing (compare the real part for complex `d`).
-let d = p.eigh_full(&[0], &[1])?.d;
-assert!(hermitian(&d)? && positive(&d.diagview()?));
-# Ok::<(), Error>(())
-```
-
-`add(&other, alpha, beta)` computes `alpha * self + beta * other`; both maps
-must have compatible runtime, space, scalar, and storage. `inner` and `norm`
-use TeNeT's weighted block inner product. Normalizing is `scale(1.0 / norm)`;
-check the norm first when zero tensors are possible, since dividing by it
-produces non-finite values rather than an error.
-
-`GradedSpace` exposes its sectors, per-sector degeneracies, total dimension,
-direct sum (`oplus`), and fusion (`fuse`). The total dimension includes each
-sector's quantum dimension.
-
-```rust
-use std::sync::Arc;
-use tenet::sector::{U1FusionRule, U1Irrep};
-use tenet::typed::{Error, GradedSpace};
-
-let v = GradedSpace::try_new(
-    Arc::new(U1FusionRule),
-    [(-1, 2), (0, 3), (1, 2)].map(|(q, n)| (U1Irrep::new(q), n)),
-)?;
-let w = GradedSpace::try_new(
-    Arc::new(U1FusionRule),
-    [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
-)?;
-assert_eq!(v.degeneracy(&U1Irrep::new(0))?, 3);
-assert_eq!(v.fuse(&w)?.dim()?, v.dim()? * w.dim()?);
-assert_eq!(v.oplus(&w)?.degeneracy(&U1Irrep::new(0))?, 4);
-# Ok::<(), Error>(())
-```
-
-### Fusing legs
-
-TensorKit's `isomorphism(fuse(V1 ⊗ V2), V1 ⊗ V2)` is spelled with
-`GradedSpace::fuse` and `TensorMap::isomorphism`. Compose with the
-isomorphism to fuse two codomain legs into one, and with its adjoint to split
-them again. Restricting the fused leg with `restrict_leg` then keeps a
-selected subspace of it, for example to truncate a multi-leg side before a
-factorization. `remove_unit` only drops a trivial unit leg; it is not a
-general fusion.
-
-```rust
-use std::sync::Arc;
-use tenet::sector::{U1FusionRule, U1Irrep};
-use tenet::typed::{Error, GradedSpace, LegSelection, Runtime, TensorMap};
-
-let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new(
-    Arc::new(U1FusionRule),
-    [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
-)?;
-let w = GradedSpace::try_new(Arc::new(U1FusionRule), [(0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)))?;
-let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &w], [&v], 9)?;
-
-let vw = v.fuse(&w)?;
-let fuser = TensorMap::<U1FusionRule, f64>::isomorphism(&rt, [&vw], [&v, &w])?;
-let fused = fuser.compose(&t)?;
-assert_eq!((fused.codomain_rank(), fused.domain_rank()), (1, 1));
-let split = fuser.adjoint()?.compose(&fused)?;
-assert!(split.axpby(1.0, &t, -1.0)?.norm(2.0)? <= 1e-12);
-
-let keep = LegSelection::try_new(&vw, [(U1Irrep::new(0), 0..2), (U1Irrep::new(1), 0..1)])?;
-let truncated = fused.restrict_leg(&[(0, &keep)])?;
-assert_eq!(truncated.codomain()[0].dim()?, 3.0);
-# Ok::<(), Error>(())
-```
-
-Composing with the isomorphism is a GEMM against an identity in every coupled
-sector; TensorKit fuses the same way.
-
-Symmetries can be combined with `product`. The order and association are part
-of the provider type, so choose an order once for a model. The payload scalar
-remains separate from the provider's categorical coefficient scalar.
-
-```rust
-use std::sync::Arc;
-use tenet::sector::{
-    product_sector, FermionParityFusionRule, ProductFusionRuleExt, U1FusionRule, U1Irrep, Z2Irrep,
-};
-use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
-
-let rt = Runtime::builder().build()?;
-let rule = FermionParityFusionRule.product(U1FusionRule);
-let v = GradedSpace::try_new(
-    Arc::new(rule),
-    [
-        (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 1),
-        (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
-    ],
-)?;
-assert_eq!(TensorMap::<_, f64>::zeros(&rt, [&v], [&v])?.subblock_count(), 2);
-# Ok::<(), Error>(())
-```
-
-An external provider uses the same user API when it implements the required
-traits. Its laws and current capability requirements are in
-[`docs/provider_interface.md`](../../docs/provider_interface.md).
-
-Product providers are useful for simultaneous conserved quantities such as
-fermion parity and particle number. They do not provide an automatic change of
-basis between separately constructed models. Construct the desired sector
-labels explicitly, then use the same space and tensor operations as for U(1).
-
-## Decompositions
-
-Decompositions act independently in each coupled sector across the current
-codomain | domain split. The main method families are
-`svd_compact`/`svd_full`/`svd_vals`, `qr_compact`/`lq_compact`,
-`eigh_full`/`eigh_vals`, `eig_full`/`eig_vals`, and endomorphism methods
-`exp`, `inv`, and `pinv`. General eigendecomposition returns `c64` data even
-for real input.
-
-A truncated factorization is composed from primitives, each with a visible
-cost: factorize (`svd_compact`), read the spectrum (`diagview`), decide what to
-keep (`GradedSpace::find_truncated` on the bond leg), and cut the bond
-(`restrict_leg` on the bond leg of `u` and `vh`, and on both legs of `s` with
-one call, which keeps a compact `s` compact). `restrict_leg` takes a set of
-`(axis, selection)` pairs and restricts all of them in one strided pass. The
-decision also
-reports the discarded weighted Frobenius norm. `Truncation::rank(n)` bounds the
-weighted kept bond dimension; tolerance constructors and `and` combine
-additional limits. The same four steps truncate `eigh_full` and `eig_full`,
-whose factors are `d` and `v`. Each factorization returns a named result
-([`typed::Svd`], [`typed::Qr`], [`typed::Lq`], [`typed::Eigh`],
-[`typed::Eig`], [`typed::LeftPolar`], [`typed::RightPolar`]); its
-documentation states the spectrum order and which routes store `s` or `d`
-compactly.
-
-```rust
-use std::sync::Arc;
-use tenet::sector::{U1FusionRule, U1Irrep};
-use tenet::typed::{Error, GradedSpace, Qr, Runtime, Svd, TensorMap, Truncation};
+use tenet::typed::{Error, GradedSpace, Runtime, Svd, TensorMap, Truncation};
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
@@ -473,8 +125,6 @@ let v = GradedSpace::try_new(
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
 )?;
 let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 10)?;
-
-// Truncated SVD: factorize, decide, cut.
 let Svd { u, s, vh } = t.svd_compact(&[0, 1], &[2, 3])?;
 let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(6))?;
 let u = u.restrict_leg(&[(u.codomain_rank(), &found.selection)])?;
@@ -484,113 +134,27 @@ let vh = vh.restrict_leg(&[(0, &found.selection)])?;
 let reconstructed = u.compose(&s)?.compose(&vh)?;
 let error = reconstructed.axpby(1.0, &t, -1.0)?.norm(2.0)?;
 assert!((error - found.error).abs() <= 1e-8 * (1.0 + found.error));
-
-let Qr { q, r } = t.qr_compact(&[0, 1], &[2, 3])?;
-assert!(q.compose(&r)?.axpby(1.0, &t, -1.0)?.norm(2.0)? <= 1e-10 * (1.0 + t.norm(2.0)?));
 # Ok::<(), Error>(())
 ```
 
-Every factorization and matrix function takes its leg roles `(rows, cols)`:
-the source axes (codomain first) that form the rows and the columns of the
-matrix it acts on. The result is the operation applied to
-`t.permute(rows, cols)`; the current split, as above, runs no transform, and
-any other split costs exactly that one `permute`. Factoring a different
-bipartition is therefore `t.svd_compact(&[0, 2], &[1, 3])`, not a separate
-`permute` first.
+`found.error` is the discarded weighted Frobenius norm for this truncation.
+It does not measure convergence of a larger algorithm. `qr_compact`,
+`eigh_full`, and their related methods have their own result types and
+contracts in rustdoc.
 
-The returned `s` is a diagonal tensor map on the newly introduced bond space.
-Keep it when a tensor-network algorithm needs bond weights, or absorb it into
-one neighboring factor when it does not. `found.error` measures discarded
-weight for the selected truncation, not convergence of an iterative algorithm.
-Check both that error and the observable relevant to the calculation.
+## Storage and execution
 
-## Physical entries
+`dense_data` and `blocks` expose **reduced** storage, not a dense array in the
+physical carrier basis. Use `to_physical_dense` when that full array is needed.
+The latter can be much larger than the reduced representation.
 
-[`typed::TensorMap::dense_data`] is reduced fusion-tree storage, not ordinary
-carrier-basis data. Use [`typed::TensorMap::to_physical_dense`] to expand to
-that basis and [`typed::TensorMap::project_physical_dense`] to project into
-the exact schema of another tensor. Basis alignment is application-specific;
-TeNeT does not infer a conversion between different symmetry choices.
+Host is the default execution placement. With the `cuda` feature, configure a
+device on `Runtime::builder()` and explicitly move tensor payloads with
+`to_cuda()` and `to_host()`. TeNeT does not silently transfer an unsupported
+operation to Host. Supported operations depend on the provider, scalar type,
+and placement; see the [backend policy](https://github.com/Ryo-wtnb11/TeNeT/blob/main/docs/backend_policy.md) and each
+method's rustdoc for the current capability boundary.
 
-Each axis is laid out as in TensorKit's `convert(Array, t)`: sectors in
-TensorKit's order, and a dual space `V'` in `V`'s order. Moving a leg across the
-split therefore keeps its index order; for the built-in U(1) and SU(2)
-providers a `permute` is exactly an axis permutation of the physical array
-([`typed::TensorMap::to_physical_dense`] has an example).
-
-Projection takes the receiver tensor as the target schema. It therefore makes
-the destination runtime, provider, leg order, and sector content explicit.
-When two applications use different physical basis orders, permute that
-physical data in application code before projection; no generic ordering can
-be inferred from the symmetry names alone.
-
-## Runtime and backends
-
-Build one `Runtime` and reuse or clone it for related tensors. Host execution
-is the default. The builder selects thread counts, dense backends, and the
-`tensor!` optimizer. With the `cuda` feature, `.cuda(device)` attaches a device
-to the runtime; tensors remain on Host storage until `to_cuda()` transfers them
-explicitly. Device payloads are `f64` and `Complex64`; single precision has no
-device payload. `svd_compact` and `eigh_full` run on device for both
-payloads: EIGH admits a block only when it equals its conjugate transpose, and
-`u`/`vh` follow the same largest-pivot gauge as the Host SVD.
-Truncation is a global decision over quantum-dimension-weighted spectra and
-stays on the host, so a device truncated factorization is the same
-composition with one explicit transfer: `svd_compact` (or `eigh_full`) on the
-device, `to_host`, `diagview`, `GradedSpace::find_truncated`, then
-`restrict_leg` on the bond leg of `u`/`vh` (or `v`) and on both legs of `s`
-(or `d`); the factors move to the host once until a device `restrict_leg`
-lands. `qr_compact` returns the
-positive-diagonal gauge and is device-available for every device payload.
-
-```rust
-use std::sync::Arc;
-use tenet::sector::{U1FusionRule, U1Irrep};
-use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
-
-let rt = Runtime::builder().dense_threads(4).build()?;
-let rt_for_worker = rt.clone();
-let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
-let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt_for_worker, [&v], [&v], 11)?;
-assert!(a.runtime().shares_state_with(&rt));
-# Ok::<(), Error>(())
-```
-
-An unset builder uses Tenferro's resolved compiled Host provider default: BLAS
-when its CPU build enables `cpu-blas`, otherwise `cpu-faer`. Select a different
-enabled dense backend with the builder when a measured workload requires it.
-CUDA operations reject unsupported combinations rather than silently moving
-work back to the CPU. Build the runtime once at program setup; `clone` shares
-its execution configuration for work submitted from another thread.
-
-Building a CUDA runtime pays the backend library initialization (CUDA context,
-cuTENSOR, cuSOLVER/cuBLAS handles) up front — a few hundred milliseconds that
-would otherwise land on whichever user operation happened to be first, and that
-is one more reason to build the runtime once. Because that happens at
-construction, `build()` requires cuSOLVER and cuBLAS to be loadable as well as
-cuTENSOR, even for a program that only contracts: a missing or unloadable
-library is the same typed dense error as before, reported when the runtime is
-built rather than at the first factorization. Tenferro resolves the three
-through `TENFERRO_CUTENSOR_PATH`, `TENFERRO_CUSOLVER_PATH` and
-`TENFERRO_CUBLAS_PATH` when the default locations do not apply. The first use
-of each CubeCL kernel family still compiles it (NVRTC) in that process; that
-compile is CubeCL's, and so is its PTX disk cache, enabled through CubeCL's
-`cubecl.toml` (`[compilation] cache`), not through a TeNeT setting.
-
-Spaces built with `GradedSpace::try_new` each own a provider allocation.
-To share one provider, and its caches, across spaces, create it once as an
-`Arc` and pass clones to `GradedSpace::try_new`; spaces derived from
-an existing space (`try_dual`, `fuse`, `oplus`, `unitspace`) already reuse its
-provider.
-
-Implicit caches are per runtime. `Runtime::tree_transform_cache_info` and
-`Runtime::clear_tree_transform_cache` observe and reset the tree-transform
-cache, and `Runtime::plan_cache_config` bounds the `tensor!` plan cache.
-Contraction-structure and fusion-space caches have no public statistics yet.
-
-`tensor!` does not accept hyperedges: a label may appear at most twice.
-It does not promote scalar types automatically. Slicing is explicit rather
-than selected automatically by the macro.
-
-For source correspondence and background references, see
-[`references.md`](references.md).
+For more detail, use the [documentation index](https://github.com/Ryo-wtnb11/TeNeT/blob/main/docs/README.md) for
+mathematical conventions, provider implementation, complete examples, and
+development guidance.
