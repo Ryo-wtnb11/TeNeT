@@ -124,6 +124,464 @@ fn su2_case() -> Case<SU2FusionRule> {
     }
 }
 
+#[derive(Default)]
+struct CountingDense {
+    inner: tenet_dense::DefaultDenseExecutor,
+    submissions: Vec<usize>,
+}
+
+impl tenet_dense::DenseExecutor for CountingDense {
+    fn svd(
+        &mut self,
+        input: tenet_dense::DenseRead<'_>,
+    ) -> Result<Vec<tenet_dense::DenseTensor>, tenet_dense::DenseError> {
+        tenet_dense::DenseExecutor::svd(&mut self.inner, input)
+    }
+    fn qr(
+        &mut self,
+        input: tenet_dense::DenseRead<'_>,
+    ) -> Result<Vec<tenet_dense::DenseTensor>, tenet_dense::DenseError> {
+        tenet_dense::DenseExecutor::qr(&mut self.inner, input)
+    }
+    fn eigh(
+        &mut self,
+        input: tenet_dense::DenseRead<'_>,
+    ) -> Result<Vec<tenet_dense::DenseTensor>, tenet_dense::DenseError> {
+        tenet_dense::DenseExecutor::eigh(&mut self.inner, input)
+    }
+    fn dot_general_into(
+        &mut self,
+        output: tenet_dense::DenseWrite<'_>,
+        lhs: tenet_dense::DenseRead<'_>,
+        rhs: tenet_dense::DenseRead<'_>,
+        config: &tenet_dense::DenseDotConfig,
+    ) -> Result<(), tenet_dense::DenseError> {
+        tenet_dense::DenseExecutor::dot_general_into(&mut self.inner, output, lhs, rhs, config)
+    }
+    fn matmul_batch_axpby_into(
+        &mut self,
+        output: tenet_dense::DenseWrite<'_>,
+        lhs: tenet_dense::DenseRead<'_>,
+        rhs: tenet_dense::DenseRead<'_>,
+        jobs: &[tenet_dense::DenseGemmBatchJob],
+        runs: &[usize],
+        alpha: tenet_dense::DenseScalar,
+        beta: tenet_dense::DenseScalar,
+    ) -> Result<(), tenet_dense::DenseError> {
+        self.submissions.push(jobs.len());
+        tenet_dense::DenseExecutor::matmul_batch_axpby_into(
+            &mut self.inner,
+            output,
+            lhs,
+            rhs,
+            jobs,
+            runs,
+            alpha,
+            beta,
+        )
+    }
+}
+
+fn physical_oracle(case: &Case<SU2FusionRule>, lhs: &[f64], rhs: &[f64]) -> (Vec<usize>, Vec<f64>) {
+    let (a_shape, a) =
+        crate::expand_physical_host(crate::BoundDynamicTensorRef::try_new(&case.lhs, lhs).unwrap())
+            .unwrap();
+    let (b_shape, b) =
+        crate::expand_physical_host(crate::BoundDynamicTensorRef::try_new(&case.rhs, rhs).unwrap())
+            .unwrap();
+    let strides = |shape: &[usize]| {
+        shape
+            .iter()
+            .scan(1usize, |stride, &dim| {
+                let current = *stride;
+                *stride *= dim;
+                Some(current)
+            })
+            .collect::<Vec<_>>()
+    };
+    let a_stride = strides(&a_shape);
+    let b_stride = strides(&b_shape);
+    let a_open = (0..a_shape.len())
+        .filter(|axis| !case.lhs_axes.contains(axis))
+        .collect::<Vec<_>>();
+    let b_open = (0..b_shape.len())
+        .filter(|axis| !case.rhs_axes.contains(axis))
+        .collect::<Vec<_>>();
+    let joint_shape = a_open
+        .iter()
+        .map(|&axis| a_shape[axis])
+        .chain(b_open.iter().map(|&axis| b_shape[axis]))
+        .collect::<Vec<_>>();
+    let output_shape = case
+        .output_axes
+        .iter()
+        .map(|&axis| joint_shape[axis])
+        .collect::<Vec<_>>();
+    let output_strides = strides(&output_shape);
+    let contracted_shape = case
+        .lhs_axes
+        .iter()
+        .map(|&axis| a_shape[axis])
+        .collect::<Vec<_>>();
+    let contracted_strides = strides(&contracted_shape);
+    let mut joint = vec![0; joint_shape.len()];
+    let mut result = vec![0.0; output_shape.iter().product()];
+    for (linear, value) in result.iter_mut().enumerate() {
+        for (position, &axis) in case.output_axes.iter().enumerate() {
+            joint[axis] = (linear / output_strides[position]) % output_shape[position];
+        }
+        let a_base = a_open
+            .iter()
+            .enumerate()
+            .map(|(position, &axis)| joint[position] * a_stride[axis])
+            .sum::<usize>();
+        let b_base = b_open
+            .iter()
+            .enumerate()
+            .map(|(position, &axis)| joint[a_open.len() + position] * b_stride[axis])
+            .sum::<usize>();
+        for contracted in 0..contracted_shape.iter().product::<usize>() {
+            let mut ai = a_base;
+            let mut bi = b_base;
+            for (position, (&a_axis, &b_axis)) in
+                case.lhs_axes.iter().zip(&case.rhs_axes).enumerate()
+            {
+                let coordinate =
+                    (contracted / contracted_strides[position]) % contracted_shape[position];
+                ai += coordinate * a_stride[a_axis];
+                bi += coordinate * b_stride[b_axis];
+            }
+            *value += a[ai] * b[bi];
+        }
+    }
+    (output_shape, result)
+}
+
+fn su2_rank5_case() -> Case<SU2FusionRule> {
+    let provider = Arc::new(SU2FusionRule);
+    let s = su2_leg;
+    Case {
+        lhs: space(&provider, vec![s(), s(), s()], vec![s(), s()]),
+        rhs: space(&provider, vec![s(), s()], vec![s(), s()]),
+        lhs_axes: vec![3, 1],
+        rhs_axes: vec![0, 3],
+        output_axes: vec![2, 0, 4, 1, 3],
+    }
+}
+
+#[test]
+fn dynamic_artifact_replays_host_members() {
+    let case = su2_rank5_case();
+    let destination = case.dst();
+    let resolution = Context::<f64>::default()
+        .compile_storage_contract_resolution(
+            &destination,
+            FusionOperand::direct(case.lhs.space()),
+            FusionOperand::direct(case.rhs.space()),
+            case.axes(),
+        )
+        .unwrap();
+    let super::resolution::StorageContractRoute::DynamicTree(artifact) = resolution.route else {
+        panic!("fixture must select DynamicTree");
+    };
+    assert!(artifact
+        .test_lhs_transform()
+        .0
+        .has_pack_gemm_scatter_blocks());
+    let lhs_len = case.lhs.space().required_len().unwrap();
+    let rhs_len = case.rhs.space().required_len().unwrap();
+    let member_len = destination.space().required_len().unwrap();
+    let mut workspace = super::dynamic::DynamicTreeMembersWorkspace::default();
+    let mut independent = super::dynamic::DynamicTreeMembersWorkspace::default();
+    let mut first_bytes = 0;
+    let mut b2_submissions = 0;
+    for (pass, members) in [1, 2, 17, 1].into_iter().enumerate() {
+        let lhs = (0..members)
+            .flat_map(|i| host_data(case.lhs.space(), 3 + 2 * i))
+            .collect::<Vec<_>>();
+        let rhs = (0..members)
+            .flat_map(|i| host_data(case.rhs.space(), 7 + 4 * i))
+            .collect::<Vec<_>>();
+        let mut actual = vec![f64::NAN; members * member_len];
+        let current = if pass == 3 {
+            &mut independent
+        } else {
+            &mut workspace
+        };
+        let mut dense = CountingDense::default();
+        let mut backend = DenseTreeTransformOperations::new(CountingDense::default());
+        let mut backend_workspace = crate::contract::backend::TensorContractWorkspace::default();
+        if members == 2 {
+            let original = actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert!(
+                super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
+                    &mut dense,
+                    &mut backend,
+                    &mut backend_workspace,
+                    &artifact,
+                    destination.space().structure(),
+                    current,
+                    &mut actual,
+                    &lhs,
+                    &rhs[..rhs.len() - 1],
+                    members,
+                )
+                .is_err()
+            );
+            assert_eq!(
+                actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                original
+            );
+            assert!(dense.submissions.is_empty());
+            assert!(backend.dense_mut().submissions.is_empty());
+            let short_len = actual.len() - 1;
+            assert!(
+                super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
+                    &mut dense,
+                    &mut backend,
+                    &mut backend_workspace,
+                    &artifact,
+                    destination.space().structure(),
+                    current,
+                    &mut actual[..short_len],
+                    &lhs,
+                    &rhs,
+                    members,
+                )
+                .is_err()
+            );
+            assert_eq!(
+                actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                original
+            );
+            assert!(dense.submissions.is_empty());
+            assert!(backend.dense_mut().submissions.is_empty());
+        }
+        super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
+            &mut dense,
+            &mut backend,
+            &mut backend_workspace,
+            &artifact,
+            destination.space().structure(),
+            current,
+            &mut actual,
+            &lhs,
+            &rhs,
+            members,
+        )
+        .unwrap();
+        let submissions = dense.submissions.len() + backend.dense_mut().submissions.len();
+        eprintln!("#1647 SU(2) B={members}: Host dense submissions={submissions}, transform jobs={}, core jobs={}", dense.submissions.iter().sum::<usize>(), backend.dense_mut().submissions.iter().sum::<usize>());
+        if members == 2 {
+            b2_submissions = submissions;
+        }
+        if members == 17 {
+            assert_eq!(submissions, b2_submissions);
+        }
+        if members > 1 {
+            assert!(dense.submissions.iter().any(|&jobs| jobs >= members));
+            assert!(backend
+                .dense_mut()
+                .submissions
+                .iter()
+                .any(|&jobs| jobs >= members));
+        }
+        assert!(actual.iter().all(|x| x.is_finite()));
+        if pass == 0 {
+            first_bytes = current.retained_bytes();
+        }
+        if pass == 2 {
+            assert!(current.retained_bytes() < 100 * first_bytes.max(1));
+        }
+        for member in 0..members {
+            let left = &lhs[member * lhs_len..(member + 1) * lhs_len];
+            let right = &rhs[member * rhs_len..(member + 1) * rhs_len];
+            let observed = &actual[member * member_len..(member + 1) * member_len];
+            let expected = eager_host(&case, left, right);
+            for (&found, &want) in observed.iter().zip(&expected) {
+                assert!((found - want).abs() < 1e-9 * (1.0 + want.abs()));
+            }
+            if members == 2 {
+                let (oracle_shape, oracle) = physical_oracle(&case, left, right);
+                let (found_shape, found) = crate::expand_physical_host(
+                    crate::BoundDynamicTensorRef::try_new(&destination, observed).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(found_shape, oracle_shape);
+                for (&value, &want) in found.iter().zip(&oracle) {
+                    assert!((value - want).abs() < 1e-8 * (1.0 + want.abs()));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dynamic_artifact_complex_members_match_eager() {
+    use num_complex::Complex64;
+    let case = su2_rank5_case();
+    let destination = case.dst();
+    let resolution = Context::<Complex64>::default()
+        .compile_storage_contract_resolution(
+            &destination,
+            FusionOperand::direct(case.lhs.space()),
+            FusionOperand::direct(case.rhs.space()),
+            case.axes(),
+        )
+        .unwrap();
+    let super::resolution::StorageContractRoute::DynamicTree(artifact) = resolution.route else {
+        panic!("fixture must select DynamicTree");
+    };
+    let mut workspace = super::dynamic::DynamicTreeMembersWorkspace::default();
+    let lhs_len = case.lhs.space().required_len().unwrap();
+    let rhs_len = case.rhs.space().required_len().unwrap();
+    let dst_len = destination.space().required_len().unwrap();
+    for members in [1, 2, 17] {
+        let values = |space, base| {
+            (0..members)
+                .flat_map(|member| {
+                    host_data(space, base + member * 3)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, x)| Complex64::new(x, (i as f64 * 0.13 + x).cos()))
+                })
+                .collect::<Vec<_>>()
+        };
+        let lhs = values(case.lhs.space(), 5);
+        let rhs = values(case.rhs.space(), 9);
+        let mut actual = vec![Complex64::new(f64::NAN, f64::NAN); members * dst_len];
+        super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
+            &mut tenet_dense::DefaultDenseExecutor::new(),
+            &mut DenseTreeTransformOperations::default(),
+            &mut crate::contract::backend::TensorContractWorkspace::default(),
+            &artifact,
+            destination.space().structure(),
+            &mut workspace,
+            &mut actual,
+            &lhs,
+            &rhs,
+            members,
+        )
+        .unwrap();
+        for member in 0..members {
+            let expected = eager_host(
+                &case,
+                &lhs[member * lhs_len..(member + 1) * lhs_len],
+                &rhs[member * rhs_len..(member + 1) * rhs_len],
+            );
+            for (&found, &want) in actual[member * dst_len..(member + 1) * dst_len]
+                .iter()
+                .zip(&expected)
+            {
+                assert!((found - want).norm() < 1e-9 * (1.0 + want.norm()));
+            }
+        }
+    }
+}
+
+#[test]
+fn dynamic_artifact_overwrites_inactive_u1_members() {
+    let (_, case, _) = overwrite_cases().pop().unwrap();
+    let destination = case.dst();
+    let resolution = Context::<f64>::default()
+        .compile_storage_contract_resolution(
+            &destination,
+            FusionOperand::direct(case.lhs.space()),
+            FusionOperand::direct(case.rhs.space()),
+            case.axes(),
+        )
+        .unwrap();
+    let super::resolution::StorageContractRoute::DynamicTree(artifact) = resolution.route else {
+        panic!("fixture must select DynamicTree");
+    };
+    let lhs_len = case.lhs.space().required_len().unwrap();
+    let rhs_len = case.rhs.space().required_len().unwrap();
+    let dst_len = destination.space().required_len().unwrap();
+    let lhs = [
+        host_data(case.lhs.space(), 2),
+        host_data(case.lhs.space(), 5),
+    ]
+    .concat();
+    let rhs = [
+        host_data(case.rhs.space(), 7),
+        host_data(case.rhs.space(), 11),
+    ]
+    .concat();
+    let mut actual = vec![f64::NAN; 2 * dst_len];
+    super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
+        &mut tenet_dense::DefaultDenseExecutor::new(),
+        &mut DenseTreeTransformOperations::default(),
+        &mut crate::contract::backend::TensorContractWorkspace::default(),
+        &artifact,
+        destination.space().structure(),
+        &mut super::dynamic::DynamicTreeMembersWorkspace::default(),
+        &mut actual,
+        &lhs,
+        &rhs,
+        2,
+    )
+    .unwrap();
+    for member in 0..2 {
+        let expected = eager_host(
+            &case,
+            &lhs[member * lhs_len..(member + 1) * lhs_len],
+            &rhs[member * rhs_len..(member + 1) * rhs_len],
+        );
+        for (&found, &want) in actual[member * dst_len..(member + 1) * dst_len]
+            .iter()
+            .zip(&expected)
+        {
+            assert!(found.is_finite());
+            assert!((found - want).abs() < 1e-9 * (1.0 + want.abs()));
+        }
+    }
+}
+
+#[test]
+fn dynamic_artifact_rejects_twist_before_writes() {
+    let (_, case) = fermionic_cases().into_iter().next().unwrap();
+    let lhs_one = host_data(case.lhs.space(), 3);
+    let rhs_one = host_data(case.rhs.space(), 7);
+    let artifact =
+        crate::contract::contracted_axis_order_candidates(&case.lhs_axes, &case.rhs_axes)
+            .into_iter()
+            .flat_map(|candidate| {
+                orientations().map(move |orientation| (candidate.clone(), orientation))
+            })
+            .map(|(candidate, orientation)| {
+                forced_artifact(&case, &candidate, orientation, &lhs_one, &rhs_one).0
+            })
+            .find(|artifact| artifact.requires_source_twist())
+            .expect("fermionic fixture needs a twisted artifact");
+    let destination = case.dst();
+    let mut dst = vec![f64::NAN; 2 * destination.space().required_len().unwrap()];
+    let lhs = [lhs_one.as_slice(), lhs_one.as_slice()].concat();
+    let rhs = [rhs_one.as_slice(), rhs_one.as_slice()].concat();
+    let before = dst.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    let mut dense = CountingDense::default();
+    let mut backend = DenseTreeTransformOperations::new(CountingDense::default());
+    let error = super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
+        &mut dense,
+        &mut backend,
+        &mut crate::contract::backend::TensorContractWorkspace::default(),
+        &artifact,
+        destination.space().structure(),
+        &mut super::dynamic::DynamicTreeMembersWorkspace::default(),
+        &mut dst,
+        &lhs,
+        &rhs,
+        2,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::OperationError::UnsupportedTensorContractScope { .. }
+    ));
+    assert_eq!(dst.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), before);
+    assert!(dense.submissions.is_empty());
+    assert!(backend.dense_mut().submissions.is_empty());
+}
+
 #[test]
 fn rank_five_su2_member_transform_matches_physical_permutation_and_ordinary_replay() {
     let provider = Arc::new(SU2FusionRule);

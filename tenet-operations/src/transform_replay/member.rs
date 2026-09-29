@@ -234,6 +234,37 @@ where
     Ok(())
 }
 
+/// Read-only admission for a member replay. It validates bounds and prepares
+/// fallible coefficient conversion before the caller starts any stage.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn admit_tree_transform_members_overwrite_raw<D, C>(
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_len: usize,
+    src_len: usize,
+    members: usize,
+) -> Result<(), OperationError>
+where
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    let task = structure.task_view()?;
+    admit::<D, C>(
+        task,
+        dst_structure,
+        src_structure,
+        dst_len,
+        src_len,
+        members,
+        &mut workspace.member_ranges,
+    )?;
+    ensure_recoupling_coefficients(workspace, task, structure.identity_marker())?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn move_members<A, D>(
     kernels: &mut A,

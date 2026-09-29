@@ -875,7 +875,9 @@ where
         Ok(())
     }
 
-    fn validate_replay_structures(
+    /// Read-only structure admission for a composite replay preflight.
+    #[doc(hidden)]
+    pub fn validate_replay_structures(
         &self,
         dst_structure: &Arc<BlockStructure>,
         lhs_structure: &Arc<BlockStructure>,
