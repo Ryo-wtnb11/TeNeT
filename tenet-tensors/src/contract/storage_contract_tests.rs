@@ -295,7 +295,7 @@ fn dynamic_artifact_replays_host_members() {
     let mut independent = super::dynamic::DynamicTreeMembersWorkspace::default();
     let mut first_bytes = 0;
     let mut b2_submissions = 0;
-    for (pass, members) in [1, 2, 17, 1].into_iter().enumerate() {
+    for (pass, members) in [1, 2, 2, 17, 1].into_iter().enumerate() {
         let lhs = (0..members)
             .flat_map(|i| host_data(case.lhs.space(), 3 + 2 * i))
             .collect::<Vec<_>>();
@@ -303,7 +303,7 @@ fn dynamic_artifact_replays_host_members() {
             .flat_map(|i| host_data(case.rhs.space(), 7 + 4 * i))
             .collect::<Vec<_>>();
         let mut actual = vec![f64::NAN; members * member_len];
-        let current = if pass == 3 {
+        let current = if pass == 4 {
             &mut independent
         } else {
             &mut workspace
@@ -325,6 +325,7 @@ fn dynamic_artifact_replays_host_members() {
                     &lhs,
                     &rhs[..rhs.len() - 1],
                     members,
+                    1,
                 )
                 .is_err()
             );
@@ -347,6 +348,7 @@ fn dynamic_artifact_replays_host_members() {
                     &lhs,
                     &rhs,
                     members,
+                    1,
                 )
                 .is_err()
             );
@@ -357,6 +359,7 @@ fn dynamic_artifact_replays_host_members() {
             assert!(dense.submissions.is_empty());
             assert!(backend.dense_mut().submissions.is_empty());
         }
+        let builds_before = current.core_replay_builds();
         super::dynamic::execute_dynamic_tree_execution_artifact_members_host(
             &mut dense,
             &mut backend,
@@ -368,8 +371,13 @@ fn dynamic_artifact_replays_host_members() {
             &lhs,
             &rhs,
             members,
+            if members == 1 { 2 } else { 1 },
         )
         .unwrap();
+        assert_eq!(
+            current.core_replay_builds(),
+            builds_before + usize::from(pass != 2)
+        );
         let submissions = dense.submissions.len() + backend.dense_mut().submissions.len();
         eprintln!("#1647 SU(2) B={members}: Host dense submissions={submissions}, transform jobs={}, core jobs={}", dense.submissions.iter().sum::<usize>(), backend.dense_mut().submissions.iter().sum::<usize>());
         if members == 2 {
@@ -390,7 +398,7 @@ fn dynamic_artifact_replays_host_members() {
         if pass == 0 {
             first_bytes = current.retained_bytes();
         }
-        if pass == 2 {
+        if pass == 3 {
             assert!(current.retained_bytes() < 100 * first_bytes.max(1));
         }
         for member in 0..members {
@@ -461,6 +469,7 @@ fn dynamic_artifact_complex_members_match_eager() {
             &lhs,
             &rhs,
             members,
+            1,
         )
         .unwrap();
         for member in 0..members {
@@ -519,6 +528,7 @@ fn dynamic_artifact_overwrites_inactive_u1_members() {
         &lhs,
         &rhs,
         2,
+        1,
     )
     .unwrap();
     for member in 0..2 {
@@ -571,6 +581,7 @@ fn dynamic_artifact_rejects_twist_before_writes() {
         &lhs,
         &rhs,
         2,
+        1,
     )
     .unwrap_err();
     assert!(matches!(

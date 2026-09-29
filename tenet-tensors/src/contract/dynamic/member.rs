@@ -17,6 +17,8 @@ pub(crate) struct DynamicTreeMembersWorkspace<D, C = f64> {
     rhs_transform: TreeTransformWorkspace<D>,
     output_transform: TreeTransformWorkspace<D>,
     core: Option<StackedDirectReplay<C>>,
+    #[cfg(test)]
+    core_replay_builds: usize,
 }
 
 impl<D, C: Copy + PartialEq + num_traits::One> DynamicTreeMembersWorkspace<D, C> {
@@ -30,6 +32,11 @@ impl<D, C: Copy + PartialEq + num_traits::One> DynamicTreeMembersWorkspace<D, C>
             + self.lhs_transform.retained_bytes()
             + self.rhs_transform.retained_bytes()
             + self.output_transform.retained_bytes()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn core_replay_builds(&self) -> usize {
+        self.core_replay_builds
     }
 }
 
@@ -90,12 +97,15 @@ fn exact_len(actual: usize, member: usize, members: usize) -> Result<(), Operati
 
 /// Execute one immutable, twist-free artifact over uniform owned-dense Host
 /// payloads. The caller binds semantic tensor metadata; this raw seam admits
-/// only the artifact's structures and checked, disjoint member spans.
+/// only the artifact's structures and checked, disjoint member spans. TeNeT
+/// submits grouped batches to the dense executors; their provider kernel
+/// launch count is outside this seam. `threads` controls the ordinary B=1
+/// transform schedule.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_dynamic_tree_execution_artifact_members_host<E, BC, D, C>(
+pub(crate) fn execute_dynamic_tree_execution_artifact_members_host<E, EC, D, C>(
     dense: &mut E,
-    backend: &mut BC,
-    backend_workspace: &mut BC::Workspace,
+    backend: &mut tenet_operations::DenseTreeTransformOperations<EC>,
+    backend_workspace: &mut super::super::backend::TensorContractWorkspace<D>,
     artifact: &DynamicTreeExecutionArtifact<C>,
     dst_structure: &Arc<BlockStructure>,
     workspace: &mut DynamicTreeMembersWorkspace<D, C>,
@@ -103,10 +113,11 @@ pub(crate) fn execute_dynamic_tree_execution_artifact_members_host<E, BC, D, C>(
     lhs_data: &[D],
     rhs_data: &[D],
     members: usize,
+    threads: usize,
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor,
-    BC: TensorContractBackend<D, C>,
+    EC: DenseExecutor,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     C: DenseBlockScalar,
 {
@@ -131,7 +142,21 @@ where
     exact_len(rhs_data.len(), rhs_src_len, members)?;
     exact_len(dst_data.len(), dst_len, members)?;
 
-    let replay = StackedDirectReplay::new(Arc::clone(&artifact.block_plan), members)?;
+    let cached = workspace.core.as_ref().is_some_and(|replay| {
+        replay.members() == members && Arc::ptr_eq(replay.plan(), &artifact.block_plan)
+    });
+    let new_replay = if cached {
+        None
+    } else {
+        Some(StackedDirectReplay::new(
+            Arc::clone(&artifact.block_plan),
+            members,
+        )?)
+    };
+    let replay = new_replay
+        .as_ref()
+        .or(workspace.core.as_ref())
+        .expect("cached or freshly built replay");
     let (left_len, right_len) = if artifact.orientation == FusionContractOrientation::RhsLhs {
         (rhs_core_len, lhs_core_len)
     } else {
@@ -198,7 +223,13 @@ where
     if core_dst.is_some() {
         workspace.dst.resize(core_dst_len * members, D::zero());
     }
-    workspace.core = Some(replay);
+    if let Some(replay) = new_replay {
+        workspace.core = Some(replay);
+        #[cfg(test)]
+        {
+            workspace.core_replay_builds += 1;
+        }
+    }
 
     let mut kernels = crate::StridedHostKernelAdapter::default();
     if !artifact.lhs_borrowed {
@@ -212,7 +243,7 @@ where
             &mut workspace.lhs,
             lhs_data,
             members,
-            1,
+            threads,
         )?;
     }
     if !artifact.rhs_borrowed {
@@ -226,7 +257,7 @@ where
             &mut workspace.rhs,
             rhs_data,
             members,
-            1,
+            threads,
         )?;
     }
     let physical_lhs = if artifact.lhs_borrowed {
@@ -256,7 +287,8 @@ where
     let mut output_storage = WriteSlice(output);
     let mut output_view =
         StackedStorageViewMut::new::<D>(&mut output_storage, core_dst_len, members, core_dst_len)?;
-    let mut gemm = super::super::fusion_block::BackendRank2Gemm::new(backend, backend_workspace);
+    let mut gemm =
+        super::super::fusion_block::BackendRank2Gemm::<_, _, C>::new(backend, backend_workspace);
     workspace.core.as_ref().unwrap().execute_host(
         &mut kernels,
         &mut gemm,
@@ -276,7 +308,7 @@ where
             dst_data,
             &workspace.dst,
             members,
-            1,
+            threads,
         )?;
     }
     Ok(())
