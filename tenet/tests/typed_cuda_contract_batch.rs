@@ -12,8 +12,9 @@ mod contract_cases;
 use braiding_probe::{ProbeSector, RealBraidingProbe};
 use common::{DevicePayload, DeviceRule};
 use contract_cases::{
-    assert_close, blas_contract_oracle, candidate_core_probes, fill, poisoned_destination, su2, u1,
-    u1_inactive_cases, u1_non_self_dual, Case,
+    assert_close, blas_contract_oracle, candidate_core_probes, fermion_su2, fermion_u1,
+    fermionic_blas_contract_oracle_partitioned, fill, poisoned_destination, su2, u1,
+    u1_inactive_cases, u1_non_self_dual, Case, TwistRole,
 };
 use num_complex::Complex64;
 use std::hint::black_box;
@@ -24,8 +25,335 @@ use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::{
-    ContractPlan, ContractSpec, CudaStorage, Error, Runtime, StackedTensorMap, TensorMap,
+    ContractPlan, ContractSpec, CudaStorage, Direction, Error, GradedSpace, Runtime,
+    StackedTensorMap, TensorMap,
 };
+
+fn check_signed_core<R: DeviceRule, D: DevicePayload>(
+    runtime: &Runtime,
+    space: &GradedSpace<R>,
+    swapped: bool,
+) {
+    let dual = space.try_dual().unwrap();
+    let a = TensorMap::<R, D>::from_subblock_fn(runtime, [space], [&dual], fill(201)).unwrap();
+    let b = TensorMap::<R, D>::from_subblock_fn(runtime, [&dual], [space], fill(202)).unwrap();
+    let base = Case {
+        name: "signed CUDA core",
+        lhs: if swapped { b.clone() } else { a.clone() },
+        rhs: if swapped { a } else { b },
+        lhs_axes: vec![usize::from(!swapped)],
+        rhs_axes: vec![usize::from(swapped)],
+        output_axes: if swapped { vec![1, 0] } else { vec![0, 1] },
+        dense: false,
+    };
+    let first_lhs = StackedTensorMap::pack(&[&base.lhs])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let first_rhs = StackedTensorMap::pack(&[&base.rhs])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let plan = ContractPlan::new(&first_lhs, &first_rhs, &base.spec()).unwrap();
+    let reserved_before = runtime
+        .cuda_plan_cache_stats()
+        .unwrap()
+        .unwrap()
+        .reserved_entries;
+    let mut workspace = plan.workspace().unwrap();
+    let mut other = plan.workspace().unwrap();
+    let mut expected_gemms = None;
+    for count in [1, 2, 17] {
+        let members: Vec<_> = (0..count)
+            .map(|i| Case {
+                name: base.name,
+                lhs: base
+                    .lhs
+                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0)),
+                rhs: base.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0)),
+                lhs_axes: base.lhs_axes.clone(),
+                rhs_axes: base.rhs_axes.clone(),
+                output_axes: base.output_axes.clone(),
+                dense: false,
+            })
+            .collect();
+        let left: Vec<_> = members.iter().map(|m| &m.lhs).collect();
+        let right: Vec<_> = members.iter().map(|m| &m.rhs).collect();
+        let lhs = StackedTensorMap::pack(&left).unwrap().to_cuda().unwrap();
+        let rhs = StackedTensorMap::pack(&right).unwrap().to_cuda().unwrap();
+        let (_, cold) = observe(|| plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+        assert!(cold.cuda.h2d_calls >= 1);
+        let (_, warm) = observe(|| {
+            plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        });
+        assert_eq!(warm.cuda.h2d_calls, 0);
+        assert_eq!(warm.cuda.d2h_calls, 0);
+        let result = plan
+            .execute(&lhs, &rhs, &mut workspace)
+            .unwrap()
+            .to_host()
+            .unwrap();
+        let gemms = warm.cuda.gemm_calls;
+        assert!(gemms > 0);
+        if let Some(expected) = expected_gemms {
+            assert_eq!(gemms, expected);
+        }
+        expected_gemms = Some(gemms);
+        for (i, member) in members.iter().enumerate() {
+            let twist = |tensor: &TensorMap<R, D>, legs: &[usize]| {
+                tensor.twist(legs, Direction::Forward).unwrap()
+            };
+            let role = if swapped { TwistRole::A } else { TwistRole::B };
+            let oracle = fermionic_blas_contract_oracle_partitioned(member, role, 1, twist);
+            let selected = if swapped {
+                Case {
+                    name: "selected signed swapped dispatch",
+                    lhs: member.rhs.clone(),
+                    rhs: member.lhs.clone(),
+                    lhs_axes: vec![1],
+                    rhs_axes: vec![0],
+                    output_axes: vec![0, 1],
+                    dense: false,
+                }
+            } else {
+                Case {
+                    name: member.name,
+                    lhs: member.lhs.clone(),
+                    rhs: member.rhs.clone(),
+                    lhs_axes: member.lhs_axes.clone(),
+                    rhs_axes: member.rhs_axes.clone(),
+                    output_axes: member.output_axes.clone(),
+                    dense: false,
+                }
+            };
+            let selected_oracle =
+                fermionic_blas_contract_oracle_partitioned(&selected, TwistRole::B, 1, twist);
+            let untwisted =
+                fermionic_blas_contract_oracle_partitioned(&selected, TwistRole::None, 1, twist);
+            let expected = oracle.dense_data().unwrap();
+            assert_close(
+                expected,
+                selected_oracle.dense_data().unwrap(),
+                member.terms(),
+                base.name,
+            );
+            let selected_data = selected_oracle.dense_data().unwrap();
+            let scale = selected_data
+                .iter()
+                .map(|x| x.magnitude())
+                .fold(0.0, f64::max);
+            let tolerance = 64.0 * (member.terms().max(1) as f64).sqrt() * D::EPS * (1.0 + scale);
+            assert!(
+                selected_data
+                    .iter()
+                    .zip(untwisted.dense_data().unwrap())
+                    .any(|(&x, &y)| x.distance(y) > tolerance),
+                "twist must change signed {}",
+                D::NAME
+            );
+            assert_close(
+                result.member(i).unwrap().dense_data().unwrap(),
+                expected,
+                member.terms(),
+                base.name,
+            );
+            let eager = member
+                .lhs
+                .to_cuda()
+                .unwrap()
+                .contract(&member.rhs.to_cuda().unwrap(), &member.spec())
+                .unwrap()
+                .to_host()
+                .unwrap();
+            assert_close(
+                result.member(i).unwrap().dense_data().unwrap(),
+                eager.dense_data().unwrap(),
+                member.terms(),
+                base.name,
+            );
+        }
+        let poisoned: Vec<_> = members.iter().map(poisoned_destination).collect();
+        let mut dst = StackedTensorMap::pack(&poisoned.iter().collect::<Vec<_>>())
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        let (_, into) = observe(|| plan.execute_into(&lhs, &rhs, &mut dst, &mut other).unwrap());
+        assert_eq!(into.cuda.h2d_calls, 0);
+        assert_eq!(into.cuda.d2h_calls, 0);
+        assert_eq!(into.cuda.gemm_calls, gemms);
+        let written = dst.to_host().unwrap();
+        for (i, member) in members.iter().enumerate() {
+            assert_close(
+                written.member(i).unwrap().dense_data().unwrap(),
+                result.member(i).unwrap().dense_data().unwrap(),
+                member.terms(),
+                base.name,
+            );
+        }
+        if count == 2 {
+            let before = payload_snapshot(&dst);
+            let short_rhs = rhs.select(&[0]).unwrap();
+            assert!(plan
+                .execute_into(&lhs, &short_rhs, &mut dst, &mut other)
+                .is_err());
+            assert_eq!(payload_snapshot(&dst), before);
+            let mut wrong_dst = dst.select(&[0]).unwrap();
+            let wrong_before = payload_snapshot(&wrong_dst);
+            assert!(plan
+                .execute_into(&lhs, &rhs, &mut wrong_dst, &mut other)
+                .is_err());
+            assert_eq!(payload_snapshot(&wrong_dst), wrong_before);
+            assert_eq!(payload_snapshot(&dst), before);
+        }
+    }
+    drop(plan);
+    drop(workspace);
+    drop(other);
+    assert_eq!(
+        runtime
+            .cuda_plan_cache_stats()
+            .unwrap()
+            .unwrap()
+            .reserved_entries,
+        reserved_before
+    );
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn signed_core_and_swapped_core_all_device_dtypes() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    macro_rules! cases {
+        ($dtype:ty) => {
+            for swapped in [false, true] {
+                check_signed_core::<_, $dtype>(&runtime, &fermion_u1(), swapped);
+                check_signed_core::<_, $dtype>(&runtime, &fermion_su2(), swapped);
+            }
+        };
+    }
+    cases!(f32);
+    cases!(num_complex::Complex32);
+    cases!(f64);
+    cases!(Complex64);
+}
+
+#[test]
+fn signed_fixture_twist_is_nonvacuous_without_a_device() {
+    let runtime = Runtime::builder().build().unwrap();
+    for space in [fermion_u1()] {
+        let dual = space.try_dual().unwrap();
+        let a =
+            TensorMap::<_, f64>::from_subblock_fn(&runtime, [&space], [&dual], fill(201)).unwrap();
+        let b =
+            TensorMap::<_, f64>::from_subblock_fn(&runtime, [&dual], [&space], fill(202)).unwrap();
+        for swapped in [false, true] {
+            let case = Case {
+                name: "signed fixture",
+                lhs: if swapped { b.clone() } else { a.clone() },
+                rhs: if swapped { a.clone() } else { b.clone() },
+                lhs_axes: vec![usize::from(!swapped)],
+                rhs_axes: vec![usize::from(swapped)],
+                output_axes: if swapped { vec![1, 0] } else { vec![0, 1] },
+                dense: false,
+            };
+            let twist = |tensor: &TensorMap<_, f64>, legs: &[usize]| {
+                tensor.twist(legs, Direction::Forward).unwrap()
+            };
+            let selected = if swapped {
+                Case {
+                    name: "selected signed swapped dispatch",
+                    lhs: case.rhs.clone(),
+                    rhs: case.lhs.clone(),
+                    lhs_axes: vec![1],
+                    rhs_axes: vec![0],
+                    output_axes: vec![0, 1],
+                    dense: false,
+                }
+            } else {
+                case
+            };
+            let actual =
+                fermionic_blas_contract_oracle_partitioned(&selected, TwistRole::B, 1, twist);
+            let absent =
+                fermionic_blas_contract_oracle_partitioned(&selected, TwistRole::None, 1, twist);
+            assert!(
+                actual
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .zip(absent.dense_data().unwrap())
+                    .any(|(&x, &y)| (x - y).abs() > 1e-10),
+                "swapped={swapped}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn signed_core_zeroes_inactive_blocks_after_poisoning() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let v = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
+            (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+            (product_sector(Z2Irrep::ODD, U1Irrep::new(-1)), 1),
+        ],
+    )
+    .unwrap();
+    let w = GradedSpace::try_new(
+        rule,
+        [
+            (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
+            (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+        ],
+    )
+    .unwrap();
+    let wd = w.try_dual().unwrap();
+    let case = Case {
+        name: "signed inactive",
+        lhs: TensorMap::<_, f64>::from_subblock_fn(&runtime, [&v], [&wd], fill(201)).unwrap(),
+        rhs: TensorMap::<_, f64>::from_subblock_fn(&runtime, [&wd], [&v], fill(202)).unwrap(),
+        lhs_axes: vec![1],
+        rhs_axes: vec![0],
+        output_axes: vec![0, 1],
+        dense: false,
+    };
+    let oracle = case.host();
+    let expected = oracle.dense_data().unwrap();
+    assert!(expected.contains(&0.0));
+    assert!(expected.iter().any(|&x| x != 0.0));
+    let lhs = StackedTensorMap::pack(&[&case.lhs, &case.lhs])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let rhs = StackedTensorMap::pack(&[&case.rhs, &case.rhs])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let plan = ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap();
+    let mut workspace = plan.workspace().unwrap();
+    let poison = poisoned_destination(&case);
+    let mut dst = StackedTensorMap::pack(&[&poison, &poison])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    for _ in 0..2 {
+        plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+            .unwrap();
+        let result = dst.to_host().unwrap();
+        for i in 0..2 {
+            assert_close(
+                result.member(i).unwrap().dense_data().unwrap(),
+                expected,
+                case.terms(),
+                case.name,
+            );
+        }
+    }
+}
 
 fn payload_snapshot<R: DeviceRule, D: DevicePayload>(
     stack: &StackedTensorMap<R, D, CudaStorage<D>>,
@@ -668,6 +996,116 @@ fn direct_core_release_measurement() {
             eprintln!("{} B={count} f64 CUDA0 Faer1: pack={pack}; upload={upload}; compile={compile}; workspace={reserve}; cold_returned={cold_returned}; warm_returned={warm_returned}; first_into={first_into}; warm_into={warm_into}; eager_members={eager}; zero_region_submissions_per_warm={zero_submissions}; retained_workspace_bytes={retained}; runtime_scalar_template_bytes={scalar_template_bytes}; plan_ledger={}/{}/{}; plan_cache_bytes={}/{}/{}; teardown={teardown}", case.name,
                 cache_before.reserved_entries, cache_held.reserved_entries, cache_after.reserved_entries,
                 cache_before.retained_bytes, cache_held.retained_bytes, cache_after.retained_bytes);
+        }
+    }
+}
+
+#[test]
+#[ignore = "release-only A100 measurement"]
+fn signed_core_release_measurement() {
+    let runtime = Runtime::builder()
+        .cuda(0)
+        .dense_threads(1)
+        .gemm_backend(tenet::typed::LinalgBackend::Faer)
+        .linalg_backend(tenet::typed::LinalgBackend::Faer)
+        .build()
+        .unwrap();
+    let space = fermion_u1();
+    let dual = space.try_dual().unwrap();
+    let a = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&space], [&dual], fill(201)).unwrap();
+    let b = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&dual], [&space], fill(202)).unwrap();
+    for swapped in [false, true] {
+        let case = Case {
+            name: if swapped {
+                "signed swapped"
+            } else {
+                "signed direct"
+            },
+            lhs: if swapped { b.clone() } else { a.clone() },
+            rhs: if swapped { a.clone() } else { b.clone() },
+            lhs_axes: vec![usize::from(!swapped)],
+            rhs_axes: vec![usize::from(swapped)],
+            output_axes: if swapped { vec![1, 0] } else { vec![0, 1] },
+            dense: false,
+        };
+        for count in [1, 2, 17] {
+            let left: Vec<_> = (0..count)
+                .map(|i| case.lhs.scale(1.0 + i as f64 / 8.0))
+                .collect();
+            let right: Vec<_> = (0..count)
+                .map(|i| case.rhs.scale(1.0 - i as f64 / 32.0))
+                .collect();
+            let ((host_lhs, host_rhs), pack) = observe(|| {
+                (
+                    StackedTensorMap::pack(&left).unwrap(),
+                    StackedTensorMap::pack(&right).unwrap(),
+                )
+            });
+            let ((lhs, rhs), upload) =
+                observe(|| (host_lhs.to_cuda().unwrap(), host_rhs.to_cuda().unwrap()));
+            let (plan, compile) = observe(|| ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap());
+            let ledger_before = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+            let (mut workspace, reserve) = observe(|| plan.workspace().unwrap());
+            let ledger_held = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+            let (_, cold) = observe(|| {
+                black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+            });
+            let warm = median(
+                (0..11)
+                    .map(|_| {
+                        observe(|| {
+                            black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+                        })
+                        .1
+                    })
+                    .collect(),
+            );
+            let dest = case.host();
+            let mut dst = StackedTensorMap::pack(&vec![&dest; count])
+                .unwrap()
+                .to_cuda()
+                .unwrap();
+            let (_, first_into) = observe(|| {
+                plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+                    .unwrap()
+            });
+            let warm_into = median(
+                (0..11)
+                    .map(|_| {
+                        observe(|| {
+                            plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+                                .unwrap();
+                        })
+                        .1
+                    })
+                    .collect(),
+            );
+            let eager_inputs: Vec<_> = left
+                .iter()
+                .zip(&right)
+                .map(|(a, b)| (a.to_cuda().unwrap(), b.to_cuda().unwrap()))
+                .collect();
+            let eager = median(
+                (0..11)
+                    .map(|_| {
+                        observe(|| {
+                            for (a, b) in &eager_inputs {
+                                black_box(a.contract(b, &case.spec()).unwrap());
+                            }
+                        })
+                        .1
+                    })
+                    .collect(),
+            );
+            let retained = workspace.retained_bytes();
+            let (_, teardown) = observe(|| {
+                drop(workspace);
+                drop(plan);
+            });
+            let ledger_after = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+            eprintln!("{} B={count} f64 CUDA0 Faer1 unsynchronized_host_submission: pack={pack}; upload={upload}; compile={compile}; workspace={reserve}; cold={cold}; warm_median={warm}; first_into={first_into}; warm_into_median={warm_into}; eager_members={eager}; retained_workspace_bytes={retained}; plan_ledger={}/{}/{}; plan_cache_bytes={}/{}/{}; teardown={teardown}",
+                case.name, ledger_before.reserved_entries, ledger_held.reserved_entries, ledger_after.reserved_entries,
+                ledger_before.retained_bytes, ledger_held.retained_bytes, ledger_after.retained_bytes);
         }
     }
 }

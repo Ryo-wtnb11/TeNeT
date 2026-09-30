@@ -60,8 +60,8 @@ pub use factorization::{
     cuda_svd_gauge_phases, cuda_svd_region, CudaSpectrum, CudaSvdGaugeWeights, CudaSvdPhases,
 };
 pub use gemm::{
-    cuda_gemm_region_batched_into, cuda_gemm_region_into, cuda_gemm_region_with_ops_into,
-    cuda_matmul_region_into,
+    cuda_gemm_region_batched_into, cuda_gemm_region_batched_scaled_into, cuda_gemm_region_into,
+    cuda_gemm_region_with_ops_into, cuda_matmul_region_into,
 };
 pub use hermitian::{
     cuda_hermitian_regions, cuda_hermitian_regions_batched, cuda_is_hermitian_region,
