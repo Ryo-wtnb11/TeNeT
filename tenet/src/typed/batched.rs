@@ -1640,6 +1640,7 @@ where
         let mut buffers = workspace.take_buffers(source.members);
         workspace.host_spectra.clear();
         if let Err(error) = self.run_host(source, &mut buffers, &mut workspace.host_spectra) {
+            workspace.host_spectra.clear();
             return workspace.settle(buffers, Err(error));
         }
         if let Err(error) = publish_spectra(
@@ -1653,8 +1654,10 @@ where
                     .map_err(|_| internal_layout_error("a member is missing a coupled sector"))
             },
         ) {
+            workspace.host_spectra.clear();
             return workspace.settle(buffers, Err(error.into()));
         }
+        workspace.host_spectra.clear();
         workspace.settle(buffers, Ok(()))?;
         Ok(self.output_ref(workspace)?)
     }

@@ -166,6 +166,38 @@ fn plan_supports_independent_workspaces_changing_b_and_rejects_foreign_workspace
 }
 
 #[test]
+fn plan_workspace_failure_hides_output_and_recovers() {
+    let runtime = Runtime::builder().build().unwrap();
+    let (leg, _) = u1_legs();
+    let good = hermitian_members(&runtime, &[&leg], 3, 11);
+    let mut bad = good.clone();
+    bad[1] = members::<_, f64>(&runtime, &[&leg], &[&leg], 1, 12).remove(0);
+    let good_stack = StackedTensorMap::pack(&good).unwrap();
+    let bad_stack = StackedTensorMap::pack(&bad).unwrap();
+    let plan = EighFullPlan::new(&good_stack, &[0], &[1]).unwrap();
+    let mut workspace = plan.workspace().unwrap();
+
+    plan.execute(&good_stack, &mut workspace).unwrap();
+    assert!(matches!(
+        plan.execute(&bad_stack, &mut workspace).map(|_| ()),
+        Err(BatchError::MemberRejected { .. })
+    ));
+    assert!(workspace.take_output().is_none());
+
+    let output = plan.execute(&good_stack, &mut workspace).unwrap();
+    for (member, input) in good.iter().enumerate() {
+        let Eigh { d, v } = input.eigh_full(&[0], &[1]).unwrap();
+        assert!(
+            output.d.member(member).unwrap().dense_data().unwrap()
+                == d.materialize().unwrap().dense_data().unwrap()
+        );
+        assert!(
+            output.v.member(member).unwrap().dense_data().unwrap() == v.dense_data().unwrap()
+        );
+    }
+}
+
+#[test]
 fn plus_minus_lambda_and_degenerate_groups_compare_by_value() {
     let runtime = Runtime::builder().build().unwrap();
     let leg = u1_legs().0;
