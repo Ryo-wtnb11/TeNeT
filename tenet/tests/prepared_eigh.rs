@@ -191,9 +191,7 @@ fn plan_workspace_failure_hides_output_and_recovers() {
             output.d.member(member).unwrap().dense_data().unwrap()
                 == d.materialize().unwrap().dense_data().unwrap()
         );
-        assert!(
-            output.v.member(member).unwrap().dense_data().unwrap() == v.dense_data().unwrap()
-        );
+        assert!(output.v.member(member).unwrap().dense_data().unwrap() == v.dense_data().unwrap());
     }
 }
 
