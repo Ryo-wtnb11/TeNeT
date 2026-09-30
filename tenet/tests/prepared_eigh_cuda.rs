@@ -1,4 +1,4 @@
-//! Device gates of `PreparedEighFull` (#1499, leaf L3 of #1287).
+//! Device gates of `EighFullPlan` and its `PreparedEighFull` forwarder.
 //!
 //! Its own binary, with every test serialized, because `cuda_transfer_stats`
 //! and the plan-cache statistics are process- and context-wide. Run with
@@ -12,6 +12,7 @@
 //! bit-identical (IEEE `==`) to device eager.
 
 #![cfg(feature = "cuda")]
+#![allow(deprecated)]
 
 mod common;
 #[path = "../../tests/support/numerics.rs"]
@@ -27,8 +28,8 @@ use tenet::expert::{cuda_transfer_stats, CudaPlanCacheStats, CudaTransferStats};
 use tenet::sector::{SU2FusionRule, SU2Irrep};
 use tenet::typed::Error;
 use tenet::typed::{
-    BatchError, Eigh, GradedSpace, MemberFault, PreparedEighFull, Runtime, StackedTensorMap,
-    TensorMap,
+    BatchError, Eigh, EighFullPlan, GradedSpace, MemberFault, PreparedEighFull, Runtime,
+    StackedTensorMap, TensorMap,
 };
 
 use common::DeviceRule;
@@ -84,10 +85,10 @@ where
     let _ = (Complex32::new(0.0, 0.0), Complex64::new(0.0, 0.0));
     let device: Vec<_> = inputs.iter().map(|t| t.to_cuda().unwrap()).collect();
     let stack = StackedTensorMap::pack(inputs).unwrap().to_cuda().unwrap();
-    let mut handle =
-        PreparedEighFull::new(&stack, &codomain_axes(&inputs[0]), &domain_axes(&inputs[0]))
-            .unwrap();
-    let output = handle.execute(&stack).unwrap();
+    let plan =
+        EighFullPlan::new(&stack, &codomain_axes(&inputs[0]), &domain_axes(&inputs[0])).unwrap();
+    let mut workspace = plan.workspace().unwrap();
+    let output = plan.execute(&stack, &mut workspace).unwrap();
     let d_stack = output.d.to_host().unwrap();
     let v_stack = output.v.to_host().unwrap();
     for (member, (input, device_input)) in inputs.iter().zip(&device).enumerate() {
@@ -223,9 +224,9 @@ fn submissions_transfers_and_the_ledger_do_not_depend_on_b() {
         let sum_n: usize = sizes.iter().sum();
         let stack = StackedTensorMap::pack(&inputs).unwrap().to_cuda().unwrap();
         let reserved = plans(&runtime).reserved_entries;
-        let mut handle =
-            PreparedEighFull::new(&stack, &codomain_axes(&inputs[0]), &domain_axes(&inputs[0]))
-                .unwrap();
+        let plan = EighFullPlan::new(&stack, &codomain_axes(&inputs[0]), &domain_axes(&inputs[0]))
+            .unwrap();
+        let mut workspace = plan.workspace().unwrap();
         assert_eq!(
             plans(&runtime).reserved_entries,
             reserved,
@@ -234,8 +235,10 @@ fn submissions_transfers_and_the_ledger_do_not_depend_on_b() {
 
         let cold_plans = plans(&runtime);
         let before = cuda_transfer_stats();
-        handle.execute(&stack).unwrap();
+        plan.execute(&stack, &mut workspace).unwrap();
         let cold = delta(cuda_transfer_stats(), before);
+        let retained = workspace.retained_bytes();
+        assert!(retained > 0, "B={count}: workspace owns capacity");
         assert_eq!(
             plans(&runtime).misses,
             cold_plans.misses,
@@ -244,8 +247,13 @@ fn submissions_transfers_and_the_ledger_do_not_depend_on_b() {
 
         let warm_plans = plans(&runtime);
         let before = cuda_transfer_stats();
-        handle.execute(&stack).unwrap();
+        plan.execute(&stack, &mut workspace).unwrap();
         let warm = delta(cuda_transfer_stats(), before);
+        assert_eq!(
+            workspace.retained_bytes(),
+            retained,
+            "B={count}: warm capacity"
+        );
         let after = plans(&runtime);
         assert_eq!(
             after.misses, warm_plans.misses,

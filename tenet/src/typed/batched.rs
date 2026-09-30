@@ -1223,8 +1223,7 @@ impl std::error::Error for BatchError {
     }
 }
 
-/// The factors of one [`PreparedEighFull::execute`], borrowed from the
-/// handle.
+/// The factors of one [`EighFullPlan::execute`], borrowed from its workspace.
 ///
 /// Member `i` of `d` and `v` is the eager `eigh_full` of the same placement
 /// on member `i` of the source; `spectra[i]` is that member's eigenvalues per
@@ -1272,18 +1271,38 @@ pub struct EighStackOutput<'a, R: SectorCodec, D, S = Vec<D>> {
 /// Endomorphisms with packed coupled-sector regions (every structure a
 /// public constructor builds). A batch fails as a whole
 /// ([`BatchError`]): on any error no output is returned, and none is
-/// observable afterwards ([`Self::take_output`] returns `None`) until the
-/// next successful call, which rewrites every member.
+/// observable afterwards ([`EighFullWorkspace::take_output`] returns `None`)
+/// until the next successful call, which rewrites every member.
 ///
 /// # Retained state and shared effects
 ///
-/// The handle owns its output stacks and host spectra, reported by
-/// [`Self::retained_bytes`] and freed on drop. It reserves nothing in the
+/// Each workspace owns its output stacks and host spectra, reported by
+/// [`EighFullWorkspace::retained_bytes`] and freed on drop. It reserves
+/// nothing in the
 /// device context's plan-entry ledger: no step submits a cuTENSOR
 /// contraction (the admission and gather are CubeCL kernels, and the
 /// materializations and copies are permutations, which Tenferro caches
 /// separately).
-pub struct PreparedEighFull<R: SectorCodec, D, S = Vec<D>> {
+///
+/// ```
+/// use std::sync::Arc;
+/// use tenet::sector::{U1FusionRule, U1Irrep};
+/// use tenet::typed::{EighFullPlan, GradedSpace, Runtime, StackedTensorMap, TensorMap};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let runtime = Runtime::builder().build()?;
+/// let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
+/// let stack = StackedTensorMap::pack(&[TensorMap::<_, f64>::zeros(
+///     &runtime, [&leg], [&leg],
+/// )?])?;
+/// let plan = EighFullPlan::new(&stack, &[0], &[1])?;
+/// let mut workspace = plan.workspace()?;
+/// let _output = plan.execute(&stack, &mut workspace)?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct EighFullPlan<R: SectorCodec, D, S = Vec<D>> {
+    identity: Arc<()>,
     runtime: Runtime,
     source: StructureSignature,
     space: BoundDynamicFusionMapSpace<R>,
@@ -1291,14 +1310,30 @@ pub struct PreparedEighFull<R: SectorCodec, D, S = Vec<D>> {
     regions: Arc<[CoupledSectorRegion]>,
     /// The source's coupled sectors in label order, as eager reports them.
     labels: Vec<(SectorId, <R as SectorCodec>::Sector)>,
+    #[cfg(feature = "cuda")]
+    device: Option<DeviceEighPlan<R>>,
+    _payload: PhantomData<(D, S)>,
+}
+
+/// Caller-owned mutable state for repeated execution of an [`EighFullPlan`].
+pub struct EighFullWorkspace<R: SectorCodec, D, S = Vec<D>> {
+    binding: Arc<()>,
     /// The factors of the last successful call: the only observable output.
     output: Option<StackPair<R, D, S>>,
     /// Buffers kept for reuse after a failed call. Never observable: a
     /// failed call may have written part of them.
     spare: Option<StackPair<R, D, S>>,
     spectra: Vec<Vec<SectorSpectrum<<R as SectorCodec>::Sector>>>,
+    host_spectra: Vec<Vec<tenet_matrixalgebra::SectorSpectrum>>,
     #[cfg(feature = "cuda")]
-    device: Option<DeviceEighPlan<R>>,
+    device: DeviceEighWorkspace,
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Default)]
+struct DeviceEighWorkspace {
+    sorted: Vec<f64>,
+    orders: Vec<usize>,
 }
 
 /// `(d, v)` of a prepared eigendecomposition.
@@ -1326,7 +1361,7 @@ struct DeviceEighPlan<R> {
     v_signature: StructureSignature,
 }
 
-impl<R, D, S> PreparedEighFull<R, D, S>
+impl<R, D, S> EighFullPlan<R, D, S>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
@@ -1406,23 +1441,35 @@ where
             Placement::Host => None,
         };
         Ok(Self {
+            identity: Arc::new(()),
             runtime: source.runtime.clone(),
             source: source.signature.clone(),
             space: source.space.clone(),
             member_len: source.member_len,
             regions,
             labels,
+            #[cfg(feature = "cuda")]
+            device,
+            _payload: PhantomData,
+        })
+    }
+
+    /// Creates independent mutable execution state for this plan.
+    pub fn workspace(&self) -> Result<EighFullWorkspace<R, D, S>, Error> {
+        Ok(EighFullWorkspace {
+            binding: Arc::clone(&self.identity),
             output: None,
             spare: None,
             spectra: Vec::new(),
+            host_spectra: Vec::new(),
             #[cfg(feature = "cuda")]
-            device,
+            device: DeviceEighWorkspace::default(),
         })
     }
 }
 
-impl<R: SectorCodec, D, S> PreparedEighFull<R, D, S> {
-    /// Moves the handle-owned `(d, v)` of the last successful call out; the
+impl<R: SectorCodec, D, S> EighFullWorkspace<R, D, S> {
+    /// Moves the workspace-owned `(d, v)` of the last successful call out; the
     /// next execute allocates new ones. `None` after a failed call: a batch
     /// fails as a whole, so no partially written factor is ever handed out.
     pub fn take_output(&mut self) -> Option<StackPair<R, D, S>> {
@@ -1457,8 +1504,9 @@ impl<R: SectorCodec, D, S> PreparedEighFull<R, D, S> {
         }
     }
 
-    /// Bytes the handle itself retains: the output payloads (host or device)
-    /// and the host spectra. The shared plan is not included.
+    /// Bytes retained exclusively by this workspace: output payloads, host
+    /// spectra, and Host/CUDA staging buffers. The shared plan and backend
+    /// context resources are not included.
     pub fn retained_bytes(&self) -> usize {
         let payloads = self
             .output
@@ -1468,13 +1516,51 @@ impl<R: SectorCodec, D, S> PreparedEighFull<R, D, S> {
                 (d.members * d.member_len + v.members * v.member_len) * std::mem::size_of::<D>()
             })
             .sum::<usize>();
-        let spectra = self
-            .spectra
-            .iter()
-            .flatten()
-            .map(|entry| entry.values.capacity() * std::mem::size_of::<f64>())
-            .sum::<usize>();
-        payloads + spectra
+        let spectra = self.spectra.capacity()
+            * std::mem::size_of::<Vec<SectorSpectrum<<R as SectorCodec>::Sector>>>()
+            + self
+                .spectra
+                .iter()
+                .map(|member| {
+                    member.capacity()
+                        * std::mem::size_of::<SectorSpectrum<<R as SectorCodec>::Sector>>()
+                        + member
+                            .iter()
+                            .map(|entry| entry.values.capacity() * std::mem::size_of::<f64>())
+                            .sum::<usize>()
+                })
+                .sum::<usize>();
+        let host_scratch = self.host_spectra.capacity()
+            * std::mem::size_of::<Vec<tenet_matrixalgebra::SectorSpectrum>>()
+            + self
+                .host_spectra
+                .iter()
+                .map(|member| {
+                    member.capacity() * std::mem::size_of::<tenet_matrixalgebra::SectorSpectrum>()
+                        + member
+                            .iter()
+                            .map(|entry| entry.values.capacity() * std::mem::size_of::<f64>())
+                            .sum::<usize>()
+                })
+                .sum::<usize>();
+        #[cfg(feature = "cuda")]
+        let device_scratch = self.device.sorted.capacity() * std::mem::size_of::<f64>()
+            + self.device.orders.capacity() * std::mem::size_of::<usize>();
+        #[cfg(not(feature = "cuda"))]
+        let device_scratch = 0;
+        payloads + spectra + host_scratch + device_scratch
+    }
+}
+
+impl<R: SectorCodec, D, S> EighFullPlan<R, D, S> {
+    fn check_workspace(&self, workspace: &EighFullWorkspace<R, D, S>) -> Result<(), Error> {
+        if Arc::ptr_eq(&self.identity, &workspace.binding) {
+            Ok(())
+        } else {
+            Err(Error::InvalidArgument(
+                "eigh workspace belongs to another plan".into(),
+            ))
+        }
     }
 
     fn check_source(&self, source: &StackedTensorMap<R, D, S>) -> Result<(), Error> {
@@ -1506,32 +1592,35 @@ impl<R: SectorCodec, D, S> PreparedEighFull<R, D, S> {
         }
     }
 
-    fn output_ref(&self) -> Result<EighStackOutput<'_, R, D, S>, Error> {
-        let (d, v) = self
+    fn output_ref<'a>(
+        &self,
+        workspace: &'a EighFullWorkspace<R, D, S>,
+    ) -> Result<EighStackOutput<'a, R, D, S>, Error> {
+        let (d, v) = workspace
             .output
             .as_ref()
             .ok_or_else(|| Error::InvalidArgument("eigh output is missing".into()))?;
         Ok(EighStackOutput {
             d,
             v,
-            spectra: &self.spectra,
+            spectra: &workspace.spectra,
         })
     }
 }
 
-impl<R, D> PreparedEighFull<R, D>
+impl<R, D> EighFullPlan<R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: FactorizationScalar,
 {
-    /// Decomposes every member into the handle-owned `(d, v)` and borrows
+    /// Decomposes every member into the workspace-owned `(d, v)` and borrows
     /// them with the host spectra.
     ///
     /// Every member is admitted (the eager Hermitian rule, per coupled
     /// sector) before any member is solved; then each member runs the eager
     /// Host eigendecomposition. The outputs are allocated zeroed when absent
     /// or when `B` changes and reused otherwise: `v` is overwritten, and `d`
-    /// only on its diagonal, since the handle never writes `d` elsewhere.
+    /// only on its diagonal, since the workspace never writes `d` elsewhere.
     ///
     /// # Errors
     ///
@@ -1539,26 +1628,35 @@ where
     /// stack of another signature; [`BatchError::MemberRejected`] listing
     /// every non-Hermitian member (before any solve) or, after the solves,
     /// every member with a non-finite eigenvalue; otherwise the eager
-    /// operation's errors as [`BatchError::Operation`].
-    pub fn execute(
-        &mut self,
+    /// operation's errors as [`BatchError::Operation`]. A workspace from
+    /// another plan is rejected before it is touched. Once the workspace is
+    /// bound to this plan, any execution error leaves no observable output.
+    pub fn execute<'a>(
+        &self,
         source: &StackedTensorMap<R, D>,
-    ) -> Result<EighStackOutput<'_, R, D>, BatchError> {
-        let mut buffers = self.take_buffers(source.members);
-        let result = self.run_host(source, &mut buffers);
-        let spectra = self.settle(buffers, result)?;
-        publish_spectra(
-            &mut self.spectra,
+        workspace: &'a mut EighFullWorkspace<R, D>,
+    ) -> Result<EighStackOutput<'a, R, D>, BatchError> {
+        self.check_workspace(workspace)?;
+        let mut buffers = workspace.take_buffers(source.members);
+        workspace.host_spectra.clear();
+        if let Err(error) = self.run_host(source, &mut buffers, &mut workspace.host_spectra) {
+            return workspace.settle(buffers, Err(error));
+        }
+        if let Err(error) = publish_spectra(
+            &mut workspace.spectra,
             &self.labels,
             source.members,
             |member, sector| {
-                spectra[member]
+                workspace.host_spectra[member]
                     .binary_search_by_key(&sector, |entry| entry.sector)
-                    .map(|index| spectra[member][index].values.as_slice())
+                    .map(|index| workspace.host_spectra[member][index].values.as_slice())
                     .map_err(|_| internal_layout_error("a member is missing a coupled sector"))
             },
-        )?;
-        Ok(self.output_ref()?)
+        ) {
+            return workspace.settle(buffers, Err(error.into()));
+        }
+        workspace.settle(buffers, Ok(()))?;
+        Ok(self.output_ref(workspace)?)
     }
 
     /// The Host call into `buffers`, allocated zeroed when absent; returns
@@ -1569,7 +1667,8 @@ where
         &self,
         source: &StackedTensorMap<R, D>,
         buffers: &mut Option<StackPair<R, D, Vec<D>>>,
-    ) -> Result<Vec<Vec<tenet_matrixalgebra::SectorSpectrum>>, BatchError> {
+        spectra: &mut Vec<Vec<tenet_matrixalgebra::SectorSpectrum>>,
+    ) -> Result<(), BatchError> {
         self.check_source(source)?;
         let members = source.members;
         let len = self.member_len;
@@ -1596,7 +1695,7 @@ where
             return Err(BatchError::MemberRejected { members: rejected });
         }
 
-        let mut spectra = Vec::with_capacity(members);
+        spectra.reserve(members);
         let mut faults = Vec::new();
         let mut diagonals = Vec::new();
         for member in 0..members {
@@ -1677,7 +1776,7 @@ where
         if !faults.is_empty() {
             return Err(BatchError::MemberRejected { members: faults });
         }
-        Ok(spectra)
+        Ok(())
     }
 }
 
@@ -1857,12 +1956,12 @@ fn route_diagonals<R>(plan: &super::TypedCudaEighPlan<R>) -> Result<Vec<(usize, 
 }
 
 #[cfg(feature = "cuda")]
-impl<R, D> PreparedEighFull<R, D, CudaStorage<D>>
+impl<R, D> EighFullPlan<R, D, CudaStorage<D>>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaFactorizationPayload,
 {
-    /// The device form of the Host [`PreparedEighFull::execute`].
+    /// The device form of the Host [`EighFullPlan::execute`].
     ///
     /// Per call, independent of `B`: at most three admission downloads and
     /// one spectra download; one batched solver call per coupled sector
@@ -1875,9 +1974,10 @@ where
     /// two `[B]` normalizer vectors per coupled sector.
     ///
     /// `d` and `v` are reused across calls at the same `B`. A new `B`, or a
-    /// call after [`Self::take_output`], allocates both with one zero upload
-    /// each (`B · Σ n²` and `B · L_v` elements, the only device allocation
-    /// path until #740); `d`'s off-diagonal entries are never written.
+    /// call after [`EighFullWorkspace::take_output`], allocates both with one
+    /// zero upload each (`B · Σ n²` and `B · L_v` elements, the only device
+    /// allocation path until #740); `d`'s off-diagonal entries are never
+    /// written.
     ///
     /// # Errors
     ///
@@ -1885,20 +1985,23 @@ where
     /// admission before any solver launch, and [`BatchError::Solver`] when
     /// the solver reports a numerical failure on a block. Argument, bounds
     /// and backend failures are [`BatchError::Operation`].
-    pub fn execute(
-        &mut self,
+    pub fn execute<'a>(
+        &self,
         source: &StackedTensorMap<R, D, CudaStorage<D>>,
-    ) -> Result<EighStackOutput<'_, R, D, CudaStorage<D>>, BatchError> {
-        let mut buffers = self.take_buffers(source.members);
-        let result = self.run_cuda(source, &mut buffers);
-        let sorted = self.settle(buffers, result)?;
+        workspace: &'a mut EighFullWorkspace<R, D, CudaStorage<D>>,
+    ) -> Result<EighStackOutput<'a, R, D, CudaStorage<D>>, BatchError> {
+        self.check_workspace(workspace)?;
+        let mut buffers = workspace.take_buffers(source.members);
+        if let Err(error) = self.run_cuda(source, &mut buffers, &mut workspace.device) {
+            return workspace.settle(buffers, Err(error));
+        }
         let device = self
             .device
             .as_ref()
-            .ok_or_else(|| internal_layout_error("a device eigh handle has no device plan"))?;
+            .ok_or_else(|| internal_layout_error("a device eigh plan has no device route plan"))?;
         let total = device.spectrum_len;
-        publish_spectra(
-            &mut self.spectra,
+        if let Err(error) = publish_spectra(
+            &mut workspace.spectra,
             &self.labels,
             source.members,
             |member, sector| {
@@ -1908,11 +2011,16 @@ where
                     .iter()
                     .zip(&device.spectrum_offsets)
                     .find(|(route, _)| device.plan.source_regions[route.source].coupled() == sector)
-                    .map(|(route, &offset)| &sorted[member * total + offset..][..route.kept])
+                    .map(|(route, &offset)| {
+                        &workspace.device.sorted[member * total + offset..][..route.kept]
+                    })
                     .ok_or_else(|| internal_layout_error("a coupled sector has no route"))
             },
-        )?;
-        Ok(self.output_ref()?)
+        ) {
+            return workspace.settle(buffers, Err(error.into()));
+        }
+        workspace.settle(buffers, Ok(()))?;
+        Ok(self.output_ref(workspace)?)
     }
 
     /// The device call into `buffers`, allocated zeroed when absent; returns
@@ -1921,14 +2029,15 @@ where
         &self,
         source: &StackedTensorMap<R, D, CudaStorage<D>>,
         buffers: &mut Option<StackPair<R, D, CudaStorage<D>>>,
-    ) -> Result<Vec<f64>, BatchError> {
+        workspace: &mut DeviceEighWorkspace,
+    ) -> Result<(), BatchError> {
         self.check_source(source)?;
         let members = source.members;
         let runtime = self.runtime.clone();
         let device = self
             .device
             .as_ref()
-            .ok_or_else(|| internal_layout_error("a device eigh handle has no device plan"))?;
+            .ok_or_else(|| internal_layout_error("a device eigh plan has no device route plan"))?;
         let mut lease = runtime.lease_cuda()?;
         let cuda = &mut *lease;
         let routes = &device.plan.routes;
@@ -1982,8 +2091,10 @@ where
         // Per member and route, eager's order: descending |λ|, index
         // tie-break, on the solver's own (ascending) order.
         let total = device.spectrum_len;
-        let mut sorted = vec![0.0_f64; total * members];
-        let mut orders = vec![0usize; total * members];
+        workspace.sorted.clear();
+        workspace.sorted.resize(total * members, 0.0);
+        workspace.orders.clear();
+        workspace.orders.resize(total * members, 0);
         let mut faults = Vec::new();
         for member in 0..members {
             let mut finite = true;
@@ -1992,7 +2103,7 @@ where
                 let base = member * total + offset;
                 let values = &raw[base..base + n];
                 finite &= values.iter().all(|value| value.is_finite());
-                let order = &mut orders[base..base + n];
+                let order = &mut workspace.orders[base..base + n];
                 for (index, slot) in order.iter_mut().enumerate() {
                     *slot = index;
                 }
@@ -2002,7 +2113,10 @@ where
                         .total_cmp(&values[left].abs())
                         .then(left.cmp(&right))
                 });
-                for (slot, &index) in sorted[base..base + n].iter_mut().zip(order.iter()) {
+                for (slot, &index) in workspace.sorted[base..base + n]
+                    .iter_mut()
+                    .zip(order.iter())
+                {
                     *slot = values[index];
                 }
             }
@@ -2015,7 +2129,7 @@ where
         }
 
         // `d` and `v` are allocated zeroed once per `B` (the only device
-        // allocation path, #740). The handle never writes `d` off its
+        // allocation path, #740). The workspace never writes `d` off its
         // diagonal, so each call moves only the `B · Σ n` sorted values.
         if buffers.is_none() {
             let zeros = |len: usize| {
@@ -2044,7 +2158,11 @@ where
         };
         let values = CudaStorage::<D>::upload_owned(
             cuda,
-            sorted.iter().map(|&value| D::from_real(value)).collect(),
+            workspace
+                .sorted
+                .iter()
+                .map(|&value| D::from_real(value))
+                .collect(),
         )
         .map_err(Error::from)?;
         for ((&(offset, step), &spectrum), route) in device
@@ -2074,7 +2192,7 @@ where
             let target = &device.plan.left_regions[route.left];
             let columns: Vec<usize> = (0..members)
                 .flat_map(|member| {
-                    orders[member * total + offset..][..route.kept]
+                    workspace.orders[member * total + offset..][..route.kept]
                         .iter()
                         .copied()
                 })
@@ -2093,7 +2211,74 @@ where
             )
             .map_err(dense_err)?;
         }
-        Ok(sorted)
+        Ok(())
+    }
+}
+
+/// Compatibility wrapper for the former combined EIGH handle.
+#[deprecated(note = "use EighFullPlan with a caller-owned EighFullWorkspace")]
+pub struct PreparedEighFull<R: SectorCodec, D, S = Vec<D>> {
+    plan: EighFullPlan<R, D, S>,
+    workspace: EighFullWorkspace<R, D, S>,
+}
+
+#[allow(deprecated)]
+impl<R, D, S> PreparedEighFull<R, D, S>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+    S: TensorStorage<D>,
+{
+    /// Constructs the compatibility handle.
+    pub fn new(
+        source: &StackedTensorMap<R, D, S>,
+        rows: &[usize],
+        cols: &[usize],
+    ) -> Result<Self, Error> {
+        let plan = EighFullPlan::new(source, rows, cols)?;
+        let workspace = plan.workspace()?;
+        Ok(Self { plan, workspace })
+    }
+
+    /// Moves the retained factors out of the compatibility handle.
+    pub fn take_output(&mut self) -> Option<StackPair<R, D, S>> {
+        self.workspace.take_output()
+    }
+
+    /// Returns bytes retained exclusively by the compatibility workspace.
+    pub fn retained_bytes(&self) -> usize {
+        self.workspace.retained_bytes()
+    }
+}
+
+#[allow(deprecated)]
+impl<R, D> PreparedEighFull<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: FactorizationScalar,
+{
+    /// Executes through the plan/workspace API.
+    pub fn execute(
+        &mut self,
+        source: &StackedTensorMap<R, D>,
+    ) -> Result<EighStackOutput<'_, R, D>, BatchError> {
+        self.plan.execute(source, &mut self.workspace)
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[allow(deprecated)]
+impl<R, D> PreparedEighFull<R, D, CudaStorage<D>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaFactorizationPayload,
+{
+    /// Executes through the CUDA plan/workspace API.
+    pub fn execute(
+        &mut self,
+        source: &StackedTensorMap<R, D, CudaStorage<D>>,
+    ) -> Result<EighStackOutput<'_, R, D, CudaStorage<D>>, BatchError> {
+        self.plan.execute(source, &mut self.workspace)
     }
 }
 
@@ -2207,7 +2392,7 @@ mod tests {
 
     use std::sync::Arc;
 
-    use tenet_core::{Placement, RuleIdentity, TensorStorage, U1FusionRule, U1Irrep};
+    use tenet_core::{Placement, RuleIdentity, SectorId, TensorStorage, U1FusionRule, U1Irrep};
 
     use super::super::Runtime;
     use super::super::{owned_repr, GradedSpace, TensorMap, TypedTensorBody};
@@ -2218,6 +2403,21 @@ mod tests {
         pub(super) static FORCE_TREEWISE: std::cell::Cell<bool> = const {
             std::cell::Cell::new(false)
         };
+    }
+
+    #[test]
+    fn spectra_publication_failure_does_not_publish_factors() {
+        let runtime = Runtime::builder().build().unwrap();
+        let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+        let x = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1).unwrap();
+        let input = x.axpby(1.0, &x.adjoint().unwrap(), 1.0).unwrap();
+        let stack = super::StackedTensorMap::pack(&[input]).unwrap();
+        let mut plan = super::EighFullPlan::new(&stack, &[0], &[1]).unwrap();
+        let mut workspace = plan.workspace().unwrap();
+        plan.labels[0].0 = SectorId::new(usize::MAX);
+
+        assert!(plan.execute(&stack, &mut workspace).is_err());
+        assert!(workspace.take_output().is_none());
     }
 
     #[cfg(feature = "cuda")]
@@ -2251,6 +2451,7 @@ mod tests {
             let mut handle = PreparedEighFull::new(&stack, &[0, 1], &[2, 3]).unwrap();
             FORCE_TREEWISE.with(|flag| flag.set(false));
             let copies: usize = handle
+                .plan
                 .device
                 .as_ref()
                 .unwrap()
@@ -2258,7 +2459,7 @@ mod tests {
                 .iter()
                 .map(Vec::len)
                 .sum();
-            let routes = handle.device.as_ref().unwrap().copies.len();
+            let routes = handle.plan.device.as_ref().unwrap().copies.len();
             let output = handle.execute(&stack).unwrap();
             (
                 copies,

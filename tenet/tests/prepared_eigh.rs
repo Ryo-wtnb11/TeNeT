@@ -5,6 +5,7 @@
 //! `prepared/eigh.rs`, over U(1), SU(2) and fZ2xU(1) with several coupled
 //! sectors and degeneracies above one. A batch fails as a whole and names
 //! every failing member.
+#![allow(deprecated)]
 
 mod common;
 #[path = "../../tests/support/numerics.rs"]
@@ -18,8 +19,8 @@ use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCo
 use tenet::sector::{SU2FusionRule, SU2Irrep};
 use tenet::typed::Error;
 use tenet::typed::{
-    BatchError, Eigh, GradedSpace, MemberFault, PreparedEighFull, Runtime, SignatureField,
-    StackedTensorMap, TensorMap,
+    BatchError, Eigh, EighFullPlan, GradedSpace, MemberFault, PreparedEighFull, Runtime,
+    SignatureField, StackedTensorMap, TensorMap,
 };
 
 use prepared::eigh::{
@@ -130,6 +131,38 @@ fn host_members_equal_host_eager_and_the_dense_oracle() {
     equivalence("u1", u1_legs().0);
     equivalence("su2", su2_legs().0);
     equivalence("fz2u1", fz2u1_legs().0);
+}
+
+#[test]
+fn plan_supports_independent_workspaces_changing_b_and_rejects_foreign_workspace() {
+    let runtime = Runtime::builder().build().unwrap();
+    let (leg, _) = u1_legs();
+    let inputs = hermitian_members(&runtime, &[&leg], 4, 3);
+    let four = StackedTensorMap::pack(&inputs).unwrap();
+    let two = StackedTensorMap::pack(&inputs[..2]).unwrap();
+    let plan = EighFullPlan::new(&four, &[0], &[1]).unwrap();
+    let mut first = plan.workspace().unwrap();
+    let mut second = plan.workspace().unwrap();
+
+    assert_eq!(plan.execute(&four, &mut first).unwrap().d.len(), 4);
+    let first_bytes = first.retained_bytes();
+    assert_eq!(plan.execute(&two, &mut second).unwrap().d.len(), 2);
+    assert!(second.retained_bytes() > 0);
+    assert_eq!(plan.execute(&two, &mut first).unwrap().d.len(), 2);
+    assert_ne!(
+        first.retained_bytes(),
+        first_bytes,
+        "workspace capacity follows B"
+    );
+
+    let foreign = EighFullPlan::new(&four, &[0], &[1]).unwrap();
+    let mut foreign_workspace = foreign.workspace().unwrap();
+    foreign.execute(&four, &mut foreign_workspace).unwrap();
+    assert!(plan.execute(&four, &mut foreign_workspace).is_err());
+    assert!(
+        foreign_workspace.take_output().is_some(),
+        "identity rejection leaves another plan's workspace untouched"
+    );
 }
 
 #[test]
