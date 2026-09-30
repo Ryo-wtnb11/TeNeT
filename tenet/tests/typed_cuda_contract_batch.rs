@@ -83,6 +83,10 @@ fn check_signed_core<R: DeviceRule, D: DevicePayload>(
         let rhs = StackedTensorMap::pack(&right).unwrap().to_cuda().unwrap();
         let (_, cold) = observe(|| plan.execute(&lhs, &rhs, &mut workspace).unwrap());
         assert!(cold.cuda.h2d_calls >= 1);
+        assert_eq!(
+            cold.cuda.gemm_calls, 3,
+            "three signed structural jobs for this fixture"
+        );
         let (_, warm) = observe(|| {
             plan.execute(&lhs, &rhs, &mut workspace).unwrap();
         });
@@ -94,7 +98,7 @@ fn check_signed_core<R: DeviceRule, D: DevicePayload>(
             .to_host()
             .unwrap();
         let gemms = warm.cuda.gemm_calls;
-        assert!(gemms > 0);
+        assert!(gemms >= 3, "warm replay also zeroes inactive blocks");
         if let Some(expected) = expected_gemms {
             assert_eq!(gemms, expected);
         }
@@ -287,6 +291,38 @@ fn signed_fixture_twist_is_nonvacuous_without_a_device() {
             );
         }
     }
+    let odd = GradedSpace::try_new(
+        Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+        [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 2)],
+    )
+    .unwrap();
+    let dual = odd.try_dual().unwrap();
+    let case = Case {
+        name: "negative-only signed core",
+        lhs: TensorMap::<_, f64>::from_subblock_fn(&runtime, [&odd], [&dual], |_, _| 1.0).unwrap(),
+        rhs: TensorMap::<_, f64>::from_subblock_fn(&runtime, [&dual], [&odd], |_, _| 1.0).unwrap(),
+        lhs_axes: vec![1],
+        rhs_axes: vec![0],
+        output_axes: vec![0, 1],
+        dense: false,
+    };
+    let twist = |tensor: &TensorMap<_, f64>, legs: &[usize]| {
+        tensor.twist(legs, Direction::Forward).unwrap()
+    };
+    let signed = fermionic_blas_contract_oracle_partitioned(&case, TwistRole::B, 1, twist);
+    let absent = fermionic_blas_contract_oracle_partitioned(&case, TwistRole::None, 1, twist);
+    assert!(signed
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(absent.dense_data().unwrap())
+        .any(|(&x, &y)| (x - y).abs() > 1e-10));
+    assert_close(
+        case.host().dense_data().unwrap(),
+        signed.dense_data().unwrap(),
+        case.terms(),
+        case.name,
+    );
 }
 
 #[test]
@@ -325,32 +361,42 @@ fn signed_core_zeroes_inactive_blocks_after_poisoning() {
     let expected = oracle.dense_data().unwrap();
     assert!(expected.contains(&0.0));
     assert!(expected.iter().any(|&x| x != 0.0));
-    let lhs = StackedTensorMap::pack(&[&case.lhs, &case.lhs])
+    let lhs = StackedTensorMap::pack(&[&case.lhs])
         .unwrap()
         .to_cuda()
         .unwrap();
-    let rhs = StackedTensorMap::pack(&[&case.rhs, &case.rhs])
+    let rhs = StackedTensorMap::pack(&[&case.rhs])
         .unwrap()
         .to_cuda()
         .unwrap();
     let plan = ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap();
     let mut workspace = plan.workspace().unwrap();
     let poison = poisoned_destination(&case);
-    let mut dst = StackedTensorMap::pack(&[&poison, &poison])
-        .unwrap()
-        .to_cuda()
-        .unwrap();
-    for _ in 0..2 {
-        plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+    for count in [1, 2, 17] {
+        let lhs = StackedTensorMap::pack(&vec![&case.lhs; count])
+            .unwrap()
+            .to_cuda()
             .unwrap();
-        let result = dst.to_host().unwrap();
-        for i in 0..2 {
-            assert_close(
-                result.member(i).unwrap().dense_data().unwrap(),
-                expected,
-                case.terms(),
-                case.name,
-            );
+        let rhs = StackedTensorMap::pack(&vec![&case.rhs; count])
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        for _ in 0..2 {
+            let mut dst = StackedTensorMap::pack(&vec![&poison; count])
+                .unwrap()
+                .to_cuda()
+                .unwrap();
+            plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+                .unwrap();
+            let result = dst.to_host().unwrap();
+            for i in 0..count {
+                assert_close(
+                    result.member(i).unwrap().dense_data().unwrap(),
+                    expected,
+                    case.terms(),
+                    case.name,
+                );
+            }
         }
     }
 }
@@ -810,7 +856,7 @@ fn invalid_bindings_preserve_poisoned_destination() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn signed_copy_c_and_dynamic_routes_are_explicitly_unsupported() {
+fn negative_only_signed_core_matches_literal_twist() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let odd = tenet::typed::GradedSpace::try_new(
         Arc::new(FermionParityFusionRule.product(U1FusionRule)),
@@ -822,16 +868,57 @@ fn signed_copy_c_and_dynamic_routes_are_explicitly_unsupported() {
         TensorMap::<_, f64>::from_subblock_fn(&runtime, [&odd], [&odd_dual], |_, _| 1.0).unwrap();
     let rhs =
         TensorMap::<_, f64>::from_subblock_fn(&runtime, [&odd_dual], [&odd], |_, _| 1.0).unwrap();
-    let left = StackedTensorMap::pack(&[&lhs]).unwrap().to_cuda().unwrap();
-    let right = StackedTensorMap::pack(&[&rhs]).unwrap().to_cuda().unwrap();
-    let spec = ContractSpec {
-        lhs: &[1],
-        rhs: &[0],
-        codomain: &[0],
-        domain: &[1],
+    let case = Case {
+        name: "negative-only signed core",
+        lhs,
+        rhs,
+        lhs_axes: vec![1],
+        rhs_axes: vec![0],
+        output_axes: vec![0, 1],
+        dense: false,
     };
-    assert!(matches!(ContractPlan::new(&left, &right, &spec),
-        Err(Error::Operation(error)) if matches!(*error, tenet::typed::OperationError::UnsupportedTensorContractScope { .. })));
+    let twist = |tensor: &TensorMap<_, f64>, legs: &[usize]| {
+        tensor.twist(legs, Direction::Forward).unwrap()
+    };
+    let oracle = fermionic_blas_contract_oracle_partitioned(&case, TwistRole::B, 1, twist);
+    let untwisted = fermionic_blas_contract_oracle_partitioned(&case, TwistRole::None, 1, twist);
+    let expected = oracle.dense_data().unwrap();
+    assert!(expected
+        .iter()
+        .zip(untwisted.dense_data().unwrap())
+        .any(|(&x, &y)| (x - y).abs() > 1e-10));
+    assert_close(
+        case.host().dense_data().unwrap(),
+        expected,
+        case.terms(),
+        case.name,
+    );
+    let left = StackedTensorMap::pack(&[&case.lhs])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let right = StackedTensorMap::pack(&[&case.rhs])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let plan = ContractPlan::new(&left, &right, &case.spec()).unwrap();
+    let actual = plan
+        .execute(&left, &right, &mut plan.workspace().unwrap())
+        .unwrap()
+        .to_host()
+        .unwrap();
+    assert_close(
+        actual.member(0).unwrap().dense_data().unwrap(),
+        expected,
+        case.terms(),
+        case.name,
+    );
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn copy_c_and_dynamic_routes_are_explicitly_unsupported() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
 
     let v = u1(&[(0, 2), (1, 2)]);
     let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 3).unwrap();

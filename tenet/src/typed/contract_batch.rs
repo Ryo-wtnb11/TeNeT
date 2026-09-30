@@ -823,6 +823,16 @@ mod fermionic_unit_tests {
             ],
         )
         .unwrap();
+        let u1_full = GradedSpace::try_new(
+            Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+            [
+                (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(-1)), 1),
+                (product_sector(Z2Irrep::EVEN, U1Irrep::new(1)), 1),
+            ],
+        )
+        .unwrap();
         let su2 = GradedSpace::try_new(
             Arc::new(FermionParityFusionRule.product(SU2FusionRule)),
             [
@@ -848,6 +858,7 @@ mod fermionic_unit_tests {
         .unwrap();
         for swapped in [false, true] {
             check_signed_classes(&runtime, &u1, 1, 2, swapped);
+            check_signed_classes(&runtime, &u1_full, 1, 2, swapped);
             check_signed_classes(&runtime, &su2, 2, 1, swapped);
             check_signed_classes(&runtime, &odd_only, 0, 1, swapped);
         }
