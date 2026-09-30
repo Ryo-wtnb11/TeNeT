@@ -53,7 +53,7 @@ use crate::{
 /// No tensor payload or backend handle is retained here.
 #[doc(hidden)]
 pub struct CudaSingleMemberRegions {
-    moves: Vec<(CudaRegion, CudaRegion, f64)>,
+    moves: Vec<(CudaRegion, CudaRegion, f64, Option<usize>)>,
     zeros: Vec<CudaRegion>,
     max_zero_len: usize,
 }
@@ -118,6 +118,7 @@ impl CudaSingleMemberRegions {
             CudaRegion::new(shape, steps, offset).map_err(OperationError::Dense)
         };
         let mut moves = Vec::with_capacity(device.moves.len());
+        let mut scaled_count = 0;
         for entry in &device.moves {
             // A full-stack bounds check alone could accept a block spilling
             // into the next member. Check the compiled member views first.
@@ -167,7 +168,12 @@ impl CudaSingleMemberRegions {
                 .ok_or(OperationError::InvalidArgument {
                     message: "CUDA CopyC Single move has no coefficient",
                 })?;
-            moves.push((source, destination, coefficient));
+            let coefficient_offset = (coefficient != 1.0).then(|| {
+                let offset = scaled_count;
+                scaled_count += 1;
+                offset
+            });
+            moves.push((source, destination, coefficient, coefficient_offset));
         }
         let mut zeros = Vec::with_capacity(device.zeros.len());
         for entry in &device.zeros {
@@ -189,7 +195,7 @@ impl CudaSingleMemberRegions {
         })
     }
 
-    pub fn moves(&self) -> &[(CudaRegion, CudaRegion, f64)] {
+    pub fn moves(&self) -> &[(CudaRegion, CudaRegion, f64, Option<usize>)] {
         &self.moves
     }
     pub fn zeros(&self) -> &[CudaRegion] {
@@ -201,7 +207,15 @@ impl CudaSingleMemberRegions {
     pub fn has_scaled_moves(&self) -> bool {
         self.moves
             .iter()
-            .any(|(_, _, coefficient)| *coefficient != 1.0)
+            .any(|(_, _, _, coefficient)| coefficient.is_some())
+    }
+    pub fn scaled_coefficients<D: RecouplingCoefficientAction<f64>>(&self) -> Vec<D> {
+        self.moves
+            .iter()
+            .filter_map(|(_, _, coefficient, offset)| {
+                offset.map(|_| D::coefficient_as_data(*coefficient))
+            })
+            .collect()
     }
 
     /// Overwrites every active layout and zeros every inactive layout.
@@ -209,24 +223,33 @@ impl CudaSingleMemberRegions {
         &self,
         ctx: &mut CudaDenseContext,
         source: &CudaStorage<D>,
+        coefficients: Option<&CudaDenseStorage>,
         destination: &mut CudaStorage<D>,
     ) -> Result<(), OperationError> {
         for region in &self.zeros {
             cuda_region_zero::<D>(ctx, &mut destination.0, region)
                 .map_err(OperationError::Dense)?;
         }
-        for (src, dst, coefficient) in &self.moves {
+        for (src, dst, coefficient, coefficient_offset) in &self.moves {
             if *coefficient == 1.0 {
                 cuda_copy_strided_into::<D>(ctx, &source.0, src, &mut destination.0, dst)
                     .map_err(OperationError::Dense)?;
             } else {
+                let coefficients = coefficients.ok_or(OperationError::InvalidArgument {
+                    message: "CUDA CopyC scaled move has no coefficient buffer",
+                })?;
                 cuda_region_axpby::<D>(
                     ctx,
                     &source.0,
                     src,
                     false,
-                    D::coefficient_as_data(*coefficient),
-                    CudaRegionCoefficient::One,
+                    D::ONE,
+                    CudaRegionCoefficient::Buffer(
+                        coefficients,
+                        coefficient_offset.ok_or(OperationError::InvalidArgument {
+                            message: "CUDA CopyC scaled move has no coefficient offset",
+                        })?,
+                    ),
                     CudaRegionBeta::Overwrite,
                     &mut destination.0,
                     dst,
@@ -245,7 +268,7 @@ impl CudaSingleMemberRegions {
         let metadata = self
             .moves
             .iter()
-            .flat_map(|(a, b, _)| [a, b])
+            .flat_map(|(a, b, _, _)| [a, b])
             .chain(self.zeros.iter());
         regions
             .saturating_mul(std::mem::size_of::<CudaRegion>())

@@ -81,6 +81,16 @@ fn single_member_admission_accepts_nonzero_and_rejects_zero() {
         CudaSingleMemberRegions::admit(&zero),
         Err(OperationError::UnsupportedTensorContractScope { .. })
     ));
+
+    let tiny = TreeTransformStructure::compile_structures(
+        &structure,
+        &structure,
+        &[TreeTransformBlockSpec::single(0, 0, f64::from_bits(1))],
+    )
+    .unwrap();
+    let regions =
+        CudaSingleMemberRegions::prepare(&tiny, &structure, &structure, 2, 2, 2, 2, 1).unwrap();
+    assert_eq!(regions.scaled_coefficients::<f32>(), [0.0]);
 }
 
 #[test]
@@ -125,7 +135,7 @@ fn unit_single_member_overwrite_zeros_inactive_layouts() {
                 .unwrap();
                 let before = cuda_transfer_stats();
                 regions
-                    .execute_overwrite(&mut ctx, &input, &mut output)
+                    .execute_overwrite(&mut ctx, &input, None, &mut output)
                     .unwrap();
                 let after = cuda_transfer_stats();
                 assert_eq!(after.copy_calls - before.copy_calls, 1);
@@ -167,7 +177,7 @@ fn exact_unit_single_preserves_nonfinite_bits() {
     let input = CudaStorage::upload_owned(&ctx, source.to_vec()).unwrap();
     let mut output = CudaStorage::upload_owned(&ctx, vec![1.0; source.len()]).unwrap();
     regions
-        .execute_overwrite(&mut ctx, &input, &mut output)
+        .execute_overwrite(&mut ctx, &input, None, &mut output)
         .unwrap();
     let actual = output.download(&ctx).unwrap();
     assert_eq!(
@@ -180,6 +190,77 @@ fn exact_unit_single_preserves_nonfinite_bits() {
             .map(|value| value.to_bits())
             .collect::<Vec<_>>()
     );
+
+    let source = [
+        Complex32::new(f32::NAN, f32::INFINITY),
+        Complex32::new(f32::NEG_INFINITY, -0.0),
+        Complex32::new(0.0, f32::NAN),
+        Complex32::new(-0.0, f32::NEG_INFINITY),
+        Complex32::new(f32::INFINITY, 0.0),
+    ];
+    let input = CudaStorage::upload_owned(&ctx, source.to_vec()).unwrap();
+    let mut output = CudaStorage::upload_owned(&ctx, vec![Complex32::new(1.0, 1.0); 5]).unwrap();
+    regions
+        .execute_overwrite(&mut ctx, &input, None, &mut output)
+        .unwrap();
+    let actual = output.download(&ctx).unwrap();
+    assert!(actual.iter().zip(source).all(|(actual, expected)| (
+        actual.re.to_bits(),
+        actual.im.to_bits()
+    ) == (
+        expected.re.to_bits(),
+        expected.im.to_bits()
+    )));
+
+    let source = [
+        Complex64::new(f64::NAN, f64::INFINITY),
+        Complex64::new(f64::NEG_INFINITY, -0.0),
+        Complex64::new(0.0, f64::NAN),
+        Complex64::new(-0.0, f64::NEG_INFINITY),
+        Complex64::new(f64::INFINITY, 0.0),
+    ];
+    let input = CudaStorage::upload_owned(&ctx, source.to_vec()).unwrap();
+    let mut output = CudaStorage::upload_owned(&ctx, vec![Complex64::new(1.0, 1.0); 5]).unwrap();
+    regions
+        .execute_overwrite(&mut ctx, &input, None, &mut output)
+        .unwrap();
+    let actual = output.download(&ctx).unwrap();
+    assert!(actual.iter().zip(source).all(|(actual, expected)| (
+        actual.re.to_bits(),
+        actual.im.to_bits()
+    ) == (
+        expected.re.to_bits(),
+        expected.im.to_bits()
+    )));
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn underflowed_f32_single_coefficient_remains_a_data_operand() {
+    let structure = Arc::new(BlockStructure::packed_column_major(1, [vec![2]]).unwrap());
+    let transform = TreeTransformStructure::compile_structures(
+        &structure,
+        &structure,
+        &[TreeTransformBlockSpec::single(0, 0, f64::from_bits(1))],
+    )
+    .unwrap();
+    let regions =
+        CudaSingleMemberRegions::prepare(&transform, &structure, &structure, 2, 2, 2, 2, 1)
+            .unwrap();
+    let mut ctx = context();
+    let coefficients =
+        CudaStorage::upload_owned(&ctx, regions.scaled_coefficients::<f32>()).unwrap();
+    let input = CudaStorage::upload_owned(&ctx, vec![f32::NAN, 2.0]).unwrap();
+    let mut output = CudaStorage::upload_owned(&ctx, vec![1.0_f32; 2]).unwrap();
+    regions
+        .execute_overwrite(&mut ctx, &input, Some(&coefficients.0), &mut output)
+        .unwrap();
+    let actual = output.download(&ctx).unwrap();
+    assert!(
+        actual[0].is_nan(),
+        "zero coefficient still reads NaN source data"
+    );
+    assert_eq!(actual[1].to_bits(), 0.0_f32.to_bits());
 }
 
 /// Payload dtypes replayed on device, with the host arithmetic the oracle and

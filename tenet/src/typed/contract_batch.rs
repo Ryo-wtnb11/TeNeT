@@ -453,6 +453,13 @@ impl<R, D: CudaPayload> ContractWorkspace<R, D, CudaStorage<D>> {
                 .map_or(0, |regions| regions.retained_bytes())
             + self
                 .device
+                .copy_coefficients
+                .as_ref()
+                .map_or(0, |coefficients| {
+                    coefficients.len() * std::mem::size_of::<D>()
+                })
+            + self
+                .device
                 .zero_regions
                 .iter()
                 .map(|region| 2 * region.dims().len() * std::mem::size_of::<usize>())
@@ -591,9 +598,13 @@ where
             || Error::InvalidArgument("CopyC zero template length overflows".into()),
         )?)
         .map_err(tenet_operations::OperationError::Dense)?;
-        if !regions.zeros().is_empty() || regions.has_scaled_moves() {
+        if !regions.zeros().is_empty() {
             ctx.reserve_ones_template::<D>(1)
                 .map_err(tenet_operations::OperationError::Dense)?;
+        }
+        if regions.has_scaled_moves() && workspace.device.copy_coefficients.is_none() {
+            workspace.device.copy_coefficients =
+                Some(CudaStorage::<D>::upload_owned(ctx, regions.scaled_coefficients::<D>())?.0);
         }
         workspace.device.copy_regions = Some(regions);
         Ok(())
@@ -684,7 +695,12 @@ where
                 let regions = workspace.device.copy_regions.as_ref().ok_or_else(|| {
                     Error::InvalidArgument("CopyC device regions are unprepared".into())
                 })?;
-                regions.execute_overwrite(ctx, &value.storage, dst)?;
+                regions.execute_overwrite(
+                    ctx,
+                    &value.storage,
+                    workspace.device.copy_coefficients.as_ref(),
+                    dst,
+                )?;
                 Ok(())
             })();
             workspace.copy_c_temporary = Some(value);

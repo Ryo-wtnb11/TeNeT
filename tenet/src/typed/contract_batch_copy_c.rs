@@ -500,6 +500,58 @@ mod tests {
     }
 
     #[test]
+    fn su2_copy_c_orientations_are_unconjugated_scaled_single_tasks() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let v = GradedSpace::try_new(
+            Arc::new(SU2FusionRule),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 2),
+                (SU2Irrep::from_twice_spin(2), 1),
+            ],
+        )
+        .unwrap();
+        let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 61).unwrap();
+        let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 62).unwrap();
+        for (lhs_axes, rhs_axes, codomain, domain) in [
+            ([3, 2], [1, 0], [1, 0], [3, 2]),
+            ([0, 1], [2, 3], [3, 2], [1, 0]),
+        ] {
+            let spec = ContractSpec {
+                lhs: &lhs_axes,
+                rhs: &rhs_axes,
+                codomain: &codomain,
+                domain: &domain,
+            };
+            let lhs = StackedTensorMap::pack(&[&a]).unwrap();
+            let rhs = StackedTensorMap::pack(&[&b]).unwrap();
+            let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
+            let transform = &plan
+                .copy_c
+                .as_ref()
+                .expect("route must choose CopyC")
+                .transform;
+            assert!(!transform.storage_conjugate());
+            let coefficients: Vec<_> = transform
+                .blocks()
+                .iter()
+                .map(|block| match *block {
+                    tenet_operations::TreeTransformBlock::Single { coefficient, .. } => {
+                        transform.coefficient(coefficient)
+                    }
+                    tenet_operations::TreeTransformBlock::Multi { .. } => {
+                        panic!("reached SU2 CopyC route must contain only Single moves")
+                    }
+                })
+                .collect();
+            assert!(coefficients.contains(&-1.0));
+            assert!(coefficients
+                .iter()
+                .any(|&coefficient| coefficient != 1.0 && (coefficient - 1.0).abs() < 1e-12));
+        }
+    }
+
+    #[test]
     fn compiled_copy_c_core_and_transform_submit_member_expanded_jobs() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let v = GradedSpace::try_new(
@@ -532,7 +584,7 @@ mod tests {
                         copy.transform.coefficient(coefficient) != 1.0,
                     tenet_operations::TreeTransformBlock::Multi { .. } => true,
                 }),
-                "this selected SU2 CopyC route must be rejected by unit-only CUDA admission"
+                "this selected SU2 CopyC route must contain a scaled Single move"
             );
             let mut workspace = plan.workspace();
             let expected = plan
