@@ -260,23 +260,30 @@ impl CudaSingleMemberRegions {
         Ok(())
     }
     pub fn retained_bytes(&self) -> usize {
-        let regions = self
+        let inline = self
             .moves
             .capacity()
-            .saturating_mul(2)
-            .saturating_add(self.zeros.capacity());
+            .saturating_mul(std::mem::size_of::<(
+                CudaRegion,
+                CudaRegion,
+                f64,
+                Option<usize>,
+            )>())
+            .saturating_add(
+                self.zeros
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<CudaRegion>()),
+            );
         let metadata = self
             .moves
             .iter()
             .flat_map(|(a, b, _, _)| [a, b])
             .chain(self.zeros.iter());
-        regions
-            .saturating_mul(std::mem::size_of::<CudaRegion>())
-            .saturating_add(
-                metadata
-                    .map(|r| 2 * r.dims().len() * std::mem::size_of::<usize>())
-                    .sum::<usize>(),
-            )
+        inline.saturating_add(
+            metadata
+                .map(CudaRegion::retained_heap_bytes)
+                .fold(0usize, usize::saturating_add),
+        )
     }
 }
 
