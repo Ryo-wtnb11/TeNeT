@@ -20,7 +20,7 @@ impl<D: CudaPayload> ContractBatchStorage<D> for CudaStorage<D> {}
 /// This binding admits owned-source transformed-tree routes, fully direct
 /// Core/SwappedCore routes with exact +1/-1 coefficients, and CopyC when its
 /// temporary is a unit-alpha direct core followed by one output transform.
-/// CUDA also admits CopyC when every output move is an unconjugated exact-unit
+/// CUDA also admits CopyC when every output move is an unconjugated nonzero
 /// Single task. Direct
 /// composition is served by [`ComposePlan`]. The plan fixes structure and
 /// axes, but not member count.
@@ -61,7 +61,7 @@ where
     S: ContractBatchStorage<D>,
 {
     /// Fixes an ordinary contraction without reading operand payloads.
-    /// CUDA admits exact-sign direct Core/SwappedCore and exact-unit Single CopyC routes.
+    /// CUDA admits exact-sign direct Core/SwappedCore and nonzero Single CopyC routes.
     pub fn new(
         lhs: &StackedTensorMap<R, D, S>,
         rhs: &StackedTensorMap<R, D, S>,
@@ -171,9 +171,7 @@ where
         #[cfg(feature = "cuda")]
         if matches!(placement, Placement::Cuda(_)) {
             if let Some(copy) = &copy_c {
-                tenet_operations::cuda_transform::CudaUnitSingleMemberRegions::admit(
-                    &copy.transform,
-                )?;
+                tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(&copy.transform)?;
             }
         }
         let member_len = space.space().required_len()?;
@@ -495,7 +493,7 @@ where
             .collect::<std::collections::HashSet<_>>()
             .len();
         let copy_fills = self.copy_c.as_ref().map_or(Ok(0), |copy| {
-            tenet_operations::cuda_transform::CudaUnitSingleMemberRegions::admit(&copy.transform)
+            tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(&copy.transform)
         })?;
         workspace.device.reserved_plan_entries = self
             .runtime
@@ -579,7 +577,7 @@ where
             return Ok(());
         }
         let temporary_len = copy.temporary_space.space().required_len()?;
-        let regions = tenet_operations::cuda_transform::CudaUnitSingleMemberRegions::prepare(
+        let regions = tenet_operations::cuda_transform::CudaSingleMemberRegions::prepare(
             &copy.transform,
             self.space.space().structure(),
             copy.temporary_space.space().structure(),
@@ -593,7 +591,7 @@ where
             || Error::InvalidArgument("CopyC zero template length overflows".into()),
         )?)
         .map_err(tenet_operations::OperationError::Dense)?;
-        if !regions.zeros().is_empty() {
+        if !regions.zeros().is_empty() || regions.has_scaled_moves() {
             ctx.reserve_ones_template::<D>(1)
                 .map_err(tenet_operations::OperationError::Dense)?;
         }

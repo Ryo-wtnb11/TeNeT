@@ -368,7 +368,7 @@ mod tests {
         assert!(plan.copy_c.is_some());
         assert_eq!(plan.core().0.inactive_destination_regions().len(), 1);
         assert_eq!(
-            tenet_operations::cuda_transform::CudaUnitSingleMemberRegions::admit(
+            tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(
                 &plan.copy_c.as_ref().unwrap().transform,
             )
             .unwrap(),

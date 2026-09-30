@@ -28,7 +28,7 @@ use tenet_dense::{
     CudaDenseStorage, CudaRegion, CudaScalar, CudaTransferStats,
 };
 use tenet_operations::cuda::CudaStorage;
-use tenet_operations::cuda_transform::CudaUnitSingleMemberRegions;
+use tenet_operations::cuda_transform::CudaSingleMemberRegions;
 use tenet_operations::{
     tree_transform_structure_overwrite_with_strided_kernel_raw,
     tree_transform_structure_with_strided_kernel_raw, CudaTreeTransformDestination,
@@ -48,8 +48,38 @@ fn unit_single_member_preflight_rejects_cross_member_geometry() {
     // The total allocation fits two five-element members, but a claimed
     // four-element source member cannot contain the compiled five-element view.
     assert!(matches!(
-        CudaUnitSingleMemberRegions::prepare(&transform, &structure, &structure, 5, 4, 10, 10, 2,),
+        CudaSingleMemberRegions::prepare(&transform, &structure, &structure, 5, 4, 10, 10, 2,),
         Err(OperationError::ElementCountMismatch { .. })
+    ));
+}
+
+#[test]
+fn single_member_admission_accepts_nonzero_and_rejects_zero() {
+    let structure = Arc::new(BlockStructure::packed_column_major(1, [vec![2]]).unwrap());
+    for coefficient in [-1.0, 1.0000000000000002] {
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::single(0, 0, coefficient)],
+        )
+        .unwrap();
+        CudaSingleMemberRegions::admit(&transform).unwrap();
+        let regions =
+            CudaSingleMemberRegions::prepare(&transform, &structure, &structure, 2, 2, 34, 34, 17)
+                .unwrap();
+        assert!(regions.has_scaled_moves());
+        assert_eq!(regions.moves()[0].2, coefficient);
+    }
+
+    let zero = TreeTransformStructure::compile_structures(
+        &structure,
+        &structure,
+        &[TreeTransformBlockSpec::single(0, 0, 0.0)],
+    )
+    .unwrap();
+    assert!(matches!(
+        CudaSingleMemberRegions::admit(&zero),
+        Err(OperationError::UnsupportedTensorContractScope { .. })
     ));
 }
 
@@ -67,7 +97,7 @@ fn unit_single_member_overwrite_zeros_inactive_layouts() {
         .unwrap();
         let mut ctx = context();
         for members in [1, 2, 17] {
-            let regions = CudaUnitSingleMemberRegions::prepare(
+            let regions = CudaSingleMemberRegions::prepare(
                 &transform,
                 &structure,
                 &structure,
@@ -117,6 +147,39 @@ fn unit_single_member_overwrite_zeros_inactive_layouts() {
     }
     check::<f64>();
     check::<Complex64>();
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn exact_unit_single_preserves_nonfinite_bits() {
+    let structure = Arc::new(BlockStructure::packed_column_major(1, [vec![5]]).unwrap());
+    let transform = TreeTransformStructure::compile_structures(
+        &structure,
+        &structure,
+        &[TreeTransformBlockSpec::single(0, 0, 1.0_f64)],
+    )
+    .unwrap();
+    let regions =
+        CudaSingleMemberRegions::prepare(&transform, &structure, &structure, 5, 5, 5, 5, 1)
+            .unwrap();
+    let mut ctx = context();
+    let source = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0];
+    let input = CudaStorage::upload_owned(&ctx, source.to_vec()).unwrap();
+    let mut output = CudaStorage::upload_owned(&ctx, vec![1.0; source.len()]).unwrap();
+    regions
+        .execute_overwrite(&mut ctx, &input, &mut output)
+        .unwrap();
+    let actual = output.download(&ctx).unwrap();
+    assert_eq!(
+        actual
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        source
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
 }
 
 /// Payload dtypes replayed on device, with the host arithmetic the oracle and

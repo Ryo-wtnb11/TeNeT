@@ -917,10 +917,10 @@ fn negative_only_signed_core_matches_literal_twist() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn copy_c_unit_single_public_admission() {
+fn copy_c_nonzero_single_public_admission() {
     fn check<D: DevicePayload>() {
         let runtime = Runtime::builder().cuda(0).build().unwrap();
-        let v = u1(&[(0, 2), (1, 2)]);
+        let v = su2();
         let a = TensorMap::<_, D>::from_subblock_fn(&runtime, [&v, &v], [&v, &v], fill(3)).unwrap();
         let b = TensorMap::<_, D>::from_subblock_fn(&runtime, [&v, &v], [&v, &v], fill(4)).unwrap();
         for (lhs_axes, rhs_axes, output) in [
@@ -928,7 +928,7 @@ fn copy_c_unit_single_public_admission() {
             ([0, 1], [2, 3], [3, 2, 1, 0]),
         ] {
             let case = Case {
-                name: "unit Single CUDA CopyC",
+                name: "nonzero Single CUDA CopyC",
                 lhs: a.clone(),
                 rhs: b.clone(),
                 lhs_axes: lhs_axes.to_vec(),
@@ -945,7 +945,7 @@ fn copy_c_unit_single_public_admission() {
                 .to_cuda()
                 .unwrap();
             let plan = ContractPlan::new(&first_lhs, &first_rhs, &case.spec())
-                .expect("unit Single CopyC must be admitted");
+                .expect("nonzero Single CopyC must be admitted");
             let reserved_before = runtime
                 .cuda_plan_cache_stats()
                 .unwrap()
@@ -985,11 +985,11 @@ fn copy_c_unit_single_public_admission() {
                         .to_cuda()
                         .unwrap();
                 let (_, cold) = observe(|| plan.execute(&lhs, &rhs, &mut workspace).unwrap());
-                assert_eq!(cold.cuda.copy_calls, 6);
+                assert!(cold.cuda.copy_calls > 0, "exact +1 moves remain copies");
                 let (_, warm) = observe(|| {
                     plan.execute(&lhs, &rhs, &mut workspace).unwrap();
                 });
-                assert_eq!(warm.cuda.copy_calls, 6);
+                assert_eq!(warm.cuda.copy_calls, cold.cuda.copy_calls);
                 assert_eq!(warm.cuda.h2d_calls, 0);
                 assert_eq!(warm.cuda.d2h_calls, 0);
                 assert!(warm.cuda.gemm_calls > 0);
@@ -1049,7 +1049,7 @@ fn copy_c_unit_single_public_admission() {
                     .unwrap();
                 let (_, into) =
                     observe(|| plan.execute_into(&lhs, &rhs, &mut dst, &mut other).unwrap());
-                assert_eq!(into.cuda.copy_calls, 6);
+                assert_eq!(into.cuda.copy_calls, cold.cuda.copy_calls);
                 assert!(
                     into.cuda.h2d_calls >= 1,
                     "cold second workspace uploads its temporary"
@@ -1057,7 +1057,7 @@ fn copy_c_unit_single_public_admission() {
                 assert_eq!(into.cuda.d2h_calls, 0);
                 let (_, warm_into) =
                     observe(|| plan.execute_into(&lhs, &rhs, &mut dst, &mut other).unwrap());
-                assert_eq!(warm_into.cuda.copy_calls, 6);
+                assert_eq!(warm_into.cuda.copy_calls, cold.cuda.copy_calls);
                 assert_eq!(warm_into.cuda.h2d_calls, 0);
                 assert_eq!(warm_into.cuda.d2h_calls, 0);
                 let eager_inputs: Vec<_> = members
@@ -1134,22 +1134,8 @@ fn copy_c_unit_single_public_admission() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn nonunit_copy_c_and_dynamic_routes_are_explicitly_unsupported() {
+fn dynamic_copy_c_routes_are_explicitly_unsupported() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
-
-    let v = su2();
-    let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 3).unwrap();
-    let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 4).unwrap();
-    let left = StackedTensorMap::pack(&[&a]).unwrap().to_cuda().unwrap();
-    let right = StackedTensorMap::pack(&[&b]).unwrap().to_cuda().unwrap();
-    let spec = ContractSpec {
-        lhs: &[3, 2],
-        rhs: &[1, 0],
-        codomain: &[1, 0],
-        domain: &[3, 2],
-    };
-    assert!(matches!(ContractPlan::new(&left, &right, &spec),
-        Err(Error::Operation(error)) if matches!(*error, tenet::typed::OperationError::UnsupportedTensorContractScope { .. })));
 
     // The second inactive fixture has a source transform and is pinned as
     // DynamicTree by storage_contract_tests::each_way_a_device_overwrite.

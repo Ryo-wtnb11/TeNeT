@@ -49,33 +49,44 @@ use crate::{
     OperationError, RecouplingCoefficientAction, TreeTransformBlock, TreeTransformStructure,
 };
 
-/// The validated B-appended views of an exact-unit CopyC output transform.
+/// The validated B-appended views of a nonzero-Single CopyC output transform.
 /// No tensor payload or backend handle is retained here.
 #[doc(hidden)]
-pub struct CudaUnitSingleMemberRegions {
-    moves: Vec<(CudaRegion, CudaRegion)>,
+pub struct CudaSingleMemberRegions {
+    moves: Vec<(CudaRegion, CudaRegion, f64)>,
     zeros: Vec<CudaRegion>,
     max_zero_len: usize,
 }
 
-impl CudaUnitSingleMemberRegions {
+impl CudaSingleMemberRegions {
     /// Checks the entire completed task class before the temporary core runs.
     pub fn admit(structure: &TreeTransformStructure<f64>) -> Result<usize, OperationError> {
         let task = structure.task_view()?;
         if task.storage_conjugate()
             || task.blocks().iter().any(|block| match *block {
-                TreeTransformBlock::Single { coefficient, .. } => {
-                    task.coefficients().get(coefficient) != Some(&1.0)
-                }
+                TreeTransformBlock::Single { coefficient, .. } => task
+                    .coefficients()
+                    .get(coefficient)
+                    .is_none_or(|&coefficient| coefficient == 0.0),
                 TreeTransformBlock::Multi { .. } => true,
             })
         {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "CUDA CopyC batch requires unconjugated exact-unit Single tasks",
+                message: "CUDA CopyC batch requires unconjugated nonzero Single tasks",
             });
         }
         let device = compile_device_plan(task)?;
-        Ok(device.zeros.len())
+        Ok(device.zeros.len()
+            + device
+                .moves
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .coefficient
+                        .and_then(|index| task.coefficients().get(index))
+                        != Some(&1.0)
+                })
+                .count())
     }
 
     /// Validates every source, destination and inactive output region for B members.
@@ -149,7 +160,14 @@ impl CudaUnitSingleMemberRegions {
             destination
                 .validate_as_destination("cuda CopyC batch")
                 .map_err(OperationError::Dense)?;
-            moves.push((source, destination));
+            let coefficient = entry
+                .coefficient
+                .and_then(|index| task.coefficients().get(index))
+                .copied()
+                .ok_or(OperationError::InvalidArgument {
+                    message: "CUDA CopyC Single move has no coefficient",
+                })?;
+            moves.push((source, destination, coefficient));
         }
         let mut zeros = Vec::with_capacity(device.zeros.len());
         for entry in &device.zeros {
@@ -171,7 +189,7 @@ impl CudaUnitSingleMemberRegions {
         })
     }
 
-    pub fn moves(&self) -> &[(CudaRegion, CudaRegion)] {
+    pub fn moves(&self) -> &[(CudaRegion, CudaRegion, f64)] {
         &self.moves
     }
     pub fn zeros(&self) -> &[CudaRegion] {
@@ -180,9 +198,14 @@ impl CudaUnitSingleMemberRegions {
     pub fn max_zero_len(&self) -> usize {
         self.max_zero_len
     }
+    pub fn has_scaled_moves(&self) -> bool {
+        self.moves
+            .iter()
+            .any(|(_, _, coefficient)| *coefficient != 1.0)
+    }
 
     /// Overwrites every active layout and zeros every inactive layout.
-    pub fn execute_overwrite<D: CudaScalar>(
+    pub fn execute_overwrite<D: CudaScalar + RecouplingCoefficientAction<f64>>(
         &self,
         ctx: &mut CudaDenseContext,
         source: &CudaStorage<D>,
@@ -192,9 +215,24 @@ impl CudaUnitSingleMemberRegions {
             cuda_region_zero::<D>(ctx, &mut destination.0, region)
                 .map_err(OperationError::Dense)?;
         }
-        for (src, dst) in &self.moves {
-            cuda_copy_strided_into::<D>(ctx, &source.0, src, &mut destination.0, dst)
+        for (src, dst, coefficient) in &self.moves {
+            if *coefficient == 1.0 {
+                cuda_copy_strided_into::<D>(ctx, &source.0, src, &mut destination.0, dst)
+                    .map_err(OperationError::Dense)?;
+            } else {
+                cuda_region_axpby::<D>(
+                    ctx,
+                    &source.0,
+                    src,
+                    false,
+                    D::coefficient_as_data(*coefficient),
+                    CudaRegionCoefficient::One,
+                    CudaRegionBeta::Overwrite,
+                    &mut destination.0,
+                    dst,
+                )
                 .map_err(OperationError::Dense)?;
+            }
         }
         Ok(())
     }
@@ -207,7 +245,7 @@ impl CudaUnitSingleMemberRegions {
         let metadata = self
             .moves
             .iter()
-            .flat_map(|(a, b)| [a, b])
+            .flat_map(|(a, b, _)| [a, b])
             .chain(self.zeros.iter());
         regions
             .saturating_mul(std::mem::size_of::<CudaRegion>())
