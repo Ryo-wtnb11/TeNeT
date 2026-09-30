@@ -411,11 +411,12 @@ mod tests {
         dims.extend([2, 3]);
         let mut strides = Vec::with_capacity(9);
         strides.extend([1, 2]);
+        let expected = dims
+            .capacity()
+            .saturating_add(strides.capacity())
+            .saturating_mul(std::mem::size_of::<usize>());
         let region = CudaRegion::new(dims, strides, 0).unwrap();
-        assert_eq!(
-            region.retained_heap_bytes(),
-            (7 + 9) * std::mem::size_of::<usize>()
-        );
+        assert_eq!(region.retained_heap_bytes(), expected);
     }
 
     #[test]
