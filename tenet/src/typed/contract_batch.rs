@@ -20,7 +20,7 @@ impl<D: CudaPayload> ContractBatchStorage<D> for CudaStorage<D> {}
 /// This binding admits owned-source transformed-tree routes, fully direct
 /// Core/SwappedCore routes with exact +1/-1 coefficients, and CopyC when its
 /// temporary is a unit-alpha direct core followed by one output transform.
-/// CUDA admits only fully direct unit-alpha Core/SwappedCore routes. Direct
+/// CUDA admits the same fully direct exact-sign Core/SwappedCore routes. Direct
 /// composition is served by [`ComposePlan`]. The plan fixes structure and
 /// axes, but not member count.
 pub struct ContractPlan<R, D, S = Vec<D>> {
@@ -58,7 +58,7 @@ where
     S: ContractBatchStorage<D>,
 {
     /// Fixes an ordinary contraction without reading operand payloads.
-    /// CUDA admits only unit-alpha direct Core/SwappedCore routes.
+    /// CUDA admits exact-sign direct Core/SwappedCore routes.
     pub fn new(
         lhs: &StackedTensorMap<R, D, S>,
         rhs: &StackedTensorMap<R, D, S>,
@@ -142,16 +142,12 @@ where
             .into());
         }
         if direct {
-            if matches!(placement, Placement::Host) {
-                resolution.admits_stacked_signed_direct_host_replay()?;
-            } else {
-                resolution.admits_stacked_direct_host_replay()?;
-            }
+            resolution.admits_stacked_signed_direct_host_replay()?;
         }
         if !matches!(placement, Placement::Host) && (!direct || copy_c.is_some()) {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message:
-                    "CUDA contract batch requires a unit-alpha direct Core or SwappedCore route",
+                    "CUDA contract batch requires an exact-sign direct Core or SwappedCore route",
             }
             .into());
         }
@@ -173,7 +169,7 @@ where
         let member_len = space.space().required_len()?;
         #[cfg(feature = "cuda")]
         let device_plan = if matches!(placement, Placement::Cuda(_)) {
-            resolution.unit_direct_core_plan()?
+            resolution.signed_direct_core_plan()?
         } else {
             None
         };
@@ -827,6 +823,16 @@ mod fermionic_unit_tests {
             ],
         )
         .unwrap();
+        let u1_full = GradedSpace::try_new(
+            Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+            [
+                (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(-1)), 1),
+                (product_sector(Z2Irrep::EVEN, U1Irrep::new(1)), 1),
+            ],
+        )
+        .unwrap();
         let su2 = GradedSpace::try_new(
             Arc::new(FermionParityFusionRule.product(SU2FusionRule)),
             [
@@ -852,9 +858,55 @@ mod fermionic_unit_tests {
         .unwrap();
         for swapped in [false, true] {
             check_signed_classes(&runtime, &u1, 1, 2, swapped);
+            check_signed_classes(&runtime, &u1_full, 1, 2, swapped);
             check_signed_classes(&runtime, &su2, 2, 1, swapped);
             check_signed_classes(&runtime, &odd_only, 0, 1, swapped);
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn signed_direct_can_leave_inactive_destination_blocks() {
+        let runtime = Runtime::builder().build().unwrap();
+        let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+        let v = GradedSpace::try_new(
+            Arc::clone(&rule),
+            [
+                (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(-1)), 1),
+            ],
+        )
+        .unwrap();
+        let w = GradedSpace::try_new(
+            rule,
+            [
+                (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+            ],
+        )
+        .unwrap();
+        let wd = w.try_dual().unwrap();
+        let lhs = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&v], [&wd], |_, _| 1.0).unwrap();
+        let rhs = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&wd], [&v], |_, _| 1.0).unwrap();
+        let left = StackedTensorMap::pack(&[&lhs]).unwrap();
+        let right = StackedTensorMap::pack(&[&rhs]).unwrap();
+        let spec = super::super::super::ContractSpec {
+            lhs: &[1],
+            rhs: &[0],
+            codomain: &[0],
+            domain: &[1],
+        };
+        let plan = ContractPlan::new(&left, &right, &spec).unwrap();
+        let core = plan
+            .resolution
+            .signed_direct_core_plan()
+            .unwrap()
+            .unwrap()
+            .0;
+        assert!(plan.resolution.unit_direct_core_plan().is_err());
+        assert!(!core.inactive_destination_regions().is_empty());
+        assert!(core.distinct_direct_gemm_shapes() > 0);
     }
 
     fn check_signed_classes<R>(

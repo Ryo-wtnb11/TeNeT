@@ -209,6 +209,45 @@ pub fn cuda_gemm_region_batched_into<D: CudaScalar>(
     n: usize,
     members: usize,
 ) -> Result<(), DenseError> {
+    cuda_gemm_region_batched_scaled_into::<D>(
+        ctx,
+        dst,
+        dst_offset,
+        dst_member_stride,
+        lhs,
+        lhs_offset,
+        lhs_member_stride,
+        rhs,
+        rhs_offset,
+        rhs_member_stride,
+        m,
+        k,
+        n,
+        members,
+        D::ONE,
+    )
+}
+
+/// Batched region GEMM with one common alpha and overwrite semantics.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_gemm_region_batched_scaled_into<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    dst: &mut CudaDenseStorage,
+    dst_offset: usize,
+    dst_member_stride: usize,
+    lhs: &CudaDenseStorage,
+    lhs_offset: usize,
+    lhs_member_stride: usize,
+    rhs: &CudaDenseStorage,
+    rhs_offset: usize,
+    rhs_member_stride: usize,
+    m: usize,
+    k: usize,
+    n: usize,
+    members: usize,
+    alpha: D,
+) -> Result<(), DenseError> {
     const OP: &str = "cuda_gemm_batched";
     ensure_cuda_device(
         ctx.device,
@@ -267,7 +306,7 @@ pub fn cuda_gemm_region_batched_into<D: CudaScalar>(
     let accumulation = DotGeneralAccumulation {
         lhs_conj: false,
         rhs_conj: false,
-        alpha: D::ONE.contraction_scalar(),
+        alpha: alpha.contraction_scalar(),
         beta: D::ZERO.contraction_scalar(),
     };
     record(|stats| stats.gemm_calls += 1);
