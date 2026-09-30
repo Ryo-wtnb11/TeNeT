@@ -20,7 +20,8 @@ impl<D: CudaPayload> ContractBatchStorage<D> for CudaStorage<D> {}
 /// This binding admits owned-source transformed-tree routes, fully direct
 /// Core/SwappedCore routes with exact +1/-1 coefficients, and CopyC when its
 /// temporary is a unit-alpha direct core followed by one output transform.
-/// CUDA admits the same fully direct exact-sign Core/SwappedCore routes. Direct
+/// CUDA also admits CopyC when every output move is an unconjugated exact-unit
+/// Single task. Direct
 /// composition is served by [`ComposePlan`]. The plan fixes structure and
 /// axes, but not member count.
 pub struct ContractPlan<R, D, S = Vec<D>> {
@@ -47,6 +48,8 @@ pub struct ContractWorkspace<R, D, S = Vec<D>> {
     replay: Option<(StackedDirectReplay, bool)>,
     copy_c: Option<CopyCWorkspace<D>>,
     #[cfg(feature = "cuda")]
+    copy_c_temporary: Option<StackedTensorMap<R, D, S>>,
+    #[cfg(feature = "cuda")]
     device: DeviceComposeState,
 }
 
@@ -58,7 +61,7 @@ where
     S: ContractBatchStorage<D>,
 {
     /// Fixes an ordinary contraction without reading operand payloads.
-    /// CUDA admits exact-sign direct Core/SwappedCore routes.
+    /// CUDA admits exact-sign direct Core/SwappedCore and exact-unit Single CopyC routes.
     pub fn new(
         lhs: &StackedTensorMap<R, D, S>,
         rhs: &StackedTensorMap<R, D, S>,
@@ -144,10 +147,9 @@ where
         if direct {
             resolution.admits_stacked_signed_direct_host_replay()?;
         }
-        if !matches!(placement, Placement::Host) && (!direct || copy_c.is_some()) {
+        if !matches!(placement, Placement::Host) && !direct {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message:
-                    "CUDA contract batch requires an exact-sign direct Core or SwappedCore route",
+                message: "CUDA contract batch requires an exact-sign direct core",
             }
             .into());
         }
@@ -166,6 +168,14 @@ where
         } else {
             None
         };
+        #[cfg(feature = "cuda")]
+        if matches!(placement, Placement::Cuda(_)) {
+            if let Some(copy) = &copy_c {
+                tenet_operations::cuda_transform::CudaUnitSingleMemberRegions::admit(
+                    &copy.transform,
+                )?;
+            }
+        }
         let member_len = space.space().required_len()?;
         #[cfg(feature = "cuda")]
         let device_plan = if matches!(placement, Placement::Cuda(_)) {
@@ -255,6 +265,8 @@ where
             members: DynamicTreeMembersWorkspace::default(),
             replay: None,
             copy_c: self.copy_c.as_ref().map(|_| CopyCWorkspace::default()),
+            #[cfg(feature = "cuda")]
+            copy_c_temporary: None,
             #[cfg(feature = "cuda")]
             device: DeviceComposeState::default(),
         }
@@ -423,6 +435,12 @@ impl<R, D: CudaPayload> ContractWorkspace<R, D, CudaStorage<D>> {
     /// Retained device payload and Host layout scratch, excluding Runtime resources.
     pub fn retained_bytes(&self) -> usize {
         self.retained_scratch_bytes()
+            + self.copy_c_temporary.as_ref().map_or(0, |temporary| {
+                temporary
+                    .members
+                    .saturating_mul(temporary.member_len)
+                    .saturating_mul(std::mem::size_of::<D>())
+            })
             + self.output.as_ref().map_or(0, |output| {
                 output
                     .members
@@ -430,6 +448,11 @@ impl<R, D: CudaPayload> ContractWorkspace<R, D, CudaStorage<D>> {
                     .saturating_mul(std::mem::size_of::<D>())
             })
             + self.device.zero_regions.capacity() * std::mem::size_of::<tenet_dense::CudaRegion>()
+            + self
+                .device
+                .copy_regions
+                .as_ref()
+                .map_or(0, |regions| regions.retained_bytes())
             + self
                 .device
                 .zero_regions
@@ -460,6 +483,7 @@ where
             members: DynamicTreeMembersWorkspace::default(),
             replay: None,
             copy_c: None,
+            copy_c_temporary: None,
             device: DeviceComposeState::default(),
         };
         let plan = &self.core().0;
@@ -470,10 +494,13 @@ where
             .map(|layout| (&layout.block.shape, &layout.block.strides))
             .collect::<std::collections::HashSet<_>>()
             .len();
+        let copy_fills = self.copy_c.as_ref().map_or(Ok(0), |copy| {
+            tenet_operations::cuda_transform::CudaUnitSingleMemberRegions::admit(&copy.transform)
+        })?;
         workspace.device.reserved_plan_entries = self
             .runtime
             .lease_cuda()?
-            .reserve_plan_entries(gemms + fills)
+            .reserve_plan_entries(gemms + fills + copy_fills)
             .map_err(tenet_operations::OperationError::Dense)?;
         Ok(workspace)
     }
@@ -487,8 +514,15 @@ where
         if workspace.device.members == members {
             return Ok(());
         }
+        workspace.device.copy_regions = None;
         let mut regions = Vec::with_capacity(self.core().0.inactive_destination_regions().len());
         let mut largest = 0usize;
+        let core_member_len = if let Some(copy) = &self.copy_c {
+            copy.temporary_space.space().required_len()?
+        } else {
+            self.member_len
+        };
+        let core_total = self.total_len(core_member_len, members)?;
         for layout in self.core().0.inactive_destination_regions() {
             let block = &layout.block;
             let unsigned = |value: isize| {
@@ -505,11 +539,14 @@ where
                 .iter()
                 .map(|&stride| unsigned(stride))
                 .collect::<Result<Vec<_>, _>>()?;
-            strides.push(self.member_len);
+            strides.push(core_member_len);
             let region = tenet_dense::CudaRegion::new(dims, strides, unsigned(block.offset)?)
                 .map_err(tenet_operations::OperationError::Dense)?;
             region
                 .validate_as_destination("prepared contract zero fill")
+                .map_err(tenet_operations::OperationError::Dense)?;
+            region
+                .validate_within(core_total)
                 .map_err(tenet_operations::OperationError::Dense)?;
             largest = largest.max(block.shape.iter().product::<usize>());
             regions.push(region);
@@ -529,9 +566,44 @@ where
         Ok(())
     }
 
+    fn prepare_copy_regions(
+        &self,
+        workspace: &mut ContractWorkspace<R, D, CudaStorage<D>>,
+        ctx: &mut tenet_dense::CudaDenseContext,
+        members: usize,
+    ) -> Result<(), Error> {
+        let Some(copy) = &self.copy_c else {
+            return Ok(());
+        };
+        if workspace.device.copy_regions.is_some() {
+            return Ok(());
+        }
+        let temporary_len = copy.temporary_space.space().required_len()?;
+        let regions = tenet_operations::cuda_transform::CudaUnitSingleMemberRegions::prepare(
+            &copy.transform,
+            self.space.space().structure(),
+            copy.temporary_space.space().structure(),
+            self.member_len,
+            temporary_len,
+            self.total_len(self.member_len, members)?,
+            self.total_len(temporary_len, members)?,
+            members,
+        )?;
+        ctx.reserve_zero_template::<D>(regions.max_zero_len().checked_mul(members).ok_or_else(
+            || Error::InvalidArgument("CopyC zero template length overflows".into()),
+        )?)
+        .map_err(tenet_operations::OperationError::Dense)?;
+        if !regions.zeros().is_empty() {
+            ctx.reserve_ones_template::<D>(1)
+                .map_err(tenet_operations::OperationError::Dense)?;
+        }
+        workspace.device.copy_regions = Some(regions);
+        Ok(())
+    }
+
     fn run_cuda(
         &self,
-        workspace: &ContractWorkspace<R, D, CudaStorage<D>>,
+        workspace: &mut ContractWorkspace<R, D, CudaStorage<D>>,
         ctx: &mut tenet_dense::CudaDenseContext,
         lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
         rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
@@ -539,7 +611,8 @@ where
         zero_inactive: bool,
     ) -> Result<(), Error> {
         let (plan, swapped) = self.core();
-        let (left, right) = if *swapped { (rhs, lhs) } else { (lhs, rhs) };
+        let swap = *swapped ^ self.copy_c.as_ref().is_some_and(|copy| copy.input_swapped);
+        let (left, right) = if swap { (rhs, lhs) } else { (lhs, rhs) };
         let left = StackedStorageView::new::<D>(
             &left.storage,
             left.member_len,
@@ -552,20 +625,73 @@ where
             lhs.members,
             right.member_len,
         )?;
-        let mut dst =
-            StackedStorageViewMut::new::<D>(dst, self.member_len, lhs.members, self.member_len)?;
-        if zero_inactive {
+        let mut temporary = if let Some(copy) = &self.copy_c {
+            let temporary_len = copy.temporary_space.space().required_len()?;
+            let total = self.total_len(temporary_len, lhs.members)?;
+            let existing = workspace
+                .copy_c_temporary
+                .take()
+                .filter(|value| value.members == lhs.members);
+            Some((
+                existing.is_none(),
+                match existing {
+                    Some(value) => value,
+                    None => StackedTensorMap {
+                        runtime: self.runtime.clone(),
+                        space: copy.temporary_space.clone(),
+                        signature: StructureSignature::of_space(
+                            &copy.temporary_space,
+                            self.output_signature.placement,
+                            &self.runtime,
+                        ),
+                        storage: CudaStorage::upload_members(
+                            ctx,
+                            zeroed_payload(total),
+                            temporary_len,
+                            lhs.members,
+                        )?,
+                        members: lhs.members,
+                        member_len: temporary_len,
+                        _payload: PhantomData,
+                    },
+                },
+            ))
+        } else {
+            None
+        };
+        let (core_storage, core_len, zero_core) = match &mut temporary {
+            Some((fresh, value)) => (&mut value.storage, value.member_len, !*fresh),
+            None => (&mut *dst, self.member_len, zero_inactive),
+        };
+        let mut core_destination =
+            StackedStorageViewMut::new::<D>(core_storage, core_len, lhs.members, core_len)?;
+        if zero_core {
             for region in &workspace.device.zero_regions {
-                tenet_dense::cuda_region_zero::<D>(ctx, &mut dst.storage_mut().0, region)
-                    .map_err(tenet_operations::OperationError::Dense)?;
+                tenet_dense::cuda_region_zero::<D>(
+                    ctx,
+                    &mut core_destination.storage_mut().0,
+                    region,
+                )
+                .map_err(tenet_operations::OperationError::Dense)?;
             }
         }
         plan.execute_direct_on_storage_prezeroed(
             &mut tenet_operations::cuda::CudaStackedStorageGemm::new(ctx),
-            &mut dst,
+            &mut core_destination,
             &left,
             &right,
         )?;
+        if let Some((_, value)) = temporary {
+            let result: Result<(), Error> = (|| {
+                let regions = workspace.device.copy_regions.as_ref().ok_or_else(|| {
+                    Error::InvalidArgument("CopyC device regions are unprepared".into())
+                })?;
+                regions.execute_overwrite(ctx, &value.storage, dst)?;
+                Ok(())
+            })();
+            workspace.copy_c_temporary = Some(value);
+            result?;
+        }
         Ok(())
     }
 
@@ -588,6 +714,7 @@ where
         let runtime = self.runtime.clone();
         let mut lease = runtime.lease_cuda()?;
         self.prepare_zero_regions(workspace, &mut lease, members)?;
+        self.prepare_copy_regions(workspace, &mut lease, members)?;
         let mut output = match workspace
             .output
             .take()
@@ -641,6 +768,7 @@ where
         let runtime = self.runtime.clone();
         let mut lease = runtime.lease_cuda()?;
         self.prepare_zero_regions(workspace, &mut lease, members)?;
+        self.prepare_copy_regions(workspace, &mut lease, members)?;
         self.run_cuda(workspace, &mut lease, lhs, rhs, &mut dst.storage, true)
     }
 }

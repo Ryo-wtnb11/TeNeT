@@ -21,17 +21,103 @@ use common::{
     unit_coefficient_fixtures, Fixture, TestScalar,
 };
 use num_complex::{Complex32, Complex64};
+use std::sync::Arc;
+use tenet_core::BlockStructure;
 use tenet_dense::{
     cuda_region_zero, cuda_transfer_stats, reset_cuda_transfer_stats, CudaDenseContext,
     CudaDenseStorage, CudaRegion, CudaScalar, CudaTransferStats,
 };
 use tenet_operations::cuda::CudaStorage;
+use tenet_operations::cuda_transform::CudaUnitSingleMemberRegions;
 use tenet_operations::{
     tree_transform_structure_overwrite_with_strided_kernel_raw,
     tree_transform_structure_with_strided_kernel_raw, CudaTreeTransformDestination,
-    CudaTreeTransformExecutor, OperationError, StridedHostKernelAdapter, TreeTransformWorkspace,
-    DEFAULT_PLAN_CACHE_BUDGET_BYTES,
+    CudaTreeTransformExecutor, OperationError, StridedHostKernelAdapter, TreeTransformBlockSpec,
+    TreeTransformStructure, TreeTransformWorkspace, DEFAULT_PLAN_CACHE_BUDGET_BYTES,
 };
+
+#[test]
+fn unit_single_member_preflight_rejects_cross_member_geometry() {
+    let structure = Arc::new(BlockStructure::packed_column_major(1, [vec![2], vec![3]]).unwrap());
+    let transform = TreeTransformStructure::compile_structures(
+        &structure,
+        &structure,
+        &[TreeTransformBlockSpec::single(0, 0, 1.0_f64)],
+    )
+    .unwrap();
+    // The total allocation fits two five-element members, but a claimed
+    // four-element source member cannot contain the compiled five-element view.
+    assert!(matches!(
+        CudaUnitSingleMemberRegions::prepare(&transform, &structure, &structure, 5, 4, 10, 10, 2,),
+        Err(OperationError::ElementCountMismatch { .. })
+    ));
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn unit_single_member_overwrite_zeros_inactive_layouts() {
+    fn check<D: DeviceScalar + PartialEq + std::fmt::Debug>() {
+        let structure =
+            Arc::new(BlockStructure::packed_column_major(1, [vec![2], vec![3]]).unwrap());
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0_f64)],
+        )
+        .unwrap();
+        let mut ctx = context();
+        for members in [1, 2, 17] {
+            let regions = CudaUnitSingleMemberRegions::prepare(
+                &transform,
+                &structure,
+                &structure,
+                5,
+                5,
+                5 * members,
+                5 * members,
+                members,
+            )
+            .unwrap();
+            assert_eq!(regions.moves().len(), 1);
+            assert_eq!(regions.zeros().len(), 1);
+            ctx.reserve_zero_template::<D>(regions.max_zero_len() * members)
+                .unwrap();
+            ctx.reserve_ones_template::<D>(1).unwrap();
+            let source: Vec<D> = (0..5 * members)
+                .map(|i| D::from_parts(1.0 + i as f64 / 8.0, -0.5 - i as f64 / 16.0))
+                .collect();
+            let input = CudaStorage::upload_owned(&ctx, source.clone()).unwrap();
+            for _ in 0..2 {
+                let mut output = CudaStorage::upload_owned(
+                    &ctx,
+                    vec![D::from_parts(f64::NAN, f64::NAN); 5 * members],
+                )
+                .unwrap();
+                let before = cuda_transfer_stats();
+                regions
+                    .execute_overwrite(&mut ctx, &input, &mut output)
+                    .unwrap();
+                let after = cuda_transfer_stats();
+                assert_eq!(after.copy_calls - before.copy_calls, 1);
+                assert_eq!(after.h2d_calls - before.h2d_calls, 0);
+                assert_eq!(after.d2h_calls - before.d2h_calls, 0);
+                let actual = output.download(&ctx).unwrap();
+                for member in 0..members {
+                    assert_eq!(
+                        &actual[member * 5..member * 5 + 2],
+                        &source[member * 5..member * 5 + 2]
+                    );
+                    assert_eq!(
+                        &actual[member * 5 + 2..member * 5 + 5],
+                        &[D::from_parts(0.0, 0.0); 3]
+                    );
+                }
+            }
+        }
+    }
+    check::<f64>();
+    check::<Complex64>();
+}
 
 /// Payload dtypes replayed on device, with the host arithmetic the oracle and
 /// the host comparison need.

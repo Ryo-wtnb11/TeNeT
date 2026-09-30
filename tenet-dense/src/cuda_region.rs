@@ -164,6 +164,16 @@ impl CudaRegion {
         validate_destination_layout(op, self)
     }
 
+    /// Checks a prepared region against its flat storage before any device submission.
+    #[doc(hidden)]
+    pub fn validate_within(&self, len: usize) -> Result<(), DenseError> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        self.offset_isize()?;
+        validate_region(self, len)
+    }
+
     /// Whether distinct index tuples map to distinct flat positions.
     ///
     /// This is the cumulative-span rule the host proves block layouts with
