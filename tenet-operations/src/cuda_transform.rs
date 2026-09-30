@@ -30,9 +30,9 @@ use std::sync::Arc;
 use tenet_core::{BlockStructure, Placement, TensorStorage};
 pub use tenet_dense::DEFAULT_PLAN_CACHE_BUDGET_BYTES;
 use tenet_dense::{
-    cuda_matmul_region_into, cuda_region_axpby, cuda_region_scale, plan_cache_entries_for,
-    CudaDenseContext, CudaDenseStorage, CudaRegion, CudaRegionBeta, CudaRegionCoefficient,
-    CudaScalar, DenseError,
+    cuda_copy_strided_into, cuda_matmul_region_into, cuda_region_axpby, cuda_region_scale,
+    cuda_region_zero, plan_cache_entries_for, CudaDenseContext, CudaDenseStorage, CudaRegion,
+    CudaRegionBeta, CudaRegionCoefficient, CudaScalar, DenseError,
 };
 
 use crate::cuda::CudaStorage;
@@ -45,7 +45,179 @@ use crate::opaque_admission::{
     ExecutorSnapshot, StorageDomain, StorageRegion, StorageSnapshot, WorkspaceSnapshot,
 };
 use crate::task_view::TreeTransformTaskView;
-use crate::{OperationError, RecouplingCoefficientAction, TreeTransformStructure};
+use crate::{
+    OperationError, RecouplingCoefficientAction, TreeTransformBlock, TreeTransformStructure,
+};
+
+/// The validated B-appended views of an exact-unit CopyC output transform.
+/// No tensor payload or backend handle is retained here.
+#[doc(hidden)]
+pub struct CudaUnitSingleMemberRegions {
+    moves: Vec<(CudaRegion, CudaRegion)>,
+    zeros: Vec<CudaRegion>,
+    max_zero_len: usize,
+}
+
+impl CudaUnitSingleMemberRegions {
+    /// Checks the entire completed task class before the temporary core runs.
+    pub fn admit(structure: &TreeTransformStructure<f64>) -> Result<usize, OperationError> {
+        let task = structure.task_view()?;
+        if task.storage_conjugate()
+            || task.blocks().iter().any(|block| match *block {
+                TreeTransformBlock::Single { coefficient, .. } => {
+                    task.coefficients().get(coefficient) != Some(&1.0)
+                }
+                TreeTransformBlock::Multi { .. } => true,
+            })
+        {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "CUDA CopyC batch requires unconjugated exact-unit Single tasks",
+            });
+        }
+        let device = compile_device_plan(task)?;
+        Ok(device.zeros.len())
+    }
+
+    /// Validates every source, destination and inactive output region for B members.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare(
+        structure: &TreeTransformStructure<f64>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_member_len: usize,
+        src_member_len: usize,
+        dst_len: usize,
+        src_len: usize,
+        members: usize,
+    ) -> Result<Self, OperationError> {
+        Self::admit(structure)?;
+        let task = structure.task_view()?;
+        task.validate_structures_and_lengths(
+            dst_structure,
+            src_structure,
+            dst_member_len,
+            src_member_len,
+        )?;
+        let device = compile_device_plan(task)?;
+        let region = |dims: &[usize], strides: &[usize], offset: usize, member_stride| {
+            let mut shape = dims.to_vec();
+            shape.push(members);
+            let mut steps = strides.to_vec();
+            steps.push(member_stride);
+            CudaRegion::new(shape, steps, offset).map_err(OperationError::Dense)
+        };
+        let mut moves = Vec::with_capacity(device.moves.len());
+        for entry in &device.moves {
+            // A full-stack bounds check alone could accept a block spilling
+            // into the next member. Check the compiled member views first.
+            let source_member = CudaRegion::new(
+                entry.dims.clone(),
+                entry.src_strides.clone(),
+                entry.src_offset,
+            )
+            .map_err(OperationError::Dense)?;
+            let destination_member = CudaRegion::new(
+                entry.dims.clone(),
+                entry.dst_strides.clone(),
+                entry.dst_offset,
+            )
+            .map_err(OperationError::Dense)?;
+            source_member
+                .validate_within(src_member_len)
+                .map_err(OperationError::Dense)?;
+            destination_member
+                .validate_within(dst_member_len)
+                .map_err(OperationError::Dense)?;
+            let source = region(
+                &entry.dims,
+                &entry.src_strides,
+                entry.src_offset,
+                src_member_len,
+            )?;
+            let destination = region(
+                &entry.dims,
+                &entry.dst_strides,
+                entry.dst_offset,
+                dst_member_len,
+            )?;
+            source
+                .validate_within(src_len)
+                .map_err(OperationError::Dense)?;
+            destination
+                .validate_within(dst_len)
+                .map_err(OperationError::Dense)?;
+            destination
+                .validate_as_destination("cuda CopyC batch")
+                .map_err(OperationError::Dense)?;
+            moves.push((source, destination));
+        }
+        let mut zeros = Vec::with_capacity(device.zeros.len());
+        for entry in &device.zeros {
+            CudaRegion::new(entry.dims.clone(), entry.strides.clone(), entry.offset)
+                .map_err(OperationError::Dense)?
+                .validate_within(dst_member_len)
+                .map_err(OperationError::Dense)?;
+            let zero = region(&entry.dims, &entry.strides, entry.offset, dst_member_len)?;
+            zero.validate_within(dst_len)
+                .map_err(OperationError::Dense)?;
+            zero.validate_as_destination("cuda CopyC batch zero")
+                .map_err(OperationError::Dense)?;
+            zeros.push(zero);
+        }
+        Ok(Self {
+            moves,
+            zeros,
+            max_zero_len: device.max_zero_len,
+        })
+    }
+
+    pub fn moves(&self) -> &[(CudaRegion, CudaRegion)] {
+        &self.moves
+    }
+    pub fn zeros(&self) -> &[CudaRegion] {
+        &self.zeros
+    }
+    pub fn max_zero_len(&self) -> usize {
+        self.max_zero_len
+    }
+
+    /// Overwrites every active layout and zeros every inactive layout.
+    pub fn execute_overwrite<D: CudaScalar>(
+        &self,
+        ctx: &mut CudaDenseContext,
+        source: &CudaStorage<D>,
+        destination: &mut CudaStorage<D>,
+    ) -> Result<(), OperationError> {
+        for region in &self.zeros {
+            cuda_region_zero::<D>(ctx, &mut destination.0, region)
+                .map_err(OperationError::Dense)?;
+        }
+        for (src, dst) in &self.moves {
+            cuda_copy_strided_into::<D>(ctx, &source.0, src, &mut destination.0, dst)
+                .map_err(OperationError::Dense)?;
+        }
+        Ok(())
+    }
+    pub fn retained_bytes(&self) -> usize {
+        let regions = self
+            .moves
+            .capacity()
+            .saturating_mul(2)
+            .saturating_add(self.zeros.capacity());
+        let metadata = self
+            .moves
+            .iter()
+            .flat_map(|(a, b)| [a, b])
+            .chain(self.zeros.iter());
+        regions
+            .saturating_mul(std::mem::size_of::<CudaRegion>())
+            .saturating_add(
+                metadata
+                    .map(|r| 2 * r.dims().len() * std::mem::size_of::<usize>())
+                    .sum::<usize>(),
+            )
+    }
+}
 
 /// How a device replay treats the destination it writes.
 ///

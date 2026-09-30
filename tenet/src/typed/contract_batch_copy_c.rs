@@ -328,6 +328,89 @@ mod tests {
             .all(|x| x.is_finite()));
     }
 
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn cuda_copy_c_zeros_poisoned_inactive_temporary_on_warm_replay() {
+        let runtime = Runtime::builder().cuda(0).build().unwrap();
+        let v = GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [
+                (U1Irrep::new(0), 1),
+                (U1Irrep::new(1), 2),
+                (U1Irrep::new(2), 1),
+            ],
+        )
+        .unwrap();
+        let w = GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+        )
+        .unwrap();
+        let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&w], 55).unwrap();
+        let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&w], [&v], 56).unwrap();
+        let spec = ContractSpec {
+            lhs: &[2],
+            rhs: &[0],
+            codomain: &[1, 0],
+            domain: &[2],
+        };
+        let expected = a.contract(&b, &spec).unwrap();
+        let lhs = StackedTensorMap::pack(&[&a, &a])
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        let rhs = StackedTensorMap::pack(&[&b, &b])
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
+        assert!(plan.copy_c.is_some());
+        assert_eq!(plan.core().0.inactive_destination_regions().len(), 1);
+        assert_eq!(
+            tenet_operations::cuda_transform::CudaUnitSingleMemberRegions::admit(
+                &plan.copy_c.as_ref().unwrap().transform,
+            )
+            .unwrap(),
+            0
+        );
+        let mut workspace = plan.workspace().unwrap();
+        plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        let temporary = workspace.copy_c_temporary.as_mut().unwrap();
+        let total = temporary.members * temporary.member_len;
+        let lease = runtime.lease_cuda().unwrap();
+        temporary.storage = CudaStorage::upload_members(
+            &lease,
+            vec![f64::NAN; total],
+            temporary.member_len,
+            temporary.members,
+        )
+        .unwrap();
+        drop(lease);
+        let poisoned = expected.scale(f64::NAN);
+        let mut dst = StackedTensorMap::pack(&[&poisoned, &poisoned])
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+            .unwrap();
+        let actual = dst.to_host().unwrap();
+        for i in 0..2 {
+            for (&value, &reference) in actual
+                .member(i)
+                .unwrap()
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(expected.dense_data().unwrap())
+            {
+                assert!(value.is_finite());
+                let tolerance = 128.0 * 64.0_f64.sqrt() * f64::EPSILON * reference.abs().max(1.0);
+                assert!((value - reference).abs() <= tolerance);
+            }
+        }
+    }
+
     #[test]
     fn labeled_copy_c_routes_are_admitted_at_every_payload_precision() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -443,6 +526,14 @@ mod tests {
             let rhs = StackedTensorMap::pack(&vec![&b; members]).unwrap();
             let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
             let copy = plan.copy_c.as_ref().expect("C1p must choose CopyC");
+            assert!(
+                copy.transform.blocks().iter().any(|block| match *block {
+                    tenet_operations::TreeTransformBlock::Single { coefficient, .. } =>
+                        copy.transform.coefficient(coefficient) != 1.0,
+                    tenet_operations::TreeTransformBlock::Multi { .. } => true,
+                }),
+                "this selected SU2 CopyC route must be rejected by unit-only CUDA admission"
+            );
             let mut workspace = plan.workspace();
             let expected = plan
                 .execute(&lhs, &rhs, &mut workspace)
