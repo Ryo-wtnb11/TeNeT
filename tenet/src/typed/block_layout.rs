@@ -181,8 +181,7 @@ impl CatCopyPlan {
         });
         let [lhs_len, rhs_len] = source_lengths;
         let source_lengths = [lhs_len?, rhs_len?];
-        let mut diagonals = [None, None];
-        for (index, source) in sources.iter().enumerate() {
+        for source in &sources {
             let CatOperandData::Diagonal {
                 structure,
                 spectrum,
@@ -190,22 +189,21 @@ impl CatCopyPlan {
             else {
                 continue;
             };
-            let by_sector: std::collections::HashMap<_, _> =
-                spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-            if by_sector.len() != spectrum.len() {
-                return Err(internal_layout_error("compact cat spectrum sectors repeat"));
+            if structure.block_count() != spectrum.len() {
+                return Err(internal_layout_error(
+                    "compact cat spectrum block count disagrees",
+                ));
             }
-            let mut by_offset = std::collections::HashMap::with_capacity(structure.block_count());
-            for block_index in 0..structure.block_count() {
+            for (block_index, entry) in spectrum.iter().enumerate() {
                 let block = structure.block(block_index)?;
                 let pair = block.key().as_fusion_tree_pair().ok_or_else(|| {
                     internal_layout_error("compact cat source is not fusion-tree keyed")
                 })?;
-                let entry = by_sector
-                    .get(&pair.codomain_tree().coupled())
-                    .ok_or_else(|| {
-                        internal_layout_error("compact cat spectrum sector is absent")
-                    })?;
+                if pair.codomain_tree().coupled() != entry.sector {
+                    return Err(internal_layout_error(
+                        "compact cat spectrum sector is absent",
+                    ));
+                }
                 let [rows, cols] = block.shape() else {
                     return Err(internal_layout_error("compact cat source is not a matrix"));
                 };
@@ -214,27 +212,34 @@ impl CatCopyPlan {
                         "compact cat spectrum shape disagrees",
                     ));
                 }
-                if by_offset.insert(block.offset(), *entry).is_some() {
-                    return Err(internal_layout_error("compact cat source offsets overlap"));
-                }
             }
-            diagonals[index] = Some(by_offset);
         }
         let dense_sources = sources.map(|source| match source {
             CatOperandData::Dense(values) => Some(values),
             CatOperandData::Diagonal { .. } => None,
         });
+        // The compiled copies follow increasing coupled sectors; a compact
+        // rank-(1,1) bond has exactly one physical block in each sector.
+        let mut source_positions = [0usize; 2];
         let compact_entries = self
             .copies
             .iter()
             .map(|copy| {
-                let Some(by_offset) = diagonals.get(copy.source()).and_then(Option::as_ref) else {
+                let Some(CatOperandData::Diagonal {
+                    structure,
+                    spectrum,
+                }) = sources.get(copy.source())
+                else {
                     return Ok(None);
                 };
-                let entry = by_offset
-                    .get(&copy.source_offset())
+                let position = &mut source_positions[copy.source()];
+                let block = structure.block(*position)?;
+                let entry = spectrum
+                    .get(*position)
                     .ok_or_else(|| internal_layout_error("compact cat source region is absent"))?;
+                *position += 1;
                 if copy.rows() != copy.cols()
+                    || block.offset() != copy.source_offset()
                     || entry.values.len() != copy.rows()
                     || copy.source_row_stride() != 1
                     || copy.source_column_stride() != copy.rows()
@@ -245,6 +250,13 @@ impl CatCopyPlan {
                 Ok(Some(entry.values.as_slice()))
             })
             .collect::<Result<Vec<_>, Error>>()?;
+        for (index, source) in sources.iter().enumerate() {
+            if let CatOperandData::Diagonal { structure, .. } = source {
+                if source_positions[index] != structure.block_count() {
+                    return Err(internal_layout_error("compact cat source region is absent"));
+                }
+            }
+        }
         tenet_operations::try_cat_owned_mixed_raw(
             self.required_len,
             side,

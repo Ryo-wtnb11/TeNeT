@@ -844,7 +844,7 @@ where
     /// crosses above at each transposition; for a symmetric (bosonic) braiding
     /// they cannot change the result, and this is then [`Self::permute`].
     ///
-    /// A compact rank-(1,1) diagonal is read directly when the prepared braid
+    /// A compact rank-(1,1) diagonal is read directly when the compiled braid
     /// has one term per source block, its coefficient remains finite and
     /// nonzero in the payload dtype, and destination coverage is complete;
     /// otherwise it uses the ordinary dense replay.
@@ -1123,17 +1123,32 @@ where
                     .logical_space()
                     .transformed_multiplicity_free(&operation)
                 {
-                    if let Some(data) = crate::tensor_core::try_braid_rank_one_diagonal_data(
-                        self.logical_space().provider(),
-                        self.logical_space().space(),
-                        destination.space(),
-                        &operation,
-                        spectrum,
-                    ) {
-                        return Ok(Self {
-                            runtime: self.runtime.clone(),
-                            repr: owned_repr(TypedTensorBody::dense(destination, data)),
-                        });
+                    let compiled = {
+                        let mut lease = self.runtime.lease_context()?;
+                        lease
+                            .context()
+                            .multiplicity_free_lane::<D>()?
+                            .tree_context_mut()
+                            .compile_tree_pair_structure(
+                                self.logical_space().provider(),
+                                &operation,
+                                destination.space().structure(),
+                                self.logical_space().space().structure(),
+                            )
+                            .ok()
+                    };
+                    if let Some(compiled) = compiled {
+                        if let Some(data) = crate::tensor_core::try_braid_rank_one_diagonal_data(
+                            self.logical_space().space(),
+                            destination.space(),
+                            &compiled,
+                            spectrum,
+                        ) {
+                            return Ok(Self {
+                                runtime: self.runtime.clone(),
+                                repr: owned_repr(TypedTensorBody::dense(destination, data)),
+                            });
+                        }
                     }
                 }
             }

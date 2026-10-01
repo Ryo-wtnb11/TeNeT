@@ -14,7 +14,7 @@ use tenet::typed::Side;
 
 use tenet::sector::{U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep};
 use tenet::typed::{Complex64, Runtime};
-use tenet::typed::{GradedSpace, TensorMap};
+use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
 struct CountingAllocator;
 
@@ -194,6 +194,25 @@ fn typed_cat_reads_compact_operands_without_source_sized_buffers() {
             "{call} cat allocated {bytes} B; expected one owned output ({expected} B)"
         );
     }
+}
+
+#[test]
+fn compact_cat_ignores_zero_degeneracy_bond_sectors() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = u1_leg(&Arc::new(U1FusionRule), &[(0, 0), (1, 2)]);
+    let diagonal: TensorMap<U1FusionRule, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(1),
+            values: vec![2.0, 3.0],
+        }],
+    )
+    .unwrap();
+    let actual = diagonal.cat(&diagonal, Side::Domain).unwrap();
+    let dense = diagonal.materialize().unwrap();
+    let expected = dense.cat(&dense, Side::Domain).unwrap();
+    assert_eq!(actual.dense_data(), expected.dense_data());
 }
 
 #[test]
