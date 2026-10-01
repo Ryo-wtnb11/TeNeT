@@ -91,7 +91,7 @@ pub(crate) use svd::*;
 // glob.
 pub use eig::{
     eig_full, eig_full_dyn, eig_full_dyn_checked_generic, eig_vals, eig_vals_diagonal_dyn,
-    eig_vals_dyn, eig_vals_dyn_checked_generic, eigh_full, eigh_full_dyn,
+    eig_vals_dyn, eig_vals_dyn_checked_generic, eigh_full, eigh_full_diagonal_dyn, eigh_full_dyn,
     eigh_full_dyn_checked_generic, eigh_vals, eigh_vals_diagonal_dyn, eigh_vals_dyn,
     eigh_vals_dyn_checked_generic, validate_hermitian_regions, EigFull, EigFullDyn, EighFull,
     EighFullDyn,

@@ -2161,10 +2161,11 @@ where
     ///
     /// No eigenvector factor or bond space is built. The input must be an
     /// endomorphism and every sector must satisfy the same Hermiticity check as
-    /// [`Self::eigh_full`]. Multiplicity-free lazy adjoints and compact
-    /// diagonals are materialized only for this call; checked Generic
-    /// currently requires owned input for
-    /// this values-only method. Dense failures return [`Error::Operation`],
+    /// [`Self::eigh_full`]. An owned Host multiplicity-free compact diagonal
+    /// with finite, exactly real entries is read directly; other compact
+    /// inputs and lazy adjoints use the dense route. Checked Generic currently
+    /// requires owned input for this values-only method. Dense failures return
+    /// [`Error::Operation`],
     /// layout failures return [`Error::Core`], and an original provider or
     /// label-decoding error is available as the source. No spectrum is returned
     /// unless every sector succeeds.
@@ -2204,9 +2205,10 @@ where
     ///
     /// Both multiplicity-free and checked-Generic `d` factors use compact
     /// diagonal storage. Checked factors retain the exact source provider
-    /// `Arc`. A lazy adjoint or a compact diagonal input (a multiplicity-free
-    /// spectrum or a checked-Generic `d`) is materialized into an
-    /// operation-local dense payload for this call.
+    /// `Arc`. An owned Host multiplicity-free compact diagonal with finite,
+    /// exactly real entries is read directly into a permutation eigenbasis;
+    /// its dense output still occupies `Σ_c k_c²` elements. Other compact
+    /// inputs and lazy adjoints use an operation-local dense payload.
     ///
     /// # Errors and cost
     ///
@@ -2217,7 +2219,9 @@ where
     /// error is available as the source. It also validates identical full
     /// row/column fusion-tree stacking. Factors are returned only after every
     /// sector succeeds; otherwise the method returns an error and no factors.
-    /// Cost is `O(sum_c n_c^3)`.
+    /// The direct compact path sorts in `O(Σ_c k_c log k_c)` time and writes
+    /// `O(Σ_c k_c²)` eigenvector elements; the general dense route costs
+    /// `O(Σ_c n_c³)` time.
     ///
     /// ```
     /// use std::sync::Arc;

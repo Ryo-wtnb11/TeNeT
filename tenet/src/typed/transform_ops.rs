@@ -2488,6 +2488,8 @@ where
     /// eigenvalues are real for both payload dtypes — TensorKit's Hermitian `D`
     /// is real too — but `d` keeps the payload dtype `D` so it composes with
     /// `v` directly.
+    /// An admitted owned compact diagonal builds the sorted spectrum and dense
+    /// permutation eigenbasis without materializing a dense input.
     ///
     /// # Errors
     ///
@@ -2499,6 +2501,19 @@ where
     where
         D: FactorizationScalar,
     {
+        if let TypedTensorRepr::Owned(body) = &self.repr {
+            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                if let Some(out) =
+                    tenet_matrixalgebra::eigh_full_diagonal_dyn(&body.space, spectrum)?
+                {
+                    let (v, mut eigenvalues) = out.into_parts();
+                    return Ok(Eigh {
+                        d: self.diagonal_factor(&mut eigenvalues, D::from_real)?,
+                        v: self.wrap_bound_factor(v),
+                    });
+                }
+            }
+        }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .materialized_tensor_uncached()?
