@@ -82,6 +82,539 @@ impl DenseExecutor for CountEighVals {
 }
 
 #[derive(Default)]
+struct CountEighFull {
+    inner: DefaultDenseExecutor,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DenseExecutor for CountEighFull {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises eigh_full")
+    }
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises eigh_full")
+    }
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.eigh(input)
+    }
+    fn eigh_into(
+        &mut self,
+        input: DenseRead<'_>,
+        values: DenseWrite<'_>,
+        vectors: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.eigh_into(input, values, vectors)
+    }
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises eigh_full")
+    }
+}
+
+#[test]
+fn compact_diagonal_eigh_full_skips_dense_input_and_solver() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(CountEighFull {
+            inner: DefaultDenseExecutor::default(),
+            calls: Arc::clone(&calls),
+        }))
+        .build()
+        .unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
+    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![
+                Complex64::new(2.0, 0.0),
+                Complex64::new(-2.0, 0.0),
+                Complex64::new(1.0, 0.0),
+            ],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let Eigh { d, v } = input.eigh_full(&[0], &[1]).unwrap();
+    assert_eq!(
+        d.diagview().unwrap()[0].values,
+        vec![
+            Complex64::new(-2.0, 0.0),
+            Complex64::new(2.0, 0.0),
+            Complex64::new(1.0, 0.0)
+        ]
+    );
+    assert_eq!(v.dense_data().unwrap().len(), 9);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let _ = input.eigh_full(&[1], &[0]).unwrap();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn compact_diagonal_eigh_full_hand_permutation_all_scalars() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
+    macro_rules! check {
+        ($dtype:ty, $values:expr, $sorted:expr, $zero:expr, $one:expr) => {{
+            let input: TensorMap<_, $dtype> = TensorMap::diagonal(
+                &runtime,
+                &leg,
+                [SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: $values,
+                }],
+            )
+            .unwrap();
+            let saved = input.diagview().unwrap();
+            let dense = input.materialize().unwrap().eigh_full(&[0], &[1]).unwrap();
+            DIAGONAL_MATERIALIZATIONS.set(0);
+            let Eigh { d, v } = input.eigh_full(&[0], &[1]).unwrap();
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(input.diagview().unwrap(), saved);
+            assert_eq!(d.diagview().unwrap()[0].values, $sorted);
+            assert_eq!(d.codomain(), v.domain());
+            assert_eq!(d.domain(), v.domain());
+            assert_eq!(v.codomain(), input.codomain());
+            assert_eq!(v.domain(), dense.v.domain());
+            assert!(!v.domain()[0].is_dual());
+            let z: $dtype = $zero;
+            let o: $dtype = $one;
+            assert_eq!(v.dense_data().unwrap(), [z, o, z, o, z, z, z, z, o]);
+            assert_eq!(
+                input.compose(&v).unwrap().dense_data().unwrap(),
+                v.compose(&d).unwrap().dense_data().unwrap()
+            );
+            assert_eq!(
+                v.compose(&d)
+                    .unwrap()
+                    .compose(&v.adjoint().unwrap())
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
+                input.materialize().unwrap().dense_data().unwrap()
+            );
+            assert_eq!(
+                v.adjoint()
+                    .unwrap()
+                    .compose(&v)
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
+                [o, z, z, z, o, z, z, z, o]
+            );
+        }};
+    }
+    check!(
+        f32,
+        vec![2.0_f32, -2.0, 1.0],
+        vec![-2.0_f32, 2.0, 1.0],
+        0.0_f32,
+        1.0_f32
+    );
+    check!(
+        f64,
+        vec![2.0_f64, -2.0, 1.0],
+        vec![-2.0_f64, 2.0, 1.0],
+        0.0_f64,
+        1.0_f64
+    );
+    check!(
+        num_complex::Complex32,
+        vec![
+            num_complex::Complex32::new(2.0, 0.0),
+            num_complex::Complex32::new(-2.0, 0.0),
+            num_complex::Complex32::new(1.0, 0.0)
+        ],
+        vec![
+            num_complex::Complex32::new(-2.0, 0.0),
+            num_complex::Complex32::new(2.0, 0.0),
+            num_complex::Complex32::new(1.0, 0.0)
+        ],
+        num_complex::Complex32::new(0.0, 0.0),
+        num_complex::Complex32::new(1.0, 0.0)
+    );
+    check!(
+        Complex64,
+        vec![
+            Complex64::new(2.0, 0.0),
+            Complex64::new(-2.0, 0.0),
+            Complex64::new(1.0, 0.0)
+        ],
+        vec![
+            Complex64::new(-2.0, 0.0),
+            Complex64::new(2.0, 0.0),
+            Complex64::new(1.0, 0.0)
+        ],
+        Complex64::new(0.0, 0.0),
+        Complex64::new(1.0, 0.0)
+    );
+}
+
+#[test]
+fn compact_diagonal_eigh_full_signed_zeros_remain_a_valid_eigenbasis() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![0.0, -0.0],
+        }],
+    )
+    .unwrap();
+    let dense = input.materialize().unwrap().eigh_full(&[0], &[1]).unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let Eigh { d, v } = input.eigh_full(&[0], &[1]).unwrap();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(
+        d.diagview().unwrap()[0].values,
+        dense.d.diagview().unwrap()[0].values
+    );
+    let av = input.compose(&v).unwrap();
+    let vd = v.compose(&d).unwrap();
+    assert_eq!(av.dense_data().unwrap(), vd.dense_data().unwrap());
+    assert_eq!(
+        vd.compose(&v.adjoint().unwrap())
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        input.materialize().unwrap().dense_data().unwrap()
+    );
+    assert_eq!(
+        v.adjoint()
+            .unwrap()
+            .compose(&v)
+            .unwrap()
+            .dense_data()
+            .unwrap(),
+        [1.0, 0.0, 0.0, 1.0]
+    );
+}
+
+#[test]
+fn compact_diagonal_eigh_full_preserves_sector_spaces_and_zero_regions() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    macro_rules! check {
+        ($leg:expr, $spectra:expr, $expected:expr) => {{
+            let input: TensorMap<_, f64> = TensorMap::diagonal(&runtime, &$leg, $spectra).unwrap();
+            let saved = input.diagview().unwrap();
+            let dense = input.materialize().unwrap().eigh_full(&[0], &[1]).unwrap();
+            DIAGONAL_MATERIALIZATIONS.set(0);
+            let Eigh { d, v } = input.eigh_full(&[0], &[1]).unwrap();
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(input.diagview().unwrap(), saved);
+            assert_eq!(d.diagview().unwrap(), $expected);
+            assert_eq!(v.codomain(), input.codomain());
+            assert_eq!(v.domain(), dense.v.domain());
+            assert!(!v.domain()[0].is_dual());
+            assert_eq!(d.codomain(), v.domain());
+            assert_eq!(d.domain(), v.domain());
+            let av = input.compose(&v).unwrap();
+            let vd = v.compose(&d).unwrap();
+            for (&a, &b) in av
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(vd.dense_data().unwrap())
+            {
+                assert!((a - b).abs() <= 1e-12);
+            }
+            let recon = vd.compose(&v.adjoint().unwrap()).unwrap();
+            for (&a, &b) in recon
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(input.materialize().unwrap().dense_data().unwrap())
+            {
+                assert!((a - b).abs() <= 1e-12);
+            }
+            let unit = v.adjoint().unwrap().compose(&v).unwrap();
+            let bond = v.domain();
+            let expected_unit = TensorMap::<_, f64>::from_subblock_fn(
+                &runtime,
+                [&bond[0]],
+                [&bond[0]],
+                |_, indices| f64::from(indices[0] == indices[1]),
+            )
+            .unwrap();
+            for (&a, &b) in unit
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(expected_unit.dense_data().unwrap())
+            {
+                assert!((a - b).abs() <= 1e-12);
+            }
+        }};
+    }
+    let u1 = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+    let dual = u1.try_dual().unwrap();
+    check!(
+        dual,
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(-1),
+                values: vec![2.0, -2.0]
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![1.0, -4.0, 0.0]
+            },
+        ],
+        vec![
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![-4.0, 1.0, 0.0]
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(-1),
+                values: vec![-2.0, 2.0]
+            },
+        ]
+    );
+    let spin0 = SU2Irrep::from_twice_spin(0);
+    let spin_half = SU2Irrep::from_twice_spin(1);
+    let su2 = GradedSpace::try_new(Arc::new(SU2FusionRule), [(spin0, 2), (spin_half, 1)]).unwrap();
+    check!(
+        su2,
+        [
+            SectorSpectrum {
+                sector: spin_half,
+                values: vec![-3.0]
+            },
+            SectorSpectrum {
+                sector: spin0,
+                values: vec![2.0, -2.0]
+            },
+        ],
+        vec![
+            SectorSpectrum {
+                sector: spin0,
+                values: vec![-2.0, 2.0]
+            },
+            SectorSpectrum {
+                sector: spin_half,
+                values: vec![-3.0]
+            },
+        ]
+    );
+    let even = product_sector(U1Irrep::new(0), Z2Irrep::EVEN);
+    let odd = product_sector(U1Irrep::new(1), Z2Irrep::ODD);
+    let fermion = GradedSpace::try_new(
+        Arc::new(U1FusionRule.product(FermionParityFusionRule)),
+        [(even, 2), (odd, 1)],
+    )
+    .unwrap();
+    check!(
+        fermion,
+        [
+            SectorSpectrum {
+                sector: odd,
+                values: vec![-3.0]
+            },
+            SectorSpectrum {
+                sector: even,
+                values: vec![2.0, -2.0]
+            },
+        ],
+        vec![
+            SectorSpectrum {
+                sector: even,
+                values: vec![-2.0, 2.0]
+            },
+            SectorSpectrum {
+                sector: odd,
+                values: vec![-3.0]
+            },
+        ]
+    );
+    let zero = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 0), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+    check!(
+        zero,
+        [SectorSpectrum {
+            sector: U1Irrep::new(1),
+            values: vec![2.0, -3.0]
+        }],
+        vec![SectorSpectrum {
+            sector: U1Irrep::new(1),
+            values: vec![-3.0, 2.0]
+        },]
+    );
+    let empty = GradedSpace::try_new(Arc::new(U1FusionRule), []).unwrap();
+    check!(
+        empty,
+        Vec::<SectorSpectrum<_, f64>>::new(),
+        Vec::<SectorSpectrum<_, f64>>::new()
+    );
+}
+
+#[test]
+fn compact_diagonal_eigh_full_retains_near_hermitian_and_nonfinite_routes() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(CountEighFull {
+            inner: DefaultDenseExecutor::default(),
+            calls: Arc::clone(&calls),
+        }))
+        .build()
+        .unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
+    let near: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![Complex64::new(1.0, 1e-15)],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let Eigh { d, .. } = near.eigh_full(&[0], &[1]).unwrap();
+    assert_eq!(d.diagview().unwrap()[0].values, [Complex64::new(1.0, 0.0)]);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    for value in [f64::NAN, f64::INFINITY] {
+        let input: TensorMap<_, f64> = TensorMap::diagonal(
+            &runtime,
+            &leg,
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![value],
+            }],
+        )
+        .unwrap();
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        let actual = input.eigh_full(&[0], &[1]);
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+        let dense = input.materialize().unwrap().eigh_full(&[0], &[1]);
+        assert_eq!(actual.is_err(), dense.is_err());
+    }
+    let extreme: TensorMap<_, f32> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![f32::MAX],
+        }],
+    )
+    .unwrap();
+    let calls_before = calls.load(std::sync::atomic::Ordering::Relaxed);
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(
+        extreme.eigh_full(&[0], &[1]).unwrap().d.diagview().unwrap()[0].values,
+        [f32::MAX]
+    );
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::Relaxed),
+        calls_before
+    );
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![1.0],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert!(matches!(
+        input.eigh_full(&[0, 1], &[]),
+        Err(Error::Operation(error))
+            if matches!(error.as_ref(), tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                message: "eigh requires an endomorphism (codomain == domain)"
+            })
+    ));
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+}
+
+#[test]
+fn compact_diagonal_eigh_full_changed_roles_match_explicit_dense_permute() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 1), (U1Irrep::new(1), 2)],
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(-1),
+                values: vec![-2.0, 3.0],
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![1.0],
+            },
+        ],
+    )
+    .unwrap();
+    let swapped = input.permute(&[1], &[0]).unwrap();
+    assert_ne!(swapped.diagview().unwrap(), input.diagview().unwrap());
+    let reference = swapped
+        .materialize()
+        .unwrap()
+        .eigh_full(&[0], &[1])
+        .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let Eigh { d, v } = input.eigh_full(&[1], &[0]).unwrap();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(d.diagview().unwrap(), reference.d.diagview().unwrap());
+    assert_eq!(d.codomain(), reference.d.codomain());
+    assert_eq!(d.domain(), reference.d.domain());
+    assert_eq!(v.codomain(), reference.v.codomain());
+    assert_eq!(v.domain(), reference.v.domain());
+    assert!(!v.domain()[0].is_dual());
+    let av = swapped.compose(&v).unwrap();
+    let vd = v.compose(&d).unwrap();
+    for (&a, &b) in av
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(vd.dense_data().unwrap())
+    {
+        assert!((a - b).abs() <= 1e-12);
+    }
+    let recon = vd.compose(&v.adjoint().unwrap()).unwrap();
+    for (&a, &b) in recon
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(swapped.materialize().unwrap().dense_data().unwrap())
+    {
+        assert!((a - b).abs() <= 1e-12);
+    }
+}
+
+#[derive(Default)]
 struct CountEigVals {
     inner: DefaultDenseExecutor,
     calls: Arc<std::sync::atomic::AtomicUsize>,
