@@ -1,12 +1,10 @@
-//! Allocation gates for the typed `cat`/`absorb`
+//! Allocation gates for the typed `cat`/`braid`/`absorb`
 //! (#580 PR 4), alongside the compact-storage gates in
 //! `typed_diagonal_allocations.rs`: bytes counted through a global allocator
 //! while one warmed operation runs.
 //!
-//! The claims under gate: each operation performs exactly one output-sized
-//! payload allocation and no per-block allocations, and a compact diagonal
-//! operand is materialized dense exactly once (into the shared body cache),
-//! never once per call.
+//! The compact diagonal gates require one dense output allocation and no
+//! source-sized dense intermediate per compact operand.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -169,11 +167,7 @@ fn typed_absorb_clones_the_destination_once() {
 }
 
 #[test]
-fn typed_cat_densifies_a_compact_operand_per_call_and_retains_nothing() {
-    // What: a compact diagonal operand (svd_compact's `s`) is densified into
-    // an operation-local buffer once per operand per call (#1548): no
-    // densification is retained, so a repeated cat costs the same as the
-    // first.
+fn typed_cat_reads_compact_operands_without_source_sized_buffers() {
     const DEGENERACY: usize = 128;
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, DEGENERACY)]).unwrap();
@@ -188,8 +182,7 @@ fn typed_cat_densifies_a_compact_operand_per_call_and_retains_nothing() {
     let s: TensorMap<Z2FusionRule, f64> = tensor.svd_compact(&[0], &[1]).unwrap().s;
     let dense_payload = DEGENERACY * DEGENERACY * std::mem::size_of::<f64>();
     let output_payload = 2 * dense_payload;
-    // Both operands are compact, so each call densifies two of them.
-    let expected = (output_payload + 2 * dense_payload) as u64;
+    let expected = output_payload as u64;
 
     for call in ["first", "second"] {
         let (bytes, payload_allocations) = measured_allocations(output_payload, || {
@@ -198,10 +191,44 @@ fn typed_cat_densifies_a_compact_operand_per_call_and_retains_nothing() {
         assert_eq!(payload_allocations, 1, "{call} cat");
         assert!(
             (expected..=expected + STRUCTURAL_TOLERANCE).contains(&bytes),
-            "{call} cat allocated {bytes} B; expected the output plus one \
-             densification per compact operand ({expected} B)"
+            "{call} cat allocated {bytes} B; expected one owned output ({expected} B)"
         );
     }
+}
+
+#[test]
+fn typed_braid_and_absorb_allocate_only_one_dense_output_for_compact_input() {
+    const DEGENERACY: usize = 128;
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, DEGENERACY)]).unwrap();
+    let diagonal: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [tenet::typed::SectorSpectrum {
+            sector: Z2Irrep::EVEN,
+            values: vec![2.0; DEGENERACY],
+        }],
+    )
+    .unwrap();
+    black_box(diagonal.braid(&[1], &[0], &[0, 1]).unwrap());
+    black_box(diagonal.absorb(&diagonal).unwrap());
+    let payload = DEGENERACY * DEGENERACY * std::mem::size_of::<f64>();
+    let mut counts = [0; 2];
+    for (operation, name) in ["braid", "absorb"].into_iter().enumerate() {
+        let (bytes, payload_allocations) = measured_allocations(payload, || {
+            if operation == 0 {
+                black_box(diagonal.braid(&[1], &[0], &[0, 1]).unwrap());
+            } else {
+                black_box(diagonal.absorb(&diagonal).unwrap());
+            }
+        });
+        counts[operation] = payload_allocations;
+        assert!(
+            bytes >= payload as u64,
+            "{name} allocated fewer than the required output: {bytes} B"
+        );
+    }
+    assert_eq!(counts, [1, 1], "braid/absorb P-sized buffer counts");
 }
 
 #[test]
