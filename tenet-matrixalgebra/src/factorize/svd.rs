@@ -502,8 +502,8 @@ pub type SvdFactorsDyn<R, D> = (
 
 /// Compact diagonal input: sort each sector's magnitudes and write the
 /// permutation/phase factors directly into the existing dense factor layout.
-/// A nonfinite spectrum or an unsupported region layout retains the ordinary
-/// dense-SVD path and its error behavior.
+/// Nonfinite or unrepresentable magnitudes, and unsupported region layouts,
+/// retain the ordinary dense-SVD path and its error behavior.
 #[doc(hidden)]
 pub fn svd_compact_diagonal_factors_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
@@ -516,7 +516,10 @@ where
     if spectrum
         .iter()
         .flat_map(|entry| &entry.values)
-        .any(|&value| !value.widen_complex().norm().is_finite())
+        .any(|&value| {
+            let magnitude = value.widen_complex().norm();
+            !magnitude.is_finite() || !D::from_real(magnitude).widen_complex().re.is_finite()
+        })
     {
         return Ok(None);
     }
@@ -560,7 +563,10 @@ where
                 vh[column + source * k] = if magnitude == 0.0 {
                     D::from_real(1.0)
                 } else {
-                    D::from_complex64(entry.values[source].widen_complex() / magnitude)
+                    let value = entry.values[source].widen_complex();
+                    let scale = value.re.abs().max(value.im.abs());
+                    let scaled = value / scale;
+                    D::from_complex64(scaled / scaled.norm())
                 };
             }
             u_regions[route.left_region.expect("nonzero route has left region")] = Some(u);

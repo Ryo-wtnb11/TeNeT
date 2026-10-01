@@ -279,6 +279,46 @@ fn compact_diagonal_svd_other_host_scalars_and_sectors() {
     assert!(s.diagview().unwrap().is_empty());
 }
 
+#[test]
+fn compact_diagonal_svd_preserves_dense_failure_at_c32_range_edge() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
+    let large = f32::MAX * 0.75;
+    let input: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![num_complex::Complex32::new(large, large)],
+        }],
+    )
+    .unwrap();
+    let dense_result = input.materialize().unwrap().svd_compact(&[0], &[1]);
+    let compact_result = input.svd_compact(&[0], &[1]);
+    assert_eq!(compact_result.is_err(), dense_result.is_err());
+}
+
+#[test]
+fn compact_diagonal_svd_subnormal_complex_phase_is_unit() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
+    let tiny = f64::from_bits(1);
+    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![Complex64::new(tiny, tiny)],
+        }],
+    )
+    .unwrap();
+    let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
+    assert!((vh.dense_data().unwrap()[0].norm() - 1.0).abs() < 1e-12);
+    assert!((u.dense_data().unwrap()[0].norm() - 1.0).abs() < 1e-12);
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert_eq!(rebuilt.dense_data().unwrap()[0], Complex64::new(tiny, tiny));
+}
+
 struct NonCloneHost(Vec<f64>);
 
 impl TensorStorage<f64> for NonCloneHost {

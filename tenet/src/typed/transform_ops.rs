@@ -1947,11 +1947,12 @@ where
     /// GEMM. [`Self::materialize`] builds the dense buffer on request; a
     /// caller who only needs the values should reach for
     /// [`Self::svd_vals`], which builds no factor at all.
-    /// An owned, finite compact-diagonal input is sorted directly by sector:
+    /// An owned compact-diagonal input with representable magnitudes is sorted
+    /// directly by sector:
     /// no dense input or dense SVD is needed. The dense `u` and `vh` permutation
     /// factors still require `Σ_c k_c²` storage and writes; sorting costs
-    /// `O(Σ_c k_c log k_c)`. Nonfinite inputs retain the dense solver's error
-    /// behavior.
+    /// `O(Σ_c k_c log k_c)`. Nonfinite or unrepresentable spectra retain the
+    /// dense solver's error behavior.
     ///
     /// # Errors
     ///

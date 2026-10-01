@@ -1740,13 +1740,15 @@ where
     /// and EIG are the Generic factorizations whose diagonal factor is compact.
     /// All checked factors retain the source's exact provider `Arc`.
     ///
-    /// Dense inputs cost `O(sum_c m_c * n_c * min(m_c, n_c))`. An owned, finite
-    /// multiplicity-free compact diagonal is sorted directly by sector, without
+    /// Dense inputs cost `O(sum_c m_c * n_c * min(m_c, n_c))`. An owned
+    /// multiplicity-free compact diagonal with representable magnitudes is
+    /// sorted directly by sector, without
     /// a dense input or dense SVD call; its dense `u` and `vh` still require
     /// `O(sum_c k_c²)` output storage and writes. A multiplicity-free lazy
     /// adjoint is handled from its parent without materializing it.
     /// Checked-Generic SVD requires owned input and still densifies compact
-    /// diagonals. Nonfinite compact inputs use the ordinary dense solver path.
+    /// diagonals. Nonfinite or unrepresentable compact spectra use the ordinary
+    /// dense solver path.
     /// Any sector, layout, or provider failure returns no factors.
     ///
     /// ```
