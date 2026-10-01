@@ -13,7 +13,52 @@ use tenet::expert::{
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::OperationError;
 use tenet::typed::{Error, Svd};
-use tenet::typed::{GradedSpace, LinalgBackend, Runtime, RuntimeConfigError, TensorMap};
+use tenet::typed::{
+    GradedSpace, LinalgBackend, Runtime, RuntimeConfigError, SectorSpectrum, TensorMap,
+};
+
+#[test]
+fn compact_diagonal_svd_submits_no_dense_svd() {
+    let counts = Arc::new(SpyCounts::default());
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(SpyExecutor {
+            inner: DefaultDenseExecutor::default(),
+            counts: Arc::clone(&counts),
+        }))
+        .build()
+        .unwrap();
+    let leg = u1_space([(-1, 2), (0, 3), (1, 1)]);
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(-1),
+                values: vec![1.0, -3.0],
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![0.0, -4.0, 2.0],
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(1),
+                values: vec![-2.0],
+            },
+        ],
+    )
+    .unwrap();
+    let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
+    assert_eq!(counts.read(), (0, 0, 0, 0));
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    for (actual, expected) in rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(input.materialize().unwrap().dense_data().unwrap())
+    {
+        assert!((actual - expected).abs() < 1e-12);
+    }
+}
 
 fn u1_space(entries: [(i32, usize); 3]) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(

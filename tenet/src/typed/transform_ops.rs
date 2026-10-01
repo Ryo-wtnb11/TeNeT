@@ -1947,6 +1947,12 @@ where
     /// GEMM. [`Self::materialize`] builds the dense buffer on request; a
     /// caller who only needs the values should reach for
     /// [`Self::svd_vals`], which builds no factor at all.
+    /// An owned compact-diagonal input with representable magnitudes is sorted
+    /// directly by sector:
+    /// no dense input or dense SVD is needed. The dense `u` and `vh` permutation
+    /// factors still require `Σ_c k_c²` storage and writes; sorting costs
+    /// `O(Σ_c k_c log k_c)`. Nonfinite or unrepresentable spectra retain the
+    /// dense solver's error behavior.
     ///
     /// # Errors
     ///
@@ -1987,24 +1993,35 @@ where
     where
         D: FactorizationScalar,
     {
-        // Dense lease only: a factorization runs entirely on the dense-executor
-        // boundary, so leasing the (scarcer)
-        // recoupling context here would serialize unrelated work for nothing.
-        let mut dense = self.runtime.lease_dense();
-        // Why the `_factors_` seam rather than `svd_compact_dyn`: the latter
-        // builds the dense block-diagonal `s` itself, so taking it and throwing
-        // it away would pay the very `Σ_c k_c²` allocation this storage avoids.
-        let (u, vh, mut spectrum) = match &self.repr {
-            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_compact_adjoint_factors_dyn(
-                dense.dense(),
-                &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
-            )?,
-            TypedTensorRepr::Owned(_) => {
-                let (bound_space, bound_payload) = self.bound_payload()?;
-                tenet_matrixalgebra::svd_compact_factors_dyn(
-                    dense.dense(),
-                    &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
-                )?
+        let compact = match &self.repr {
+            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+                TypedData::Diagonal(spectrum) => {
+                    tenet_matrixalgebra::svd_compact_diagonal_factors_dyn(&body.space, spectrum)?
+                }
+                TypedData::Dense(_) => None,
+            },
+            TypedTensorRepr::Adjoint(_) => None,
+        };
+        let (u, vh, mut spectrum) = if let Some(factors) = compact {
+            factors
+        } else {
+            // The ordinary route keeps its dense-only lease and its compact-S
+            // factor seam, including the established nonfinite error behavior.
+            let mut dense = self.runtime.lease_dense();
+            match &self.repr {
+                TypedTensorRepr::Adjoint(view) => {
+                    tenet_matrixalgebra::svd_compact_adjoint_factors_dyn(
+                        dense.dense(),
+                        &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
+                    )?
+                }
+                TypedTensorRepr::Owned(_) => {
+                    let (bound_space, bound_payload) = self.bound_payload()?;
+                    tenet_matrixalgebra::svd_compact_factors_dyn(
+                        dense.dense(),
+                        &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+                    )?
+                }
             }
         };
         Ok(Svd {
