@@ -89,10 +89,10 @@ fn main() {
         let right = input.right_polar(&[0], &[1]).unwrap();
         println!(
             "left_w_diagonal={},left_p_diagonal={},right_wh_diagonal={},right_p_diagonal={},spaces_preserved={}",
-            left.w.diagview().is_ok(),
-            left.p.diagview().is_ok(),
-            right.wh.diagview().is_ok(),
-            right.p.diagview().is_ok(),
+            left.w.dense_data().is_err() && left.w.diagview().is_ok(),
+            left.p.dense_data().is_err() && left.p.diagview().is_ok(),
+            right.wh.dense_data().is_err() && right.wh.diagview().is_ok(),
+            right.p.dense_data().is_err() && right.p.diagview().is_ok(),
             left.w.domain() == input.domain() && right.p.codomain() == input.codomain()
         );
         return;
@@ -102,7 +102,7 @@ fn main() {
     );
     macro_rules! family {
         ($dtype:ty, $name:literal, $value:expr, $family:literal, $rule:expr, $sector:expr) => {
-            for (sectors, k, dual) in [(1, 8, false), (4, 8, true), (1, 64, false), (4, 64, true)] {
+            for (sectors, k, dual) in [(1, 8, false), (4, 64, true)] {
                 for storage in ["diagonal", "dense"] {
                     let setup = Instant::now();
                     let mut leg = GradedSpace::try_new(Arc::new($rule),

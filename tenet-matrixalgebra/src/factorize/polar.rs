@@ -5,28 +5,15 @@ struct PolarDiagonalAdmission<R, D> {
     w_regions: Arc<[CoupledSectorRegion]>,
     p_regions: Arc<[CoupledSectorRegion]>,
     routes: Vec<PolarRegionRoute>,
-    diagonal: Vec<Vec<(D, D)>>,
+    phase: Vec<SectorSpectrum<D>>,
+    magnitude: Vec<SectorSpectrum<D>>,
     w_space: BoundDynamicFusionMapSpace<R>,
     p_space: BoundDynamicFusionMapSpace<R>,
 }
 
 impl<R, D: FactorScalar> PolarDiagonalAdmission<R, D> {
     fn spectra(self) -> (Vec<SectorSpectrum<D>>, Vec<SectorSpectrum<D>>) {
-        let mut phase = Vec::with_capacity(self.routes.len());
-        let mut magnitude = Vec::with_capacity(self.routes.len());
-        for route in self.routes {
-            let sector = self.source_regions[route.source].coupled();
-            let (phases, magnitudes) = self.diagonal[route.source].iter().copied().unzip();
-            phase.push(SectorSpectrum {
-                sector,
-                values: phases,
-            });
-            magnitude.push(SectorSpectrum {
-                sector,
-                values: magnitudes,
-            });
-        }
-        (phase, magnitude)
+        (self.phase, self.magnitude)
     }
 
     fn dense(self) -> Result<DynamicFactorPair<R, D>, OperationError> {
@@ -46,7 +33,12 @@ impl<R, D: FactorScalar> PolarDiagonalAdmission<R, D> {
             let n = self.source_regions[route.source].rows();
             let w_start = self.w_regions[route.w].range().start;
             let p_start = self.p_regions[route.p].range().start;
-            for (index, &(phase, magnitude)) in self.diagonal[route.source].iter().enumerate() {
+            for (index, (&phase, &magnitude)) in self.phase[route.source]
+                .values
+                .iter()
+                .zip(&self.magnitude[route.source].values)
+                .enumerate()
+            {
                 w_data[w_start + index * (n + 1)] = phase;
                 p_data[p_start + index * (n + 1)] = magnitude;
             }
@@ -86,7 +78,8 @@ where
     if by_sector.len() != spectrum.len() || by_sector.len() != source_regions.len() {
         return Ok(None);
     }
-    let mut diagonal = Vec::with_capacity(source_regions.len());
+    let mut phase = Vec::with_capacity(source_regions.len());
+    let mut magnitude = Vec::with_capacity(source_regions.len());
     for region in source_regions.iter() {
         let Some(entry) = by_sector.get(&region.coupled()) else {
             return Ok(None);
@@ -97,14 +90,23 @@ where
         {
             return Ok(None);
         }
-        let mut values = Vec::with_capacity(entry.values.len());
+        let mut phases = Vec::with_capacity(entry.values.len());
+        let mut magnitudes = Vec::with_capacity(entry.values.len());
         for &value in &entry.values {
-            let Some((phase, magnitude)) = diagonal_phase_magnitude(value) else {
+            let Some((value_phase, value_magnitude)) = diagonal_phase_magnitude(value) else {
                 return Ok(None);
             };
-            values.push((phase, magnitude));
+            phases.push(value_phase);
+            magnitudes.push(value_magnitude);
         }
-        diagonal.push(values);
+        phase.push(SectorSpectrum {
+            sector: region.coupled(),
+            values: phases,
+        });
+        magnitude.push(SectorSpectrum {
+            sector: region.coupled(),
+            values: magnitudes,
+        });
     }
 
     let p_homspace = match direction {
@@ -156,7 +158,8 @@ where
         w_regions,
         p_regions,
         routes,
-        diagonal,
+        phase,
+        magnitude,
         w_space,
         p_space,
     }))
