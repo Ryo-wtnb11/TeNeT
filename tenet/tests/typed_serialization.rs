@@ -1932,3 +1932,51 @@ fn dual_compact_qr_lq_factor_roundtrip_preserves_space_and_storage() {
         assert_eq!(restored.to_bytes_with(&codec).unwrap(), bytes);
     }
 }
+
+#[test]
+fn dual_diagonal_full_svd_s_roundtrip_preserves_bond_and_storage() {
+    let runtime = runtime();
+    let provider = Arc::new(U1FusionRule);
+    let codec = U1Codec {
+        provider: Arc::clone(&provider),
+    };
+    let leg = GradedSpace::try_new(provider, [(U1Irrep::new(2), 3)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(-2),
+            values: vec![
+                Complex64::new(0.0, 0.0),
+                Complex64::new(3.0, 4.0),
+                Complex64::new(-2.0, 0.0),
+            ],
+        }],
+    )
+    .unwrap();
+    let factor = input.svd_full(&[0], &[1]).unwrap().s;
+    let bytes = factor.to_bytes_with(&codec).unwrap();
+    let restored = TensorMap::<U1FusionRule, Complex64>::from_bytes_with(
+        &runtime,
+        &bytes,
+        DecodeLimits::default(),
+        &codec,
+    )
+    .unwrap();
+    assert_eq!(restored.codomain(), factor.codomain());
+    assert_eq!(restored.domain(), factor.domain());
+    assert_ne!(restored.domain(), input.domain());
+    assert_eq!(
+        restored.diagview().unwrap()[0].values,
+        vec![
+            Complex64::new(5.0, 0.0),
+            Complex64::new(2.0, 0.0),
+            Complex64::new(0.0, 0.0)
+        ]
+    );
+    assert!(restored.dense_data().is_err());
+    assert_eq!(restored.to_bytes_with(&codec).unwrap(), bytes);
+}

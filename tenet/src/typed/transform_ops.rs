@@ -2037,12 +2037,13 @@ where
     /// Returns an [`Svd`] with `u : codomain <- W`, `s : W <- W'` and
     /// `vh : W' <- domain`.
     ///
-    /// `s` is dense here where [`Self::svd_compact`]'s is diagonal, and that is
-    /// TK-exact rather than a residual gap: TensorKit's own `svd_full` builds
-    /// `s` as a dense rectangular tensor
-    /// (`similar(t, real(scalartype(t)), V_cod <- V_dom)`). TensorKit's
-    /// diagonal-`S` `svd_full!` applies to diagonal *inputs*, which is a
-    /// different operation.
+    /// For admitted owned Host compact-diagonal inputs, `s` remains compact
+    /// on the existing nondual bond `W <- W`; `u` and `vh` are dense sorted
+    /// permutation/phase factors. This is TensorKit's diagonal full-SVD route.
+    /// Sorting costs `O(Σ_c k_c log k_c)` and dense factor writes cost
+    /// `O(Σ_c k_c²)`, without dense input materialization or a solver call.
+    /// Other inputs retain dense, possibly rectangular `s`. Use
+    /// [`Self::materialize`] when a dense singular-value buffer is required.
     ///
     /// # Errors
     ///
@@ -2051,6 +2052,21 @@ where
     where
         D: FactorizationScalar,
     {
+        if let TypedTensorRepr::Owned(body) = &self.repr {
+            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                // A diagonal input has square sectors, so compact and full
+                // factor spaces coincide, including their nondual bond W.
+                if let Some((u, vh, mut spectrum)) =
+                    tenet_matrixalgebra::svd_compact_diagonal_factors_dyn(&body.space, spectrum)?
+                {
+                    return Ok(Svd {
+                        u: self.wrap_bound_factor(u),
+                        s: self.diagonal_factor(&mut spectrum, D::from_real)?,
+                        vh: self.wrap_bound_factor(vh),
+                    });
+                }
+            }
+        }
         let mut dense = self.runtime.lease_dense();
         let out = match &self.repr {
             TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_full_adjoint_dyn(

@@ -1802,13 +1802,16 @@ where
     /// Returns the full SVD `self = u * s * vh` with square outer factors.
     ///
     /// In sector `c`, `u` is `m_c x m_c`, `vh` is `n_c x n_c`, and `s` is
-    /// the dense rectangular `m_c x n_c` diagonal matrix. The spaces are
+    /// the rectangular `m_c x n_c` diagonal matrix. The spaces are
     /// `u : codomain <- W_out`, `s : W_out <- W_in`, and
     /// `vh : W_in <- domain`. It accepts the same inputs as
-    /// [`Self::svd_compact`], including the operation-local densification of
-    /// a compact diagonal input, but its square outer factors can require more
-    /// dense storage. Checked factors use the source provider instance, and a
-    /// failure returns no factors.
+    /// [`Self::svd_compact`], but its square outer factors can require more
+    /// dense storage. Admitted owned Host multiplicity-free compact-diagonal
+    /// inputs keep `s` compact on `W_out = W_in`, with dense permutation/phase
+    /// `u` and `vh`, and require no dense input or solver. Other routes return
+    /// dense `s`. Call `s.materialize()` before `dense_data()` when needed.
+    /// Checked factors use the source provider instance; a failure returns no
+    /// factors.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing

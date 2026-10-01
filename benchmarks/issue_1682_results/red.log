@@ -1,0 +1,32 @@
+     Locking 496 packages to latest compatible versions
+      Adding syn v2.0.119 (available: v3.0.6)
+   Compiling tenet-sectors v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1682-compact-full-svd/tenet-sectors)
+   Compiling tenet-dense v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1682-compact-full-svd/tenet-dense)
+   Compiling tenet-core v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1682-compact-full-svd/tenet-core)
+   Compiling tenet-operations v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1682-compact-full-svd/tenet-operations)
+   Compiling tenet-tensors v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1682-compact-full-svd/tenet-tensors)
+   Compiling tenet-matrixalgebra v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1682-compact-full-svd/tenet-matrixalgebra)
+   Compiling tenet-rs v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1682-compact-full-svd/tenet)
+    Finished `test` profile [unoptimized] target(s) in 1m 01s
+     Running unittests src/lib.rs (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet/target/debug/deps/tenet-0eeb67372aaf2371)
+
+running 1 test
+test typed::representation_gates::compact_diagonal_svd_full_preserves_spaces_without_materialization_or_solver ... FAILED
+
+failures:
+
+---- typed::representation_gates::compact_diagonal_svd_full_preserves_spaces_without_materialization_or_solver stdout ----
+
+thread 'typed::representation_gates::compact_diagonal_svd_full_preserves_spaces_without_materialization_or_solver' (29153982) panicked at tenet/src/typed/representation_gates.rs:2563:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    typed::representation_gates::compact_diagonal_svd_full_preserves_spaces_without_materialization_or_solver
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 192 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `-p tenet-rs --lib`

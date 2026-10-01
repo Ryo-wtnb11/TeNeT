@@ -2539,48 +2539,270 @@ fn compact_diagonal_eigh_vals_widens_stored_single_precision_values() {
 }
 
 #[test]
-fn compact_diagonal_svd_uses_spectrum_without_dense_input() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new(
-        Arc::new(U1FusionRule),
-        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
-    )
-    .unwrap();
-    let source: TensorMap<_, f64> = TensorMap::diagonal(
+fn compact_diagonal_svd_full_preserves_spaces_without_materialization_or_solver() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(CountPolarKernels {
+            svd_calls: Arc::clone(&calls),
+            ..Default::default()
+        }))
+        .build()
+        .unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(2), 3)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
         &leg,
-        [
-            SectorSpectrum {
-                sector: U1Irrep::new(1),
-                values: vec![3.0, -2.0],
-            },
-            SectorSpectrum {
-                sector: U1Irrep::new(0),
-                values: vec![1.0, -4.0, 0.0],
-            },
-        ],
+        [SectorSpectrum {
+            sector: U1Irrep::new(-2),
+            values: vec![0.0, -4.0, 2.0],
+        }],
     )
     .unwrap();
-    let input = source.materialize().unwrap().dense_data().unwrap().to_vec();
+    let w = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(-2), 3)]).unwrap();
+    let dense = input.materialize().unwrap();
+    let old = dense.svd_full(&[0], &[1]).unwrap();
+    calls.store(0, std::sync::atomic::Ordering::Relaxed);
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let Svd { u, s, vh } = source.svd_compact(&[0], &[1]).unwrap();
+    let out = input.svd_full(&[0], &[1]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(out.u.codomain(), input.codomain());
+    assert_eq!(out.vh.domain(), input.domain());
+    assert_eq!(out.u.domain(), vec![w.clone()]);
+    assert_eq!(out.s.codomain(), vec![w.clone()]);
+    assert_eq!(out.s.domain(), vec![w.clone()]);
+    assert_eq!(out.vh.codomain(), vec![w]);
+    for (actual, expected) in [(&out.u, &old.u), (&out.s, &old.s), (&out.vh, &old.vh)] {
+        assert_eq!(actual.codomain(), expected.codomain());
+        assert_eq!(actual.domain(), expected.domain());
+    }
+    assert!(out.u.dense_data().is_ok());
+    assert!(out.vh.dense_data().is_ok());
+    assert!(out.s.dense_data().is_err());
+    assert_eq!(out.s.diagview().unwrap()[0].values, vec![4.0, 2.0, 0.0]);
     assert_eq!(
-        s.diagview()
+        out.s.diagonal_spectrum().unwrap().unwrap(),
+        out.s.diagview().unwrap()
+    );
+    assert_eq!(
+        out.s.materialize().unwrap().dense_data().unwrap(),
+        &[4.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0]
+    );
+}
+
+#[test]
+fn compact_diagonal_svd_full_sorted_hand_oracle_all_scalars() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 4)]).unwrap();
+    macro_rules! check {
+        ($ty:ty, $second:expr, $phase:expr, $tol:expr) => {{
+            let input: TensorMap<_, $ty> = TensorMap::diagonal(
+                &runtime,
+                &leg,
+                [SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: vec![
+                        <$ty as FactorScalar>::from_real(0.0),
+                        $second,
+                        <$ty as FactorScalar>::from_real(2.0),
+                        <$ty as FactorScalar>::from_real(-4.0),
+                    ],
+                }],
+            )
+            .unwrap();
+            let out = input.svd_full(&[0], &[1]).unwrap();
+            assert_eq!(
+                out.s.diagview().unwrap()[0].values,
+                [4.0, 2.0, 2.0, 0.0].map(<$ty as FactorScalar>::from_real)
+            );
+            // Hand order: magnitude 4, the two 2s in source order, then zero.
+            let permutation = [3, 1, 2, 0];
+            let phases = [
+                Complex64::new(-1.0, 0.0),
+                $phase,
+                Complex64::new(1.0, 0.0),
+                Complex64::new(1.0, 0.0),
+            ];
+            for col in 0..4 {
+                for row in 0..4 {
+                    let u = Complex64::new(if row == permutation[col] { 1.0 } else { 0.0 }, 0.0);
+                    let vh = if col == permutation[row] {
+                        phases[row]
+                    } else {
+                        Complex64::new(0.0, 0.0)
+                    };
+                    assert!(
+                        (out.u.dense_data().unwrap()[row + 4 * col].widen_complex() - u).norm()
+                            < $tol
+                    );
+                    assert!(
+                        (out.vh.dense_data().unwrap()[row + 4 * col].widen_complex() - vh).norm()
+                            < $tol
+                    );
+                }
+            }
+        }};
+    }
+    check!(f32, -2.0, Complex64::new(-1.0, 0.0), 1e-6);
+    check!(f64, -2.0, Complex64::new(-1.0, 0.0), 1e-12);
+    check!(
+        num_complex::Complex32,
+        num_complex::Complex32::new(0.0, -2.0),
+        Complex64::new(0.0, -1.0),
+        1e-6
+    );
+    check!(
+        Complex64,
+        Complex64::new(0.0, -2.0),
+        Complex64::new(0.0, -1.0),
+        1e-12
+    );
+}
+
+#[test]
+fn compact_diagonal_svd_full_subnormal_phase_and_nonfinite_fallback() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
+    macro_rules! check {
+        ($ty:ty, $value:expr, $phase:expr, $tol:expr, $bad:expr) => {{
+            let make = |value| {
+                TensorMap::<_, $ty>::diagonal(
+                    &runtime,
+                    &leg,
+                    [SectorSpectrum {
+                        sector: U1Irrep::new(0),
+                        values: vec![value],
+                    }],
+                )
+                .unwrap()
+            };
+            let input = make($value);
+            DIAGONAL_MATERIALIZATIONS.set(0);
+            let out = input.svd_full(&[0], &[1]).unwrap();
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert!(out.s.diagview().unwrap()[0].values[0].widen_complex().re > 0.0);
+            assert!(
+                (out.u.dense_data().unwrap()[0].widen_complex() - Complex64::new(1.0, 0.0)).norm()
+                    < $tol
+            );
+            assert!((out.vh.dense_data().unwrap()[0].widen_complex() - $phase).norm() < $tol);
+            assert_eq!(
+                out.u
+                    .compose(&out.s)
+                    .unwrap()
+                    .compose(&out.vh)
+                    .unwrap()
+                    .dense_data()
+                    .unwrap(),
+                &[$value]
+            );
+            for value in $bad {
+                let input = make(value);
+                let dense_result = input.materialize().unwrap().svd_full(&[0], &[1]);
+                DIAGONAL_MATERIALIZATIONS.set(0);
+                let result = input.svd_full(&[0], &[1]);
+                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+                match (result, dense_result) {
+                    (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
+                    (Ok(a), Ok(_)) => assert!(a.s.dense_data().is_ok()),
+                    _ => panic!("diagonal fallback changed dense acceptance"),
+                }
+            }
+        }};
+    }
+    check!(
+        f32,
+        -f32::from_bits(1),
+        Complex64::new(-1.0, 0.0),
+        1e-6,
+        [f32::NAN, f32::INFINITY]
+    );
+    check!(
+        f64,
+        -f64::from_bits(1),
+        Complex64::new(-1.0, 0.0),
+        1e-12,
+        [f64::NAN, f64::INFINITY]
+    );
+    let phase = Complex64::new(0.5_f64.sqrt(), 0.5_f64.sqrt());
+    check!(
+        num_complex::Complex32,
+        num_complex::Complex32::new(f32::from_bits(1), f32::from_bits(1)),
+        phase,
+        1e-6,
+        [
+            num_complex::Complex32::new(f32::NAN, 0.0),
+            num_complex::Complex32::new(f32::INFINITY, 0.0),
+            num_complex::Complex32::new(f32::MAX, f32::MAX)
+        ]
+    );
+    check!(
+        Complex64,
+        Complex64::new(f64::from_bits(1), f64::from_bits(1)),
+        phase,
+        1e-12,
+        [
+            Complex64::new(f64::NAN, 0.0),
+            Complex64::new(f64::INFINITY, 0.0),
+            Complex64::new(f64::MAX, f64::MAX)
+        ]
+    );
+}
+
+#[test]
+fn compact_diagonal_svd_uses_spectrum_without_dense_input() {
+    for full in [false, true] {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+        )
+        .unwrap();
+        let source: TensorMap<_, f64> = TensorMap::diagonal(
+            &runtime,
+            &leg,
+            [
+                SectorSpectrum {
+                    sector: U1Irrep::new(1),
+                    values: vec![3.0, -2.0],
+                },
+                SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: vec![1.0, -4.0, 0.0],
+                },
+            ],
+        )
+        .unwrap();
+        let input = source.materialize().unwrap().dense_data().unwrap().to_vec();
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        let Svd { u, s, vh } = (if full {
+            source.svd_full(&[0], &[1])
+        } else {
+            source.svd_compact(&[0], &[1])
+        })
+        .unwrap();
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(
+            s.diagview()
+                .unwrap()
+                .iter()
+                .map(|e| e.values.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![4.0, 1.0, 0.0], vec![3.0, 2.0]]
+        );
+        let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+        assert!(rebuilt
+            .dense_data()
             .unwrap()
             .iter()
-            .map(|e| e.values.clone())
-            .collect::<Vec<_>>(),
-        vec![vec![4.0, 1.0, 0.0], vec![3.0, 2.0]]
-    );
-    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
-    assert!(rebuilt
-        .dense_data()
-        .unwrap()
-        .iter()
-        .zip(input)
-        .all(|(a, b)| (a - b).abs() < 1e-12));
-    assert_eq!(source.diagview().unwrap()[0].values, vec![1.0, -4.0, 0.0]);
+            .zip(input)
+            .all(|(a, b)| (a - b).abs() < 1e-12));
+        assert_eq!(source.diagview().unwrap()[0].values, vec![1.0, -4.0, 0.0]);
+    }
 }
 
 #[test]
@@ -2714,245 +2936,281 @@ fn compact_diagonal_svd_vals_retains_dense_rejection_edges() {
 
 #[test]
 fn compact_diagonal_svd_complex_permutation_and_phase() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new(
-        Arc::new(U1FusionRule),
-        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
-    )
-    .unwrap();
-    let z = Complex64::new;
-    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
-        &runtime,
-        &leg,
-        [
-            SectorSpectrum {
-                sector: U1Irrep::new(1),
-                values: vec![z(-2.0, 0.0), z(4.0, 0.0)],
-            },
-            SectorSpectrum {
-                sector: U1Irrep::new(0),
-                values: vec![z(0.0, 0.0), z(0.0, -3.0), z(1.0, 1.0)],
-            },
-        ],
-    )
-    .unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
-    let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    let root2 = 2.0_f64.sqrt();
-    assert_eq!(u.dense_data().unwrap().len(), 13);
-    assert_eq!(vh.dense_data().unwrap().len(), 13);
-    for (actual, expected) in u.dense_data().unwrap().iter().zip([
-        z(0.0, 0.0),
-        z(1.0, 0.0),
-        z(0.0, 0.0),
-        z(0.0, 0.0),
-        z(0.0, 0.0),
-        z(1.0, 0.0),
-        z(1.0, 0.0),
-        z(0.0, 0.0),
-        z(0.0, 0.0),
-        z(0.0, 0.0),
-        z(1.0, 0.0),
-        z(1.0, 0.0),
-        z(0.0, 0.0),
-    ]) {
-        assert!((*actual - expected).norm() < 1e-12);
-    }
-    for (actual, expected) in vh.dense_data().unwrap().iter().zip([
-        z(0.0, 0.0),
-        z(0.0, 0.0),
-        z(1.0, 0.0),
-        z(0.0, -1.0),
-        z(0.0, 0.0),
-        z(0.0, 0.0),
-        z(0.0, 0.0),
-        z(1.0 / root2, 1.0 / root2),
-        z(0.0, 0.0),
-        z(0.0, 0.0),
-        z(-1.0, 0.0),
-        z(1.0, 0.0),
-        z(0.0, 0.0),
-    ]) {
-        assert!((*actual - expected).norm() < 1e-12);
-    }
-    assert_eq!(
-        s.diagview()
+    for full in [false, true] {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+        )
+        .unwrap();
+        let z = Complex64::new;
+        let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+            &runtime,
+            &leg,
+            [
+                SectorSpectrum {
+                    sector: U1Irrep::new(1),
+                    values: vec![z(-2.0, 0.0), z(4.0, 0.0)],
+                },
+                SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: vec![z(0.0, 0.0), z(0.0, -3.0), z(1.0, 1.0)],
+                },
+            ],
+        )
+        .unwrap();
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        let Svd { u, s, vh } = (if full {
+            input.svd_full(&[0], &[1])
+        } else {
+            input.svd_compact(&[0], &[1])
+        })
+        .unwrap();
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        let root2 = 2.0_f64.sqrt();
+        assert_eq!(u.dense_data().unwrap().len(), 13);
+        assert_eq!(vh.dense_data().unwrap().len(), 13);
+        for (actual, expected) in u.dense_data().unwrap().iter().zip([
+            z(0.0, 0.0),
+            z(1.0, 0.0),
+            z(0.0, 0.0),
+            z(0.0, 0.0),
+            z(0.0, 0.0),
+            z(1.0, 0.0),
+            z(1.0, 0.0),
+            z(0.0, 0.0),
+            z(0.0, 0.0),
+            z(0.0, 0.0),
+            z(1.0, 0.0),
+            z(1.0, 0.0),
+            z(0.0, 0.0),
+        ]) {
+            assert!((*actual - expected).norm() < 1e-12);
+        }
+        for (actual, expected) in vh.dense_data().unwrap().iter().zip([
+            z(0.0, 0.0),
+            z(0.0, 0.0),
+            z(1.0, 0.0),
+            z(0.0, -1.0),
+            z(0.0, 0.0),
+            z(0.0, 0.0),
+            z(0.0, 0.0),
+            z(1.0 / root2, 1.0 / root2),
+            z(0.0, 0.0),
+            z(0.0, 0.0),
+            z(-1.0, 0.0),
+            z(1.0, 0.0),
+            z(0.0, 0.0),
+        ]) {
+            assert!((*actual - expected).norm() < 1e-12);
+        }
+        assert_eq!(
+            s.diagview()
+                .unwrap()
+                .iter()
+                .map(|e| e.values.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                vec![z(3.0, 0.0), z(root2, 0.0), z(0.0, 0.0)],
+                vec![z(4.0, 0.0), z(2.0, 0.0)]
+            ]
+        );
+        let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+        assert!(rebuilt
+            .dense_data()
             .unwrap()
             .iter()
-            .map(|e| e.values.clone())
-            .collect::<Vec<_>>(),
-        vec![
-            vec![z(3.0, 0.0), z(root2, 0.0), z(0.0, 0.0)],
-            vec![z(4.0, 0.0), z(2.0, 0.0)]
-        ]
-    );
-    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
-    assert!(rebuilt
-        .dense_data()
-        .unwrap()
-        .iter()
-        .zip(input.materialize().unwrap().dense_data().unwrap())
-        .all(|(a, b)| (*a - *b).norm() < 1e-12));
+            .zip(input.materialize().unwrap().dense_data().unwrap())
+            .all(|(a, b)| (*a - *b).norm() < 1e-12));
+    }
 }
 
 #[test]
 fn compact_diagonal_svd_other_host_scalars_and_sectors() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    macro_rules! check {
-        ($rule:expr, $legs:expr, $spectra:expr, $dtype:ty, $tol:expr) => {{
-            let leg = GradedSpace::try_new(Arc::new($rule), $legs).unwrap();
-            let input: TensorMap<_, $dtype> =
-                TensorMap::diagonal(&runtime, &leg, $spectra).unwrap();
-            let before = input.materialize().unwrap().dense_data().unwrap().to_vec();
-            let saved = input.diagview().unwrap();
-            let dense_values = input.materialize().unwrap().svd_vals(&[0], &[1]).unwrap();
-            DIAGONAL_MATERIALIZATIONS.set(0);
-            let compact_values = input.svd_vals(&[0], &[1]).unwrap();
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-            assert_eq!(compact_values.len(), dense_values.len());
-            for (actual, expected) in compact_values.iter().zip(&dense_values) {
-                assert_eq!(actual.sector, expected.sector);
-                assert_eq!(actual.values.len(), expected.values.len());
-                for (&a, &b) in actual.values.iter().zip(&expected.values) {
-                    assert!((a - b).abs() <= $tol * b.max(1.0));
+    for full in [false, true] {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        macro_rules! check {
+            ($rule:expr, $legs:expr, $spectra:expr, $dtype:ty, $tol:expr) => {{
+                let leg = GradedSpace::try_new(Arc::new($rule), $legs).unwrap();
+                let input: TensorMap<_, $dtype> =
+                    TensorMap::diagonal(&runtime, &leg, $spectra).unwrap();
+                let before = input.materialize().unwrap().dense_data().unwrap().to_vec();
+                let saved = input.diagview().unwrap();
+                let dense_values = input.materialize().unwrap().svd_vals(&[0], &[1]).unwrap();
+                DIAGONAL_MATERIALIZATIONS.set(0);
+                let compact_values = input.svd_vals(&[0], &[1]).unwrap();
+                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+                assert_eq!(compact_values.len(), dense_values.len());
+                for (actual, expected) in compact_values.iter().zip(&dense_values) {
+                    assert_eq!(actual.sector, expected.sector);
+                    assert_eq!(actual.values.len(), expected.values.len());
+                    for (&a, &b) in actual.values.iter().zip(&expected.values) {
+                        assert!((a - b).abs() <= $tol * b.max(1.0));
+                    }
                 }
-            }
-            DIAGONAL_MATERIALIZATIONS.set(0);
-            let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-            let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
-            assert!(rebuilt
-                .dense_data()
-                .unwrap()
-                .iter()
-                .zip(before)
-                .all(|(a, b)| FactorScalar::widen_complex(*a - b).norm() <= $tol));
-            assert_eq!(input.diagview().unwrap(), saved);
-        }};
+                DIAGONAL_MATERIALIZATIONS.set(0);
+                let Svd { u, s, vh } = (if full {
+                    input.svd_full(&[0], &[1])
+                } else {
+                    input.svd_compact(&[0], &[1])
+                })
+                .unwrap();
+                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+                let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+                assert!(rebuilt
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .zip(before)
+                    .all(|(a, b)| FactorScalar::widen_complex(*a - b).norm() <= $tol));
+                assert_eq!(input.diagview().unwrap(), saved);
+            }};
+        }
+        check!(
+            U1FusionRule,
+            [(U1Irrep::new(0), 3)],
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![-0.0_f32, -3.0, 1.0]
+            }],
+            f32,
+            1e-5
+        );
+        check!(
+            U1FusionRule,
+            [(U1Irrep::new(0), 2)],
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![
+                    num_complex::Complex32::new(1.0, 2.0),
+                    num_complex::Complex32::new(-3.0, 1.0)
+                ]
+            }],
+            num_complex::Complex32,
+            1e-5
+        );
+        let spin0 = SU2Irrep::from_twice_spin(0);
+        let spin_half = SU2Irrep::from_twice_spin(1);
+        check!(
+            SU2FusionRule,
+            [(spin0, 2), (spin_half, 1)],
+            [
+                SectorSpectrum {
+                    sector: spin_half,
+                    values: vec![-4.0_f64]
+                },
+                SectorSpectrum {
+                    sector: spin0,
+                    values: vec![2.0, -3.0]
+                },
+            ],
+            f64,
+            1e-12
+        );
+        let even = product_sector(U1Irrep::new(0), Z2Irrep::EVEN);
+        let odd = product_sector(U1Irrep::new(1), Z2Irrep::ODD);
+        check!(
+            U1FusionRule.product(FermionParityFusionRule),
+            [(even, 2), (odd, 1)],
+            [
+                SectorSpectrum {
+                    sector: odd,
+                    values: vec![-4.0_f64]
+                },
+                SectorSpectrum {
+                    sector: even,
+                    values: vec![2.0, -3.0]
+                },
+            ],
+            f64,
+            1e-12
+        );
+        check!(
+            U1FusionRule,
+            [(U1Irrep::new(0), 0), (U1Irrep::new(1), 2)],
+            [SectorSpectrum {
+                sector: U1Irrep::new(1),
+                values: vec![2.0_f64, -3.0]
+            }],
+            f64,
+            1e-12
+        );
+        let empty = GradedSpace::try_new(Arc::new(U1FusionRule), []).unwrap();
+        let input: TensorMap<_, f64> =
+            TensorMap::diagonal(&runtime, &empty, Vec::<SectorSpectrum<_, f64>>::new()).unwrap();
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        assert!(input.svd_vals(&[0], &[1]).unwrap().is_empty());
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        let Svd { u, s, vh } = (if full {
+            input.svd_full(&[0], &[1])
+        } else {
+            input.svd_compact(&[0], &[1])
+        })
+        .unwrap();
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(
+            u.dense_data().unwrap().len() + vh.dense_data().unwrap().len(),
+            0
+        );
+        assert!(s.diagview().unwrap().is_empty());
     }
-    check!(
-        U1FusionRule,
-        [(U1Irrep::new(0), 3)],
-        [SectorSpectrum {
-            sector: U1Irrep::new(0),
-            values: vec![-0.0_f32, -3.0, 1.0]
-        }],
-        f32,
-        1e-5
-    );
-    check!(
-        U1FusionRule,
-        [(U1Irrep::new(0), 2)],
-        [SectorSpectrum {
-            sector: U1Irrep::new(0),
-            values: vec![
-                num_complex::Complex32::new(1.0, 2.0),
-                num_complex::Complex32::new(-3.0, 1.0)
-            ]
-        }],
-        num_complex::Complex32,
-        1e-5
-    );
-    let spin0 = SU2Irrep::from_twice_spin(0);
-    let spin_half = SU2Irrep::from_twice_spin(1);
-    check!(
-        SU2FusionRule,
-        [(spin0, 2), (spin_half, 1)],
-        [
-            SectorSpectrum {
-                sector: spin_half,
-                values: vec![-4.0_f64]
-            },
-            SectorSpectrum {
-                sector: spin0,
-                values: vec![2.0, -3.0]
-            },
-        ],
-        f64,
-        1e-12
-    );
-    let even = product_sector(U1Irrep::new(0), Z2Irrep::EVEN);
-    let odd = product_sector(U1Irrep::new(1), Z2Irrep::ODD);
-    check!(
-        U1FusionRule.product(FermionParityFusionRule),
-        [(even, 2), (odd, 1)],
-        [
-            SectorSpectrum {
-                sector: odd,
-                values: vec![-4.0_f64]
-            },
-            SectorSpectrum {
-                sector: even,
-                values: vec![2.0, -3.0]
-            },
-        ],
-        f64,
-        1e-12
-    );
-    check!(
-        U1FusionRule,
-        [(U1Irrep::new(0), 0), (U1Irrep::new(1), 2)],
-        [SectorSpectrum {
-            sector: U1Irrep::new(1),
-            values: vec![2.0_f64, -3.0]
-        }],
-        f64,
-        1e-12
-    );
-    let empty = GradedSpace::try_new(Arc::new(U1FusionRule), []).unwrap();
-    let input: TensorMap<_, f64> =
-        TensorMap::diagonal(&runtime, &empty, Vec::<SectorSpectrum<_, f64>>::new()).unwrap();
-    DIAGONAL_MATERIALIZATIONS.set(0);
-    assert!(input.svd_vals(&[0], &[1]).unwrap().is_empty());
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(
-        u.dense_data().unwrap().len() + vh.dense_data().unwrap().len(),
-        0
-    );
-    assert!(s.diagview().unwrap().is_empty());
 }
 
 #[test]
 fn compact_diagonal_svd_preserves_dense_failure_at_c32_range_edge() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
-    let large = f32::MAX * 0.75;
-    let input: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
-        &runtime,
-        &leg,
-        [SectorSpectrum {
-            sector: U1Irrep::new(0),
-            values: vec![num_complex::Complex32::new(large, large)],
-        }],
-    )
-    .unwrap();
-    let dense_result = input.materialize().unwrap().svd_compact(&[0], &[1]);
-    let compact_result = input.svd_compact(&[0], &[1]);
-    assert_eq!(compact_result.is_err(), dense_result.is_err());
+    for full in [false, true] {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
+        let large = f32::MAX * 0.75;
+        let input: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
+            &runtime,
+            &leg,
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![num_complex::Complex32::new(large, large)],
+            }],
+        )
+        .unwrap();
+        let dense_result = (if full {
+            input.materialize().unwrap().svd_full(&[0], &[1])
+        } else {
+            input.materialize().unwrap().svd_compact(&[0], &[1])
+        });
+        let compact_result = (if full {
+            input.svd_full(&[0], &[1])
+        } else {
+            input.svd_compact(&[0], &[1])
+        });
+        assert_eq!(compact_result.is_err(), dense_result.is_err());
+    }
 }
 
 #[test]
 fn compact_diagonal_svd_subnormal_complex_phase_is_unit() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
-    let tiny = f64::from_bits(1);
-    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
-        &runtime,
-        &leg,
-        [SectorSpectrum {
-            sector: U1Irrep::new(0),
-            values: vec![Complex64::new(tiny, tiny)],
-        }],
-    )
-    .unwrap();
-    let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
-    assert!((vh.dense_data().unwrap()[0].norm() - 1.0).abs() < 1e-12);
-    assert!((u.dense_data().unwrap()[0].norm() - 1.0).abs() < 1e-12);
-    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
-    assert_eq!(rebuilt.dense_data().unwrap()[0], Complex64::new(tiny, tiny));
+    for full in [false, true] {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
+        let tiny = f64::from_bits(1);
+        let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+            &runtime,
+            &leg,
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![Complex64::new(tiny, tiny)],
+            }],
+        )
+        .unwrap();
+        let Svd { u, s, vh } = (if full {
+            input.svd_full(&[0], &[1])
+        } else {
+            input.svd_compact(&[0], &[1])
+        })
+        .unwrap();
+        assert!((vh.dense_data().unwrap()[0].norm() - 1.0).abs() < 1e-12);
+        assert!((u.dense_data().unwrap()[0].norm() - 1.0).abs() < 1e-12);
+        let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+        assert_eq!(rebuilt.dense_data().unwrap()[0], Complex64::new(tiny, tiny));
+    }
 }
 
 struct NonCloneHost(Vec<f64>);
