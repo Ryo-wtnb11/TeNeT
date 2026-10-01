@@ -98,6 +98,15 @@ impl CudaRegion {
         self.offset
     }
 
+    /// Heap storage retained by this descriptor, excluding the inline value.
+    #[doc(hidden)]
+    pub fn retained_heap_bytes(&self) -> usize {
+        self.dims
+            .capacity()
+            .saturating_add(self.strides.capacity())
+            .saturating_mul(std::mem::size_of::<usize>())
+    }
+
     /// Whether the region addresses no element at all. Checked before the
     /// element count, so a zero extent is a no-op even when the remaining
     /// extents would overflow — the host rule (`shape.contains(&0)`) exactly.
@@ -394,6 +403,20 @@ mod tests {
         assert_eq!(dims, vec![2, 3, 1]);
         assert_eq!(strides, vec![3, 1, 1]);
         assert_eq!(region.offset_isize().unwrap(), 5);
+    }
+
+    #[test]
+    fn retained_heap_bytes_uses_vector_capacity() {
+        let mut dims = Vec::with_capacity(7);
+        dims.extend([2, 3]);
+        let mut strides = Vec::with_capacity(9);
+        strides.extend([1, 2]);
+        let expected = dims
+            .capacity()
+            .saturating_add(strides.capacity())
+            .saturating_mul(std::mem::size_of::<usize>());
+        let region = CudaRegion::new(dims, strides, 0).unwrap();
+        assert_eq!(region.retained_heap_bytes(), expected);
     }
 
     #[test]

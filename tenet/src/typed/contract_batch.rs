@@ -20,7 +20,7 @@ impl<D: CudaPayload> ContractBatchStorage<D> for CudaStorage<D> {}
 /// This binding admits owned-source transformed-tree routes, fully direct
 /// Core/SwappedCore routes with exact +1/-1 coefficients, and CopyC when its
 /// temporary is a unit-alpha direct core followed by one output transform.
-/// CUDA also admits CopyC when every output move is an unconjugated exact-unit
+/// CUDA also admits CopyC when every output move is an unconjugated nonzero
 /// Single task. Direct
 /// composition is served by [`ComposePlan`]. The plan fixes structure and
 /// axes, but not member count.
@@ -61,7 +61,7 @@ where
     S: ContractBatchStorage<D>,
 {
     /// Fixes an ordinary contraction without reading operand payloads.
-    /// CUDA admits exact-sign direct Core/SwappedCore and exact-unit Single CopyC routes.
+    /// CUDA admits exact-sign direct Core/SwappedCore and nonzero Single CopyC routes.
     pub fn new(
         lhs: &StackedTensorMap<R, D, S>,
         rhs: &StackedTensorMap<R, D, S>,
@@ -171,9 +171,7 @@ where
         #[cfg(feature = "cuda")]
         if matches!(placement, Placement::Cuda(_)) {
             if let Some(copy) = &copy_c {
-                tenet_operations::cuda_transform::CudaUnitSingleMemberRegions::admit(
-                    &copy.transform,
-                )?;
+                tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(&copy.transform)?;
             }
         }
         let member_len = space.space().required_len()?;
@@ -455,6 +453,13 @@ impl<R, D: CudaPayload> ContractWorkspace<R, D, CudaStorage<D>> {
                 .map_or(0, |regions| regions.retained_bytes())
             + self
                 .device
+                .copy_coefficients
+                .as_ref()
+                .map_or(0, |coefficients| {
+                    coefficients.len() * std::mem::size_of::<D>()
+                })
+            + self
+                .device
                 .zero_regions
                 .iter()
                 .map(|region| 2 * region.dims().len() * std::mem::size_of::<usize>())
@@ -495,7 +500,7 @@ where
             .collect::<std::collections::HashSet<_>>()
             .len();
         let copy_fills = self.copy_c.as_ref().map_or(Ok(0), |copy| {
-            tenet_operations::cuda_transform::CudaUnitSingleMemberRegions::admit(&copy.transform)
+            tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(&copy.transform)
         })?;
         workspace.device.reserved_plan_entries = self
             .runtime
@@ -579,7 +584,7 @@ where
             return Ok(());
         }
         let temporary_len = copy.temporary_space.space().required_len()?;
-        let regions = tenet_operations::cuda_transform::CudaUnitSingleMemberRegions::prepare(
+        let regions = tenet_operations::cuda_transform::CudaSingleMemberRegions::prepare(
             &copy.transform,
             self.space.space().structure(),
             copy.temporary_space.space().structure(),
@@ -596,6 +601,10 @@ where
         if !regions.zeros().is_empty() {
             ctx.reserve_ones_template::<D>(1)
                 .map_err(tenet_operations::OperationError::Dense)?;
+        }
+        if regions.has_scaled_moves() && workspace.device.copy_coefficients.is_none() {
+            workspace.device.copy_coefficients =
+                Some(CudaStorage::<D>::upload_owned(ctx, regions.scaled_coefficients::<D>())?.0);
         }
         workspace.device.copy_regions = Some(regions);
         Ok(())
@@ -686,7 +695,12 @@ where
                 let regions = workspace.device.copy_regions.as_ref().ok_or_else(|| {
                     Error::InvalidArgument("CopyC device regions are unprepared".into())
                 })?;
-                regions.execute_overwrite(ctx, &value.storage, dst)?;
+                regions.execute_overwrite(
+                    ctx,
+                    &value.storage,
+                    workspace.device.copy_coefficients.as_ref(),
+                    dst,
+                )?;
                 Ok(())
             })();
             workspace.copy_c_temporary = Some(value);
