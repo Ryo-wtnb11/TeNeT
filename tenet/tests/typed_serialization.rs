@@ -1918,7 +1918,13 @@ fn dual_compact_qr_lq_factor_roundtrip_preserves_space_and_storage() {
     for factor in [qr.q, qr.r, lq.l, lq.q] {
         let bytes = factor.to_bytes_with(&codec).unwrap();
         let restored: TensorMap<_, Complex64> =
-            TensorMap::from_bytes_with(&runtime, &bytes, DecodeLimits::default(), &codec).unwrap();
+            TensorMap::<U1FusionRule, Complex64>::from_bytes_with(
+                &runtime,
+                &bytes,
+                DecodeLimits::default(),
+                &codec,
+            )
+            .unwrap();
         assert_eq!(restored.codomain(), input.codomain());
         assert_eq!(restored.domain(), input.domain());
         assert_eq!(restored.diagview().unwrap(), factor.diagview().unwrap());

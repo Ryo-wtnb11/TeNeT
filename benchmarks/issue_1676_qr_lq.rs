@@ -6,7 +6,10 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::Instant;
-use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::sector::{
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
+};
 use tenet::typed::{GradedSpace, LinalgBackend, Runtime, SectorSpectrum, TensorMap};
 
 struct Allocator;
@@ -69,19 +72,19 @@ fn main() {
         .build()
         .unwrap();
     println!(
-        "dtype,sectors,k,dual,storage,operation,setup_ns,cold_ns,median_ns,alloc_calls,alloc_bytes"
+        "family,dtype,sectors,k,dual,storage,operation,setup_ns,first_ns,median_ns,alloc_calls,alloc_bytes"
     );
-    macro_rules! run {
-        ($dtype:ty, $name:literal, $value:expr) => {
+    macro_rules! family {
+        ($dtype:ty, $name:literal, $value:expr, $family:literal, $rule:expr, $sector:expr) => {
             for (sectors, k, dual) in [(1, 8, false), (4, 8, true), (1, 64, false), (4, 64, true)] {
                 for storage in ["diagonal", "dense"] {
                     let setup = Instant::now();
-                    let mut leg = GradedSpace::try_new(Arc::new(U1FusionRule),
-                        (0..sectors).map(|c| (U1Irrep::new(c), k))).unwrap();
+                    let mut leg = GradedSpace::try_new(Arc::new($rule),
+                        (0..sectors).map(|c| (($sector)(c, false), k))).unwrap();
                     if dual { leg = leg.try_dual().unwrap(); }
                     let mut input: TensorMap<_, $dtype> = TensorMap::diagonal(&runtime, &leg,
                         (0..sectors).map(|c| SectorSpectrum {
-                            sector: U1Irrep::new(if dual { -c } else { c }),
+                            sector: ($sector)(c, dual),
                             values: (0..k).map($value).collect(),
                         })).unwrap();
                     if storage == "dense" { input = input.materialize().unwrap(); }
@@ -95,11 +98,41 @@ fn main() {
                                 _ => { black_box(input.lq_full(&[0], &[1]).unwrap()); },
                             }
                         });
-                        println!("{},{sectors},{k},{dual},{storage},{op},{setup_ns},{cold},{median},{calls},{bytes}", $name);
+                        println!("{},{},{sectors},{k},{dual},{storage},{op},{setup_ns},{cold},{median},{calls},{bytes}", $family, $name);
                     }
                 }
             }
         }
+    }
+    macro_rules! run {
+        ($dtype:ty, $name:literal, $value:expr) => {
+            family!($dtype, $name, $value, "U1", U1FusionRule, |c: i32, dual| {
+                U1Irrep::new(if dual { -c } else { c })
+            });
+            family!(
+                $dtype,
+                $name,
+                $value,
+                "SU2",
+                SU2FusionRule,
+                |c: i32, _dual| SU2Irrep::from_twice_spin(c as usize)
+            );
+            family!(
+                $dtype,
+                $name,
+                $value,
+                "U1xF",
+                U1FusionRule.product(FermionParityFusionRule),
+                |c: i32, dual| product_sector(
+                    U1Irrep::new(if dual { -c } else { c }),
+                    if c % 2 == 0 {
+                        Z2Irrep::EVEN
+                    } else {
+                        Z2Irrep::ODD
+                    }
+                )
+            );
+        };
     }
     run!(f32, "f32", |i| if i % 3 == 0 {
         0.0
