@@ -942,6 +942,32 @@ fn full_svd_adjoint_builds_only_the_final_factor_buffers() {
     assert_eq!(output.vh().space().space().required_len().unwrap(), 4);
 }
 
+#[test]
+fn full_svd_adjoint_completion_reconstructs_rectangular_input() {
+    let tensor = one_sector_rectangular_matrix(vec![1.0, 2.0, 3.0, 4.0, 5.0, 7.0], 2, 3);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let mut dense = SvdCallSpy::default();
+    let output = svd_full_adjoint_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    assert_eq!(dense.svd_calls, 1);
+    let u = output.u().data();
+    let s = output.s().data();
+    let vh = output.vh().data();
+    for col in 0..2 {
+        for row in 0..3 {
+            let reconstructed = (0..3)
+                .map(|middle| {
+                    (0..2)
+                        .map(|inner| {
+                            u[row + 3 * middle] * s[middle + 3 * inner] * vh[inner + 2 * col]
+                        })
+                        .sum::<f64>()
+                })
+                .sum::<f64>();
+            assert!((reconstructed - tensor.data()[col + 2 * row]).abs() < 1e-10);
+        }
+    }
+}
+
 fn f64_svd_outputs(rows: usize, cols: usize) -> Vec<DenseTensor> {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let data = vec![1.0; rows * cols];
@@ -1081,7 +1107,14 @@ fn assert_rectangular_direct_svd(rows: usize, cols: usize) {
         }
     }
 
+    crate::factorize::reset_compact_svd_copy_probe();
     let adjoint = svd_compact_adjoint_factors_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let adjoint_probe = crate::factorize::compact_svd_copy_probe();
+    assert_eq!(adjoint_probe.input_pack_calls, 0);
+    assert_eq!(adjoint_probe.output_scatter_calls, 0);
+    if rank != 0 {
+        assert_eq!(adjoint_probe.owned_output_owner_reused, 2);
+    }
     let adjoint_singular = adjoint
         .2
         .first()
