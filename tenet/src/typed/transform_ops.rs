@@ -2426,8 +2426,7 @@ where
     /// # Complexity
     ///
     /// Dense input costs `O(Σ_c n_c³)` sectorwise. An admitted owned compact
-    /// diagonal uses `O(Σ_c n_c²)` dense factor writes and no dense SVD,
-    /// matching TensorKit's diagonal polar specialization.
+    /// diagonal uses `O(Σ_c n_c)` compact factor values and no dense SVD.
     pub(super) fn left_polar_multiplicity_free(&self) -> Result<LeftPolar<Self>, Error>
     where
         D: FactorizationScalar,
@@ -2435,11 +2434,11 @@ where
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                 if let Some(LeftPolar { w, p }) =
-                    tenet_matrixalgebra::left_polar_diagonal_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::left_polar_diagonal_spectra_dyn(&body.space, spectrum)?
                 {
                     return Ok(LeftPolar {
-                        w: self.wrap_bound_factor(w),
-                        p: self.wrap_bound_factor(p),
+                        w: self.with_spectrum(w),
+                        p: self.with_spectrum(p),
                     });
                 }
             }
@@ -2492,8 +2491,8 @@ where
     ///
     /// # Complexity
     ///
-    /// As [`Self::left_polar`], with direct dense factor writes for an
-    /// admitted owned compact diagonal.
+    /// As [`Self::left_polar`], with compact factor values for an admitted
+    /// owned compact diagonal.
     pub(super) fn right_polar_multiplicity_free(&self) -> Result<RightPolar<Self>, Error>
     where
         D: FactorizationScalar,
@@ -2501,11 +2500,11 @@ where
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                 if let Some(RightPolar { p, wh }) =
-                    tenet_matrixalgebra::right_polar_diagonal_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::right_polar_diagonal_spectra_dyn(&body.space, spectrum)?
                 {
                     return Ok(RightPolar {
-                        p: self.wrap_bound_factor(p),
-                        wh: self.wrap_bound_factor(wh),
+                        p: self.with_spectrum(p),
+                        wh: self.with_spectrum(wh),
                     });
                 }
             }
@@ -4127,8 +4126,8 @@ where
     /// is wide. [`Self::right_polar`] handles wide blocks.
     ///
     /// Dense-input cost is `O(sum_c m_c * n_c * min(m_c, n_c))` plus sectorwise
-    /// composition. An admitted owned compact diagonal writes dense factors
-    /// directly. A lazy
+    /// composition. An admitted owned compact diagonal stores both factors
+    /// compactly; use [`Self::materialize`] for dense buffers. A lazy
     /// adjoint runs the opposite decomposition on its owned parent and returns
     /// detached owned factors without materializing the receiver. Checked factors
     /// use the same provider instance as `self`. If that provider rejects an

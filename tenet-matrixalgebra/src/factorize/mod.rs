@@ -102,9 +102,10 @@ pub use null_space::{
 };
 pub use polar::{
     left_polar, left_polar_adjoint_parent_dyn, left_polar_adjoint_parent_dyn_checked_generic,
-    left_polar_diagonal_dyn, left_polar_dyn, left_polar_dyn_checked_generic, right_polar,
-    right_polar_adjoint_parent_dyn, right_polar_adjoint_parent_dyn_checked_generic,
-    right_polar_diagonal_dyn, right_polar_dyn, right_polar_dyn_checked_generic,
+    left_polar_diagonal_dyn, left_polar_diagonal_spectra_dyn, left_polar_dyn,
+    left_polar_dyn_checked_generic, right_polar, right_polar_adjoint_parent_dyn,
+    right_polar_adjoint_parent_dyn_checked_generic, right_polar_diagonal_dyn,
+    right_polar_diagonal_spectra_dyn, right_polar_dyn, right_polar_dyn_checked_generic,
 };
 use qr_lq::diagonal_phase_magnitude;
 pub use qr_lq::{

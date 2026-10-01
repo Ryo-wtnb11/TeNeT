@@ -1,10 +1,68 @@
 use super::*;
 
-fn polar_diagonal_dyn<R, D>(
+struct PolarDiagonalAdmission<R, D> {
+    source_regions: Arc<[CoupledSectorRegion]>,
+    w_regions: Arc<[CoupledSectorRegion]>,
+    p_regions: Arc<[CoupledSectorRegion]>,
+    routes: Vec<PolarRegionRoute>,
+    diagonal: Vec<Vec<(D, D)>>,
+    w_space: BoundDynamicFusionMapSpace<R>,
+    p_space: BoundDynamicFusionMapSpace<R>,
+}
+
+impl<R, D: FactorScalar> PolarDiagonalAdmission<R, D> {
+    fn spectra(self) -> (Vec<SectorSpectrum<D>>, Vec<SectorSpectrum<D>>) {
+        let mut phase = Vec::with_capacity(self.routes.len());
+        let mut magnitude = Vec::with_capacity(self.routes.len());
+        for route in self.routes {
+            let sector = self.source_regions[route.source].coupled();
+            let (phases, magnitudes) = self.diagonal[route.source].iter().copied().unzip();
+            phase.push(SectorSpectrum {
+                sector,
+                values: phases,
+            });
+            magnitude.push(SectorSpectrum {
+                sector,
+                values: magnitudes,
+            });
+        }
+        (phase, magnitude)
+    }
+
+    fn dense(self) -> Result<DynamicFactorPair<R, D>, OperationError> {
+        let source = self.w_space.space();
+        let (nout, nin) = (source.nout(), source.nin());
+        let w_len = source
+            .required_len()
+            .map_err(OperationError::from_core_preserving_context)?;
+        let p_len = self
+            .p_space
+            .space()
+            .required_len()
+            .map_err(OperationError::from_core_preserving_context)?;
+        let mut w_data = vec![D::zero(); w_len];
+        let mut p_data = vec![D::zero(); p_len];
+        for route in self.routes {
+            let n = self.source_regions[route.source].rows();
+            let w_start = self.w_regions[route.w].range().start;
+            let p_start = self.p_regions[route.p].range().start;
+            for (index, &(phase, magnitude)) in self.diagonal[route.source].iter().enumerate() {
+                w_data[w_start + index * (n + 1)] = phase;
+                p_data[p_start + index * (n + 1)] = magnitude;
+            }
+        }
+        let w = BoundDynFactor::from_bound(self.w_space, w_data, nout, nin)?;
+        let p_nout = self.p_space.space().nout();
+        let p = BoundDynFactor::from_bound(self.p_space, p_data, p_nout, p_nout)?;
+        Ok((w, p))
+    }
+}
+
+fn polar_diagonal_admission<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
     direction: PolarDirection,
-) -> Result<Option<DynamicFactorPair<R, D>>, OperationError>
+) -> Result<Option<PolarDiagonalAdmission<R, D>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
@@ -93,20 +151,65 @@ where
     ) else {
         return Ok(None);
     };
-    let mut w_data = vec![D::zero(); w_len];
-    let mut p_data = vec![D::zero(); p_len];
-    for route in routes {
-        let n = source_regions[route.source].rows();
-        let w_start = w_regions[route.w].range().start;
-        let p_start = p_regions[route.p].range().start;
-        for (index, &(phase, magnitude)) in diagonal[route.source].iter().enumerate() {
-            w_data[w_start + index * (n + 1)] = phase;
-            p_data[p_start + index * (n + 1)] = magnitude;
-        }
-    }
-    let w = BoundDynFactor::from_bound(w_space, w_data, source.nout(), source.nin())?;
-    let p = BoundDynFactor::from_bound(p_space, p_data, p_nout, p_nout)?;
-    Ok(Some((w, p)))
+    Ok(Some(PolarDiagonalAdmission {
+        source_regions,
+        w_regions,
+        p_regions,
+        routes,
+        diagonal,
+        w_space,
+        p_space,
+    }))
+}
+
+fn polar_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+    direction: PolarDirection,
+) -> Result<Option<DynamicFactorPair<R, D>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    polar_diagonal_admission(authority, spectrum, direction)?
+        .map(PolarDiagonalAdmission::dense)
+        .transpose()
+}
+
+/// Compact left polar spectra after the same full-tree route admission as the dense seam.
+#[doc(hidden)]
+pub fn left_polar_diagonal_spectra_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<LeftPolar<Vec<SectorSpectrum<D>>>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    Ok(
+        polar_diagonal_admission(authority, spectrum, PolarDirection::Left)?.map(|admission| {
+            let (w, p) = admission.spectra();
+            LeftPolar { w, p }
+        }),
+    )
+}
+
+/// Compact right polar spectra after the same full-tree route admission as the dense seam.
+#[doc(hidden)]
+pub fn right_polar_diagonal_spectra_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<RightPolar<Vec<SectorSpectrum<D>>>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    Ok(
+        polar_diagonal_admission(authority, spectrum, PolarDirection::Right)?.map(|admission| {
+            let (wh, p) = admission.spectra();
+            RightPolar { p, wh }
+        }),
+    )
 }
 
 /// Direct left polar factors of an admitted owned compact diagonal.
