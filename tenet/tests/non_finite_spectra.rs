@@ -139,6 +139,28 @@ fn su2_complex_nan_spectrum_is_rejected() {
 }
 
 #[test]
+fn compact_svd_rejects_infinite_input_without_changing_spectrum() {
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime(),
+        &u1(),
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![1.0, -2.0],
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(1),
+                values: vec![f64::INFINITY, 0.0],
+            },
+        ],
+    )
+    .unwrap();
+    let before = input.diagview().unwrap();
+    assert!(input.svd_compact(&[0], &[1]).is_err());
+    assert_eq!(input.diagview().unwrap(), before);
+}
+
+#[test]
 fn compact_pinv_of_a_finite_diagonal_is_unchanged() {
     // Hand-computed: sigma_max = 4, rcond 0.2 -> cutoff 0.8; 0.5 is cut.
     let diagonal: TensorMap<_, f64> = TensorMap::diagonal(

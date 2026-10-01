@@ -500,6 +500,94 @@ pub type SvdFactorsDyn<R, D> = (
     Vec<SectorSpectrum>,
 );
 
+/// Compact diagonal input: sort each sector's magnitudes and write the
+/// permutation/phase factors directly into the existing dense factor layout.
+/// A nonfinite spectrum or an unsupported region layout retains the ordinary
+/// dense-SVD path and its error behavior.
+#[doc(hidden)]
+pub fn svd_compact_diagonal_factors_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<SvdFactorsDyn<R, D>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    if spectrum
+        .iter()
+        .flat_map(|entry| &entry.values)
+        .any(|&value| !value.widen_complex().norm().is_finite())
+    {
+        return Ok(None);
+    }
+    let Some(plan) = compact_factor_plan(authority)? else {
+        return Ok(None);
+    };
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != spectrum.len() || spectrum.len() != plan.routes.len() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "compact diagonal spectrum does not match source sectors",
+        });
+    }
+    let mut u_regions = vec![None; plan.left_regions.len()];
+    let mut vh_regions = vec![None; plan.right_regions.len()];
+    let mut singular_values = Vec::with_capacity(plan.routes.len());
+    for route in &plan.routes {
+        let entry =
+            by_sector
+                .get(&route.sector)
+                .ok_or(OperationError::UnsupportedTensorContractScope {
+                    message: "compact diagonal spectrum is missing a source sector",
+                })?;
+        let k = route.rank;
+        if entry.values.len() != k {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "compact diagonal spectrum length does not match source region",
+            });
+        }
+        let mut order = entry
+            .values
+            .iter()
+            .enumerate()
+            .map(|(index, &value)| (index, value.widen_complex().norm()))
+            .collect::<Vec<_>>();
+        order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        if k != 0 {
+            let mut u = vec![D::zero(); k * k];
+            let mut vh = vec![D::zero(); k * k];
+            for (column, &(source, magnitude)) in order.iter().enumerate() {
+                u[source + column * k] = D::from_real(1.0);
+                vh[column + source * k] = if magnitude == 0.0 {
+                    D::from_real(1.0)
+                } else {
+                    D::from_complex64(entry.values[source].widen_complex() / magnitude)
+                };
+            }
+            u_regions[route.left_region.expect("nonzero route has left region")] = Some(u);
+            vh_regions[route.right_region.expect("nonzero route has right region")] = Some(vh);
+        }
+        singular_values.push(SectorSpectrum {
+            sector: route.sector,
+            values: order.into_iter().map(|(_, magnitude)| magnitude).collect(),
+        });
+    }
+    let u_data = concat_compact_svd_factor_regions(u_regions, plan.left_layout.required_len()?);
+    let vh_data = concat_compact_svd_factor_regions(vh_regions, plan.right_layout.required_len()?);
+    let u = BoundDynFactor::from_bound(
+        authority.rebind_validated(&plan.left_layout)?,
+        u_data,
+        authority.space().nout(),
+        1,
+    )?;
+    let vh = BoundDynFactor::from_bound(
+        authority.rebind_validated(&plan.right_layout)?,
+        vh_data,
+        1,
+        authority.space().nin(),
+    )?;
+    Ok(Some((u, vh, singular_values)))
+}
+
 pub fn svd_compact_factors_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
