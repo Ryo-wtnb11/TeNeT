@@ -272,7 +272,7 @@ fn next_fusion_tree_layout_id() -> FusionTreeLayoutId {
     #[cfg(test)]
     FUSION_TREE_LAYOUT_ID_CALLS.set(FUSION_TREE_LAYOUT_ID_CALLS.get() + 1);
     let id = FUSION_TREE_LAYOUT_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         })
         .expect("fusion-tree layout identity space exhausted");
