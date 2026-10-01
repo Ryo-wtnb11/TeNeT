@@ -1,0 +1,9 @@
+Commit dd6ca8c698342b94b6805af3feb0b601bc425a7c (production b2b82413e971f88c0852d2022f4eef0b5c122192)
+2026-10-02, aarch64-apple-darwin, rustc 1.96.0, offline Cargo, shared tenet/target, serialized commands.
+Baseline test (8dd296d5): compact_diagonal_svd_full_preserves_spaces_without_materialization_or_solver FAILED; expected materialization count 0, observed 1. See red.log.
+Candidate focused test: 11 passed, 0 failed.
+cargo fmt --all --check: passed.
+cargo test --workspace -- --test-threads=1: 3100 passed, 0 failed (unit/integration/doctest groups).
+cargo clippy --workspace --all-targets -- -D warnings: passed.
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps: passed.
+cargo llvm-cov --workspace --json ...: passed; scripts/check-coverage.py: 188/188 files passed.
