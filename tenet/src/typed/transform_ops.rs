@@ -751,16 +751,13 @@ where
     ///
     /// # Compact storage
     ///
-    /// A non-identity transform of a factor in compact diagonal storage
-    /// ([`Self::svd_compact`]'s `s`, [`Self::eigh_full`]'s `d`) is
-    /// **materialized** here, and so by [`Self::braid`], [`Self::transpose`]
-    /// and [`Self::repartition`] as well: the input is densified into an
-    /// operation-local buffer and the result is a dense `Σ_c k_c²` buffer. An exact identity returns the source body
-    /// unchanged and preserves compact storage.
-    /// TensorKit draws the line in the same place — its `DiagonalTensorMap`
-    /// implements only the two permutations that leave a diagonal diagonal —
-    /// and the general case genuinely is not diagonal, so this is a missing
-    /// specialization for two axis orders rather than a missing operation.
+    /// An exact identity returns a compact diagonal factor unchanged. A
+    /// rank-(1,1) leg swap through [`Self::permute`] or [`Self::transpose`]
+    /// keeps it compact. An admitted rank-(1,1) [`Self::braid`] reads its
+    /// spectrum directly and publishes a dense result. Other non-identity
+    /// `permute`/`transpose`/`repartition` cases and unadmitted braids
+    /// materialize the compact source into an operation-local buffer and
+    /// publish a dense `Σ_c k_c²` result.
     ///
     /// # Errors
     ///
@@ -844,8 +841,10 @@ where
     /// crosses above at each transposition; for a symmetric (bosonic) braiding
     /// they cannot change the result, and this is then [`Self::permute`].
     ///
-    /// A compact diagonal is densified into an operation-local buffer first:
-    /// one `Σ_c n_c²` copy, released with the call.
+    /// A compact rank-(1,1) diagonal is read directly when the compiled braid
+    /// has one term per source block, its coefficient remains finite and
+    /// nonzero in the payload dtype, and destination coverage is complete;
+    /// otherwise it uses the ordinary dense replay.
     ///
     /// # Errors
     ///
@@ -1111,6 +1110,44 @@ where
                     spectrum,
                 )?;
                 return Ok(self.with_spectrum_on(destination, transformed));
+            }
+            if crate::tensor_core::is_rank_one_diagonal_braid(
+                self.codomain_rank(),
+                self.rank() - self.codomain_rank(),
+                &operation,
+            ) {
+                if let Ok(destination) = self
+                    .logical_space()
+                    .transformed_multiplicity_free(&operation)
+                {
+                    let compiled = {
+                        let mut lease = self.runtime.lease_context()?;
+                        lease
+                            .context()
+                            .multiplicity_free_lane::<D>()?
+                            .tree_context_mut()
+                            .compile_tree_pair_structure(
+                                self.logical_space().provider(),
+                                &operation,
+                                destination.space().structure(),
+                                self.logical_space().space().structure(),
+                            )
+                            .ok()
+                    };
+                    if let Some(compiled) = compiled {
+                        if let Some(data) = crate::tensor_core::try_braid_rank_one_diagonal_data(
+                            self.logical_space().space(),
+                            destination.space(),
+                            &compiled,
+                            spectrum,
+                        ) {
+                            return Ok(Self {
+                                runtime: self.runtime.clone(),
+                                repr: owned_repr(TypedTensorBody::dense(destination, data)),
+                            });
+                        }
+                    }
+                }
             }
         }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {

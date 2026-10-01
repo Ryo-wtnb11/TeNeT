@@ -698,12 +698,10 @@ fn cat_refuses_an_adjoint_view_when_its_plan_declines() {
     assert_same_tensor!(a.cat(&lazy, Side::Domain).unwrap(), fast, "cat fallback");
 }
 
-/// #1548: the declined-plan fallback of `cat` materializes only a lazy
-/// adjoint; an owned operand reuses the buffer read for the plan, so a
-/// compact diagonal is densified once, not twice. The result is bitwise the
-/// fast-plan result and an all-materialized oracle.
+/// The declined-plan fallback materializes a lazy adjoint while reading a
+/// compact diagonal directly. The result is bitwise the fast-plan result.
 #[test]
-fn cat_fallback_densifies_a_compact_operand_once_and_matches_the_plan() {
+fn cat_fallback_reads_compact_operand_without_densifying() {
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -739,8 +737,8 @@ fn cat_fallback_densifies_a_compact_operand_once_and_matches_the_plan() {
     let _reset = Reset;
     for side in [Side::Domain, Side::Codomain] {
         for (name, lhs, rhs, compact) in [
-            ("d|lazy", &d, &lazy, 1usize),
-            ("lazy|d", &lazy, &d, 1),
+            ("d|lazy", &d, &lazy, 0usize),
+            ("lazy|d", &lazy, &d, 0),
             ("x|lazy", &x, &lazy, 0),
             ("lazy|x", &lazy, &x, 0),
         ] {

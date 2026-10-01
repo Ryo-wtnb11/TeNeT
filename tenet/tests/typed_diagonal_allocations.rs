@@ -510,10 +510,10 @@ fn the_rank_one_swap_keeps_its_source_and_its_result_compact() {
 }
 
 #[test]
-fn exact_identity_keeps_compact_storage_and_a_real_braid_keeps_the_dense_route() {
+fn exact_identity_keeps_compact_storage_and_braid_publishes_dense_output() {
     // What (#689 PR A): exact identities return the source body without
-    // allocating or materializing its compact spectrum. A real braid remains
-    // the negative control and still takes the dense transform route.
+    // allocating or materializing its compact spectrum. An explicit braid
+    // reads compact input and publishes an owned dense output.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let d = spectrum(0x5eed_0042);
 

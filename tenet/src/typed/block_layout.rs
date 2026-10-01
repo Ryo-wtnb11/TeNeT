@@ -143,19 +143,129 @@ pub(crate) struct CatCopyPlan {
     side: Side,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum CatOperandData<'a, D> {
+    Dense(&'a [D]),
+    Diagonal {
+        structure: &'a Arc<BlockStructure>,
+        spectrum: &'a [tenet_matrixalgebra::SectorSpectrum<D>],
+    },
+}
+
 impl CatCopyPlan {
-    pub(crate) fn execute<D: ScalarOps>(&self, lhs: &[D], rhs: &[D]) -> Result<Vec<D>, Error> {
+    pub(crate) fn execute<D: ScalarOps>(
+        &self,
+        sources: [CatOperandData<'_, D>; 2],
+    ) -> Result<Vec<D>, Error> {
         let side = match self.side {
             Side::Domain => OwnedCatSide::Domain,
             Side::Codomain => OwnedCatSide::Codomain,
         };
-        tenet_tensors::try_cat_owned_raw(self.required_len, side, &self.copies, [lhs, rhs])
+        if let [CatOperandData::Dense(lhs), CatOperandData::Dense(rhs)] = sources {
+            return tenet_tensors::try_cat_owned_raw(
+                self.required_len,
+                side,
+                &self.copies,
+                [lhs, rhs],
+            )
             .ok_or_else(|| {
                 internal_layout_error(
                     "cat copy plan declined by the fast-path prover; no known geometry reaches \
                      this",
                 )
+            });
+        }
+        let source_lengths = sources.map(|source| match source {
+            CatOperandData::Dense(values) => Ok(values.len()),
+            CatOperandData::Diagonal { structure, .. } => structure.required_len(),
+        });
+        let [lhs_len, rhs_len] = source_lengths;
+        let source_lengths = [lhs_len?, rhs_len?];
+        for source in &sources {
+            let CatOperandData::Diagonal {
+                structure,
+                spectrum,
+            } = source
+            else {
+                continue;
+            };
+            if structure.block_count() != spectrum.len() {
+                return Err(internal_layout_error(
+                    "compact cat spectrum block count disagrees",
+                ));
+            }
+            for (block_index, entry) in spectrum.iter().enumerate() {
+                let block = structure.block(block_index)?;
+                let pair = block.key().as_fusion_tree_pair().ok_or_else(|| {
+                    internal_layout_error("compact cat source is not fusion-tree keyed")
+                })?;
+                if pair.codomain_tree().coupled() != entry.sector {
+                    return Err(internal_layout_error(
+                        "compact cat spectrum sector is absent",
+                    ));
+                }
+                let [rows, cols] = block.shape() else {
+                    return Err(internal_layout_error("compact cat source is not a matrix"));
+                };
+                if rows != cols || entry.values.len() != *rows {
+                    return Err(internal_layout_error(
+                        "compact cat spectrum shape disagrees",
+                    ));
+                }
+            }
+        }
+        let dense_sources = sources.map(|source| match source {
+            CatOperandData::Dense(values) => Some(values),
+            CatOperandData::Diagonal { .. } => None,
+        });
+        // The compiled copies follow increasing coupled sectors; a compact
+        // rank-(1,1) bond has exactly one physical block in each sector.
+        let mut source_positions = [0usize; 2];
+        let compact_entries = self
+            .copies
+            .iter()
+            .map(|copy| {
+                let Some(CatOperandData::Diagonal {
+                    structure,
+                    spectrum,
+                }) = sources.get(copy.source())
+                else {
+                    return Ok(None);
+                };
+                let position = &mut source_positions[copy.source()];
+                let block = structure.block(*position)?;
+                let entry = spectrum
+                    .get(*position)
+                    .ok_or_else(|| internal_layout_error("compact cat source region is absent"))?;
+                *position += 1;
+                if copy.rows() != copy.cols()
+                    || block.offset() != copy.source_offset()
+                    || entry.values.len() != copy.rows()
+                    || copy.source_row_stride() != 1
+                    || copy.source_column_stride() != copy.rows()
+                    || copy.conjugate()
+                {
+                    return Err(internal_layout_error("compact cat copy geometry disagrees"));
+                }
+                Ok(Some(entry.values.as_slice()))
             })
+            .collect::<Result<Vec<_>, Error>>()?;
+        for (index, source) in sources.iter().enumerate() {
+            if let CatOperandData::Diagonal { structure, .. } = source {
+                if source_positions[index] != structure.block_count() {
+                    return Err(internal_layout_error("compact cat source region is absent"));
+                }
+            }
+        }
+        tenet_operations::try_cat_owned_mixed_raw(
+            self.required_len,
+            side,
+            &self.copies,
+            dense_sources,
+            source_lengths,
+            &compact_entries,
+        )
+        .ok_or_else(|| internal_layout_error("cat copy plan declined by the fast-path prover"))
     }
 }
 
@@ -542,7 +652,10 @@ mod cat_plan_tests {
             side: Side::Domain,
         };
         let error = plan
-            .execute(&[1.0, 2.0, 3.0, 4.0], &[5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+            .execute([
+                CatOperandData::Dense(&[1.0, 2.0, 3.0, 4.0]),
+                CatOperandData::Dense(&[5.0, 6.0, 7.0, 8.0, 9.0, 10.0]),
+            ])
             .unwrap_err();
         assert!(matches!(
             error,

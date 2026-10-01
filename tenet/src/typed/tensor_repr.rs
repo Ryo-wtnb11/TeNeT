@@ -826,8 +826,9 @@ where
     /// the non-shared region — TK documents the same contract.
     ///
     /// The result keeps `self`'s spaces and dtype. Equal `D` is required by
-    /// the signature; widen with [`Self::convert`] first. A compact diagonal
-    /// payload (on either side) is materialized dense first, exactly once.
+    /// the signature; widen with [`Self::convert`] first. A compact `source`
+    /// is read directly, including its structural zero entries. A compact
+    /// receiver is expanded into the returned dense output.
     ///
     /// # Complexity
     ///
@@ -892,34 +893,47 @@ where
                 ));
             }
         }
-        // Lazy and compact inputs take an operation-local dense payload.
+        // A lazy input still takes an operation-local dense payload.
         let destination = self.materialized_tensor_uncached()?;
         let source = source.materialized_tensor_uncached()?;
-        let destination_data_payload = destination
+        let destination_body = destination
             .owned_body()
-            .expect("uncached materialization is owned")
-            .materialized_dense_data();
-        let destination_data: &[D] = &destination_data_payload;
-        let source_data_payload = source
+            .expect("uncached materialization is owned");
+        let source_body = source
             .owned_body()
-            .expect("uncached materialization is owned")
-            .materialized_dense_data();
-        let source_data: &[D] = &source_data_payload;
-        if destination_space.structure().required_len()? != destination_data.len()
-            || source_space.structure().required_len()? != source_data.len()
+            .expect("uncached materialization is owned");
+        let mut output = match destination_body.data.as_ref() {
+            TypedData::Dense(data) => data.clone(),
+            TypedData::Diagonal(spectrum) => {
+                tenet_matrixalgebra::diagonal_bond_data(destination_space, spectrum, &|value| {
+                    value
+                })?
+            }
+        };
+        let source_required_len = source_space.structure().required_len()?;
+        if destination_space.structure().required_len()? != output.len()
+            || matches!(source_body.data.as_ref(), TypedData::Dense(data)
+                if source_required_len != data.len())
         {
             return Err(internal_layout_error(
                 "absorb block layout does not cover scalar storage",
             ));
         }
-        let mut output = destination_data.to_vec();
-        absorb_mapped(
-            destination_space.structure(),
-            &mut output,
-            source_space.structure(),
-            source_data,
-            Ok,
-        )?;
+        match source_body.data.as_ref() {
+            TypedData::Dense(data) => absorb_mapped(
+                destination_space.structure(),
+                &mut output,
+                source_space.structure(),
+                data,
+                Ok,
+            )?,
+            TypedData::Diagonal(spectrum) => absorb_compact_source(
+                destination_space.structure(),
+                &mut output,
+                source_space.structure(),
+                spectrum,
+            )?,
+        }
         Ok(Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(self.logical_space().clone(), output)),

@@ -8782,9 +8782,421 @@ fn compact_arms_never_densify_their_spectrum_operand() {
     let _ = d.diagview().unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
-    // Positive control: a real braid takes the dense route.
+    // A one-term rank-(1,1) braid reads the compact source directly.
     let _ = d.braid(&[1], &[0], &[0, 1]).unwrap();
-    assert!(DIAGONAL_MATERIALIZATIONS.get() > 0);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+}
+
+#[test]
+fn compact_braid_off_diagonal_zeros_are_numerically_zero() {
+    // This finite witness exercises the one-term admission; structural zeros
+    // have no prescribed sign under a fermionic braid.
+    use tenet_core::PreparedTreePairOperation;
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    macro_rules! probe {
+        ($rule:expr, $sectors:expr, $negative_zeros:expr) => {{
+            let leg = GradedSpace::try_new(Arc::new($rule), $sectors).unwrap();
+            let tensor: TensorMap<_, f64> =
+                TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 1617).unwrap();
+            let diagonal = tensor.svd_compact(&[0], &[1]).unwrap().s;
+            let source = diagonal.logical_space().space().structure();
+            let prepared = PreparedTreePairOperation::prepare_braid(
+                diagonal.provider(),
+                1,
+                1,
+                &[1],
+                &[0],
+                &[0],
+                &[1],
+            )
+            .unwrap();
+            let mut counts = Vec::new();
+            let destination = diagonal
+                .logical_space()
+                .transformed_multiplicity_free(&TreeTransformOperation::braid([1], [0], [0], [1]))
+                .unwrap();
+            let destination_structure = destination.space().structure();
+            let mut covered = vec![false; destination_structure.block_count()];
+            for i in 0..source.block_count() {
+                let source_block = source.block(i).unwrap();
+                let pair = source_block.key().as_fusion_tree_pair().unwrap();
+                let rows = prepared
+                    .execute_multiplicity_free(diagonal.provider(), pair)
+                    .unwrap();
+                counts.push(rows.len());
+                assert_eq!(rows.len(), 1);
+                let (destination_pair, coefficient) = &rows[0];
+                assert!(coefficient.is_finite() && *coefficient != 0.0);
+                let destination_index = (0..destination_structure.block_count())
+                    .find(|&j| {
+                        destination_structure.block(j).unwrap().key()
+                            == &tenet_core::BlockKey::FusionTree(destination_pair.clone())
+                    })
+                    .expect("braid destination exists");
+                assert!(!std::mem::replace(&mut covered[destination_index], true));
+                let destination_block = destination_structure.block(destination_index).unwrap();
+                assert_eq!(source_block.shape(), destination_block.shape());
+                assert_eq!(destination_block.shape()[0], destination_block.shape()[1]);
+            }
+            assert!(covered.iter().all(|&seen| seen));
+            DIAGONAL_MATERIALIZATIONS.set(0);
+            let result = diagonal.braid(&[1], &[0], &[0, 1]).unwrap();
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            let dense_oracle = diagonal
+                .materialize()
+                .unwrap()
+                .braid(&[1], &[0], &[0, 1])
+                .unwrap();
+            for (&actual, &expected) in result
+                .dense_data()
+                .unwrap()
+                .iter()
+                .zip(dense_oracle.dense_data().unwrap())
+            {
+                assert!((actual - expected).abs() <= 32.0 * f64::EPSILON * expected.abs().max(1.0));
+            }
+            assert!(diagonal
+                .diagview()
+                .unwrap()
+                .iter()
+                .flat_map(|entry| &entry.values)
+                .all(|&value| value != 0.0));
+            let output = result.dense_data().unwrap();
+            let structure = result.logical_space().space().structure();
+            let mut negative_zeros = 0;
+            for block_index in 0..structure.block_count() {
+                let block = structure.block(block_index).unwrap();
+                assert_eq!(block.shape().len(), 2);
+                assert_eq!(block.shape()[0], block.shape()[1]);
+                for column in 0..block.shape()[1] {
+                    for row in 0..block.shape()[0] {
+                        if row != column {
+                            let offset = block.offset()
+                                + row * block.strides()[0]
+                                + column * block.strides()[1];
+                            assert_eq!(output[offset], 0.0);
+                            negative_zeros +=
+                                usize::from(output[offset].to_bits() == (-0.0_f64).to_bits());
+                        }
+                    }
+                }
+            }
+            assert!(counts.iter().all(|&count| count == 1));
+            assert_eq!(negative_zeros, $negative_zeros);
+        }};
+    }
+    probe!(
+        U1FusionRule,
+        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+        0
+    );
+    probe!(
+        SU2FusionRule,
+        [
+            (SU2Irrep::from_twice_spin(0), 3),
+            (SU2Irrep::from_twice_spin(1), 2)
+        ],
+        0
+    );
+    probe!(
+        FermionParityFusionRule,
+        [(Z2Irrep::EVEN, 3), (Z2Irrep::ODD, 2)],
+        0
+    );
+    probe!(
+        FermionParityFusionRule.product(U1FusionRule),
+        [
+            (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 3),
+            (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+        ],
+        0
+    );
+}
+
+#[test]
+fn compact_fermionic_braid_matches_hand_diagonal_and_complex_sign() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let bond = GradedSpace::try_new(
+        Arc::new(FermionParityFusionRule),
+        [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)],
+    )
+    .unwrap();
+    let real: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Z2Irrep::EVEN,
+                values: vec![2.0, -3.0],
+            },
+            SectorSpectrum {
+                sector: Z2Irrep::ODD,
+                values: vec![5.0, -7.0, 11.0],
+            },
+        ],
+    )
+    .unwrap();
+    // Fibonacci has complex categorical coefficients, but its public compact
+    // constructor is unavailable: TypedTensorRootDispatch requires R::Scalar=f64.
+    // This Complex64 payload still exercises the supported real-coefficient lane.
+    let complex = real
+        .convert::<Complex64>()
+        .map_diagonal(|value| Complex64::new(value.re, value.re / 4.0))
+        .unwrap();
+    let real_output = real.braid(&[1], &[0], &[0, 1]).unwrap();
+    let complex_output = complex.braid(&[1], &[0], &[0, 1]).unwrap();
+    let real_spectra = real_output.diagview().unwrap();
+    let complex_spectra = complex_output.diagview().unwrap();
+    let source_spectra = real.diagview().unwrap();
+    assert_eq!(real_spectra.len(), source_spectra.len());
+    assert_eq!(complex_spectra.len(), source_spectra.len());
+    for (real_entry, complex_entry) in real_spectra.iter().zip(&complex_spectra) {
+        assert_eq!(real_entry.sector, complex_entry.sector);
+        let source = source_spectra
+            .iter()
+            .find(|entry| entry.sector == real_entry.sector)
+            .unwrap();
+        assert_eq!(real_entry.values.len(), source.values.len());
+        assert_eq!(complex_entry.values.len(), source.values.len());
+        let sign = if real_entry.sector == Z2Irrep::ODD {
+            -1.0
+        } else {
+            1.0
+        };
+        for ((&real_value, &complex_value), &source_value) in real_entry
+            .values
+            .iter()
+            .zip(&complex_entry.values)
+            .zip(&source.values)
+        {
+            assert_eq!(real_value, sign * source_value);
+            assert_eq!(
+                complex_value,
+                Complex64::new(sign * source_value, sign * source_value / 4.0)
+            );
+        }
+    }
+    let structure = real_output.logical_space().space().structure();
+    let real_data = real_output.dense_data().unwrap();
+    let complex_data = complex_output.dense_data().unwrap();
+    for block_index in 0..structure.block_count() {
+        let block = structure.block(block_index).unwrap();
+        for column in 0..block.shape()[1] {
+            for row in 0..block.shape()[0] {
+                if row != column {
+                    let offset =
+                        block.offset() + row * block.strides()[0] + column * block.strides()[1];
+                    assert_eq!(real_data[offset], 0.0);
+                    assert_eq!(complex_data[offset], Complex64::new(0.0, 0.0));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn compact_cat_braid_absorb_avoid_dense_source_materializations() {
+    let diagonal = fixture().svd_compact(&[0], &[1]).unwrap().s;
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let _ = diagonal.cat(&diagonal, Side::Domain).unwrap();
+    let cat = DIAGONAL_MATERIALIZATIONS.get();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let _ = diagonal.braid(&[1], &[0], &[0, 1]).unwrap();
+    let braid = DIAGONAL_MATERIALIZATIONS.get();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let _ = diagonal.absorb(&diagonal).unwrap();
+    let absorb = DIAGONAL_MATERIALIZATIONS.get();
+    assert_eq!([cat, braid, absorb], [0, 0, 0]);
+}
+
+#[test]
+fn absorb_compact_source_zeros_shared_off_diagonal_and_preserves_outer_region() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(Z2FusionRule);
+    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::EVEN, 4)]).unwrap();
+    let narrow = GradedSpace::try_new(provider, [(Z2Irrep::EVEN, 2)]).unwrap();
+    let receiver: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&wide], [&wide], |_, index| {
+            1.0 + index[0] as f64 + 10.0 * index[1] as f64
+        })
+        .unwrap();
+    let source: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &narrow,
+        [SectorSpectrum {
+            sector: Z2Irrep::EVEN,
+            values: vec![2.0, -3.0],
+        }],
+    )
+    .unwrap();
+    let result = receiver.absorb(&source).unwrap();
+    let data = result.dense_data().unwrap();
+    let block = result.logical_space().space().structure().block(0).unwrap();
+    assert_eq!(block.shape(), &[4, 4]);
+    for column in 0..4 {
+        for row in 0..4 {
+            let expected = if row < 2 && column < 2 {
+                if row == column {
+                    [2.0, -3.0][row]
+                } else {
+                    0.0
+                }
+            } else {
+                1.0 + row as f64 + 10.0 * column as f64
+            };
+            let offset = block.offset() + row * block.strides()[0] + column * block.strides()[1];
+            assert_eq!(data[offset], expected, "row={row}, column={column}");
+        }
+    }
+}
+
+#[test]
+fn compact_absorb_handles_strided_prefixes_and_interleaved_sectors() {
+    let key = |sector| {
+        let tree = FusionTreeKey::try_from_sector_ids_for_rule(
+            &Z2FusionRule,
+            [sector],
+            sector,
+            [false],
+            [],
+            [],
+        )
+        .unwrap();
+        BlockKey::FusionTree(FusionTreePairKey::pair(tree.clone(), tree))
+    };
+    let source = BlockStructure::from_blocks(vec![
+        BlockSpec::column_major_with_key(key(0), vec![1, 1], 0).unwrap(),
+        BlockSpec::column_major_with_key(key(1), vec![2, 2], 1).unwrap(),
+    ])
+    .unwrap();
+    let destination =
+        BlockStructure::from_blocks(vec![
+            BlockSpec::with_key(key(1), vec![2, 2], vec![2, 5], 0).unwrap()
+        ])
+        .unwrap();
+    let spectrum = [
+        tenet_matrixalgebra::SectorSpectrum {
+            sector: SectorId::new(0),
+            values: vec![5.0],
+        },
+        tenet_matrixalgebra::SectorSpectrum {
+            sector: SectorId::new(1),
+            values: vec![7.0, 9.0],
+        },
+    ];
+    let mut values = vec![42.0; 8];
+    absorb_compact_source(&destination, &mut values, &source, &spectrum).unwrap();
+    assert_eq!(values, [7.0, 42.0, 0.0, 42.0, 42.0, 0.0, 42.0, 9.0]);
+
+    // A destination-only lower sector is likewise untouched before the
+    // shared strided block; this exercises both sides of the sector merge.
+    let destination = BlockStructure::from_blocks(vec![
+        BlockSpec::column_major_with_key(key(0), vec![1, 1], 0).unwrap(),
+        BlockSpec::with_key(key(1), vec![2, 2], vec![2, 5], 1).unwrap(),
+    ])
+    .unwrap();
+    let source = BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
+        key(1),
+        vec![2, 2],
+        0,
+    )
+    .unwrap()])
+    .unwrap();
+    let mut values = vec![42.0; 9];
+    absorb_compact_source(&destination, &mut values, &source, &spectrum[1..]).unwrap();
+    assert_eq!(values, [42.0, 7.0, 42.0, 0.0, 42.0, 42.0, 0.0, 42.0, 9.0]);
+
+    let duplicate = [spectrum[1].clone(), spectrum[1].clone()];
+    assert!(absorb_compact_source(&destination, &mut values, &source, &duplicate).is_err());
+    assert!(absorb_compact_source(&destination, &mut values, &source, &[]).is_err());
+    let wrong_shape = [tenet_matrixalgebra::SectorSpectrum {
+        sector: SectorId::new(1),
+        values: vec![7.0],
+    }];
+    assert!(absorb_compact_source(&destination, &mut values, &source, &wrong_shape).is_err());
+}
+
+#[test]
+fn compact_cat_and_absorb_preserve_stored_bits_and_zero_structural_cells() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let bond = GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, 2)]).unwrap();
+    let nan = f64::from_bits(0x7ff8_0000_0000_1617);
+    let compact: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [SectorSpectrum {
+            sector: Z2Irrep::EVEN,
+            values: vec![-0.0, nan],
+        }],
+    )
+    .unwrap();
+    let dense = compact.materialize().unwrap();
+    let compact_cat = compact.cat(&compact, Side::Domain).unwrap();
+    let dense_cat = dense.cat(&dense, Side::Domain).unwrap();
+    assert_eq!(
+        compact_cat
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        dense_cat
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert!(compact_cat
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|x| x.to_bits() == (-0.0f64).to_bits()));
+    assert!(compact_cat
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|x| x.to_bits() == nan.to_bits()));
+    assert!(compact_cat
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|x| x.to_bits() == 0.0f64.to_bits()));
+
+    let receiver: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |_, index| {
+            10.0 + index[0] as f64 + index[1] as f64
+        })
+        .unwrap();
+    let compact_absorb = receiver.absorb(&compact).unwrap();
+    let dense_absorb = receiver.absorb(&dense).unwrap();
+    assert_eq!(
+        compact_absorb
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        dense_absorb
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>()
+    );
+    let block = compact_absorb
+        .logical_space()
+        .space()
+        .structure()
+        .block(0)
+        .unwrap();
+    let values = compact_absorb.dense_data().unwrap();
+    let offset =
+        |row, column| block.offset() + row * block.strides()[0] + column * block.strides()[1];
+    assert_eq!(values[offset(0, 0)].to_bits(), (-0.0f64).to_bits());
+    assert_eq!(values[offset(1, 1)].to_bits(), nan.to_bits());
+    assert_eq!(values[offset(0, 1)].to_bits(), 0.0f64.to_bits());
+    assert_eq!(values[offset(1, 0)].to_bits(), 0.0f64.to_bits());
 }
 
 /// A destination whose device is not the Runtime's is rejected before any

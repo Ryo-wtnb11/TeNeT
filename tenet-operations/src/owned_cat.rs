@@ -3,6 +3,7 @@ use core::mem::MaybeUninit;
 use core::ops::Range;
 
 use num_complex::Complex64;
+use num_traits::Zero;
 use strided_kernel::{CopyPlan, MaybeSendSync, RawStridedMut, RawStridedRef, StridedError};
 
 use crate::owned_overwrite_buffer::initialize_owned;
@@ -136,6 +137,56 @@ pub fn try_cat_owned_raw<D: ConjugateValue + MaybeSendSync>(
     Some(initialize_infallible(required_len, |destination| {
         for copy in copies {
             write_same(destination, sources[copy.source], copy);
+        }
+    }))
+}
+
+/// Validates the complete copy plan, then uses the existing dense copy kernel
+/// and initializes each compact slab column before writing its stored diagonal.
+#[doc(hidden)]
+pub fn try_cat_owned_mixed_raw<D>(
+    required_len: usize,
+    side: OwnedCatSide,
+    copies: &[OwnedCatCopy],
+    sources: [Option<&[D]>; 2],
+    source_lengths: [usize; 2],
+    compact_diagonals: &[Option<&[D]>],
+) -> Option<Vec<D>>
+where
+    D: ConjugateValue + MaybeSendSync + Zero,
+{
+    if sources
+        .iter()
+        .zip(source_lengths)
+        .any(|(source, len)| source.is_some_and(|values| values.len() != len))
+        || validate_owned_cat(required_len, side, copies, source_lengths).is_none()
+        || compact_diagonals.len() != copies.len()
+        || copies.iter().enumerate().any(|(index, copy)| {
+            sources[copy.source].is_none()
+                && !compact_diagonals[index]
+                    .is_some_and(|values| copy.rows == copy.cols && values.len() == copy.rows)
+        })
+    {
+        return None;
+    }
+    Some(initialize_infallible(required_len, |destination| {
+        for (copy_index, copy) in copies.iter().enumerate() {
+            if let Some(source) = sources[copy.source] {
+                write_same(destination, source, copy);
+            } else {
+                let values = compact_diagonals[copy_index]
+                    .expect("compact cat diagonal was admitted before output allocation");
+                for column in 0..copy.cols {
+                    let start =
+                        copy.destination_offset + column * copy.destination_leading_dimension;
+                    let cells = &mut destination[start..start + copy.rows];
+                    cells[..column].fill(MaybeUninit::new(D::zero()));
+                    cells[column].write(values[column]);
+                    cells[column + 1..].fill(MaybeUninit::new(D::zero()));
+                    #[cfg(test)]
+                    observe_writes(start..start + copy.rows);
+                }
+            }
         }
     }))
 }
@@ -398,6 +449,36 @@ fn observe_writes(range: Range<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_compact_and_dense_cat_initializes_each_cell_once() {
+        let copies = [
+            copy(0, 0, 0, [2, 2], [1, 2], 2, 0..8, false),
+            copy(1, 0, 4, [2, 2], [1, 2], 2, 0..8, false),
+        ];
+        let dense = [1.0, 2.0, 3.0, 4.0];
+        let nan = f64::from_bits(0x7ff8_0000_0000_1617);
+        let diagonal = [-0.0, nan];
+        TEST_WRITE_BITMAP.with(|bitmap| *bitmap.borrow_mut() = Some(vec![0; 8]));
+        let output = try_cat_owned_mixed_raw(
+            8,
+            OwnedCatSide::Domain,
+            &copies,
+            [None, Some(&dense)],
+            [4, dense.len()],
+            &[Some(&diagonal), None],
+        )
+        .unwrap();
+        let writes = TEST_WRITE_BITMAP.with(|bitmap| bitmap.borrow_mut().take().unwrap());
+        assert_eq!(writes, [1; 8]);
+        assert_eq!(
+            output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            [-0.0, 0.0, 0.0, nan, 1.0, 2.0, 3.0, 4.0].map(f64::to_bits)
+        );
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn copy(

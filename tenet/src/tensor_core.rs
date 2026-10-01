@@ -9,11 +9,12 @@ use tenet_core::{
     OrientedFusionTreeHomSpace, PreparedTreePairOperation, RuleIdentity,
 };
 use tenet_matrixalgebra::SectorSpectrum;
+use tenet_operations::TreeTransformBlock;
 use tenet_tensors::{
     zeroed_payload, BoundDynamicFusionMapSpace, BoundDynamicTensorRef, ContractDestinationInit,
     DynamicFusionMapSpace, FusionOperand, OutputAxisOrder, RecouplingCoefficientAction,
     TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
-    TreeTransformRuleCacheKey,
+    TreeTransformRuleCacheKey, TreeTransformStructure,
 };
 
 use crate::error::Error;
@@ -280,6 +281,153 @@ pub(crate) fn is_rank_one_diagonal_swap(
             operation.kind(),
             TreeTransformOperationKind::Permute | TreeTransformOperationKind::Transpose
         )
+}
+
+/// Candidate geometry for the compact source braid admission below.
+pub(crate) fn is_rank_one_diagonal_braid(
+    codomain_rank: usize,
+    domain_rank: usize,
+    operation: &TreeTransformOperation,
+) -> bool {
+    codomain_rank == 1
+        && domain_rank == 1
+        && operation.kind() == TreeTransformOperationKind::Braid
+        && operation.codomain_permutation() == [1]
+        && operation.domain_permutation() == [0]
+}
+
+/// Returns a dense result only when the compiled braid proves a one-to-one
+/// map between all square bond blocks. A provider that declines this proof
+/// stays on the general dense replay path.
+pub(crate) fn try_braid_rank_one_diagonal_data<D>(
+    source: &DynamicFusionMapSpace,
+    destination: &DynamicFusionMapSpace,
+    compiled: &TreeTransformStructure<f64>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Option<Vec<D>>
+where
+    D: ScalarOps,
+{
+    let sources = source.structure();
+    let destinations = destination.structure();
+    if sources.block_count() != spectrum.len()
+        || sources.block_count() != destinations.block_count()
+        || compiled.blocks().len() != sources.block_count()
+    {
+        return None;
+    }
+    // A compact bond has one physical block per spectrum entry in sector order.
+    // Check that correspondence before using compiled layout offsets as identities.
+    for (index, entry) in spectrum.iter().enumerate() {
+        let source_block = sources.block(index).ok()?;
+        let source_pair = source_block.key().as_fusion_tree_pair()?;
+        let [rows, columns] = source_block.shape() else {
+            return None;
+        };
+        if source_pair.codomain_tree().coupled() != entry.sector
+            || rows != columns
+            || entry.values.len() != *rows
+        {
+            return None;
+        }
+    }
+    let mut source_offsets = None;
+    let mut seen_source = smallvec::SmallVec::<[bool; 16]>::from_elem(false, sources.block_count());
+    let mut writes = smallvec::SmallVec::<[(usize, usize, f64); 16]>::new();
+    let layouts = compiled.layouts();
+    for prepared in compiled.blocks() {
+        let TreeTransformBlock::Single {
+            dst_layout,
+            src_layout,
+            coefficient,
+        } = prepared
+        else {
+            return None;
+        };
+        let src = layouts.entry(*src_layout);
+        let dst = layouts.entry(*dst_layout);
+        // Single layouts are inserted as destination/source pairs before the
+        // replay blocks are weight-sorted. Check that this pair's source is
+        // the compact spectrum ordinal; only unusual ordering needs a map.
+        let ordinal = src_layout
+            .checked_sub(1)
+            .filter(|_| src_layout % 2 == 1 && dst_layout.checked_add(1) == Some(*src_layout))
+            .map(|index| index / 2)
+            .filter(|&index| index < sources.block_count())
+            .filter(|&index| {
+                sources
+                    .block(index)
+                    .ok()
+                    .and_then(|block| isize::try_from(block.offset()).ok())
+                    == Some(src.offset)
+            });
+        let source_index = if let Some(ordinal) = ordinal {
+            ordinal
+        } else {
+            let offsets = source_offsets.get_or_insert_with(|| {
+                (0..sources.block_count())
+                    .filter_map(|index| {
+                        let block = sources.block(index).ok()?;
+                        Some((isize::try_from(block.offset()).ok()?, index))
+                    })
+                    .collect::<HashMap<_, _>>()
+            });
+            if offsets.len() != sources.block_count() {
+                return None;
+            }
+            *offsets.get(&src.offset)?
+        };
+        if std::mem::replace(&mut seen_source[source_index], true) {
+            return None;
+        }
+        let source_block = sources.block(source_index).ok()?;
+        let [rows, cols] = source_block.shape() else {
+            return None;
+        };
+        let source_strides = source_block.strides();
+        if layouts.shape(src) != source_block.shape()
+            || layouts.shape(dst) != source_block.shape()
+            || layouts.strides(src)
+                != [
+                    isize::try_from(source_strides[1]).ok()?,
+                    isize::try_from(source_strides[0]).ok()?,
+                ]
+            || src.element_count != rows.checked_mul(*cols)?
+            || dst.element_count != src.element_count
+            || dst.offset < 0
+            || layouts.strides(dst).iter().any(|&stride| stride < 0)
+        {
+            return None;
+        }
+        let coefficient = compiled.coefficient(*coefficient);
+        let converted_coefficient = D::coefficient_as_data(coefficient);
+        if !coefficient.is_finite()
+            || coefficient == 0.0
+            || converted_coefficient == D::from_real(0.0)
+            || !converted_coefficient.abs_value().is_finite()
+        {
+            return None;
+        }
+        writes.push((*dst_layout, source_index, coefficient));
+    }
+    // Compilation rejects duplicate destination owners; one Single per
+    // destination block proves exact destination coverage here.
+    if seen_source.iter().any(|&covered| !covered) {
+        return None;
+    }
+    let mut output = vec![D::from_real(0.0); destination.required_len().ok()?];
+    for (dst_layout, source_index, coefficient) in writes {
+        let entry = &spectrum[source_index];
+        let block = layouts.entry(dst_layout);
+        let strides = layouts.strides(block);
+        let step = usize::try_from(strides[0].checked_add(strides[1])?).ok()?;
+        let start = usize::try_from(block.offset).ok()?;
+        for (position, &value) in entry.values.iter().enumerate() {
+            let offset = start.checked_add(position.checked_mul(step)?)?;
+            *output.get_mut(offset)? = value.scale_by_coefficient(coefficient);
+        }
+    }
+    Some(output)
 }
 
 // Test-only observability at the two owned multiplicity-free seams: armed
@@ -1332,6 +1480,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::typed::ContractSpec;
+    use tenet_matrixalgebra::SectorSpectrum;
 
     use tenet_core::{
         BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CheckedGenericFusion,
@@ -1347,8 +1496,8 @@ mod tests {
     use super::{
         scatter_tensor_product_block, tensorcontract_owned_multiplicity_free,
         tensorproduct_owned_checked_generic, tree_transform_owned_multiplicity_free,
-        CHECKED_TENSOR_PRODUCT_COMMIT_COUNT, CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE,
-        FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
+        try_braid_rank_one_diagonal_data, CHECKED_TENSOR_PRODUCT_COMMIT_COUNT,
+        CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE, FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
     };
     use crate::runtime::Ctx;
 
@@ -1617,9 +1766,9 @@ mod tests {
 
     /// Deliberately outside the user-layer rule enum: this exercises the typed
     /// core with a provider an application can define without `LoweredMultiplicityFreeAlgebra`.
-    struct ExternalZ2;
+    struct ExternalZ2<const R_SCALE: u8>;
 
-    impl FusionRule for ExternalZ2 {
+    impl<const R_SCALE: u8> FusionRule for ExternalZ2<R_SCALE> {
         fn rule_identity(&self) -> RuleIdentity {
             RuleIdentity::of_type::<Self>()
         }
@@ -1649,9 +1798,9 @@ mod tests {
         }
     }
 
-    impl MultiplicityFreeFusionRule for ExternalZ2 {}
+    impl<const R_SCALE: u8> MultiplicityFreeFusionRule for ExternalZ2<R_SCALE> {}
 
-    impl MultiplicityFreeFusionSymbols for ExternalZ2 {
+    impl<const R_SCALE: u8> MultiplicityFreeFusionSymbols for ExternalZ2<R_SCALE> {
         type Scalar = f64;
 
         fn has_trivial_associator_gauge(&self) -> bool {
@@ -1677,10 +1826,15 @@ mod tests {
             coupled: SectorId,
         ) -> Self::Scalar {
             Z2FusionRule.r_symbol_scalar(left, right, coupled)
+                * match R_SCALE {
+                    1 => 1e-100,
+                    2 => 1e100,
+                    _ => 1.0,
+                }
         }
     }
 
-    impl MultiplicityFreeRigidSymbols for ExternalZ2 {
+    impl<const R_SCALE: u8> MultiplicityFreeRigidSymbols for ExternalZ2<R_SCALE> {
         fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
             Z2FusionRule.dim_scalar(sector)
         }
@@ -1707,8 +1861,82 @@ mod tests {
     }
 
     #[test]
+    fn compact_braid_declines_coefficients_outside_the_payload_dtype() {
+        let provider = Arc::new(ExternalZ2::<2>);
+        let leg = SectorLeg::new([(SectorId::new(1), 2)], false);
+        let source = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&provider),
+            tenet_core::FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg.clone()]),
+                FusionProductSpace::new([leg]),
+            ),
+            [vec![2, 2]],
+        )
+        .unwrap();
+        let operation = TreeTransformOperation::braid([1], [0], [0], [1]);
+        let destination = source.transformed_multiplicity_free(&operation).unwrap();
+        let f32_spectrum = [SectorSpectrum {
+            sector: SectorId::new(1),
+            values: vec![1.0f32, 2.0],
+        }];
+        let compiled = tenet_tensors::TreeTransformStructure::compile_structures(
+            destination.space().structure(),
+            source.space().structure(),
+            &[
+                tenet_operations::TreeTransformBlockSpec::single(0, 0, 1e100)
+                    .with_source_axes([1, 0]),
+            ],
+        )
+        .unwrap();
+        assert!(try_braid_rank_one_diagonal_data::<f32>(
+            source.space(),
+            destination.space(),
+            &compiled,
+            &f32_spectrum,
+        )
+        .is_none());
+        let f64_spectrum = [SectorSpectrum {
+            sector: SectorId::new(1),
+            values: vec![1.0f64, 2.0],
+        }];
+        assert!(try_braid_rank_one_diagonal_data::<f64>(
+            source.space(),
+            destination.space(),
+            &compiled,
+            &f64_spectrum,
+        )
+        .is_some());
+        let underflow_provider = Arc::new(ExternalZ2::<1>);
+        let underflow_source = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&underflow_provider),
+            source.space().homspace().clone(),
+            [vec![2, 2]],
+        )
+        .unwrap();
+        let underflow_destination = underflow_source
+            .transformed_multiplicity_free(&operation)
+            .unwrap();
+        let underflow_compiled = tenet_tensors::TreeTransformStructure::compile_structures(
+            underflow_destination.space().structure(),
+            underflow_source.space().structure(),
+            &[
+                tenet_operations::TreeTransformBlockSpec::single(0, 0, 1e-100)
+                    .with_source_axes([1, 0]),
+            ],
+        )
+        .unwrap();
+        assert!(try_braid_rank_one_diagonal_data::<f32>(
+            underflow_source.space(),
+            underflow_destination.space(),
+            &underflow_compiled,
+            &f32_spectrum,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn external_multiplicity_free_provider_matches_direct_transform() {
-        let provider = Arc::new(ExternalZ2);
+        let provider = Arc::new(ExternalZ2::<0>);
         let leg = SectorLeg::new([(SectorId::new(0), 2)], false);
         let source = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
             Arc::clone(&provider),
@@ -1739,7 +1967,7 @@ mod tests {
             )
             .unwrap();
 
-        let input: tenet_matrixalgebra::BoundDynamicTensorRef<'_, ExternalZ2, f64> =
+        let input: tenet_matrixalgebra::BoundDynamicTensorRef<'_, ExternalZ2<0>, f64> =
             BoundDynamicTensorRef::try_new(&source, &source_data).unwrap();
         let mut context = Ctx::<f64, RuleIdentity>::default();
         let (actual_destination, actual_data) =
@@ -1751,7 +1979,7 @@ mod tests {
 
     #[test]
     fn external_multiplicity_free_provider_contracts_direct_with_output_order() {
-        let provider = Arc::new(ExternalZ2);
+        let provider = Arc::new(ExternalZ2::<0>);
         let lhs_codomain = SectorLeg::new([(SectorId::new(0), 2)], false);
         let contracted = SectorLeg::new([(SectorId::new(0), 3)], false);
         let rhs_domain = SectorLeg::new([(SectorId::new(0), 4)], false);
