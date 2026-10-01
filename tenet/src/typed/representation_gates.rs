@@ -9051,6 +9051,72 @@ fn absorb_compact_source_zeros_shared_off_diagonal_and_preserves_outer_region() 
 }
 
 #[test]
+fn compact_absorb_handles_strided_prefixes_and_interleaved_sectors() {
+    let key = |sector| {
+        let tree = FusionTreeKey::try_from_sector_ids_for_rule(
+            &Z2FusionRule,
+            [sector],
+            sector,
+            [false],
+            [],
+            [],
+        )
+        .unwrap();
+        BlockKey::FusionTree(FusionTreePairKey::pair(tree.clone(), tree))
+    };
+    let source = BlockStructure::from_blocks(vec![
+        BlockSpec::column_major_with_key(key(0), vec![1, 1], 0).unwrap(),
+        BlockSpec::column_major_with_key(key(1), vec![2, 2], 1).unwrap(),
+    ])
+    .unwrap();
+    let destination =
+        BlockStructure::from_blocks(vec![
+            BlockSpec::with_key(key(1), vec![2, 2], vec![2, 5], 0).unwrap()
+        ])
+        .unwrap();
+    let spectrum = [
+        tenet_matrixalgebra::SectorSpectrum {
+            sector: SectorId::new(0),
+            values: vec![5.0],
+        },
+        tenet_matrixalgebra::SectorSpectrum {
+            sector: SectorId::new(1),
+            values: vec![7.0, 9.0],
+        },
+    ];
+    let mut values = vec![42.0; 8];
+    absorb_compact_source(&destination, &mut values, &source, &spectrum).unwrap();
+    assert_eq!(values, [7.0, 42.0, 0.0, 42.0, 42.0, 0.0, 42.0, 9.0]);
+
+    // A destination-only lower sector is likewise untouched before the
+    // shared strided block; this exercises both sides of the sector merge.
+    let destination = BlockStructure::from_blocks(vec![
+        BlockSpec::column_major_with_key(key(0), vec![1, 1], 0).unwrap(),
+        BlockSpec::with_key(key(1), vec![2, 2], vec![2, 5], 1).unwrap(),
+    ])
+    .unwrap();
+    let source = BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
+        key(1),
+        vec![2, 2],
+        0,
+    )
+    .unwrap()])
+    .unwrap();
+    let mut values = vec![42.0; 9];
+    absorb_compact_source(&destination, &mut values, &source, &spectrum[1..]).unwrap();
+    assert_eq!(values, [42.0, 7.0, 42.0, 0.0, 42.0, 42.0, 0.0, 42.0, 9.0]);
+
+    let duplicate = [spectrum[1].clone(), spectrum[1].clone()];
+    assert!(absorb_compact_source(&destination, &mut values, &source, &duplicate).is_err());
+    assert!(absorb_compact_source(&destination, &mut values, &source, &[]).is_err());
+    let wrong_shape = [tenet_matrixalgebra::SectorSpectrum {
+        sector: SectorId::new(1),
+        values: vec![7.0],
+    }];
+    assert!(absorb_compact_source(&destination, &mut values, &source, &wrong_shape).is_err());
+}
+
+#[test]
 fn compact_cat_and_absorb_preserve_stored_bits_and_zero_structural_cells() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let bond = GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, 2)]).unwrap();
