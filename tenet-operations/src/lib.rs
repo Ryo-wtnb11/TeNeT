@@ -122,7 +122,8 @@ pub use owned_overwrite_buffer::{zeroed_payload, ZeroBytes};
 mod owned_trace;
 #[doc(hidden)]
 pub use owned_cat::{
-    try_cat_owned_c64_raw, try_cat_owned_raw, OwnedCatC64Source, OwnedCatCopy, OwnedCatSide,
+    try_cat_owned_c64_raw, try_cat_owned_raw, validate_owned_cat, OwnedCatC64Source, OwnedCatCopy,
+    OwnedCatSide,
 };
 #[doc(hidden)]
 pub use owned_trace::{try_tensortrace_owned_raw, OwnedTraceTerm};

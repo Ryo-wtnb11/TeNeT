@@ -624,6 +624,89 @@ where
     Ok(())
 }
 
+pub(crate) fn absorb_compact_source<D: TensorScalar>(
+    destination_structure: &BlockStructure,
+    destination: &mut [D],
+    source_structure: &BlockStructure,
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+) -> Result<(), Error> {
+    let by_sector: std::collections::HashMap<_, _> =
+        spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != spectrum.len() {
+        return Err(internal_layout_error(
+            "compact absorb has duplicate spectrum sectors",
+        ));
+    }
+    let destination_sector = destination_structure.sector_structure();
+    let source_sector = source_structure.sector_structure();
+    let mut destination_position = 0;
+    let mut source_position = 0;
+    while destination_position < destination_sector.sorted_indices().len()
+        && source_position < source_sector.sorted_indices().len()
+    {
+        let destination_index = destination_sector.sorted_indices()[destination_position];
+        let source_index = source_sector.sorted_indices()[source_position];
+        let destination_block = destination_structure.block(destination_index)?;
+        let source_block = source_structure.block(source_index)?;
+        match destination_block.key().cmp(source_block.key()) {
+            std::cmp::Ordering::Less => destination_position += 1,
+            std::cmp::Ordering::Greater => source_position += 1,
+            std::cmp::Ordering::Equal => {
+                let pair = source_block.key().as_fusion_tree_pair().ok_or_else(|| {
+                    internal_layout_error("absorb reached a non-fusion-tree block key")
+                })?;
+                let [source_rows, source_cols] = source_block.shape() else {
+                    return Err(internal_layout_error(
+                        "compact absorb source is not a matrix",
+                    ));
+                };
+                let [destination_rows, destination_cols] = destination_block.shape() else {
+                    return Err(internal_layout_error(
+                        "compact absorb destination is not a matrix",
+                    ));
+                };
+                let entry = by_sector
+                    .get(&pair.codomain_tree().coupled())
+                    .ok_or_else(|| {
+                        internal_layout_error("compact absorb spectrum sector is absent")
+                    })?;
+                if source_rows != source_cols || entry.values.len() != *source_rows {
+                    return Err(internal_layout_error(
+                        "compact absorb spectrum shape disagrees",
+                    ));
+                }
+                for column in 0..(*source_cols).min(*destination_cols) {
+                    for row in 0..(*source_rows).min(*destination_rows) {
+                        let offset = row
+                            .checked_mul(destination_block.strides()[0])
+                            .and_then(|row_offset| {
+                                destination_block.offset().checked_add(row_offset)
+                            })
+                            .and_then(|offset| {
+                                column
+                                    .checked_mul(destination_block.strides()[1])
+                                    .and_then(|column_offset| offset.checked_add(column_offset))
+                            })
+                            .ok_or_else(|| {
+                                internal_layout_error("compact absorb destination offset overflow")
+                            })?;
+                        *destination.get_mut(offset).ok_or_else(|| {
+                            internal_layout_error("compact absorb destination offset out of bounds")
+                        })? = if row == column {
+                            entry.values[row]
+                        } else {
+                            D::from_real(0.0)
+                        };
+                    }
+                }
+                destination_position += 1;
+                source_position += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn copy_absorb_prefix<D, S>(
     destination: &mut [D],

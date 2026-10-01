@@ -3877,23 +3877,30 @@ where
         }
     }
 
-    fn cat_operand(&self) -> Result<(CatOperandLayout<'_>, std::borrow::Cow<'_, [D]>), Error> {
+    fn cat_operand(&self) -> Result<(CatOperandLayout<'_>, CatOperandData<'_, D>), Error> {
         match &self.repr {
-            TypedTensorRepr::Owned(body) => Ok((
-                CatOperandLayout::owned(
+            TypedTensorRepr::Owned(body) => {
+                let layout = CatOperandLayout::owned(
                     body.space.space().structure(),
                     body.space.space().nout(),
                     body.space.space().nin(),
-                )?,
-                body.materialized_dense_data(),
-            )),
+                )?;
+                let data = match body.data.as_ref() {
+                    TypedData::Dense(data) => CatOperandData::Dense(data),
+                    TypedData::Diagonal(spectrum) => CatOperandData::Diagonal {
+                        structure: body.space.space().structure(),
+                        spectrum,
+                    },
+                };
+                Ok((layout, data))
+            }
             TypedTensorRepr::Adjoint(view) => Ok((
                 CatOperandLayout::adjoint(
                     view.parent.space.space().structure(),
                     view.parent.space.space().nout(),
                     view.parent.space.space().nin(),
                 )?,
-                std::borrow::Cow::Borrowed(view.parent_data()),
+                CatOperandData::Dense(view.parent_data()),
             )),
         }
     }
@@ -4039,14 +4046,15 @@ where
     /// unrepresentable — widen with [`Self::convert`] first.
     /// A lazy adjoint is read from parent storage through the oriented copy
     /// plan without publishing a receiver-sized materialization. A compact
-    /// diagonal operand is densified into an operation-local buffer on every
-    /// call; nothing is retained.
+    /// diagonal operand is read directly from its spectrum into the output;
+    /// nothing is retained.
     ///
     /// # Complexity
     ///
-    /// One output admission and allocation plus a single
-    /// `O(len(self) + len(other))` copy pass over the compiled per-sector slab
-    /// plan. If an oriented geometry is conservatively declined, correctness
+    /// One output admission and allocation plus
+    /// `O(len(self) + len(other))` work over the compiled per-sector slab plan.
+    /// The compact path also initializes structural zeros in the output.
+    /// If an oriented geometry is conservatively declined, correctness
     /// falls back to operation-local materialization and retries the
     /// plan against the already-admitted output.
     ///
@@ -4104,7 +4112,7 @@ where
         )
         .map_err(TypedFacadeError::<R>::from)?
         {
-            plan.execute(&lhs_data, &rhs_data)
+            plan.execute([lhs_data, rhs_data])
                 .map_err(TypedFacadeError::<R>::from)?
         } else {
             // Why not recurse through `cat`: output admission has succeeded,
@@ -4116,8 +4124,7 @@ where
                 .refuse_borrowed_view("cat")
                 .map_err(TypedFacadeError::<R>::from)?;
             // Only a lazy adjoint needs a logical payload; an owned operand
-            // reuses the buffer read above, so a compact operand is not
-            // densified a second time.
+            // retains its borrowed dense or compact source.
             let lhs_local = self
                 .adjoint_logical_for_cat()
                 .map_err(TypedFacadeError::<R>::from)?;
@@ -4126,16 +4133,12 @@ where
                 .map_err(TypedFacadeError::<R>::from)?;
             let (lhs_layout, lhs_data) = match &lhs_local {
                 Some(local) => local.cat_operand(),
-                None => self
-                    .owned_cat_layout()
-                    .map(|layout| (layout, std::borrow::Cow::Borrowed(&*lhs_data))),
+                None => self.owned_cat_layout().map(|layout| (layout, lhs_data)),
             }
             .map_err(TypedFacadeError::<R>::from)?;
             let (rhs_layout, rhs_data) = match &rhs_local {
                 Some(local) => local.cat_operand(),
-                None => other
-                    .owned_cat_layout()
-                    .map(|layout| (layout, std::borrow::Cow::Borrowed(&*rhs_data))),
+                None => other.owned_cat_layout().map(|layout| (layout, rhs_data)),
             }
             .map_err(TypedFacadeError::<R>::from)?;
             let plan = compile_cat_plan(
@@ -4151,7 +4154,7 @@ where
                     "owned cat operands did not produce a copy plan",
                 ))
             })?;
-            plan.execute(&lhs_data, &rhs_data)
+            plan.execute([lhs_data, rhs_data])
                 .map_err(TypedFacadeError::<R>::from)?
         };
         Ok(Self {

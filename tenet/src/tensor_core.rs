@@ -282,6 +282,116 @@ pub(crate) fn is_rank_one_diagonal_swap(
         )
 }
 
+/// Returns a dense result only when the prepared braid proves a one-to-one
+/// map between all square bond blocks. A provider that declines this proof
+/// stays on the general dense replay path.
+pub(crate) fn try_braid_rank_one_diagonal_data<R, D>(
+    rule: &R,
+    source: &DynamicFusionMapSpace,
+    destination: &DynamicFusionMapSpace,
+    operation: &TreeTransformOperation,
+    spectrum: &[SectorSpectrum<D>],
+) -> Option<Vec<D>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: ScalarOps,
+{
+    if source.nout() != 1
+        || source.nin() != 1
+        || operation.kind() != TreeTransformOperationKind::Braid
+        || operation.codomain_permutation() != [1]
+        || operation.domain_permutation() != [0]
+    {
+        return None;
+    }
+    let prepared = match operation.raw_axis_positions() {
+        Some(positions) => PreparedTreePairOperation::prepare_braid_with_raw_axis_positions(
+            rule,
+            1,
+            1,
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
+            operation.codomain_levels(),
+            operation.domain_levels(),
+            positions,
+        )
+        .ok()?,
+        None => PreparedTreePairOperation::prepare_braid(
+            rule,
+            1,
+            1,
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
+            operation.codomain_levels(),
+            operation.domain_levels(),
+        )
+        .ok()?,
+    };
+    let sources = source.structure();
+    let destinations = destination.structure();
+    if sources.block_count() != spectrum.len()
+        || sources.block_count() != destinations.block_count()
+    {
+        return None;
+    }
+    let spectra: HashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if spectra.len() != spectrum.len() {
+        return None;
+    }
+    let mut destination_by_key = HashMap::with_capacity(destinations.block_count());
+    for index in 0..destinations.block_count() {
+        if destination_by_key
+            .insert(destinations.block(index).ok()?.key().clone(), index)
+            .is_some()
+        {
+            return None;
+        }
+    }
+    let mut seen = vec![false; destinations.block_count()];
+    let mut writes = Vec::with_capacity(sources.block_count());
+    for index in 0..sources.block_count() {
+        let source_block = sources.block(index).ok()?;
+        let source_pair = source_block.key().as_fusion_tree_pair()?;
+        let entry = spectra.get(&source_pair.codomain_tree().coupled())?;
+        let [rows, columns] = source_block.shape() else {
+            return None;
+        };
+        if rows != columns || entry.values.len() != *rows {
+            return None;
+        }
+        let rows = prepared.execute_multiplicity_free(rule, source_pair).ok()?;
+        let [(destination_pair, coefficient)] = rows.as_slice() else {
+            return None;
+        };
+        if !coefficient.is_finite() || *coefficient == 0.0 {
+            return None;
+        }
+        let destination_index =
+            *destination_by_key.get(&BlockKey::FusionTree(destination_pair.clone()))?;
+        if std::mem::replace(&mut seen[destination_index], true) {
+            return None;
+        }
+        let block = destinations.block(destination_index).ok()?;
+        if block.shape() != source_block.shape() {
+            return None;
+        }
+        writes.push((destination_index, *coefficient, *entry));
+    }
+    if seen.iter().any(|&covered| !covered) {
+        return None;
+    }
+    let mut output = vec![D::from_real(0.0); destination.required_len().ok()?];
+    for (index, coefficient, entry) in writes {
+        let block = destinations.block(index).ok()?;
+        let step = block.strides()[0].checked_add(block.strides()[1])?;
+        for (position, &value) in entry.values.iter().enumerate() {
+            let offset = block.offset().checked_add(position.checked_mul(step)?)?;
+            *output.get_mut(offset)? = value.scale_by_coefficient(coefficient);
+        }
+    }
+    Some(output)
+}
+
 // Test-only observability at the two owned multiplicity-free seams: armed
 // thread-locals count executions of the seam the current thread runs through.
 // A gate over these counters pins "one fused contraction, no separate permute

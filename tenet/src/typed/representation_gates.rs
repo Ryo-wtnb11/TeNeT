@@ -8782,15 +8782,15 @@ fn compact_arms_never_densify_their_spectrum_operand() {
     let _ = d.diagview().unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
-    // Positive control: a real braid takes the dense route.
+    // A one-term rank-(1,1) braid reads the compact source directly.
     let _ = d.braid(&[1], &[0], &[0, 1]).unwrap();
-    assert!(DIAGONAL_MATERIALIZATIONS.get() > 0);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
 #[test]
-fn compact_braid_can_produce_negative_off_diagonal_zeros() {
-    // This is a finite witness, not a proof that every rank-(1,1) braid has
-    // one term. The fermionic sign acts on structural +0 off-diagonal cells.
+fn compact_braid_off_diagonal_zeros_are_numerically_zero() {
+    // This finite witness exercises the one-term admission; structural zeros
+    // have no prescribed sign under a fermionic braid.
     use tenet_core::PreparedTreePairOperation;
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     macro_rules! probe {
@@ -8841,7 +8841,7 @@ fn compact_braid_can_produce_negative_off_diagonal_zeros() {
             assert!(covered.iter().all(|&seen| seen));
             DIAGONAL_MATERIALIZATIONS.set(0);
             let result = diagonal.braid(&[1], &[0], &[0, 1]).unwrap();
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
             let dense_oracle = diagonal
                 .materialize()
                 .unwrap()
@@ -8901,7 +8901,7 @@ fn compact_braid_can_produce_negative_off_diagonal_zeros() {
     probe!(
         FermionParityFusionRule,
         [(Z2Irrep::EVEN, 3), (Z2Irrep::ODD, 2)],
-        2
+        0
     );
     probe!(
         FermionParityFusionRule.product(U1FusionRule),
@@ -8909,7 +8909,7 @@ fn compact_braid_can_produce_negative_off_diagonal_zeros() {
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 3),
             (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
         ],
-        2
+        0
     );
 }
 
@@ -9048,6 +9048,89 @@ fn absorb_compact_source_zeros_shared_off_diagonal_and_preserves_outer_region() 
             assert_eq!(data[offset], expected, "row={row}, column={column}");
         }
     }
+}
+
+#[test]
+fn compact_cat_and_absorb_preserve_stored_bits_and_zero_structural_cells() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let bond = GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, 2)]).unwrap();
+    let nan = f64::from_bits(0x7ff8_0000_0000_1617);
+    let compact: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [SectorSpectrum {
+            sector: Z2Irrep::EVEN,
+            values: vec![-0.0, nan],
+        }],
+    )
+    .unwrap();
+    let dense = compact.materialize().unwrap();
+    let compact_cat = compact.cat(&compact, Side::Domain).unwrap();
+    let dense_cat = dense.cat(&dense, Side::Domain).unwrap();
+    assert_eq!(
+        compact_cat
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        dense_cat
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert!(compact_cat
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|x| x.to_bits() == (-0.0f64).to_bits()));
+    assert!(compact_cat
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|x| x.to_bits() == nan.to_bits()));
+    assert!(compact_cat
+        .dense_data()
+        .unwrap()
+        .iter()
+        .any(|x| x.to_bits() == 0.0f64.to_bits()));
+
+    let receiver: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |_, index| {
+            10.0 + index[0] as f64 + index[1] as f64
+        })
+        .unwrap();
+    let compact_absorb = receiver.absorb(&compact).unwrap();
+    let dense_absorb = receiver.absorb(&dense).unwrap();
+    assert_eq!(
+        compact_absorb
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        dense_absorb
+            .dense_data()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>()
+    );
+    let block = compact_absorb
+        .logical_space()
+        .space()
+        .structure()
+        .block(0)
+        .unwrap();
+    let values = compact_absorb.dense_data().unwrap();
+    let offset =
+        |row, column| block.offset() + row * block.strides()[0] + column * block.strides()[1];
+    assert_eq!(values[offset(0, 0)].to_bits(), (-0.0f64).to_bits());
+    assert_eq!(values[offset(1, 1)].to_bits(), nan.to_bits());
+    assert_eq!(values[offset(0, 1)].to_bits(), 0.0f64.to_bits());
+    assert_eq!(values[offset(1, 0)].to_bits(), 0.0f64.to_bits());
 }
 
 /// A destination whose device is not the Runtime's is rejected before any

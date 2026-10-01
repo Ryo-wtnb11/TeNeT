@@ -143,19 +143,135 @@ pub(crate) struct CatCopyPlan {
     side: Side,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum CatOperandData<'a, D> {
+    Dense(&'a [D]),
+    Diagonal {
+        structure: &'a Arc<BlockStructure>,
+        spectrum: &'a [tenet_matrixalgebra::SectorSpectrum<D>],
+    },
+}
+
 impl CatCopyPlan {
-    pub(crate) fn execute<D: ScalarOps>(&self, lhs: &[D], rhs: &[D]) -> Result<Vec<D>, Error> {
+    pub(crate) fn execute<D: ScalarOps>(
+        &self,
+        sources: [CatOperandData<'_, D>; 2],
+    ) -> Result<Vec<D>, Error> {
         let side = match self.side {
             Side::Domain => OwnedCatSide::Domain,
             Side::Codomain => OwnedCatSide::Codomain,
         };
-        tenet_tensors::try_cat_owned_raw(self.required_len, side, &self.copies, [lhs, rhs])
+        if let [CatOperandData::Dense(lhs), CatOperandData::Dense(rhs)] = sources {
+            return tenet_tensors::try_cat_owned_raw(
+                self.required_len,
+                side,
+                &self.copies,
+                [lhs, rhs],
+            )
             .ok_or_else(|| {
                 internal_layout_error(
                     "cat copy plan declined by the fast-path prover; no known geometry reaches \
                      this",
                 )
-            })
+            });
+        }
+        let source_lengths = sources.map(|source| match source {
+            CatOperandData::Dense(values) => Ok(values.len()),
+            CatOperandData::Diagonal { structure, .. } => structure.required_len(),
+        });
+        let [lhs_len, rhs_len] = source_lengths;
+        let source_lengths = [lhs_len?, rhs_len?];
+        tenet_operations::validate_owned_cat(self.required_len, side, &self.copies, source_lengths)
+            .ok_or_else(|| {
+                internal_layout_error("cat copy plan declined by the fast-path prover")
+            })?;
+        let mut diagonals = [None, None];
+        for (index, source) in sources.iter().enumerate() {
+            let CatOperandData::Diagonal {
+                structure,
+                spectrum,
+            } = source
+            else {
+                continue;
+            };
+            let by_sector: std::collections::HashMap<_, _> =
+                spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+            if by_sector.len() != spectrum.len() {
+                return Err(internal_layout_error("compact cat spectrum sectors repeat"));
+            }
+            let mut by_offset = std::collections::HashMap::with_capacity(structure.block_count());
+            for block_index in 0..structure.block_count() {
+                let block = structure.block(block_index)?;
+                let pair = block.key().as_fusion_tree_pair().ok_or_else(|| {
+                    internal_layout_error("compact cat source is not fusion-tree keyed")
+                })?;
+                let entry = by_sector
+                    .get(&pair.codomain_tree().coupled())
+                    .ok_or_else(|| {
+                        internal_layout_error("compact cat spectrum sector is absent")
+                    })?;
+                let [rows, cols] = block.shape() else {
+                    return Err(internal_layout_error("compact cat source is not a matrix"));
+                };
+                if rows != cols || entry.values.len() != *rows {
+                    return Err(internal_layout_error(
+                        "compact cat spectrum shape disagrees",
+                    ));
+                }
+                if by_offset.insert(block.offset(), *entry).is_some() {
+                    return Err(internal_layout_error("compact cat source offsets overlap"));
+                }
+            }
+            diagonals[index] = Some(by_offset);
+        }
+        let mut output = vec![D::from_real(0.0); self.required_len];
+        for copy in &self.copies {
+            match sources[copy.source()] {
+                CatOperandData::Dense(source) => {
+                    for column in 0..copy.cols() {
+                        for row in 0..copy.rows() {
+                            let source_offset = copy.source_offset()
+                                + row * copy.source_row_stride()
+                                + column * copy.source_column_stride();
+                            let destination_offset = copy.destination_offset()
+                                + row
+                                + column * copy.destination_leading_dimension();
+                            let value = source.get(source_offset).copied().ok_or_else(|| {
+                                internal_layout_error("cat dense source offset out of bounds")
+                            })?;
+                            *output.get_mut(destination_offset).ok_or_else(|| {
+                                internal_layout_error("cat destination offset out of bounds")
+                            })? = value.maybe_conj(copy.conjugate());
+                        }
+                    }
+                }
+                CatOperandData::Diagonal { .. } => {
+                    let entry = diagonals[copy.source()]
+                        .as_ref()
+                        .and_then(|by_offset| by_offset.get(&copy.source_offset()))
+                        .ok_or_else(|| {
+                            internal_layout_error("compact cat source region is absent")
+                        })?;
+                    if copy.rows() != copy.cols()
+                        || entry.values.len() != copy.rows()
+                        || copy.source_row_stride() != 1
+                        || copy.source_column_stride() != copy.rows()
+                        || copy.conjugate()
+                    {
+                        return Err(internal_layout_error("compact cat copy geometry disagrees"));
+                    }
+                    for (position, &value) in entry.values.iter().enumerate() {
+                        let destination_offset = copy.destination_offset()
+                            + position
+                            + position * copy.destination_leading_dimension();
+                        *output.get_mut(destination_offset).ok_or_else(|| {
+                            internal_layout_error("compact cat destination offset out of bounds")
+                        })? = value;
+                    }
+                }
+            }
+        }
+        Ok(output)
     }
 }
 
@@ -542,7 +658,10 @@ mod cat_plan_tests {
             side: Side::Domain,
         };
         let error = plan
-            .execute(&[1.0, 2.0, 3.0, 4.0], &[5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+            .execute([
+                CatOperandData::Dense(&[1.0, 2.0, 3.0, 4.0]),
+                CatOperandData::Dense(&[5.0, 6.0, 7.0, 8.0, 9.0, 10.0]),
+            ])
             .unwrap_err();
         assert!(matches!(
             error,

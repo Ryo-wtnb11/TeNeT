@@ -176,7 +176,8 @@ fn initialize_infallible<D: Copy>(
     }
 }
 
-fn validate_owned_cat(
+#[doc(hidden)]
+pub fn validate_owned_cat(
     required_len: usize,
     side: OwnedCatSide,
     copies: &[OwnedCatCopy],
