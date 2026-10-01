@@ -1892,3 +1892,43 @@ fn every_scalar_mismatch_direction_is_typed_and_precedes_provider_resolution() {
         Err(DecodeError::InvalidFormat(_))
     ));
 }
+
+#[test]
+fn dual_compact_qr_lq_factor_roundtrip_preserves_space_and_storage() {
+    let runtime = runtime();
+    let provider = Arc::new(U1FusionRule);
+    let codec = U1Codec {
+        provider: Arc::clone(&provider),
+    };
+    let leg = GradedSpace::try_new(provider, [(U1Irrep::new(2), 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(-2),
+            values: vec![Complex64::new(3.0, 4.0), Complex64::new(0.0, 0.0)],
+        }],
+    )
+    .unwrap();
+    let qr = input.qr_compact(&[0], &[1]).unwrap();
+    let lq = input.lq_full(&[0], &[1]).unwrap();
+    for factor in [qr.q, qr.r, lq.l, lq.q] {
+        let bytes = factor.to_bytes_with(&codec).unwrap();
+        let restored: TensorMap<_, Complex64> =
+            TensorMap::<U1FusionRule, Complex64>::from_bytes_with(
+                &runtime,
+                &bytes,
+                DecodeLimits::default(),
+                &codec,
+            )
+            .unwrap();
+        assert_eq!(restored.codomain(), input.codomain());
+        assert_eq!(restored.domain(), input.domain());
+        assert_eq!(restored.diagview().unwrap(), factor.diagview().unwrap());
+        assert!(restored.dense_data().is_err());
+        assert_eq!(restored.to_bytes_with(&codec).unwrap(), bytes);
+    }
+}

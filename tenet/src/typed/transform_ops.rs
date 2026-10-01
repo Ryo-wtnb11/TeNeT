@@ -2120,6 +2120,27 @@ where
         self.decode_spectrum(raw)
     }
 
+    fn try_qr_diagonal(&self) -> Option<Qr<Self>>
+    where
+        D: FactorizationScalar,
+    {
+        let TypedTensorRepr::Owned(body) = &self.repr else {
+            return None;
+        };
+        let TypedData::Diagonal(spectrum) = body.data.as_ref() else {
+            return None;
+        };
+        let Qr { q, r } = tenet_matrixalgebra::qr_diagonal_dyn(&body.space, spectrum)?;
+        let wrap = |values| Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::diagonal(body.space.clone(), values)),
+        };
+        Some(Qr {
+            q: wrap(q),
+            r: wrap(r),
+        })
+    }
+
     /// TensorKit 0.17 / MatrixAlgebraKit `qr_compact`: `t = q * r` with `q`
     /// carrying orthonormal columns per coupled sector.
     ///
@@ -2132,17 +2153,16 @@ where
     /// `O(Σ_c n_c³)` — sectorwise cubic; the seam runs one dense QR per
     /// coupled-sector matrix. A lazy adjoint first allocates its whole logical
     /// dense payload as an operation-local owned tensor, released with the
-    /// operation, and the returned factors are owned. A compact-diagonal
-    /// payload (TensorKit's `DiagonalTensorMap`) is densified into an
-    /// operation-local coupled buffer first, as for [`Self::left_polar`].
-    /// TensorKit 0.17 *does* keep a diagonal QR compact
-    /// (MatrixAlgebraKit's `DiagonalAlgorithm`); that fast path is not adopted
-    /// here — the issue #613 Group 4 contract requires every compact fast path
-    /// to be re-proven individually, the same deferral the polars record.
+    /// operation, and the returned factors are owned. An admitted owned compact
+    /// diagonal uses O(Σ_c k_c) spectrum work/storage and no dense QR. Both
+    /// factors preserve the input bond, including dual orientation.
     pub(super) fn qr_compact_multiplicity_free(&self) -> Result<Qr<Self>, Error>
     where
         D: FactorizationScalar,
     {
+        if let Some(factors) = self.try_qr_diagonal() {
+            return Ok(factors);
+        }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .materialized_tensor_uncached()?
@@ -2173,13 +2193,14 @@ where
     /// `m_c <= n_c`, and `O(m_c²(n_c + m_c))` when completion is required.
     /// Source packing and owned factor publication are additional costs. A
     /// lazy adjoint also allocates its whole logical payload for the call. A
-    /// compact-diagonal payload is densified into an operation-local buffer
-    /// first (TensorKit's `DiagonalAlgorithm` covers `qr_full!` too —
-    /// same non-adoption, same #613 Group 4 deferral).
+    /// compact diagonal uses the same O(Σ_c k_c) route as compact QR.
     pub(super) fn qr_full_multiplicity_free(&self) -> Result<Qr<Self>, Error>
     where
         D: FactorizationScalar,
     {
+        if let Some(factors) = self.try_qr_diagonal() {
+            return Ok(factors);
+        }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .materialized_tensor_uncached()?
@@ -2209,13 +2230,15 @@ where
     /// Sectorwise cubic. A lazy adjoint runs compact QR on its owned parent,
     /// reverses and adjoints the factors, then materializes both outputs into
     /// detached owned tensors, retaining neither parent factor buffer. A
-    /// compact-diagonal payload is densified into an operation-local buffer
-    /// first (TensorKit's `DiagonalAlgorithm` covers the LQ pair as well
-    /// — same non-adoption, same #613 Group 4 deferral).
+    /// compact diagonal uses the QR spectrum route with exchanged factors,
+    /// in O(Σ_c k_c) work/storage.
     pub(super) fn lq_compact_multiplicity_free(&self) -> Result<Lq<Self>, Error>
     where
         D: FactorizationScalar,
     {
+        if let Some(Qr { q, r }) = self.try_qr_diagonal() {
+            return Ok(Lq { l: r, q });
+        }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             let Qr { q, r } = self.adjoint()?.qr_compact_multiplicity_free()?;
             return Ok(Lq {
@@ -2248,12 +2271,15 @@ where
     /// `n_c <= m_c`, and `O(n_c²(m_c + n_c))` when completion is required.
     /// Source packing, the sectorwise adjoint, and owned factor publication are
     /// additional costs. A lazy adjoint uses the parent full-QR route and two
-    /// detached owned output payloads. A compact-diagonal payload is
-    /// materialized dense first.
+    /// detached owned output payloads. An admitted owned compact diagonal uses
+    /// the same O(Σ_c k_c) spectrum route as compact LQ.
     pub(super) fn lq_full_multiplicity_free(&self) -> Result<Lq<Self>, Error>
     where
         D: FactorizationScalar,
     {
+        if let Some(Qr { q, r }) = self.try_qr_diagonal() {
+            return Ok(Lq { l: r, q });
+        }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             let Qr { q, r } = self.adjoint()?.qr_full_multiplicity_free()?;
             return Ok(Lq {
@@ -2298,8 +2324,8 @@ where
     ///
     /// Sectorwise cubic — one compact SVD per coupled sector plus an
     /// orthonormal completion of the sectors that keep null directions; a
-    /// compact-diagonal payload is materialized dense first, as for
-    /// [`Self::qr_compact`]. A lazy adjoint runs the owned parent's
+    /// compact-diagonal payload is materialized dense first. A lazy adjoint
+    /// runs the owned parent's
     /// [`Self::right_null`] and returns its detached adjoint, without
     /// materializing the receiver.
     pub(super) fn left_null_multiplicity_free(&self) -> Result<Self, Error>

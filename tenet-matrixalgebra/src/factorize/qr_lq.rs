@@ -1,5 +1,91 @@
 use super::*;
 
+/// Finite, dtype-representable phase and magnitude, with unit phase at zero.
+/// Scaling before normalization keeps complex subnormals on the unit circle.
+pub(super) fn diagonal_phase_magnitude<D: FactorScalar>(value: D) -> Option<(D, D)> {
+    let value = value.widen_complex();
+    if !value.re.is_finite() || !value.im.is_finite() {
+        return None;
+    }
+    let scale = value.re.abs().max(value.im.abs());
+    let (phase, magnitude) = if scale == 0.0 {
+        (Complex64::new(1.0, 0.0), 0.0)
+    } else {
+        let normalized = value / scale;
+        let norm = normalized.norm();
+        (normalized / norm, scale * norm)
+    };
+    if !magnitude.is_finite() {
+        return None;
+    }
+    let phase = D::from_complex64(phase);
+    let magnitude = D::from_real(magnitude);
+    let phase_check = phase.widen_complex();
+    let magnitude_check = magnitude.widen_complex();
+    if !phase_check.re.is_finite()
+        || !phase_check.im.is_finite()
+        || !magnitude_check.re.is_finite()
+        || !magnitude_check.im.is_finite()
+    {
+        return None;
+    }
+    Some((phase, magnitude))
+}
+
+/// QR spectra on the input bond `V <- V`, including its dual orientation.
+/// Full and compact QR coincide; LQ exchanges the phase/magnitude factors.
+/// Returns `None` when existing dense execution must decide the result.
+#[doc(hidden)]
+pub fn qr_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Option<Qr<Vec<SectorSpectrum<D>>>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let source = authority.space();
+    if source.nout() != 1
+        || source.nin() != 1
+        || source.homspace().codomain() != source.homspace().domain()
+    {
+        return None;
+    }
+    let regions = checked_sector_regions(source.structure(), source.nout()).ok()??;
+    validate_endomorphism_region_stacking(&regions, "diagonal QR requires aligned trees").ok()?;
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != spectrum.len() || by_sector.len() != regions.len() {
+        return None;
+    }
+    let mut q = Vec::with_capacity(regions.len());
+    let mut r = Vec::with_capacity(regions.len());
+    for region in regions.iter() {
+        let entry = by_sector.get(&region.coupled())?;
+        if !region.has_aligned_diagonal()
+            || region.rows() != region.cols()
+            || entry.values.len() != region.rows()
+        {
+            return None;
+        }
+        let mut phases = Vec::with_capacity(entry.values.len());
+        let mut magnitudes = Vec::with_capacity(entry.values.len());
+        for &value in &entry.values {
+            let (phase, magnitude) = diagonal_phase_magnitude(value)?;
+            phases.push(phase);
+            magnitudes.push(magnitude);
+        }
+        q.push(SectorSpectrum {
+            sector: entry.sector,
+            values: phases,
+        });
+        r.push(SectorSpectrum {
+            sector: entry.sector,
+            values: magnitudes,
+        });
+    }
+    Some(Qr { q, r })
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct CompactQrCopyProbe {
@@ -750,14 +836,55 @@ pub(super) fn extend_adjoint_col_major<D: FactorScalar>(
     debug_assert_eq!(data.len(), rows * cols);
     output.reserve(data.len());
     for row in 0..rows {
-        output.extend(
-            data[row..]
-                .iter()
-                .step_by(rows)
-                .take(cols)
-                .map(|&value| FactorScalar::adjoint(value)),
-        );
+        // The StepBy/Take chain retained an out-of-line fold per row in Release.
+        output.extend((0..cols).map(|col| FactorScalar::adjoint(data[row + col * rows])));
     }
+}
+
+#[test]
+fn append_adjoint_preserves_rectangular_order_conjugation_and_existing_values() {
+    macro_rules! check {
+        ($ty:ty) => {{
+            let input = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0].map(<$ty as FactorScalar>::from_real);
+            let mut output = vec![<$ty as FactorScalar>::from_real(99.0)];
+            extend_adjoint_col_major(&mut output, &input, 2, 3);
+            assert_eq!(
+                output,
+                [99.0, 1.0, 3.0, 5.0, 2.0, 4.0, 6.0].map(<$ty as FactorScalar>::from_real)
+            );
+            for (rows, cols) in [(0, 0), (0, 3), (3, 0)] {
+                let before = output.clone();
+                extend_adjoint_col_major(&mut output, &[], rows, cols);
+                assert_eq!(output, before);
+            }
+        }};
+    }
+    check!(f32);
+    check!(f64);
+    check!(num_complex::Complex32);
+    check!(Complex64);
+    let input = [
+        Complex64::new(1.0, 2.0),
+        Complex64::new(3.0, 4.0),
+        Complex64::new(5.0, 6.0),
+        Complex64::new(7.0, 8.0),
+        Complex64::new(9.0, 10.0),
+        Complex64::new(11.0, 12.0),
+    ];
+    let mut output = vec![Complex64::new(99.0, 1.0)];
+    extend_adjoint_col_major(&mut output, &input, 2, 3);
+    assert_eq!(
+        output,
+        [
+            Complex64::new(99.0, 1.0),
+            Complex64::new(1.0, -2.0),
+            Complex64::new(5.0, -6.0),
+            Complex64::new(9.0, -10.0),
+            Complex64::new(3.0, -4.0),
+            Complex64::new(7.0, -8.0),
+            Complex64::new(11.0, -12.0)
+        ]
+    );
 }
 
 /// Transposes a column-major `rows x cols` matrix into column-major

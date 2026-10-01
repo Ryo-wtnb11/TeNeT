@@ -1672,11 +1672,17 @@ where
     /// [`Self::qr_full`] instead uses `dim(W_c) = m_c`, making `q` square and
     /// `r` upper trapezoidal in every sector.
     ///
-    /// Each sector runs one dense QR, with cost
-    /// `O(sum_c m_c * n_c * min(m_c, n_c))`. Compact diagonal input is
-    /// materialized first. Multiplicity-free lazy adjoints are materialized
-    /// only for the operation; checked-Generic QR requires an
-    /// owned input. Checked factors use the same provider instance as `self`.
+    /// An admitted finite owned Host compact diagonal on `V <- V` returns
+    /// both factors in compact storage with `W = V`, including dual orientation.
+    /// Phase is +1 at zero; work and output storage are `O(sum_c k_c)` after
+    /// sector/layout validation. Use [`Self::diagview`] to read the factors,
+    /// or [`Self::materialize`] before [`Self::dense_data`] for a dense buffer.
+    /// Nonfinite or unrepresentable magnitudes retain the dense provider route.
+    ///
+    /// Other inputs run one dense QR per sector, with cost
+    /// `O(sum_c m_c * n_c * min(m_c, n_c))`. Multiplicity-free lazy adjoints
+    /// are materialized only for the operation; checked-Generic QR requires
+    /// an owned input. Checked factors use the same provider instance as `self`.
     /// If any sector fails or the provider rejects an output space, no factors
     /// are returned.
     ///
@@ -1834,8 +1840,9 @@ where
     /// [`Self::lq_full`] instead uses `dim(W_c) = n_c`, so `q` is square and
     /// `l` is lower trapezoidal.
     ///
-    /// Its cost is the same as [`Self::qr_compact`]. Compact inputs are
-    /// materialized first, and checked Generic requires an owned input.
+    /// Its cost and compact storage contract are the same as [`Self::qr_compact`]:
+    /// admitted owned Host compact diagonals preserve `W = V` and both factors
+    /// are compact. Checked Generic requires an owned input.
     /// Checked factors use the source provider instance, and a failure returns
     /// no factors. A multiplicity-free lazy adjoint runs QR on its owned
     /// parent and returns detached owned factors without materializing the
@@ -2064,7 +2071,9 @@ where
     /// and non-negative. For sector shape `m_c x n_c`, dense work is
     /// `O(m_c² n_c)` when `m_c <= n_c`; when `m_c > n_c`, completing the
     /// square `q` costs `O(m_c²(n_c + m_c))`. Source packing and owned factor
-    /// publication are additional costs. See [`Self::qr_compact`] for the
+    /// publication are additional costs. An admitted owned Host compact diagonal
+    /// uses `W = V` and two compact factors, exactly as compact QR.
+    /// See [`Self::qr_compact`] for the
     /// compact alternative, storage and lazy-input behavior, errors, and example.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
@@ -2093,8 +2102,9 @@ where
     /// non-negative. For sector shape `m_c x n_c`, dense work is
     /// `O(n_c² m_c)` when `n_c <= m_c`; when `n_c > m_c`, completing the
     /// square `q` costs `O(n_c²(m_c + n_c))`. Source packing, the sectorwise
-    /// adjoint, and owned factor publication are additional costs. See
-    /// [`Self::lq_compact`] for the compact alternative, storage and
+    /// adjoint, and owned factor publication are additional costs. An admitted
+    /// owned Host compact diagonal uses `W = V` and two compact factors,
+    /// exactly as compact LQ. See [`Self::lq_compact`] for the compact alternative, storage and
     /// lazy-input behavior, errors, and example.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix

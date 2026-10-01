@@ -38,7 +38,7 @@ pub use factorize::{
     left_polar_diagonal_dyn, left_polar_dyn, left_polar_dyn_checked_generic, lq_compact,
     lq_compact_dyn, lq_compact_dyn_checked_generic, lq_compact_dyn_generic, lq_full, lq_full_dyn,
     lq_full_dyn_checked_generic, qr_compact, qr_compact_dyn, qr_compact_dyn_checked_generic,
-    qr_compact_dyn_generic, qr_full, qr_full_dyn, qr_full_dyn_checked_generic,
+    qr_compact_dyn_generic, qr_diagonal_dyn, qr_full, qr_full_dyn, qr_full_dyn_checked_generic,
     rectangular_diagonal_bond_tensor_generic_checked, right_null, right_null_dyn,
     right_null_dyn_checked_generic, right_polar, right_polar_adjoint_parent_dyn,
     right_polar_adjoint_parent_dyn_checked_generic, right_polar_diagonal_dyn, right_polar_dyn,
