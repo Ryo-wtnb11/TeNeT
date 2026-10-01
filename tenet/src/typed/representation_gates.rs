@@ -8787,6 +8787,102 @@ fn compact_arms_never_densify_their_spectrum_operand() {
     assert!(DIAGONAL_MATERIALIZATIONS.get() > 0);
 }
 
+#[test]
+fn compact_braid_can_produce_negative_off_diagonal_zeros() {
+    // This is a finite witness, not a proof that every rank-(1,1) braid has
+    // one term. The fermionic sign acts on structural +0 off-diagonal cells.
+    use tenet_core::PreparedTreePairOperation;
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    macro_rules! probe {
+        ($rule:expr, $sectors:expr, $negative_zeros:expr) => {{
+            let leg = GradedSpace::try_new(Arc::new($rule), $sectors).unwrap();
+            let tensor: TensorMap<_, f64> =
+                TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 1617).unwrap();
+            let diagonal = tensor.svd_compact(&[0], &[1]).unwrap().s;
+            let source = diagonal.logical_space().space().structure();
+            let prepared = PreparedTreePairOperation::prepare_braid(
+                diagonal.provider(),
+                1,
+                1,
+                &[1],
+                &[0],
+                &[0],
+                &[1],
+            )
+            .unwrap();
+            let mut counts = Vec::new();
+            for i in 0..source.block_count() {
+                let pair = source
+                    .block(i)
+                    .unwrap()
+                    .key()
+                    .as_fusion_tree_pair()
+                    .unwrap();
+                let rows = prepared
+                    .execute_multiplicity_free(diagonal.provider(), pair)
+                    .unwrap();
+                counts.push(rows.len());
+            }
+            DIAGONAL_MATERIALIZATIONS.set(0);
+            let result = diagonal.braid(&[1], &[0], &[0, 1]).unwrap();
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+            assert!(diagonal
+                .diagview()
+                .unwrap()
+                .iter()
+                .flat_map(|entry| &entry.values)
+                .all(|&value| value != 0.0));
+            let output = result.dense_data().unwrap();
+            let structure = result.logical_space().space().structure();
+            let mut negative_zeros = 0;
+            for block_index in 0..structure.block_count() {
+                let block = structure.block(block_index).unwrap();
+                assert_eq!(block.shape().len(), 2);
+                assert_eq!(block.shape()[0], block.shape()[1]);
+                for column in 0..block.shape()[1] {
+                    for row in 0..block.shape()[0] {
+                        if row != column {
+                            let offset = block.offset()
+                                + row * block.strides()[0]
+                                + column * block.strides()[1];
+                            negative_zeros +=
+                                usize::from(output[offset].to_bits() == (-0.0_f64).to_bits());
+                        }
+                    }
+                }
+            }
+            assert!(counts.iter().all(|&count| count == 1));
+            assert_eq!(negative_zeros, $negative_zeros);
+        }};
+    }
+    probe!(
+        U1FusionRule,
+        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+        0
+    );
+    probe!(
+        SU2FusionRule,
+        [
+            (SU2Irrep::from_twice_spin(0), 3),
+            (SU2Irrep::from_twice_spin(1), 2)
+        ],
+        0
+    );
+    probe!(
+        FermionParityFusionRule,
+        [(Z2Irrep::EVEN, 3), (Z2Irrep::ODD, 2)],
+        2
+    );
+    probe!(
+        FermionParityFusionRule.product(U1FusionRule),
+        [
+            (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 3),
+            (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+        ],
+        2
+    );
+}
+
 /// A destination whose device is not the Runtime's is rejected before any
 /// device work, its bytes untouched (#1551). The public API cannot build
 /// one — a tensor's storage lives on its own Runtime's device, and the
