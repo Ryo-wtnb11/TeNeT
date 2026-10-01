@@ -751,16 +751,13 @@ where
     ///
     /// # Compact storage
     ///
-    /// A non-identity transform of a factor in compact diagonal storage
-    /// ([`Self::svd_compact`]'s `s`, [`Self::eigh_full`]'s `d`) is
-    /// **materialized** here, and so by [`Self::braid`], [`Self::transpose`]
-    /// and [`Self::repartition`] as well: the input is densified into an
-    /// operation-local buffer and the result is a dense `Σ_c k_c²` buffer. An exact identity returns the source body
-    /// unchanged and preserves compact storage.
-    /// TensorKit draws the line in the same place — its `DiagonalTensorMap`
-    /// implements only the two permutations that leave a diagonal diagonal —
-    /// and the general case genuinely is not diagonal, so this is a missing
-    /// specialization for two axis orders rather than a missing operation.
+    /// An exact identity returns a compact diagonal factor unchanged. A
+    /// rank-(1,1) leg swap through [`Self::permute`] or [`Self::transpose`]
+    /// keeps it compact. An admitted rank-(1,1) [`Self::braid`] reads its
+    /// spectrum directly and publishes a dense result. Other non-identity
+    /// `permute`/`transpose`/`repartition` cases and unadmitted braids
+    /// materialize the compact source into an operation-local buffer and
+    /// publish a dense `Σ_c k_c²` result.
     ///
     /// # Errors
     ///

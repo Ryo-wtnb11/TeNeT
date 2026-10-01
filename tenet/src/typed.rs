@@ -133,12 +133,14 @@
 //! `DiagonalTensorMap` is. It is a storage property and not a type: no signature
 //! mentions it, [`TensorMap::dense_data`] refuses it (call
 //! [`TensorMap::materialize`] for the dense buffer), and the operations that can exploit
-//! it — [`TensorMap::compose`],
-//! [`TensorMap::scale`], [`TensorMap::axpby`], [`TensorMap::adjoint`],
+//! it — [`TensorMap::compose`], admitted bond-scaling [`TensorMap::contract`],
+//! [`TensorMap::cat`], [`TensorMap::absorb`], [`TensorMap::scale`],
+//! [`TensorMap::axpby`], [`TensorMap::adjoint`],
 //! [`TensorMap::trace_pairs`] on its full-pair arm, and the reductions — do so
-//! silently. The ones that cannot say so in their own
-//! documentation: [`TensorMap::permute`] and its family, and
-//! [`TensorMap::contract`].
+//! silently. Rank-(1,1) [`TensorMap::permute`] and [`TensorMap::transpose`]
+//! swaps keep the compact result; an admitted [`TensorMap::braid`] reads the
+//! compact source directly and publishes a dense result. Other transform and
+//! contraction geometries use the documented dense route.
 //!
 //! [`TensorMap::compose`] was previously documented here as blocked below this
 //! layer, on a public seam sealed by `LoweredMultiplicityFreeAlgebra`. That
