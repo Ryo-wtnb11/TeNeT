@@ -535,7 +535,7 @@ pub(super) enum TypedData<D, S = Vec<D>> {
     /// The dense coupled-sector buffer every operation can read.
     Dense(S),
     /// Compact O(Σ_c k_c) storage for a proved bond endomorphism, including
-    /// SVD `s`, `eigh`/`eig` `d`, and diagonal QR/LQ factors: only the
+    /// SVD `s`, `eigh`/`eig` `d`, and diagonal QR/LQ/polar factors: only the
     /// per-sector diagonal values, keyed by the engine's raw
     /// [`crate::sector::SectorId`] — a stored payload never leaves this module, so
     /// there is nothing here for the codec to label.

@@ -207,15 +207,33 @@ fn compact_diagonal_polar_skips_input_materialization_svd_and_gemm() {
     .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
     let left = input.left_polar(&[0], &[1]).unwrap();
-    assert!(left.w.dense_data().is_ok());
-    assert!(left.p.dense_data().is_ok());
+    assert!(left.w.diagview().is_ok());
+    assert!(left.p.diagview().is_ok());
+    assert!(left.w.dense_data().is_err());
+    assert!(left.p.dense_data().is_err());
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     assert_eq!(gemm_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    let old_dense = tenet_matrixalgebra::left_polar_diagonal_dyn(
+        input.logical_space(),
+        input.spectrum().unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        old_dense.w.data(),
+        left.w.materialize().unwrap().dense_data().unwrap()
+    );
+    assert_eq!(
+        old_dense.p.data(),
+        left.p.materialize().unwrap().dense_data().unwrap()
+    );
     DIAGONAL_MATERIALIZATIONS.set(0);
     let right = input.right_polar(&[0], &[1]).unwrap();
-    assert!(right.wh.dense_data().is_ok());
-    assert!(right.p.dense_data().is_ok());
+    assert!(right.wh.diagview().is_ok());
+    assert!(right.p.diagview().is_ok());
+    assert!(right.wh.dense_data().is_err());
+    assert!(right.p.dense_data().is_err());
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     assert_eq!(gemm_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
@@ -596,8 +614,12 @@ fn compact_diagonal_polar_matches_hand_phase_and_absolute_value_all_scalars() {
                     }
                 );
                 assert_eq!(p.domain(), p.codomain());
-                assert!(w.dense_data().is_ok());
-                assert!(p.dense_data().is_ok());
+                assert!(w.dense_data().is_err());
+                assert!(p.dense_data().is_err());
+                assert!(w.diagview().is_ok());
+                assert!(p.diagview().is_ok());
+                let w = w.materialize().unwrap();
+                let p = p.materialize().unwrap();
                 for (i, (&actual_w, &actual_p)) in w
                     .dense_data()
                     .unwrap()
@@ -622,7 +644,14 @@ fn compact_diagonal_polar_matches_hand_phase_and_absolute_value_all_scalars() {
                     $tol,
                 );
                 let unit = w.adjoint().unwrap().compose(&w).unwrap();
-                for (i, &value) in unit.dense_data().unwrap().iter().enumerate() {
+                for (i, &value) in unit
+                    .materialize()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                {
                     let expected = if i % 4 == i / 4 { 1.0 } else { 0.0 };
                     assert!((value.widen_complex() - Complex64::new(expected, 0.0)).norm() <= $tol);
                 }
@@ -692,6 +721,14 @@ fn compact_diagonal_polar_preserves_sectors_and_changed_roles() {
                 let left = input.left_polar(&rows, &cols).unwrap();
                 let right = input.right_polar(&rows, &cols).unwrap();
                 assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+                if permuted.spectrum().is_some() {
+                    for factor in [&left.w, &left.p, &right.p, &right.wh] {
+                        assert!(factor.diagview().is_ok());
+                        assert!(factor.dense_data().is_err());
+                        assert_eq!(factor.codomain(), permuted.codomain());
+                        assert_eq!(factor.domain(), permuted.domain());
+                    }
+                }
                 assert_polar_factors(
                     &input,
                     &dense,
@@ -805,8 +842,8 @@ fn compact_diagonal_polar_scales_complex_subnormals_before_normalizing() {
                     let RightPolar { p, wh } = input.right_polar(&[0], &[1]).unwrap();
                     (wh, p)
                 };
-                let phase = w.dense_data().unwrap()[0].widen_complex();
-                let magnitude = p.dense_data().unwrap()[0].widen_complex().re;
+                let phase = w.diagview().unwrap()[0].values[0].widen_complex();
+                let magnitude = p.diagview().unwrap()[0].values[0].widen_complex().re;
                 assert!((phase.re - std::f64::consts::FRAC_1_SQRT_2).abs() < $tol);
                 assert!((phase.im - std::f64::consts::FRAC_1_SQRT_2).abs() < $tol);
                 assert!(magnitude.is_finite() && magnitude > 0.0);
@@ -6944,6 +6981,8 @@ fn assert_typed_map_close<R, D>(
         expected.logical_space().space()
     );
     assert!(actual
+        .materialize()
+        .unwrap()
         .dense_data()
         .unwrap()
         .iter()
@@ -7476,7 +7515,7 @@ fn assert_polar_factors<R, D>(
             factor.logical_space().provider_arc(),
             source.logical_space().provider_arc()
         ));
-        let _ = factor.dense_data().unwrap();
+        let _ = factor.materialize().unwrap().dense_data().unwrap();
     }
     assert_eq!(
         actual.0.logical_space().space(),
