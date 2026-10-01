@@ -603,6 +603,69 @@ where
     })
 }
 
+/// Forms the full eigenbasis of an admitted owned compact diagonal directly.
+#[doc(hidden)]
+pub fn eig_full_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<EigFullDyn<R, D>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let space = authority.space();
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Ok(None);
+    }
+    let Ok(Some(plan)) = compact_factor_plan(authority) else {
+        return Ok(None);
+    };
+    if validate_endomorphism_tree_stacking(
+        plan.source_regions.as_ref(),
+        "eig_full requires identical endomorphism row/column fusion-tree stacking",
+    )
+    .is_err()
+    {
+        return Ok(None);
+    }
+    let Some(by_sector) = complex_diagonal_by_sector(&plan.source_regions, spectrum) else {
+        return Ok(None);
+    };
+    let v_space = authority.rebind_validated(&plan.left_layout)?;
+    let mut v_data = vec![<D::Eig as num_traits::Zero>::zero(); plan.left_layout.required_len()?];
+    let mut eigenvalues = Vec::with_capacity(plan.routes.len());
+    for route in plan.routes.iter().copied() {
+        let entry = by_sector[&route.sector];
+        let n = entry.values.len();
+        let mut ordered: Vec<_> = entry
+            .values
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(row, value)| {
+                let value = value.widen_complex();
+                (row, value, value.norm())
+            })
+            .collect();
+        ordered.sort_by(|a, b| b.2.total_cmp(&a.2));
+        if let Some(index) = route.left_region {
+            let start = plan.left_regions[index].range().start;
+            for (column, &(row, _, _)) in ordered.iter().enumerate() {
+                v_data[start + column * n + row] =
+                    <D::Eig as FactorScalar>::from_complex64(Complex64::new(1.0, 0.0));
+            }
+        }
+        eigenvalues.push(SectorSpectrum {
+            sector: route.sector,
+            values: ordered.into_iter().map(|(_, value, _)| value).collect(),
+        });
+    }
+    Ok(Some(EigFullDyn {
+        v: BoundDynFactor::from_bound(v_space, v_data, space.nout(), 1)?,
+        eigenvalues,
+    }))
+}
+
 /// Reads an admitted compact diagonal without packing or an eigensolver.
 #[doc(hidden)]
 pub fn eigh_vals_diagonal_dyn<R, D>(
@@ -681,6 +744,36 @@ fn real_diagonal_by_sector<'a, D: FactorScalar>(
     Some(by_sector)
 }
 
+fn complex_diagonal_by_sector<'a, D: FactorScalar>(
+    regions: &[CoupledSectorRegion],
+    spectrum: &'a [SectorSpectrum<D>],
+) -> Option<FxHashMap<SectorId, &'a SectorSpectrum<D>>> {
+    if spectrum
+        .iter()
+        .flat_map(|entry| &entry.values)
+        .any(|&value| {
+            let value = value.widen_complex();
+            !value.re.is_finite() || !value.im.is_finite() || !value.norm().is_finite()
+        })
+    {
+        return None;
+    }
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != spectrum.len() || by_sector.len() != regions.len() {
+        return None;
+    }
+    for region in regions {
+        let entry = by_sector.get(&region.coupled())?;
+        if !region.has_aligned_diagonal()
+            || region.rows() != region.cols()
+            || entry.values.len() != region.rows()
+        {
+            return None;
+        }
+    }
+    Some(by_sector)
+}
+
 /// Reads an admitted compact diagonal spectrum without dense input or eigensolver.
 #[doc(hidden)]
 pub fn eig_vals_diagonal_dyn<R, D>(
@@ -691,16 +784,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    if spectrum
-        .iter()
-        .flat_map(|entry| &entry.values)
-        .any(|&value| {
-            let value = value.widen_complex();
-            !value.re.is_finite() || !value.im.is_finite() || !value.norm().is_finite()
-        })
-    {
-        return Ok(None);
-    }
     let space = authority.space();
     if space.homspace().codomain() != space.homspace().domain() {
         return Ok(None);
@@ -716,21 +799,12 @@ where
     {
         return Ok(None);
     }
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != spectrum.len() || by_sector.len() != regions.len() {
+    let Some(by_sector) = complex_diagonal_by_sector(&regions, spectrum) else {
         return Ok(None);
-    }
+    };
     let mut result = Vec::with_capacity(regions.len());
     for region in regions.iter() {
-        let Some(entry) = by_sector.get(&region.coupled()) else {
-            return Ok(None);
-        };
-        if !region.has_aligned_diagonal()
-            || region.rows() != region.cols()
-            || entry.values.len() != region.rows()
-        {
-            return Ok(None);
-        }
+        let entry = by_sector[&region.coupled()];
         let mut values: Vec<Complex64> = entry
             .values
             .iter()
