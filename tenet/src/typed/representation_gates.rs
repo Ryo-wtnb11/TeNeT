@@ -2565,6 +2565,7 @@ fn compact_diagonal_svd_full_preserves_spaces_without_materialization_or_solver(
     let w = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(-2), 3)]).unwrap();
     let dense = input.materialize().unwrap();
     let old = dense.svd_full(&[0], &[1]).unwrap();
+    assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
     calls.store(0, std::sync::atomic::Ordering::Relaxed);
     DIAGONAL_MATERIALIZATIONS.set(0);
     let out = input.svd_full(&[0], &[1]).unwrap();
@@ -2588,6 +2589,20 @@ fn compact_diagonal_svd_full_preserves_spaces_without_materialization_or_solver(
         out.s.diagonal_spectrum().unwrap().unwrap(),
         out.s.diagview().unwrap()
     );
+    let rebuilt = out.u.compose(&out.s).unwrap().compose(&out.vh).unwrap();
+    assert_eq!(rebuilt.dense_data().unwrap(), dense.dense_data().unwrap());
+    for (gram, identity) in [
+        (
+            out.u.adjoint().unwrap().compose(&out.u).unwrap(),
+            TensorMap::isomorphism(&runtime, &out.u.domain(), &out.u.domain()).unwrap(),
+        ),
+        (
+            out.vh.compose(&out.vh.adjoint().unwrap()).unwrap(),
+            TensorMap::isomorphism(&runtime, &out.vh.codomain(), &out.vh.codomain()).unwrap(),
+        ),
+    ] {
+        assert!(gram.axpby(1.0, &identity, -1.0).unwrap().norm(2.0).unwrap() < 1e-12);
+    }
     assert_eq!(
         out.s.materialize().unwrap().dense_data().unwrap(),
         &[4.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0]
@@ -3171,16 +3186,16 @@ fn compact_diagonal_svd_preserves_dense_failure_at_c32_range_edge() {
             }],
         )
         .unwrap();
-        let dense_result = (if full {
+        let dense_result = if full {
             input.materialize().unwrap().svd_full(&[0], &[1])
         } else {
             input.materialize().unwrap().svd_compact(&[0], &[1])
-        });
-        let compact_result = (if full {
+        };
+        let compact_result = if full {
             input.svd_full(&[0], &[1])
         } else {
             input.svd_compact(&[0], &[1])
-        });
+        };
         assert_eq!(compact_result.is_err(), dense_result.is_err());
     }
 }
