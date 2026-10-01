@@ -2383,19 +2383,25 @@ where
     ///
     /// # Complexity
     ///
-    /// `O(Σ_c n_c³)` — sectorwise cubic, no global materialization; the seam
-    /// factorizes each coupled sector on its own. A compact-diagonal payload
-    /// (TensorKit's `DiagonalTensorMap`) is densified into an operation-local
-    /// buffer first, as for [`Self::qr_compact`]: TensorKit 0.17 has
-    /// no diagonal polar specialization either (its `DiagonalAlgorithm`
-    /// table gives `DiagonalTensorMap` only `copy_input` for the polars, so
-    /// it dispatches dense per block), and the
-    /// issue #613 Group 4 contract requires any compact fast path to be
-    /// individually re-proven — out of scope here.
+    /// Dense input costs `O(Σ_c n_c³)` sectorwise. An admitted owned compact
+    /// diagonal uses `O(Σ_c n_c²)` dense factor writes and no dense SVD,
+    /// matching TensorKit's diagonal polar specialization.
     pub(super) fn left_polar_multiplicity_free(&self) -> Result<LeftPolar<Self>, Error>
     where
         D: FactorizationScalar,
     {
+        if let TypedTensorRepr::Owned(body) = &self.repr {
+            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                if let Some(LeftPolar { w, p }) =
+                    tenet_matrixalgebra::left_polar_diagonal_dyn(&body.space, spectrum)?
+                {
+                    return Ok(LeftPolar {
+                        w: self.wrap_bound_factor(w),
+                        p: self.wrap_bound_factor(p),
+                    });
+                }
+            }
+        }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let mut dense = self.runtime.lease_dense();
             let mut lease = self.runtime.lease_context()?;
@@ -2444,12 +2450,24 @@ where
     ///
     /// # Complexity
     ///
-    /// As [`Self::left_polar`]: `O(Σ_c n_c³)`, sectorwise, with a
-    /// compact-diagonal payload materialized first.
+    /// As [`Self::left_polar`], with direct dense factor writes for an
+    /// admitted owned compact diagonal.
     pub(super) fn right_polar_multiplicity_free(&self) -> Result<RightPolar<Self>, Error>
     where
         D: FactorizationScalar,
     {
+        if let TypedTensorRepr::Owned(body) = &self.repr {
+            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                if let Some(RightPolar { p, wh }) =
+                    tenet_matrixalgebra::right_polar_diagonal_dyn(&body.space, spectrum)?
+                {
+                    return Ok(RightPolar {
+                        p: self.wrap_bound_factor(p),
+                        wh: self.wrap_bound_factor(wh),
+                    });
+                }
+            }
+        }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let mut dense = self.runtime.lease_dense();
             let mut lease = self.runtime.lease_context()?;
@@ -4066,8 +4084,9 @@ where
     /// compact SVD. Every coupled-sector block must be at least as tall as it
     /// is wide. [`Self::right_polar`] handles wide blocks.
     ///
-    /// Cost is `O(sum_c m_c * n_c * min(m_c, n_c))` plus sectorwise
-    /// composition. Compact diagonal input is materialized first. A lazy
+    /// Dense-input cost is `O(sum_c m_c * n_c * min(m_c, n_c))` plus sectorwise
+    /// composition. An admitted owned compact diagonal writes dense factors
+    /// directly. A lazy
     /// adjoint runs the opposite decomposition on its owned parent and returns
     /// detached owned factors without materializing the receiver. Checked factors
     /// use the same provider instance as `self`. If that provider rejects an

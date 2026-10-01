@@ -1,5 +1,165 @@
 use super::*;
 
+fn polar_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+    direction: PolarDirection,
+) -> Result<Option<DynamicFactorPair<R, D>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let source = authority.space();
+    if source.homspace().codomain() != source.homspace().domain() {
+        return Ok(None);
+    }
+    let Ok(Some(source_regions)) = checked_sector_regions(source.structure(), source.nout()) else {
+        return Ok(None);
+    };
+    if validate_endomorphism_region_stacking(
+        &source_regions,
+        "polar requires identical endomorphism row/column fusion-tree stacking",
+    )
+    .is_err()
+    {
+        return Ok(None);
+    }
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != spectrum.len() || by_sector.len() != source_regions.len() {
+        return Ok(None);
+    }
+    let mut diagonal = Vec::with_capacity(source_regions.len());
+    for region in source_regions.iter() {
+        let Some(entry) = by_sector.get(&region.coupled()) else {
+            return Ok(None);
+        };
+        if !region.has_aligned_diagonal()
+            || region.rows() != region.cols()
+            || entry.values.len() != region.rows()
+        {
+            return Ok(None);
+        }
+        let mut values = Vec::with_capacity(entry.values.len());
+        for &value in &entry.values {
+            let value = value.widen_complex();
+            if !value.re.is_finite() || !value.im.is_finite() {
+                return Ok(None);
+            }
+            let scale = value.re.abs().max(value.im.abs());
+            let (phase, magnitude) = if scale == 0.0 {
+                (Complex64::new(1.0, 0.0), 0.0)
+            } else {
+                let normalized = value / scale;
+                let norm = normalized.norm();
+                (normalized / norm, scale * norm)
+            };
+            if !magnitude.is_finite() {
+                return Ok(None);
+            }
+            let phase = D::from_complex64(phase);
+            let magnitude = D::from_real(magnitude);
+            let phase_check = phase.widen_complex();
+            let magnitude_check = magnitude.widen_complex();
+            if !phase_check.re.is_finite()
+                || !phase_check.im.is_finite()
+                || !magnitude_check.re.is_finite()
+                || !magnitude_check.im.is_finite()
+            {
+                return Ok(None);
+            }
+            values.push((phase, magnitude));
+        }
+        diagonal.push(values);
+    }
+
+    let p_homspace = match direction {
+        PolarDirection::Left => FusionTreeHomSpace::new(
+            source.homspace().domain().clone(),
+            source.homspace().domain().clone(),
+        ),
+        PolarDirection::Right => FusionTreeHomSpace::new(
+            source.homspace().codomain().clone(),
+            source.homspace().codomain().clone(),
+        ),
+    };
+    let p_nout = p_homspace.codomain().len();
+    let Ok(p_space) = authority.derive_from_final_homspace(p_homspace) else {
+        return Ok(None);
+    };
+    let w_space = authority.clone();
+    let Ok(Some(w_regions)) = checked_sector_regions(w_space.space().structure(), source.nout())
+    else {
+        return Ok(None);
+    };
+    let Ok(Some(p_regions)) = checked_sector_regions(p_space.space().structure(), p_nout) else {
+        return Ok(None);
+    };
+    let source_len = source
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let w_len = w_space
+        .space()
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let p_len = p_space
+        .space()
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let Ok(routes) = compile_polar_region_routes(
+        &source_regions,
+        &w_regions,
+        &p_regions,
+        source_len,
+        w_len,
+        p_len,
+        direction,
+    ) else {
+        return Ok(None);
+    };
+    let mut w_data = vec![D::zero(); w_len];
+    let mut p_data = vec![D::zero(); p_len];
+    for route in routes {
+        let n = source_regions[route.source].rows();
+        let w_start = w_regions[route.w].range().start;
+        let p_start = p_regions[route.p].range().start;
+        for (index, &(phase, magnitude)) in diagonal[route.source].iter().enumerate() {
+            w_data[w_start + index * (n + 1)] = phase;
+            p_data[p_start + index * (n + 1)] = magnitude;
+        }
+    }
+    let w = BoundDynFactor::from_bound(w_space, w_data, source.nout(), source.nin())?;
+    let p = BoundDynFactor::from_bound(p_space, p_data, p_nout, p_nout)?;
+    Ok(Some((w, p)))
+}
+
+/// Direct left polar factors of an admitted owned compact diagonal.
+#[doc(hidden)]
+pub fn left_polar_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<LeftPolar<BoundDynFactor<R, D>>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    polar_diagonal_dyn(authority, spectrum, PolarDirection::Left)
+        .map(|result| result.map(|(w, p)| LeftPolar { w, p }))
+}
+
+/// Direct right polar factors of an admitted owned compact diagonal.
+#[doc(hidden)]
+pub fn right_polar_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<RightPolar<BoundDynFactor<R, D>>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    polar_diagonal_dyn(authority, spectrum, PolarDirection::Right)
+        .map(|result| result.map(|(wh, p)| RightPolar { p, wh }))
+}
+
 /// Left polar decomposition `t = W * P` (MatrixAlgebraKit `left_polar`):
 /// `W` is the isometry `U * Vh` and `P = V * S * Vh` the positive part on
 /// the domain. Every coupled-sector matrix must have at least as many rows as
