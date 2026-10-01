@@ -11103,6 +11103,61 @@ fn non_symmetric_compact_trace_rejects_like_dense_trace() {
     assert_compact_trace_rejects_like_dense_trace::<true>();
 }
 
+#[test]
+fn compact_braid_matches_dense_replay_when_r_overflows_or_underflows_f32() {
+    fn compare<const R_SCALE: u8>(values: [f32; 2]) {
+        let runtime = runtime();
+        let leg = GradedSpace::try_new(
+            Arc::new(RealBraidingProbe::<true, R_SCALE>),
+            [(ProbeSector, 2)],
+        )
+        .unwrap();
+        let compact: TensorMap<RealBraidingProbe<true, R_SCALE>, f32> = TensorMap::diagonal(
+            &runtime,
+            &leg,
+            [tenet::typed::SectorSpectrum {
+                sector: ProbeSector,
+                values: values.to_vec(),
+            }],
+        )
+        .unwrap();
+        let actual = compact.braid(&[1], &[0], &[0, 1]).unwrap();
+        let expected = compact
+            .materialize()
+            .unwrap()
+            .braid(&[1], &[0], &[0, 1])
+            .unwrap();
+        if R_SCALE == 1 {
+            assert!(expected
+                .dense_data()
+                .unwrap()
+                .iter()
+                .all(|&value| value == 0.0));
+        } else {
+            assert!(expected
+                .dense_data()
+                .unwrap()
+                .iter()
+                .any(|value| value.is_nan()));
+        }
+        for (&actual, &expected) in actual
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(expected.dense_data().unwrap())
+        {
+            if expected.is_nan() {
+                assert!(actual.is_nan());
+            } else {
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+    let _guard = cache_lock();
+    compare::<1>([f32::INFINITY, 2.0]);
+    compare::<2>([1.0, 2.0]);
+}
+
 /// The device entries follow the Host order: the rejection comes before any
 /// device work and leaves the destination as it was; device `compose` is
 /// admitted and agrees with the Host.
