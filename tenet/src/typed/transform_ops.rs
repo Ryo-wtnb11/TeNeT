@@ -845,8 +845,9 @@ where
     /// they cannot change the result, and this is then [`Self::permute`].
     ///
     /// A compact rank-(1,1) diagonal is read directly when the prepared braid
-    /// has one finite nonzero term per source block and complete destination
-    /// coverage; other compact layouts use the ordinary dense replay.
+    /// has one term per source block, its coefficient remains finite and
+    /// nonzero in the payload dtype, and destination coverage is complete;
+    /// otherwise it uses the ordinary dense replay.
     ///
     /// # Errors
     ///
@@ -1113,21 +1114,27 @@ where
                 )?;
                 return Ok(self.with_spectrum_on(destination, transformed));
             }
-            if let Ok(destination) = self
-                .logical_space()
-                .transformed_multiplicity_free(&operation)
-            {
-                if let Some(data) = crate::tensor_core::try_braid_rank_one_diagonal_data(
-                    self.logical_space().provider(),
-                    self.logical_space().space(),
-                    destination.space(),
-                    &operation,
-                    spectrum,
-                ) {
-                    return Ok(Self {
-                        runtime: self.runtime.clone(),
-                        repr: owned_repr(TypedTensorBody::dense(destination, data)),
-                    });
+            if crate::tensor_core::is_rank_one_diagonal_braid(
+                self.codomain_rank(),
+                self.rank() - self.codomain_rank(),
+                &operation,
+            ) {
+                if let Ok(destination) = self
+                    .logical_space()
+                    .transformed_multiplicity_free(&operation)
+                {
+                    if let Some(data) = crate::tensor_core::try_braid_rank_one_diagonal_data(
+                        self.logical_space().provider(),
+                        self.logical_space().space(),
+                        destination.space(),
+                        &operation,
+                        spectrum,
+                    ) {
+                        return Ok(Self {
+                            runtime: self.runtime.clone(),
+                            repr: owned_repr(TypedTensorBody::dense(destination, data)),
+                        });
+                    }
                 }
             }
         }

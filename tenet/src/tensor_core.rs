@@ -282,6 +282,19 @@ pub(crate) fn is_rank_one_diagonal_swap(
         )
 }
 
+/// Candidate geometry for the compact source braid admission below.
+pub(crate) fn is_rank_one_diagonal_braid(
+    codomain_rank: usize,
+    domain_rank: usize,
+    operation: &TreeTransformOperation,
+) -> bool {
+    codomain_rank == 1
+        && domain_rank == 1
+        && operation.kind() == TreeTransformOperationKind::Braid
+        && operation.codomain_permutation() == [1]
+        && operation.domain_permutation() == [0]
+}
+
 /// Returns a dense result only when the prepared braid proves a one-to-one
 /// map between all square bond blocks. A provider that declines this proof
 /// stays on the general dense replay path.
@@ -296,12 +309,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: ScalarOps,
 {
-    if source.nout() != 1
-        || source.nin() != 1
-        || operation.kind() != TreeTransformOperationKind::Braid
-        || operation.codomain_permutation() != [1]
-        || operation.domain_permutation() != [0]
-    {
+    if !is_rank_one_diagonal_braid(source.nout(), source.nin(), operation) {
         return None;
     }
     let prepared = match operation.raw_axis_positions() {
