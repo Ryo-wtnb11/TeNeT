@@ -402,7 +402,19 @@ fn compact_diagonal_eig_vals_retains_dense_fallback() {
         }],
     )
     .unwrap();
-    assert!(input.eig_vals(&[0, 1], &[]).is_err());
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let error = input.eig_vals(&[0, 1], &[]).unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Operation(error)
+            if matches!(
+                error.as_ref(),
+                tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                    message: "eig requires an endomorphism (codomain == domain)"
+                }
+            )
+    ));
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
 }
 
 #[test]
