@@ -2582,6 +2582,8 @@ where
     /// complex in general, and TensorKit's `eigen` likewise returns
     /// `ComplexF64` `D` and `V` for a real argument. `d` carries the spectrum
     /// in compact diagonal storage.
+    /// An admitted owned compact diagonal builds the sorted spectrum and dense
+    /// permutation eigenbasis without materializing a dense input.
     ///
     /// # The `D::Eig` bound
     ///
@@ -2606,6 +2608,24 @@ where
         D: AdvancedLinalgScalar,
         <D as FactorScalar>::Eig: TensorScalar,
     {
+        if let TypedTensorRepr::Owned(body) = &self.repr {
+            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                if let Some(out) =
+                    tenet_matrixalgebra::eig_full_diagonal_dyn(&body.space, spectrum)?
+                {
+                    let (v, mut eigenvalues) = out.into_parts();
+                    return Ok(Eig {
+                        d: diagonal_factor_on(
+                            &self.runtime,
+                            self.logical_space(),
+                            &mut eigenvalues,
+                            <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
+                        )?,
+                        v: wrap_factor_on(&self.runtime, v),
+                    });
+                }
+            }
+        }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .materialized_tensor_uncached()?

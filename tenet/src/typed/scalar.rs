@@ -2313,13 +2313,16 @@ where
     /// `n * epsilon * sigma_max`. This is an operational gate on the computed
     /// matrix, not a universal detector for every defective floating-point
     /// input. The multiplicity-free path forwards the dense backend result
-    /// without this additional rank gate. Lazy adjoints and compact diagonal
-    /// inputs are materialized into an operation-local dense payload for this
-    /// call.
+    /// without this additional rank gate. An admitted owned Host
+    /// multiplicity-free compact diagonal reads finite eigenvalues directly
+    /// and builds a dense permutation factor. Lazy adjoints and other inputs
+    /// use an operation-local dense payload.
     ///
     /// A non-endomorphism, invalid/non-finite dense result, checked rank-gate
     /// failure, factor-layout failure, or provider failure returns no factors.
-    /// Sectorwise cost is `O(sum_c n_c^3)`.
+    /// The direct compact path sorts in `O(Σ_c n_c log n_c)` time and writes
+    /// `O(Σ_c n_c²)` eigenvector elements; the dense route costs
+    /// `O(Σ_c n_c³)` time.
     ///
     /// ```
     /// use std::sync::Arc;
