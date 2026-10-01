@@ -29,7 +29,7 @@ for key in keys:
     row["speedup"] = row["baseline_median_ns"] / row["candidate_median_ns"]
     summary.append(row)
 with (root / "summary.csv").open("w") as out:
-    writer = csv.DictWriter(out, fieldnames=summary[0].keys())
+    writer = csv.DictWriter(out, fieldnames=summary[0].keys(), lineterminator="\n")
     writer.writeheader()
     writer.writerows(summary)
 for storage in ("diagonal", "dense"):
