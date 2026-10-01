@@ -56,7 +56,8 @@ improve 4.47–91.47× (geometric mean of per-case speedups 16.75×). Allocation
 calls fall by 32–262 per call, and requested bytes by 14,280–4,990,008.
 For the 48 dense controls, median speedup ranges 0.986–1.022× (geometric mean
 1.003×); allocation calls and bytes match exactly. No dense case has a
-non-overlapping baseline/candidate timing range. These measurements support
+non-overlapping slowdown range; one small dense case has a non-overlapping
+improvement range. These measurements support
 the admitted compact route on this machine; they do not establish general
 speedup or bitwise agreement across providers.
 
