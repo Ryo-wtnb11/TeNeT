@@ -675,28 +675,59 @@ pub(crate) fn absorb_compact_source<D: TensorScalar>(
                         "compact absorb spectrum shape disagrees",
                     ));
                 }
-                for column in 0..(*source_cols).min(*destination_cols) {
-                    for row in 0..(*source_rows).min(*destination_rows) {
-                        let offset = row
-                            .checked_mul(destination_block.strides()[0])
-                            .and_then(|row_offset| {
-                                destination_block.offset().checked_add(row_offset)
-                            })
-                            .and_then(|offset| {
-                                column
-                                    .checked_mul(destination_block.strides()[1])
-                                    .and_then(|column_offset| offset.checked_add(column_offset))
+                let prefix_rows = (*source_rows).min(*destination_rows);
+                let prefix_cols = (*source_cols).min(*destination_cols);
+                if destination_block.strides()[0] == 1
+                    && destination_block.strides()[1] >= *destination_rows
+                {
+                    for column in 0..prefix_cols {
+                        let start = column
+                            .checked_mul(destination_block.strides()[1])
+                            .and_then(|column_offset| {
+                                destination_block.offset().checked_add(column_offset)
                             })
                             .ok_or_else(|| {
                                 internal_layout_error("compact absorb destination offset overflow")
                             })?;
-                        *destination.get_mut(offset).ok_or_else(|| {
+                        let end = start.checked_add(prefix_rows).ok_or_else(|| {
+                            internal_layout_error("compact absorb destination offset overflow")
+                        })?;
+                        let cells = destination.get_mut(start..end).ok_or_else(|| {
                             internal_layout_error("compact absorb destination offset out of bounds")
-                        })? = if row == column {
-                            entry.values[row]
-                        } else {
-                            D::from_real(0.0)
-                        };
+                        })?;
+                        cells.fill(D::from_real(0.0));
+                        if column < prefix_rows {
+                            cells[column] = entry.values[column];
+                        }
+                    }
+                } else {
+                    for column in 0..prefix_cols {
+                        for row in 0..prefix_rows {
+                            let offset = row
+                                .checked_mul(destination_block.strides()[0])
+                                .and_then(|row_offset| {
+                                    destination_block.offset().checked_add(row_offset)
+                                })
+                                .and_then(|offset| {
+                                    column
+                                        .checked_mul(destination_block.strides()[1])
+                                        .and_then(|column_offset| offset.checked_add(column_offset))
+                                })
+                                .ok_or_else(|| {
+                                    internal_layout_error(
+                                        "compact absorb destination offset overflow",
+                                    )
+                                })?;
+                            *destination.get_mut(offset).ok_or_else(|| {
+                                internal_layout_error(
+                                    "compact absorb destination offset out of bounds",
+                                )
+                            })? = if row == column {
+                                entry.values[row]
+                            } else {
+                                D::from_real(0.0)
+                            };
+                        }
                     }
                 }
                 destination_position += 1;

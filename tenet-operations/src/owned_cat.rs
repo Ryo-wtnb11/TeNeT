@@ -3,6 +3,7 @@ use core::mem::MaybeUninit;
 use core::ops::Range;
 
 use num_complex::Complex64;
+use num_traits::Zero;
 use strided_kernel::{CopyPlan, MaybeSendSync, RawStridedMut, RawStridedRef, StridedError};
 
 use crate::owned_overwrite_buffer::initialize_owned;
@@ -141,49 +142,53 @@ pub fn try_cat_owned_raw<D: ConjugateValue + MaybeSendSync>(
 }
 
 /// Validates the complete copy plan, then uses the existing dense copy kernel
-/// and asks `compact_value` for each cell of a compact source descriptor.
-/// A failed callback leaves the output unpublished.
+/// and initializes each compact slab column before writing its stored diagonal.
 #[doc(hidden)]
-pub fn try_cat_owned_mixed_raw<D, E>(
+pub fn try_cat_owned_mixed_raw<D>(
     required_len: usize,
     side: OwnedCatSide,
     copies: &[OwnedCatCopy],
     sources: [Option<&[D]>; 2],
     source_lengths: [usize; 2],
-    mut compact_value: impl FnMut(usize, usize, usize) -> Result<D, E>,
-) -> Result<Option<Vec<D>>, E>
+    compact_diagonals: &[Option<&[D]>],
+) -> Option<Vec<D>>
 where
-    D: ConjugateValue + MaybeSendSync,
+    D: ConjugateValue + MaybeSendSync + Zero,
 {
     if sources
         .iter()
         .zip(source_lengths)
         .any(|(source, len)| source.is_some_and(|values| values.len() != len))
         || validate_owned_cat(required_len, side, copies, source_lengths).is_none()
+        || compact_diagonals.len() != copies.len()
+        || copies.iter().enumerate().any(|(index, copy)| {
+            sources[copy.source].is_none()
+                && !compact_diagonals[index]
+                    .is_some_and(|values| copy.rows == copy.cols && values.len() == copy.rows)
+        })
     {
-        return Ok(None);
+        return None;
     }
-    initialize_owned(required_len, |destination| {
+    Some(initialize_infallible(required_len, |destination| {
         for (copy_index, copy) in copies.iter().enumerate() {
             if let Some(source) = sources[copy.source] {
                 write_same(destination, source, copy);
             } else {
+                let values = compact_diagonals[copy_index]
+                    .expect("compact cat diagonal was admitted before output allocation");
                 for column in 0..copy.cols {
-                    for row in 0..copy.rows {
-                        let value = compact_value(copy_index, row, column)?;
-                        let offset = copy.destination_offset
-                            + row
-                            + column * copy.destination_leading_dimension;
-                        destination[offset].write(value);
-                        #[cfg(test)]
-                        observe_writes(offset..offset + 1);
-                    }
+                    let start =
+                        copy.destination_offset + column * copy.destination_leading_dimension;
+                    let cells = &mut destination[start..start + copy.rows];
+                    cells[..column].fill(MaybeUninit::new(D::zero()));
+                    cells[column].write(values[column]);
+                    cells[column + 1..].fill(MaybeUninit::new(D::zero()));
+                    #[cfg(test)]
+                    observe_writes(start..start + copy.rows);
                 }
             }
         }
-        Ok(())
-    })
-    .map(Some)
+    }))
 }
 
 /// Returns `None` unless the compiled mixed-dtype copies prove a complete overwrite.
@@ -453,6 +458,7 @@ mod tests {
         ];
         let dense = [1.0, 2.0, 3.0, 4.0];
         let nan = f64::from_bits(0x7ff8_0000_0000_1617);
+        let diagonal = [-0.0, nan];
         TEST_WRITE_BITMAP.with(|bitmap| *bitmap.borrow_mut() = Some(vec![0; 8]));
         let output = try_cat_owned_mixed_raw(
             8,
@@ -460,12 +466,8 @@ mod tests {
             &copies,
             [None, Some(&dense)],
             [4, dense.len()],
-            |copy_index, row, column| -> Result<f64, Infallible> {
-                assert_eq!(copy_index, 0);
-                Ok(if row == column { [-0.0, nan][row] } else { 0.0 })
-            },
+            &[Some(&diagonal), None],
         )
-        .unwrap()
         .unwrap();
         let writes = TEST_WRITE_BITMAP.with(|bitmap| bitmap.borrow_mut().take().unwrap());
         assert_eq!(writes, [1; 8]);

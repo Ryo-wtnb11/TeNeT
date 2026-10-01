@@ -251,16 +251,8 @@ impl CatCopyPlan {
             &self.copies,
             dense_sources,
             source_lengths,
-            |copy_index, row, column| {
-                let values = compact_entries[copy_index]
-                    .expect("compact cat copy was admitted before output allocation");
-                Ok::<D, Error>(if row == column {
-                    values[row]
-                } else {
-                    D::from_real(0.0)
-                })
-            },
-        )?
+            &compact_entries,
+        )
         .ok_or_else(|| internal_layout_error("cat copy plan declined by the fast-path prover"))
     }
 }
