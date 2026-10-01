@@ -1,1 +1,0 @@
-q_diagonal=true,r_diagonal=true,spaces_preserved=true

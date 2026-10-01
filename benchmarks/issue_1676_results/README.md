@@ -27,7 +27,7 @@ Distinct executable hashes and `--probe` output are retained beside this
 report. The probe verifies the expected change from dense output / fresh bond
 to compact output / exact source bond. Scoped cleaning is required because an
 earlier cross-worktree shared-target build incorrectly reused one executable;
-those runs are excluded, as documented in `experiments/README.md`.
+those runs are excluded, as documented in `experiments.md`.
 
 Five pairs use execution order B/C, C/B, B/C, C/B, B/C. Each process measures
 384 cases: U1, SU2, U1 × fermion parity; f32/f64/c32/c64;
