@@ -96,7 +96,7 @@ impl RuleIdentity {
     pub fn new_unique<R: 'static>() -> Self {
         static NEXT_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let instance = NEXT_INSTANCE
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
                 |current| current.checked_add(1),
