@@ -8936,6 +8936,9 @@ fn compact_fermionic_braid_matches_hand_diagonal_and_complex_sign() {
         ],
     )
     .unwrap();
+    // Fibonacci has complex categorical coefficients, but its public compact
+    // constructor is unavailable: TypedTensorRootDispatch requires R::Scalar=f64.
+    // This Complex64 payload still exercises the supported real-coefficient lane.
     let complex = real
         .convert::<Complex64>()
         .map_diagonal(|value| Complex64::new(value.re, value.re / 4.0))
@@ -8944,14 +8947,17 @@ fn compact_fermionic_braid_matches_hand_diagonal_and_complex_sign() {
     let complex_output = complex.braid(&[1], &[0], &[0, 1]).unwrap();
     let real_spectra = real_output.diagview().unwrap();
     let complex_spectra = complex_output.diagview().unwrap();
+    let source_spectra = real.diagview().unwrap();
+    assert_eq!(real_spectra.len(), source_spectra.len());
+    assert_eq!(complex_spectra.len(), source_spectra.len());
     for (real_entry, complex_entry) in real_spectra.iter().zip(&complex_spectra) {
         assert_eq!(real_entry.sector, complex_entry.sector);
-        let source = real
-            .diagview()
-            .unwrap()
-            .into_iter()
+        let source = source_spectra
+            .iter()
             .find(|entry| entry.sector == real_entry.sector)
             .unwrap();
+        assert_eq!(real_entry.values.len(), source.values.len());
+        assert_eq!(complex_entry.values.len(), source.values.len());
         let sign = if real_entry.sector == Z2Irrep::ODD {
             -1.0
         } else {
@@ -9001,6 +9007,47 @@ fn compact_cat_braid_absorb_avoid_dense_source_materializations() {
     let _ = diagonal.absorb(&diagonal).unwrap();
     let absorb = DIAGONAL_MATERIALIZATIONS.get();
     assert_eq!([cat, braid, absorb], [0, 0, 0]);
+}
+
+#[test]
+fn absorb_compact_source_zeros_shared_off_diagonal_and_preserves_outer_region() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(Z2FusionRule);
+    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::EVEN, 4)]).unwrap();
+    let narrow = GradedSpace::try_new(provider, [(Z2Irrep::EVEN, 2)]).unwrap();
+    let receiver: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&wide], [&wide], |_, index| {
+            1.0 + index[0] as f64 + 10.0 * index[1] as f64
+        })
+        .unwrap();
+    let source: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &narrow,
+        [SectorSpectrum {
+            sector: Z2Irrep::EVEN,
+            values: vec![2.0, -3.0],
+        }],
+    )
+    .unwrap();
+    let result = receiver.absorb(&source).unwrap();
+    let data = result.dense_data().unwrap();
+    let block = result.logical_space().space().structure().block(0).unwrap();
+    assert_eq!(block.shape(), &[4, 4]);
+    for column in 0..4 {
+        for row in 0..4 {
+            let expected = if row < 2 && column < 2 {
+                if row == column {
+                    [2.0, -3.0][row]
+                } else {
+                    0.0
+                }
+            } else {
+                1.0 + row as f64 + 10.0 * column as f64
+            };
+            let offset = block.offset() + row * block.strides()[0] + column * block.strides()[1];
+            assert_eq!(data[offset], expected, "row={row}, column={column}");
+        }
+    }
 }
 
 /// A destination whose device is not the Runtime's is rejected before any

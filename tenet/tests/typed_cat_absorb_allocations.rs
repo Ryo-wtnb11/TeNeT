@@ -232,6 +232,38 @@ fn typed_braid_and_absorb_allocate_only_one_dense_output_for_compact_input() {
 }
 
 #[test]
+fn typed_absorb_smaller_compact_source_avoids_its_dense_buffer() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(Z2FusionRule);
+    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::EVEN, 128)]).unwrap();
+    let narrow = GradedSpace::try_new(provider, [(Z2Irrep::EVEN, 64)]).unwrap();
+    let receiver: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&wide], [&wide], |_, index| {
+            1.0 + index[0] as f64 + index[1] as f64
+        })
+        .unwrap();
+    let source: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &narrow,
+        [tenet::typed::SectorSpectrum {
+            sector: Z2Irrep::EVEN,
+            values: vec![2.0; 64],
+        }],
+    )
+    .unwrap();
+    black_box(receiver.absorb(&source).unwrap());
+    let output_bytes = 128 * 128 * std::mem::size_of::<f64>();
+    let source_bytes = 64 * 64 * std::mem::size_of::<f64>();
+    let (allocated, output_allocations) =
+        measured_allocations(output_bytes, || receiver.absorb(&source).unwrap());
+    assert_eq!(output_allocations, 1);
+    assert!(
+        allocated < (output_bytes + source_bytes / 2) as u64,
+        "absorb allocated {allocated} B; a compact source must not add its {source_bytes} B dense buffer"
+    );
+}
+
+#[test]
 fn typed_lazy_adjoint_cat_allocates_only_the_output_payload() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
