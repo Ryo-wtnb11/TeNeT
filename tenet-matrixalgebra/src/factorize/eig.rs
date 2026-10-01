@@ -538,6 +538,73 @@ where
     })
 }
 
+/// Reads an admitted compact diagonal without packing or an eigensolver.
+#[doc(hidden)]
+pub fn eigh_vals_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<Vec<SectorSpectrum>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    if spectrum
+        .iter()
+        .flat_map(|entry| &entry.values)
+        .any(|&value| {
+            let value = value.widen_complex();
+            !value.re.is_finite() || value.im != 0.0
+        })
+    {
+        return Ok(None);
+    }
+    let space = authority.space();
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Ok(None);
+    }
+    let Ok(Some(regions)) = checked_sector_regions(space.structure(), space.nout()) else {
+        return Ok(None);
+    };
+    if validate_endomorphism_region_stacking(
+        &regions,
+        "eigh_vals requires identical endomorphism row/column fusion-tree stacking",
+    )
+    .is_err()
+    {
+        return Ok(None);
+    }
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != spectrum.len() || by_sector.len() != regions.len() {
+        return Ok(None);
+    }
+    let mut result = Vec::with_capacity(regions.len());
+    for region in regions.iter() {
+        let Some(entry) = by_sector.get(&region.coupled()) else {
+            return Ok(None);
+        };
+        if !region.has_aligned_diagonal()
+            || region.rows() != region.cols()
+            || entry.values.len() != region.rows()
+        {
+            return Ok(None);
+        }
+        let mut values: Vec<f64> = entry
+            .values
+            .iter()
+            .map(|&value| value.widen_complex().re)
+            .collect();
+        // Dense EIGH first orders signed values ascending, then stably sorts
+        // by magnitude. The first pass preserves its tie order for ±x.
+        values.sort_by(f64::total_cmp);
+        values.sort_by(|a, b| b.abs().total_cmp(&a.abs()));
+        result.push(SectorSpectrum {
+            sector: region.coupled(),
+            values,
+        });
+    }
+    Ok(Some(result))
+}
+
 /// All Hermitian eigenvalues per coupled sector, descending by magnitude
 /// (MatrixAlgebraKit `eigh_vals`).
 ///

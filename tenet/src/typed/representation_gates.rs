@@ -45,6 +45,306 @@ use tenet_dense::{
     DenseTensor, DenseWrite,
 };
 
+#[derive(Default)]
+struct CountEighVals {
+    inner: DefaultDenseExecutor,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DenseExecutor for CountEighVals {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises eigh_vals")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises eigh_vals")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises eigh_vals")
+    }
+
+    fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.eigh_vals(input)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises eigh_vals")
+    }
+}
+
+#[test]
+fn compact_diagonal_eigh_vals_skips_dense_input_and_solver() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(CountEighVals {
+            inner: DefaultDenseExecutor::default(),
+            calls: Arc::clone(&calls),
+        }))
+        .build()
+        .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+    let source: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(1),
+                values: vec![2.0, -2.0],
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![1.0, -4.0, 0.0],
+            },
+        ],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let result = source.eigh_vals(&[0], &[1]).unwrap();
+    assert_eq!(result[0].values, vec![-4.0, 1.0, 0.0]);
+    assert_eq!(result[1].values, vec![-2.0, 2.0]);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn compact_diagonal_eigh_vals_match_hand_spectra_across_scalars_and_sectors() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    macro_rules! check {
+        ($leg:expr, $spectra:expr, $dtype:ty, $expected:expr, $tol:expr) => {{
+            let input: TensorMap<_, $dtype> =
+                TensorMap::diagonal(&runtime, &$leg, $spectra).unwrap();
+            let saved = input.diagview().unwrap();
+            let dense = input.materialize().unwrap();
+            let dense_values = dense.eigh_vals(&[0], &[1]).unwrap();
+            DIAGONAL_MATERIALIZATIONS.set(0);
+            let actual = input.eigh_vals(&[0], &[1]).unwrap();
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(input.diagview().unwrap(), saved);
+            let expected: Vec<Vec<f64>> = $expected;
+            assert_eq!(actual.len(), expected.len());
+            for ((actual, dense), expected) in actual.iter().zip(&dense_values).zip(expected) {
+                assert_eq!(actual.sector, dense.sector);
+                assert_eq!(actual.values.len(), expected.len());
+                for ((&actual, &dense), expected) in
+                    actual.values.iter().zip(&dense.values).zip(expected)
+                {
+                    assert!((actual - expected).abs() <= $tol);
+                    assert!((actual - dense).abs() <= $tol);
+                }
+            }
+        }};
+    }
+    let u1 = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+    check!(
+        u1,
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(1),
+                values: vec![2.0_f32, -2.0]
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![1.0, -4.0, 0.0]
+            },
+        ],
+        f32,
+        vec![vec![-4.0, 1.0, 0.0], vec![-2.0, 2.0]],
+        1e-5
+    );
+    check!(
+        u1,
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(1),
+                values: vec![
+                    num_complex::Complex32::new(2.0, 0.0),
+                    num_complex::Complex32::new(-2.0, 0.0)
+                ]
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![
+                    num_complex::Complex32::new(1.0, 0.0),
+                    num_complex::Complex32::new(-4.0, 0.0),
+                    num_complex::Complex32::new(0.0, 0.0)
+                ]
+            },
+        ],
+        num_complex::Complex32,
+        vec![vec![-4.0, 1.0, 0.0], vec![-2.0, 2.0]],
+        1e-5
+    );
+    let dual = u1.try_dual().unwrap();
+    check!(
+        dual,
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(-1),
+                values: vec![2.0_f64, -2.0]
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![1.0, -4.0, 0.0]
+            },
+        ],
+        f64,
+        vec![vec![-2.0, 2.0], vec![-4.0, 1.0, 0.0]],
+        1e-12
+    );
+    let spin0 = SU2Irrep::from_twice_spin(0);
+    let spin_half = SU2Irrep::from_twice_spin(1);
+    let su2 = GradedSpace::try_new(Arc::new(SU2FusionRule), [(spin0, 2), (spin_half, 1)]).unwrap();
+    check!(
+        su2,
+        [
+            SectorSpectrum {
+                sector: spin_half,
+                values: vec![Complex64::new(-3.0, 0.0)]
+            },
+            SectorSpectrum {
+                sector: spin0,
+                values: vec![Complex64::new(2.0, 0.0), Complex64::new(-2.0, 0.0)]
+            },
+        ],
+        Complex64,
+        vec![vec![-2.0, 2.0], vec![-3.0]],
+        1e-12
+    );
+    let even = product_sector(U1Irrep::new(0), Z2Irrep::EVEN);
+    let odd = product_sector(U1Irrep::new(1), Z2Irrep::ODD);
+    let fermion = GradedSpace::try_new(
+        Arc::new(U1FusionRule.product(FermionParityFusionRule)),
+        [(even, 2), (odd, 1)],
+    )
+    .unwrap();
+    check!(
+        fermion,
+        [
+            SectorSpectrum {
+                sector: odd,
+                values: vec![-3.0_f64]
+            },
+            SectorSpectrum {
+                sector: even,
+                values: vec![2.0, -2.0]
+            },
+        ],
+        f64,
+        vec![vec![-2.0, 2.0], vec![-3.0]],
+        1e-12
+    );
+    let zero_sector = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 0), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+    check!(
+        zero_sector,
+        [SectorSpectrum {
+            sector: U1Irrep::new(1),
+            values: vec![2.0_f64, -3.0]
+        }],
+        f64,
+        vec![vec![-3.0, 2.0]],
+        1e-12
+    );
+    let empty = GradedSpace::try_new(Arc::new(U1FusionRule), []).unwrap();
+    let input: TensorMap<_, f64> =
+        TensorMap::diagonal(&runtime, &empty, Vec::<SectorSpectrum<_, f64>>::new()).unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert!(input.eigh_vals(&[0], &[1]).unwrap().is_empty());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+}
+
+#[test]
+fn compact_diagonal_eigh_vals_preserves_complex_dense_fallback() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(CountEighVals {
+            inner: DefaultDenseExecutor::default(),
+            calls: Arc::clone(&calls),
+        }))
+        .build()
+        .unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
+    let near: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![Complex64::new(1.0, 1e-15)],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(near.eigh_vals(&[0], &[1]).unwrap()[0].values, [1.0]);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![f64::NAN],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert!(nonfinite.eigh_vals(&[0], &[1]).is_err());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+}
+
+#[test]
+fn compact_diagonal_eigh_vals_widens_stored_single_precision_values() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
+    let values = [1.0000001_f32, -1.0000002_f32, 0.3_f32];
+    let expected = vec![values[1] as f64, values[0] as f64, values[2] as f64];
+    let real: TensorMap<_, f32> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: values.to_vec(),
+        }],
+    )
+    .unwrap();
+    let complex: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: values
+                .map(|value| num_complex::Complex32::new(value, 0.0))
+                .to_vec(),
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    for actual in [real.eigh_vals(&[0], &[1]), complex.eigh_vals(&[0], &[1])] {
+        assert_eq!(actual.unwrap()[0].values, expected);
+    }
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+}
+
 #[test]
 fn compact_diagonal_svd_uses_spectrum_without_dense_input() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();

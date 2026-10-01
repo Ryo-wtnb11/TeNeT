@@ -2522,6 +2522,9 @@ where
     ///
     /// No factor and no bond space is built, so this is the cheap way to ask
     /// about a spectrum — the [`Self::svd_vals`] of the eigendecompositions.
+    /// An owned compact diagonal with finite, exactly real entries is read
+    /// directly without materializing input blocks or invoking a dense solver.
+    /// Other inputs retain the usual Hermiticity admission and dense path.
     ///
     /// # Errors
     ///
@@ -2533,6 +2536,15 @@ where
     where
         D: FactorizationScalar,
     {
+        if let TypedTensorRepr::Owned(body) = &self.repr {
+            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                if let Some(raw) =
+                    tenet_matrixalgebra::eigh_vals_diagonal_dyn(&body.space, spectrum)?
+                {
+                    return self.decode_spectrum(raw);
+                }
+            }
+        }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .materialized_tensor_uncached()?
