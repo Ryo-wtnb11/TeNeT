@@ -127,7 +127,7 @@ pub use svd::{
     scale_axis_by_spectrum_mapped, svd_compact, svd_compact_adjoint_factors_dyn,
     svd_compact_diagonal_factors_dyn, svd_compact_dyn, svd_compact_dyn_checked_generic,
     svd_compact_factors_dyn, svd_compact_factors_dyn_generic, svd_full, svd_full_adjoint_dyn,
-    svd_full_dyn, svd_full_dyn_checked_generic, svd_vals, svd_vals_dyn,
-    svd_vals_dyn_checked_generic, svd_vals_dyn_generic, SvdCompact, SvdCompactDyn, SvdFactorsDyn,
-    SvdFull, SvdFullDyn,
+    svd_full_dyn, svd_full_dyn_checked_generic, svd_vals, svd_vals_compact_diagonal_dyn,
+    svd_vals_dyn, svd_vals_dyn_checked_generic, svd_vals_dyn_generic, SvdCompact, SvdCompactDyn,
+    SvdFactorsDyn, SvdFull, SvdFullDyn,
 };

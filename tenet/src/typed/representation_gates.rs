@@ -91,6 +91,135 @@ fn compact_diagonal_svd_uses_spectrum_without_dense_input() {
 }
 
 #[test]
+fn compact_diagonal_svd_vals_uses_only_the_stored_spectrum() {
+    let solver_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(FailSecondSvd {
+            record: Some(Arc::clone(&solver_calls)),
+            ..Default::default()
+        }))
+        .build()
+        .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(1),
+                values: vec![-2.0, 3.0],
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![-4.0, 0.0, 1.0],
+            },
+        ],
+    )
+    .unwrap();
+    let before = input.diagview().unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(
+        input.svd_vals(&[0], &[1]).unwrap(),
+        vec![
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![4.0, 1.0, 0.0]
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(1),
+                values: vec![3.0, 2.0]
+            },
+        ]
+    );
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(input.diagview().unwrap(), before);
+
+    let dual_bond = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(1), 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let dual: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &dual_bond,
+        [SectorSpectrum {
+            sector: U1Irrep::new(-1),
+            values: vec![-2.0, 1.0],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(dual.svd_vals(&[0], &[1]).unwrap()[0].values, [2.0, 1.0]);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(solver_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn compact_diagonal_svd_vals_rounds_at_payload_precision() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let real: TensorMap<_, f32> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![-1.000_000_1, 0.0],
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        real.svd_vals(&[0], &[1]).unwrap()[0].values,
+        [1.000_000_1_f32 as f64, 0.0]
+    );
+
+    let complex: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![
+                num_complex::Complex32::new(1.0, 1.0),
+                num_complex::Complex32::new(-3.0, 4.0),
+            ],
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        complex.svd_vals(&[0], &[1]).unwrap()[0].values,
+        [5.0, (2.0_f64.sqrt() as f32) as f64]
+    );
+}
+
+#[test]
+fn compact_diagonal_svd_vals_retains_dense_rejection_edges() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
+    for value in [
+        num_complex::Complex32::new(f32::NAN, 0.0),
+        num_complex::Complex32::new(f32::INFINITY, 0.0),
+        num_complex::Complex32::new(f32::MAX * 0.75, f32::MAX * 0.75),
+    ] {
+        let input: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
+            &runtime,
+            &leg,
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![value],
+            }],
+        )
+        .unwrap();
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        let compact = input.svd_vals(&[0], &[1]);
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+        let dense = input.materialize().unwrap().svd_vals(&[0], &[1]);
+        assert_eq!(compact.is_err(), dense.is_err());
+    }
+}
+
+#[test]
 fn compact_diagonal_svd_complex_permutation_and_phase() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(
@@ -184,6 +313,18 @@ fn compact_diagonal_svd_other_host_scalars_and_sectors() {
                 TensorMap::diagonal(&runtime, &leg, $spectra).unwrap();
             let before = input.materialize().unwrap().dense_data().unwrap().to_vec();
             let saved = input.diagview().unwrap();
+            let dense_values = input.materialize().unwrap().svd_vals(&[0], &[1]).unwrap();
+            DIAGONAL_MATERIALIZATIONS.set(0);
+            let compact_values = input.svd_vals(&[0], &[1]).unwrap();
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(compact_values.len(), dense_values.len());
+            for (actual, expected) in compact_values.iter().zip(&dense_values) {
+                assert_eq!(actual.sector, expected.sector);
+                assert_eq!(actual.values.len(), expected.values.len());
+                for (&a, &b) in actual.values.iter().zip(&expected.values) {
+                    assert!((a - b).abs() <= $tol * b.max(1.0));
+                }
+            }
             DIAGONAL_MATERIALIZATIONS.set(0);
             let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
             assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
@@ -270,6 +411,8 @@ fn compact_diagonal_svd_other_host_scalars_and_sectors() {
     let input: TensorMap<_, f64> =
         TensorMap::diagonal(&runtime, &empty, Vec::<SectorSpectrum<_, f64>>::new()).unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
+    assert!(input.svd_vals(&[0], &[1]).unwrap().is_empty());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(
@@ -341,6 +484,7 @@ impl HostReadableStorage<f64> for NonCloneHost {
 struct FailSecondSvd {
     inner: DefaultDenseExecutor,
     calls: usize,
+    record: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 #[derive(Default)]
@@ -402,6 +546,9 @@ impl DenseExecutor for CountingSolve {
 impl DenseExecutor for FailSecondSvd {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         self.calls += 1;
+        if let Some(record) = &self.record {
+            record.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         if self.calls == 2 {
             return Err(DenseError::Backend {
                 backend: DenseBackend::Tenferro,
@@ -420,6 +567,9 @@ impl DenseExecutor for FailSecondSvd {
         vt: DenseWrite<'_>,
     ) -> Result<(), DenseError> {
         self.calls += 1;
+        if let Some(record) = &self.record {
+            record.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         if self.calls == 2 {
             return Err(DenseError::Backend {
                 backend: DenseBackend::Tenferro,

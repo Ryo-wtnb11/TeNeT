@@ -2078,6 +2078,8 @@ where
     ///
     /// No factor tensor and no bond space is built at all, so this is cheaper
     /// still than reading [`Self::svd_compact`]'s compact `s`.
+    /// Finite owned compact-diagonal inputs are sorted sectorwise without
+    /// materializing the input or calling a dense SVD.
     ///
     /// # Errors
     ///
@@ -2090,6 +2092,15 @@ where
     where
         D: FactorizationScalar,
     {
+        if let TypedTensorRepr::Owned(body) = &self.repr {
+            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                if let Some(raw) =
+                    tenet_matrixalgebra::svd_vals_compact_diagonal_dyn(&body.space, spectrum)?
+                {
+                    return self.decode_spectrum(raw);
+                }
+            }
+        }
         let mut dense = self.runtime.lease_dense();
         // Singular values and coupled-sector ids are invariant under adjoint,
         // so an oriented input or logical-payload copy cannot change this output.

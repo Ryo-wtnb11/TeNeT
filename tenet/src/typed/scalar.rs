@@ -2121,12 +2121,17 @@ where
     /// No factor tensor or intermediate bond is built. This is the least
     /// allocating member of the SVD family when only the spectrum is needed.
     /// Multiplicity-free lazy adjoints are read through their owned parent,
-    /// and a compact diagonal input is densified operation-locally;
+    /// and an owned compact diagonal input with finite, representable magnitudes
+    /// is read and sorted directly without a dense solver. Other compact cases
+    /// retain the dense solver's behavior;
     /// checked Generic currently requires an owned input and returns
     /// [`Error::InvalidArgument`] for a lazy adjoint. A dense failure returns
     /// [`Error::Operation`]; if a provider cannot decode a sector label, its
     /// original error is available as the source. See [`Self::svd_compact`] for
     /// the decomposition contract and representative example.
+    /// For the direct path, validating `B` source blocks, sorting `k_c` values
+    /// in each of `G` sectors and sorting public labels costs
+    /// `O(B + Σ_c k_c log k_c + G log G)` time and `O(Σ_c k_c + G)` space.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing

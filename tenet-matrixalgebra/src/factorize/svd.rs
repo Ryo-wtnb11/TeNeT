@@ -470,6 +470,59 @@ where
     Ok(singular_values)
 }
 
+fn finite_compact_magnitude<D: FactorScalar>(value: D) -> Option<f64> {
+    let magnitude = value.widen_complex().norm();
+    (magnitude.is_finite() && D::from_real(magnitude).widen_complex().re.is_finite())
+        .then_some(magnitude)
+}
+
+/// Values-only path for an admitted compact diagonal tensor. Returns `None`
+/// when the ordinary dense solver must retain its input or layout behavior.
+#[doc(hidden)]
+pub fn svd_vals_compact_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<Vec<SectorSpectrum>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let Some(regions) =
+        checked_sector_regions(authority.space().structure(), authority.space().nout())?
+    else {
+        return Ok(None);
+    };
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != regions.len() || spectrum.len() != regions.len() {
+        return Ok(None);
+    }
+    let mut values = Vec::with_capacity(regions.len());
+    for region in regions.iter() {
+        let Some(entry) = by_sector.get(&region.coupled()) else {
+            return Ok(None);
+        };
+        if !region.has_aligned_diagonal()
+            || region.rows() != region.cols()
+            || entry.values.len() != region.rows()
+        {
+            return Ok(None);
+        }
+        let mut sorted = Vec::with_capacity(entry.values.len());
+        for &value in &entry.values {
+            let Some(magnitude) = finite_compact_magnitude(value) else {
+                return Ok(None);
+            };
+            sorted.push(D::from_real(magnitude).widen_complex().re);
+        }
+        sorted.sort_unstable_by(|a, b| b.total_cmp(a));
+        values.push(SectorSpectrum {
+            sector: region.coupled(),
+            values: sorted,
+        });
+    }
+    Ok(Some(values))
+}
+
 /// Compact (untruncated) fusion-tensor SVD through the device boundary.
 pub fn svd_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
@@ -516,10 +569,7 @@ where
     if spectrum
         .iter()
         .flat_map(|entry| &entry.values)
-        .any(|&value| {
-            let magnitude = value.widen_complex().norm();
-            !magnitude.is_finite() || !D::from_real(magnitude).widen_complex().re.is_finite()
-        })
+        .any(|&value| finite_compact_magnitude(value).is_none())
     {
         return Ok(None);
     }
