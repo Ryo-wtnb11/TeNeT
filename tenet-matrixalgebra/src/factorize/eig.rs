@@ -605,6 +605,70 @@ where
     Ok(Some(result))
 }
 
+/// Reads an admitted compact diagonal spectrum without dense input or eigensolver.
+#[doc(hidden)]
+pub fn eig_vals_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<Vec<SectorSpectrum<Complex64>>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    if spectrum
+        .iter()
+        .flat_map(|entry| &entry.values)
+        .any(|&value| {
+            let value = value.widen_complex();
+            !value.re.is_finite() || !value.im.is_finite() || !value.norm().is_finite()
+        })
+    {
+        return Ok(None);
+    }
+    let space = authority.space();
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Ok(None);
+    }
+    let Ok(Some(regions)) = checked_sector_regions(space.structure(), space.nout()) else {
+        return Ok(None);
+    };
+    if validate_endomorphism_region_stacking(
+        &regions,
+        "eig_vals requires identical endomorphism row/column fusion-tree stacking",
+    )
+    .is_err()
+    {
+        return Ok(None);
+    }
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != spectrum.len() || by_sector.len() != regions.len() {
+        return Ok(None);
+    }
+    let mut result = Vec::with_capacity(regions.len());
+    for region in regions.iter() {
+        let Some(entry) = by_sector.get(&region.coupled()) else {
+            return Ok(None);
+        };
+        if !region.has_aligned_diagonal()
+            || region.rows() != region.cols()
+            || entry.values.len() != region.rows()
+        {
+            return Ok(None);
+        }
+        let mut values: Vec<Complex64> = entry
+            .values
+            .iter()
+            .map(|&value| value.widen_complex())
+            .collect();
+        values.sort_by(|a, b| b.norm().total_cmp(&a.norm()));
+        result.push(SectorSpectrum {
+            sector: region.coupled(),
+            values,
+        });
+    }
+    Ok(Some(result))
+}
+
 /// All Hermitian eigenvalues per coupled sector, descending by magnitude
 /// (MatrixAlgebraKit `eigh_vals`).
 ///

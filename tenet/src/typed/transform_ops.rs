@@ -2616,6 +2616,7 @@ where
 
     /// TensorKit 0.17 / MatrixAlgebraKit `eig_vals`: the general eigenvalues
     /// per coupled sector, and nothing else. `Complex64` for every payload dtype.
+    /// An admitted owned compact diagonal is read without dense materialization.
     ///
     /// # Errors
     ///
@@ -2631,6 +2632,15 @@ where
         // of them but not the third would be reading an accident.
         <D as FactorScalar>::Eig: TensorScalar,
     {
+        if let TypedTensorRepr::Owned(body) = &self.repr {
+            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                if let Some(raw) =
+                    tenet_matrixalgebra::eig_vals_diagonal_dyn(&body.space, spectrum)?
+                {
+                    return self.decode_spectrum(raw);
+                }
+            }
+        }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .materialized_tensor_uncached()?

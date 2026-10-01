@@ -2260,11 +2260,12 @@ where
     /// provider-labelled sector and descending by magnitude.
     ///
     /// No eigenvector factor or bond space is built. The input must be an
-    /// endomorphism. Multiplicity-free lazy adjoints and compact diagonal
-    /// inputs are materialized into an operation-local dense payload for this
-    /// call; checked Generic currently requires owned input for this
-    /// values-only method. Unlike [`Self::eig_full`], no eigenvector-rank gate
-    /// is needed because no eigenbasis is returned.
+    /// endomorphism. An owned Host multiplicity-free compact diagonal with
+    /// finite eigenvalue magnitudes is read directly. Other compact inputs and
+    /// lazy adjoints use an operation-local dense payload; checked Generic
+    /// currently requires owned input for this values-only method. Unlike
+    /// [`Self::eig_full`], no eigenvector-rank gate is needed because no
+    /// eigenbasis is returned.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
