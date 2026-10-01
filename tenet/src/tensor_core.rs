@@ -363,7 +363,10 @@ where
         let [(destination_pair, coefficient)] = rows.as_slice() else {
             return None;
         };
-        if !coefficient.is_finite() || *coefficient == 0.0 {
+        if !coefficient.is_finite()
+            || *coefficient == 0.0
+            || !D::coefficient_as_data(*coefficient).abs_value().is_finite()
+        {
             return None;
         }
         let destination_index =
@@ -1442,6 +1445,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::typed::ContractSpec;
+    use tenet_matrixalgebra::SectorSpectrum;
 
     use tenet_core::{
         BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CheckedGenericFusion,
@@ -1457,8 +1461,8 @@ mod tests {
     use super::{
         scatter_tensor_product_block, tensorcontract_owned_multiplicity_free,
         tensorproduct_owned_checked_generic, tree_transform_owned_multiplicity_free,
-        CHECKED_TENSOR_PRODUCT_COMMIT_COUNT, CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE,
-        FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
+        try_braid_rank_one_diagonal_data, CHECKED_TENSOR_PRODUCT_COMMIT_COUNT,
+        CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE, FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
     };
     use crate::runtime::Ctx;
 
@@ -1727,9 +1731,9 @@ mod tests {
 
     /// Deliberately outside the user-layer rule enum: this exercises the typed
     /// core with a provider an application can define without `LoweredMultiplicityFreeAlgebra`.
-    struct ExternalZ2;
+    struct ExternalZ2<const HUGE_BRAID: bool>;
 
-    impl FusionRule for ExternalZ2 {
+    impl<const HUGE_BRAID: bool> FusionRule for ExternalZ2<HUGE_BRAID> {
         fn rule_identity(&self) -> RuleIdentity {
             RuleIdentity::of_type::<Self>()
         }
@@ -1759,9 +1763,9 @@ mod tests {
         }
     }
 
-    impl MultiplicityFreeFusionRule for ExternalZ2 {}
+    impl<const HUGE_BRAID: bool> MultiplicityFreeFusionRule for ExternalZ2<HUGE_BRAID> {}
 
-    impl MultiplicityFreeFusionSymbols for ExternalZ2 {
+    impl<const HUGE_BRAID: bool> MultiplicityFreeFusionSymbols for ExternalZ2<HUGE_BRAID> {
         type Scalar = f64;
 
         fn has_trivial_associator_gauge(&self) -> bool {
@@ -1787,10 +1791,11 @@ mod tests {
             coupled: SectorId,
         ) -> Self::Scalar {
             Z2FusionRule.r_symbol_scalar(left, right, coupled)
+                * if HUGE_BRAID { 1e100 } else { 1.0 }
         }
     }
 
-    impl MultiplicityFreeRigidSymbols for ExternalZ2 {
+    impl<const HUGE_BRAID: bool> MultiplicityFreeRigidSymbols for ExternalZ2<HUGE_BRAID> {
         fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
             Z2FusionRule.dim_scalar(sector)
         }
@@ -1817,8 +1822,49 @@ mod tests {
     }
 
     #[test]
+    fn compact_braid_declines_a_coefficient_that_overflows_the_payload_dtype() {
+        let provider = Arc::new(ExternalZ2::<true>);
+        let leg = SectorLeg::new([(SectorId::new(1), 2)], false);
+        let source = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&provider),
+            tenet_core::FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg.clone()]),
+                FusionProductSpace::new([leg]),
+            ),
+            [vec![2, 2]],
+        )
+        .unwrap();
+        let operation = TreeTransformOperation::braid([1], [0], [0], [1]);
+        let destination = source.transformed_multiplicity_free(&operation).unwrap();
+        let f32_spectrum = [SectorSpectrum {
+            sector: SectorId::new(1),
+            values: vec![1.0f32, 2.0],
+        }];
+        assert!(try_braid_rank_one_diagonal_data::<_, f32>(
+            provider.as_ref(),
+            source.space(),
+            destination.space(),
+            &operation,
+            &f32_spectrum,
+        )
+        .is_none());
+        let f64_spectrum = [SectorSpectrum {
+            sector: SectorId::new(1),
+            values: vec![1.0f64, 2.0],
+        }];
+        assert!(try_braid_rank_one_diagonal_data::<_, f64>(
+            provider.as_ref(),
+            source.space(),
+            destination.space(),
+            &operation,
+            &f64_spectrum,
+        )
+        .is_some());
+    }
+
+    #[test]
     fn external_multiplicity_free_provider_matches_direct_transform() {
-        let provider = Arc::new(ExternalZ2);
+        let provider = Arc::new(ExternalZ2::<false>);
         let leg = SectorLeg::new([(SectorId::new(0), 2)], false);
         let source = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
             Arc::clone(&provider),
@@ -1849,7 +1895,7 @@ mod tests {
             )
             .unwrap();
 
-        let input: tenet_matrixalgebra::BoundDynamicTensorRef<'_, ExternalZ2, f64> =
+        let input: tenet_matrixalgebra::BoundDynamicTensorRef<'_, ExternalZ2<false>, f64> =
             BoundDynamicTensorRef::try_new(&source, &source_data).unwrap();
         let mut context = Ctx::<f64, RuleIdentity>::default();
         let (actual_destination, actual_data) =
@@ -1861,7 +1907,7 @@ mod tests {
 
     #[test]
     fn external_multiplicity_free_provider_contracts_direct_with_output_order() {
-        let provider = Arc::new(ExternalZ2);
+        let provider = Arc::new(ExternalZ2::<false>);
         let lhs_codomain = SectorLeg::new([(SectorId::new(0), 2)], false);
         let contracted = SectorLeg::new([(SectorId::new(0), 3)], false);
         let rhs_domain = SectorLeg::new([(SectorId::new(0), 4)], false);

@@ -826,8 +826,9 @@ where
     /// the non-shared region — TK documents the same contract.
     ///
     /// The result keeps `self`'s spaces and dtype. Equal `D` is required by
-    /// the signature; widen with [`Self::convert`] first. A compact diagonal
-    /// is read directly, including its structural zero entries.
+    /// the signature; widen with [`Self::convert`] first. A compact `source`
+    /// is read directly, including its structural zero entries. A compact
+    /// receiver is expanded into the returned dense output.
     ///
     /// # Complexity
     ///

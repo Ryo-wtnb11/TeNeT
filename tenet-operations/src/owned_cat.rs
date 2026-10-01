@@ -140,6 +140,52 @@ pub fn try_cat_owned_raw<D: ConjugateValue + MaybeSendSync>(
     }))
 }
 
+/// Validates the complete copy plan, then uses the existing dense copy kernel
+/// and asks `compact_value` for each cell of a compact source descriptor.
+/// A failed callback leaves the output unpublished.
+#[doc(hidden)]
+pub fn try_cat_owned_mixed_raw<D, E>(
+    required_len: usize,
+    side: OwnedCatSide,
+    copies: &[OwnedCatCopy],
+    sources: [Option<&[D]>; 2],
+    source_lengths: [usize; 2],
+    mut compact_value: impl FnMut(usize, usize, usize) -> Result<D, E>,
+) -> Result<Option<Vec<D>>, E>
+where
+    D: ConjugateValue + MaybeSendSync,
+{
+    if sources
+        .iter()
+        .zip(source_lengths)
+        .any(|(source, len)| source.is_some_and(|values| values.len() != len))
+        || validate_owned_cat(required_len, side, copies, source_lengths).is_none()
+    {
+        return Ok(None);
+    }
+    initialize_owned(required_len, |destination| {
+        for (copy_index, copy) in copies.iter().enumerate() {
+            if let Some(source) = sources[copy.source] {
+                write_same(destination, source, copy);
+            } else {
+                for column in 0..copy.cols {
+                    for row in 0..copy.rows {
+                        let value = compact_value(copy_index, row, column)?;
+                        let offset = copy.destination_offset
+                            + row
+                            + column * copy.destination_leading_dimension;
+                        destination[offset].write(value);
+                        #[cfg(test)]
+                        observe_writes(offset..offset + 1);
+                    }
+                }
+            }
+        }
+        Ok(())
+    })
+    .map(Some)
+}
+
 /// Returns `None` unless the compiled mixed-dtype copies prove a complete overwrite.
 #[doc(hidden)]
 pub fn try_cat_owned_c64_raw(
@@ -176,8 +222,7 @@ fn initialize_infallible<D: Copy>(
     }
 }
 
-#[doc(hidden)]
-pub fn validate_owned_cat(
+fn validate_owned_cat(
     required_len: usize,
     side: OwnedCatSide,
     copies: &[OwnedCatCopy],
@@ -399,6 +444,39 @@ fn observe_writes(range: Range<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_compact_and_dense_cat_initializes_each_cell_once() {
+        let copies = [
+            copy(0, 0, 0, [2, 2], [1, 2], 2, 0..8, false),
+            copy(1, 0, 4, [2, 2], [1, 2], 2, 0..8, false),
+        ];
+        let dense = [1.0, 2.0, 3.0, 4.0];
+        let nan = f64::from_bits(0x7ff8_0000_0000_1617);
+        TEST_WRITE_BITMAP.with(|bitmap| *bitmap.borrow_mut() = Some(vec![0; 8]));
+        let output = try_cat_owned_mixed_raw(
+            8,
+            OwnedCatSide::Domain,
+            &copies,
+            [None, Some(&dense)],
+            [4, dense.len()],
+            |copy_index, row, column| -> Result<f64, Infallible> {
+                assert_eq!(copy_index, 0);
+                Ok(if row == column { [-0.0, nan][row] } else { 0.0 })
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let writes = TEST_WRITE_BITMAP.with(|bitmap| bitmap.borrow_mut().take().unwrap());
+        assert_eq!(writes, [1; 8]);
+        assert_eq!(
+            output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            [-0.0, 0.0, 0.0, nan, 1.0, 2.0, 3.0, 4.0].map(f64::to_bits)
+        );
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn copy(

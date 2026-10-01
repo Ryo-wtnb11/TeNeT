@@ -181,10 +181,6 @@ impl CatCopyPlan {
         });
         let [lhs_len, rhs_len] = source_lengths;
         let source_lengths = [lhs_len?, rhs_len?];
-        tenet_operations::validate_owned_cat(self.required_len, side, &self.copies, source_lengths)
-            .ok_or_else(|| {
-                internal_layout_error("cat copy plan declined by the fast-path prover")
-            })?;
         let mut diagonals = [None, None];
         for (index, source) in sources.iter().enumerate() {
             let CatOperandData::Diagonal {
@@ -224,54 +220,48 @@ impl CatCopyPlan {
             }
             diagonals[index] = Some(by_offset);
         }
-        let mut output = vec![D::from_real(0.0); self.required_len];
-        for copy in &self.copies {
-            match sources[copy.source()] {
-                CatOperandData::Dense(source) => {
-                    for column in 0..copy.cols() {
-                        for row in 0..copy.rows() {
-                            let source_offset = copy.source_offset()
-                                + row * copy.source_row_stride()
-                                + column * copy.source_column_stride();
-                            let destination_offset = copy.destination_offset()
-                                + row
-                                + column * copy.destination_leading_dimension();
-                            let value = source.get(source_offset).copied().ok_or_else(|| {
-                                internal_layout_error("cat dense source offset out of bounds")
-                            })?;
-                            *output.get_mut(destination_offset).ok_or_else(|| {
-                                internal_layout_error("cat destination offset out of bounds")
-                            })? = value.maybe_conj(copy.conjugate());
-                        }
-                    }
+        let dense_sources = sources.map(|source| match source {
+            CatOperandData::Dense(values) => Some(values),
+            CatOperandData::Diagonal { .. } => None,
+        });
+        let compact_entries = self
+            .copies
+            .iter()
+            .map(|copy| {
+                let Some(by_offset) = diagonals.get(copy.source()).and_then(Option::as_ref) else {
+                    return Ok(None);
+                };
+                let entry = by_offset
+                    .get(&copy.source_offset())
+                    .ok_or_else(|| internal_layout_error("compact cat source region is absent"))?;
+                if copy.rows() != copy.cols()
+                    || entry.values.len() != copy.rows()
+                    || copy.source_row_stride() != 1
+                    || copy.source_column_stride() != copy.rows()
+                    || copy.conjugate()
+                {
+                    return Err(internal_layout_error("compact cat copy geometry disagrees"));
                 }
-                CatOperandData::Diagonal { .. } => {
-                    let entry = diagonals[copy.source()]
-                        .as_ref()
-                        .and_then(|by_offset| by_offset.get(&copy.source_offset()))
-                        .ok_or_else(|| {
-                            internal_layout_error("compact cat source region is absent")
-                        })?;
-                    if copy.rows() != copy.cols()
-                        || entry.values.len() != copy.rows()
-                        || copy.source_row_stride() != 1
-                        || copy.source_column_stride() != copy.rows()
-                        || copy.conjugate()
-                    {
-                        return Err(internal_layout_error("compact cat copy geometry disagrees"));
-                    }
-                    for (position, &value) in entry.values.iter().enumerate() {
-                        let destination_offset = copy.destination_offset()
-                            + position
-                            + position * copy.destination_leading_dimension();
-                        *output.get_mut(destination_offset).ok_or_else(|| {
-                            internal_layout_error("compact cat destination offset out of bounds")
-                        })? = value;
-                    }
-                }
-            }
-        }
-        Ok(output)
+                Ok(Some(entry.values.as_slice()))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        tenet_operations::try_cat_owned_mixed_raw(
+            self.required_len,
+            side,
+            &self.copies,
+            dense_sources,
+            source_lengths,
+            |copy_index, row, column| {
+                let values = compact_entries[copy_index]
+                    .expect("compact cat copy was admitted before output allocation");
+                Ok::<D, Error>(if row == column {
+                    values[row]
+                } else {
+                    D::from_real(0.0)
+                })
+            },
+        )?
+        .ok_or_else(|| internal_layout_error("cat copy plan declined by the fast-path prover"))
     }
 }
 
