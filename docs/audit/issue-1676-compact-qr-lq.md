@@ -77,3 +77,21 @@ Issue impact: #1676 SOLVED by this diagonal rule, subject to verification and
 independent review; umbrella #1615 PARTIAL (other operation leaves remain).
 #1690/#1691 polar semantics are unchanged; shared arithmetic is regression
 covered. No dependency, cache, profiler or CUDA resource contract changes.
+
+## Dense LQ control
+
+The preexisting `extend_adjoint_col_major` StepBy/Take iterator acquired an
+out-of-line per-row fold in Release after this change. Full-call controls
+exposed a repeatable 3–5% real dense compact-LQ regression. Removing only the
+new admission check did not remove it; forcing the outer helper boundary did
+not remove it either. Explicit element pushes worsened both real and complex
+controls. An exact-size index range passed to `Vec::extend` restored timing.
+The adopted bounded change keeps the single reserve, column-major traversal,
+conjugation and append semantics. A hand-ordered rectangular complex fixture
+and all-scalar empty/append cases protect these semantics. This is an ordinary
+dense data-movement loop; it adds no dispatch, framework, provider or cache.
+
+Final gate and benchmark details, including experimental non-improvements and
+excluded invalid binary reuse, are recorded in
+[`benchmarks/issue_1676_results`](../../benchmarks/issue_1676_results/README.md).
+Timing is measurement evidence, not a CI acceptance assertion.

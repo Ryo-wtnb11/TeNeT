@@ -71,6 +71,29 @@ fn main() {
         .dense_threads(1)
         .build()
         .unwrap();
+    if std::env::args().any(|arg| arg == "--probe") {
+        let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(1), 3)])
+            .unwrap()
+            .try_dual()
+            .unwrap();
+        let input: TensorMap<_, f64> = TensorMap::diagonal(
+            &runtime,
+            &leg,
+            [SectorSpectrum {
+                sector: U1Irrep::new(-1),
+                values: vec![-2.0, 0.0, 3.0],
+            }],
+        )
+        .unwrap();
+        let qr = input.qr_compact(&[0], &[1]).unwrap();
+        println!(
+            "q_diagonal={},r_diagonal={},spaces_preserved={}",
+            qr.q.diagview().is_ok(),
+            qr.r.diagview().is_ok(),
+            qr.q.domain() == input.domain() && qr.r.codomain() == input.codomain()
+        );
+        return;
+    }
     println!(
         "family,dtype,sectors,k,dual,storage,operation,setup_ns,first_ns,median_ns,alloc_calls,alloc_bytes"
     );

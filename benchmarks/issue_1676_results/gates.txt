@@ -1,0 +1,19 @@
+Final production revision: 122ef8c8a41f3bfc0dba2b853c237cb1216bae71
+Coverage thresholds: 188/188 files passed
+tenet-matrixalgebra/src/factorize/polar.rs: {'count': 609, 'covered': 585, 'percent': 96.05911330049261}
+tenet-matrixalgebra/src/factorize/qr_lq.rs: {'count': 1107, 'covered': 1095, 'percent': 98.91598915989161}
+tenet/src/typed/fusion_tree.rs: {'count': 417, 'covered': 373, 'percent': 89.4484412470024}
+tenet/src/typed/scalar.rs: {'count': 779, 'covered': 558, 'percent': 71.63029525032091}
+tenet/src/typed/transform_ops.rs: {'count': 2666, 'covered': 2353, 'percent': 88.25956489122282}
+Prior full workspace run (before the additional serialization test and final helper adjustment): [3094, 0, 13] passed/failed/ignored; suites=204
+Final matrixalgebra + tenet tests and doctests: [1396, 0, 9] passed/failed/ignored; suites=120
+Final full workspace tests under coverage (no doctests): [3000, 0, 13] passed/failed/ignored; suites=193
+cargo fmt --all --check: pass
+cargo test -p tenet-matrixalgebra -p tenet-rs -- --test-threads=1: pass
+cargo test -p tenet-rs --test typed_serialization dual_compact_qr_lq_factor_roundtrip_preserves_space_and_storage: 1 passed
+cargo clippy --workspace --all-targets -- -D warnings: pass
+RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps: pass
+cargo llvm-cov --workspace --json --output-path /tmp/1676-coverage.json -- --test-threads=1: pass
+python3 scripts/check-coverage.py /tmp/1676-coverage.json: pass
+CARGO_TARGET_DIR=../tenet/target; CARGO_NET_OFFLINE=true; CARGO_PROFILE_TEST_DEBUG=0; CARGO_PROFILE_DEV_DEBUG=0
+Applicable default-feature Host gates; no CUDA runtime test claim.
