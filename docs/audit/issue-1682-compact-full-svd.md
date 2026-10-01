@@ -35,7 +35,10 @@ pivotal coefficient or fermion exchange. U and Vh are generally permutations,
 so their existing dense representation is required; S is diagonal on W.
 
 Rust uses borrowed input and newly owned outputs instead of Julia's copied
-mutable input. Sort costs O(sum k_c log k_c), dense U/Vh publication costs
+mutable input. The facade keeps its existing common payload dtype D for all
+factors: complex S stores real magnitudes with zero imaginary part, whereas
+TensorKit can return a real-valued S. No new scalar/result type is introduced.
+Sort costs O(sum k_c log k_c), dense U/Vh publication costs
 Theta(sum k_c^2), and S stores O(sum k_c). No dense input or S payload, solver,
 retained plan, cache or backend workspace is needed on the direct route.
 Nonfinite/unrepresentable spectra or declined layouts retain the existing

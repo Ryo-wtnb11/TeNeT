@@ -1,0 +1,1 @@
+s_compact=true,outer_dense=true,bond_matches=true

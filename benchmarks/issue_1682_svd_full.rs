@@ -87,8 +87,8 @@ fn main() {
         .unwrap();
         let out = input.svd_full(&[0], &[1]).unwrap();
         println!(
-            "s_diagonal={},outer_dense={},bond_matches={}",
-            out.s.diagview().is_ok(),
+            "s_compact={},outer_dense={},bond_matches={}",
+            out.s.dense_data().is_err() && out.s.diagview().is_ok(),
             out.u.dense_data().is_ok() && out.vh.dense_data().is_ok(),
             out.u.domain() == out.s.codomain() && out.s.domain() == out.vh.codomain()
         );
