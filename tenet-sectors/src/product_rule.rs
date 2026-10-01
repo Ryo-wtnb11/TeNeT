@@ -669,7 +669,7 @@ mod tests {
 
         assert_close(
             rule.dim_scalar(t1),
-            Complex64::new(1.618_033_988_749_895, 0.0),
+            Complex64::new(std::f64::consts::GOLDEN_RATIO, 0.0),
         );
         assert_close(
             rule.twist_scalar(t1),

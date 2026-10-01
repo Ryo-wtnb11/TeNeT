@@ -442,7 +442,7 @@ where
                 .pool
                 .counters
                 .idle
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |idle| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |idle| {
                     (idle < MAX_IDLE_WORKSPACES_PER_PLAN as u64).then_some(idle + 1)
                 })
                 .is_ok();
