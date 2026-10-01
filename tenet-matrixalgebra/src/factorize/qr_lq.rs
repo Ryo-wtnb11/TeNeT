@@ -836,14 +836,55 @@ pub(super) fn extend_adjoint_col_major<D: FactorScalar>(
     debug_assert_eq!(data.len(), rows * cols);
     output.reserve(data.len());
     for row in 0..rows {
-        output.extend(
-            data[row..]
-                .iter()
-                .step_by(rows)
-                .take(cols)
-                .map(|&value| FactorScalar::adjoint(value)),
-        );
+        // The StepBy/Take chain retained an out-of-line fold per row in Release.
+        output.extend((0..cols).map(|col| FactorScalar::adjoint(data[row + col * rows])));
     }
+}
+
+#[test]
+fn append_adjoint_preserves_rectangular_order_conjugation_and_existing_values() {
+    macro_rules! check {
+        ($ty:ty) => {{
+            let input = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0].map(<$ty as FactorScalar>::from_real);
+            let mut output = vec![<$ty as FactorScalar>::from_real(99.0)];
+            extend_adjoint_col_major(&mut output, &input, 2, 3);
+            assert_eq!(
+                output,
+                [99.0, 1.0, 3.0, 5.0, 2.0, 4.0, 6.0].map(<$ty as FactorScalar>::from_real)
+            );
+            for (rows, cols) in [(0, 0), (0, 3), (3, 0)] {
+                let before = output.clone();
+                extend_adjoint_col_major(&mut output, &[], rows, cols);
+                assert_eq!(output, before);
+            }
+        }};
+    }
+    check!(f32);
+    check!(f64);
+    check!(num_complex::Complex32);
+    check!(Complex64);
+    let input = [
+        Complex64::new(1.0, 2.0),
+        Complex64::new(3.0, 4.0),
+        Complex64::new(5.0, 6.0),
+        Complex64::new(7.0, 8.0),
+        Complex64::new(9.0, 10.0),
+        Complex64::new(11.0, 12.0),
+    ];
+    let mut output = vec![Complex64::new(99.0, 1.0)];
+    extend_adjoint_col_major(&mut output, &input, 2, 3);
+    assert_eq!(
+        output,
+        [
+            Complex64::new(99.0, 1.0),
+            Complex64::new(1.0, -2.0),
+            Complex64::new(5.0, -6.0),
+            Complex64::new(9.0, -10.0),
+            Complex64::new(3.0, -4.0),
+            Complex64::new(7.0, -8.0),
+            Complex64::new(11.0, -12.0)
+        ]
+    );
 }
 
 /// Transposes a column-major `rows x cols` matrix into column-major
