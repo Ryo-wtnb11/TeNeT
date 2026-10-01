@@ -177,7 +177,7 @@ fn labelled_block_inspection_refuses_a_lazy_adjoint_without_copying() {
 }
 
 #[test]
-fn typed_compact_svd_keeps_peak_below_the_materialize_baseline() {
+fn typed_compact_svd_keeps_allocations_below_the_materialize_baseline() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: the typed wrapper reuses the same parent-factor seam and does not
     // hide a receiver-sized logical-adjoint allocation around it.
@@ -190,6 +190,14 @@ fn typed_compact_svd_keeps_peak_below_the_materialize_baseline() {
 
     let optimized = parent.adjoint().unwrap();
     let baseline = parent.adjoint().unwrap();
+    black_box(optimized.svd_compact(&[0], &[1]).unwrap());
+    black_box(
+        baseline
+            .materialize()
+            .unwrap()
+            .svd_compact(&[0], &[1])
+            .unwrap(),
+    );
     let optimized_cost = measure_peak(|| {
         black_box(optimized.svd_compact(&[0], &[1]).unwrap());
     });
@@ -204,8 +212,10 @@ fn typed_compact_svd_keeps_peak_below_the_materialize_baseline() {
         );
     });
 
-    // Total bytes are currently higher than the explicit route; that cost is
-    // tracked separately. The contract here is peak bytes.
+    assert!(
+        optimized_cost.1 <= baseline_cost.1,
+        "total bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
+    );
     assert!(
         optimized_cost.2 < baseline_cost.2,
         "peak bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
@@ -213,7 +223,7 @@ fn typed_compact_svd_keeps_peak_below_the_materialize_baseline() {
 }
 
 #[test]
-fn typed_full_svd_keeps_peak_below_the_materialize_baseline() {
+fn typed_full_svd_keeps_allocations_below_the_materialize_baseline() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
@@ -222,9 +232,16 @@ fn typed_full_svd_keeps_peak_below_the_materialize_baseline() {
         TensorMap::rand_with_seed(&runtime, [&space], [&space], 693_697).unwrap();
     black_box(parent.svd_full(&[0], &[1]).unwrap());
 
-    let input_bytes = std::mem::size_of_val(parent.dense_data().unwrap()) as u64;
     let optimized = parent.adjoint().unwrap();
     let baseline = parent.adjoint().unwrap();
+    black_box(optimized.svd_full(&[0], &[1]).unwrap());
+    black_box(
+        baseline
+            .materialize()
+            .unwrap()
+            .svd_full(&[0], &[1])
+            .unwrap(),
+    );
     let optimized_cost = measure_peak(|| {
         black_box(optimized.svd_full(&[0], &[1]).unwrap());
     });
@@ -238,10 +255,11 @@ fn typed_full_svd_keeps_peak_below_the_materialize_baseline() {
                 .unwrap(),
         );
     });
-    eprintln!("input={input_bytes} optimized={optimized_cost:?} materialized={baseline_cost:?}");
 
-    // Total bytes are currently higher than the explicit route; that cost is
-    // tracked separately. The contract here is peak bytes.
+    assert!(
+        optimized_cost.1 <= baseline_cost.1,
+        "total bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
+    );
     assert!(
         optimized_cost.2 < baseline_cost.2,
         "peak bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
@@ -249,7 +267,7 @@ fn typed_full_svd_keeps_peak_below_the_materialize_baseline() {
 }
 
 #[test]
-fn typed_truncated_svd_keeps_peak_below_the_materialize_baseline() {
+fn typed_truncated_svd_keeps_allocations_below_the_materialize_baseline() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: typed truncation reuses the parent-factor seam without retaining
     // a receiver-sized logical-adjoint input.
@@ -277,6 +295,8 @@ fn typed_truncated_svd_keeps_peak_below_the_materialize_baseline() {
 
     let optimized = parent.adjoint().unwrap();
     let baseline = parent.adjoint().unwrap();
+    black_box(truncated_svd(&optimized));
+    black_box(truncated_svd(&baseline.materialize().unwrap()));
     let optimized_cost = measure_peak(|| {
         black_box(truncated_svd(&optimized));
     });
@@ -285,12 +305,61 @@ fn typed_truncated_svd_keeps_peak_below_the_materialize_baseline() {
         black_box(truncated_svd(&baseline.materialize().unwrap()));
     });
 
-    // Total bytes are currently higher than the explicit route; that cost is
-    // tracked separately. The contract here is peak bytes.
+    assert!(
+        optimized_cost.1 <= baseline_cost.1,
+        "total bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
+    );
     assert!(
         optimized_cost.2 < baseline_cost.2,
         "peak bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
     );
+}
+
+#[test]
+fn rectangular_multisector_adjoint_svd_keeps_total_and_peak_below_materialization() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let left = GradedSpace::try_new(
+        Arc::clone(&provider),
+        (-2..=2).map(|charge| (U1Irrep::new(charge), 24)),
+    )
+    .unwrap();
+    let right =
+        GradedSpace::try_new(provider, (-2..=2).map(|charge| (U1Irrep::new(charge), 16))).unwrap();
+    let parent: TensorMap<_, num_complex::Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&left], [&right], 693_698).unwrap();
+    black_box(parent.svd_compact(&[0], &[1]).unwrap());
+    black_box(parent.svd_full(&[0], &[1]).unwrap());
+
+    let operation = |tensor: &TensorMap<U1FusionRule, num_complex::Complex64>, full| {
+        if full {
+            tensor.svd_full(&[0], &[1])
+        } else {
+            tensor.svd_compact(&[0], &[1])
+        }
+    };
+    for full in [false, true] {
+        let name = if full { "full" } else { "compact" };
+        let optimized = parent.adjoint().unwrap();
+        let baseline = parent.adjoint().unwrap();
+        black_box(operation(&optimized, full).unwrap());
+        black_box(operation(&baseline.materialize().unwrap(), full).unwrap());
+        let actual = measure_peak(|| {
+            black_box(operation(&optimized, full).unwrap());
+        });
+        let expected = measure_peak(|| {
+            black_box(operation(&baseline.materialize().unwrap(), full).unwrap());
+        });
+        assert!(
+            actual.1 <= expected.1,
+            "{name} total: {actual:?} vs {expected:?}"
+        );
+        assert!(
+            actual.2 <= expected.2,
+            "{name} peak: {actual:?} vs {expected:?}"
+        );
+    }
 }
 
 #[test]
