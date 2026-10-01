@@ -41,32 +41,9 @@ where
         }
         let mut values = Vec::with_capacity(entry.values.len());
         for &value in &entry.values {
-            let value = value.widen_complex();
-            if !value.re.is_finite() || !value.im.is_finite() {
+            let Some((phase, magnitude)) = diagonal_phase_magnitude(value) else {
                 return Ok(None);
-            }
-            let scale = value.re.abs().max(value.im.abs());
-            let (phase, magnitude) = if scale == 0.0 {
-                (Complex64::new(1.0, 0.0), 0.0)
-            } else {
-                let normalized = value / scale;
-                let norm = normalized.norm();
-                (normalized / norm, scale * norm)
             };
-            if !magnitude.is_finite() {
-                return Ok(None);
-            }
-            let phase = D::from_complex64(phase);
-            let magnitude = D::from_real(magnitude);
-            let phase_check = phase.widen_complex();
-            let magnitude_check = magnitude.widen_complex();
-            if !phase_check.re.is_finite()
-                || !phase_check.im.is_finite()
-                || !magnitude_check.re.is_finite()
-                || !magnitude_check.im.is_finite()
-            {
-                return Ok(None);
-            }
             values.push((phase, magnitude));
         }
         diagonal.push(values);

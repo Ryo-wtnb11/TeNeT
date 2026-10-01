@@ -1,0 +1,124 @@
+     Locking 496 packages to latest compatible versions
+      Adding syn v2.0.119 (available: v3.0.6)
+   Compiling proc-macro2 v1.0.107
+   Compiling autocfg v1.5.1
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling bytemuck v1.25.2
+   Compiling crossbeam-utils v0.8.23
+   Compiling crossbeam-epoch v0.9.21
+   Compiling crossbeam-deque v0.8.8
+   Compiling libm v0.2.16
+   Compiling version_check v0.9.5
+   Compiling thiserror v1.0.69
+   Compiling rayon-core v1.13.0
+   Compiling paste v1.0.15
+   Compiling pulp-wasm-simd-flag v0.1.1
+   Compiling cfg-if v1.0.5
+   Compiling either v1.18.0
+   Compiling reborrow v0.5.5
+   Compiling nano-gemm-codegen v0.2.1
+   Compiling smallvec v1.16.2
+   Compiling libc v0.2.189
+   Compiling heck v0.5.0
+   Compiling thiserror v2.0.21
+   Compiling pulp v0.22.3
+   Compiling bitflags v2.13.2
+   Compiling num-traits v0.2.19
+   Compiling dyn-stack-macros v0.1.3
+   Compiling byteorder v1.5.0
+   Compiling raw-cpuid v11.6.0
+   Compiling dyn-stack v0.13.2
+   Compiling seq-macro v0.3.6
+   Compiling once_cell v1.21.4
+   Compiling nano-gemm-core v0.2.1
+   Compiling tenferro-core-ops v0.7.1
+   Compiling nano-gemm-f32 v0.2.1
+   Compiling nano-gemm-c64 v0.2.1
+   Compiling nano-gemm-f64 v0.2.1
+   Compiling nano-gemm-c32 v0.2.1
+   Compiling allocator-api2 v0.2.21
+   Compiling equivalent v1.0.2
+   Compiling foldhash v0.1.5
+   Compiling hashbrown v0.15.5
+   Compiling lru v0.12.5
+   Compiling computegraph v0.1.0
+   Compiling equator-macro v0.6.0
+   Compiling atomic-wait v1.1.0
+   Compiling generativity v1.2.1
+   Compiling rustc-hash v2.1.3
+   Compiling equator v0.6.0
+   Compiling crossbeam-queue v0.3.14
+   Compiling crossbeam-channel v0.5.17
+   Compiling syn v2.0.119
+   Compiling syn v3.0.6
+   Compiling crossbeam v0.8.5
+   Compiling rayon v1.12.0
+   Compiling thiserror-impl v2.0.21
+   Compiling thiserror-impl v1.0.69
+   Compiling enum-as-inner v0.6.1
+   Compiling equator-macro v0.4.2
+   Compiling equator-macro v0.2.1
+   Compiling tenferro-internal-extension-macros v0.7.1
+   Compiling num-complex v0.4.6
+   Compiling num-integer v0.1.47
+   Compiling equator v0.2.2
+   Compiling equator v0.4.2
+   Compiling num-bigint v0.4.8
+   Compiling strided-traits v0.4.4
+   Compiling num-rational v0.4.2
+   Compiling racah v0.2.2
+   Compiling tenet-sectors v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1676-compact-qr-lq/tenet-sectors)
+   Compiling tenet-core v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1676-compact-qr-lq/tenet-core)
+   Compiling tenferro-tensor-core v0.7.1
+   Compiling tenferro-tensor v0.7.1
+   Compiling spindle v0.2.6
+   Compiling sysctl v0.6.0
+   Compiling strided-view v0.4.4
+   Compiling strided-perm v0.4.4
+   Compiling tenferro-internal-ops v0.7.1
+   Compiling tenferro-runtime v0.7.1
+   Compiling nano-gemm v0.2.2
+   Compiling gemm-common v0.19.0
+   Compiling strided-basic v0.4.4
+   Compiling qd v0.8.0
+   Compiling faer-traits v0.24.0
+   Compiling gemm-f32 v0.19.0
+   Compiling gemm-c32 v0.19.0
+   Compiling gemm-c64 v0.19.0
+   Compiling gemm-f64 v0.19.0
+   Compiling gemm v0.19.0
+   Compiling faer v0.24.4
+   Compiling strided-fused v0.4.4
+   Compiling tenferro-cpu-basic v0.7.1
+   Compiling strided-kernel v0.4.4
+   Compiling tenferro-cpu-fused v0.7.1
+   Compiling tenferro-internal-cpu-kernels v0.7.1
+   Compiling tenferro-cpu v0.7.1
+   Compiling tenferro-linalg v0.7.1
+   Compiling tenet-dense v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1676-compact-qr-lq/tenet-dense)
+   Compiling tenet-operations v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1676-compact-qr-lq/tenet-operations)
+   Compiling tenet-tensors v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1676-compact-qr-lq/tenet-tensors)
+   Compiling tenet-matrixalgebra v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1676-compact-qr-lq/tenet-matrixalgebra)
+   Compiling tenet-rs v0.1.1 (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet-1676-compact-qr-lq/tenet)
+    Finished `test` profile [unoptimized] target(s) in 33.52s
+     Running unittests src/lib.rs (/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet/target/debug/deps/tenet-0eeb67372aaf2371)
+
+running 1 test
+test typed::representation_gates::compact_diagonal_qr_lq_preserves_compact_factors_without_dense_kernels ... FAILED
+
+failures:
+
+---- typed::representation_gates::compact_diagonal_qr_lq_preserves_compact_factors_without_dense_kernels stdout ----
+
+thread 'typed::representation_gates::compact_diagonal_qr_lq_preserves_compact_factors_without_dense_kernels' (28277797) panicked at tenet/src/typed/representation_gates.rs:73:9:
+test only exercises polar
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    typed::representation_gates::compact_diagonal_qr_lq_preserves_compact_factors_without_dense_kernels
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 186 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p tenet-rs --lib`

@@ -534,8 +534,9 @@ pub struct SectorSpectrum<S, V = f64> {
 pub(super) enum TypedData<D, S = Vec<D>> {
     /// The dense coupled-sector buffer every operation can read.
     Dense(S),
-    /// Compact O(Σ_c k_c) storage for a spectrum factor (SVD `s`, `eigh`/`eig`
-    /// `d`): only the per-sector diagonal values, keyed by the engine's raw
+    /// Compact O(Σ_c k_c) storage for a proved bond endomorphism, including
+    /// SVD `s`, `eigh`/`eig` `d`, and diagonal QR/LQ factors: only the
+    /// per-sector diagonal values, keyed by the engine's raw
     /// [`crate::sector::SectorId`] — a stored payload never leaves this module, so
     /// there is nothing here for the codec to label.
     Diagonal(Vec<tenet_matrixalgebra::SectorSpectrum<D>>),
@@ -744,9 +745,10 @@ where
 /// Only decoding untrusted input can make this answer `false`. At the
 /// compact-*destination* call sites it cannot fail — every
 /// [`TypedData::Diagonal`] payload this module can produce sits on a space
-/// built by [`diagonal_factor_on`], i.e. by
-/// [`tenet_matrixalgebra::diagonal_bond_bound_space_like`], which is a bond
-/// space by construction, and the operations that preserve the payload
+/// admitted by [`TensorMap::diagonal`] or built by [`diagonal_factor_on`]
+/// through [`tenet_matrixalgebra::diagonal_bond_bound_space_like`], which is a
+/// bond space by construction. Diagonal QR/LQ preserve that exact input space,
+/// and the operations that preserve the payload
 /// ([`TensorMap::scale`], [`TensorMap::axpby`], [`TensorMap::adjoint`],
 /// [`TensorMap::map_diagonal`], the `D * D` arm) all keep that space. It stays
 /// at those sites because the next constructor of a compact payload — a
