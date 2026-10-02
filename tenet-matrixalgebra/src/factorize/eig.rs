@@ -407,38 +407,93 @@ where
     for route in plan.routes.iter().copied() {
         let entry = by_sector[&route.sector];
         let n = entry.values.len();
-        let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by(|&a, &b| {
-            entry.values[a]
-                .widen_complex()
-                .re
-                .total_cmp(&entry.values[b].widen_complex().re)
-        });
-        order.sort_by(|&a, &b| {
-            entry.values[b]
-                .widen_complex()
-                .re
-                .abs()
-                .total_cmp(&entry.values[a].widen_complex().re.abs())
-        });
-        if let Some(index) = route.left_region {
-            let start = plan.left_regions[index].range().start;
-            for (column, &row) in order.iter().enumerate() {
-                v_data[start + column * n + row] = D::from_real(1.0);
-            }
-        }
+        // An empty sector has no left region and writes nothing.
+        let start = route
+            .left_region
+            .map_or(0, |index| plan.left_regions[index].range().start);
         eigenvalues.push(SectorSpectrum {
             sector: route.sector,
-            values: order
-                .iter()
-                .map(|&index| entry.values[index].widen_complex().re)
-                .collect(),
+            values: compact_diagonal_eigh_sector(&entry.values, &mut v_data[start..start + n * n]),
         });
     }
     Ok(Some(EighFullDyn {
         v: BoundDynFactor::from_bound(v_space, v_data, space.nout(), 1)?,
         eigenvalues,
     }))
+}
+
+/// Sorts one admitted real diagonal sector into the dense EIGH order and
+/// writes the matching permutation into the zeroed column-major `n x n`
+/// `vectors`. Dense EIGH orders signed values ascending, then stably by
+/// descending magnitude, so `-x` precedes `+x`.
+fn compact_diagonal_eigh_sector<D: FactorScalar>(values: &[D], vectors: &mut [D]) -> Vec<f64> {
+    let n = values.len();
+    let real = |index: usize| values[index].widen_complex().re;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| real(a).total_cmp(&real(b)));
+    order.sort_by(|&a, &b| real(b).abs().total_cmp(&real(a).abs()));
+    for (column, &row) in order.iter().enumerate() {
+        vectors[column * n + row] = D::from_real(1.0);
+    }
+    order.into_iter().map(real).collect()
+}
+
+/// Checked-provider full eigenbasis of an admitted owned compact diagonal.
+/// Ineligible layouts or values return `None` before any output work, so the
+/// checked dense route keeps its errors and their order; admitted output uses
+/// the same checked factor builder over the same region geometry.
+#[doc(hidden)]
+pub fn eigh_full_diagonal_dyn_checked_generic<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<EighFullDyn<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let space = authority.space();
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Ok(None);
+    }
+    let Ok(Some(regions)) = checked_sector_regions(space.structure(), space.nout()) else {
+        return Ok(None);
+    };
+    if validate_endomorphism_tree_stacking(regions.as_ref(), EIGH_FULL_STACKING).is_err() {
+        return Ok(None);
+    }
+    let Some(by_sector) = real_diagonal_by_sector(&regions, spectrum) else {
+        return Ok(None);
+    };
+    let mut eigenvalues = Vec::with_capacity(regions.len());
+    let mut pairs = Vec::with_capacity(regions.len());
+    let mut dimensions = BTreeMap::new();
+    for region in regions.iter() {
+        let entry = by_sector[&region.coupled()];
+        let n = region.rows();
+        let mut vectors = vec![D::zero(); n * n];
+        eigenvalues.push(SectorSpectrum {
+            sector: region.coupled(),
+            values: compact_diagonal_eigh_sector(&entry.values, &mut vectors),
+        });
+        pairs.push(FactorPair {
+            sector: region.coupled(),
+            kept: n,
+            left: vectors,
+            left_rows: n,
+            right: Vec::new(),
+            right_leading: 0,
+        });
+        dimensions.insert(region.coupled(), n);
+    }
+    let v = build_bound_factor_generic_checked(
+        authority.provider_arc(),
+        space.homspace(),
+        &regions,
+        &mut pairs,
+        &dimensions,
+        FactorSide::Left,
+    )?;
+    Ok(Some(EighFullDyn { v, eigenvalues }))
 }
 
 pub(crate) fn eigenvector_gauge<D: FactorScalar>(
