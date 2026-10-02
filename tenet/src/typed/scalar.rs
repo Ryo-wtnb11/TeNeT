@@ -1851,9 +1851,12 @@ where
     /// `r` upper trapezoidal in every sector.
     ///
     /// An admitted finite owned Host compact diagonal on `V <- V` returns
-    /// both factors in compact storage with `W = V`. Checked-Generic input
-    /// requires a nondual `V`; its dual bond retains the checked dense route.
-    /// The multiplicity-free route also admits dual orientation.
+    /// both factors in compact storage with `W = V`, including dual
+    /// orientation, for multiplicity-free and checked-Generic providers alike
+    /// (TensorKit's diagonal dispatch). Any other input, including a
+    /// materialized diagonal or swapped leg roles, takes the dense route,
+    /// whose `W` is a fresh nondual bond (TensorKit `fuse`); a dual `V` thus
+    /// yields `W = V` or its nondual flip depending on storage.
     /// Phase is +1 at zero; work and output storage are `O(sum_c k_c)` after
     /// sector/layout validation. Use [`Self::diagview`] to read the factors,
     /// or [`Self::materialize`] before [`Self::dense_data`] for a dense buffer.
@@ -2031,8 +2034,8 @@ where
     ///
     /// Its cost and compact storage contract are the same as [`Self::qr_compact`]:
     /// admitted owned Host compact diagonals preserve `W = V` and both factors
-    /// are compact. Checked Generic requires an owned input and a nondual bond;
-    /// a dual checked bond retains the dense route.
+    /// are compact, including on a dual `V`. Checked Generic requires an owned
+    /// input.
     /// Checked factors use the source provider instance, and a failure returns
     /// no factors. A multiplicity-free lazy adjoint runs QR on its owned
     /// parent and returns detached owned factors without materializing the

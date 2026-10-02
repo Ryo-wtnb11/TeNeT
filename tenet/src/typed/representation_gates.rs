@@ -3563,6 +3563,55 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
     assert_eq!(solver_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
 
+/// #1729: an admitted checked-Generic dual diagonal (non-self-dual SU(3)
+/// labels) runs all four QR/LQ methods on `W = V` without materializing the
+/// input or calling the dense QR kernel (`CountPolarKernels::qr` panics).
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_dual_diagonal_qr_lq_skips_materialization_and_dense_qr() {
+    use tenet_core::SUNFusionRule;
+
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::<CountPolarKernels>::default())
+        .build()
+        .unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 0], 3), (vec![0, 0], 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let sectors = leg.sectors().unwrap();
+    assert!(!sectors.contains(&vec![1, 0]));
+    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        sectors.into_iter().map(|sector| {
+            let values = (0..leg.degeneracy(&sector).unwrap())
+                .map(|index| Complex64::new(index as f64 - 1.0, 2.0 - index as f64))
+                .collect();
+            SectorSpectrum { sector, values }
+        }),
+    )
+    .unwrap();
+    for operation in 0..4 {
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        let (left, right) = match operation {
+            0 => input.qr_compact(&[0], &[1]).unwrap().pair(),
+            1 => input.qr_full(&[0], &[1]).unwrap().pair(),
+            2 => input.lq_compact(&[0], &[1]).unwrap().pair(),
+            _ => input.lq_full(&[0], &[1]).unwrap().pair(),
+        };
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        for factor in [&left, &right] {
+            assert_eq!(factor.codomain(), input.codomain());
+            assert_eq!(factor.domain(), input.domain());
+            assert!(factor.codomain()[0].is_dual());
+            assert!(factor.diagview().is_ok());
+            assert!(factor.dense_data().is_err());
+        }
+    }
+}
+
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
