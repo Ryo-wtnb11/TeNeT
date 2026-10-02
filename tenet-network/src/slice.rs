@@ -341,7 +341,7 @@ pub(crate) fn validate_contraction_plan_for_ir(
 ) -> Result<()> {
     if plan.tensor_count() != ir.tensors().len() || plan.output_labels() != ir.output_labels() {
         return Err(ContractError::InvalidContractionPlan(
-            "sliced plan topology does not match the typed network".to_string(),
+            "plan topology does not match the typed network".to_string(),
         ));
     }
     let input_labels = ir

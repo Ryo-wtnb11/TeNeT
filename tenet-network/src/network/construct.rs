@@ -128,6 +128,13 @@ impl Network {
     }
 
     /// Wraps an already searched structural order for typed execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-argument error when `plan` does not describe this
+    /// network: its tensor count, output labels, or step result labels differ
+    /// from the lowered inputs. This is the step-label check
+    /// [`ContractionPlan::from_steps`] runs, repeated once per call.
     pub fn plan_with<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
@@ -140,6 +147,9 @@ impl Network {
         S: TensorStorage<D>,
     {
         let LoweredTypedNetwork { ir, .. } = self.lower_typed(tensors)?;
+        // The schedule compiler trusts its plan: an order for fewer tensors
+        // would silently drop a closed scalar subnetwork.
+        validate_contraction_plan_for_ir(&ir, &plan).map_err(invalid)?;
         self.finish_typed_plan(tensors, ir, plan)
     }
 

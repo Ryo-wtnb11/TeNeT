@@ -1970,3 +1970,114 @@ fn typed_replay_keeps_the_step_destination_after_its_contract_fails() {
     drop(planned.execute(&refs, &mut workspace).unwrap());
     assert_eq!(retained(&workspace), before);
 }
+
+/// `A[i;j] * B[j;k]`, optionally times the closed pair `C[x;y] * D[y;x]`.
+fn matrix_product_plan(with_closed_pair: bool, output: &[&str]) -> ContractionPlan {
+    let mut inputs = vec![vec![label("i"), label("j")], vec![label("j"), label("k")]];
+    let output = output.iter().map(|name| label(name)).collect::<Vec<_>>();
+    let step = |lhs, rhs, result, labels| {
+        ContractionStep::new(
+            TensorId::new(lhs),
+            TensorId::new(rhs),
+            TensorId::new(result),
+            0,
+            labels,
+        )
+    };
+    let steps = if with_closed_pair {
+        inputs.push(vec![label("x"), label("y")]);
+        inputs.push(vec![label("y"), label("x")]);
+        vec![
+            step(2, 3, 4, vec![]),
+            step(0, 1, 5, vec![label("i"), label("k")]),
+            step(5, 4, 6, output.clone()),
+        ]
+    } else {
+        vec![step(0, 1, 2, output.clone())]
+    };
+    let ir = NetworkIR::from_labels(inputs, output).unwrap();
+    ContractionPlan::from_steps(&ir, steps).unwrap()
+}
+
+#[test]
+fn plan_with_rejects_a_plan_that_does_not_cover_the_network() {
+    let runtime = Runtime::builder().build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let space = |degeneracy| {
+        GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), degeneracy)]).unwrap()
+    };
+    let (i, j, k, x, y) = (space(2), space(3), space(4), space(2), space(3));
+    let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&i], [&j], 31).unwrap();
+    let b = TensorMap::rand_with_seed(&runtime, [&j], [&k], 32).unwrap();
+    let c = TensorMap::rand_with_seed(&runtime, [&x], [&y], 33).unwrap();
+    let d = TensorMap::rand_with_seed(&runtime, [&y], [&x], 34).unwrap();
+    let s = crate::tensor!([] = c[x; y] * d[y; x]).unwrap();
+    let network = |inputs: Vec<Vec<&str>>, splits: Vec<Option<usize>>| {
+        let n = inputs.len();
+        Network::new(
+            inputs
+                .into_iter()
+                .map(|names| names.into_iter().map(label).collect())
+                .collect(),
+            vec![false; n],
+            splits,
+            vec![label("i"), label("k")],
+            Some(1),
+        )
+        .unwrap()
+    };
+    let ab = matrix_product_plan(false, &["i", "k"]);
+    let rejects = |result: Result<PlannedNetwork, Error>| {
+        assert!(matches!(result, Err(Error::InvalidArgument(_))));
+    };
+
+    // A rank-0 operand is a closed scalar subnetwork: a 2-tensor A*B plan
+    // would otherwise drop it and return A*B.
+    let with_scalar = network(
+        vec![vec!["i", "j"], vec!["j", "k"], vec![]],
+        vec![Some(1), Some(1), Some(0)],
+    );
+    rejects(with_scalar.plan_with(&[&a, &b, &s], ab.clone()));
+
+    // A pair contracted only with each other is the same closed subnetwork.
+    let with_pair = network(
+        vec![
+            vec!["i", "j"],
+            vec!["j", "k"],
+            vec!["x", "y"],
+            vec!["y", "x"],
+        ],
+        vec![Some(1); 4],
+    );
+    let abcd = [&a, &b, &c, &d];
+    rejects(with_pair.plan_with(&abcd, ab.clone()));
+
+    // A plan for more tensors than the network has is rejected up front.
+    let product = network(vec![vec!["i", "j"], vec!["j", "k"]], vec![Some(1); 2]);
+    rejects(product.plan_with(&[&a, &b], matrix_product_plan(true, &["i", "k"])));
+
+    // A plan for the same tensor count but another output is rejected.
+    rejects(product.plan_with(&[&a, &b], matrix_product_plan(false, &["k", "i"])));
+
+    // A matching plan still wraps and executes to the searched result.
+    let supplied = with_pair
+        .plan_with(&abcd, matrix_product_plan(true, &["i", "k"]))
+        .unwrap()
+        .execute(&abcd, &mut Default::default())
+        .unwrap();
+    let searched = with_pair
+        .plan(&abcd, &GreedyDenseOptimizer)
+        .unwrap()
+        .execute(&abcd, &mut Default::default())
+        .unwrap();
+    assert_eq!(supplied.codomain(), searched.codomain());
+    assert_eq!(supplied.domain(), searched.domain());
+    let (supplied, searched) = (
+        supplied.dense_data().unwrap(),
+        searched.dense_data().unwrap(),
+    );
+    assert!(supplied
+        .iter()
+        .zip(searched)
+        .all(|(lhs, rhs)| (lhs - rhs).abs() <= 1e-12 * rhs.abs().max(1.0)));
+}
