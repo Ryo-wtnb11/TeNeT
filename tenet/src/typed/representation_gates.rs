@@ -3788,6 +3788,77 @@ fn checked_compact_diagonal_eigh_vals_keeps_dense_hermiticity_boundary() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
+fn checked_compact_diagonal_svd_compact_avoids_input_materialization_and_solver() {
+    use tenet_core::SUNFusionRule;
+
+    let svd_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(CountPolarKernels {
+            inner: DefaultDenseExecutor::default(),
+            svd_calls: Arc::clone(&svd_calls),
+            gemm_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let bond =
+        GradedSpace::try_new(Arc::clone(&provider), [(vec![0, 0], 2), (vec![1, 0], 3)]).unwrap();
+    let input: TensorMap<_, num_complex::Complex64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![
+                    num_complex::Complex64::new(0.0, 0.0),
+                    num_complex::Complex64::new(-2.0, 0.0),
+                ],
+            },
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![
+                    num_complex::Complex64::new(1.0, 0.0),
+                    num_complex::Complex64::new(0.0, 3.0),
+                    num_complex::Complex64::new(-1.0, 0.0),
+                ],
+            },
+        ],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert!(std::ptr::eq(u.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(s.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
+    assert!(u.dense_data().is_ok());
+    assert!(s.dense_data().is_err());
+    assert!(vh.dense_data().is_ok());
+
+    let TypedData::Diagonal(spectrum) = owned(&input).data.as_ref() else {
+        panic!("diagonal constructor must retain compact storage");
+    };
+    let source = &owned(&input).space;
+    let mut missing = spectrum.clone();
+    missing.pop();
+    let mut duplicate = spectrum.clone();
+    duplicate[1].sector = duplicate[0].sector;
+    let mut short = spectrum.clone();
+    short[0].values.pop();
+    for malformed in [&missing, &duplicate, &short] {
+        assert!(
+            tenet_matrixalgebra::svd_compact_diagonal_factors_dyn_checked_generic(
+                source, malformed
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
 fn checked_compact_diagonal_svd_vals_rounds_at_payload_precision() {
     use tenet_core::SUNFusionRule;
 

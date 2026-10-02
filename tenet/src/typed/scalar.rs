@@ -1617,6 +1617,26 @@ where
                 "checked Generic svd_compact does not accept lazy adjoints".to_string(),
             )));
         };
+        if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            if let Some((u, vh, mut singular_values)) =
+                tenet_matrixalgebra::svd_compact_diagonal_factors_dyn_checked_generic(
+                    &body.space,
+                    spectrum,
+                )?
+            {
+                let s = diagonal_factor_on_checked(
+                    &self.runtime,
+                    Arc::clone(body.space.provider_arc()),
+                    &mut singular_values,
+                    D::from_real,
+                )?;
+                return Ok(Svd {
+                    u: wrap_factor_on(&self.runtime, u),
+                    s,
+                    vh: wrap_factor_on(&self.runtime, vh),
+                });
+            }
+        }
         let mut dense = self.runtime.lease_dense();
         let payload = body.materialized_dense_data();
         let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
@@ -1816,8 +1836,9 @@ where
     /// a dense input or dense SVD call; its dense `u` and `vh` still require
     /// `O(sum_c k_c²)` output storage and writes. A multiplicity-free lazy
     /// adjoint is handled from its parent without materializing it.
-    /// Checked-Generic SVD requires owned input and still densifies compact
-    /// diagonals. Nonfinite or unrepresentable compact spectra use the ordinary
+    /// Checked-Generic SVD requires owned input. An admitted square compact
+    /// diagonal uses the same direct per-sector sorting and factor publication;
+    /// other layouts and nonfinite or unrepresentable spectra use the ordinary
     /// dense solver path.
     /// Any sector, layout, or provider failure returns no factors.
     ///
