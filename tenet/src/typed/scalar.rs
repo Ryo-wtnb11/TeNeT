@@ -1490,6 +1490,16 @@ where
                 "checked Generic qr_full does not accept lazy adjoints".to_string(),
             )));
         };
+        if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            if let Some((q_space, r_space, phases, magnitudes)) =
+                tenet_matrixalgebra::qr_diagonal_dyn_checked_generic(&body.space, spectrum, true)?
+            {
+                return Ok(Qr {
+                    q: self.with_spectrum_on(q_space, phases),
+                    r: self.with_spectrum_on(r_space, magnitudes),
+                });
+            }
+        }
         let mut dense = self.runtime.lease_dense();
         let payload = body.materialized_dense_data();
         let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
@@ -1570,6 +1580,16 @@ where
                 "checked Generic lq_compact does not accept lazy adjoints".to_string(),
             )));
         };
+        if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            if let Some((l_space, q_space, phases, magnitudes)) =
+                tenet_matrixalgebra::lq_diagonal_dyn_checked_generic(&body.space, spectrum, false)?
+            {
+                return Ok(Lq {
+                    l: self.with_spectrum_on(l_space, magnitudes),
+                    q: self.with_spectrum_on(q_space, phases),
+                });
+            }
+        }
         let mut dense = self.runtime.lease_dense();
         let payload = body.materialized_dense_data();
         let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
@@ -1782,6 +1802,16 @@ where
                 "checked Generic qr_compact does not accept lazy adjoints".to_string(),
             )));
         };
+        if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            if let Some((q_space, r_space, phases, magnitudes)) =
+                tenet_matrixalgebra::qr_diagonal_dyn_checked_generic(&body.space, spectrum, false)?
+            {
+                return Ok(Qr {
+                    q: self.with_spectrum_on(q_space, phases),
+                    r: self.with_spectrum_on(r_space, magnitudes),
+                });
+            }
+        }
         let mut dense = self.runtime.lease_dense();
         let payload = body.materialized_dense_data();
         let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
@@ -1811,7 +1841,9 @@ where
     /// `r` upper trapezoidal in every sector.
     ///
     /// An admitted finite owned Host compact diagonal on `V <- V` returns
-    /// both factors in compact storage with `W = V`, including dual orientation.
+    /// both factors in compact storage with `W = V`. Checked-Generic input
+    /// requires a nondual `V`; its dual bond retains the checked dense route.
+    /// The multiplicity-free route also admits dual orientation.
     /// Phase is +1 at zero; work and output storage are `O(sum_c k_c)` after
     /// sector/layout validation. Use [`Self::diagview`] to read the factors,
     /// or [`Self::materialize`] before [`Self::dense_data`] for a dense buffer.
@@ -1989,7 +2021,8 @@ where
     ///
     /// Its cost and compact storage contract are the same as [`Self::qr_compact`]:
     /// admitted owned Host compact diagonals preserve `W = V` and both factors
-    /// are compact. Checked Generic requires an owned input.
+    /// are compact. Checked Generic requires an owned input and a nondual bond;
+    /// a dual checked bond retains the dense route.
     /// Checked factors use the source provider instance, and a failure returns
     /// no factors. A multiplicity-free lazy adjoint runs QR on its owned
     /// parent and returns detached owned factors without materializing the
@@ -2218,7 +2251,8 @@ where
     /// `O(m_c² n_c)` when `m_c <= n_c`; when `m_c > n_c`, completing the
     /// square `q` costs `O(m_c²(n_c + m_c))`. Source packing and owned factor
     /// publication are additional costs. An admitted owned Host compact diagonal
-    /// uses `W = V` and two compact factors, exactly as compact QR.
+    /// uses `W = V` and two compact factors under the boundary documented by
+    /// [`Self::qr_compact`].
     /// See [`Self::qr_compact`] for the
     /// compact alternative, storage and lazy-input behavior, errors, and example.
     ///
@@ -2249,8 +2283,8 @@ where
     /// `O(n_c² m_c)` when `n_c <= m_c`; when `n_c > m_c`, completing the
     /// square `q` costs `O(n_c²(m_c + n_c))`. Source packing, the sectorwise
     /// adjoint, and owned factor publication are additional costs. An admitted
-    /// owned Host compact diagonal uses `W = V` and two compact factors,
-    /// exactly as compact LQ. See [`Self::lq_compact`] for the compact alternative, storage and
+    /// owned Host compact diagonal uses `W = V` and two compact factors under
+    /// the boundary documented by [`Self::lq_compact`]. See [`Self::lq_compact`] for the compact alternative, storage and
     /// lazy-input behavior, errors, and example.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
