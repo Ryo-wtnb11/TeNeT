@@ -2288,6 +2288,335 @@ fn checked_generic_dense_input_svd_publishes_compact_multisector_s() {
 }
 
 #[test]
+fn checked_compact_diagonal_svd_compact_matches_hand_permutation_and_phase() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond =
+        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 2), (Label::X, 3)]).unwrap();
+    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![Complex64::new(0.0, 0.0), Complex64::new(-2.0, 0.0)],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![
+                    Complex64::new(1.0, 0.0),
+                    Complex64::new(0.0, 3.0),
+                    Complex64::new(-1.0, 0.0),
+                ],
+            },
+        ],
+    )
+    .unwrap();
+    let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
+    for factor in [&u, &s, &vh] {
+        assert!(std::ptr::eq(factor.provider(), provider.as_ref()));
+    }
+    assert_eq!(
+        s.diagview().unwrap()[0].values,
+        [Complex64::new(2.0, 0.0), Complex64::new(0.0, 0.0)]
+    );
+    assert_eq!(
+        s.diagview().unwrap()[1].values,
+        [
+            Complex64::new(3.0, 0.0),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(1.0, 0.0)
+        ]
+    );
+
+    let expected_u: TensorMap<_, Complex64> = TensorMap::from_subblock_fn(
+        &runtime,
+        u.codomain().iter(),
+        u.domain().iter(),
+        |trees, ij| {
+            let order: &[usize] = if trees.coupled() == &Label::Vacuum {
+                &[1, 0]
+            } else {
+                &[1, 0, 2]
+            };
+            Complex64::new(f64::from(ij[0] == order[ij[1]]), 0.0)
+        },
+    )
+    .unwrap();
+    let expected_vh: TensorMap<_, Complex64> = TensorMap::from_subblock_fn(
+        &runtime,
+        vh.codomain().iter(),
+        vh.domain().iter(),
+        |trees, ij| {
+            let (order, phases): (&[usize], &[Complex64]) = if trees.coupled() == &Label::Vacuum {
+                (
+                    &[1, 0],
+                    &[Complex64::new(-1.0, 0.0), Complex64::new(1.0, 0.0)],
+                )
+            } else {
+                (
+                    &[1, 0, 2],
+                    &[
+                        Complex64::new(0.0, 1.0),
+                        Complex64::new(1.0, 0.0),
+                        Complex64::new(-1.0, 0.0),
+                    ],
+                )
+            };
+            if ij[1] == order[ij[0]] {
+                phases[ij[0]]
+            } else {
+                Complex64::new(0.0, 0.0)
+            }
+        },
+    )
+    .unwrap();
+    for (actual, expected) in [(&u, &expected_u), (&vh, &expected_vh)] {
+        assert!(actual
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(expected.dense_data().unwrap())
+            .all(|(actual, expected)| (*actual - expected).norm() <= 1e-12));
+    }
+    for gram in [
+        u.adjoint()
+            .unwrap()
+            .materialize()
+            .unwrap()
+            .compose(&u)
+            .unwrap(),
+        vh.compose(&vh.adjoint().unwrap().materialize().unwrap())
+            .unwrap(),
+    ] {
+        let identity: TensorMap<_, Complex64> = TensorMap::from_subblock_fn(
+            &runtime,
+            gram.codomain().iter(),
+            gram.domain().iter(),
+            |_, ij| Complex64::new(f64::from(ij[0] == ij[1]), 0.0),
+        )
+        .unwrap();
+        assert!(gram
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(identity.dense_data().unwrap())
+            .all(|(actual, expected)| (*actual - expected).norm() <= 1e-12));
+    }
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(input.materialize().unwrap().dense_data().unwrap())
+        .all(|(actual, expected)| (*actual - expected).norm() <= 1e-12));
+
+    let narrow = input.convert::<Complex32>();
+    let Svd { u, s, vh } = narrow.svd_compact(&[0], &[1]).unwrap();
+    assert_eq!(
+        s.diagview().unwrap()[0].values,
+        [Complex32::new(2.0, 0.0), Complex32::new(0.0, 0.0)]
+    );
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(narrow.materialize().unwrap().dense_data().unwrap())
+        .all(|(actual, expected)| (*actual - expected).norm() <= 1e-5));
+}
+
+#[test]
+fn checked_compact_diagonal_svd_compact_preserves_fallback_error_order() {
+    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(PinvFaultExecutor {
+            inner: DefaultDenseExecutor::new(),
+            svd_calls: Arc::clone(&svd_calls),
+            gemm_calls: Arc::new(AtomicUsize::new(0)),
+            fail_svd: Some(1),
+            fail_gemm: None,
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![f64::NAN, 1.0],
+        }],
+    )
+    .unwrap();
+    provider.fail_algebra.store(true, Ordering::Relaxed);
+    let error = nonfinite.svd_compact(&[0], &[1]).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Operation(
+                tenet::typed::OperationError::Dense(DenseError::Backend { op: "svd", .. })
+            ))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 1);
+
+    provider.fail_algebra.store(false, Ordering::Relaxed);
+    let finite: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![2.0, 1.0],
+        }],
+    )
+    .unwrap();
+    svd_calls.store(0, Ordering::Relaxed);
+    provider.invalid_style.store(true, Ordering::Relaxed);
+    let error = finite.svd_compact(&[0], &[1]).unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Operation(
+            tenet::typed::OperationError::Core(
+                tenet::typed::CoreError::UnsupportedFusionStyle { .. }
+            )
+        ))
+    ));
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn checked_compact_diagonal_svd_compact_numeric_admission_matches_dense() {
+    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(PinvFaultExecutor {
+            inner: DefaultDenseExecutor::new(),
+            svd_calls: Arc::clone(&svd_calls),
+            gemm_calls: Arc::new(AtomicUsize::new(0)),
+            fail_svd: None,
+            fail_gemm: None,
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
+
+    macro_rules! compare_real {
+        ($dtype:ty, $subnormal:expr, $minimum:expr) => {
+            for (name, value, direct) in [
+                ("subnormal", $subnormal, false),
+                ("minimum normal", $minimum, true),
+            ] {
+                let input: TensorMap<_, $dtype> = TensorMap::diagonal(
+                    &runtime,
+                    &bond,
+                    [SectorSpectrum {
+                        sector: Label::X,
+                        values: vec![value],
+                    }],
+                )
+                .unwrap();
+                let dense = input.materialize().unwrap();
+                svd_calls.store(0, Ordering::Relaxed);
+                let got = input.svd_compact(&[0], &[1]);
+                assert_eq!(
+                    svd_calls.load(Ordering::Relaxed),
+                    usize::from(!direct),
+                    "{name}"
+                );
+                let expected = dense.svd_compact(&[0], &[1]);
+                match (got, expected) {
+                    (Ok(got), Ok(expected)) => {
+                        assert_eq!(
+                            got.s.diagview().unwrap(),
+                            expected.s.diagview().unwrap(),
+                            "{name}"
+                        );
+                    }
+                    (Err(got), Err(expected)) => {
+                        assert_eq!(format!("{got:?}"), format!("{expected:?}"), "{name}");
+                    }
+                    (got, expected) => panic!("{name}: {got:?} versus {expected:?}"),
+                }
+            }
+        };
+    }
+    compare_real!(f32, f32::from_bits(1), f32::MIN_POSITIVE);
+    compare_real!(f64, f64::from_bits(1), f64::MIN_POSITIVE);
+
+    macro_rules! compare_complex_overflow {
+        ($dtype:ty, $value:expr) => {
+            let overflow: TensorMap<_, $dtype> = TensorMap::diagonal(
+                &runtime,
+                &bond,
+                [SectorSpectrum {
+                    sector: Label::X,
+                    values: vec![$value],
+                }],
+            )
+            .unwrap();
+            let dense = overflow.materialize().unwrap();
+            svd_calls.store(0, Ordering::Relaxed);
+            let got = overflow.svd_compact(&[0], &[1]);
+            assert_eq!(svd_calls.load(Ordering::Relaxed), 1);
+            let expected = dense.svd_compact(&[0], &[1]);
+            match (got, expected) {
+                (Ok(got), Ok(expected)) => {
+                    assert_eq!(got.s.diagview().unwrap(), expected.s.diagview().unwrap());
+                }
+                (Err(got), Err(expected)) => {
+                    assert_eq!(format!("{got:?}"), format!("{expected:?}"));
+                }
+                (got, expected) => panic!("{got:?} versus {expected:?}"),
+            }
+        };
+    }
+    compare_complex_overflow!(Complex32, Complex32::new(f32::MAX, f32::MAX));
+    compare_complex_overflow!(Complex64, Complex64::new(f64::MAX, f64::MAX));
+}
+
+#[test]
+fn checked_compact_diagonal_svd_compact_preserves_dual_and_changed_roles() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let dual_bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &dual_bond,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![-2.0, 0.0],
+        }],
+    )
+    .unwrap();
+    let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
+    assert!(std::ptr::eq(u.provider(), provider.as_ref()));
+    assert_eq!(s.diagview().unwrap()[0].values, [2.0, 0.0]);
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert_eq!(
+        rebuilt.dense_data().unwrap(),
+        input.materialize().unwrap().dense_data().unwrap()
+    );
+    // Changed roles enter the checked transform first; this provider rejects
+    // that transform before SVD can inspect the compact payload.
+    assert!(matches!(
+        input.svd_compact(&[1], &[0]),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Operation(
+                tenet::typed::OperationError::EmptyTransformBlock
+            )
+        ))
+    ));
+}
+
+#[test]
 fn checked_generic_full_svd_keeps_dense_s_for_equal_total_but_unequal_sector_bonds() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));

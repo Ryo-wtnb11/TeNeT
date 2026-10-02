@@ -575,16 +575,48 @@ where
     let Some(plan) = compact_factor_plan(authority)? else {
         return Ok(None);
     };
+    let (u_data, vh_data, singular_values) = compact_diagonal_svd_factor_data(
+        &plan.routes,
+        plan.left_regions.len(),
+        plan.right_regions.len(),
+        plan.left_layout.required_len()?,
+        plan.right_layout.required_len()?,
+        spectrum,
+    )?;
+    let u = BoundDynFactor::from_bound(
+        authority.rebind_validated(&plan.left_layout)?,
+        u_data,
+        authority.space().nout(),
+        1,
+    )?;
+    let vh = BoundDynFactor::from_bound(
+        authority.rebind_validated(&plan.right_layout)?,
+        vh_data,
+        1,
+        authority.space().nin(),
+    )?;
+    Ok(Some((u, vh, singular_values)))
+}
+
+#[expect(clippy::type_complexity)]
+fn compact_diagonal_svd_factor_data<D: FactorScalar>(
+    routes: &[CompactFactorRoute],
+    left_region_count: usize,
+    right_region_count: usize,
+    left_len: usize,
+    right_len: usize,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<(Vec<D>, Vec<D>, Vec<SectorSpectrum>), OperationError> {
     let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != spectrum.len() || spectrum.len() != plan.routes.len() {
+    if by_sector.len() != spectrum.len() || spectrum.len() != routes.len() {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: "compact diagonal spectrum does not match source sectors",
         });
     }
-    let mut u_regions = vec![None; plan.left_regions.len()];
-    let mut vh_regions = vec![None; plan.right_regions.len()];
-    let mut singular_values = Vec::with_capacity(plan.routes.len());
-    for route in &plan.routes {
+    let mut u_regions = vec![None; left_region_count];
+    let mut vh_regions = vec![None; right_region_count];
+    let mut singular_values = Vec::with_capacity(routes.len());
+    for route in routes {
         let entry =
             by_sector
                 .get(&route.sector)
@@ -597,48 +629,123 @@ where
                 message: "compact diagonal spectrum length does not match source region",
             });
         }
-        let mut order = entry
-            .values
-            .iter()
-            .enumerate()
-            .map(|(index, &value)| (index, value.widen_complex().norm()))
-            .collect::<Vec<_>>();
-        order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let (u, vh, values) = compact_diagonal_svd_sector(&entry.values);
         if k != 0 {
-            let mut u = vec![D::zero(); k * k];
-            let mut vh = vec![D::zero(); k * k];
-            for (column, &(source, magnitude)) in order.iter().enumerate() {
-                u[source + column * k] = D::from_real(1.0);
-                vh[column + source * k] = if magnitude == 0.0 {
-                    D::from_real(1.0)
-                } else {
-                    let value = entry.values[source].widen_complex();
-                    let scale = value.re.abs().max(value.im.abs());
-                    let scaled = value / scale;
-                    D::from_complex64(scaled / scaled.norm())
-                };
-            }
             u_regions[route.left_region.expect("nonzero route has left region")] = Some(u);
             vh_regions[route.right_region.expect("nonzero route has right region")] = Some(vh);
         }
         singular_values.push(SectorSpectrum {
             sector: route.sector,
-            values: order.into_iter().map(|(_, magnitude)| magnitude).collect(),
+            values,
         });
     }
-    let u_data = concat_compact_svd_factor_regions(u_regions, plan.left_layout.required_len()?);
-    let vh_data = concat_compact_svd_factor_regions(vh_regions, plan.right_layout.required_len()?);
-    let u = BoundDynFactor::from_bound(
-        authority.rebind_validated(&plan.left_layout)?,
-        u_data,
-        authority.space().nout(),
-        1,
-    )?;
-    let vh = BoundDynFactor::from_bound(
-        authority.rebind_validated(&plan.right_layout)?,
-        vh_data,
-        1,
-        authority.space().nin(),
+    let u_data = concat_compact_svd_factor_regions(u_regions, left_len);
+    let vh_data = concat_compact_svd_factor_regions(vh_regions, right_len);
+    Ok((u_data, vh_data, singular_values))
+}
+
+fn compact_diagonal_svd_sector<D: FactorScalar>(values: &[D]) -> (Vec<D>, Vec<D>, Vec<f64>) {
+    let k = values.len();
+    let mut order = values
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| (index, value.widen_complex().norm()))
+        .collect::<Vec<_>>();
+    order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut u = vec![D::zero(); k * k];
+    let mut vh = vec![D::zero(); k * k];
+    for (column, &(source, magnitude)) in order.iter().enumerate() {
+        u[source + column * k] = D::from_real(1.0);
+        vh[column + source * k] = if magnitude == 0.0 {
+            D::from_real(1.0)
+        } else {
+            let value = values[source].widen_complex();
+            let scale = value.re.abs().max(value.im.abs());
+            let scaled = value / scale;
+            D::from_complex64(scaled / scaled.norm())
+        };
+    }
+    (
+        u,
+        vh,
+        order.into_iter().map(|(_, magnitude)| magnitude).collect(),
+    )
+}
+
+/// Checked-provider diagonal SVD factors. Unsupported source layouts or
+/// numerical inputs leave the ordinary checked dense path in charge of its
+/// errors and numerics; admitted outputs use the usual checked factor builder.
+#[doc(hidden)]
+pub fn svd_compact_diagonal_factors_dyn_checked_generic<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<
+    Option<CheckedCompactSvdFactorsWithSpectrum<R, D>>,
+    CheckedGenericFactorPlanError<R::Error>,
+>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let source = authority.space();
+    if source.nout() != 1
+        || source.nin() != 1
+        || source.homspace().codomain().legs() != source.homspace().domain().legs()
+    {
+        return Ok(None);
+    }
+    let Ok(Some(source_regions)) = checked_sector_regions(source.structure(), 1) else {
+        return Ok(None);
+    };
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != spectrum.len() || spectrum.len() != source_regions.len() {
+        return Ok(None);
+    }
+    for region in source_regions.iter() {
+        let Some(entry) = by_sector.get(&region.coupled()) else {
+            return Ok(None);
+        };
+        if !region.has_aligned_diagonal()
+            || region.rows() != region.cols()
+            || region.row_trees().len() != 1
+            || region.col_trees().len() != 1
+            || entry.values.len() != region.rows()
+        {
+            return Ok(None);
+        }
+        for &value in &entry.values {
+            let Some(magnitude) = finite_compact_magnitude(value) else {
+                return Ok(None);
+            };
+            if magnitude > 0.0 && magnitude < D::safe_minimum() {
+                return Ok(None);
+            }
+        }
+    }
+
+    let mut pairs = Vec::with_capacity(source_regions.len());
+    let mut singular_values = Vec::with_capacity(source_regions.len());
+    for region in source_regions.iter() {
+        let entry = by_sector[&region.coupled()];
+        let (left, right, values) = compact_diagonal_svd_sector(&entry.values);
+        pairs.push(FactorPair {
+            sector: region.coupled(),
+            kept: region.rows(),
+            left,
+            left_rows: region.rows(),
+            right,
+            right_leading: region.rows(),
+        });
+        singular_values.push(SectorSpectrum {
+            sector: region.coupled(),
+            values,
+        });
+    }
+    let (u, vh) = build_left_right_bound_pair_generic_checked(
+        authority.provider_arc(),
+        source.homspace(),
+        &source_regions,
+        pairs,
     )?;
     Ok(Some((u, vh, singular_values)))
 }
