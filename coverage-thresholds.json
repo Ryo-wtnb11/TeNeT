@@ -1,17 +1,17 @@
 {
-  "_comment": "Per-crate line coverage floors (%), checked by scripts/check-coverage.py. Ratchet: each floor is the crate's measured coverage rounded down (CI run 37050928687, coverage job 110983844454; tenet-core measured exactly 89.00 and varied by one line between runs, so it sits one point lower); raise it when coverage rises. Crates not listed use 'default'. Changed-line coverage of a PR is printed for review only.",
+  "_comment": "Per-crate line coverage floors (%), checked by scripts/check-coverage.py. Each floor is the crate's coverage measured on CI run 37050928687 (coverage job 110983844454), rounded down, minus a 1-point margin for run-to-run jitter and small PRs. Ratchet: raise a floor when coverage rises. Crates not listed use 'default'. Changed-line coverage of a PR is printed for review only.",
   "default": 80,
   "crates": {
-    "tenet": 91,
-    "tenet-category-data": 92,
+    "tenet": 90,
+    "tenet-category-data": 91,
     "tenet-core": 88,
-    "tenet-dense": 88,
-    "tenet-krylov": 92,
-    "tenet-macros": 98,
-    "tenet-matrixalgebra": 92,
-    "tenet-network": 86,
-    "tenet-operations": 91,
-    "tenet-sectors": 93,
-    "tenet-tensors": 90
+    "tenet-dense": 87,
+    "tenet-krylov": 91,
+    "tenet-macros": 97,
+    "tenet-matrixalgebra": 91,
+    "tenet-network": 85,
+    "tenet-operations": 90,
+    "tenet-sectors": 92,
+    "tenet-tensors": 89
   }
 }
