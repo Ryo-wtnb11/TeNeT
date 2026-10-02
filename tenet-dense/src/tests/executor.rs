@@ -209,6 +209,11 @@ fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
         .unwrap();
 
     assert_eq!(
+        executor.staged_grouped_jobs(),
+        0,
+        "valid run must stay strided"
+    );
+    assert_eq!(
         executor.seam_dispatches(),
         1,
         "same-shape strided batch made {} seam dispatches for {} jobs",
@@ -2227,4 +2232,65 @@ fn identity_two_job_affine_run_is_admitted_to_the_strided_view() {
     );
     assert_eq!(executor.seam_dispatches(), 1);
     assert_eq!(output, [sentinel; 8]);
+}
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_batch_with_malformed_single_run_falls_back_to_grouped() {
+    // `runs == [2]` claims one run, but job 1 has a different row count, so the
+    // two jobs are not one affine run (issue #1733). Job 1's destination step
+    // (8) still clears job 0's block (2*4), which used to select the strided
+    // route and compute job 1 with job 0's shape.
+    let jobs = [
+        DenseGemmBatchJob {
+            dst_offset: 0,
+            lhs_offset: 0,
+            rhs_offset: 0,
+            rows: 2,
+            contracted: 3,
+            cols: 4,
+        },
+        DenseGemmBatchJob {
+            dst_offset: 8,
+            lhs_offset: 6,
+            rhs_offset: 12,
+            rows: 3,
+            contracted: 3,
+            cols: 4,
+        },
+    ];
+    let runs = vec![2];
+    let lhs = (0..15).map(|i| 1.0 + i as f64).collect::<Vec<_>>();
+    let rhs = (0..24).map(|i| 0.5 - 0.25 * i as f64).collect::<Vec<_>>();
+    let mut output = vec![-99.0; 20];
+
+    let mut executor = DefaultDenseExecutor::new();
+    executor
+        .matmul_batch_axpby_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &[20], &[1], 0).unwrap()),
+            DenseRead::F64(DenseView::new(&lhs, &[15], &[1], 0).unwrap()),
+            DenseRead::F64(DenseView::new(&rhs, &[24], &[1], 0).unwrap()),
+            &jobs,
+            &runs,
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(0.0),
+        )
+        .unwrap();
+
+    for job in &jobs {
+        let (m, k, n) = (job.rows, job.contracted, job.cols);
+        let expected = matmul_f64(
+            &lhs[job.lhs_offset..job.lhs_offset + m * k],
+            &rhs[job.rhs_offset..job.rhs_offset + k * n],
+            m,
+            k,
+            n,
+        );
+        for (actual, expected) in output[job.dst_offset..job.dst_offset + m * n]
+            .iter()
+            .zip(expected)
+        {
+            assert_f64_close(*actual, expected, 1.0e-12);
+        }
+    }
+    assert_eq!(executor.staged_grouped_jobs(), jobs.len());
 }
