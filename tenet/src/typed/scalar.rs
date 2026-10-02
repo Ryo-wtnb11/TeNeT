@@ -2396,10 +2396,10 @@ where
     /// magnitudes and an admitted endomorphism sector layout is read directly
     /// for both multiplicity-free and checked-Generic providers. The checked
     /// route also requires the canonical bond space and a bijection between
-    /// stored spectra and aligned square sector regions. Other compact inputs
-    /// and lazy adjoints use an operation-local dense payload; checked Generic
-    /// requires owned input and rejects lazy adjoints for this values-only
-    /// method. Unlike
+    /// stored spectra and aligned square sector regions. For multiplicity-free
+    /// providers, other compact inputs and lazy adjoints use an operation-local
+    /// dense payload. Checked Generic uses that dense route only for owned
+    /// inputs and rejects lazy adjoints for this values-only method. Unlike
     /// [`Self::eig_full`], no eigenvector-rank gate is needed because no
     /// eigenbasis is returned.
     ///
