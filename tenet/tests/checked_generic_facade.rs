@@ -4304,6 +4304,36 @@ fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
         .iter()
         .any(|value| value.im.abs() > 1.0));
     assert_checked_generic_eig_reconstruction(&complex, &complex_d, &complex_v);
+
+    let compact: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![Complex64::new(1.0, 1.0), Complex64::new(0.0, -3.0)],
+        }],
+    )
+    .unwrap();
+    let Eig { d, v } = compact.eig_full(&[0], &[1]).unwrap();
+    assert_eq!(
+        d.diagview().unwrap()[0].values,
+        [Complex64::new(0.0, -3.0), Complex64::new(1.0, 1.0)]
+    );
+    let dense = compact.materialize().unwrap();
+    assert_checked_generic_eig_reconstruction(&dense, &d, &v);
+    // Changed leg roles reach the provider through `permute`; its failure is
+    // the dense route's failure.
+    provider.fail_algebra.store(true, Ordering::Relaxed);
+    let compact_error = compact.eig_full(&[1], &[0]).unwrap_err();
+    let dense_error = dense.eig_full(&[1], &[0]).unwrap_err();
+    provider.fail_algebra.store(false, Ordering::Relaxed);
+    assert!(matches!(
+        compact_error,
+        GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(
+            ToyError::Algebra
+        ))
+    ));
+    assert_eq!(format!("{compact_error:?}"), format!("{dense_error:?}"));
 }
 
 #[test]
