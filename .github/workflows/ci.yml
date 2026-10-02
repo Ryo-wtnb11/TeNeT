@@ -456,9 +456,19 @@ jobs:
       - name: Generate coverage JSON
         run: cargo llvm-cov report --json --output-path coverage.json
         working-directory: tenet
-      - name: Check per-file thresholds
-        run: python3 scripts/check-coverage.py coverage.json
+      # Changed-line coverage is printed for review only; crate floors gate.
+      - name: Check per-crate coverage floors
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_SHA}" ]; then
+            git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+            python3 scripts/check-coverage.py coverage.json --diff-base "${BASE_SHA}"
+          else
+            python3 scripts/check-coverage.py coverage.json
+          fi
         working-directory: tenet
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
 
   clippy:
     name: clippy
