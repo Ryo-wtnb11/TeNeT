@@ -6,6 +6,46 @@ fn compact_singular_value<D: FactorScalar>(value: D) -> Option<f64> {
     (rounded.is_finite() && (magnitude == 0.0 || rounded > 0.0)).then_some(rounded)
 }
 
+fn compact_null_sector<D: FactorScalar>(values: &[D], side: FactorSide) -> Option<(usize, Vec<D>)> {
+    let k = values.len();
+    let (sigma_max, nullity) =
+        values
+            .iter()
+            .copied()
+            .try_fold((0.0_f64, 0_usize), |(largest, zeros), value| {
+                compact_singular_value(value).map(|magnitude| {
+                    (
+                        largest.max(magnitude),
+                        zeros + usize::from(magnitude == 0.0),
+                    )
+                })
+            })?;
+    let cutoff = D::epsilon() * k as f64 * sigma_max;
+    let margin = cutoff.max(D::epsilon().sqrt() * sigma_max);
+    if !margin.is_finite()
+        || (sigma_max > 0.0 && (margin == 0.0 || sigma_max < D::safe_minimum()))
+        || values.iter().copied().any(|value| {
+            compact_singular_value(value)
+                .is_none_or(|magnitude| magnitude > 0.0 && magnitude <= margin)
+        })
+    {
+        return None;
+    }
+    let mut coordinates = vec![D::zero(); k * nullity];
+    let mut column = 0;
+    for (index, &value) in values.iter().enumerate() {
+        if compact_singular_value(value) != Some(0.0) {
+            continue;
+        }
+        match side {
+            FactorSide::Left => coordinates[index + column * k] = D::from_real(1.0),
+            FactorSide::Right => coordinates[column + index * nullity] = D::from_real(1.0),
+        }
+        column += 1;
+    }
+    Some((nullity, coordinates))
+}
+
 /// Coordinate kernels of an admitted compact diagonal. A sector with any
 /// positive magnitude near the rank cutoff stays on the solver path; the
 /// margin is conservative, not a provider-specific singular-value bound.
@@ -37,6 +77,11 @@ where
             .domain()
             .coupled_sector_block_dimensions(authority.provider())?
     };
+    let side = if left {
+        FactorSide::Left
+    } else {
+        FactorSide::Right
+    };
     let mut pairs = Vec::new();
     for region in regions.iter() {
         let k = region.rows();
@@ -46,55 +91,14 @@ where
         if !region.has_aligned_diagonal() || k != region.cols() || entry.values.len() != k {
             return Ok(None);
         }
-        let Some((sigma_max, q)) =
-            entry
-                .values
-                .iter()
-                .copied()
-                .try_fold((0.0_f64, 0_usize), |(largest, zeros), value| {
-                    compact_singular_value(value).map(|magnitude| {
-                        (
-                            largest.max(magnitude),
-                            zeros + usize::from(magnitude == 0.0),
-                        )
-                    })
-                })
-        else {
+        let Some((q, coordinates)) = compact_null_sector(&entry.values, side) else {
             return Ok(None);
         };
-        let cutoff = D::epsilon() * k as f64 * sigma_max;
-        let margin = cutoff.max(D::epsilon().sqrt() * sigma_max);
-        if !margin.is_finite()
-            || (sigma_max > 0.0 && (margin == 0.0 || sigma_max < D::safe_minimum()))
-        {
-            return Ok(None);
-        }
-        for &value in &entry.values {
-            let Some(magnitude) = compact_singular_value(value) else {
-                return Ok(None);
-            };
-            if magnitude > 0.0 && magnitude <= margin {
-                return Ok(None);
-            }
-        }
         if q == 0 {
             null_dimensions.remove(&region.coupled());
             continue;
         }
         null_dimensions.insert(region.coupled(), q);
-        let mut coordinates = vec![D::zero(); k * q];
-        let mut column = 0;
-        for (index, &value) in entry.values.iter().enumerate() {
-            if compact_singular_value(value) != Some(0.0) {
-                continue;
-            }
-            if left {
-                coordinates[index + column * k] = D::from_real(1.0);
-            } else {
-                coordinates[column + index * q] = D::from_real(1.0);
-            }
-            column += 1;
-        }
         let (left_data, right_data) = if left {
             (coordinates, Vec::new())
         } else {
@@ -109,11 +113,6 @@ where
             right_leading: q,
         });
     }
-    let side = if left {
-        FactorSide::Left
-    } else {
-        FactorSide::Right
-    };
     Ok(Some(build_bound_factor(
         authority,
         space.homspace(),
@@ -122,6 +121,119 @@ where
         &null_dimensions,
         side,
     )?))
+}
+
+pub type CheckedNullDimensions<E> =
+    Result<BTreeMap<SectorId, usize>, CheckedGenericFactorPlanError<E>>;
+
+#[doc(hidden)]
+pub enum CheckedDiagonalNullFactor<R, D, E> {
+    Direct(BoundDynFactor<R, D>),
+    Fallback(Option<CheckedNullDimensions<E>>),
+}
+
+fn null_diagonal_dyn_checked_generic<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+    side: FactorSide,
+) -> Result<CheckedDiagonalNullFactor<R, D, R::Error>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let space = authority.space();
+    let Ok(Some(regions)) = checked_sector_regions(space.structure(), space.nout()) else {
+        return Ok(CheckedDiagonalNullFactor::Fallback(None));
+    };
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != regions.len() || spectrum.len() != regions.len() {
+        return Ok(CheckedDiagonalNullFactor::Fallback(None));
+    }
+    let dimensions = coupled_sector_block_dimensions_generic_checked(
+        match side {
+            FactorSide::Left => space.homspace().codomain(),
+            FactorSide::Right => space.homspace().domain(),
+        },
+        authority.provider(),
+    );
+    let mut null_dimensions = match dimensions {
+        Ok(dimensions) => dimensions,
+        Err(error) => return Ok(CheckedDiagonalNullFactor::Fallback(Some(Err(error)))),
+    };
+    let mut pairs = Vec::new();
+    for region in regions.iter() {
+        let k = region.rows();
+        let Some(entry) = by_sector.get(&region.coupled()) else {
+            return Ok(CheckedDiagonalNullFactor::Fallback(Some(Ok(
+                null_dimensions,
+            ))));
+        };
+        if !region.has_aligned_diagonal() || k != region.cols() || entry.values.len() != k {
+            return Ok(CheckedDiagonalNullFactor::Fallback(Some(Ok(
+                null_dimensions,
+            ))));
+        }
+        let Some((nullity, coordinates)) = compact_null_sector(&entry.values, side) else {
+            return Ok(CheckedDiagonalNullFactor::Fallback(Some(Ok(
+                null_dimensions,
+            ))));
+        };
+        let (left_data, right_data) = match side {
+            FactorSide::Left => (coordinates, Vec::new()),
+            FactorSide::Right => (Vec::new(), coordinates),
+        };
+        pairs.push(FactorPair {
+            sector: region.coupled(),
+            kept: nullity,
+            left: left_data,
+            left_rows: k,
+            right: right_data,
+            right_leading: nullity,
+        });
+    }
+    pairs.retain(|pair| {
+        if pair.kept == 0 {
+            null_dimensions.remove(&pair.sector);
+            false
+        } else {
+            null_dimensions.insert(pair.sector, pair.kept);
+            true
+        }
+    });
+    Ok(CheckedDiagonalNullFactor::Direct(
+        build_bound_factor_generic_checked(
+            authority.provider_arc(),
+            space.homspace(),
+            regions.as_ref(),
+            &mut pairs,
+            &null_dimensions,
+            side,
+        )?,
+    ))
+}
+
+#[doc(hidden)]
+pub fn left_null_diagonal_dyn_checked_generic<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<CheckedDiagonalNullFactor<R, D, R::Error>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    null_diagonal_dyn_checked_generic(authority, spectrum, FactorSide::Left)
+}
+
+#[doc(hidden)]
+pub fn right_null_diagonal_dyn_checked_generic<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<CheckedDiagonalNullFactor<R, D, R::Error>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    null_diagonal_dyn_checked_generic(authority, spectrum, FactorSide::Right)
 }
 
 #[doc(hidden)]
@@ -316,14 +428,31 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
+    left_null_dyn_checked_generic_with_dimensions(dense, input, None)
+}
+
+#[doc(hidden)]
+pub fn left_null_dyn_checked_generic_with_dimensions<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    dimensions: Option<CheckedNullDimensions<R::Error>>,
+) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
     let provider = input.space().provider_arc();
     let space = input.space().space();
     let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
-    let mut null_dimensions = coupled_sector_block_dimensions_generic_checked(
-        space.homspace().codomain(),
-        provider.as_ref(),
-    )?;
+    let mut null_dimensions = match dimensions {
+        Some(dimensions) => dimensions?,
+        None => coupled_sector_block_dimensions_generic_checked(
+            space.homspace().codomain(),
+            provider.as_ref(),
+        )?,
+    };
     let mut pairs = Vec::new();
     in_linalg_scope(dense, |dense| {
         for index in 0..matrices.len() {
@@ -381,14 +510,31 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
+    right_null_dyn_checked_generic_with_dimensions(dense, input, None)
+}
+
+#[doc(hidden)]
+pub fn right_null_dyn_checked_generic_with_dimensions<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    dimensions: Option<CheckedNullDimensions<R::Error>>,
+) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
     let provider = input.space().provider_arc();
     let space = input.space().space();
     let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
-    let mut null_dimensions = coupled_sector_block_dimensions_generic_checked(
-        space.homspace().domain(),
-        provider.as_ref(),
-    )?;
+    let mut null_dimensions = match dimensions {
+        Some(dimensions) => dimensions?,
+        None => coupled_sector_block_dimensions_generic_checked(
+            space.homspace().domain(),
+            provider.as_ref(),
+        )?,
+    };
     let mut pairs = Vec::new();
     in_linalg_scope(dense, |dense| {
         for index in 0..matrices.len() {

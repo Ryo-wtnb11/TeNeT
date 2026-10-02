@@ -795,10 +795,33 @@ where
         let body = tensor
             .owned_body()
             .expect("checked Generic left-null input is owned after lazy dispatch");
+        let dimensions = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            if is_diagonal_bond_space(body.space.space()) {
+                match tenet_matrixalgebra::left_null_diagonal_dyn_checked_generic(
+                    &body.space,
+                    spectrum,
+                )? {
+                    tenet_matrixalgebra::CheckedDiagonalNullFactor::Direct(factor) => {
+                        return Ok(wrap_factor_on(&tensor.runtime, factor));
+                    }
+                    tenet_matrixalgebra::CheckedDiagonalNullFactor::Fallback(dimensions) => {
+                        dimensions
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let payload = body.materialized_dense_data();
         let input = BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
         let mut dense = tensor.runtime.lease_dense();
-        let factor = tenet_matrixalgebra::left_null_dyn_checked_generic(dense.dense(), &input)?;
+        let factor = tenet_matrixalgebra::left_null_dyn_checked_generic_with_dimensions(
+            dense.dense(),
+            &input,
+            dimensions,
+        )?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
     }
 
@@ -814,10 +837,33 @@ where
         let body = tensor
             .owned_body()
             .expect("checked Generic right-null input is owned after lazy dispatch");
+        let dimensions = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            if is_diagonal_bond_space(body.space.space()) {
+                match tenet_matrixalgebra::right_null_diagonal_dyn_checked_generic(
+                    &body.space,
+                    spectrum,
+                )? {
+                    tenet_matrixalgebra::CheckedDiagonalNullFactor::Direct(factor) => {
+                        return Ok(wrap_factor_on(&tensor.runtime, factor));
+                    }
+                    tenet_matrixalgebra::CheckedDiagonalNullFactor::Fallback(dimensions) => {
+                        dimensions
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let payload = body.materialized_dense_data();
         let input = BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
         let mut dense = tensor.runtime.lease_dense();
-        let factor = tenet_matrixalgebra::right_null_dyn_checked_generic(dense.dense(), &input)?;
+        let factor = tenet_matrixalgebra::right_null_dyn_checked_generic_with_dimensions(
+            dense.dense(),
+            &input,
+            dimensions,
+        )?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
     }
 }
