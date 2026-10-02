@@ -217,10 +217,10 @@ pub(crate) fn compile_device_plan<C: Copy>(
             .checked_mul(dst_count)
             .and_then(|len| coefficient_start.checked_add(len))
             .ok_or(OperationError::ElementCountOverflow)?;
-        if coefficient_end > task.coefficients().len() {
+        if coefficient_end > task.coefficient_len() {
             return Err(OperationError::CoefficientCountMismatch {
                 expected: coefficient_end,
-                actual: task.coefficients().len(),
+                actual: task.coefficient_len(),
             });
         }
         let mut packs = Vec::with_capacity(src_count);
@@ -717,13 +717,18 @@ mod tests {
         // The 4-element block was declared second, so its matrix is the second
         // run of the payload although it is the first job of the plan: the
         // device addresses it where the structure put it, not where the host's
-        // re-packed scratch would.
+        // re-packed scratch would. The payload holds the one Single scalar
+        // first, so the matrices start at 1.
         let matrices: Vec<usize> = plan
             .recouplings
             .iter()
             .map(|entry| entry.matrix_offset)
             .collect();
-        assert_eq!(matrices, vec![4, 0]);
+        assert_eq!(matrices, vec![5, 1]);
+        assert_eq!(
+            compiled.gathered_coefficients(),
+            [-1.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
         assert_eq!(plan.recouplings[0].job.rhs_offset, 0);
         assert_eq!(plan.recouplings[1].job.rhs_offset, 4);
     }

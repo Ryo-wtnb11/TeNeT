@@ -139,10 +139,10 @@ where
                 layouts.strides(src),
                 src_member,
             )?;
-            if coefficient >= task.coefficients().len() {
+            if coefficient >= task.single_coefficients().len() {
                 return Err(OperationError::CoefficientCountMismatch {
                     expected: coefficient + 1,
-                    actual: task.coefficients().len(),
+                    actual: task.single_coefficients().len(),
                 });
             }
         }
@@ -178,11 +178,7 @@ where
         checked_range(job.lhs_offset, src_span, plan.source_len())?;
         checked_range(job.dst_offset, dst_span, plan.destination_len())?;
         checked_range(job.rhs_offset, coefficient_span, plan.coefficient_len())?;
-        checked_range(
-            coefficient_start,
-            coefficient_span,
-            task.coefficients().len(),
-        )?;
+        checked_range(coefficient_start, coefficient_span, task.coefficient_len())?;
         destinations.push((job.dst_offset, job.dst_offset + dst_span));
         for column in 0..src_count {
             let layout = layouts.entry(src_layout_start + column);
@@ -444,7 +440,7 @@ where
             dst.offset,
             src.offset,
             task.storage_conjugate(),
-            TransformScale::new(D::one(), task.coefficients()[coefficient]),
+            TransformScale::new(D::one(), task.single_coefficients()[coefficient]),
             None,
             None,
             None,

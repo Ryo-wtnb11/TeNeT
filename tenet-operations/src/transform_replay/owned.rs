@@ -55,7 +55,7 @@ where
     initialize_owned(proof.required_len, |dst_data| {
         let recoupling_plan = structure.recoupling_plan();
         let storage_conjugate = structure.storage_conjugate();
-        let coefficients = task.coefficients();
+        let coefficients = task.single_coefficients();
         let mut kernels = crate::StridedHostKernelAdapter::default();
 
         for &layout_index in structure.inactive_destination_layouts() {

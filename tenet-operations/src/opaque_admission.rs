@@ -568,18 +568,12 @@ mod tests {
             self.converted_coefficients
                 .reserve(required.converted_coefficient_len);
             for (block_index, _) in task.recoupling_plan().entries() {
-                let TreeTransformBlock::Multi {
-                    dst_count,
-                    src_count,
-                    coefficient_start,
-                    ..
-                } = task.blocks()[block_index]
-                else {
+                let TreeTransformBlock::Multi { .. } = task.blocks()[block_index] else {
                     unreachable!("completed recoupling plan references Multi blocks")
                 };
-                let coefficient_end = coefficient_start + dst_count * src_count;
                 self.converted_coefficients.extend(
-                    task.coefficients()[coefficient_start..coefficient_end]
+                    task.block_matrix(block_index)
+                        .expect("completed Multi block has a matrix")
                         .iter()
                         .copied()
                         .map(Into::into),
@@ -688,7 +682,7 @@ mod tests {
                 } => {
                     let dst = task.layouts().entry(dst_layout);
                     let src = task.layouts().entry(src_layout);
-                    let coefficient = task.coefficients()[coefficient].into();
+                    let coefficient = task.single_coefficients()[coefficient].into();
                     for element in 0..dst.element_count {
                         self.write(
                             dst.offset as usize + element,

@@ -262,7 +262,7 @@ where
     )?;
 
     let src_data = src.data();
-    for block in structure.blocks() {
+    for (block_index, block) in structure.blocks().iter().enumerate() {
         match *block {
             TreeTransformBlock::Single {
                 dst_layout,
@@ -290,8 +290,8 @@ where
                 dst_count,
                 src_layout_start,
                 src_count,
-                coefficient_start,
                 element_count,
+                ..
             } => {
                 let source_len = element_count
                     .checked_mul(src_count)
@@ -318,9 +318,9 @@ where
                     dst_count,
                     src_layout_start,
                     src_count,
-                    coefficient_start,
+                    0,
                     element_count,
-                    structure.recoupling_coefficients_dst_src(),
+                    structure.block_matrix(block_index).unwrap_or_default(),
                     structure.storage_conjugate(),
                     dst.data_mut(),
                     src_data,
@@ -449,7 +449,7 @@ where
     let task = structure.task_view()?;
     workspace.prepare_fused_indices(1, structure.layouts().max_fused_rank())?;
     scale_inactive_destinations(kernels, &mut workspace.zero_strides, task, dst_data, mode)?;
-    for block in structure.blocks() {
+    for (block_index, block) in structure.blocks().iter().enumerate() {
         match *block {
             TreeTransformBlock::Single {
                 dst_layout,
@@ -474,8 +474,8 @@ where
                 dst_count,
                 src_layout_start,
                 src_count,
-                coefficient_start,
                 element_count,
+                ..
             } => tree_transform_multi_with_pack_gemm_scatter(
                 kernels,
                 workspace,
@@ -484,9 +484,9 @@ where
                 dst_count,
                 src_layout_start,
                 src_count,
-                coefficient_start,
+                0,
                 element_count,
-                structure.recoupling_coefficients_dst_src(),
+                structure.block_matrix(block_index).unwrap_or_default(),
                 structure.storage_conjugate(),
                 dst_data,
                 src_data,
