@@ -70,6 +70,8 @@ pub(crate) fn profiled_artifact_compile_phases() -> (bool, bool, bool) {
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
+#[cfg(feature = "cuda")]
+pub(crate) mod cuda_member;
 mod member;
 pub(crate) use member::execute_dynamic_tree_execution_artifact_members_host;
 #[doc(hidden)]

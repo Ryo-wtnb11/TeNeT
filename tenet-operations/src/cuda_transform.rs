@@ -61,6 +61,26 @@ pub struct CudaSingleMemberRegions {
 impl CudaSingleMemberRegions {
     /// Checks the entire completed task class before the temporary core runs.
     pub fn admit(structure: &TreeTransformStructure<f64>) -> Result<usize, OperationError> {
+        Self::admit_scaled(structure, &[])
+    }
+
+    /// [`Self::admit`] with each move writing destination block offset `b`
+    /// scaled by θ_b from `destination_scales` (strictly increasing offsets),
+    /// the fermionic source twist folded as in
+    /// [`CudaTreeTransformExecutor::replay_with_destination_scales`]. Returns
+    /// the zero-fill and scaled-move plan entries a replay needs.
+    pub fn admit_scaled(
+        structure: &TreeTransformStructure<f64>,
+        destination_scales: &[(usize, f64)],
+    ) -> Result<usize, OperationError> {
+        if destination_scales
+            .windows(2)
+            .any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err(OperationError::InvalidArgument {
+                message: "CUDA member transform scales must have strictly increasing offsets",
+            });
+        }
         let task = structure.task_view()?;
         if task.storage_conjugate()
             || task.blocks().iter().any(|block| match *block {
@@ -72,21 +92,21 @@ impl CudaSingleMemberRegions {
             })
         {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "CUDA CopyC batch requires unconjugated nonzero Single tasks",
+                message: "CUDA member transform requires unconjugated nonzero Single tasks",
             });
         }
         let device = compile_device_plan(task)?;
-        Ok(device.zeros.len()
-            + device
-                .moves
-                .iter()
-                .filter(|entry| {
-                    entry
-                        .coefficient
-                        .and_then(|index| task.single_coefficients().get(index))
-                        != Some(&1.0)
-                })
-                .count())
+        let mut scaled = 0;
+        for entry in &device.moves {
+            let coefficient = scaled_coefficient(task, entry, destination_scales)?;
+            if coefficient == 0.0 {
+                return Err(OperationError::UnsupportedTensorContractScope {
+                    message: "CUDA member transform requires unconjugated nonzero Single tasks",
+                });
+            }
+            scaled += usize::from(coefficient != 1.0);
+        }
+        Ok(device.zeros.len() + scaled)
     }
 
     /// Validates every source, destination and inactive output region for B members.
@@ -101,7 +121,33 @@ impl CudaSingleMemberRegions {
         src_len: usize,
         members: usize,
     ) -> Result<Self, OperationError> {
-        Self::admit(structure)?;
+        Self::prepare_scaled(
+            structure,
+            dst_structure,
+            src_structure,
+            dst_member_len,
+            src_member_len,
+            dst_len,
+            src_len,
+            members,
+            &[],
+        )
+    }
+
+    /// [`Self::prepare`] with the destination-block scales of [`Self::admit_scaled`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_scaled(
+        structure: &TreeTransformStructure<f64>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_member_len: usize,
+        src_member_len: usize,
+        dst_len: usize,
+        src_len: usize,
+        members: usize,
+        destination_scales: &[(usize, f64)],
+    ) -> Result<Self, OperationError> {
+        Self::admit_scaled(structure, destination_scales)?;
         let task = structure.task_view()?;
         task.validate_structures_and_lengths(
             dst_structure,
@@ -161,13 +207,7 @@ impl CudaSingleMemberRegions {
             destination
                 .validate_as_destination("cuda CopyC batch")
                 .map_err(OperationError::Dense)?;
-            let coefficient = entry
-                .coefficient
-                .and_then(|index| task.single_coefficients().get(index))
-                .copied()
-                .ok_or(OperationError::InvalidArgument {
-                    message: "CUDA CopyC Single move has no coefficient",
-                })?;
+            let coefficient = scaled_coefficient(task, entry, destination_scales)?;
             let coefficient_offset = (coefficient != 1.0).then(|| {
                 let offset = scaled_count;
                 scaled_count += 1;
@@ -285,6 +325,28 @@ impl CudaSingleMemberRegions {
                 .fold(0usize, usize::saturating_add),
         )
     }
+}
+
+/// A Single move's coefficient times θ of the destination block it writes
+/// (the lookup of [`destination_scaled`]).
+fn scaled_coefficient(
+    task: TreeTransformTaskView<'_, f64>,
+    entry: &DeviceMoveSpec,
+    destination_scales: &[(usize, f64)],
+) -> Result<f64, OperationError> {
+    let coefficient = entry
+        .coefficient
+        .and_then(|index| task.single_coefficients().get(index))
+        .copied()
+        .ok_or(OperationError::InvalidArgument {
+            message: "CUDA CopyC Single move has no coefficient",
+        })?;
+    Ok(
+        match destination_scales.binary_search_by_key(&entry.dst_offset, |&(offset, _)| offset) {
+            Ok(index) => coefficient * destination_scales[index].1,
+            Err(_) => coefficient,
+        },
+    )
 }
 
 /// How a device replay treats the destination it writes.

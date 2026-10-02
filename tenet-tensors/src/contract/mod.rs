@@ -13,6 +13,9 @@ mod dynamic;
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub use dynamic::cuda::{execute_storage_contract_resolution_on_cuda, CudaContractScratch};
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub use dynamic::cuda_member::CudaDynamicTreeMembersWorkspace;
 #[doc(hidden)]
 pub use dynamic::DynamicTreeMembersWorkspace;
 #[cfg(test)]

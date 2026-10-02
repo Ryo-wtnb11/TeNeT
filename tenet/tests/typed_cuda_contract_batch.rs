@@ -13,8 +13,9 @@ use braiding_probe::{ProbeSector, RealBraidingProbe};
 use common::{DevicePayload, DeviceRule};
 use contract_cases::{
     assert_close, blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_su2,
-    fermion_u1, fermionic_blas_contract_oracle_partitioned, fill, poisoned_destination, su2, u1,
-    u1_inactive_cases, u1_non_self_dual, Case, TwistRole,
+    fermion_u1, fermionic_blas_contract_oracle, fermionic_blas_contract_oracle_partitioned,
+    fermionic_canonical_nonuniform, fermionic_twist_roles, fill, poisoned_destination, su2,
+    su2_bent, u1, u1_inactive_cases, u1_non_self_dual, u1_reordered, Case, FermionU1, TwistRole,
 };
 use num_complex::Complex64;
 use std::hint::black_box;
@@ -1132,27 +1133,339 @@ fn copy_c_nonzero_single_public_admission() {
     check::<Complex64>();
 }
 
+/// Batch-independent submission counts of one warm call.
+fn submissions(observation: &Observation) -> (u64, u64) {
+    (observation.cuda.gemm_calls, observation.cuda.copy_calls)
+}
+
+/// One transformed-tree (DynamicTree) case at B=1/2/17: every member equals
+/// eager CUDA `contract` and the independent `oracle`; warm calls move no
+/// payload across the Host boundary and submit the same work for every B;
+/// a poisoned destination is fully overwritten through a second workspace.
+/// `physical` returns `(actual, expected)` physical-basis arrays where the
+/// provider has a physical basis.
+fn check_dynamic_tree<R: DeviceRule, D: DevicePayload>(
+    case: &Case<R, D>,
+    oracle: impl Fn(&Case<R, D>) -> TensorMap<R, D>,
+    physical: impl Fn(&Case<R, D>, &TensorMap<R, D>) -> Option<(Vec<D>, Vec<D>)>,
+) {
+    let stack = |members: &[Case<R, D>], lhs: bool| {
+        StackedTensorMap::pack(
+            &members
+                .iter()
+                .map(|m| if lhs { &m.lhs } else { &m.rhs })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+        .to_cuda()
+        .unwrap()
+    };
+    let one = [Case {
+        name: case.name,
+        lhs: case.lhs.clone(),
+        rhs: case.rhs.clone(),
+        lhs_axes: case.lhs_axes.clone(),
+        rhs_axes: case.rhs_axes.clone(),
+        output_axes: case.output_axes.clone(),
+        dense: case.dense,
+    }];
+    let plan = ContractPlan::new(&stack(&one, true), &stack(&one, false), &case.spec())
+        .unwrap_or_else(|error| panic!("{}: DynamicTree must be admitted: {error:?}", case.name));
+    let mut workspace = plan.workspace().unwrap();
+    let mut other = plan.workspace().unwrap();
+    let mut warm_counts = None;
+    let mut into_counts = None;
+    for count in [1, 2, 17] {
+        let members: Vec<_> = (0..count)
+            .map(|i| Case {
+                name: case.name,
+                lhs: case
+                    .lhs
+                    .scale(D::entry(1.0 + i as f64 / 8.0, i as f64 / 16.0)),
+                rhs: case.rhs.scale(D::entry(1.0 - i as f64 / 32.0, 0.0)),
+                lhs_axes: case.lhs_axes.clone(),
+                rhs_axes: case.rhs_axes.clone(),
+                output_axes: case.output_axes.clone(),
+                dense: case.dense,
+            })
+            .collect();
+        let (lhs, rhs) = (stack(&members, true), stack(&members, false));
+        let (_, cold) = observe(|| {
+            plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        });
+        assert!(cold.cuda.gemm_calls > 0, "{}: core must submit", case.name);
+        let (_, warm) = observe(|| {
+            plan.execute(&lhs, &rhs, &mut workspace).unwrap();
+        });
+        assert_eq!(
+            (
+                warm.cuda.h2d_calls,
+                warm.cuda.d2h_calls,
+                warm.cuda.device_allocs
+            ),
+            (0, 0, 0),
+            "{}: warm batch must not transfer or allocate",
+            case.name
+        );
+        assert_eq!(
+            *warm_counts.get_or_insert(submissions(&warm)),
+            submissions(&warm),
+            "{}: submissions independent of B",
+            case.name
+        );
+        let output = plan
+            .execute(&lhs, &rhs, &mut workspace)
+            .unwrap()
+            .to_host()
+            .unwrap();
+        for (i, member) in members.iter().enumerate() {
+            let actual = output.member(i).unwrap();
+            let eager = member
+                .lhs
+                .to_cuda()
+                .unwrap()
+                .contract(&member.rhs.to_cuda().unwrap(), &member.spec())
+                .unwrap()
+                .to_host()
+                .unwrap();
+            let expected = oracle(member);
+            for reference in [&eager, &expected] {
+                assert_eq!(actual.codomain_rank(), reference.codomain_rank());
+                assert_close(
+                    actual.dense_data().unwrap(),
+                    reference.dense_data().unwrap(),
+                    member.terms(),
+                    case.name,
+                );
+            }
+            if let Some((actual, expected)) = physical(member, &actual) {
+                assert_close(&actual, &expected, member.terms(), case.name);
+            }
+        }
+        let poison: Vec<_> = members.iter().map(poisoned_destination).collect();
+        let mut dst = StackedTensorMap::pack(&poison.iter().collect::<Vec<_>>())
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        plan.execute_into(&lhs, &rhs, &mut dst, &mut other).unwrap();
+        let (_, warm_into) = observe(|| {
+            plan.execute_into(&lhs, &rhs, &mut dst, &mut other).unwrap();
+        });
+        assert_eq!(
+            (
+                warm_into.cuda.h2d_calls,
+                warm_into.cuda.d2h_calls,
+                warm_into.cuda.device_allocs
+            ),
+            (0, 0, 0),
+            "{}: warm into must not transfer or allocate",
+            case.name
+        );
+        assert_eq!(
+            *into_counts.get_or_insert(submissions(&warm_into)),
+            submissions(&warm_into),
+            "{}: into submissions independent of B",
+            case.name
+        );
+        let written = dst.to_host().unwrap();
+        for (i, member) in members.iter().enumerate() {
+            assert_close(
+                written.member(i).unwrap().dense_data().unwrap(),
+                output.member(i).unwrap().dense_data().unwrap(),
+                member.terms(),
+                case.name,
+            );
+        }
+        if count == 2 {
+            let mut invalid = StackedTensorMap::pack(&poison.iter().collect::<Vec<_>>())
+                .unwrap()
+                .to_cuda()
+                .unwrap();
+            let before = payload_snapshot(&invalid);
+            let short_rhs = rhs.select(&[0]).unwrap();
+            let (rejected, metrics) =
+                observe(|| plan.execute_into(&lhs, &short_rhs, &mut invalid, &mut other));
+            assert!(rejected.is_err());
+            assert_eq!(submissions(&metrics), (0, 0));
+            assert_eq!(payload_snapshot(&invalid), before);
+        }
+        let eager_inputs: Vec<_> = members
+            .iter()
+            .map(|m| (m.lhs.to_cuda().unwrap(), m.rhs.to_cuda().unwrap()))
+            .collect();
+        let (_, eager) = observe(|| {
+            for (left, right) in &eager_inputs {
+                black_box(left.contract(right, &case.spec()).unwrap());
+            }
+        });
+        eprintln!(
+            "DynamicTree {} {} B={count}: cold={cold}; warm={warm}; warm_into={warm_into}; eager_members={eager}; retained_workspace_bytes={}",
+            case.name,
+            D::NAME,
+            workspace.retained_bytes()
+        );
+    }
+}
+
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn dynamic_copy_c_routes_are_explicitly_unsupported() {
-    let runtime = Runtime::builder().cuda(0).build().unwrap();
-
-    // The second inactive fixture has a source transform and is pinned as
-    // DynamicTree by storage_contract_tests::each_way_a_device_overwrite.
-    let dynamic = u1_inactive_cases::<f64>(&runtime)
+fn dynamic_tree_single_transform_routes_are_admitted() {
+    fn bosonic<D: DevicePayload>(runtime: &Runtime) {
+        // The second inactive fixture has a source transform and is pinned as
+        // DynamicTree by storage_contract_tests::each_way_a_device_overwrite;
+        // u1_reordered adds an output transform.
+        let inactive = u1_inactive_cases::<D>(runtime).into_iter().nth(1).unwrap();
+        for case in [inactive, u1_reordered::<D>(runtime)] {
+            check_dynamic_tree(&case, blas_contract_oracle, |member, actual| {
+                member.dense.then(|| {
+                    (
+                        actual.to_physical_dense().unwrap().data,
+                        dense_oracle(member).1,
+                    )
+                })
+            });
+        }
+    }
+    fn fermionic<D: DevicePayload>(runtime: &Runtime) {
+        let twist = |tensor: &TensorMap<FermionU1, D>, legs: &[usize]| {
+            tensor.twist(legs, Direction::Forward).unwrap()
+        };
+        let roles = fermionic_twist_roles::<FermionU1, D>(
+            runtime,
+            &fermion_u1(),
+            [
+                "fZ2xU1 A copied",
+                "fZ2xU1 canonical",
+                "fZ2xU1 B copied",
+                "fZ2xU1 both",
+            ],
+            71,
+        )
         .into_iter()
-        .nth(1)
+        .zip([TwistRole::A, TwistRole::A, TwistRole::B, TwistRole::A])
+        .chain([(
+            fermionic_canonical_nonuniform::<FermionU1, D>(
+                runtime,
+                &fermion_u1(),
+                "fZ2xU1 canonical nonuniform",
+                39,
+            ),
+            TwistRole::A,
+        )]);
+        for (case, role) in roles {
+            check_dynamic_tree(
+                &case,
+                |member| fermionic_blas_contract_oracle(member, role, twist),
+                |_, _| None,
+            );
+        }
+    }
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    bosonic::<f32>(&runtime);
+    bosonic::<num_complex::Complex32>(&runtime);
+    bosonic::<f64>(&runtime);
+    bosonic::<Complex64>(&runtime);
+    fermionic::<f32>(&runtime);
+    fermionic::<num_complex::Complex32>(&runtime);
+    fermionic::<f64>(&runtime);
+    fermionic::<Complex64>(&runtime);
+}
+
+/// Release-only paired observation of the DynamicTree batch against the
+/// eager per-member loop at one revision. Run with `--release --ignored
+/// --nocapture --test-threads=1`; host elapsed times bracket host submission
+/// without a device synchronization, so they are not GPU completion times.
+#[test]
+#[ignore = "release-only A100 measurement"]
+fn dynamic_tree_release_measurement() {
+    fn run<R: DeviceRule>(case: &Case<R, f64>) {
+        for count in [1, 2, 17] {
+            let left: Vec<_> = (0..count)
+                .map(|i| case.lhs.scale(1.0 + i as f64 / 8.0))
+                .collect();
+            let right: Vec<_> = (0..count)
+                .map(|i| case.rhs.scale(1.0 - i as f64 / 32.0))
+                .collect();
+            let lhs = StackedTensorMap::pack(&left).unwrap().to_cuda().unwrap();
+            let rhs = StackedTensorMap::pack(&right).unwrap().to_cuda().unwrap();
+            let (plan, compile) = observe(|| ContractPlan::new(&lhs, &rhs, &case.spec()).unwrap());
+            let (mut workspace, reserve) = observe(|| plan.workspace().unwrap());
+            let (_, cold) = observe(|| {
+                black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+            });
+            let median_of =
+                |run: &mut dyn FnMut()| median((0..11).map(|_| observe(&mut *run).1).collect());
+            let warm = median_of(&mut || {
+                black_box(plan.execute(&lhs, &rhs, &mut workspace).unwrap());
+            });
+            let dest = case.host();
+            let mut dst = StackedTensorMap::pack(&vec![&dest; count])
+                .unwrap()
+                .to_cuda()
+                .unwrap();
+            let warm_into = median_of(&mut || {
+                plan.execute_into(&lhs, &rhs, &mut dst, &mut workspace)
+                    .unwrap();
+            });
+            let eager_inputs: Vec<_> = left
+                .iter()
+                .zip(&right)
+                .map(|(a, b)| (a.to_cuda().unwrap(), b.to_cuda().unwrap()))
+                .collect();
+            let eager = median_of(&mut || {
+                for (a, b) in &eager_inputs {
+                    black_box(a.contract(b, &case.spec()).unwrap());
+                }
+            });
+            eprintln!(
+                "{} B={count} f64: compile={compile}; workspace={reserve}; cold={cold}; warm={warm}; warm_into={warm_into}; eager_members={eager}; retained_workspace_bytes={}",
+                case.name,
+                workspace.retained_bytes()
+            );
+        }
+    }
+    let runtime = Runtime::builder()
+        .cuda(0)
+        .dense_threads(1)
+        .gemm_backend(tenet::typed::LinalgBackend::Faer)
+        .linalg_backend(tenet::typed::LinalgBackend::Faer)
+        .build()
         .unwrap();
-    let left = StackedTensorMap::pack(&[&dynamic.lhs])
+    run(&u1_inactive_cases::<f64>(&runtime)[1]);
+    run(&u1_reordered::<f64>(&runtime));
+    for case in fermionic_twist_roles::<FermionU1, f64>(
+        &runtime,
+        &fermion_u1(),
+        [
+            "fZ2xU1 A copied",
+            "fZ2xU1 canonical",
+            "fZ2xU1 B copied",
+            "fZ2xU1 both",
+        ],
+        71,
+    ) {
+        run(&case);
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn dynamic_tree_multi_transform_stays_unsupported() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let case = su2_bent::<f64>(&runtime);
+    let left = StackedTensorMap::pack(&[&case.lhs])
         .unwrap()
         .to_cuda()
         .unwrap();
-    let right = StackedTensorMap::pack(&[&dynamic.rhs])
+    let right = StackedTensorMap::pack(&[&case.rhs])
         .unwrap()
         .to_cuda()
         .unwrap();
-    assert!(matches!(ContractPlan::new(&left, &right, &dynamic.spec()),
-        Err(Error::Operation(error)) if matches!(*error, tenet::typed::OperationError::UnsupportedTensorContractScope { .. })));
+    assert!(matches!(ContractPlan::new(&left, &right, &case.spec()),
+    Err(Error::Operation(error)) if matches!(*error,
+        tenet::typed::OperationError::UnsupportedTensorContractScope {
+            message: "CUDA member transform requires unconjugated nonzero Single tasks"
+        })));
 }
 
 #[test]
