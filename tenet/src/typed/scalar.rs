@@ -1454,15 +1454,25 @@ where
                 .eig_full_checked_generic();
         }
         let body = self.owned_body().expect("owned checked Generic EIG input");
-        let mut dense = self.runtime.lease_dense();
-        let payload = body.materialized_dense_data();
-        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let out = tenet_matrixalgebra::eig_full_dyn_checked_generic(dense.dense(), &input)?;
+        let direct = match body.data.as_ref() {
+            TypedData::Diagonal(spectrum) if is_diagonal_bond_space(body.space.space()) => {
+                tenet_matrixalgebra::eig_full_diagonal_dyn_checked_generic(&body.space, spectrum)?
+            }
+            _ => None,
+        };
+        let out = if let Some(out) = direct {
+            out
+        } else {
+            let mut dense = self.runtime.lease_dense();
+            let payload = body.materialized_dense_data();
+            let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
+                .map_err(|error| GenericTensorError::Facade(error.into()))?;
+            tenet_matrixalgebra::eig_full_dyn_checked_generic(dense.dense(), &input)?
+        };
         let (v, mut eigenvalues) = out.into_parts();
         let d = diagonal_factor_on_checked(
             &self.runtime,
-            Arc::clone(input.space().provider_arc()),
+            Arc::clone(body.space.provider_arc()),
             &mut eigenvalues,
             <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
         )?;
@@ -2511,10 +2521,13 @@ where
     /// `n * epsilon * sigma_max`. This is an operational gate on the computed
     /// matrix, not a universal detector for every defective floating-point
     /// input. The multiplicity-free path forwards the dense backend result
-    /// without this additional rank gate. An admitted owned Host
-    /// multiplicity-free compact diagonal reads finite eigenvalues directly
-    /// and builds a dense permutation factor. Lazy adjoints and other inputs
-    /// use an operation-local dense payload.
+    /// without this additional rank gate. An admitted owned Host compact
+    /// diagonal with finite values of finite norm and one aligned square
+    /// region per coupled sector reads its eigenvalues directly and builds a
+    /// dense permutation factor, for both multiplicity-free and checked-Generic
+    /// providers; the rank gate is not evaluated there because a permutation
+    /// has unit singular values. Lazy adjoints and other inputs use an
+    /// operation-local dense payload.
     ///
     /// A non-endomorphism, invalid/non-finite dense result, checked rank-gate
     /// failure, factor-layout failure, or provider failure returns no factors.

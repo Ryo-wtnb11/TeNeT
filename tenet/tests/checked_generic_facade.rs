@@ -4304,6 +4304,57 @@ fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
         .iter()
         .any(|value| value.im.abs() > 1.0));
     assert_checked_generic_eig_reconstruction(&complex, &complex_d, &complex_v);
+
+    let compact: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![Complex64::new(1.0, 1.0), Complex64::new(0.0, -3.0)],
+        }],
+    )
+    .unwrap();
+    let Eig { d, v } = compact.eig_full(&[0], &[1]).unwrap();
+    assert_eq!(
+        d.diagview().unwrap()[0].values,
+        [Complex64::new(0.0, -3.0), Complex64::new(1.0, 1.0)]
+    );
+    let dense = compact.materialize().unwrap();
+    assert_checked_generic_eig_reconstruction(&dense, &d, &v);
+    let fault_runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(EigFaultExecutor {
+            inner: DefaultDenseExecutor::new(),
+            fault: EigFault::Eig,
+        }))
+        .build()
+        .unwrap();
+    let fault_provider = Arc::new(CheckedOnlyToy::new(1));
+    let fault_leg = GradedSpace::try_new(Arc::clone(&fault_provider), [(Label::X, 2)]).unwrap();
+    let fault_compact: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &fault_runtime,
+        &fault_leg,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![Complex64::new(1.0, 1.0), Complex64::new(0.0, -3.0)],
+        }],
+    )
+    .unwrap();
+    // The eligible compact path reaches checked V publication; falling back
+    // to dense EIG would return the injected dense error instead.
+    fault_provider.invalid_style.store(true, Ordering::Relaxed);
+    let compact_error = fault_compact.eig_full(&[0], &[1]).unwrap_err();
+    assert!(
+        matches!(
+            compact_error,
+            GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Operation(
+                tenet::typed::OperationError::Core(
+                    tenet::typed::CoreError::UnsupportedFusionStyle { .. }
+                )
+            ))
+        ),
+        "{compact_error:?}"
+    );
 }
 
 #[test]

@@ -692,33 +692,109 @@ where
     for route in plan.routes.iter().copied() {
         let entry = by_sector[&route.sector];
         let n = entry.values.len();
-        let mut ordered: Vec<_> = entry
-            .values
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(row, value)| {
-                let value = value.widen_complex();
-                (row, value, value.norm())
-            })
-            .collect();
-        ordered.sort_by(|a, b| b.2.total_cmp(&a.2));
-        if let Some(index) = route.left_region {
-            let start = plan.left_regions[index].range().start;
-            for (column, &(row, _, _)) in ordered.iter().enumerate() {
-                v_data[start + column * n + row] =
-                    <D::Eig as FactorScalar>::from_complex64(Complex64::new(1.0, 0.0));
-            }
-        }
+        // An empty sector has no left region and writes nothing.
+        let start = route
+            .left_region
+            .map_or(0, |index| plan.left_regions[index].range().start);
         eigenvalues.push(SectorSpectrum {
             sector: route.sector,
-            values: ordered.into_iter().map(|(_, value, _)| value).collect(),
+            values: compact_diagonal_eig_sector(&entry.values, &mut v_data[start..start + n * n]),
         });
     }
     Ok(Some(EigFullDyn {
         v: BoundDynFactor::from_bound(v_space, v_data, space.nout(), 1)?,
         eigenvalues,
     }))
+}
+
+/// Sorts one admitted complex diagonal sector by descending magnitude, with
+/// ties in stored order, and writes the matching permutation into the zeroed
+/// column-major `n x n` `vectors`.
+fn compact_diagonal_eig_sector<D: FactorScalar>(
+    values: &[D],
+    vectors: &mut [D::Eig],
+) -> Vec<Complex64> {
+    let n = values.len();
+    let mut ordered: Vec<_> = values
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(row, value)| {
+            let value = value.widen_complex();
+            (row, value, value.norm())
+        })
+        .collect();
+    ordered.sort_by(|a, b| b.2.total_cmp(&a.2));
+    for (column, &(row, _, _)) in ordered.iter().enumerate() {
+        vectors[column * n + row] =
+            <D::Eig as FactorScalar>::from_complex64(Complex64::new(1.0, 0.0));
+    }
+    ordered.into_iter().map(|(_, value, _)| value).collect()
+}
+
+/// Checked-provider full general eigenbasis of an admitted owned compact
+/// diagonal. Ineligible layouts or values return `None` before any output
+/// work, so the checked dense route keeps its errors and their order; admitted
+/// output uses the same checked factor builder over the same region geometry.
+/// The dense route's eigenvector `svd_vals` rank gate is not run: every
+/// singular value of a permutation is 1, so the gate cannot fail.
+#[doc(hidden)]
+pub fn eig_full_diagonal_dyn_checked_generic<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<EigFullDyn<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let space = authority.space();
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Ok(None);
+    }
+    let Ok(Some(regions)) = checked_sector_regions(space.structure(), space.nout()) else {
+        return Ok(None);
+    };
+    if validate_endomorphism_tree_stacking(
+        regions.as_ref(),
+        "eig_full requires identical endomorphism row/column fusion-tree stacking",
+    )
+    .is_err()
+    {
+        return Ok(None);
+    }
+    let Some(by_sector) = complex_diagonal_by_sector(&regions, spectrum) else {
+        return Ok(None);
+    };
+    let mut eigenvalues = Vec::with_capacity(regions.len());
+    let mut pairs = Vec::with_capacity(regions.len());
+    let mut dimensions = BTreeMap::new();
+    for region in regions.iter() {
+        let entry = by_sector[&region.coupled()];
+        let n = region.rows();
+        let mut vectors = vec![D::Eig::zero(); n * n];
+        eigenvalues.push(SectorSpectrum {
+            sector: region.coupled(),
+            values: compact_diagonal_eig_sector(&entry.values, &mut vectors),
+        });
+        pairs.push(FactorPair {
+            sector: region.coupled(),
+            kept: n,
+            left: vectors,
+            left_rows: n,
+            right: Vec::new(),
+            right_leading: 0,
+        });
+        dimensions.insert(region.coupled(), n);
+    }
+    let v = build_bound_factor_generic_checked(
+        authority.provider_arc(),
+        space.homspace(),
+        &regions,
+        &mut pairs,
+        &dimensions,
+        FactorSide::Left,
+    )?;
+    Ok(Some(EigFullDyn { v, eigenvalues }))
 }
 
 /// Reads an admitted compact diagonal without packing or an eigensolver.
