@@ -1063,7 +1063,8 @@ impl CudaTreeTransformExecutor {
         // Multi block's matrix as the run at its own `coefficient_start`. This
         // gathers the shared per-group matrices into the one upload; the gather
         // is the conversion copy the upload already needed.
-        let values: Vec<D> = task.collect_logical_coefficients(D::coefficient_as_data);
+        let mut values: Vec<D> = Vec::new();
+        task.gather_converted_coefficients_into(&mut values, D::coefficient_as_data);
         for entry in &mut prepared.moves {
             entry.zero_coefficient = entry
                 .coefficient

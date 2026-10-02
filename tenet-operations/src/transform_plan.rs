@@ -4,7 +4,8 @@
 //! rules; replay consumes them without any symmetry knowledge.
 
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::fmt;
+use std::sync::{Arc, OnceLock};
 
 use tenet_core::{
     BlockKey, BlockStructure, FusionTreeBlockGroup, FusionTreeGroupKey, FusionTreePairKey,
@@ -15,7 +16,9 @@ use crate::transform_helpers::{
     duplicate_fusion_tree_pair_indices, fusion_tree_group_block_keys,
     fusion_tree_pair_matches_group, fusion_tree_pairs_share_group,
 };
-use crate::transform_structure::TreeTransformStructure;
+use crate::transform_structure::{
+    charged_shared_coefficient_bytes, TreeTransformCoefficients, TreeTransformStructure,
+};
 use crate::OperationError;
 
 /// Why shared slices: a Runtime reuses one group's specs across the plans of
@@ -638,6 +641,11 @@ impl<T> TreeTransformGroupBlockSpec<T> {
         )
     }
 
+    #[inline]
+    pub(crate) fn shared_coefficients(&self) -> Option<&Arc<[T]>> {
+        self.entries.shared_coefficients()
+    }
+
     fn resolve_with_source_projection<F>(
         &self,
         dst_structure: &BlockStructure,
@@ -664,19 +672,51 @@ impl<T> TreeTransformGroupBlockSpec<T> {
 
 /// Immutable categorical fusion-tree transform, independent of storage layout.
 ///
-/// Every binding references each group's recoupling matrix through the spec's
-/// shared `Arc<[T]>`, as TensorKit's transformer references the cached
-/// per-`FusionTreeBlock` `U`. Why not one flattened payload per plan: a plan
-/// miss after a sector change reuses most groups' specs, and flattening would
-/// copy every reused matrix again.
-#[derive(Clone, Debug, PartialEq)]
+/// The first binding builds one coefficient payload that every later binding
+/// shares by an `Arc` bump. It references each group's recoupling matrix
+/// through the spec's shared `Arc<[T]>`, as TensorKit's transformer references
+/// the cached per-`FusionTreeBlock` `U`, and copies only Single scalars. Why
+/// not one flattened payload per plan: a plan miss after a sector change
+/// reuses most groups' specs, and flattening would copy every reused matrix.
+#[derive(Clone)]
 pub struct TreeTransformGroupPlan<T> {
     specs: Vec<TreeTransformGroupBlockSpec<T>>,
+    coefficients: OnceLock<Arc<TreeTransformCoefficients<T>>>,
+}
+
+impl<T: fmt::Debug> fmt::Debug for TreeTransformGroupPlan<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TreeTransformGroupPlan")
+            .field("specs", &self.specs)
+            .finish()
+    }
+}
+
+impl<T: PartialEq> PartialEq for TreeTransformGroupPlan<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.specs == other.specs
+    }
 }
 
 impl<T> TreeTransformGroupPlan<T> {
     pub fn new(specs: Vec<TreeTransformGroupBlockSpec<T>>) -> Self {
-        Self { specs }
+        Self {
+            specs,
+            coefficients: OnceLock::new(),
+        }
+    }
+
+    /// Upper bound of the shared coefficient payload's own heap bytes, which
+    /// a retaining cache charges before the first binding builds it. The
+    /// matrices belong to the specs and are excluded.
+    #[doc(hidden)]
+    pub fn charged_coefficient_payload_bytes(&self) -> usize {
+        charged_shared_coefficient_bytes::<T>(
+            self.specs
+                .iter()
+                .map(|spec| (spec.dst_keys().len(), spec.src_keys().len())),
+        )
     }
 
     pub fn from_specs<I>(specs: I) -> Self
@@ -705,6 +745,23 @@ impl<T> TreeTransformGroupPlan<T> {
 }
 
 impl<T: Copy> TreeTransformGroupPlan<T> {
+    fn shared_coefficients(&self) -> Result<Arc<TreeTransformCoefficients<T>>, OperationError> {
+        if let Some(coefficients) = self.coefficients.get() {
+            return Ok(Arc::clone(coefficients));
+        }
+        let built = TreeTransformCoefficients::from_specs(self.specs.iter().map(|spec| {
+            (
+                spec.dst_keys().len(),
+                spec.src_keys().len(),
+                spec.recoupling_coefficients_dst_src(),
+                spec.shared_coefficients(),
+            )
+        }))?;
+        Ok(Arc::clone(
+            self.coefficients.get_or_init(|| Arc::new(built)),
+        ))
+    }
+
     fn compile_shared_structures_internal(
         &self,
         dst_structure: Arc<BlockStructure>,
@@ -720,6 +777,7 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
             src_structure,
             &specs,
             storage_conjugate,
+            self.shared_coefficients()?,
         )
     }
 
@@ -811,6 +869,7 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
             storage_src_structure,
             &specs,
             storage_conjugate,
+            self.shared_coefficients()?,
         )
     }
 
@@ -841,6 +900,7 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
             storage_src_structure,
             &specs,
             storage_conjugate,
+            self.shared_coefficients()?,
         )
     }
 }
@@ -923,14 +983,8 @@ mod tests {
             first.block_coefficients(0).unwrap().as_ptr(),
             plan.specs()[0].recoupling_coefficients_dst_src().as_ptr()
         );
-        assert_eq!(
-            first.recoupling_coefficients_dst_src(),
-            &[1.0, 2.0, 3.0, 4.0]
-        );
-        assert_eq!(
-            second.recoupling_coefficients_dst_src(),
-            &[1.0, 2.0, 3.0, 4.0]
-        );
+        assert_eq!(first.gathered_coefficients(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(second.gathered_coefficients(), &[1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]

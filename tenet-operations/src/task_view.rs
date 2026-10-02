@@ -81,10 +81,15 @@ impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
         self.structure.coefficient_len()
     }
 
-    /// The logical payload, converted, for a single device upload.
+    /// The logical payload, converted, gathered once per device upload.
     #[cfg(feature = "cuda")]
-    pub(crate) fn collect_logical_coefficients<U>(self, convert: impl FnMut(C) -> U) -> Vec<U> {
-        self.structure.collect_logical_coefficients(convert)
+    pub(crate) fn gather_converted_coefficients_into<U>(
+        self,
+        out: &mut Vec<U>,
+        convert: impl FnMut(C) -> U,
+    ) {
+        self.structure
+            .gather_converted_coefficients_into(out, convert);
     }
 
     #[inline]

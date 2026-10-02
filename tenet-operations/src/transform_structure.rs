@@ -88,11 +88,15 @@ impl<T> TreeTransformCompileSpec<T> for ResolvedTreeTransformBlockSpec<'_, T> {
 /// `TreeTransformBlock::Multi::coefficient_start` index one logical payload
 /// holding every Single scalar (spec order) followed by every Multi matrix
 /// (spec order). Only the scalars are stored contiguously; each Multi block
-/// references its spec's shared matrix, so binding never copies a matrix.
+/// references its spec's shared matrix, and every binding of one categorical
+/// plan shares that plan's payload, so binding never copies a coefficient.
 ///
-/// Migration: code that previously read the public `blocks`, `layouts`, or
-/// `recoupling_coefficients_dst_src` fields must use the same-named accessor
-/// methods. Post-compilation mutation is no longer supported.
+/// Migration: code that previously read the public `blocks` or `layouts`
+/// fields must use the same-named accessor methods. The flat
+/// `recoupling_coefficients_dst_src` view no longer exists: read one block
+/// with [`Self::block_coefficients`], or copy the whole payload explicitly
+/// with [`Self::gather_recoupling_coefficients_into`]. Post-compilation
+/// mutation is no longer supported.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformStructure<T> {
     rank: usize,
@@ -100,16 +104,158 @@ pub struct TreeTransformStructure<T> {
     identity: Arc<()>,
     blocks: Vec<TreeTransformBlock>,
     layouts: TreeTransformLayoutTable,
-    single_coefficients: Vec<T>,
-    /// Aligned with `blocks`: `Some` exactly for Multi blocks.
-    block_matrices: Vec<Option<Arc<[T]>>>,
-    coefficient_len: usize,
+    coefficients: Arc<TreeTransformCoefficients<T>>,
     inactive_dst_layouts: Vec<usize>,
     physical_overwrite_len: Option<usize>,
     recoupling_plan: TreeTransformRecouplingPlan,
     parallel_schedule: TreeTransformParallelSchedule,
     dst_structure: Arc<BlockStructure>,
     src_structure: Arc<BlockStructure>,
+}
+
+/// One plan's coefficients, shared by every binding of that plan.
+///
+/// Holds the Single scalars, the Multi matrices as the specs' own `Arc`s
+/// (spec order, which is also `coefficient_start` order), and an O(1) index
+/// from a Multi block's `dst_layout_start` to its matrix. Every part is
+/// layout-independent: compilation pushes `dst_count + src_count` layouts per
+/// spec in spec order, so a spec's `dst_layout_start` is the same in every
+/// binding, and binding an existing plan is one `Arc` bump.
+#[derive(Debug, PartialEq)]
+pub(crate) struct TreeTransformCoefficients<T> {
+    singles: Vec<T>,
+    matrices: Vec<Arc<[T]>>,
+    /// Indexed by `dst_layout_start / 2`. Why halved: every spec owns at least
+    /// one destination and one source layout, so two specs never share a slot.
+    matrix_slots: Vec<u32>,
+    len: usize,
+}
+
+impl<T: Copy> TreeTransformCoefficients<T> {
+    /// Builds the shared payload from `(dst_count, src_count, coefficients,
+    /// shared matrix)` per spec in spec order. Malformed specs are stored
+    /// as given; compilation rejects them before any read.
+    pub(crate) fn from_specs<'a, I>(specs: I) -> Result<Self, OperationError>
+    where
+        I: Iterator<Item = (usize, usize, &'a [T], Option<&'a Arc<[T]>>)> + Clone,
+        T: 'a,
+    {
+        let (mut single_count, mut matrix_count, mut layout_count) = (0usize, 0usize, 0usize);
+        for (dst_count, src_count, _, _) in specs.clone() {
+            if dst_count == 1 && src_count == 1 {
+                single_count += 1;
+            } else {
+                matrix_count += 1;
+            }
+            layout_count = layout_count
+                .checked_add(dst_count)
+                .and_then(|count| count.checked_add(src_count))
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+        let mut coefficients = Self {
+            singles: Vec::with_capacity(single_count),
+            matrices: Vec::with_capacity(matrix_count),
+            matrix_slots: Vec::new(),
+            len: single_count,
+        };
+        if matrix_count != 0 {
+            coefficients.matrix_slots = vec![u32::MAX; layout_count.div_ceil(2)];
+        }
+        let mut layout_start = 0usize;
+        for (dst_count, src_count, values, shared) in specs {
+            if dst_count == 1 && src_count == 1 {
+                if let Some(&value) = values.first() {
+                    coefficients.singles.push(value);
+                }
+            } else {
+                let slot = u32::try_from(coefficients.matrices.len())
+                    .map_err(|_| OperationError::ElementCountOverflow)?;
+                if let Some(entry) = coefficients.matrix_slots.get_mut(layout_start / 2) {
+                    *entry = slot;
+                }
+                coefficients.len = coefficients
+                    .len
+                    .checked_add(values.len())
+                    .ok_or(OperationError::ElementCountOverflow)?;
+                coefficients
+                    .matrices
+                    .push(shared.cloned().unwrap_or_else(|| Arc::from(values)));
+            }
+            layout_start += dst_count + src_count;
+        }
+        Ok(coefficients)
+    }
+}
+
+impl<T> TreeTransformCoefficients<T> {
+    #[inline]
+    fn matrix(&self, dst_layout_start: usize) -> Option<&[T]> {
+        let slot = *self.matrix_slots.get(dst_layout_start / 2)?;
+        self.matrices.get(slot as usize).map(|matrix| &**matrix)
+    }
+
+    /// Conservative charge: the shared matrices are charged in full for every
+    /// bound structure, as the flattened payload was before.
+    fn charged_bytes(&self) -> usize {
+        const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
+        let element = core::mem::size_of::<T>();
+        self.matrices.iter().fold(
+            ARC_CONTROL_BYTES
+                .saturating_add(core::mem::size_of::<Self>())
+                .saturating_add(self.singles.capacity().saturating_mul(element))
+                .saturating_add(
+                    self.matrices
+                        .capacity()
+                        .saturating_mul(core::mem::size_of::<Arc<[T]>>()),
+                )
+                .saturating_add(
+                    self.matrix_slots
+                        .capacity()
+                        .saturating_mul(core::mem::size_of::<u32>()),
+                ),
+            |bytes, matrix| {
+                bytes
+                    .saturating_add(ARC_CONTROL_BYTES)
+                    .saturating_add(matrix.len().saturating_mul(element))
+            },
+        )
+    }
+}
+
+/// Whether a binding's spec has no same-length entry in the shared payload it
+/// was given; the payload is built from the same specs, so this is a
+/// structural check, not a value comparison.
+fn shared_coefficient_mismatch<T>(shared: Option<&[T]>, spec: &[T]) -> bool {
+    shared.is_none_or(|shared| shared.len() != spec.len())
+}
+
+fn shared_payload_mismatch() -> OperationError {
+    OperationError::InvalidArgument {
+        message: "tree transform plan coefficients disagree with its specs",
+    }
+}
+
+/// Upper bound of [`TreeTransformCoefficients`]' own heap bytes for `specs`
+/// (matrices excluded: their `Arc`s belong to the specs), for a cache that
+/// charges a plan before its first binding builds the payload.
+pub(crate) fn charged_shared_coefficient_bytes<T>(
+    spec_shapes: impl Iterator<Item = (usize, usize)>,
+) -> usize {
+    const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
+    spec_shapes.fold(
+        ARC_CONTROL_BYTES.saturating_add(core::mem::size_of::<TreeTransformCoefficients<T>>()),
+        |bytes, (dst_count, src_count)| {
+            bytes
+                .saturating_add(core::mem::size_of::<T>().max(core::mem::size_of::<Arc<[T]>>()))
+                .saturating_add(
+                    dst_count
+                        .saturating_add(src_count)
+                        .div_ceil(2)
+                        .saturating_add(1)
+                        .saturating_mul(core::mem::size_of::<u32>()),
+                )
+        },
+    )
 }
 
 impl<T> TreeTransformStructure<T> {
@@ -165,24 +311,7 @@ impl<T> TreeTransformStructure<T> {
                 self.layouts.fused_slots.capacity(),
                 core::mem::size_of::<FusedSlot>(),
             ))
-            .saturating_add(vector_bytes(
-                self.single_coefficients.capacity(),
-                core::mem::size_of::<T>(),
-            ))
-            .saturating_add(vector_bytes(
-                self.block_matrices.capacity(),
-                core::mem::size_of::<Option<Arc<[T]>>>(),
-            ))
-            .saturating_add(
-                self.block_matrices
-                    .iter()
-                    .flatten()
-                    .fold(0usize, |bytes, matrix| {
-                        bytes
-                            .saturating_add(ARC_CONTROL_BYTES)
-                            .saturating_add(core::mem::size_of_val::<[T]>(matrix))
-                    }),
-            )
+            .saturating_add(self.coefficients.charged_bytes())
             .saturating_add(vector_bytes(
                 self.inactive_dst_layouts.capacity(),
                 core::mem::size_of::<usize>(),
@@ -377,8 +506,15 @@ impl<T: Copy> TreeTransformStructure<T> {
         src_structure: Arc<BlockStructure>,
         specs: &[ResolvedTreeTransformBlockSpec<'_, T>],
         storage_conjugate: bool,
+        coefficients: Arc<TreeTransformCoefficients<T>>,
     ) -> Result<Self, OperationError> {
-        Self::compile_shared_structures(dst_structure, src_structure, specs, storage_conjugate)
+        Self::compile_with_coefficients(
+            dst_structure,
+            src_structure,
+            specs,
+            storage_conjugate,
+            coefficients,
+        )
     }
 
     pub fn compile_keyed<
@@ -540,6 +676,33 @@ impl<T: Copy> TreeTransformStructure<T> {
     where
         S: TreeTransformCompileSpec<T>,
     {
+        let coefficients = TreeTransformCoefficients::from_specs(specs.iter().map(|spec| {
+            (
+                spec.dst_blocks().len(),
+                spec.src_blocks().len(),
+                spec.coefficients(),
+                spec.shared_coefficients(),
+            )
+        }))?;
+        Self::compile_with_coefficients(
+            dst_structure,
+            src_structure,
+            specs,
+            storage_conjugate,
+            Arc::new(coefficients),
+        )
+    }
+
+    fn compile_with_coefficients<S>(
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+        specs: &[S],
+        storage_conjugate: bool,
+        shared: Arc<TreeTransformCoefficients<T>>,
+    ) -> Result<Self, OperationError>
+    where
+        S: TreeTransformCompileSpec<T>,
+    {
         let rank = dst_structure.rank();
         if src_structure.rank() != rank {
             return Err(OperationError::StructureRankMismatch {
@@ -554,21 +717,14 @@ impl<T: Copy> TreeTransformStructure<T> {
 
         let mut layouts = TreeTransformLayoutTable::default();
         let mut blocks = Vec::with_capacity(specs.len());
-        let single_count = specs
-            .iter()
-            .filter(|spec| spec.dst_blocks().len() == 1 && spec.src_blocks().len() == 1)
-            .count();
-        let mut single_coefficients = Vec::with_capacity(single_count);
-        // Spec (= `coefficient_start`) order; re-aligned with the sorted blocks
-        // below.
-        let mut matrices = Vec::with_capacity(specs.len() - single_count);
-        let mut matrix_end = single_count;
+        let mut single_end = 0usize;
+        let mut matrix_end = shared.singles.len();
         let mut touched_dst_blocks = vec![false; dst_structure.block_count()];
 
         for spec in specs {
             let dst_blocks = spec.dst_blocks();
             let src_blocks = spec.src_blocks();
-            let coefficients = spec.coefficients();
+            let spec_coefficients = spec.coefficients();
             if dst_blocks.is_empty() || src_blocks.is_empty() {
                 return Err(OperationError::EmptyTransformBlock);
             }
@@ -577,10 +733,10 @@ impl<T: Copy> TreeTransformStructure<T> {
             let expected_coefficients = src_count
                 .checked_mul(dst_count)
                 .ok_or(OperationError::ElementCountOverflow)?;
-            if coefficients.len() != expected_coefficients {
+            if spec_coefficients.len() != expected_coefficients {
                 return Err(OperationError::CoefficientCountMismatch {
                     expected: expected_coefficients,
-                    actual: coefficients.len(),
+                    actual: spec_coefficients.len(),
                 });
             }
 
@@ -648,25 +804,26 @@ impl<T: Copy> TreeTransformStructure<T> {
                         src: layouts.shape(src_layout).to_vec(),
                     });
                 }
+                if shared_coefficient_mismatch(
+                    shared.singles.get(single_end..=single_end),
+                    spec_coefficients,
+                ) {
+                    return Err(shared_payload_mismatch());
+                }
                 blocks.push(TreeTransformBlock::Single {
                     dst_layout: dst_layout_start,
                     src_layout: src_layout_start,
-                    coefficient: single_coefficients.len(),
+                    coefficient: single_end,
                 });
-                single_coefficients.push(coefficients[0]);
+                single_end += 1;
             } else {
+                if shared_coefficient_mismatch(shared.matrix(dst_layout_start), spec_coefficients) {
+                    return Err(shared_payload_mismatch());
+                }
                 let coefficient_start = matrix_end;
                 matrix_end = matrix_end
-                    .checked_add(coefficients.len())
+                    .checked_add(spec_coefficients.len())
                     .ok_or(OperationError::ElementCountOverflow)?;
-                matrices.push((
-                    coefficient_start,
-                    Some(
-                        spec.shared_coefficients()
-                            .cloned()
-                            .unwrap_or_else(|| Arc::from(coefficients)),
-                    ),
-                ));
                 blocks.push(TreeTransformBlock::Multi {
                     dst_layout_start,
                     dst_count,
@@ -690,18 +847,9 @@ impl<T: Copy> TreeTransformStructure<T> {
             tree_transform_block_weight(rhs, &layouts)
                 .cmp(&tree_transform_block_weight(lhs, &layouts))
         });
-        let block_matrices = blocks
-            .iter()
-            .map(|block| match *block {
-                TreeTransformBlock::Single { .. } => None,
-                TreeTransformBlock::Multi {
-                    coefficient_start, ..
-                } => matrices
-                    .binary_search_by_key(&coefficient_start, |(start, _)| *start)
-                    .ok()
-                    .and_then(|index| matrices[index].1.take()),
-            })
-            .collect();
+        if single_end != shared.singles.len() || matrix_end != shared.len {
+            return Err(shared_payload_mismatch());
+        }
         layouts.bake_fused_layouts(&blocks)?;
         let recoupling_plan = compile_recoupling_plan(&blocks)?;
         let parallel_schedule = compile_parallel_schedule(&blocks, &layouts, &recoupling_plan)?;
@@ -720,9 +868,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             identity: Arc::new(()),
             blocks,
             layouts,
-            single_coefficients,
-            block_matrices,
-            coefficient_len: matrix_end,
+            coefficients: shared,
             inactive_dst_layouts,
             physical_overwrite_len,
             recoupling_plan,
@@ -768,7 +914,7 @@ impl<T: Copy> TreeTransformStructure<T> {
     pub fn block_coefficients(&self, block_index: usize) -> Option<&[T]> {
         match *self.blocks.get(block_index)? {
             TreeTransformBlock::Single { coefficient, .. } => {
-                self.single_coefficients.get(coefficient..=coefficient)
+                self.coefficients.singles.get(coefficient..=coefficient)
             }
             TreeTransformBlock::Multi { .. } => self.block_matrix(block_index),
         }
@@ -776,56 +922,59 @@ impl<T: Copy> TreeTransformStructure<T> {
 
     #[inline]
     pub(crate) fn block_matrix(&self, block_index: usize) -> Option<&[T]> {
-        self.block_matrices.get(block_index)?.as_deref()
+        match *self.blocks.get(block_index)? {
+            TreeTransformBlock::Single { .. } => None,
+            TreeTransformBlock::Multi {
+                dst_layout_start, ..
+            } => self.coefficients.matrix(dst_layout_start),
+        }
     }
 
     /// Scalars of the Single blocks, indexed by their `coefficient`.
     #[inline]
     pub(crate) fn single_coefficients(&self) -> &[T] {
-        &self.single_coefficients
+        &self.coefficients.singles
     }
 
     /// Length of the logical coefficient payload the block offsets index.
     #[inline]
     pub fn coefficient_len(&self) -> usize {
-        self.coefficient_len
+        self.coefficients.len
     }
 
-    /// Copies the logical destination-by-source coefficient payload.
+    /// Copies the logical destination-by-source coefficient payload into
+    /// `out`, replacing its contents.
     ///
-    /// This allocates and copies every coefficient. Replay reads
+    /// This is an O([`Self::coefficient_len`]) copy; replay reads
     /// [`Self::block_coefficients`] in place instead.
-    pub fn recoupling_coefficients_dst_src(&self) -> Vec<T> {
-        self.collect_logical_coefficients(|coefficient| coefficient)
+    pub fn gather_recoupling_coefficients_into(&self, out: &mut Vec<T>)
+    where
+        T: Copy,
+    {
+        self.gather_converted_coefficients_into(out, |coefficient| coefficient);
     }
 
-    /// The logical payload, converted, in one allocation: the scalars, then
-    /// the Multi matrices ordered by `coefficient_start`.
-    pub(crate) fn collect_logical_coefficients<U>(
+    /// The logical payload, converted: the scalars, then the Multi matrices in
+    /// `coefficient_start` (= spec) order. The CUDA executor calls this once
+    /// per device structure upload.
+    pub(crate) fn gather_converted_coefficients_into<U>(
         &self,
+        out: &mut Vec<U>,
         mut convert: impl FnMut(T) -> U,
-    ) -> Vec<U> {
-        let mut matrices = self
-            .blocks
-            .iter()
-            .zip(&self.block_matrices)
-            .filter_map(|(block, matrix)| match (block, matrix) {
-                (
-                    TreeTransformBlock::Multi {
-                        coefficient_start, ..
-                    },
-                    Some(matrix),
-                ) => Some((*coefficient_start, matrix)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        matrices.sort_unstable_by_key(|(start, _)| *start);
-        let mut coefficients = Vec::with_capacity(self.coefficient_len);
-        coefficients.extend(self.single_coefficients.iter().map(|&value| convert(value)));
-        for (_, matrix) in matrices {
-            coefficients.extend(matrix.iter().map(|&value| convert(value)));
+    ) where
+        T: Copy,
+    {
+        out.clear();
+        out.reserve(self.coefficients.len);
+        out.extend(
+            self.coefficients
+                .singles
+                .iter()
+                .map(|&value| convert(value)),
+        );
+        for matrix in &self.coefficients.matrices {
+            out.extend(matrix.iter().map(|&value| convert(value)));
         }
-        coefficients
     }
 
     pub fn workspace_lens(&self) -> (usize, usize) {
@@ -860,19 +1009,19 @@ impl<T: Copy> TreeTransformStructure<T> {
     }
 
     #[cfg(test)]
+    pub(crate) fn gathered_coefficients(&self) -> Vec<T>
+    where
+        T: Copy,
+    {
+        let mut coefficients = Vec::new();
+        self.gather_recoupling_coefficients_into(&mut coefficients);
+        coefficients
+    }
+
+    #[cfg(test)]
     pub(crate) fn shares_recoupling_matrices_with(&self, other: &Self) -> bool {
-        let matrices = |structure: &Self| {
-            let mut pointers = structure
-                .block_matrices
-                .iter()
-                .flatten()
-                .map(|matrix| matrix.as_ptr())
-                .collect::<Vec<_>>();
-            pointers.sort_unstable();
-            pointers
-        };
-        let pointers = matrices(self);
-        !pointers.is_empty() && pointers == matrices(other)
+        !self.coefficients.matrices.is_empty()
+            && Arc::ptr_eq(&self.coefficients, &other.coefficients)
     }
 
     #[inline]
@@ -897,31 +1046,23 @@ impl<T: Copy> TreeTransformStructure<T> {
     /// Element `index` of the logical coefficient payload.
     ///
     /// O(1) for a Single block's `coefficient`; an index inside a Multi matrix
-    /// scans the blocks, which only diagnostics do.
+    /// scans the matrices, which only diagnostics do.
     ///
     /// # Panics
     ///
     /// Panics if `index >= self.coefficient_len()`.
     pub fn coefficient(&self, index: usize) -> T {
-        if let Some(&coefficient) = self.single_coefficients.get(index) {
+        if let Some(&coefficient) = self.coefficients.singles.get(index) {
             return coefficient;
         }
-        self.blocks
-            .iter()
-            .zip(&self.block_matrices)
-            .find_map(|(block, matrix)| match (block, matrix) {
-                (
-                    TreeTransformBlock::Multi {
-                        coefficient_start, ..
-                    },
-                    Some(matrix),
-                ) => index
-                    .checked_sub(*coefficient_start)
-                    .and_then(|offset| matrix.get(offset))
-                    .copied(),
-                _ => None,
-            })
-            .expect("coefficient index out of bounds")
+        let mut offset = index - self.coefficients.singles.len();
+        for matrix in &self.coefficients.matrices {
+            match matrix.get(offset) {
+                Some(&coefficient) => return coefficient,
+                None => offset -= matrix.len(),
+            }
+        }
+        panic!("coefficient index out of bounds")
     }
 
     #[inline]
@@ -1972,8 +2113,8 @@ mod tests {
         assert_eq!(first.blocks(), second.blocks());
         assert_eq!(first.layouts(), second.layouts());
         assert_eq!(
-            first.recoupling_coefficients_dst_src(),
-            second.recoupling_coefficients_dst_src()
+            first.gathered_coefficients(),
+            second.gathered_coefficients()
         );
     }
 

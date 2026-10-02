@@ -3327,7 +3327,7 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
     assert_eq!(miss.layouts(), hit.layouts());
     let coefficient_bits = |structure: &TreeTransformStructure<f64>| {
         structure
-            .recoupling_coefficients_dst_src()
+            .gathered_coefficients()
             .iter()
             .map(|coefficient| coefficient.to_bits())
             .collect::<Vec<_>>()
@@ -4578,12 +4578,12 @@ fn rank_nine_same_split_groups_prepare_once_and_lower_once_each() {
     assert_eq!(compiled.layouts(), oracle_compiled.layouts());
     assert_eq!(
         compiled
-            .recoupling_coefficients_dst_src()
+            .gathered_coefficients()
             .iter()
             .map(|coefficient| coefficient.to_bits())
             .collect::<Vec<_>>(),
         oracle_compiled
-            .recoupling_coefficients_dst_src()
+            .gathered_coefficients()
             .iter()
             .map(|coefficient| coefficient.to_bits())
             .collect::<Vec<_>>()
@@ -6999,10 +6999,7 @@ fn grouped_storage_mapping_owns_coefficients_and_matches_direct_complex_replay()
         ]
     );
     assert_eq!(grouped, direct);
-    assert_eq!(
-        grouped.recoupling_coefficients_dst_src(),
-        coefficients.as_slice()
-    );
+    assert_eq!(grouped.gathered_coefficients(), coefficients.as_slice());
 
     let src_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
@@ -10385,4 +10382,17 @@ fn generic_facade_structure_rejects_multiplicity_free_style() {
     )
     .unwrap_err();
     assert!(matches!(err, OperationError::UnsupportedFusionStyle { .. }));
+}
+
+/// Test view of the logical coefficient payload (an explicit copy).
+trait GatheredCoefficients<T> {
+    fn gathered_coefficients(&self) -> Vec<T>;
+}
+
+impl<T: Copy> GatheredCoefficients<T> for tenet_operations::TreeTransformStructure<T> {
+    fn gathered_coefficients(&self) -> Vec<T> {
+        let mut coefficients = Vec::new();
+        self.gather_recoupling_coefficients_into(&mut coefficients);
+        coefficients
+    }
 }

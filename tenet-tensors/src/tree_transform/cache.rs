@@ -208,6 +208,9 @@ fn charged_plan_bytes<T>(plan: &TreeTransformGroupPlan<T>) -> usize {
                 .saturating_mul(core::mem::size_of::<TreeTransformGroupBlockSpec<T>>()),
         )
         .saturating_add(specs)
+        // Why charge the shared payload before it exists: the first layout
+        // binding builds it after admission, and a charge never grows.
+        .saturating_add(plan.charged_coefficient_payload_bytes())
 }
 
 /// Heap bytes of `specs` (excluding their inline structs), coefficients

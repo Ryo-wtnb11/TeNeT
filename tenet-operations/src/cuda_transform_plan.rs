@@ -726,7 +726,7 @@ mod tests {
             .collect();
         assert_eq!(matrices, vec![5, 1]);
         assert_eq!(
-            compiled.recoupling_coefficients_dst_src(),
+            compiled.gathered_coefficients(),
             [-1.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
         );
         assert_eq!(plan.recouplings[0].job.rhs_offset, 0);

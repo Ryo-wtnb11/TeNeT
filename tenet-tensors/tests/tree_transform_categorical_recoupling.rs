@@ -132,7 +132,7 @@ fn the_categorical_oracle_agrees_with_host_replay() {
 fn transposed_walk(fixture: &Compiled, source: &[f64]) -> Vec<f64> {
     let structure = &fixture.structure;
     let layouts = structure.layouts();
-    let coefficients = structure.recoupling_coefficients_dst_src();
+    let coefficients = structure.gathered_coefficients();
     let mut transposed = vec![0.0_f64; fixture.len()];
     for block in structure.blocks() {
         let TreeTransformBlock::Multi {
@@ -253,8 +253,21 @@ fn the_fermionic_recoupling_matrix_differs_from_the_bosonic_one() {
     );
 
     assert_ne!(
-        bosonic.structure.recoupling_coefficients_dst_src(),
-        fermionic.structure.recoupling_coefficients_dst_src(),
+        bosonic.structure.gathered_coefficients(),
+        fermionic.structure.gathered_coefficients(),
         "the fermionic rule produced the bosonic coefficients"
     );
+}
+
+/// Test view of the logical coefficient payload (an explicit copy).
+trait GatheredCoefficients<T> {
+    fn gathered_coefficients(&self) -> Vec<T>;
+}
+
+impl<T: Copy> GatheredCoefficients<T> for tenet_tensors::TreeTransformStructure<T> {
+    fn gathered_coefficients(&self) -> Vec<T> {
+        let mut coefficients = Vec::new();
+        self.gather_recoupling_coefficients_into(&mut coefficients);
+        coefficients
+    }
 }

@@ -316,7 +316,7 @@ impl Compiled {
     /// Whether some recoupling matrix is not its own transpose, so an executor
     /// applying `U` where the reference applies `Uᵀ` cannot agree by accident.
     pub fn has_non_symmetric_matrix(&self) -> bool {
-        let coefficients = self.structure.recoupling_coefficients_dst_src();
+        let coefficients = self.structure.gathered_coefficients();
         self.structure.blocks().iter().any(|block| {
             let TreeTransformBlock::Multi {
                 src_count,
@@ -561,7 +561,7 @@ pub fn expected_scaled<T: TestScalar>(
     alpha: T,
 ) -> Vec<T> {
     let structure = &fixture.structure;
-    let coefficients = structure.recoupling_coefficients_dst_src();
+    let coefficients = structure.gathered_coefficients();
     let mut expected = if overwrite {
         vec![T::zero(); destination.len()]
     } else {
@@ -700,4 +700,17 @@ where
         .unwrap();
     }
     data
+}
+
+/// Test view of the logical coefficient payload (an explicit copy).
+trait GatheredCoefficients<T> {
+    fn gathered_coefficients(&self) -> Vec<T>;
+}
+
+impl<T: Copy> GatheredCoefficients<T> for tenet_tensors::TreeTransformStructure<T> {
+    fn gathered_coefficients(&self) -> Vec<T> {
+        let mut coefficients = Vec::new();
+        self.gather_recoupling_coefficients_into(&mut coefficients);
+        coefficients
+    }
 }

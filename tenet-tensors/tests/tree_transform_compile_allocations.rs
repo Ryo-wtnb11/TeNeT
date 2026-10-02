@@ -550,8 +550,8 @@ fn grouped_multi_compile_borrows_plan_coefficient_matrix() {
         "grouped_bytes={grouped_bytes}, direct_bytes={direct_bytes}"
     );
     assert_eq!(
-        grouped.recoupling_coefficients_dst_src(),
-        direct.recoupling_coefficients_dst_src()
+        grouped.gathered_coefficients(),
+        direct.gathered_coefficients()
     );
 }
 
@@ -733,4 +733,26 @@ fn assert_sector_change_binding_copies_only_changed_groups(operation: TreeTransf
         copied <= changed + singles,
         "copied={copied} coefficients, changed={changed}, singles={singles}, total={total}"
     );
+
+    // What: binding the already-bound plan again (a structure-tier miss on a
+    // plan-tier hit) shares the plan's payload and copies no coefficient.
+    let rebound_real = bind_bytes(&bind_real);
+    let rebound_complex = bind_bytes(&bind_complex);
+    assert_eq!(
+        rebound_complex, rebound_real,
+        "a re-binding must not store any coefficient"
+    );
+}
+
+/// Test view of the logical coefficient payload (an explicit copy).
+trait GatheredCoefficients<T> {
+    fn gathered_coefficients(&self) -> Vec<T>;
+}
+
+impl<T: Copy> GatheredCoefficients<T> for tenet_tensors::TreeTransformStructure<T> {
+    fn gathered_coefficients(&self) -> Vec<T> {
+        let mut coefficients = Vec::new();
+        self.gather_recoupling_coefficients_into(&mut coefficients);
+        coefficients
+    }
 }
