@@ -3795,6 +3795,31 @@ fn checked_generic_eig_vals_preserves_spectrum_and_dtype() {
 
     let complex = source.convert::<Complex64>();
     assert_eq!(complex.eig_vals(&[0], &[1]).unwrap(), spectra);
+
+    let compact: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![Complex64::new(1.0, -1.0), Complex64::new(0.0, 3.0)],
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        compact.eig_vals(&[0], &[1]).unwrap(),
+        vec![SectorSpectrum {
+            sector: Label::X,
+            values: vec![Complex64::new(0.0, 3.0), Complex64::new(1.0, -1.0)],
+        }]
+    );
+    provider.fail_decode.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        compact.eig_vals(&[0], &[1]),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Decode)
+        ))
+    ));
+    provider.fail_decode.store(false, Ordering::Relaxed);
 }
 
 fn assert_checked_generic_eig_reconstruction(
