@@ -4,8 +4,7 @@
 //! rules; replay consumes them without any symmetry knowledge.
 
 use std::borrow::Cow;
-use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use tenet_core::{
     BlockKey, BlockStructure, FusionTreeBlockGroup, FusionTreeGroupKey, FusionTreePairKey,
@@ -16,7 +15,7 @@ use crate::transform_helpers::{
     duplicate_fusion_tree_pair_indices, fusion_tree_group_block_keys,
     fusion_tree_pair_matches_group, fusion_tree_pairs_share_group,
 };
-use crate::transform_structure::{SharedTreeTransformCoefficients, TreeTransformStructure};
+use crate::transform_structure::TreeTransformStructure;
 use crate::OperationError;
 
 /// Why shared slices: a Runtime reuses one group's specs across the plans of
@@ -60,6 +59,14 @@ impl<K, T> SpecEntries<K, T> {
             Self::Multi { coefficients, .. } => coefficients,
         }
     }
+
+    #[inline]
+    fn shared_coefficients(&self) -> Option<&Arc<[T]>> {
+        match self {
+            Self::Single { .. } => None,
+            Self::Multi { coefficients, .. } => Some(coefficients),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -72,7 +79,7 @@ enum ResolvedSpecEntries<'a, T> {
     Multi {
         dst: Vec<usize>,
         src: Vec<usize>,
-        coefficients: &'a [T],
+        coefficients: &'a Arc<[T]>,
     },
 }
 
@@ -98,6 +105,14 @@ impl<T> ResolvedSpecEntries<'_, T> {
         match self {
             Self::Single { coefficient, .. } => std::slice::from_ref(coefficient),
             Self::Multi { coefficients, .. } => coefficients,
+        }
+    }
+
+    #[inline]
+    fn shared_coefficients(&self) -> Option<&Arc<[T]>> {
+        match self {
+            Self::Single { .. } => None,
+            Self::Multi { coefficients, .. } => Some(coefficients),
         }
     }
 
@@ -195,6 +210,10 @@ impl<'a, T> ResolvedTreeTransformBlockSpec<'a, T> {
 
     pub(crate) fn coefficients(&self) -> &[T] {
         self.entries.coefficients()
+    }
+
+    pub(crate) fn shared_coefficients(&self) -> Option<&Arc<[T]>> {
+        self.entries.shared_coefficients()
     }
 
     pub(crate) fn source_axes(&self) -> Option<&[usize]> {
@@ -296,6 +315,11 @@ impl<T> TreeTransformBlockSpec<T> {
     #[inline]
     pub fn source_axes(&self) -> Option<&[usize]> {
         self.source_axes.as_deref()
+    }
+
+    #[inline]
+    pub(crate) fn shared_coefficients(&self) -> Option<&Arc<[T]>> {
+        self.entries.shared_coefficients()
     }
 }
 
@@ -614,10 +638,6 @@ impl<T> TreeTransformGroupBlockSpec<T> {
         )
     }
 
-    fn has_matrix_payload(&self) -> bool {
-        matches!(self.entries, SpecEntries::Multi { .. })
-    }
-
     fn resolve_with_source_projection<F>(
         &self,
         dst_structure: &BlockStructure,
@@ -644,30 +664,19 @@ impl<T> TreeTransformGroupBlockSpec<T> {
 
 /// Immutable categorical fusion-tree transform, independent of storage layout.
 ///
-/// Matrix-valued groups materialize one shared contiguous coefficient payload
-/// on first binding. All-Single plans keep their compact inline coefficients;
-/// sharing those scalars would add allocation without removing a matrix copy.
-#[derive(Clone)]
+/// Every binding references each group's recoupling matrix through the spec's
+/// shared `Arc<[T]>`, as TensorKit's transformer references the cached
+/// per-`FusionTreeBlock` `U`. Why not one flattened payload per plan: a plan
+/// miss after a sector change reuses most groups' specs, and flattening would
+/// copy every reused matrix again.
+#[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformGroupPlan<T> {
     specs: Vec<TreeTransformGroupBlockSpec<T>>,
-    coefficient_payload: OnceLock<Option<SharedTreeTransformCoefficients<T>>>,
-}
-
-impl<T: fmt::Debug> fmt::Debug for TreeTransformGroupPlan<T> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("TreeTransformGroupPlan")
-            .field("specs", &self.specs)
-            .finish()
-    }
 }
 
 impl<T> TreeTransformGroupPlan<T> {
     pub fn new(specs: Vec<TreeTransformGroupBlockSpec<T>>) -> Self {
-        Self {
-            specs,
-            coefficient_payload: OnceLock::new(),
-        }
+        Self { specs }
     }
 
     pub fn from_specs<I>(specs: I) -> Self
@@ -695,44 +704,7 @@ impl<T> TreeTransformGroupPlan<T> {
     }
 }
 
-impl<T: PartialEq> PartialEq for TreeTransformGroupPlan<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.specs == other.specs
-    }
-}
-
 impl<T: Copy> TreeTransformGroupPlan<T> {
-    fn coefficient_payload(
-        &self,
-    ) -> Result<Option<SharedTreeTransformCoefficients<T>>, OperationError> {
-        if let Some(payload) = self.coefficient_payload.get() {
-            return Ok(payload.clone());
-        }
-        let coefficient_count = self.specs.iter().try_fold(0usize, |count, spec| {
-            count
-                .checked_add(spec.recoupling_coefficients_dst_src().len())
-                .ok_or(OperationError::ElementCountOverflow)
-        })?;
-        let has_matrix_payload = self
-            .specs
-            .iter()
-            .any(TreeTransformGroupBlockSpec::has_matrix_payload);
-        Ok(self
-            .coefficient_payload
-            .get_or_init(|| {
-                if !has_matrix_payload {
-                    return None;
-                }
-                let mut coefficients = Vec::with_capacity(coefficient_count);
-                for spec in &self.specs {
-                    coefficients.extend_from_slice(spec.recoupling_coefficients_dst_src());
-                }
-                debug_assert_eq!(coefficients.len(), coefficient_count);
-                Some(SharedTreeTransformCoefficients::from_vec(coefficients))
-            })
-            .clone())
-    }
-
     fn compile_shared_structures_internal(
         &self,
         dst_structure: Arc<BlockStructure>,
@@ -748,7 +720,6 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
             src_structure,
             &specs,
             storage_conjugate,
-            self.coefficient_payload()?,
         )
     }
 
@@ -840,7 +811,6 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
             storage_src_structure,
             &specs,
             storage_conjugate,
-            self.coefficient_payload()?,
         )
     }
 
@@ -871,7 +841,6 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
             storage_src_structure,
             &specs,
             storage_conjugate,
-            self.coefficient_payload()?,
         )
     }
 }
@@ -936,7 +905,7 @@ mod tests {
     #[test]
     fn categorical_coefficients_are_shared_across_layout_bindings() {
         // What: one categorical plan binds to different degeneracy layouts
-        // without copying its coefficient payload into either replay plan.
+        // without copying its recoupling matrices into either replay plan.
         let keys = [tree_pair(1), tree_pair(2)];
         let plan = matrix_plan(&keys);
         let first_layout = structure(&keys, 2);
@@ -949,7 +918,11 @@ mod tests {
             .compile_structures(&second_layout, &second_layout)
             .unwrap();
 
-        assert!(first.shares_coefficient_payload_with(&second));
+        assert!(first.shares_recoupling_matrices_with(&second));
+        assert_eq!(
+            first.block_coefficients(0).unwrap().as_ptr(),
+            plan.specs()[0].recoupling_coefficients_dst_src().as_ptr()
+        );
         assert_eq!(
             first.recoupling_coefficients_dst_src(),
             &[1.0, 2.0, 3.0, 4.0]
@@ -961,9 +934,9 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_cold_bindings_share_the_installed_payload() {
-        // What: racing cold layout bindings retain the one payload installed
-        // by OnceLock instead of each retaining its own flattened matrix.
+    fn concurrent_cold_bindings_share_the_spec_matrices() {
+        // What: racing cold layout bindings both reference the spec's matrix
+        // instead of each retaining its own copy.
         let keys = [tree_pair(1), tree_pair(2)];
         let plan = matrix_plan(&keys);
         let first_layout = structure(&keys, 2);
@@ -992,13 +965,13 @@ mod tests {
             (first.join().unwrap(), second.join().unwrap())
         });
 
-        assert!(first.shares_coefficient_payload_with(&second));
+        assert!(first.shares_recoupling_matrices_with(&second));
     }
 
     #[test]
-    fn debug_output_ignores_lazy_payload_state_and_storage_kind() {
-        // What: Debug remains the categorical specs plus the historical
-        // coefficient slice, independent of lazy initialization and binding.
+    fn debug_output_is_independent_of_binding_and_spec_kind() {
+        // What: Debug of a plan is its categorical specs, unchanged by binding,
+        // and a grouped binding prints like the equivalent direct binding.
         let keys = [tree_pair(1), tree_pair(2)];
         let plan = matrix_plan(&keys);
         let layout = structure(&keys, 2);
@@ -1029,7 +1002,5 @@ mod tests {
         .unwrap();
         let shared_debug = format!("{shared:?}");
         assert_eq!(shared_debug, format!("{owned:?}"));
-        assert!(!shared_debug.contains("Owned"));
-        assert!(!shared_debug.contains("Shared"));
     }
 }

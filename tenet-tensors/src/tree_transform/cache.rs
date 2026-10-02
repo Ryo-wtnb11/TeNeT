@@ -200,9 +200,7 @@ impl CategoricalTransformKey {
 fn charged_plan_bytes<T>(plan: &TreeTransformGroupPlan<T>) -> usize {
     const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
     let mut backings = rustc_hash::FxHashSet::default();
-    let (specs, coefficient_count) = charged_spec_bytes(plan.specs(), &mut backings);
-    // Why charge the flattened payload before it exists: the first layout
-    // binding may materialize it after admission, and a charge never grows.
+    let specs = charged_spec_bytes(plan.specs(), &mut backings);
     (core::mem::size_of::<TreeTransformGroupPlan<T>>())
         .saturating_add(ARC_CONTROL_BYTES)
         .saturating_add(
@@ -210,20 +208,17 @@ fn charged_plan_bytes<T>(plan: &TreeTransformGroupPlan<T>) -> usize {
                 .saturating_mul(core::mem::size_of::<TreeTransformGroupBlockSpec<T>>()),
         )
         .saturating_add(specs)
-        .saturating_add(ARC_CONTROL_BYTES)
-        .saturating_add(coefficient_count.saturating_mul(core::mem::size_of::<T>()))
 }
 
-/// Heap bytes of `specs` (excluding their inline structs) and their total
-/// coefficient count.
+/// Heap bytes of `specs` (excluding their inline structs), coefficients
+/// included once.
 fn charged_spec_bytes<T>(
     specs: &[TreeTransformGroupBlockSpec<T>],
     backings: &mut rustc_hash::FxHashSet<usize>,
-) -> (usize, usize) {
+) -> usize {
     const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
     let key_bytes = core::mem::size_of::<FusionTreePairKey>();
     let mut bytes = 0usize;
-    let mut coefficient_count = 0usize;
     // ponytail: every spec is charged as if its keys and coefficients were
     // shared heap slices with three `Arc` control blocks (`Multi`: dst, src,
     // coefficients). `Single` keeps them inline and is over-charged the same
@@ -231,7 +226,6 @@ fn charged_spec_bytes<T>(
     // is the contract.
     for spec in specs {
         let coefficients = spec.recoupling_coefficients_dst_src().len();
-        coefficient_count = coefficient_count.saturating_add(coefficients);
         bytes = bytes
             .saturating_add(3 * ARC_CONTROL_BYTES)
             .saturating_add(
@@ -251,7 +245,7 @@ fn charged_spec_bytes<T>(
             }
         }
     }
-    (bytes, coefficient_count)
+    bytes
 }
 
 /// Everything one source group's specs read besides the group's own trees.
@@ -411,10 +405,8 @@ fn charged_group_entry_bytes<T>(
     for src in key.src_keys.iter() {
         bytes = bytes.saturating_add(src.charge_retained_backings(&mut backings));
     }
-    let (specs, coefficients) = charged_spec_bytes(entry_specs, &mut backings);
-    bytes
-        .saturating_add(specs)
-        .saturating_add(coefficients.saturating_mul(core::mem::size_of::<T>()))
+    let specs = charged_spec_bytes(entry_specs, &mut backings);
+    bytes.saturating_add(specs)
 }
 
 /// One source group: its external-sector key and its ordered tree pairs.

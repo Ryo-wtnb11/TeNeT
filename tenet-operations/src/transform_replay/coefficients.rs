@@ -32,7 +32,6 @@ where
         let TreeTransformBlock::Multi {
             dst_count,
             src_count,
-            coefficient_start,
             ..
         } = *block
         else {
@@ -41,16 +40,13 @@ where
         let coefficient_len = src_count
             .checked_mul(dst_count)
             .ok_or_else(|| OperationError::ElementCountOverflow)?;
-        let coefficient_end = coefficient_start
-            .checked_add(coefficient_len)
-            .ok_or_else(|| OperationError::ElementCountOverflow)?;
-        let coefficients = task
-            .coefficients()
-            .get(coefficient_start..coefficient_end)
-            .ok_or_else(|| OperationError::CoefficientCountMismatch {
-                expected: coefficient_end,
-                actual: task.coefficients().len(),
-            })?;
+        let coefficients = task.block_matrix(block_index).unwrap_or_default();
+        if coefficients.len() != coefficient_len {
+            return Err(OperationError::CoefficientCountMismatch {
+                expected: coefficient_len,
+                actual: coefficients.len(),
+            });
+        }
         workspace.coefficient_scratch.extend(
             coefficients
                 .iter()
@@ -271,7 +267,7 @@ mod coefficient_cache_tests {
         let b_then_a = two_group_layout(&keys, [3, 1]);
         let first = plan.compile_structures(&a_then_b, &a_then_b).unwrap();
         let second = plan.compile_structures(&b_then_a, &b_then_a).unwrap();
-        assert!(first.shares_coefficient_payload_with(&second));
+        assert!(first.shares_recoupling_matrices_with(&second));
         let mut workspace = TreeTransformWorkspace::<f64>::default();
 
         assert!(ensure_recoupling_coefficients(

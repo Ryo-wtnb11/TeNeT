@@ -528,8 +528,8 @@ fn grouped_multi_compile_borrows_plan_coefficient_matrix() {
     let grouped_allocations = ALLOCATIONS.get();
     let grouped_bytes = ALLOCATED_BYTES.get();
 
-    // What: first categorical materialization allocates one coefficient data
-    // buffer plus small shared ownership, not a second full-size Arc slice.
+    // What: the first categorical binding references the spec's matrix and
+    // allocates no coefficient buffer beyond what a direct binding does.
     assert!(
         cold_grouped_allocations <= direct_allocations + 16,
         "cold_grouped_allocations={cold_grouped_allocations}, direct_allocations={direct_allocations}"
@@ -552,5 +552,185 @@ fn grouped_multi_compile_borrows_plan_coefficient_matrix() {
     assert_eq!(
         grouped.recoupling_coefficients_dst_src(),
         direct.recoupling_coefficients_dst_src()
+    );
+}
+
+/// `[s, s, s] <- [d]` with `s = {1/2, 1}` and the domain leg's sectors `d`.
+fn su2_three_to_one_structure(domain_twice_spins: &[usize]) -> Arc<BlockStructure> {
+    let leg = |twice_spins: &[usize]| {
+        SectorLeg::new(
+            twice_spins
+                .iter()
+                .map(|&j| (SU2Irrep::from_twice_spin(j).sector_id(), 1)),
+            false,
+        )
+    };
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(&[1, 2]), leg(&[1, 2]), leg(&[1, 2])]),
+        FusionProductSpace::new([leg(domain_twice_spins)]),
+    );
+    let keys = hom
+        .fusion_tree_keys(&SU2FusionRule)
+        .iter()
+        .cloned()
+        .map(BlockKey::from)
+        .collect::<Vec<_>>();
+    let count = keys.len();
+    Arc::new(
+        BlockStructure::from_parts(
+            SectorStructure::from_keys(4, keys).unwrap(),
+            DegeneracyStructure::packed_column_major(4, (0..count).map(|_| vec![1usize; 4]))
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+}
+
+fn convert_spec<T: Copy>(
+    spec: &tenet_tensors::TreeTransformGroupBlockSpec<f64>,
+    convert: fn(f64) -> T,
+) -> tenet_tensors::TreeTransformGroupBlockSpec<T> {
+    let coefficients = spec
+        .recoupling_coefficients_dst_src()
+        .iter()
+        .map(|&value| convert(value))
+        .collect::<Vec<_>>();
+    let converted = if coefficients.len() == 1 {
+        tenet_tensors::TreeTransformGroupBlockSpec::single(
+            spec.dst_keys()[0].clone(),
+            spec.src_keys()[0].clone(),
+            coefficients[0],
+        )
+    } else {
+        tenet_tensors::TreeTransformGroupBlockSpec::try_multi(
+            spec.dst_keys().iter().cloned(),
+            spec.src_keys().iter().cloned(),
+            coefficients,
+        )
+        .unwrap()
+    };
+    match spec.source_axes() {
+        Some(axes) => converted.with_source_axes(axes.iter().copied()),
+        None => converted,
+    }
+}
+
+/// The `c` plan a warm Runtime assembles after a sector change: every group
+/// `a` already built is the cached spec handle (`plan.rs` clones group specs),
+/// and only the added groups are new. Returns the plan, the coefficient count
+/// of the added groups, and the number of Single (1x1) specs.
+fn reused_sector_change_plan<T: Copy>(
+    a: &tenet_tensors::TreeTransformGroupPlan<f64>,
+    c: &tenet_tensors::TreeTransformGroupPlan<f64>,
+    convert: fn(f64) -> T,
+) -> (tenet_tensors::TreeTransformGroupPlan<T>, usize, usize) {
+    let cached = a
+        .specs()
+        .iter()
+        .map(|spec| convert_spec(spec, convert))
+        .collect::<Vec<_>>();
+    let mut changed_coefficients = 0;
+    let mut singles = 0;
+    let specs = c
+        .specs()
+        .iter()
+        .map(|spec| {
+            if spec.recoupling_coefficients_dst_src().len() == 1 {
+                singles += 1;
+            }
+            cached
+                .iter()
+                .find(|hit| {
+                    hit.group_key() == spec.group_key()
+                        && hit.src_keys() == spec.src_keys()
+                        && hit.dst_keys() == spec.dst_keys()
+                })
+                .cloned()
+                .unwrap_or_else(|| {
+                    changed_coefficients += spec.recoupling_coefficients_dst_src().len();
+                    convert_spec(spec, convert)
+                })
+        })
+        .collect();
+    (
+        tenet_tensors::TreeTransformGroupPlan::new(specs),
+        changed_coefficients,
+        singles,
+    )
+}
+
+#[test]
+fn sector_change_binding_copies_coefficients_of_changed_groups_only() {
+    // Why only operations that keep the space: the binding needs the
+    // destination structure, and these map `[s, s, s] <- [d]` onto itself.
+    for operation in [
+        TreeTransformOperation::permute([0, 2, 1], [3]),
+        TreeTransformOperation::braid([0, 2, 1], [3], [0, 1, 2], [3]),
+    ] {
+        assert_sector_change_binding_copies_only_changed_groups(operation);
+    }
+}
+
+fn assert_sector_change_binding_copies_only_changed_groups(operation: TreeTransformOperation) {
+    let a = su2_three_to_one_structure(&[1, 2]);
+    let c = su2_three_to_one_structure(&[1, 2, 3]);
+    let plan_a =
+        build_tree_pair_transform_group_plan(&SU2FusionRule, operation.clone(), &a).unwrap();
+    let plan_c = build_tree_pair_transform_group_plan(&SU2FusionRule, operation, &c).unwrap();
+
+    let bind_bytes = |bind: &dyn Fn()| {
+        ALLOCATED_BYTES.set(0);
+        COUNTING.set(true);
+        bind();
+        COUNTING.set(false);
+        ALLOCATED_BYTES.get()
+    };
+    // Why compare two scalar widths: the bound plans have identical keys,
+    // blocks and layouts, so their binding allocations differ only by the
+    // coefficient values the binding stores, 8 extra bytes per copied value.
+    let (real, changed, singles) = reused_sector_change_plan(&plan_a, &plan_c, |value| value);
+    let (complex, _, _) = reused_sector_change_plan(&plan_a, &plan_c, |value| {
+        num_complex::Complex64::new(value, 0.0)
+    });
+    let total = plan_c
+        .specs()
+        .iter()
+        .map(|spec| spec.recoupling_coefficients_dst_src().len())
+        .sum::<usize>();
+    assert!(
+        changed > 0 && total > changed + singles,
+        "fixture must reuse matrix groups"
+    );
+
+    let bind_real = || {
+        std::hint::black_box(
+            real.compile_shared_structures_with_storage_conjugation(
+                Arc::clone(&c),
+                Arc::clone(&c),
+                false,
+            )
+            .unwrap(),
+        );
+    };
+    let bind_complex = || {
+        std::hint::black_box(
+            complex
+                .compile_shared_structures_with_storage_conjugation(
+                    Arc::clone(&c),
+                    Arc::clone(&c),
+                    false,
+                )
+                .unwrap(),
+        );
+    };
+    let real_bytes = bind_bytes(&bind_real);
+    let complex_bytes = bind_bytes(&bind_complex);
+    let copied = complex_bytes.saturating_sub(real_bytes) / 8;
+
+    // What: a plan miss copies coefficients of the groups it built plus the
+    // Single scalars, never the reused groups' recoupling matrices.
+    assert!(
+        copied <= changed + singles,
+        "copied={copied} coefficients, changed={changed}, singles={singles}, total={total}"
     );
 }

@@ -64,9 +64,27 @@ impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
         self.structure.layouts()
     }
 
+    /// Scalars of the Single blocks, indexed by their `coefficient`.
     #[inline]
-    pub(crate) fn coefficients(self) -> &'a [C] {
-        self.structure.recoupling_coefficients_dst_src()
+    pub(crate) fn single_coefficients(self) -> &'a [C] {
+        self.structure.single_coefficients()
+    }
+
+    /// A Multi block's shared `U[dst, src]` matrix, read in place.
+    #[inline]
+    pub(crate) fn block_matrix(self, block_index: usize) -> Option<&'a [C]> {
+        self.structure.block_matrix(block_index)
+    }
+
+    #[inline]
+    pub(crate) fn coefficient_len(self) -> usize {
+        self.structure.coefficient_len()
+    }
+
+    /// The logical payload, converted, for a single device upload.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn collect_logical_coefficients<U>(self, convert: impl FnMut(C) -> U) -> Vec<U> {
+        self.structure.collect_logical_coefficients(convert)
     }
 
     #[inline]

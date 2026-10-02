@@ -65,7 +65,7 @@ impl CudaSingleMemberRegions {
         if task.storage_conjugate()
             || task.blocks().iter().any(|block| match *block {
                 TreeTransformBlock::Single { coefficient, .. } => task
-                    .coefficients()
+                    .single_coefficients()
                     .get(coefficient)
                     .is_none_or(|&coefficient| coefficient == 0.0),
                 TreeTransformBlock::Multi { .. } => true,
@@ -83,7 +83,7 @@ impl CudaSingleMemberRegions {
                 .filter(|entry| {
                     entry
                         .coefficient
-                        .and_then(|index| task.coefficients().get(index))
+                        .and_then(|index| task.single_coefficients().get(index))
                         != Some(&1.0)
                 })
                 .count())
@@ -163,7 +163,7 @@ impl CudaSingleMemberRegions {
                 .map_err(OperationError::Dense)?;
             let coefficient = entry
                 .coefficient
-                .and_then(|index| task.coefficients().get(index))
+                .and_then(|index| task.single_coefficients().get(index))
                 .copied()
                 .ok_or(OperationError::InvalidArgument {
                     message: "CUDA CopyC Single move has no coefficient",
@@ -1060,12 +1060,10 @@ impl CudaTreeTransformExecutor {
 
         // The whole payload, converted once, indexed exactly as the structure
         // indexes it: a Single block's scalar at its own coefficient index and a
-        // Multi block's matrix as the run at its own `coefficient_start`.
-        let values: Vec<D> = task
-            .coefficients()
-            .iter()
-            .map(|coefficient| D::coefficient_as_data(*coefficient))
-            .collect();
+        // Multi block's matrix as the run at its own `coefficient_start`. This
+        // gathers the shared per-group matrices into the one upload; the gather
+        // is the conversion copy the upload already needed.
+        let values: Vec<D> = task.collect_logical_coefficients(D::coefficient_as_data);
         for entry in &mut prepared.moves {
             entry.zero_coefficient = entry
                 .coefficient
