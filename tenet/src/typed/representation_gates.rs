@@ -4181,7 +4181,7 @@ fn checked_compact_diagonal_eig_vals_keeps_dense_nonfinite_boundary() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn checked_compact_diagonal_svd_compact_avoids_input_materialization_and_solver() {
+fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
     use tenet_core::SUNFusionRule;
 
     let svd_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -4229,6 +4229,114 @@ fn checked_compact_diagonal_svd_compact_avoids_input_materialization_and_solver(
     assert!(s.dense_data().is_err());
     assert!(vh.dense_data().is_ok());
 
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    svd_calls.store(0, std::sync::atomic::Ordering::Relaxed);
+    let Svd { u, s, vh } = input.svd_full(&[0], &[1]).unwrap();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert!(std::ptr::eq(u.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(s.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
+    assert!(u.dense_data().is_ok());
+    assert!(s.dense_data().is_err());
+    assert!(vh.dense_data().is_ok());
+    assert_eq!(
+        s.diagview().unwrap(),
+        vec![
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![
+                    num_complex::Complex64::new(2.0, 0.0),
+                    num_complex::Complex64::new(0.0, 0.0),
+                ],
+            },
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![
+                    num_complex::Complex64::new(3.0, 0.0),
+                    num_complex::Complex64::new(1.0, 0.0),
+                    num_complex::Complex64::new(1.0, 0.0),
+                ],
+            },
+        ]
+    );
+    let expected_u: TensorMap<_, num_complex::Complex64> = TensorMap::from_subblock_fn(
+        &runtime,
+        u.codomain().iter(),
+        u.domain().iter(),
+        |trees, ij| {
+            let order: &[usize] = if trees.coupled() == &vec![0, 0] {
+                &[1, 0]
+            } else {
+                &[1, 0, 2]
+            };
+            num_complex::Complex64::new(f64::from(ij[0] == order[ij[1]]), 0.0)
+        },
+    )
+    .unwrap();
+    let expected_vh: TensorMap<_, num_complex::Complex64> = TensorMap::from_subblock_fn(
+        &runtime,
+        vh.codomain().iter(),
+        vh.domain().iter(),
+        |trees, ij| {
+            let (order, phases): (&[usize], &[num_complex::Complex64]) =
+                if trees.coupled() == &vec![0, 0] {
+                    (
+                        &[1, 0],
+                        &[
+                            num_complex::Complex64::new(-1.0, 0.0),
+                            num_complex::Complex64::new(1.0, 0.0),
+                        ],
+                    )
+                } else {
+                    (
+                        &[1, 0, 2],
+                        &[
+                            num_complex::Complex64::new(0.0, 1.0),
+                            num_complex::Complex64::new(1.0, 0.0),
+                            num_complex::Complex64::new(-1.0, 0.0),
+                        ],
+                    )
+                };
+            if ij[1] == order[ij[0]] {
+                phases[ij[0]]
+            } else {
+                num_complex::Complex64::new(0.0, 0.0)
+            }
+        },
+    )
+    .unwrap();
+    for (actual, expected) in [(&u, &expected_u), (&vh, &expected_vh)] {
+        assert!(actual
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(expected.dense_data().unwrap())
+            .all(|(actual, expected)| (*actual - *expected).norm() <= 1e-12));
+    }
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(input.materialize().unwrap().dense_data().unwrap())
+        .all(|(actual, expected)| (*actual - *expected).norm() <= 1e-12));
+
+    let changed = input.svd_full(&[1], &[0]).unwrap();
+    let rebuilt = changed
+        .u
+        .compose(&changed.s)
+        .unwrap()
+        .compose(&changed.vh)
+        .unwrap();
+    let expected = input.permute(&[1], &[0]).unwrap().materialize().unwrap();
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(expected.dense_data().unwrap())
+        .all(|(actual, expected)| (*actual - *expected).norm() <= 1e-12));
+
     let TypedData::Diagonal(spectrum) = owned(&input).data.as_ref() else {
         panic!("diagonal constructor must retain compact storage");
     };
@@ -4247,6 +4355,11 @@ fn checked_compact_diagonal_svd_compact_avoids_input_materialization_and_solver(
             .unwrap()
             .is_none()
         );
+        assert!(matches!(
+            tenet_matrixalgebra::svd_full_diagonal_factors_dyn_checked_generic(source, malformed)
+                .unwrap(),
+            tenet_matrixalgebra::CheckedDiagonalFullSvdFactors::NotAdmitted
+        ));
     }
 }
 
