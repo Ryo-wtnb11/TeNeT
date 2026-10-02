@@ -484,7 +484,6 @@ pub fn svd_vals_compact_diagonal_dyn<R, D>(
     spectrum: &[SectorSpectrum<D>],
 ) -> Result<Option<Vec<SectorSpectrum>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let Some(regions) =
