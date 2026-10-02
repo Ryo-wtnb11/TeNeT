@@ -53,20 +53,11 @@ where
     }
     let regions = checked_sector_regions(source.structure(), source.nout()).ok()??;
     validate_endomorphism_region_stacking(&regions, "diagonal QR requires aligned trees").ok()?;
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != spectrum.len() || by_sector.len() != regions.len() {
-        return None;
-    }
+    let by_sector = aligned_diagonal_spectrum_by_sector(&regions, spectrum)?;
     let mut q = Vec::with_capacity(regions.len());
     let mut r = Vec::with_capacity(regions.len());
     for region in regions.iter() {
         let entry = by_sector.get(&region.coupled())?;
-        if !region.has_aligned_diagonal()
-            || region.rows() != region.cols()
-            || entry.values.len() != region.rows()
-        {
-            return None;
-        }
         let mut phases = Vec::with_capacity(entry.values.len());
         let mut magnitudes = Vec::with_capacity(entry.values.len());
         for &value in &entry.values {
@@ -118,22 +109,16 @@ where
     if compact_bond_leg(&source_regions) != source.homspace().codomain().legs()[0] {
         return Ok(None);
     }
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != spectrum.len() || spectrum.len() != source_regions.len() {
+    let Some(by_sector) = aligned_diagonal_spectrum_by_sector(&source_regions, spectrum) else {
         return Ok(None);
-    }
+    };
     let mut phases = Vec::with_capacity(source_regions.len());
     let mut magnitudes = Vec::with_capacity(source_regions.len());
     for region in source_regions.iter() {
         let Some(entry) = by_sector.get(&region.coupled()) else {
             return Ok(None);
         };
-        if !region.has_aligned_diagonal()
-            || region.rows() != region.cols()
-            || region.row_trees().len() != 1
-            || region.col_trees().len() != 1
-            || entry.values.len() != region.rows()
-        {
+        if region.row_trees().len() != 1 || region.col_trees().len() != 1 {
             return Ok(None);
         }
         let mut sector_phases = Vec::with_capacity(entry.values.len());

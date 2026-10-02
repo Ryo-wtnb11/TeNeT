@@ -74,22 +74,15 @@ where
     {
         return Ok(None);
     }
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != spectrum.len() || by_sector.len() != source_regions.len() {
+    let Some(by_sector) = aligned_diagonal_spectrum_by_sector(&source_regions, spectrum) else {
         return Ok(None);
-    }
+    };
     let mut phase = Vec::with_capacity(source_regions.len());
     let mut magnitude = Vec::with_capacity(source_regions.len());
     for region in source_regions.iter() {
         let Some(entry) = by_sector.get(&region.coupled()) else {
             return Ok(None);
         };
-        if !region.has_aligned_diagonal()
-            || region.rows() != region.cols()
-            || entry.values.len() != region.rows()
-        {
-            return Ok(None);
-        }
         let mut phases = Vec::with_capacity(entry.values.len());
         let mut magnitudes = Vec::with_capacity(entry.values.len());
         for &value in &entry.values {
@@ -668,10 +661,10 @@ where
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
     let plan = checked_polar_plan(authority, source_len, direction, direction)?;
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != spectrum.len() || spectrum.len() != plan.routes.len() {
+    let Some(by_sector) = aligned_diagonal_spectrum_by_sector(&plan.source_regions, spectrum)
+    else {
         return Ok(None);
-    }
+    };
     let mut phase = Vec::with_capacity(spectrum.len());
     let mut magnitude = Vec::with_capacity(spectrum.len());
     for route in &plan.routes {
@@ -681,17 +674,14 @@ where
         let Some(entry) = by_sector.get(&source.coupled()) else {
             return Ok(None);
         };
-        if !source.has_aligned_diagonal()
-            || !w.has_aligned_diagonal()
+        if !w.has_aligned_diagonal()
             || !p.has_aligned_diagonal()
-            || source.rows() != source.cols()
             || source.row_trees().len() != 1
             || source.col_trees().len() != 1
             || w.row_trees().len() != 1
             || w.col_trees().len() != 1
             || p.row_trees().len() != 1
             || p.col_trees().len() != 1
-            || entry.values.len() != source.rows()
         {
             return Ok(None);
         }
