@@ -880,12 +880,32 @@ where
         tensor: &TensorMap<R, D>,
     ) -> Result<LeftPolar<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
     {
-        let mut dense = tensor.runtime.lease_dense();
         match &tensor.repr {
             TypedTensorRepr::Owned(body) => {
+                if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                    if is_diagonal_bond_space(body.space.space()) {
+                        if let Some(tenet_matrixalgebra::CheckedCompactPolarFactors {
+                            w_space,
+                            p_space,
+                            phase,
+                            magnitude,
+                        }) =
+                            tenet_matrixalgebra::left_polar_diagonal_spectra_dyn_checked_generic(
+                                &body.space,
+                                spectrum,
+                            )?
+                        {
+                            return Ok(LeftPolar {
+                                w: tensor.with_spectrum_on(w_space, phase),
+                                p: tensor.with_spectrum_on(p_space, magnitude),
+                            });
+                        }
+                    }
+                }
                 let payload = body.materialized_dense_data();
                 let input =
                     BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
+                let mut dense = tensor.runtime.lease_dense();
                 let LeftPolar { w, p } =
                     tenet_matrixalgebra::left_polar_dyn_checked_generic(dense.dense(), &input)?;
                 Ok(LeftPolar {
@@ -894,6 +914,7 @@ where
                 })
             }
             TypedTensorRepr::Adjoint(view) => {
+                let mut dense = tensor.runtime.lease_dense();
                 let input = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
                     .map_err(Error::from)?;
                 let RightPolar { p, wh: w } =
@@ -917,12 +938,32 @@ where
         tensor: &TensorMap<R, D>,
     ) -> Result<RightPolar<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
     {
-        let mut dense = tensor.runtime.lease_dense();
         match &tensor.repr {
             TypedTensorRepr::Owned(body) => {
+                if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                    if is_diagonal_bond_space(body.space.space()) {
+                        if let Some(tenet_matrixalgebra::CheckedCompactPolarFactors {
+                            w_space,
+                            p_space,
+                            phase,
+                            magnitude,
+                        }) =
+                            tenet_matrixalgebra::right_polar_diagonal_spectra_dyn_checked_generic(
+                                &body.space,
+                                spectrum,
+                            )?
+                        {
+                            return Ok(RightPolar {
+                                p: tensor.with_spectrum_on(p_space, magnitude),
+                                wh: tensor.with_spectrum_on(w_space, phase),
+                            });
+                        }
+                    }
+                }
                 let payload = body.materialized_dense_data();
                 let input =
                     BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
+                let mut dense = tensor.runtime.lease_dense();
                 let RightPolar { p, wh: w } =
                     tenet_matrixalgebra::right_polar_dyn_checked_generic(dense.dense(), &input)?;
                 Ok(RightPolar {
@@ -931,6 +972,7 @@ where
                 })
             }
             TypedTensorRepr::Adjoint(view) => {
+                let mut dense = tensor.runtime.lease_dense();
                 let input = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
                     .map_err(Error::from)?;
                 let LeftPolar { w, p } =

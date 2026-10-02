@@ -4365,6 +4365,111 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
+fn checked_compact_diagonal_polar_returns_compact_hand_oracle_without_dense_work() {
+    use tenet_core::SUNFusionRule;
+
+    let svd_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let gemm_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(CountPolarKernels {
+            inner: DefaultDenseExecutor::default(),
+            svd_calls: Arc::clone(&svd_calls),
+            gemm_calls: Arc::clone(&gemm_calls),
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let bond =
+        GradedSpace::try_new(Arc::clone(&provider), [(vec![0, 0], 2), (vec![1, 0], 3)]).unwrap();
+    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![
+                    Complex64::new(3.0, 4.0),
+                    Complex64::new(0.0, 0.0),
+                    Complex64::new(0.0, -2.0),
+                ],
+            },
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![Complex64::new(-3.0, 0.0), Complex64::new(0.0, 1.0)],
+            },
+        ],
+    )
+    .unwrap();
+    let dense_oracle = input.materialize().unwrap();
+
+    for left in [true, false] {
+        let (dense_w, dense_p) = if left {
+            let LeftPolar { w, p } = dense_oracle.left_polar(&[0], &[1]).unwrap();
+            (w, p)
+        } else {
+            let RightPolar { p, wh } = dense_oracle.right_polar(&[0], &[1]).unwrap();
+            (wh, p)
+        };
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        svd_calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        gemm_calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        let (w, p) = if left {
+            let LeftPolar { w, p } = input.left_polar(&[0], &[1]).unwrap();
+            (w, p)
+        } else {
+            let RightPolar { p, wh } = input.right_polar(&[0], &[1]).unwrap();
+            (wh, p)
+        };
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(gemm_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(std::ptr::eq(w.provider(), provider.as_ref()));
+        assert!(std::ptr::eq(p.provider(), provider.as_ref()));
+        assert_eq!(w.logical_space().space(), dense_w.logical_space().space());
+        assert_eq!(p.logical_space().space(), dense_p.logical_space().space());
+        assert!(w.dense_data().is_err());
+        assert!(p.dense_data().is_err());
+        let phase = w.spectrum().unwrap();
+        let magnitude = p.spectrum().unwrap();
+        for source in input.spectrum().unwrap() {
+            let actual_phase = phase
+                .iter()
+                .find(|entry| entry.sector == source.sector)
+                .unwrap();
+            let actual_magnitude = magnitude
+                .iter()
+                .find(|entry| entry.sector == source.sector)
+                .unwrap();
+            for ((&value, &got_phase), &got_magnitude) in source
+                .values
+                .iter()
+                .zip(&actual_phase.values)
+                .zip(&actual_magnitude.values)
+            {
+                let expected_magnitude = value.norm();
+                let expected_phase = if expected_magnitude == 0.0 {
+                    Complex64::new(1.0, 0.0)
+                } else {
+                    value / expected_magnitude
+                };
+                assert!((got_phase - expected_phase).norm() <= 1e-12);
+                assert!((got_magnitude - Complex64::new(expected_magnitude, 0.0)).norm() <= 1e-12);
+            }
+        }
+        let rebuilt = if left { w.compose(&p) } else { p.compose(&w) }.unwrap();
+        assert!(rebuilt
+            .materialize()
+            .unwrap()
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(dense_oracle.dense_data().unwrap())
+            .all(|(actual, expected)| (*actual - *expected).norm() <= 1e-12));
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
 fn checked_compact_diagonal_null_uses_coordinate_factors_without_dense_work() {
     use tenet_core::SUNFusionRule;
 

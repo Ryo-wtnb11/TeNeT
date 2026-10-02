@@ -534,22 +534,41 @@ pub(super) fn compile_polar_region_routes(
     Ok(routes)
 }
 
-pub(super) fn validate_checked_polar_direction<R>(
-    input: &BoundDynamicTensorRef<'_, R, impl DenseBlockScalar>,
+struct CheckedPolarPlan<R> {
+    source_regions: Arc<[CoupledSectorRegion]>,
+    w_regions: Arc<[CoupledSectorRegion]>,
+    p_regions: Arc<[CoupledSectorRegion]>,
+    routes: Vec<PolarRegionRoute>,
+    w_space: BoundDynamicFusionMapSpace<R>,
+    p_space: BoundDynamicFusionMapSpace<R>,
+}
+
+/// Compact checked-provider polar factors after the ordinary checked prelude.
+#[doc(hidden)]
+pub struct CheckedCompactPolarFactors<R, D> {
+    pub w_space: BoundDynamicFusionMapSpace<R>,
+    pub p_space: BoundDynamicFusionMapSpace<R>,
+    pub phase: Vec<SectorSpectrum<D>>,
+    pub magnitude: Vec<SectorSpectrum<D>>,
+}
+
+fn checked_polar_plan<R>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    source_len: usize,
     direction: PolarDirection,
     error_direction: PolarDirection,
-) -> Result<(), CheckedGenericFactorPlanError<R::Error>>
+) -> Result<CheckedPolarPlan<R>, CheckedGenericFactorPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
 {
-    let space = input.space().space();
+    let source_space = authority.space();
     let rows = coupled_sector_block_dimensions_generic_checked(
-        space.homspace().codomain(),
-        input.space().provider(),
+        source_space.homspace().codomain(),
+        authority.provider(),
     )?;
     let cols = coupled_sector_block_dimensions_generic_checked(
-        space.homspace().domain(),
-        input.space().provider(),
+        source_space.homspace().domain(),
+        authority.provider(),
     )?;
     for (&sector, &row_count) in &rows {
         if !direction.accepts(row_count, cols.get(&sector).copied().unwrap_or(0)) {
@@ -565,7 +584,165 @@ where
             ));
         }
     }
-    Ok(())
+    let w_space = authority.clone();
+    let p_homspace = match direction {
+        PolarDirection::Left => FusionTreeHomSpace::new(
+            source_space.homspace().domain().clone(),
+            source_space.homspace().domain().clone(),
+        ),
+        PolarDirection::Right => FusionTreeHomSpace::new(
+            source_space.homspace().codomain().clone(),
+            source_space.homspace().codomain().clone(),
+        ),
+    };
+    let p_nout = p_homspace.codomain().len();
+    let p_space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(authority.provider_arc()),
+        p_homspace,
+    )?;
+    let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?
+        .ok_or(CheckedGenericFactorPlanError::Operation(
+            OperationError::UnsupportedTensorContractScope {
+                message: "polar requires coupled-sector input storage",
+            },
+        ))?;
+    let w_regions = checked_sector_regions(w_space.space().structure(), w_space.space().nout())?
+        .ok_or(CheckedGenericFactorPlanError::Operation(
+            OperationError::UnsupportedTensorContractScope {
+                message: "polar requires coupled-sector W storage",
+            },
+        ))?;
+    let p_regions = checked_sector_regions(p_space.space().structure(), p_nout)?.ok_or(
+        CheckedGenericFactorPlanError::Operation(OperationError::UnsupportedTensorContractScope {
+            message: "polar requires coupled-sector P storage",
+        }),
+    )?;
+    let w_len = w_space
+        .space()
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let p_len = p_space
+        .space()
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let routes = compile_polar_region_routes(
+        &source_regions,
+        &w_regions,
+        &p_regions,
+        source_len,
+        w_len,
+        p_len,
+        direction,
+    )?;
+    Ok(CheckedPolarPlan {
+        source_regions,
+        w_regions,
+        p_regions,
+        routes,
+        w_space,
+        p_space,
+    })
+}
+
+fn polar_diagonal_spectra_dyn_checked_generic<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+    direction: PolarDirection,
+) -> Result<Option<CheckedCompactPolarFactors<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    // Refused numerics stay on the ordinary dense path, whose prelude remains
+    // the sole provider query sequence for that fallback.
+    if spectrum.iter().any(|entry| {
+        entry
+            .values
+            .iter()
+            .any(|&value| diagonal_phase_magnitude(value).is_none())
+    }) {
+        return Ok(None);
+    }
+    let source_len = authority
+        .space()
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let plan = checked_polar_plan(authority, source_len, direction, direction)?;
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != spectrum.len() || spectrum.len() != plan.routes.len() {
+        return Ok(None);
+    }
+    let mut phase = Vec::with_capacity(spectrum.len());
+    let mut magnitude = Vec::with_capacity(spectrum.len());
+    for route in &plan.routes {
+        let source = &plan.source_regions[route.source];
+        let w = &plan.w_regions[route.w];
+        let p = &plan.p_regions[route.p];
+        let Some(entry) = by_sector.get(&source.coupled()) else {
+            return Ok(None);
+        };
+        if !source.has_aligned_diagonal()
+            || !w.has_aligned_diagonal()
+            || !p.has_aligned_diagonal()
+            || source.rows() != source.cols()
+            || source.row_trees().len() != 1
+            || source.col_trees().len() != 1
+            || w.row_trees().len() != 1
+            || w.col_trees().len() != 1
+            || p.row_trees().len() != 1
+            || p.col_trees().len() != 1
+            || entry.values.len() != source.rows()
+        {
+            return Ok(None);
+        }
+        let mut phases = Vec::with_capacity(entry.values.len());
+        let mut magnitudes = Vec::with_capacity(entry.values.len());
+        for &value in &entry.values {
+            let Some((value_phase, value_magnitude)) = diagonal_phase_magnitude(value) else {
+                return Ok(None);
+            };
+            phases.push(value_phase);
+            magnitudes.push(value_magnitude);
+        }
+        phase.push(SectorSpectrum {
+            sector: source.coupled(),
+            values: phases,
+        });
+        magnitude.push(SectorSpectrum {
+            sector: source.coupled(),
+            values: magnitudes,
+        });
+    }
+    Ok(Some(CheckedCompactPolarFactors {
+        w_space: plan.w_space,
+        p_space: plan.p_space,
+        phase,
+        magnitude,
+    }))
+}
+
+#[doc(hidden)]
+pub fn left_polar_diagonal_spectra_dyn_checked_generic<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<CheckedCompactPolarFactors<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    polar_diagonal_spectra_dyn_checked_generic(authority, spectrum, PolarDirection::Left)
+}
+
+#[doc(hidden)]
+pub fn right_polar_diagonal_spectra_dyn_checked_generic<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<CheckedCompactPolarFactors<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    polar_diagonal_spectra_dyn_checked_generic(authority, spectrum, PolarDirection::Right)
 }
 
 pub(super) fn project_hermitian_col_major<D: FactorScalar>(matrix: &mut [D], n: usize) {
@@ -701,41 +878,21 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    validate_checked_polar_direction(input, direction, error_direction)?;
     let source_space = input.space().space();
-    let w_space = input.space().clone();
-    let p_homspace = match direction {
-        PolarDirection::Left => FusionTreeHomSpace::new(
-            source_space.homspace().domain().clone(),
-            source_space.homspace().domain().clone(),
-        ),
-        PolarDirection::Right => FusionTreeHomSpace::new(
-            source_space.homspace().codomain().clone(),
-            source_space.homspace().codomain().clone(),
-        ),
-    };
-    let p_nout = p_homspace.codomain().len();
-    let p_space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
-        Arc::clone(input.space().provider_arc()),
-        p_homspace,
+    let CheckedPolarPlan {
+        source_regions,
+        w_regions,
+        p_regions,
+        routes,
+        w_space,
+        p_space,
+    } = checked_polar_plan(
+        input.space(),
+        input.data().len(),
+        direction,
+        error_direction,
     )?;
-    let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?
-        .ok_or(CheckedGenericFactorPlanError::Operation(
-            OperationError::UnsupportedTensorContractScope {
-                message: "polar requires coupled-sector input storage",
-            },
-        ))?;
-    let w_regions = checked_sector_regions(w_space.space().structure(), w_space.space().nout())?
-        .ok_or(CheckedGenericFactorPlanError::Operation(
-            OperationError::UnsupportedTensorContractScope {
-                message: "polar requires coupled-sector W storage",
-            },
-        ))?;
-    let p_regions = checked_sector_regions(p_space.space().structure(), p_nout)?.ok_or(
-        CheckedGenericFactorPlanError::Operation(OperationError::UnsupportedTensorContractScope {
-            message: "polar requires coupled-sector P storage",
-        }),
-    )?;
+    let p_nout = p_space.space().nout();
     let w_len = w_space
         .space()
         .required_len()
@@ -744,15 +901,6 @@ where
         .space()
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
-    let routes = compile_polar_region_routes(
-        &source_regions,
-        &w_regions,
-        &p_regions,
-        input.data().len(),
-        w_len,
-        p_len,
-        direction,
-    )?;
 
     let data = input.data();
     // One scope spans the staged SVDs and the per-sector polar products.
