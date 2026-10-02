@@ -4377,9 +4377,10 @@ where
     /// Returns the per-coupled-sector diagonal of a `bond <- bond` map.
     ///
     /// MatrixAlgebraKit's `diagview`, and the spectrum reader for a factor that
-    /// is diagonal by construction but not stored compactly — a checked-Generic
-    /// `s`, or a device `s`/`d` brought back with `to_host`. Compact storage is
-    /// cloned; dense storage is read one strided diagonal per block.
+    /// is diagonal by construction but not stored compactly — an explicitly
+    /// materialized compact-SVD `s`, or a device `s`/`d` brought back with
+    /// `to_host`. Compact storage is cloned; dense storage is read one strided
+    /// diagonal per block.
     /// Off-diagonal entries are never inspected, so this returns the diagonal
     /// of an arbitrary endomorphism, not a proof that it is diagonal — use
     /// [`crate::expert::is_diagonal`] for that.
