@@ -454,9 +454,10 @@ mod fusion_tree;
 #[allow(unused_imports)]
 use fusion_tree::{
     add_spectrum_into, decode_block_fusion_trees, decode_sectors, diagonal_factor_on,
-    diagonal_factor_on_checked, is_diagonal_bond_space, map_block_fusion_trees, map_spectrum,
-    prepare_product_operand, scatter_spectrum, spectra_disagree, wrap_factor_on,
-    PreparedProductOperand, TreeExtents, TypedData,
+    diagonal_factor_on_bound, diagonal_factor_on_checked, full_svd_compact_bond,
+    full_svd_compact_layout, full_svd_spectrum_matches_bonds, is_diagonal_bond_space,
+    map_block_fusion_trees, map_spectrum, prepare_product_operand, scatter_spectrum,
+    spectra_disagree, wrap_factor_on, PreparedProductOperand, TreeExtents, TypedData,
 };
 pub use fusion_tree::{
     BlockFusionTrees, CoupledBlock, CoupledBlockPayload, FusionTreeLabels, SectorSpectrum,

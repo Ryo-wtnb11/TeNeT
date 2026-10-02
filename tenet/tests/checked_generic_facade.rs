@@ -2247,6 +2247,75 @@ fn checked_generic_dense_input_svd_publishes_compact_multisector_s() {
         .iter()
         .zip(complex.dense_data().unwrap())
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
+
+    {
+        let Svd { u, s, vh } = real.svd_full(&[0], &[1]).unwrap();
+        assert!(std::ptr::eq(s.provider(), provider.as_ref()));
+        assert_eq!(s.codomain(), s.domain());
+        assert!(s.dense_data().is_err());
+        assert!(s.network_reuse_class(false) == NetworkReuseClass::Compact);
+        let values = s.diagview().unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].sector, Label::Vacuum);
+        assert_eq!(values[1].sector, Label::X);
+        assert_eq!(values[0].values.len(), 2);
+        assert_eq!(values[1].values.len(), 3);
+        assert!(values
+            .iter()
+            .all(|entry| entry.values.windows(2).all(|pair| pair[0] >= pair[1])));
+        assert_eq!(
+            s.materialize().unwrap().diagview().unwrap(),
+            s.diagview().unwrap()
+        );
+        let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+        assert!(rebuilt
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(real.dense_data().unwrap())
+            .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
+    }
+    let Svd { u, s, vh } = complex.svd_full(&[0], &[1]).unwrap();
+    assert!(s.dense_data().is_err());
+    assert_eq!(s.diagview().unwrap().len(), 2);
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(complex.dense_data().unwrap())
+        .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
+}
+
+#[test]
+fn checked_generic_full_svd_keeps_dense_s_for_equal_total_but_unequal_sector_bonds() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let rows =
+        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 2), (Label::X, 3)]).unwrap();
+    let cols =
+        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 3), (Label::X, 2)]).unwrap();
+    let input: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&rows], [&cols], |_, ij| {
+            if ij[0] == ij[1] {
+                2.0
+            } else {
+                0.25
+            }
+        })
+        .unwrap();
+    let Svd { u, s, vh } = input.svd_full(&[0], &[1]).unwrap();
+    assert_ne!(s.codomain(), s.domain());
+    assert_eq!(s.codomain(), u.domain());
+    assert_eq!(s.domain(), vh.codomain());
+    assert!(s.dense_data().is_ok());
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(input.dense_data().unwrap())
+        .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 }
 
 #[cfg(feature = "racah-generated")]
@@ -2368,6 +2437,8 @@ fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy
     assert!(std::ptr::eq(u.provider(), provider.as_ref()));
     assert!(std::ptr::eq(s.provider(), provider.as_ref()));
     assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
+    assert!(s.dense_data().is_err());
+    assert_eq!(s.diagview().unwrap().len(), 1);
     let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
     assert!(rebuilt
         .dense_data()
@@ -5917,6 +5988,32 @@ fn checked_generic_compact_svd_failure_is_typed_and_nonpublishing() {
     let before = source.dense_data().unwrap().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = source.svd_compact(&[0, 1], &[2]).unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(
+            ToyError::Algebra
+        ))
+    ));
+    assert_eq!(source.dense_data().unwrap(), before.as_slice());
+}
+
+#[test]
+fn checked_generic_full_svd_failure_is_typed_and_nonpublishing() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, ij| {
+            if ij[0] == ij[1] {
+                2.0
+            } else {
+                0.25
+            }
+        })
+        .unwrap();
+    let before = source.dense_data().unwrap().to_vec();
+    provider.fail_algebra.store(true, Ordering::Relaxed);
+    let error = source.svd_full(&[0], &[1]).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(

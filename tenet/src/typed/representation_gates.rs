@@ -2647,6 +2647,85 @@ fn compact_diagonal_svd_full_preserves_spaces_without_materialization_or_solver(
 }
 
 #[test]
+fn full_svd_compact_bond_requires_complete_exact_nondual_sector_legs() {
+    let a = tenet_core::SectorId::new(1);
+    let b = tenet_core::SectorId::new(2);
+    let row = tenet_core::SectorLeg::new([(a, 2), (b, 3)], false);
+    let exact = vec![
+        tenet_matrixalgebra::SectorSpectrum {
+            sector: a,
+            values: vec![4.0, 1.0],
+        },
+        tenet_matrixalgebra::SectorSpectrum {
+            sector: b,
+            values: vec![3.0, 0.0, 0.0],
+        },
+    ];
+    assert!(full_svd_spectrum_matches_bonds(&row, &row, &exact));
+    let same_total = tenet_core::SectorLeg::new([(a, 3), (b, 2)], false);
+    assert!(!full_svd_spectrum_matches_bonds(&row, &same_total, &exact));
+    assert!(!full_svd_spectrum_matches_bonds(&row, &row, &exact[..1]));
+    let dual = tenet_core::SectorLeg::new([(a, 2), (b, 3)], true);
+    assert!(!full_svd_spectrum_matches_bonds(&dual, &dual, &exact));
+    let duplicate = [exact[0].clone(), exact[0].clone()];
+    assert!(!full_svd_spectrum_matches_bonds(&row, &row, &duplicate));
+}
+
+#[test]
+fn dense_multisector_full_svd_publishes_compact_s_for_real_and_complex() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
+    )
+    .unwrap();
+    let input: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                (indices[0] + 2) as f64
+            } else {
+                0.25
+            }
+        })
+        .unwrap();
+    let Svd { u, s, vh } = input.svd_full(&[0], &[1]).unwrap();
+    assert!(s.dense_data().is_err());
+    let values = s.diagview().unwrap();
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0].sector, U1Irrep::new(0));
+    assert_eq!(values[1].sector, U1Irrep::new(1));
+    assert_eq!(values[0].values.len(), 2);
+    assert_eq!(values[1].values.len(), 3);
+    assert!(values
+        .iter()
+        .all(|entry| entry.values.windows(2).all(|pair| pair[0] >= pair[1])));
+    assert_eq!(
+        s.materialize().unwrap().diagview().unwrap(),
+        s.diagview().unwrap()
+    );
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(input.dense_data().unwrap())
+        .all(|(actual, expected)| (actual - expected).abs() < 1.0e-12));
+    assert!(input.svd_full(&[1], &[0]).unwrap().s.dense_data().is_err());
+
+    let complex = input.convert::<Complex64>().scale(Complex64::new(1.0, 0.5));
+    let Svd { u, s, vh } = complex.svd_full(&[0], &[1]).unwrap();
+    assert!(s.dense_data().is_err());
+    assert_eq!(s.diagview().unwrap().len(), 2);
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(complex.dense_data().unwrap())
+        .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-12));
+}
+
+#[test]
 fn compact_diagonal_null_uses_coordinate_kernel_without_dense_solver() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let runtime = Runtime::builder()

@@ -598,19 +598,10 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     V: Copy,
 {
-    spectrum.sort_unstable_by_key(|entry| entry.sector);
     let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(authority, spectrum)?;
-    let data = spectrum
-        .iter()
-        .map(|entry| tenet_matrixalgebra::SectorSpectrum {
-            sector: entry.sector,
-            values: entry.values.iter().map(|&value| to_scalar(value)).collect(),
-        })
-        .collect();
-    Ok(TensorMap {
-        runtime: runtime.clone(),
-        repr: owned_repr(TypedTensorBody::diagonal(space, data)),
-    })
+    Ok(diagonal_factor_on_bound(
+        runtime, space, spectrum, to_scalar,
+    ))
 }
 
 /// [`diagonal_factor_on`] for the checked-generic providers, and borrowing for
@@ -629,8 +620,22 @@ where
     E: TensorScalar,
     V: Copy,
 {
-    spectrum.sort_unstable_by_key(|entry| entry.sector);
     let space = tenet_matrixalgebra::diagonal_bond_bound_space_generic_checked(provider, spectrum)?;
+    Ok(diagonal_factor_on_bound(
+        runtime, space, spectrum, to_scalar,
+    ))
+}
+
+pub(super) fn diagonal_factor_on_bound<R, E, V>(
+    runtime: &Runtime,
+    space: BoundDynamicFusionMapSpace<R>,
+    spectrum: &mut [tenet_matrixalgebra::SectorSpectrum<V>],
+    to_scalar: impl Fn(V) -> E,
+) -> TensorMap<R, E>
+where
+    V: Copy,
+{
+    spectrum.sort_unstable_by_key(|entry| entry.sector);
     let data = spectrum
         .iter()
         .map(|entry| tenet_matrixalgebra::SectorSpectrum {
@@ -638,10 +643,84 @@ where
             values: entry.values.iter().map(|&value| to_scalar(value)).collect(),
         })
         .collect();
-    Ok(TensorMap {
+    TensorMap {
         runtime: runtime.clone(),
         repr: owned_repr(TypedTensorBody::diagonal(space, data)),
-    })
+    }
+}
+
+/// Full SVD may store `S` compactly only on the exact constructed bond.
+pub(super) fn full_svd_compact_bond<R, D>(
+    u: &tenet_matrixalgebra::BoundDynFactor<R, D>,
+    vh: &tenet_matrixalgebra::BoundDynFactor<R, D>,
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum],
+) -> bool {
+    let u_domain = u.space().space().homspace().domain();
+    let vh_codomain = vh.space().space().homspace().codomain();
+    let (Some(row), Some(col)) = (
+        u_domain.legs().first().filter(|_| u_domain.len() == 1),
+        vh_codomain
+            .legs()
+            .first()
+            .filter(|_| vh_codomain.len() == 1),
+    ) else {
+        return false;
+    };
+    full_svd_spectrum_matches_bonds(row, col, spectrum)
+}
+
+pub(super) fn full_svd_spectrum_matches_bonds(
+    row: &SectorLeg,
+    col: &SectorLeg,
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum],
+) -> bool {
+    let Ok(spectrum_leg) = SectorLeg::try_new(
+        spectrum
+            .iter()
+            .map(|entry| (entry.sector, entry.values.len())),
+        false,
+    ) else {
+        return false;
+    };
+    row == col && row == &spectrum_leg && spectrum.len() == row.sectors().len()
+}
+
+/// A compact diagonal has exactly one square fusion-tree block per bond sector.
+pub(super) fn full_svd_compact_layout<R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum],
+) -> bool {
+    let homspace = space.space().homspace();
+    if space.space().nout() != 1
+        || space.space().nin() != 1
+        || homspace.codomain().legs() != homspace.domain().legs()
+    {
+        return false;
+    }
+    let structure = space.space().structure();
+    if structure.block_count() != spectrum.len() {
+        return false;
+    }
+    let mut seen = std::collections::HashSet::with_capacity(spectrum.len());
+    for index in 0..structure.block_count() {
+        let Ok(block) = structure.block(index) else {
+            return false;
+        };
+        let BlockKey::FusionTree(tree) = block.key() else {
+            return false;
+        };
+        let sector = tree.codomain_tree().coupled();
+        if tree.domain_tree() != tree.codomain_tree() || !seen.insert(sector) {
+            return false;
+        }
+        let Some(dimension) = homspace.codomain().legs()[0].degeneracy(sector) else {
+            return false;
+        };
+        if block.shape() != [dimension, dimension] {
+            return false;
+        }
+    }
+    true
 }
 
 /// [`TensorMap::wrap_bound_factor`]'s body, free for the same reason as

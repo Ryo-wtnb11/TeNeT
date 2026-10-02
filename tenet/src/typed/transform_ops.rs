@@ -2037,12 +2037,11 @@ where
     /// Returns an [`Svd`] with `u : codomain <- W`, `s : W <- W'` and
     /// `vh : W' <- domain`.
     ///
-    /// For admitted owned Host compact-diagonal inputs, `s` remains compact
-    /// on the existing nondual bond `W <- W`; `u` and `vh` are dense sorted
-    /// permutation/phase factors. This is TensorKit's diagonal full-SVD route.
-    /// Sorting costs `O(Σ_c k_c log k_c)` and dense factor writes cost
-    /// `O(Σ_c k_c²)`, without dense input materialization or a solver call.
-    /// Other inputs retain dense, possibly rectangular `s`. Use
+    /// `s` is compact when the constructed row and column bond legs coincide
+    /// exactly, its spectrum covers every bond sector, and the rank-(1,1)
+    /// compact layout is admitted. Otherwise `s` is dense and may be
+    /// rectangular. The direct owned compact-diagonal input route also avoids
+    /// dense input materialization and a solver call. Use
     /// [`Self::materialize`] when a dense singular-value buffer is required.
     ///
     /// # Errors
@@ -2068,20 +2067,39 @@ where
             }
         }
         let mut dense = self.runtime.lease_dense();
-        let out = match &self.repr {
-            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_full_adjoint_dyn(
+        let factors = match &self.repr {
+            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_full_adjoint_factors_dyn(
                 dense.dense(),
                 &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
             )?,
             TypedTensorRepr::Owned(_) => {
                 let (bound_space, bound_payload) = self.bound_payload()?;
-                tenet_matrixalgebra::svd_full_dyn(
+                tenet_matrixalgebra::svd_full_factors_dyn(
                     dense.dense(),
                     &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
                 )?
             }
         };
-        let (u, s, vh, _) = out.into_parts();
+        let (u, vh, mut spectrum, row_dimensions, col_dimensions) = factors.into_parts();
+        if full_svd_compact_bond(&u, &vh, &spectrum) {
+            let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(
+                self.logical_space(),
+                &spectrum,
+            )?;
+            if full_svd_compact_layout(&space, &spectrum) {
+                return Ok(Svd {
+                    u: self.wrap_bound_factor(u),
+                    s: diagonal_factor_on_bound(&self.runtime, space, &mut spectrum, D::from_real),
+                    vh: self.wrap_bound_factor(vh),
+                });
+            }
+        }
+        let s = tenet_matrixalgebra::rectangular_diagonal_bond_tensor(
+            self.logical_space(),
+            &spectrum,
+            &row_dimensions,
+            &col_dimensions,
+        )?;
         Ok(Svd {
             u: self.wrap_bound_factor(u),
             s: self.wrap_bound_factor(s),

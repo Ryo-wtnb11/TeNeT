@@ -1543,8 +1543,29 @@ where
         let payload = body.materialized_dense_data();
         let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let out = tenet_matrixalgebra::svd_full_dyn_checked_generic(dense.dense(), &input)?;
-        let (u, s, vh, _) = out.into_parts();
+        let factors =
+            tenet_matrixalgebra::svd_full_factors_dyn_checked_generic(dense.dense(), &input)?;
+        let (u, vh, mut spectrum, row_dimensions, col_dimensions) = factors.into_parts();
+        if full_svd_compact_bond(&u, &vh, &spectrum) {
+            let space = tenet_matrixalgebra::diagonal_bond_bound_space_generic_checked(
+                Arc::clone(input.space().provider_arc()),
+                &spectrum,
+            )?;
+            if full_svd_compact_layout(&space, &spectrum) {
+                return Ok(Svd {
+                    u: wrap_factor_on(&self.runtime, u),
+                    s: diagonal_factor_on_bound(&self.runtime, space, &mut spectrum, D::from_real),
+                    vh: wrap_factor_on(&self.runtime, vh),
+                });
+            }
+        }
+        let s = tenet_matrixalgebra::rectangular_diagonal_bond_tensor_generic_checked(
+            Arc::clone(input.space().provider_arc()),
+            &spectrum,
+            &row_dimensions,
+            &col_dimensions,
+            &D::from_real,
+        )?;
         Ok(Svd {
             u: wrap_factor_on(&self.runtime, u),
             s: wrap_factor_on(&self.runtime, s),
@@ -1814,10 +1835,12 @@ where
     /// `u : codomain <- W_out`, `s : W_out <- W_in`, and
     /// `vh : W_in <- domain`. It accepts the same inputs as
     /// [`Self::svd_compact`], but its square outer factors can require more
-    /// dense storage. Admitted owned Host multiplicity-free compact-diagonal
-    /// inputs keep `s` compact on `W_out = W_in`, with dense permutation/phase
-    /// `u` and `vh`, and require no dense input or solver. Other routes return
-    /// dense `s`. Call `s.materialize()` before `dense_data()` when needed.
+    /// dense storage. On Host, `s` uses compact diagonal storage exactly when
+    /// the constructed `W_out` and `W_in` legs coincide, every positive bond
+    /// sector has a complete spectrum, and the compact layout is admitted.
+    /// Otherwise it is dense. The admitted owned multiplicity-free compact
+    /// input route also avoids dense input materialization and a solver call.
+    /// Call `s.materialize()` before `dense_data()` when needed.
     /// Checked factors use the source provider instance; a failure returns no
     /// factors.
     ///

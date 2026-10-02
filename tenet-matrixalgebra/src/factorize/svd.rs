@@ -1285,6 +1285,41 @@ pub struct SvdFullDyn<R, D> {
     pub(super) singular_values: Vec<SectorSpectrum>,
 }
 
+/// Numerical full-SVD factors before choosing the storage of `S`.
+#[doc(hidden)]
+pub struct SvdFullFactorsDyn<R, D> {
+    u: BoundDynFactor<R, D>,
+    vh: BoundDynFactor<R, D>,
+    singular_values: Vec<SectorSpectrum>,
+    row_dimensions: BTreeMap<SectorId, usize>,
+    col_dimensions: BTreeMap<SectorId, usize>,
+    adjoint_space: Option<BoundDynamicFusionMapSpace<R>>,
+}
+
+impl<R, D> SvdFullFactorsDyn<R, D> {
+    #[expect(
+        clippy::type_complexity,
+        reason = "full-SVD factors retain both output bond maps"
+    )]
+    pub fn into_parts(
+        self,
+    ) -> (
+        BoundDynFactor<R, D>,
+        BoundDynFactor<R, D>,
+        Vec<SectorSpectrum>,
+        BTreeMap<SectorId, usize>,
+        BTreeMap<SectorId, usize>,
+    ) {
+        (
+            self.u,
+            self.vh,
+            self.singular_values,
+            self.row_dimensions,
+            self.col_dimensions,
+        )
+    }
+}
+
 impl<R, D> SvdFullDyn<R, D> {
     pub fn u(&self) -> &BoundDynFactor<R, D> {
         &self.u
@@ -1355,6 +1390,33 @@ where
     svd_full_oriented_dyn(dense, input, FactorPlacement::Direct)
 }
 
+/// Full-SVD numerical factors without publishing a dense `S` tensor.
+#[doc(hidden)]
+pub fn svd_full_factors_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<SvdFullFactorsDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    svd_full_oriented_factors_dyn(dense, input, FactorPlacement::Direct)
+}
+
+#[doc(hidden)]
+pub fn svd_full_adjoint_factors_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<SvdFullFactorsDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    svd_full_oriented_factors_dyn(dense, input, FactorPlacement::Adjoint)
+}
+
 /// Full SVD factors for the logical adjoint without constructing its input.
 #[doc(hidden)]
 pub fn svd_full_adjoint_dyn<E, R, D>(
@@ -1415,6 +1477,32 @@ pub(super) fn svd_full_oriented_dyn<E, R, D>(
     input: &BoundDynamicTensorRef<'_, R, D>,
     placement: FactorPlacement,
 ) -> Result<SvdFullDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let parts = svd_full_oriented_factors_dyn(dense, input, placement)?;
+    let authority = parts.adjoint_space.as_ref().unwrap_or(input.space());
+    let s = rectangular_diagonal_bond_tensor(
+        authority,
+        &parts.singular_values,
+        &parts.row_dimensions,
+        &parts.col_dimensions,
+    )?;
+    Ok(SvdFullDyn {
+        u: parts.u,
+        s,
+        vh: parts.vh,
+        singular_values: parts.singular_values,
+    })
+}
+
+fn svd_full_oriented_factors_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    placement: FactorPlacement,
+) -> Result<SvdFullFactorsDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -1593,17 +1681,17 @@ where
         FactorSide::Right,
         placement,
     )?;
-    let s_factor = rectangular_diagonal_bond_tensor(
-        authority,
-        &singular_values,
-        output_row_dimensions,
-        output_col_dimensions,
-    )?;
-    Ok(SvdFullDyn {
+    let (row_dimensions, col_dimensions) = match placement {
+        FactorPlacement::Direct => (row_dimensions, col_dimensions),
+        FactorPlacement::Adjoint => (col_dimensions, row_dimensions),
+    };
+    Ok(SvdFullFactorsDyn {
         u: u_factor,
-        s: s_factor,
         vh: vh_factor,
         singular_values,
+        row_dimensions,
+        col_dimensions,
+        adjoint_space,
     })
 }
 
@@ -1699,7 +1787,8 @@ where
 
 /// Rectangular diagonal `W_row <- W_col` bond factor (the `S` of the full
 /// SVD): per sector shape `[rows, cols]` with the spectrum on the diagonal.
-pub(super) fn rectangular_diagonal_bond_tensor<R, D>(
+#[doc(hidden)]
+pub fn rectangular_diagonal_bond_tensor<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectra: &[SectorSpectrum],
     row_dimensions: &BTreeMap<SectorId, usize>,
@@ -2389,6 +2478,35 @@ where
     D: FactorScalar,
 {
     let provider = input.space().provider_arc();
+    let parts = svd_full_factors_dyn_checked_generic(dense, input)?;
+    let (u, vh, singular_values, row_dimensions, col_dimensions) = parts.into_parts();
+    let s = rectangular_diagonal_bond_tensor_generic_checked(
+        Arc::clone(provider),
+        &singular_values,
+        &row_dimensions,
+        &col_dimensions,
+        &D::from_real,
+    )?;
+    Ok(SvdFullDyn {
+        u,
+        s,
+        vh,
+        singular_values,
+    })
+}
+
+/// Checked full-SVD numerical factors before choosing `S` storage.
+#[doc(hidden)]
+pub fn svd_full_factors_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<SvdFullFactorsDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = input.space().provider_arc();
     let space = input.space().space();
     // Why pack rather than borrow admitted regions: `owned_full_svd_stage`
     // moves each matrix into the dense provider, so a borrowed region would
@@ -2533,18 +2651,13 @@ where
         &col_dimensions,
         FactorSide::Right,
     )?;
-    let s = rectangular_diagonal_bond_tensor_generic_checked(
-        Arc::clone(provider),
-        &singular_values,
-        &row_dimensions,
-        &col_dimensions,
-        &D::from_real,
-    )?;
-    Ok(SvdFullDyn {
+    Ok(SvdFullFactorsDyn {
         u,
-        s,
         vh,
         singular_values,
+        row_dimensions,
+        col_dimensions,
+        adjoint_space: None,
     })
 }
 
