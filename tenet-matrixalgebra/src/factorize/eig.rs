@@ -835,7 +835,6 @@ pub fn eig_vals_diagonal_dyn<R, D>(
     spectrum: &[SectorSpectrum<D>],
 ) -> Result<Option<Vec<SectorSpectrum<Complex64>>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let space = authority.space();
