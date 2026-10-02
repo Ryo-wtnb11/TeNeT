@@ -2322,7 +2322,7 @@ where
     ///
     /// `W` is a fresh non-dual single-leg bond space carrying, per coupled
     /// sector `c`, the `rows_c − rank_c` null directions; `rank_c` is the
-    /// numerical rank the seam takes from that sector's compact SVD, counting
+    /// numerical rank under the same cutoff as the sector's compact SVD, counting
     /// `σ > ε(dtype) · max(rows_c, cols_c) · σ_max,c` as nonzero. A sector
     /// with no null directions is absent from `W`, so `W` is empty for a
     /// numerically full-rank tensor. Note this is *not*
@@ -2338,10 +2338,16 @@ where
     ///
     /// # Complexity
     ///
-    /// Sectorwise cubic — one compact SVD per coupled sector plus an
-    /// orthonormal completion of the sectors that keep null directions; a
-    /// compact-diagonal payload is materialized dense first. A lazy adjoint
-    /// runs the owned parent's
+    /// Sectorwise cubic for dense input: one compact SVD per coupled sector
+    /// plus an orthonormal completion where needed. An admitted owned Host
+    /// compact diagonal with exact zero and well-separated nonzero entries
+    /// reads its spectrum directly and writes rectangular coordinate factors
+    /// in O(Σ k_c + Σ k_c q_c) work and storage, where q_c is nullity.
+    /// Positive magnitudes at or below
+    /// `max(ε k_c, sqrt(ε)) σ_max,c` conservatively use the existing SVD
+    /// route, as do nonfinite, subnormal-scaled, or unsupported layouts. This margin is an
+    /// optimization gate, not a promise of bitwise provider-rank agreement.
+    /// A lazy adjoint runs the owned parent's
     /// [`Self::right_null`] and returns its detached adjoint, without
     /// materializing the receiver.
     pub(super) fn left_null_multiplicity_free(&self) -> Result<Self, Error>
@@ -2354,6 +2360,15 @@ where
                 .right_null_multiplicity_free()?
                 .adjoint()?
                 .materialized_tensor_uncached();
+        }
+        if let TypedTensorRepr::Owned(body) = &self.repr {
+            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                if let Some(out) =
+                    tenet_matrixalgebra::left_null_diagonal_dyn(&body.space, spectrum)?
+                {
+                    return Ok(self.wrap_bound_factor(out));
+                }
+            }
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
@@ -2381,9 +2396,9 @@ where
     ///
     /// # Complexity
     ///
-    /// As [`Self::left_null`]: sectorwise cubic, compact-diagonal payload
-    /// materialized dense first. A lazy adjoint mirrors the parent redirect
-    /// described there.
+    /// As [`Self::left_null`], including its direct compact-diagonal route
+    /// and conservative SVD fallback. A lazy adjoint mirrors the parent
+    /// redirect described there.
     pub(super) fn right_null_multiplicity_free(&self) -> Result<Self, Error>
     where
         D: FactorizationScalar,
@@ -2394,6 +2409,15 @@ where
                 .left_null_multiplicity_free()?
                 .adjoint()?
                 .materialized_tensor_uncached();
+        }
+        if let TypedTensorRepr::Owned(body) = &self.repr {
+            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                if let Some(out) =
+                    tenet_matrixalgebra::right_null_diagonal_dyn(&body.space, spectrum)?
+                {
+                    return Ok(self.wrap_bound_factor(out));
+                }
+            }
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
@@ -4056,10 +4080,16 @@ where
     /// nullity rather than this SVD numerical rank. [`Self::right_null`]
     /// returns the corresponding basis on the domain side.
     ///
-    /// The compact SVD costs
+    /// The dense-input compact SVD costs
     /// `O(sum_c m_c * n_c * min(m_c, n_c))`, plus an orthonormal completion in
-    /// sectors that keep null directions. Compact diagonal input is
-    /// materialized first. Lazy adjoints use the opposite null space of their
+    /// sectors that keep null directions. An admitted Host compact diagonal
+    /// with exact zero and well-separated nonzero entries uses a direct
+    /// coordinate basis in `O(sum_c k_c + sum_c k_c q_c)` work and storage,
+    /// where `k_c` is sector size and `q_c` is nullity. Positive magnitudes
+    /// within `max(epsilon(dtype) * k_c, sqrt(epsilon(dtype))) * sigma_max,c`
+    /// retain the SVD route, as do nonfinite, subnormal-scaled, and unsupported layouts. This
+    /// conservative gate does not promise bitwise agreement with any dense
+    /// provider at the cutoff. Lazy adjoints use the opposite null space of their
     /// owned parent and return a detached result without filling the receiver
     /// cache. Checked results use the same provider instance as `self`. TeNeT
     /// creates the output bond only after every sector succeeds; otherwise it
@@ -4094,7 +4124,8 @@ where
     ///
     /// The fresh bond contains `n_c - rank_c` directions per sector. It uses
     /// the same numerical cutoff and cost as [`Self::left_null`], with rows and
-    /// columns exchanged. Compact inputs are materialized first; a lazy
+    /// columns exchanged. Admitted Host compact diagonals use the direct
+    /// coordinate route described above; a lazy
     /// adjoint uses the left null space of its owned parent without
     /// materializing the receiver. Checked results use the source provider instance, and a
     /// failure returns no tensor.

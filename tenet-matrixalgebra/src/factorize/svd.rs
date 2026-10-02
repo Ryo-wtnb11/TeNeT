@@ -470,7 +470,7 @@ where
     Ok(singular_values)
 }
 
-fn finite_compact_magnitude<D: FactorScalar>(value: D) -> Option<f64> {
+pub(super) fn finite_compact_magnitude<D: FactorScalar>(value: D) -> Option<f64> {
     let magnitude = value.widen_complex().norm();
     (magnitude.is_finite() && D::from_real(magnitude).widen_complex().re.is_finite())
         .then_some(magnitude)

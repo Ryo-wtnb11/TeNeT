@@ -1,5 +1,153 @@
 use super::*;
 
+fn compact_singular_value<D: FactorScalar>(value: D) -> Option<f64> {
+    let magnitude = finite_compact_magnitude(value)?;
+    let rounded = D::from_real(magnitude).widen_complex().re;
+    (rounded.is_finite() && (magnitude == 0.0 || rounded > 0.0)).then_some(rounded)
+}
+
+/// Coordinate kernels of an admitted compact diagonal. A sector with any
+/// positive magnitude near the rank cutoff stays on the solver path; the
+/// margin is conservative, not a provider-specific singular-value bound.
+fn null_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+    left: bool,
+) -> Result<Option<BoundDynFactor<R, D>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let space = authority.space();
+    let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
+        return Ok(None);
+    };
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != regions.len() || spectrum.len() != regions.len() {
+        return Ok(None);
+    }
+    let mut null_dimensions = if left {
+        space
+            .homspace()
+            .codomain()
+            .coupled_sector_block_dimensions(authority.provider())?
+    } else {
+        space
+            .homspace()
+            .domain()
+            .coupled_sector_block_dimensions(authority.provider())?
+    };
+    let mut pairs = Vec::new();
+    for region in regions.iter() {
+        let k = region.rows();
+        let Some(entry) = by_sector.get(&region.coupled()) else {
+            return Ok(None);
+        };
+        if !region.has_aligned_diagonal() || k != region.cols() || entry.values.len() != k {
+            return Ok(None);
+        }
+        let Some((sigma_max, q)) =
+            entry
+                .values
+                .iter()
+                .copied()
+                .try_fold((0.0_f64, 0_usize), |(largest, zeros), value| {
+                    compact_singular_value(value).map(|magnitude| {
+                        (
+                            largest.max(magnitude),
+                            zeros + usize::from(magnitude == 0.0),
+                        )
+                    })
+                })
+        else {
+            return Ok(None);
+        };
+        let cutoff = D::epsilon() * k as f64 * sigma_max;
+        let margin = cutoff.max(D::epsilon().sqrt() * sigma_max);
+        if !margin.is_finite()
+            || (sigma_max > 0.0 && (margin == 0.0 || sigma_max < D::safe_minimum()))
+        {
+            return Ok(None);
+        }
+        for &value in &entry.values {
+            let Some(magnitude) = compact_singular_value(value) else {
+                return Ok(None);
+            };
+            if magnitude > 0.0 && magnitude <= margin {
+                return Ok(None);
+            }
+        }
+        if q == 0 {
+            null_dimensions.remove(&region.coupled());
+            continue;
+        }
+        null_dimensions.insert(region.coupled(), q);
+        let mut coordinates = vec![D::zero(); k * q];
+        let mut column = 0;
+        for (index, &value) in entry.values.iter().enumerate() {
+            if compact_singular_value(value) != Some(0.0) {
+                continue;
+            }
+            if left {
+                coordinates[index + column * k] = D::from_real(1.0);
+            } else {
+                coordinates[column + index * q] = D::from_real(1.0);
+            }
+            column += 1;
+        }
+        let (left_data, right_data) = if left {
+            (coordinates, Vec::new())
+        } else {
+            (Vec::new(), coordinates)
+        };
+        pairs.push(FactorPair {
+            sector: region.coupled(),
+            kept: q,
+            left: left_data,
+            left_rows: k,
+            right: right_data,
+            right_leading: q,
+        });
+    }
+    let side = if left {
+        FactorSide::Left
+    } else {
+        FactorSide::Right
+    };
+    Ok(Some(build_bound_factor(
+        authority,
+        space.homspace(),
+        regions.as_ref(),
+        &mut pairs,
+        &null_dimensions,
+        side,
+    )?))
+}
+
+#[doc(hidden)]
+pub fn left_null_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<BoundDynFactor<R, D>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    null_diagonal_dyn(authority, spectrum, true)
+}
+
+#[doc(hidden)]
+pub fn right_null_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Option<BoundDynFactor<R, D>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    null_diagonal_dyn(authority, spectrum, false)
+}
+
 /// Left null space `N : codomain <- W` (MatrixAlgebraKit `left_null`).
 ///
 /// Each sector uses its compact SVD and treats `sigma` as nonzero exactly when
