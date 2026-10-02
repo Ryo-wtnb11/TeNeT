@@ -14,6 +14,9 @@ revision-specific evidence, not current performance claims.
   `tensorkit_eager_overhead.jl`, `eager_overhead_phases.py`): per-call time,
   allocations, thread layouts, and sampled phase attribution of the eager
   primitives on small many-block tensors against TensorKit.
+- [`issue_1684_null.rs`](issue_1684_null.rs): paired Host compact-diagonal
+  left/right null-space calls with dense and near-cutoff controls; raw results
+  and method are in [`issue_1684_results/`](issue_1684_results/README.md).
 
 Run a harness at the revision being evaluated and keep its correctness checks
 enabled. A historical result does not become current because its script still

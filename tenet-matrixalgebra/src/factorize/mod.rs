@@ -97,8 +97,8 @@ pub use eig::{
     validate_hermitian_regions, EigFull, EigFullDyn, EighFull, EighFullDyn,
 };
 pub use null_space::{
-    left_null, left_null_dyn, left_null_dyn_checked_generic, right_null, right_null_dyn,
-    right_null_dyn_checked_generic,
+    left_null, left_null_diagonal_dyn, left_null_dyn, left_null_dyn_checked_generic, right_null,
+    right_null_diagonal_dyn, right_null_dyn, right_null_dyn_checked_generic,
 };
 pub use polar::{
     left_polar, left_polar_adjoint_parent_dyn, left_polar_adjoint_parent_dyn_checked_generic,
