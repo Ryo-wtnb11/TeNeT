@@ -3559,6 +3559,235 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
+fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
+    use tenet_core::SUNFusionRule;
+
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(CountEighVals {
+            calls: Arc::clone(&calls),
+            ..Default::default()
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg =
+        GradedSpace::try_new(Arc::clone(&provider), [(vec![0, 0], 2), (vec![1, 0], 3)]).unwrap();
+    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![
+                    Complex64::new(2.0, 0.0),
+                    Complex64::new(-2.0, 0.0),
+                    Complex64::new(1.0, 0.0),
+                ],
+            },
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![Complex64::new(-4.0, 0.0), Complex64::new(0.0, 0.0)],
+            },
+        ],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let got = input.eigh_vals(&[0], &[1]).unwrap();
+    assert_eq!(
+        got,
+        vec![
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![-4.0, 0.0],
+            },
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![-2.0, 2.0, 1.0],
+            },
+        ]
+    );
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+    let swapped = input.eigh_vals(&[1], &[0]).unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    let swapped_dense = input.permute(&[1], &[0]).unwrap().materialize().unwrap();
+    assert_eq!(swapped, swapped_dense.eigh_vals(&[0], &[1]).unwrap());
+    let dense = input.materialize().unwrap();
+    assert_eq!(got, dense.eigh_vals(&[0], &[1]).unwrap());
+
+    let real: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![2.0, -2.0, 1.0],
+            },
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![-4.0, 0.0],
+            },
+        ],
+    )
+    .unwrap();
+    let dense_real = real.materialize().unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(
+        real.eigh_vals(&[0], &[1]).unwrap(),
+        dense_real.eigh_vals(&[0], &[1]).unwrap()
+    );
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+
+    let narrow: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![
+                    num_complex::Complex32::new(2.0, 0.0),
+                    num_complex::Complex32::new(-2.0, 0.0),
+                    num_complex::Complex32::new(1.0, 0.0),
+                ],
+            },
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![
+                    num_complex::Complex32::new(-4.0, 0.0),
+                    num_complex::Complex32::new(0.0, 0.0),
+                ],
+            },
+        ],
+    )
+    .unwrap();
+    let dense_narrow = narrow.materialize().unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(
+        narrow.eigh_vals(&[0], &[1]).unwrap(),
+        dense_narrow.eigh_vals(&[0], &[1]).unwrap()
+    );
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    calls.store(0, std::sync::atomic::Ordering::Relaxed);
+
+    let dual_leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 0], 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let dual_sector = dual_leg.sectors().unwrap().remove(0);
+    let dual: TensorMap<_, f32> = TensorMap::diagonal(
+        &runtime,
+        &dual_leg,
+        [SectorSpectrum {
+            sector: dual_sector.clone(),
+            values: vec![-2.0, 2.0],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(
+        dual.eigh_vals(&[0], &[1]).unwrap(),
+        vec![SectorSpectrum {
+            sector: dual_sector,
+            values: vec![-2.0, 2.0],
+        }]
+    );
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_compact_diagonal_eigh_vals_rejects_inconsistent_spectrum_admission() {
+    use tenet_core::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg = GradedSpace::try_new(provider, [(vec![0, 0], 2), (vec![1, 0], 1)]).unwrap();
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![1.0, -1.0],
+            },
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![2.0],
+            },
+        ],
+    )
+    .unwrap();
+    let spectrum = input.spectrum().unwrap();
+    let admit = |entries: &[tenet_matrixalgebra::SectorSpectrum<f64>]| {
+        tenet_matrixalgebra::eigh_vals_diagonal_dyn(input.logical_space(), entries).unwrap()
+    };
+    assert!(admit(spectrum).is_some());
+    let mut reversed = spectrum.to_vec();
+    reversed.reverse();
+    assert!(admit(&reversed).is_some());
+    assert!(admit(&spectrum[..1]).is_none());
+    let mut duplicate = spectrum.to_vec();
+    duplicate[1].sector = duplicate[0].sector;
+    assert!(admit(&duplicate).is_none());
+    let mut wrong_size = spectrum.to_vec();
+    wrong_size[0].values.push(0.0);
+    assert!(admit(&wrong_size).is_none());
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_compact_diagonal_eigh_vals_keeps_dense_hermiticity_boundary() {
+    use tenet_core::SUNFusionRule;
+
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(CountEighVals {
+            calls: Arc::clone(&calls),
+            ..Default::default()
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg = GradedSpace::try_new(provider, [(vec![0, 0], 1)]).unwrap();
+    let near: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: vec![0, 0],
+            values: vec![Complex64::new(1.0, 1e-15)],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(near.eigh_vals(&[0], &[1]).unwrap()[0].values, [1.0]);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: vec![0, 0],
+            values: vec![f64::NAN],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let compact_error = nonfinite.eigh_vals(&[0], &[1]).unwrap_err();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    let dense_error = nonfinite
+        .materialize()
+        .unwrap()
+        .eigh_vals(&[0], &[1])
+        .unwrap_err();
+    assert_eq!(compact_error.to_string(), dense_error.to_string());
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
 fn checked_compact_diagonal_svd_vals_rounds_at_payload_precision() {
     use tenet_core::SUNFusionRule;
 

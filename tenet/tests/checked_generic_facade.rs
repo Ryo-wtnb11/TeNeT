@@ -2910,6 +2910,25 @@ fn checked_generic_eigh_vals_preserves_spectrum_and_dtype() {
 
     let complex = source.convert::<Complex64>();
     assert_eq!(complex.eigh_vals(&[0], &[1]).unwrap(), spectra);
+
+    let compact: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![2.5],
+        }],
+    )
+    .unwrap();
+    assert_eq!(compact.eigh_vals(&[0], &[1]).unwrap(), spectra);
+    provider.fail_decode.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        compact.eigh_vals(&[0], &[1]),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Decode)
+        ))
+    ));
+    provider.fail_decode.store(false, Ordering::Relaxed);
 }
 
 fn assert_checked_generic_eigh_factors<D>(

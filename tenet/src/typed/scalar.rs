@@ -1330,11 +1330,26 @@ where
                 "checked Generic eigh_vals does not accept lazy adjoints".to_string(),
             )));
         };
-        let mut dense = self.runtime.lease_dense();
-        let payload = body.materialized_dense_data();
-        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let raw = tenet_matrixalgebra::eigh_vals_dyn_checked_generic(dense.dense(), &input)?;
+        let direct = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            if is_diagonal_bond_space(body.space.space()) {
+                tenet_matrixalgebra::eigh_vals_diagonal_dyn(&body.space, spectrum).map_err(
+                    |error| GenericTensorError::Plan(CheckedGenericPlanError::Operation(error)),
+                )?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let raw = if let Some(raw) = direct {
+            raw
+        } else {
+            let mut dense = self.runtime.lease_dense();
+            let payload = body.materialized_dense_data();
+            let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
+                .map_err(|error| GenericTensorError::Facade(error.into()))?;
+            tenet_matrixalgebra::eigh_vals_dyn_checked_generic(dense.dense(), &input)?
+        };
         let provider = self.logical_space().provider();
         let mut decoded = raw
             .into_iter()
@@ -2224,10 +2239,13 @@ where
     ///
     /// No eigenvector factor or bond space is built. The input must be an
     /// endomorphism and every sector must satisfy the same Hermiticity check as
-    /// [`Self::eigh_full`]. An owned Host multiplicity-free compact diagonal
-    /// with finite, exactly real entries is read directly; other compact
-    /// inputs and lazy adjoints use the dense route. Checked Generic currently
-    /// requires owned input for this values-only method. Dense failures return
+    /// [`Self::eigh_full`]. An owned Host compact diagonal with finite, exactly
+    /// real entries and an admitted endomorphism sector layout is read directly
+    /// for both multiplicity-free and checked-Generic providers. The checked
+    /// route also requires the canonical bond space and a bijection between
+    /// stored spectra and aligned square sector regions. Other compact inputs
+    /// use the dense route; checked Generic requires owned input and rejects
+    /// lazy adjoints for this values-only method. Dense failures return
     /// [`Error::Operation`],
     /// layout failures return [`Error::Core`], and an original provider or
     /// label-decoding error is available as the source. No spectrum is returned
