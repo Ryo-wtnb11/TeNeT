@@ -1298,6 +1298,7 @@ pub(super) fn sector_region_index_map(
 
 /// Proves that a compact diagonal spectrum exactly covers aligned square
 /// source regions and returns the sole sector lookup used by its caller.
+/// Region labels are unique because callers pass `checked_sector_regions` output.
 pub(super) fn aligned_diagonal_spectrum_by_sector<'a, D>(
     regions: &[CoupledSectorRegion],
     spectrum: &'a [SectorSpectrum<D>],
