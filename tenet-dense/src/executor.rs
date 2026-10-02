@@ -313,8 +313,11 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
     ///
     /// `runs` is the plan-time run partition of `jobs` (see
     /// [`strided_batch_runs`] and issue #103): consecutive run lengths summing
-    /// to `jobs.len()`. Backends that route runs differently read it to avoid
-    /// recomputing the partition per replay; the serial default ignores it.
+    /// to `jobs.len()`. It is a routing hint only: the result is the per-job
+    /// GEMM above for every `runs`. Backends that route runs differently read
+    /// it to avoid recomputing the partition per replay, but must check that a
+    /// run they batch is one same-shape, constant-stride run and otherwise
+    /// execute its jobs individually; the serial default ignores it.
     #[expect(
         clippy::too_many_arguments,
         reason = "the dense backend boundary keeps three buffers, batch metadata, and BLAS alpha/beta explicit"

@@ -403,10 +403,20 @@ impl DefaultDenseExecutor {
         self.seam_dispatches
     }
 
+    /// Jobs staged for the last grouped submission; zero on a fresh executor
+    /// whose identity batches all took the strided route.
+    #[cfg(test)]
+    pub(crate) fn staged_grouped_jobs(&self) -> usize {
+        self.grouped_jobs.len()
+    }
+
     /// Routes one typed identity batch by what the two tenferro entries can
     /// represent, not by a run-length cutoff. The strided entry is one rank-3
     /// contraction, so it can carry a batch iff the batch is ONE affine run:
-    /// `runs == [jobs.len()]`, at least two jobs (a step needs two offsets), and
+    /// `runs == [jobs.len()]`, at least two jobs (a step needs two offsets),
+    /// every job sharing job 0's shape and the job-0-to-job-1 offset steps
+    /// (`strided_batch_run_len`, O(J): `runs` is a caller claim, and a wrong
+    /// one would apply job 0's shape and steps to every job), and
     /// a destination step of at least `rows * cols`, which is the O(1) proof
     /// that the rank-3 destination view is self-disjoint (tenferro's dot path
     /// does not check destination overlap; its grouped validator does). The
@@ -444,6 +454,7 @@ impl DefaultDenseExecutor {
         }
         let single_self_disjoint_run = runs == [jobs.len()]
             && jobs.len() >= 2
+            && strided_batch_run_len(jobs, 0) == jobs.len()
             && jobs[1]
                 .dst_offset
                 .checked_sub(jobs[0].dst_offset)
