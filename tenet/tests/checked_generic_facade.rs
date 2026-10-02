@@ -6169,6 +6169,48 @@ fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
     assert!(std::ptr::eq(source.provider(), provider.as_ref()));
 }
 
+#[test]
+fn checked_compact_null_fallback_reuses_the_admission_dimension_query() {
+    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(PinvFaultExecutor {
+            inner: DefaultDenseExecutor::new(),
+            svd_calls: Arc::clone(&svd_calls),
+            gemm_calls: Arc::new(AtomicUsize::new(0)),
+            fail_svd: None,
+            fail_gemm: None,
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let source: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![1.0, 4.0 * f64::EPSILON],
+        }],
+    )
+    .unwrap();
+    let dense = source.materialize().unwrap();
+
+    reset_provider_queries(&provider);
+    source.left_null(&[0], &[1]).unwrap();
+    let compact_queries = provider.queries_since_reset.load(Ordering::Relaxed);
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 1);
+
+    reset_provider_queries(&provider);
+    svd_calls.store(0, Ordering::Relaxed);
+    dense.left_null(&[0], &[1]).unwrap();
+    assert_eq!(
+        provider.queries_since_reset.load(Ordering::Relaxed),
+        compact_queries
+    );
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 1);
+}
+
 // Why not fewer args: each parameter is an independent fixture input for one
 // assertion helper shared by several SU(N) null-projector tests; bundling
 // them would add a struct with a single call-site shape.

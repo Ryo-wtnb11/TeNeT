@@ -98,8 +98,11 @@ pub use eig::{
     EighFullDyn,
 };
 pub use null_space::{
-    left_null, left_null_diagonal_dyn, left_null_dyn, left_null_dyn_checked_generic, right_null,
-    right_null_diagonal_dyn, right_null_dyn, right_null_dyn_checked_generic,
+    left_null, left_null_diagonal_dyn, left_null_diagonal_dyn_checked_generic, left_null_dyn,
+    left_null_dyn_checked_generic, left_null_dyn_checked_generic_with_dimensions, right_null,
+    right_null_diagonal_dyn, right_null_diagonal_dyn_checked_generic, right_null_dyn,
+    right_null_dyn_checked_generic, right_null_dyn_checked_generic_with_dimensions,
+    CheckedDiagonalNullFactor,
 };
 pub use polar::{
     left_polar, left_polar_adjoint_parent_dyn, left_polar_adjoint_parent_dyn_checked_generic,

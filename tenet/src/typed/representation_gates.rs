@@ -4365,6 +4365,144 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
+fn checked_compact_diagonal_null_uses_coordinate_factors_without_dense_work() {
+    use tenet_core::SUNFusionRule;
+
+    macro_rules! check {
+        ($dtype:ty) => {{
+            let svd_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let runtime = Runtime::builder()
+                .with_dense_executor(Box::new(CountPolarKernels {
+                    inner: DefaultDenseExecutor::default(),
+                    svd_calls: Arc::clone(&svd_calls),
+                    gemm_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                }))
+                .build()
+                .unwrap();
+            let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+            let bond =
+                GradedSpace::try_new(Arc::clone(&provider), [(vec![0, 0], 2), (vec![1, 0], 3)])
+                    .unwrap();
+            let input: TensorMap<_, $dtype> = TensorMap::diagonal(
+                &runtime,
+                &bond,
+                [
+                    SectorSpectrum {
+                        sector: vec![1, 0],
+                        values: vec![
+                            <$dtype>::from_real(1.0),
+                            <$dtype>::from_real(0.0),
+                            <$dtype>::from_real(0.0),
+                        ],
+                    },
+                    SectorSpectrum {
+                        sector: vec![0, 0],
+                        values: vec![<$dtype>::from_real(0.0), <$dtype>::from_real(-2.0)],
+                    },
+                ],
+            )
+            .unwrap();
+            let dense_input = input.materialize().unwrap();
+            DIAGONAL_MATERIALIZATIONS.set(0);
+            let left = input.left_null(&[0], &[1]).unwrap();
+            let right = input.right_null(&[0], &[1]).unwrap();
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+            assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert!(std::ptr::eq(left.provider(), provider.as_ref()));
+            assert!(std::ptr::eq(right.provider(), provider.as_ref()));
+            assert_eq!(left.domain()[0].degeneracies(), &[1, 2]);
+            assert_eq!(right.codomain()[0].degeneracies(), &[1, 2]);
+            for factor in [&left, &right] {
+                assert_eq!(factor.dense_data().unwrap().len(), 8);
+                assert_eq!(
+                    factor
+                        .dense_data()
+                        .unwrap()
+                        .iter()
+                        .filter(|&&value| value == <$dtype>::from_real(1.0))
+                        .count(),
+                    3
+                );
+                assert!(factor.dense_data().unwrap().iter().all(|&value| {
+                    value == <$dtype>::from_real(0.0) || value == <$dtype>::from_real(1.0)
+                }));
+            }
+
+            let left_adjoint = left.adjoint().unwrap();
+            let left_adjoint = left_adjoint
+                .axpby(
+                    <$dtype>::from_real(1.0),
+                    &left_adjoint,
+                    <$dtype>::from_real(0.0),
+                )
+                .unwrap();
+            let right_adjoint = right.adjoint().unwrap();
+            let right_adjoint = right_adjoint
+                .axpby(
+                    <$dtype>::from_real(1.0),
+                    &right_adjoint,
+                    <$dtype>::from_real(0.0),
+                )
+                .unwrap();
+            let left_zero = left_adjoint.compose(&input).unwrap();
+            let right_zero = input.compose(&right_adjoint).unwrap();
+            for (name, zero) in [("N^dagger A", left_zero), ("A N^dagger", right_zero)] {
+                crate::test_numerics::numerics::assert_slices_close(
+                    name,
+                    zero.dense_data().unwrap(),
+                    &vec![<$dtype>::from_real(0.0); zero.dense_data().unwrap().len()],
+                    input.logical_space().space().required_len().unwrap(),
+                );
+            }
+
+            let dense_left = dense_input.left_null(&[0], &[1]).unwrap();
+            let dense_right = dense_input.right_null(&[0], &[1]).unwrap();
+            let dense_left_adjoint = dense_left.adjoint().unwrap();
+            let dense_left_adjoint = dense_left_adjoint
+                .axpby(
+                    <$dtype>::from_real(1.0),
+                    &dense_left_adjoint,
+                    <$dtype>::from_real(0.0),
+                )
+                .unwrap();
+            let dense_right_adjoint = dense_right.adjoint().unwrap();
+            let dense_right_adjoint = dense_right_adjoint
+                .axpby(
+                    <$dtype>::from_real(1.0),
+                    &dense_right_adjoint,
+                    <$dtype>::from_real(0.0),
+                )
+                .unwrap();
+            for (name, direct, dense) in [
+                (
+                    "left null projector",
+                    left.compose(&left_adjoint).unwrap(),
+                    dense_left.compose(&dense_left_adjoint).unwrap(),
+                ),
+                (
+                    "right null projector",
+                    right_adjoint.compose(&right).unwrap(),
+                    dense_right_adjoint.compose(&dense_right).unwrap(),
+                ),
+            ] {
+                crate::test_numerics::numerics::assert_slices_close(
+                    name,
+                    direct.dense_data().unwrap(),
+                    dense.dense_data().unwrap(),
+                    input.logical_space().space().required_len().unwrap(),
+                );
+            }
+        }};
+    }
+
+    check!(f32);
+    check!(f64);
+    check!(num_complex::Complex32);
+    check!(Complex64);
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
 fn checked_compact_diagonal_eigh_full_avoids_input_materialization_and_solver() {
     use tenet_core::SUNFusionRule;
 
