@@ -21,7 +21,8 @@ impl<D: CudaPayload> ContractBatchStorage<D> for CudaStorage<D> {}
 /// Core/SwappedCore routes with exact +1/-1 coefficients, and CopyC when its
 /// temporary is a unit-alpha direct core followed by one output transform.
 /// CUDA also admits CopyC when every output move is an unconjugated nonzero
-/// Single task. Direct
+/// Single task, and transformed-tree routes whose source and output moves are
+/// all such tasks over a unit-alpha direct core. Direct
 /// composition is served by [`ComposePlan`]. The plan fixes structure and
 /// axes, but not member count.
 pub struct ContractPlan<R, D, S = Vec<D>> {
@@ -50,6 +51,8 @@ pub struct ContractWorkspace<R, D, S = Vec<D>> {
     #[cfg(feature = "cuda")]
     copy_c_temporary: Option<StackedTensorMap<R, D, S>>,
     #[cfg(feature = "cuda")]
+    dynamic: tenet_tensors::CudaDynamicTreeMembersWorkspace<S>,
+    #[cfg(feature = "cuda")]
     device: DeviceComposeState,
 }
 
@@ -61,7 +64,8 @@ where
     S: ContractBatchStorage<D>,
 {
     /// Fixes an ordinary contraction without reading operand payloads.
-    /// CUDA admits exact-sign direct Core/SwappedCore and nonzero Single CopyC routes.
+    /// CUDA admits exact-sign direct Core/SwappedCore, nonzero Single CopyC,
+    /// and transformed-tree routes whose transforms are nonzero Single moves.
     pub fn new(
         lhs: &StackedTensorMap<R, D, S>,
         rhs: &StackedTensorMap<R, D, S>,
@@ -147,12 +151,6 @@ where
         if direct {
             resolution.admits_stacked_signed_direct_host_replay()?;
         }
-        if !matches!(placement, Placement::Host) && !direct {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "CUDA contract batch requires an exact-sign direct core",
-            }
-            .into());
-        }
         let copy_c = if let Some(binding) = copy_c {
             let transform = lane.tree_context_mut().compile_tree_pair_structure(
                 space.provider(),
@@ -176,10 +174,13 @@ where
         }
         let member_len = space.space().required_len()?;
         #[cfg(feature = "cuda")]
-        let device_plan = if matches!(placement, Placement::Cuda(_)) {
-            resolution.signed_direct_core_plan()?
-        } else {
-            None
+        let device_plan = match placement {
+            Placement::Cuda(_) if direct => resolution.signed_direct_core_plan()?,
+            Placement::Cuda(_) => {
+                resolution.admit_cuda_dynamic_tree_members()?;
+                None
+            }
+            _ => None,
         };
         Ok(Self {
             runtime: lhs.runtime.clone(),
@@ -265,6 +266,8 @@ where
             copy_c: self.copy_c.as_ref().map(|_| CopyCWorkspace::default()),
             #[cfg(feature = "cuda")]
             copy_c_temporary: None,
+            #[cfg(feature = "cuda")]
+            dynamic: Default::default(),
             #[cfg(feature = "cuda")]
             device: DeviceComposeState::default(),
         }
@@ -433,6 +436,7 @@ impl<R, D: CudaPayload> ContractWorkspace<R, D, CudaStorage<D>> {
     /// Retained device payload and Host layout scratch, excluding Runtime resources.
     pub fn retained_bytes(&self) -> usize {
         self.retained_scratch_bytes()
+            + self.dynamic.retained_bytes()
             + self.copy_c_temporary.as_ref().map_or(0, |temporary| {
                 temporary
                     .members
@@ -489,8 +493,23 @@ where
             replay: None,
             copy_c: None,
             copy_c_temporary: None,
+            dynamic: Default::default(),
             device: DeviceComposeState::default(),
         };
+        let entries = if self.resolution.is_dynamic_tree() {
+            self.resolution.admit_cuda_dynamic_tree_members()?
+        } else {
+            self.direct_plan_entries()?
+        };
+        workspace.device.reserved_plan_entries = self
+            .runtime
+            .lease_cuda()?
+            .reserve_plan_entries(entries)
+            .map_err(tenet_operations::OperationError::Dense)?;
+        Ok(workspace)
+    }
+
+    fn direct_plan_entries(&self) -> Result<usize, Error> {
         let plan = &self.core().0;
         let gemms = plan.distinct_direct_gemm_shapes();
         let fills = plan
@@ -502,12 +521,7 @@ where
         let copy_fills = self.copy_c.as_ref().map_or(Ok(0), |copy| {
             tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(&copy.transform)
         })?;
-        workspace.device.reserved_plan_entries = self
-            .runtime
-            .lease_cuda()?
-            .reserve_plan_entries(gemms + fills + copy_fills)
-            .map_err(tenet_operations::OperationError::Dense)?;
-        Ok(workspace)
+        Ok(gemms + fills + copy_fills)
     }
 
     fn prepare_zero_regions(
@@ -727,8 +741,11 @@ where
             .is_none_or(|output| output.members != members);
         let runtime = self.runtime.clone();
         let mut lease = runtime.lease_cuda()?;
-        self.prepare_zero_regions(workspace, &mut lease, members)?;
-        self.prepare_copy_regions(workspace, &mut lease, members)?;
+        let dynamic = self.resolution.is_dynamic_tree();
+        if !dynamic {
+            self.prepare_zero_regions(workspace, &mut lease, members)?;
+            self.prepare_copy_regions(workspace, &mut lease, members)?;
+        }
         let mut output = match workspace
             .output
             .take()
@@ -750,7 +767,11 @@ where
                 _payload: PhantomData,
             },
         };
-        let result = self.run_cuda(workspace, &mut lease, lhs, rhs, &mut output.storage, !fresh);
+        let result = if dynamic {
+            self.run_dynamic(workspace, &mut lease, lhs, rhs, &mut output.storage, fresh)
+        } else {
+            self.run_cuda(workspace, &mut lease, lhs, rhs, &mut output.storage, !fresh)
+        };
         let output = workspace.output.insert(output);
         result.map(|()| &*output)
     }
@@ -781,9 +802,34 @@ where
         }
         let runtime = self.runtime.clone();
         let mut lease = runtime.lease_cuda()?;
+        if self.resolution.is_dynamic_tree() {
+            return self.run_dynamic(workspace, &mut lease, lhs, rhs, &mut dst.storage, false);
+        }
         self.prepare_zero_regions(workspace, &mut lease, members)?;
         self.prepare_copy_regions(workspace, &mut lease, members)?;
         self.run_cuda(workspace, &mut lease, lhs, rhs, &mut dst.storage, true)
+    }
+
+    fn run_dynamic(
+        &self,
+        workspace: &mut ContractWorkspace<R, D, CudaStorage<D>>,
+        ctx: &mut tenet_dense::CudaDenseContext,
+        lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
+        rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
+        dst: &mut CudaStorage<D>,
+        dst_zeroed: bool,
+    ) -> Result<(), Error> {
+        workspace.dynamic.execute(
+            ctx,
+            &self.resolution,
+            self.space.space().structure(),
+            dst,
+            &lhs.storage,
+            &rhs.storage,
+            lhs.members,
+            dst_zeroed,
+        )?;
+        Ok(())
     }
 }
 
@@ -1049,6 +1095,136 @@ mod fermionic_unit_tests {
         assert!(plan.resolution.unit_direct_core_plan().is_err());
         assert!(!core.inactive_destination_regions().is_empty());
         assert!(core.distinct_direct_gemm_shapes() > 0);
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_dynamic_admission<R>(
+        runtime: &Runtime,
+        codomains: [&[&GradedSpace<R>]; 2],
+        domains: [&[&GradedSpace<R>]; 2],
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output: &[usize],
+    ) -> (bool, Result<usize, OperationError>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        let [a, b] = [0, 1].map(|i| {
+            TensorMap::<_, f64>::from_subblock_fn(
+                runtime,
+                codomains[i].iter().copied(),
+                domains[i].iter().copied(),
+                |_, _| 1.0,
+            )
+            .unwrap()
+        });
+        let split = codomains[0].len() + domains[0].len() - lhs_axes.len();
+        let spec = super::super::super::ContractSpec {
+            lhs: lhs_axes,
+            rhs: rhs_axes,
+            codomain: &output[..split],
+            domain: &output[split..],
+        };
+        let plan = ContractPlan::new(
+            &StackedTensorMap::pack(&[&a]).unwrap(),
+            &StackedTensorMap::pack(&[&b]).unwrap(),
+            &spec,
+        )
+        .unwrap();
+        (
+            plan.resolution.is_dynamic_tree(),
+            plan.resolution.admit_cuda_dynamic_tree_members(),
+        )
+    }
+
+    /// Device-free pin of the public CUDA fixtures: U(1) and fermionic
+    /// transformed-tree routes have Single-only transforms, SU(2) recoupling
+    /// has a Multi transform and stays a typed capability error.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_dynamic_tree_admission_is_single_only() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let u1 = |charges: &[(i32, usize)]| {
+            GradedSpace::try_new(
+                Arc::new(U1FusionRule),
+                charges
+                    .iter()
+                    .map(|&(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
+            )
+            .unwrap()
+        };
+        let v = u1(&[(0, 1), (1, 2), (2, 1)]);
+        let w = u1(&[(0, 2), (1, 1)]);
+        let x = u1(&[(-1, 1), (0, 2), (1, 2)]);
+        for (name, codomains, domains, lhs_axes, rhs_axes, output) in [
+            (
+                "U(1) transformed lhs, inactive block",
+                [&[&v][..], &[&w]],
+                [&[&w, &v][..], &[&v]],
+                &[1][..],
+                &[0][..],
+                &[0, 1, 2][..],
+            ),
+            (
+                "U(1) reordered whole-side",
+                [&[&v, &v], &[&x, &x]],
+                [&[&x, &x], &[&v]],
+                &[3, 2],
+                &[0, 1],
+                &[1, 0, 2],
+            ),
+        ] {
+            let (dynamic, admitted) =
+                cuda_dynamic_admission(&runtime, codomains, domains, lhs_axes, rhs_axes, output);
+            assert!(dynamic, "{name}");
+            assert!(admitted.unwrap() > 0, "{name}");
+        }
+        let f = GradedSpace::try_new(
+            Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+            [
+                (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+                (product_sector(Z2Irrep::ODD, U1Irrep::new(-1)), 1),
+                (product_sector(Z2Irrep::EVEN, U1Irrep::new(1)), 1),
+            ],
+        )
+        .unwrap();
+        let fd = f.try_dual().unwrap();
+        // contract_cases::fermionic_twist_roles "A": the copied A carries the twist.
+        let (dynamic, admitted) = cuda_dynamic_admission(
+            &runtime,
+            [&[&f, &f], &[&fd]],
+            [&[&f], &[&f, &f]],
+            &[1],
+            &[0],
+            &[0, 1, 2, 3],
+        );
+        assert!(dynamic);
+        admitted.unwrap();
+        let s = GradedSpace::try_new(
+            Arc::new(SU2FusionRule),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 2),
+                (SU2Irrep::from_twice_spin(2), 1),
+            ],
+        )
+        .unwrap();
+        let (dynamic, admitted) = cuda_dynamic_admission(
+            &runtime,
+            [&[&s, &s], &[&s]],
+            [&[&s], &[&s, &s]],
+            &[0],
+            &[2],
+            &[3, 0, 2, 1],
+        );
+        assert!(dynamic);
+        assert!(matches!(
+            admitted,
+            Err(OperationError::UnsupportedTensorContractScope {
+                message: "CUDA member transform requires unconjugated nonzero Single tasks"
+            })
+        ));
     }
 
     fn check_signed_classes<R>(

@@ -87,7 +87,10 @@ pub use oriented_elementwise::{
 pub use adjoint::adjoint_bound_space_dyn_generic_checked;
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
-pub use contract::{execute_storage_contract_resolution_on_cuda, CudaContractScratch};
+pub use contract::{
+    execute_storage_contract_resolution_on_cuda, CudaContractScratch,
+    CudaDynamicTreeMembersWorkspace,
+};
 pub use facade::{
     braid_into_generic, permute_into_generic, transpose_into_generic, tree_transform_into_generic,
     tree_transform_into_with_generic, tree_transform_structure_generic,
