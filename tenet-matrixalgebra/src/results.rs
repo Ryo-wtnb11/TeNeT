@@ -25,12 +25,13 @@
 ///
 /// # Storage of `s`
 ///
-/// The facade's Host multiplicity-free `svd_compact` stores `s` as compact
-/// diagonal data (`sum_c k_c` values). Its `svd_full` also retains compact `s`
-/// for admitted owned compact-diagonal inputs; U and Vh remain dense. Other
-/// full-SVD inputs, checked-Generic and CUDA routes, and this crate's expert
-/// tensor-factor entry points store S densely. A facade caller needing a
-/// dense buffer can explicitly materialize S.
+/// The facade's Host `svd_compact` stores `s` as compact diagonal data
+/// (`sum_c k_c` values) for multiplicity-free and checked-Generic providers.
+/// Its multiplicity-free `svd_full` also retains compact `s` for admitted
+/// owned compact-diagonal inputs; U and Vh remain dense. Other full-SVD
+/// inputs, CUDA routes, and this crate's expert tensor-factor entry points
+/// store S densely. A facade caller needing a dense buffer can explicitly
+/// materialize S.
 #[derive(Clone, Debug)]
 pub struct Svd<T> {
     /// Left singular vectors, `codomain(t) <- W`.

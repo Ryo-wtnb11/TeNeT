@@ -2,11 +2,13 @@
 //! API returned. Each result is destructured back into the old tuple order and
 //! fingerprinted twice. The structural fingerprint (legs, block order, storage
 //! class, payload length) is portable and checked everywhere. The exact
-//! fingerprint adds every stored value in round-trip `Debug` form, which
+//! fingerprint adds every materialized value in round-trip `Debug` form, which
 //! identifies each `f64` bit pattern; since the dense kernels pick SIMD paths
 //! by CPU, its expected values hold only for the recording host class (macOS
-//! aarch64). All expected values were recorded with the tuple API on
+//! aarch64). The original expected values were recorded with the tuple API on
 //! `origin/main` a2ce6c49, single-threaded dense executor, `cpu-faer`.
+//! The SU(3) compact SVD storage hashes now reflect compact `s`; its
+//! materialized factor values are checked against the original exact hashes.
 
 use num_complex::Complex64;
 use std::sync::Arc;
@@ -277,6 +279,28 @@ fn named_results_match_the_tuple_results() {
             [(vec![0i64, 0], 2), (vec![1, 0], 2), (vec![0, 1], 1)],
         )
         .unwrap();
+        // The compact S changes only the storage marker in the old tuple
+        // fingerprint. Check the materialized factors against the old hashes
+        // before recording the new representation below.
+        macro_rules! unchanged_svd_payload {
+            ($dtype:ty, $old_structure:expr, $old_exact:expr) => {{
+                let tall =
+                    TensorMap::<_, $dtype>::rand_with_seed(&runtime, [&v, &v], [&v], 1541).unwrap();
+                let (structure, exact) = factors!(tall.svd_compact(&[0, 1], &[2]), svd, 0, 1, 2);
+                assert_eq!(structure.matches("compact=true").count(), 1);
+                assert_eq!(exact.matches("compact=true").count(), 1);
+                assert_eq!(
+                    fnv1a(&structure.replace("compact=true", "compact=false")),
+                    $old_structure
+                );
+                assert_eq!(
+                    fnv1a(&exact.replace("compact=true", "compact=false")),
+                    $old_exact
+                );
+            }};
+        }
+        unchanged_svd_payload!(f64, 0x12cb72c30df11d0f, 0xaa8c6dee3e7d5d6c);
+        unchanged_svd_payload!(Complex64, 0x12cb72c30df11d0f, 0x2a24b0233aa370aa);
         check(
             "su3 f64",
             &fingerprints!(&runtime, &v, f64, 1541),
@@ -558,7 +582,7 @@ const FZ2U1_C64: [u64; 20] = [
 ];
 #[cfg(feature = "racah-generated")]
 const SU3_F64_STRUCTURE: [u64; 20] = [
-    0x12cb72c30df11d0f,
+    0xbc495a3228b0b522,
     0x8cc387613de843c4,
     0x66fd3d88cf5e7459,
     0xf065848bb8da7bd1,
@@ -581,7 +605,7 @@ const SU3_F64_STRUCTURE: [u64; 20] = [
 ];
 #[cfg(feature = "racah-generated")]
 const SU3_F64: [u64; 20] = [
-    0xaa8c6dee3e7d5d6c,
+    0x443844ebdff05a81,
     0x2dd2146f4d494ed3,
     0x941829a514907395,
     0x07ec7dd204814640,
@@ -604,7 +628,7 @@ const SU3_F64: [u64; 20] = [
 ];
 #[cfg(feature = "racah-generated")]
 const SU3_C64_STRUCTURE: [u64; 20] = [
-    0x12cb72c30df11d0f,
+    0xbc495a3228b0b522,
     0x8cc387613de843c4,
     0x66fd3d88cf5e7459,
     0xf065848bb8da7bd1,
@@ -627,7 +651,7 @@ const SU3_C64_STRUCTURE: [u64; 20] = [
 ];
 #[cfg(feature = "racah-generated")]
 const SU3_C64: [u64; 20] = [
-    0x2a24b0233aa370aa,
+    0x4ac8bb9aba11c1e9,
     0x6ce7c0fa70bc3f2a,
     0xc28cb0b2fc8ad53f,
     0x6f7dc8d068450aef,

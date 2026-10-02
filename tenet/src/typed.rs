@@ -125,9 +125,9 @@
 //! no implicit conversion anywhere.
 //!
 //! Issue #570 also gave the facade **compact diagonal storage**. For
-//! multiplicity-free providers, the `s` factor from `svd_compact` is compact
-//! (and stays compact through `restrict_leg` on both legs); for checked `Generic` providers, only the `d` factor
-//! from EIGH/EIG is compact, while checked SVD publishes its `s` factor densely.
+//! Host providers, the `s` factor from `svd_compact` is compact (and stays
+//! compact through `restrict_leg` on both legs). Checked `Generic` EIGH/EIG
+//! likewise store their `d` factor compactly.
 //! A compact factor holds `Σ_c k_c` values rather than the `Σ_c k_c²`
 //! block-diagonal buffer it would fill, which is what TensorKit's
 //! `DiagonalTensorMap` is. It is a storage property and not a type: no signature

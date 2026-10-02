@@ -282,15 +282,11 @@ macro_rules! advanced_checks {
         );
 
         // ---- Elementwise sqrt of a compact spectrum. ------------------------
-        // Checked-Generic SVD stores `s` densely; `diagonal(diagview)` makes
-        // every provider's `s` compact. The residual reads the factor as
-        // published, because checked-Generic reductions need dense payloads.
+        // Compact SVD stores `s` diagonally for every Host provider. Checked
+        // Generic reductions still need an explicit dense payload.
         let Svd { s, .. } = h.svd_compact(&[0], &[1]).unwrap();
-        let compact_s = TensorMap::diagonal(&rt, &s.domain()[0], s.diagview().unwrap()).unwrap();
         let Svd { s: wide_s, .. } = wide_h.svd_compact(&[0], &[1]).unwrap();
-        let wide_s =
-            TensorMap::diagonal(&rt, &wide_s.domain()[0], wide_s.diagview().unwrap()).unwrap();
-        let root = compact_s.map_diagonal(|value| value.sqrt()).unwrap();
+        let root = s.map_diagonal(|value| value.sqrt()).unwrap();
         assert_payloads_agree_scaled(
             &format!("{name}: sqrt of a compact spectrum"),
             root.materialize().unwrap().dense_data().unwrap(),
@@ -307,7 +303,7 @@ macro_rules! advanced_checks {
         assert_residual!(
             format!("{name}: sqrt ∘ sqrt"),
             root.compose(&root).unwrap(),
-            &s,
+            &s.materialize().unwrap(),
             n,
             $narrow
         );

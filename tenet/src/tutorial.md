@@ -112,8 +112,8 @@ operation.
 
 Factorizations take `(rows, cols)`: the source axes that form each side of the
 matrix. TeNeT handles the required leg transformation. A compact SVD returns
-`u`, `s`, and `vh` on a new bond space. In this U(1) example, `s` has compact
-diagonal storage; Checked Generic providers currently return a dense `s`.
+`u`, `s`, and `vh` on a new bond space. On Host, `s` has compact diagonal
+storage for both multiplicity-free and Checked Generic providers.
 
 ```rust
 use std::sync::Arc;
