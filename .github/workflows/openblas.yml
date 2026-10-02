@@ -43,6 +43,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: backend-openblas
       - uses: ./tenet/.github/actions/cargo-build-script-cache
         with:

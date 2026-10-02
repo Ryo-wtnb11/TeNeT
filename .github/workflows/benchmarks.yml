@@ -26,6 +26,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: benchmarks
       # Why not PR CI: hosted-runner timing noise makes these diagnostic
       # measurements unsuitable as correctness gates.

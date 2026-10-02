@@ -34,9 +34,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tenet
       - run: cargo fmt --check
         working-directory: tenet
 
@@ -54,6 +51,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: msrv-1.96
       - run: cargo check --workspace
         working-directory: tenet
@@ -83,6 +81,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: backend-${{ matrix.name }}
       - run: cargo check --workspace --all-targets --no-default-features --features "${{ matrix.features }}"
         working-directory: tenet
@@ -139,6 +138,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: feature-${{ matrix.name }}
       - uses: ./tenet/.github/actions/cargo-build-script-cache
         with:
@@ -190,6 +190,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: host-pool-audit
       - uses: ./tenet/.github/actions/cargo-build-script-cache
         with:
@@ -243,6 +244,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: backend-cuda
       - run: cargo check --workspace --all-targets --no-default-features --features cuda,cpu-faer
         working-directory: tenet
@@ -265,6 +267,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: ./tenet/.github/actions/cargo-build-script-cache
         with:
           key: test-linux
@@ -323,6 +326,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: workspace-test-debug0-v1
       - uses: ./tenet/.github/actions/cargo-build-script-cache
         with:
@@ -356,6 +360,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # Coverage instrumentation produces a large, short-lived target tree.
           # Restoring it alongside the runner image exhausted disk during link.
           cache-targets: false
@@ -385,6 +390,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: clippy
       # The workspace is Clippy-clean; deny warnings so new findings cannot silently accumulate.
       - run: cargo clippy --workspace --all-targets -- -D warnings
