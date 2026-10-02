@@ -547,9 +547,9 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
-fn checked_compact_diagonal_full_svd_propagates_output_provider_failure() {
+fn checked_compact_diagonal_full_svd_has_no_post_preflight_provider_query() {
     let x = SectorId::new(1);
-    let leg = SectorLeg::new([(x, 2)], false);
+    let leg = SectorLeg::new([(x, 2)], true);
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg.clone()]),
         FusionProductSpace::new([leg]),
@@ -591,30 +591,7 @@ fn checked_compact_diagonal_full_svd_propagates_output_provider_failure() {
         svd_full_diagonal_factors_dyn_checked_generic(&successful, &spectrum).unwrap(),
         CheckedDiagonalFullSvdFactors::Direct(_)
     ));
-    let final_output_call = successful_provider.calls.get();
-    assert!(final_output_call > dimension_calls);
-
-    let failing_provider = Arc::new(LateGenericSpy {
-        rule: FactorGenericRule,
-        fail_at: final_output_call,
-        calls: Cell::new(0),
-    });
-    let failing = BoundDynamicFusionMapSpace::bind_generic(
-        source.space().clone(),
-        Arc::clone(&failing_provider),
-    )
-    .unwrap();
-    failing_provider.calls.set(0);
-    let error = match svd_full_diagonal_factors_dyn_checked_generic(&failing, &spectrum) {
-        Err(error) => error,
-        Ok(_) => panic!("final output provider call must fail"),
-    };
-    assert!(matches!(
-        error,
-        CheckedGenericFactorPlanError::Provider(LateGenericError(call))
-            if call == final_output_call
-    ));
-    assert_eq!(failing_provider.calls.get(), final_output_call);
+    assert_eq!(successful_provider.calls.get(), dimension_calls);
 }
 
 #[test]
