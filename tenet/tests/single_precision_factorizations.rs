@@ -914,8 +914,20 @@ mod checked_generic {
                         "{name}: the rank budget must discard something"
                     );
                     assert_eq!(
-                        truncated.s.dense_data().unwrap().len(),
-                        wide_truncated.s.dense_data().unwrap().len(),
+                        truncated
+                            .s
+                            .diagview()
+                            .unwrap()
+                            .iter()
+                            .map(|entry| entry.values.len())
+                            .sum::<usize>(),
+                        wide_truncated
+                            .s
+                            .diagview()
+                            .unwrap()
+                            .iter()
+                            .map(|entry| entry.values.len())
+                            .sum::<usize>(),
                         "{name}: svd_trunc kept a different number of states than the oracle"
                     );
                     assert_scalars_agree(
