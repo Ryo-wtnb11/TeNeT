@@ -5172,6 +5172,348 @@ fn checked_generic_pinv_uses_a_strict_global_cutoff() {
 }
 
 #[test]
+fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
+    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let gemm_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(PinvFaultExecutor {
+            inner: DefaultDenseExecutor::new(),
+            svd_calls: Arc::clone(&svd_calls),
+            gemm_calls: Arc::clone(&gemm_calls),
+            fail_svd: None,
+            fail_gemm: None,
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond =
+        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 2), (Label::X, 3)]).unwrap();
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![1.0, 2.0, 0.0],
+            },
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![8.0, -4.0],
+            },
+        ],
+    )
+    .unwrap();
+    let before = input.diagview().unwrap();
+    let result = input.pinv(&[0], &[1], 0.25).unwrap();
+    assert_eq!(result.codomain(), input.domain());
+    assert_eq!(result.domain(), input.codomain());
+    assert!(std::ptr::eq(result.provider(), provider.as_ref()));
+    assert_eq!(
+        result.diagview().unwrap(),
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![0.125, -0.25]
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![0.0, 0.0, 0.0]
+            },
+        ]
+    );
+    assert_eq!(input.diagview().unwrap(), before);
+    assert!(result.dense_data().is_err());
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+
+    provider.invalid_style.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        input.pinv(&[0], &[1], f64::NAN),
+        Err(GenericTensorError::Facade(
+            tenet::typed::Error::InvalidArgument(_)
+        ))
+    ));
+    assert!(matches!(
+        input.pinv(&[0], &[1], 0.25),
+        Err(GenericTensorError::Structure(_))
+    ));
+    provider.invalid_style.store(false, Ordering::Relaxed);
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+
+    let complex: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![Complex64::new(8.0, 0.0), Complex64::new(2.0, 0.0)],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![
+                    Complex64::new(3.0, 4.0),
+                    Complex64::new(0.0, 0.0),
+                    Complex64::new(1.0, 0.0),
+                ],
+            },
+        ],
+    )
+    .unwrap();
+    let complex_result = complex.pinv(&[0], &[1], 0.25).unwrap();
+    assert_eq!(
+        complex_result.diagview().unwrap(),
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![Complex64::new(0.125, 0.0), Complex64::new(0.0, 0.0)],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![
+                    Complex64::new(0.12, -0.16),
+                    Complex64::new(0.0, 0.0),
+                    Complex64::new(0.0, 0.0)
+                ],
+            },
+        ]
+    );
+    assert!(complex_result.dense_data().is_err());
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+
+    let dual_bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let dual_sector = dual_bond.sectors().unwrap().remove(0);
+    let dual: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &dual_bond,
+        [SectorSpectrum {
+            sector: dual_sector,
+            values: vec![-2.0, 0.0],
+        }],
+    )
+    .unwrap();
+    let dual_result = dual.pinv(&[0], &[1], 0.0).unwrap();
+    assert_eq!(dual_result.codomain(), dual.domain());
+    assert_eq!(dual_result.domain(), dual.codomain());
+    assert_eq!(dual_result.diagview().unwrap()[0].values, [-0.5, 0.0]);
+    assert!(dual_result.dense_data().is_err());
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn checked_compact_diagonal_pinv_nonfinite_keeps_dense_error() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    for value in [f64::NAN, f64::INFINITY] {
+        let input: TensorMap<_, f64> = TensorMap::diagonal(
+            &runtime,
+            &bond,
+            [SectorSpectrum {
+                sector: Label::X,
+                values: vec![value, 0.0],
+            }],
+        )
+        .unwrap();
+        assert!(matches!(
+            input.pinv(&[0], &[1], 0.5),
+            Err(GenericTensorError::Facade(tenet::typed::Error::Operation(error)))
+                if matches!(*error, tenet::typed::OperationError::Dense(_))
+        ));
+    }
+}
+
+#[test]
+fn checked_compact_diagonal_pinv_precision_limits_match_dense_oracle() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond = GradedSpace::try_new(provider, [(Label::Vacuum, 2), (Label::X, 2)]).unwrap();
+
+    let real: TensorMap<_, f32> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![8.0, 2.0],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![-4.0, 0.0],
+            },
+        ],
+    )
+    .unwrap();
+    let real_dense = real.materialize().unwrap().pinv(&[0], &[1], 0.25).unwrap();
+    let real_direct = real.pinv(&[0], &[1], 0.25).unwrap();
+    assert!(real_direct.dense_data().is_err());
+    assert_eq!(real_direct.diagview().unwrap()[0].values, [0.125, 0.0]);
+    for (&actual, &expected) in real_direct
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(real_dense.dense_data().unwrap())
+    {
+        assert!((actual - expected).abs() <= 1e-6);
+    }
+
+    let complex: TensorMap<_, Complex32> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![Complex32::new(8.0, 0.0), Complex32::new(2.0, 0.0)],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![Complex32::new(3.0, 4.0), Complex32::new(0.0, 0.0)],
+            },
+        ],
+    )
+    .unwrap();
+    let complex_dense = complex
+        .materialize()
+        .unwrap()
+        .pinv(&[0], &[1], 0.25)
+        .unwrap();
+    let complex_direct = complex.pinv(&[0], &[1], 0.25).unwrap();
+    assert!(complex_direct.dense_data().is_err());
+    for (&actual, &expected) in complex_direct
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(complex_dense.dense_data().unwrap())
+    {
+        assert!((actual - expected).norm() <= 1e-6);
+    }
+
+    let large: TensorMap<_, Complex32> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![
+                    Complex32::new(f32::MAX * 0.75, f32::MAX * 0.75),
+                    Complex32::new(0.0, 0.0),
+                ],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![Complex32::new(0.0, 0.0); 2],
+            },
+        ],
+    )
+    .unwrap();
+    let direct = large.pinv(&[0], &[1], 0.0);
+    let dense = large.materialize().unwrap().pinv(&[0], &[1], 0.0);
+    assert_eq!(direct.is_err(), dense.is_err());
+    if let (Err(actual), Err(expected)) = (direct, dense) {
+        assert_eq!(actual.to_string(), expected.to_string());
+    }
+
+    for value in [f32::from_bits(1), f32::from_bits(1 << 22)] {
+        let tiny: TensorMap<_, f32> = TensorMap::diagonal(
+            &runtime,
+            &bond,
+            [
+                SectorSpectrum {
+                    sector: Label::Vacuum,
+                    values: vec![value, 0.0],
+                },
+                SectorSpectrum {
+                    sector: Label::X,
+                    values: vec![0.0, 0.0],
+                },
+            ],
+        )
+        .unwrap();
+        let direct = tiny.pinv(&[0], &[1], 0.0);
+        let dense = tiny.materialize().unwrap().pinv(&[0], &[1], 0.0);
+        assert_eq!(
+            direct.is_err(),
+            dense.is_err(),
+            "tiny f32 {value}: direct={direct:?}, dense={dense:?}"
+        );
+        if let (Ok(direct), Ok(dense)) = (direct, dense) {
+            assert_eq!(direct.diagview().unwrap(), dense.diagview().unwrap());
+            if value == f32::from_bits(1) {
+                assert!(direct.dense_data().is_ok());
+            }
+        }
+    }
+
+    for value in [f64::from_bits(1), 1e-308] {
+        let tiny: TensorMap<_, f64> = TensorMap::diagonal(
+            &runtime,
+            &bond,
+            [
+                SectorSpectrum {
+                    sector: Label::Vacuum,
+                    values: vec![value, 0.0],
+                },
+                SectorSpectrum {
+                    sector: Label::X,
+                    values: vec![0.0, 0.0],
+                },
+            ],
+        )
+        .unwrap();
+        let direct = tiny.pinv(&[0], &[1], 0.0);
+        let dense = tiny.materialize().unwrap().pinv(&[0], &[1], 0.0);
+        assert_eq!(
+            direct.is_err(),
+            dense.is_err(),
+            "tiny f64 {value}: direct={direct:?}, dense={dense:?}"
+        );
+        if let (Ok(direct), Ok(dense)) = (direct, dense) {
+            assert_eq!(direct.diagview().unwrap(), dense.diagview().unwrap());
+            if value == f64::from_bits(1) {
+                assert!(direct.dense_data().is_ok());
+            }
+        }
+    }
+
+    let tiny_complex: TensorMap<_, Complex32> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![
+                    Complex32::new(f32::from_bits(1), 0.0),
+                    Complex32::new(0.0, 0.0),
+                ],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![Complex32::new(0.0, 0.0); 2],
+            },
+        ],
+    )
+    .unwrap();
+    let direct = tiny_complex.pinv(&[0], &[1], 0.0).unwrap();
+    let dense = tiny_complex
+        .materialize()
+        .unwrap()
+        .pinv(&[0], &[1], 0.0)
+        .unwrap();
+    assert!(direct.dense_data().is_ok());
+    assert_eq!(direct.diagview().unwrap(), dense.diagview().unwrap());
+}
+
+#[test]
 fn checked_generic_pinv_normalized_empty_skips_dense_execution() {
     let svd_calls = Arc::new(AtomicUsize::new(0));
     let gemm_calls = Arc::new(AtomicUsize::new(0));
