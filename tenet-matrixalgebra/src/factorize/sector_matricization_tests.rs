@@ -1,6 +1,34 @@
 use super::*;
 use tenet_core::{BlockSpec, FusionTreePairKey, Z2FusionRule};
 
+#[test]
+fn compact_routes_reject_an_extra_positive_output_region() {
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let leg = SectorLeg::new([(even, 1), (odd, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone()]),
+        FusionProductSpace::new([leg]),
+    );
+    let authority = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        Arc::new(Z2FusionRule),
+        homspace,
+    )
+    .unwrap();
+    let regions = checked_sector_regions(authority.space().structure(), 1)
+        .unwrap()
+        .unwrap();
+
+    let error = compile_compact_factor_routes(&regions[..1], &regions, &regions).unwrap_err();
+
+    assert!(matches!(
+        error,
+        OperationError::UnsupportedTensorContractScope {
+            message: "compact left factor contains an unused nonzero sector"
+        }
+    ));
+}
+
 struct PayloadFreeGeometry {
     sector: SectorId,
     rows: usize,

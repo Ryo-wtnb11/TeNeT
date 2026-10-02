@@ -113,10 +113,10 @@ pub use polar::{
 };
 use qr_lq::diagonal_phase_magnitude;
 pub use qr_lq::{
-    lq_compact, lq_compact_dyn, lq_compact_dyn_checked_generic, lq_compact_dyn_generic, lq_full,
-    lq_full_dyn, lq_full_dyn_checked_generic, qr_compact, qr_compact_dyn,
-    qr_compact_dyn_checked_generic, qr_compact_dyn_generic, qr_diagonal_dyn, qr_full, qr_full_dyn,
-    qr_full_dyn_checked_generic,
+    lq_compact, lq_compact_dyn, lq_compact_dyn_checked_generic, lq_compact_dyn_generic,
+    lq_diagonal_dyn_checked_generic, lq_full, lq_full_dyn, lq_full_dyn_checked_generic, qr_compact,
+    qr_compact_dyn, qr_compact_dyn_checked_generic, qr_compact_dyn_generic, qr_diagonal_dyn,
+    qr_diagonal_dyn_checked_generic, qr_full, qr_full_dyn, qr_full_dyn_checked_generic,
 };
 pub use region::{
     build_bound_factor_space_generic_checked, coupled_sector_block_dimensions_generic_checked,

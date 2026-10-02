@@ -1073,6 +1073,16 @@ where
                 "checked Generic lq_full does not accept lazy adjoints".to_string(),
             )));
         };
+        if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            if let Some((l_space, q_space, phases, magnitudes)) =
+                tenet_matrixalgebra::lq_diagonal_dyn_checked_generic(&body.space, spectrum, true)?
+            {
+                return Ok(Lq {
+                    l: tensor.with_spectrum_on(l_space, magnitudes),
+                    q: tensor.with_spectrum_on(q_space, phases),
+                });
+            }
+        }
         let mut dense = tensor.runtime.lease_dense();
         let payload = body.materialized_dense_data();
         let input = BoundDynamicTensorRef::try_new(&body.space, &payload)

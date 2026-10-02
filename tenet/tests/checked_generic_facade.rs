@@ -20,10 +20,8 @@ use tenet::sector::{
     SectorVec, TypedSectorAdmission,
 };
 use tenet::typed::CheckedGenericStructureError;
-#[cfg(feature = "racah-generated")]
-use tenet::typed::Qr;
 use tenet::typed::{
-    CheckedGenericTensorProductError, Eig, Eigh, GradedSpace, LeftPolar, Lq, NetworkReuseClass,
+    CheckedGenericTensorProductError, Eig, Eigh, GradedSpace, LeftPolar, Lq, NetworkReuseClass, Qr,
     RightPolar, Svd, TensorMap, Truncation, TypedTensorConstructionDispatch,
 };
 use tenet::typed::{Complex32, Complex64, GenericTensorError, Runtime, SectorSpectrum};
@@ -2460,6 +2458,272 @@ fn checked_compact_diagonal_svd_matches_hand_permutation_and_phase() {
         .iter()
         .zip(narrow.materialize().unwrap().dense_data().unwrap())
         .all(|(actual, expected)| (*actual - expected).norm() <= 1e-5));
+}
+
+struct QrCallCounter {
+    inner: DefaultDenseExecutor,
+    calls: Arc<AtomicUsize>,
+}
+
+impl DenseExecutor for QrCallCounter {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.svd(input)
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.eigh(input)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        self.inner.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
+#[test]
+fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(QrCallCounter {
+            inner: DefaultDenseExecutor::new(),
+            calls: Arc::clone(&calls),
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond =
+        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 2), (Label::X, 3)]).unwrap();
+    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![Complex64::new(-2.0, 0.0), Complex64::new(0.0, 0.0)],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![
+                    Complex64::new(0.0, 3.0),
+                    Complex64::new(4.0, 0.0),
+                    Complex64::new(-5.0, 0.0),
+                ],
+            },
+        ],
+    )
+    .unwrap();
+    let expected_phase = [
+        vec![Complex64::new(-1.0, 0.0), Complex64::new(1.0, 0.0)],
+        vec![
+            Complex64::new(0.0, 1.0),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(-1.0, 0.0),
+        ],
+    ];
+    let expected_magnitude = [
+        vec![Complex64::new(2.0, 0.0), Complex64::new(0.0, 0.0)],
+        vec![
+            Complex64::new(3.0, 0.0),
+            Complex64::new(4.0, 0.0),
+            Complex64::new(5.0, 0.0),
+        ],
+    ];
+    let assert_factors =
+        |phase: &TensorMap<CheckedOnlyToy, Complex64>,
+         magnitude: &TensorMap<CheckedOnlyToy, Complex64>| {
+            for factor in [phase, magnitude] {
+                assert!(std::ptr::eq(factor.provider(), provider.as_ref()));
+                assert_eq!(factor.codomain(), input.codomain());
+                assert_eq!(factor.domain(), input.domain());
+                assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+                assert!(factor.dense_data().is_err());
+            }
+            for (actual, expected) in phase.diagview().unwrap().iter().zip(&expected_phase) {
+                assert_eq!(&actual.values, expected);
+            }
+            for (actual, expected) in magnitude
+                .diagview()
+                .unwrap()
+                .iter()
+                .zip(&expected_magnitude)
+            {
+                assert_eq!(&actual.values, expected);
+            }
+            let rebuilt = phase.compose(magnitude).unwrap();
+            numerics::assert_slices_close(
+                "checked compact diagonal QR/LQ reconstruction",
+                rebuilt.dense_data().unwrap(),
+                input.materialize().unwrap().dense_data().unwrap(),
+                3,
+            );
+        };
+    for Qr { q, r } in [
+        input.qr_compact(&[0], &[1]).unwrap(),
+        input.qr_full(&[0], &[1]).unwrap(),
+    ] {
+        assert_factors(&q, &r);
+    }
+    for Lq { l, q } in [
+        input.lq_compact(&[0], &[1]).unwrap(),
+        input.lq_full(&[0], &[1]).unwrap(),
+    ] {
+        assert_factors(&q, &l);
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    let narrow = input.convert::<Complex32>();
+    for factor in [
+        narrow.qr_compact(&[0], &[1]).unwrap().r,
+        narrow.qr_full(&[0], &[1]).unwrap().r,
+        narrow.lq_compact(&[0], &[1]).unwrap().l,
+        narrow.lq_full(&[0], &[1]).unwrap().l,
+    ] {
+        assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+    }
+    let Qr { q, r } = narrow.qr_compact(&[0], &[1]).unwrap();
+    numerics::assert_slices_close(
+        "checked compact Complex32 QR reconstruction",
+        q.compose(&r).unwrap().dense_data().unwrap(),
+        narrow.materialize().unwrap().dense_data().unwrap(),
+        3,
+    );
+    let real: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![-2.0, 0.0],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![3.0, 4.0, -5.0],
+            },
+        ],
+    )
+    .unwrap();
+    for factor in [
+        real.qr_compact(&[0], &[1]).unwrap().r,
+        real.qr_full(&[0], &[1]).unwrap().r,
+        real.lq_compact(&[0], &[1]).unwrap().l,
+        real.lq_full(&[0], &[1]).unwrap().l,
+    ] {
+        assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+    }
+    let Lq { l, q } = real.lq_compact(&[0], &[1]).unwrap();
+    numerics::assert_slices_close(
+        "checked compact f64 LQ reconstruction",
+        l.compose(&q).unwrap().dense_data().unwrap(),
+        real.materialize().unwrap().dense_data().unwrap(),
+        3,
+    );
+    let narrow_real = real.convert::<f32>();
+    for factor in [
+        narrow_real.qr_compact(&[0], &[1]).unwrap().r,
+        narrow_real.qr_full(&[0], &[1]).unwrap().r,
+        narrow_real.lq_compact(&[0], &[1]).unwrap().l,
+        narrow_real.lq_full(&[0], &[1]).unwrap().l,
+    ] {
+        assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+    }
+    let Qr { q, r } = narrow_real.qr_compact(&[0], &[1]).unwrap();
+    numerics::assert_slices_close(
+        "checked compact f32 QR reconstruction",
+        q.compose(&r).unwrap().dense_data().unwrap(),
+        narrow_real.materialize().unwrap().dense_data().unwrap(),
+        3,
+    );
+
+    let dual_bond = bond.try_dual().unwrap();
+    let dual: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &dual_bond,
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![-2.0, 0.0],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![3.0, 4.0, -5.0],
+            },
+        ],
+    )
+    .unwrap();
+    for factor in [
+        dual.qr_compact(&[0], &[1]).unwrap().r,
+        dual.qr_full(&[0], &[1]).unwrap().r,
+    ] {
+        assert!(factor.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
+        assert!(!factor.codomain()[0].is_dual());
+    }
+    for factor in [
+        dual.lq_compact(&[0], &[1]).unwrap().l,
+        dual.lq_full(&[0], &[1]).unwrap().l,
+    ] {
+        assert!(factor.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
+        assert!(!factor.domain()[0].is_dual());
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 8);
+}
+
+#[test]
+fn checked_compact_diagonal_qr_preserves_numeric_and_provider_error_order() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(QrCallCounter {
+            inner: DefaultDenseExecutor::new(),
+            calls: Arc::clone(&calls),
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![f64::NAN, -1.0],
+        }],
+    )
+    .unwrap();
+    let _ = nonfinite.qr_compact(&[0], &[1]);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    let failing_provider = Arc::new(CheckedOnlyToy::new_product_probe(1));
+    let failing_bond =
+        GradedSpace::try_new(Arc::clone(&failing_provider), [(Label::X, 2)]).unwrap();
+    let finite: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &failing_bond,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![2.0, -1.0],
+        }],
+    )
+    .unwrap();
+    failing_provider.fail_algebra.store(true, Ordering::Relaxed);
+    let error = finite.qr_full(&[0], &[1]).unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(
+            ToyError::Algebra
+        ))
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
 #[test]
