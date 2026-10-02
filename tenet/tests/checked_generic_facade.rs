@@ -2661,16 +2661,33 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
         ],
     )
     .unwrap();
+    // #1729: TensorKit's diagonal dispatch keeps `W = V`, dual flag included.
     for factor in [
         dual.qr_compact(&[0], &[1]).unwrap().r,
         dual.qr_full(&[0], &[1]).unwrap().r,
+        dual.lq_compact(&[0], &[1]).unwrap().l,
+        dual.lq_full(&[0], &[1]).unwrap().l,
+    ] {
+        assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+        assert!(factor.codomain()[0].is_dual());
+        assert!(factor.domain()[0].is_dual());
+        assert_eq!(factor.codomain(), dual.codomain());
+        assert_eq!(factor.domain(), dual.domain());
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    // Materialized dual input keeps the dense route and its fresh nondual W.
+    let dense_dual = dual.materialize().unwrap();
+    for factor in [
+        dense_dual.qr_compact(&[0], &[1]).unwrap().r,
+        dense_dual.qr_full(&[0], &[1]).unwrap().r,
     ] {
         assert!(factor.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
         assert!(!factor.codomain()[0].is_dual());
     }
     for factor in [
-        dual.lq_compact(&[0], &[1]).unwrap().l,
-        dual.lq_full(&[0], &[1]).unwrap().l,
+        dense_dual.lq_compact(&[0], &[1]).unwrap().l,
+        dense_dual.lq_full(&[0], &[1]).unwrap().l,
     ] {
         assert!(factor.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
         assert!(!factor.domain()[0].is_dual());
@@ -2724,6 +2741,459 @@ fn checked_compact_diagonal_qr_preserves_numeric_and_provider_error_order() {
         ))
     ));
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+/// A bosonic Abelian rule exposed only through the checked-Generic contract,
+/// so dual QR/LQ is checked on self-dual Z2 and non-self-dual U(1) labels.
+struct CheckedAbelian<R>(R);
+
+impl<R: tenet::sector::FusionRule> CheckedGenericFusion for CheckedAbelian<R> {
+    type Error = ToyError;
+
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::from_canonical_bytes::<Self>(0x1729, Arc::<[u8]>::from([]))
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Generic
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.0.braiding_style()
+    }
+
+    fn vacuum(&self) -> SectorId {
+        self.0.vacuum()
+    }
+
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, ToyError> {
+        Ok(self.0.dual(sector))
+    }
+
+    fn try_fusion_channels(&self, left: SectorId, right: SectorId) -> Result<SectorVec, ToyError> {
+        Ok(self.0.fusion_channels(left, right))
+    }
+
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, ToyError> {
+        Ok(self.0.fusion_channels(left, right))
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, ToyError> {
+        Ok(self.0.nsymbol(left, right, coupled))
+    }
+
+    fn sector_order_key(&self, sector: SectorId) -> tenet::sector::SectorOrderKey {
+        self.0.sector_order_key(sector)
+    }
+}
+
+impl<R: tenet::sector::FusionRule> CheckedGenericRigidSymbols for CheckedAbelian<R> {
+    type Scalar = f64;
+
+    fn try_sqrt_dim_scalar(&self, _: SectorId) -> Result<f64, ToyError> {
+        Ok(1.0)
+    }
+
+    fn try_inv_sqrt_dim_scalar(&self, _: SectorId) -> Result<f64, ToyError> {
+        Ok(1.0)
+    }
+
+    fn try_frobenius_schur_phase_scalar(&self, _: SectorId) -> Result<f64, ToyError> {
+        Ok(1.0)
+    }
+
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<f64>, ToyError> {
+        let shape = (
+            self.0.nsymbol(a, b, e),
+            self.0.nsymbol(e, c, d),
+            self.0.nsymbol(b, c, f),
+            self.0.nsymbol(a, f, d),
+        );
+        Ok(GenericFArray::new(
+            vec![1.0; shape.0 * shape.1 * shape.2 * shape.3],
+            shape,
+        ))
+    }
+
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<f64>, ToyError> {
+        let rows = self.0.nsymbol(a, b, c);
+        Ok(GenericRMatrix::new(vec![1.0; rows * rows], rows, rows))
+    }
+}
+
+impl<R: tenet::sector::SectorCodec> TypedSectorAdmission for CheckedAbelian<R> {
+    type Sector = R::Sector;
+    type Error = ToyError;
+    type Mode = CheckedGenericAdmissionMode;
+
+    fn typed_rule_identity(&self) -> RuleIdentity {
+        CheckedGenericFusion::rule_identity(self)
+    }
+
+    fn try_encode_label(&self, sector: &R::Sector) -> Result<SectorId, ToyError> {
+        self.0
+            .encode_sector(sector)
+            .map_err(|_| ToyError::InvalidSector)
+    }
+
+    fn try_decode_label(&self, sector: SectorId) -> Result<R::Sector, ToyError> {
+        self.0.decode_sector(sector).map_err(|_| ToyError::Decode)
+    }
+
+    fn try_dual_id(&self, sector: SectorId) -> Result<SectorId, ToyError> {
+        Ok(self.0.dual(sector))
+    }
+}
+
+fn assert_wide_close<D: numerics::Numeric>(what: &str, got: D, want: Complex64) {
+    let tolerance = numerics::tolerance::<D>(2, want.norm());
+    assert!(
+        (got.wide() - want).norm() <= tolerance,
+        "{what}: {got:?} != {want}"
+    );
+}
+
+/// All four QR/LQ methods on an admitted dual diagonal `A : V <- V`. Oracle:
+/// TensorKit `diagonal.jl:16-42` keeps `space(d)` for both factors, and per
+/// entry `phase(d) = d / |d|` (1 at zero) and `|d|`, computed here in
+/// Complex64 independently of TeNeT's descriptor.
+macro_rules! assert_dual_diagonal_qr_lq {
+    ($runtime:expr, $input:expr, $calls:expr) => {{
+        use numerics::Numeric as _;
+        let input = &$input;
+        let bond = &input.codomain()[0];
+        assert!(bond.is_dual());
+        let source = input.diagview().unwrap();
+        let dense = input.materialize().unwrap();
+        let identity = TensorMap::isomorphism(&$runtime, [bond], [bond]).unwrap();
+        let before = $calls.load(Ordering::Relaxed);
+        let results = [
+            input.qr_compact(&[0], &[1]).map(|Qr { q, r }| (q, r, true)),
+            input.qr_full(&[0], &[1]).map(|Qr { q, r }| (q, r, true)),
+            input
+                .lq_compact(&[0], &[1])
+                .map(|Lq { l, q }| (q, l, false)),
+            input.lq_full(&[0], &[1]).map(|Lq { l, q }| (q, l, false)),
+        ];
+        assert_eq!($calls.load(Ordering::Relaxed), before);
+        for result in results {
+            let (phase, magnitude, qr) = result.unwrap();
+            for factor in [&phase, &magnitude] {
+                assert!(std::ptr::eq(factor.provider(), input.provider()));
+                assert_eq!(factor.codomain(), input.codomain());
+                assert_eq!(factor.domain(), input.domain());
+                assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+                assert!(factor.dense_data().is_err());
+            }
+            let phases = phase.diagview().unwrap();
+            let magnitudes = magnitude.diagview().unwrap();
+            assert_eq!(phases.len(), source.len());
+            assert_eq!(magnitudes.len(), source.len());
+            for entry in &source {
+                let p = phases.iter().find(|s| s.sector == entry.sector).unwrap();
+                let m = magnitudes
+                    .iter()
+                    .find(|s| s.sector == entry.sector)
+                    .unwrap();
+                assert_eq!(p.values.len(), entry.values.len());
+                assert_eq!(m.values.len(), entry.values.len());
+                for ((&d, &p), &m) in entry.values.iter().zip(&p.values).zip(&m.values) {
+                    let d = d.wide();
+                    let (want_phase, want_magnitude) = if d.norm() == 0.0 {
+                        (Complex64::new(1.0, 0.0), 0.0)
+                    } else {
+                        (d / d.norm(), d.norm())
+                    };
+                    assert_wide_close("phase", p, want_phase);
+                    assert_wide_close("magnitude", m, Complex64::new(want_magnitude, 0.0));
+                    // Positive gauge: the magnitude is exactly real and nonnegative.
+                    assert!(m.wide().im == 0.0 && m.wide().re >= 0.0);
+                }
+            }
+            let rebuilt = if qr {
+                phase.compose(&magnitude)
+            } else {
+                magnitude.compose(&phase)
+            }
+            .unwrap();
+            numerics::assert_slices_close(
+                "dual diagonal QR/LQ reconstruction",
+                rebuilt.materialize().unwrap().dense_data().unwrap(),
+                dense.dense_data().unwrap(),
+                2,
+            );
+            let gram = phase.adjoint().unwrap().compose(&phase).unwrap();
+            numerics::assert_slices_close(
+                "dual diagonal QR/LQ isometry",
+                gram.materialize().unwrap().dense_data().unwrap(),
+                identity.dense_data().unwrap(),
+                2,
+            );
+        }
+    }};
+}
+
+fn complex_spectra<S: Clone>(
+    sectors: [S; 2],
+    values: [&[(f64, f64)]; 2],
+) -> Vec<SectorSpectrum<S, Complex64>> {
+    sectors
+        .into_iter()
+        .zip(values)
+        .map(|(sector, values)| SectorSpectrum {
+            sector,
+            values: values
+                .iter()
+                .map(|&(re, im)| Complex64::new(re, im))
+                .collect(),
+        })
+        .collect()
+}
+
+fn real_spectra<S: Clone>(sectors: [S; 2], values: [&[f64]; 2]) -> Vec<SectorSpectrum<S, f64>> {
+    sectors
+        .into_iter()
+        .zip(values)
+        .map(|(sector, values)| SectorSpectrum {
+            sector,
+            values: values.to_vec(),
+        })
+        .collect()
+}
+
+#[test]
+fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_rules() {
+    use tenet::sector::{U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(QrCallCounter {
+            inner: DefaultDenseExecutor::new(),
+            calls: Arc::clone(&calls),
+        }))
+        .build()
+        .unwrap();
+    // Unequal degeneracies, zero and nonreal entries in every case.
+    let complex_values: [&[(f64, f64)]; 2] = [
+        &[(-2.0, 0.0), (0.0, 0.0)],
+        &[(3.0, 4.0), (0.0, -7.0), (-1.0, 0.0)],
+    ];
+    let real_values: [&[f64]; 2] = [&[-2.0, 0.0], &[5.0, -7.0, 1.0]];
+
+    let z2 = GradedSpace::try_new(
+        Arc::new(CheckedAbelian(Z2FusionRule)),
+        [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)],
+    )
+    .unwrap();
+    let z2_dual = z2.try_dual().unwrap();
+    // Self-dual labels: only the orientation flag distinguishes V' from V.
+    assert!(z2_dual.is_dual());
+    assert_eq!(z2_dual.degeneracy(&Z2Irrep::EVEN).unwrap(), 2);
+    assert_eq!(z2_dual.degeneracy(&Z2Irrep::ODD).unwrap(), 3);
+    let z2_sectors = [Z2Irrep::EVEN, Z2Irrep::ODD];
+
+    // TensorKit `dual(Rep[U1](1 => 2, 2 => 3))` carries physical sectors
+    // -1 and -2 with the same degeneracies.
+    let u1 = GradedSpace::try_new(
+        Arc::new(CheckedAbelian(U1FusionRule)),
+        [(U1Irrep::new(1), 2), (U1Irrep::new(2), 3)],
+    )
+    .unwrap();
+    let u1_dual = u1.try_dual().unwrap();
+    assert!(u1_dual.is_dual());
+    let mut u1_sectors_seen = u1_dual.sectors().unwrap();
+    u1_sectors_seen.sort();
+    assert_eq!(u1_sectors_seen, [U1Irrep::new(-2), U1Irrep::new(-1)]);
+    assert_eq!(u1_dual.degeneracy(&U1Irrep::new(-1)).unwrap(), 2);
+    assert_eq!(u1_dual.degeneracy(&U1Irrep::new(-2)).unwrap(), 3);
+    assert_eq!(u1_dual.degeneracy(&U1Irrep::new(1)).unwrap(), 0);
+    let u1_sectors = [U1Irrep::new(-1), U1Irrep::new(-2)];
+
+    let z2_complex: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &z2_dual,
+        complex_spectra(z2_sectors, complex_values),
+    )
+    .unwrap();
+    let z2_real: TensorMap<_, f64> =
+        TensorMap::diagonal(&runtime, &z2_dual, real_spectra(z2_sectors, real_values)).unwrap();
+    assert_dual_diagonal_qr_lq!(runtime, z2_complex, calls);
+    assert_dual_diagonal_qr_lq!(runtime, z2_complex.convert::<Complex32>(), calls);
+    assert_dual_diagonal_qr_lq!(runtime, z2_real, calls);
+    assert_dual_diagonal_qr_lq!(runtime, z2_real.convert::<f32>(), calls);
+
+    let u1_complex: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &u1_dual,
+        complex_spectra(u1_sectors, complex_values),
+    )
+    .unwrap();
+    let u1_real: TensorMap<_, f64> =
+        TensorMap::diagonal(&runtime, &u1_dual, real_spectra(u1_sectors, real_values)).unwrap();
+    assert_dual_diagonal_qr_lq!(runtime, u1_complex, calls);
+    assert_dual_diagonal_qr_lq!(runtime, u1_complex.convert::<Complex32>(), calls);
+    assert_dual_diagonal_qr_lq!(runtime, u1_real, calls);
+    assert_dual_diagonal_qr_lq!(runtime, u1_real.convert::<f32>(), calls);
+    // The compact adjoint of an admitted diagonal is itself admitted.
+    assert_dual_diagonal_qr_lq!(runtime, u1_complex.adjoint().unwrap(), calls);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    // Swapped leg roles: checked `permute` publishes a dense `V' <- V'`
+    // view, so QR/LQ keep the dense route and its nondual W.
+    let nondual: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &u1,
+        complex_spectra([U1Irrep::new(1), U1Irrep::new(2)], complex_values),
+    )
+    .unwrap();
+    let swapped = nondual.permute(&[1], &[0]).unwrap();
+    assert!(swapped.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
+    let Qr { q, r } = nondual.qr_compact(&[1], &[0]).unwrap();
+    let Lq { l, q: lq_q } = nondual.lq_compact(&[1], &[0]).unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 4);
+    assert!(r.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
+    assert!(!r.codomain()[0].is_dual());
+    assert!(!l.domain()[0].is_dual());
+    for rebuilt in [q.compose(&r).unwrap(), l.compose(&lq_q).unwrap()] {
+        numerics::assert_slices_close(
+            "swapped-role dense QR/LQ reconstruction",
+            rebuilt.dense_data().unwrap(),
+            swapped.dense_data().unwrap(),
+            2,
+        );
+    }
+    calls.store(0, Ordering::Relaxed);
+
+    // Ineligible dual inputs keep the dense route and its fresh nondual W:
+    // materialized payload and a nonfinite spectrum. U(1) W is `flip(V')`,
+    // nondual with the same physical sectors -1 and -2.
+    let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &u1_dual,
+        real_spectra(u1_sectors, [&[f64::NAN, 1.0], &[2.0, 3.0, 4.0]]),
+    )
+    .unwrap();
+    for (index, input) in [u1_real.materialize().unwrap(), nonfinite]
+        .iter()
+        .enumerate()
+    {
+        let before = calls.load(Ordering::Relaxed);
+        let Qr { r, .. } = input.qr_compact(&[0], &[1]).unwrap();
+        let Qr { r: full_r, .. } = input.qr_full(&[0], &[1]).unwrap();
+        let Lq { l, .. } = input.lq_compact(&[0], &[1]).unwrap();
+        let Lq { l: full_l, .. } = input.lq_full(&[0], &[1]).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), before + 8, "input {index}");
+        for bond in [
+            &r.codomain()[0],
+            &full_r.codomain()[0],
+            &l.domain()[0],
+            &full_l.domain()[0],
+        ] {
+            assert!(!bond.is_dual());
+            assert_eq!(bond.degeneracy(&U1Irrep::new(-1)).unwrap(), 2);
+            assert_eq!(bond.degeneracy(&U1Irrep::new(-2)).unwrap(), 3);
+        }
+        for factor in [&r, &full_r, &l, &full_l] {
+            assert!(factor.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
+        }
+    }
+
+    // A lazy adjoint of a dense dual tensor keeps its typed refusal.
+    let lazy = u1_real.materialize().unwrap().adjoint().unwrap();
+    let before = calls.load(Ordering::Relaxed);
+    for error in [
+        lazy.qr_compact(&[0], &[1]).err(),
+        lazy.qr_full(&[0], &[1]).err(),
+    ]
+    .into_iter()
+    .chain([
+        lazy.lq_compact(&[0], &[1]).err(),
+        lazy.lq_full(&[0], &[1]).err(),
+    ]) {
+        assert!(matches!(
+            error,
+            Some(GenericTensorError::Facade(
+                tenet::typed::Error::InvalidArgument(_)
+            ))
+        ));
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), before);
+}
+
+/// Provider failures during admission keep their typed error and publish no
+/// factors on a dual bond exactly as on its nondual counterpart: the full
+/// variants query the coupled-dimension map, while a rank-1 compact output
+/// needs no fallible fusion query.
+#[test]
+fn checked_dual_diagonal_qr_lq_propagates_output_provider_errors() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(QrCallCounter {
+            inner: DefaultDenseExecutor::new(),
+            calls: Arc::clone(&calls),
+        }))
+        .build()
+        .unwrap();
+    for dual in [false, true] {
+        let provider = Arc::new(CheckedOnlyToy::new_product_probe(1));
+        let mut bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+        if dual {
+            bond = bond.try_dual().unwrap();
+        }
+        let finite: TensorMap<_, f64> = TensorMap::diagonal(
+            &runtime,
+            &bond,
+            [SectorSpectrum {
+                sector: Label::X,
+                values: vec![2.0, -1.0],
+            }],
+        )
+        .unwrap();
+        provider.fail_algebra.store(true, Ordering::Relaxed);
+        for error in [
+            finite.qr_full(&[0], &[1]).err(),
+            finite.lq_full(&[0], &[1]).err(),
+        ] {
+            assert!(matches!(
+                error,
+                Some(GenericTensorError::Plan(
+                    tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
+                ))
+            ));
+        }
+        let Qr { q, r } = finite.qr_compact(&[0], &[1]).unwrap();
+        let Lq { l, q: lq_q } = finite.lq_compact(&[0], &[1]).unwrap();
+        for factor in [&q, &r, &l, &lq_q] {
+            assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+            assert_eq!(factor.codomain(), finite.codomain());
+            assert_eq!(factor.codomain()[0].is_dual(), dual);
+        }
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]

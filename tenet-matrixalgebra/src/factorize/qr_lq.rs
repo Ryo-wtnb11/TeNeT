@@ -99,14 +99,19 @@ where
     if source.nout() != 1
         || source.nin() != 1
         || source.homspace().codomain() != source.homspace().domain()
-        || source.homspace().codomain().legs()[0].is_dual()
     {
         return Ok(None);
     }
     let Ok(Some(source_regions)) = checked_sector_regions(source.structure(), 1) else {
         return Ok(None);
     };
-    if compact_bond_leg(&source_regions) != source.homspace().codomain().legs()[0] {
+    // TensorKit's diagonal dispatch (`diagonal.jl:16-42`) keeps `W = V`, dual
+    // orientation included. Why not `compact_bond_leg` for a dual `V`: that is
+    // the dense route's fresh nondual `W = fuse(V)`, which the diagonal
+    // convention deliberately does not share; the provider-prepared factor
+    // regions below are the structural check on both orientations.
+    let bond = &source.homspace().codomain().legs()[0];
+    if !bond.is_dual() && compact_bond_leg(&source_regions) != *bond {
         return Ok(None);
     }
     let Some(by_sector) = aligned_diagonal_spectrum_by_sector(&source_regions, spectrum) else {
@@ -152,7 +157,7 @@ where
         }
     }
 
-    let bond = source.homspace().codomain().legs()[0].clone();
+    let bond = bond.clone();
     let left_hom = FusionTreeHomSpace::new(
         source.homspace().codomain().clone(),
         FusionProductSpace::new([bond.clone()]),
