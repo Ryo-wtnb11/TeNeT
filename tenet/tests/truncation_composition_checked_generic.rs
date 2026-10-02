@@ -1,9 +1,9 @@
 //! The truncation composition on a checked Generic provider (#1300).
 //!
 //! SU(3) with the adjoint irrep is the case the multiplicity-free file cannot
-//! reach: the quantum-dimension weight is the fallible `try_sqrt_dim_scalar²`,
-//! and the compact SVD's `s` is **dense**, so `diagview` takes its strided arm
-//! rather than cloning a stored spectrum.
+//! reach: the quantum-dimension weight is the fallible `try_sqrt_dim_scalar²`.
+//! Compact SVD stores `s` diagonally; its explicitly materialized copy also
+//! exercises `diagview`'s strided dense arm.
 //!
 //! The SVD source is rank `(2,1)` on purpose. A `bond <- bond` map has
 //! rank-one trees and therefore no outer-multiplicity vertex at all; with two
@@ -119,11 +119,18 @@ macro_rules! assert_su3_svd_composition {
             let case = format!("{} {name}", $tag);
             let Svd { u, s, vh } = source.svd_compact(&[0, 1], &[2]).unwrap();
             assert!(
-                tenet::expert::diagonal_spectrum(&s).unwrap().is_none(),
-                "checked-Generic compact s is dense, which is what exercises diagview's strided arm"
+                tenet::expert::diagonal_spectrum(&s).unwrap().is_some(),
+                "{case}: compact SVD must store s diagonally"
             );
+            let dense_s = s.materialize().unwrap();
+            assert!(tenet::expert::diagonal_spectrum(&dense_s)
+                .unwrap()
+                .is_none());
+            assert_eq!(s.diagview().unwrap(), dense_s.diagview().unwrap());
             let bond = s.domain()[0].clone();
-            let found = bond.find_truncated(&s.diagview().unwrap(), &truncation).unwrap();
+            let found = bond
+                .find_truncated(&s.diagview().unwrap(), &truncation)
+                .unwrap();
             let selection = &found.selection;
             let got_u = u.restrict_leg(&[(u.codomain_rank(), selection)]).unwrap();
             let got_s = s.restrict_leg(&[(0, selection), (1, selection)]).unwrap();

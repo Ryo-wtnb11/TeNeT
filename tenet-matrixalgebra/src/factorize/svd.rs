@@ -2309,21 +2309,29 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    let (u, s, vh, _) = svd_compact_with_spectrum_dyn_checked_generic(dense, input)?;
+    let (u, vh, singular_values) =
+        svd_compact_factors_with_spectrum_dyn_checked_generic(dense, input)?;
+    let s = diagonal_bond_svd_factor_generic_checked(
+        Arc::clone(input.space().provider_arc()),
+        &singular_values,
+        &D::from_real,
+    )?;
     Ok(Svd { u, s, vh })
 }
 
-pub(super) type CheckedCompactSvdWithSpectrum<R, D> = (
-    BoundDynFactor<R, D>,
+#[doc(hidden)]
+pub type CheckedCompactSvdFactorsWithSpectrum<R, D> = (
     BoundDynFactor<R, D>,
     BoundDynFactor<R, D>,
     Vec<SectorSpectrum>,
 );
 
-pub(super) fn svd_compact_with_spectrum_dyn_checked_generic<E, R, D>(
+/// Checked compact SVD factors and sector values before diagonal publication.
+#[doc(hidden)]
+pub fn svd_compact_factors_with_spectrum_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<CheckedCompactSvdWithSpectrum<R, D>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<CheckedCompactSvdFactorsWithSpectrum<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     E: DenseExecutor + ?Sized,
     R: CheckedGenericFusion,
@@ -2364,12 +2372,7 @@ where
     })
     .map_err(CheckedGenericFactorPlanError::from)?;
     let (u, vh) = build_checked_pair_from_input(provider, space.homspace(), &matrices, pairs)?;
-    let s = diagonal_bond_svd_factor_generic_checked(
-        Arc::clone(provider),
-        &singular_values,
-        &D::from_real,
-    )?;
-    Ok((u, s, vh, singular_values))
+    Ok((u, vh, singular_values))
 }
 
 /// Checked-Generic full SVD. Dense work is performed before any output-space

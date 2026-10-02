@@ -1565,11 +1565,20 @@ where
         let payload = body.materialized_dense_data();
         let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let Svd { u, s, vh } =
-            tenet_matrixalgebra::svd_compact_dyn_checked_generic(dense.dense(), &input)?;
+        let (u, vh, mut singular_values) =
+            tenet_matrixalgebra::svd_compact_factors_with_spectrum_dyn_checked_generic(
+                dense.dense(),
+                &input,
+            )?;
+        let s = diagonal_factor_on_checked(
+            &self.runtime,
+            Arc::clone(input.space().provider_arc()),
+            &mut singular_values,
+            D::from_real,
+        )?;
         Ok(Svd {
             u: wrap_factor_on(&self.runtime, u),
-            s: wrap_factor_on(&self.runtime, s),
+            s,
             vh: wrap_factor_on(&self.runtime, vh),
         })
     }
@@ -1738,12 +1747,11 @@ where
     /// `vh : W <- domain(self)`. `u` has orthonormal columns, `vh` has
     /// orthonormal rows, and each sector's singular values are non-negative and
     /// descending. [`Self::svd_full`] instead returns square outer factors and
-    /// a rectangular dense `s`.
+    /// a generally rectangular `s`; its storage depends on the admitted bond.
     ///
-    /// For multiplicity-free providers, compact `s` stores only
-    /// `sum_c k_c` diagonal values and bond composition becomes a scaling.
-    /// Checked-Generic compact SVD currently returns a dense `s`; checked EIGH
-    /// and EIG are the Generic factorizations whose diagonal factor is compact.
+    /// On Host, compact `s` stores only `sum_c k_c` diagonal values for both
+    /// multiplicity-free and checked-Generic providers. `s.materialize()`
+    /// produces dense storage when needed.
     /// All checked factors retain the source's exact provider `Arc`.
     ///
     /// Dense inputs cost `O(sum_c m_c * n_c * min(m_c, n_c))`. An owned
@@ -2015,12 +2023,11 @@ where
     ///
     /// # Domain
     ///
-    /// The receiver must store a compact diagonal: a multiplicity-free
+    /// The receiver must store a compact diagonal: a Host
     /// [`Self::svd_compact`] `s`, an eigendecomposition's `d`, or a tensor
     /// built by [`Self::diagonal`]. A dense tensor is rejected even when its
     /// blocks happen to be diagonal; this method never scans or builds a
-    /// dense buffer. A diagonal that is stored densely (a checked-Generic
-    /// `svd_compact` `s`) is made compact explicitly with
+    /// dense buffer. A diagonal that is stored densely is made compact explicitly with
     /// `TensorMap::diagonal(runtime, bond, t.diagview()?)`.
     ///
     /// # Errors

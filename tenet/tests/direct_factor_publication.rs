@@ -389,7 +389,14 @@ mod checked_generic {
             let (Svd { u, s, vh }, svd) = measured(|| a.svd_compact(&[0], &[1]).unwrap());
             black_box(&warm);
             let polar_outputs = payload_bytes(&w) + payload_bytes(&p);
-            let svd_outputs = payload_bytes(&u) + payload_bytes(&s) + payload_bytes(&vh);
+            let s_bytes = s
+                .diagview()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.values.len())
+                .sum::<usize>()
+                * std::mem::size_of::<f64>();
+            let svd_outputs = payload_bytes(&u) + s_bytes + payload_bytes(&vh);
             (polar.bytes - polar_outputs, svd.bytes - svd_outputs)
         };
         let (polar_small, svd_small) = scratch(1);
