@@ -20,7 +20,22 @@ runs:
     # its own pruning; a separate cache with a coarser (Cargo.toml) key lets
     # these dirs survive rust-cache's prune without fighting its restore. The
     # llvm-cov-target paths cover the coverage job, which builds one level deeper.
-    - uses: actions/cache@v4
+    # Why-not save from PR refs: a PR-scoped cache is usable only by that PR's
+    # merge ref, and those caches pushed the repository past its Actions cache
+    # limit (#1742). Main saves; every other ref only restores main's entry.
+    - if: github.ref == 'refs/heads/main'
+      uses: actions/cache@v4
+      with:
+        path: |
+          tenet/target/*/.fingerprint
+          tenet/target/*/build
+          tenet/target/llvm-cov-target/*/.fingerprint
+          tenet/target/llvm-cov-target/*/build
+        key: cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-${{ hashFiles('tenet/**/Cargo.toml') }}
+        restore-keys: |
+          cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-
+    - if: github.ref != 'refs/heads/main'
+      uses: actions/cache/restore@v4
       with:
         path: |
           tenet/target/*/.fingerprint
