@@ -885,8 +885,10 @@ where
     ///
     /// - [`Error::InvalidArgument`] when `rcond` is not finite or is negative,
     ///   checked before any provider work or dense allocation.
-    /// - [`Error::InvalidArgument`] for a non-finite singular value (compact
-    ///   entry magnitude), rejected rather than cut, on every storage arm.
+    /// - A non-finite compact entry on checked Generic retains the dense SVD
+    ///   route and its typed [`Error::Operation`] failure; the multiplicity-free
+    ///   compact arm returns [`Error::InvalidArgument`]. Checked finite entries
+    ///   that require the dense route inherit its dense error behavior.
     /// - [`Error::Operation`] / [`Error::Core`] from dense SVD or recomposition.
     ///
     /// There is no singular-input failure: sending the offending directions to
@@ -896,16 +898,19 @@ where
     ///
     /// Dense input uses one compact SVD per nonempty coupled sector,
     /// `O(Σ_c n_c³)`, then folds `S⁺` into a column scaling and recomposes with
-    /// one local GEMM. Multiplicity-free compact input uses an **O(rank)
-    /// elementwise cutoff-and-reciprocal arm** over the stored diagonal values
-    /// and stays compact.
+    /// one local GEMM. An admitted finite Host compact diagonal input stays
+    /// compact in multiplicity-free mode. Checked Generic also requires a
+    /// matching source/output layout and retained values with normal magnitudes
+    /// and finite reciprocals; otherwise it follows the dense route. For `K`
+    /// stored values, `B` checked
+    /// source/output blocks, and `G` sectors, its elementwise cutoff and
+    /// reciprocal take `O(K + B + G)` time and `O(K + G)` result space.
     ///
     /// Checked Generic admits the swapped output with the source's exact
     /// provider `Arc` and validates its identity, HomSpace, rank, and layout
-    /// before any SVD/GEMM. Standalone compact construction is supported, but
-    /// checked `pinv` has no elementwise compact arm: it materializes that input
-    /// for the dense path and publishes a dense result. A checked lazy adjoint
-    /// is likewise materialized operation-locally.
+    /// before any SVD/GEMM. The compact arm also checks both source and
+    /// swapped-output coupled-sector layouts. Ineligible layouts retain the
+    /// dense route. A checked lazy adjoint is materialized operation-locally.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
