@@ -858,20 +858,7 @@ fn real_diagonal_by_sector<'a, D: FactorScalar>(
     {
         return None;
     }
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != spectrum.len() || by_sector.len() != regions.len() {
-        return None;
-    }
-    for region in regions {
-        let entry = by_sector.get(&region.coupled())?;
-        if !region.has_aligned_diagonal()
-            || region.rows() != region.cols()
-            || entry.values.len() != region.rows()
-        {
-            return None;
-        }
-    }
-    Some(by_sector)
+    aligned_diagonal_spectrum_by_sector(regions, spectrum)
 }
 
 fn complex_diagonal_by_sector<'a, D: FactorScalar>(
@@ -888,20 +875,7 @@ fn complex_diagonal_by_sector<'a, D: FactorScalar>(
     {
         return None;
     }
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != spectrum.len() || by_sector.len() != regions.len() {
-        return None;
-    }
-    for region in regions {
-        let entry = by_sector.get(&region.coupled())?;
-        if !region.has_aligned_diagonal()
-            || region.rows() != region.cols()
-            || entry.values.len() != region.rows()
-        {
-            return None;
-        }
-    }
-    Some(by_sector)
+    aligned_diagonal_spectrum_by_sector(regions, spectrum)
 }
 
 /// Reads an admitted compact diagonal spectrum without dense input or eigensolver.

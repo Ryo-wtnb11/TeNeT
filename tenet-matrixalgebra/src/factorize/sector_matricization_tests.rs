@@ -131,6 +131,100 @@ fn z2_pair(codomain: [usize; 2], domain: [usize; 2], coupled: usize) -> FusionTr
 }
 
 #[test]
+fn aligned_diagonal_spectrum_admission_is_exact_and_order_independent() {
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let leg = SectorLeg::new([(even, 2), (odd, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone()]),
+        FusionProductSpace::new([leg]),
+    );
+    let authority = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        Arc::new(Z2FusionRule),
+        homspace,
+    )
+    .unwrap();
+    let regions = checked_sector_regions(authority.space().structure(), 1)
+        .unwrap()
+        .unwrap();
+    let reordered = [
+        SectorSpectrum {
+            sector: odd,
+            values: vec![3.0],
+        },
+        SectorSpectrum {
+            sector: even,
+            values: vec![1.0, 2.0],
+        },
+    ];
+    let admitted = aligned_diagonal_spectrum_by_sector(&regions, &reordered).unwrap();
+    assert_eq!(admitted[&even].values, [1.0, 2.0]);
+    assert_eq!(admitted[&odd].values, [3.0]);
+    assert!(aligned_diagonal_spectrum_by_sector(&regions, &reordered[..1]).is_none());
+    let missing = [
+        SectorSpectrum {
+            sector: SectorId::new(9),
+            values: vec![3.0],
+        },
+        SectorSpectrum {
+            sector: even,
+            values: vec![1.0, 2.0],
+        },
+    ];
+    assert!(aligned_diagonal_spectrum_by_sector(&regions, &missing).is_none());
+    let duplicate = [
+        SectorSpectrum {
+            sector: even,
+            values: vec![1.0, 2.0],
+        },
+        SectorSpectrum {
+            sector: even,
+            values: vec![3.0, 4.0],
+        },
+    ];
+    assert!(aligned_diagonal_spectrum_by_sector(&regions, &duplicate).is_none());
+    let wrong_length = [
+        SectorSpectrum {
+            sector: odd,
+            values: vec![3.0],
+        },
+        SectorSpectrum {
+            sector: even,
+            values: vec![1.0],
+        },
+    ];
+    assert!(aligned_diagonal_spectrum_by_sector(&regions, &wrong_length).is_none());
+
+    let trees = [z2_pair([1, 1], [1, 1], 0), z2_pair([0, 0], [0, 0], 0)];
+    let mut blocks = Vec::new();
+    for (column, col) in trees.iter().enumerate() {
+        for (row, row_tree) in trees.iter().enumerate() {
+            blocks.push(
+                BlockSpec::with_key(
+                    FusionTreePairKey::pair(
+                        row_tree.codomain_tree().clone(),
+                        col.domain_tree().clone(),
+                    )
+                    .into(),
+                    vec![1, 1, 1, 1],
+                    vec![1, 1, 2, 2],
+                    row + 2 * column,
+                )
+                .unwrap(),
+            );
+        }
+    }
+    let structure = BlockStructure::from_blocks_with_rank(4, blocks).unwrap();
+    let noncanonical = checked_sector_regions(&structure, 2).unwrap().unwrap();
+    assert!(noncanonical[0].row_trees()[0].tree() > noncanonical[0].row_trees()[1].tree());
+    let spectrum = [SectorSpectrum {
+        sector: even,
+        values: vec![1.0, 2.0],
+    }];
+    assert!(aligned_diagonal_spectrum_by_sector(&noncanonical, &spectrum).is_some());
+}
+
+#[test]
 fn left_factor_publication_borrows_real_geometry_for_complex_output() {
     let x = SectorId::new(1);
     let vacuum = SectorId::new(0);

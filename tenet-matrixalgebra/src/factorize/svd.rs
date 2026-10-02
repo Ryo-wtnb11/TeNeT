@@ -491,21 +491,12 @@ where
     else {
         return Ok(None);
     };
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != regions.len() || spectrum.len() != regions.len() {
+    let Some(by_sector) = aligned_diagonal_spectrum_by_sector(&regions, spectrum) else {
         return Ok(None);
-    }
+    };
     let mut values = Vec::with_capacity(regions.len());
     for region in regions.iter() {
-        let Some(entry) = by_sector.get(&region.coupled()) else {
-            return Ok(None);
-        };
-        if !region.has_aligned_diagonal()
-            || region.rows() != region.cols()
-            || entry.values.len() != region.rows()
-        {
-            return Ok(None);
-        }
+        let entry = by_sector[&region.coupled()];
         let mut sorted = Vec::with_capacity(entry.values.len());
         for &value in &entry.values {
             let Some(magnitude) = finite_compact_magnitude(value) else {
@@ -697,20 +688,12 @@ where
     let Ok(Some(source_regions)) = checked_sector_regions(source.structure(), 1) else {
         return Ok(None);
     };
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != spectrum.len() || spectrum.len() != source_regions.len() {
+    let Some(by_sector) = aligned_diagonal_spectrum_by_sector(&source_regions, spectrum) else {
         return Ok(None);
-    }
+    };
     for region in source_regions.iter() {
-        let Some(entry) = by_sector.get(&region.coupled()) else {
-            return Ok(None);
-        };
-        if !region.has_aligned_diagonal()
-            || region.rows() != region.cols()
-            || region.row_trees().len() != 1
-            || region.col_trees().len() != 1
-            || entry.values.len() != region.rows()
-        {
+        let entry = by_sector[&region.coupled()];
+        if region.row_trees().len() != 1 || region.col_trees().len() != 1 {
             return Ok(None);
         }
         for &value in &entry.values {
@@ -771,21 +754,15 @@ where
     let Ok(Some(source_regions)) = checked_sector_regions(source.structure(), 1) else {
         return Ok(CheckedDiagonalFullSvdFactors::NotAdmitted);
     };
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != spectrum.len() || spectrum.len() != source_regions.len() {
+    let Some(by_sector) = aligned_diagonal_spectrum_by_sector(&source_regions, spectrum) else {
         return Ok(CheckedDiagonalFullSvdFactors::NotAdmitted);
-    }
+    };
     let mut source_dimensions = BTreeMap::new();
     for region in source_regions.iter() {
-        let Some(entry) = by_sector.get(&region.coupled()) else {
-            return Ok(CheckedDiagonalFullSvdFactors::NotAdmitted);
-        };
-        if !region.has_aligned_diagonal()
-            || region.rows() == 0
-            || region.rows() != region.cols()
+        let entry = by_sector[&region.coupled()];
+        if region.rows() == 0
             || region.row_trees().len() != 1
             || region.col_trees().len() != 1
-            || entry.values.len() != region.rows()
             || source_dimensions
                 .insert(region.coupled(), region.rows())
                 .is_some()
