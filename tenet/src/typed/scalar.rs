@@ -1947,8 +1947,12 @@ where
     /// dense storage. On Host, `s` uses compact diagonal storage exactly when
     /// the constructed `W_out` and `W_in` legs coincide, every positive bond
     /// sector has a complete spectrum, and the compact layout is admitted.
-    /// Otherwise it is dense. The admitted owned multiplicity-free compact
-    /// input route also avoids dense input materialization and a solver call.
+    /// Otherwise it is dense. An admitted owned compact input avoids dense
+    /// input materialization and a solver call. For a checked-Generic provider,
+    /// this requires a rank-(1,1) square aligned source with one tree per side
+    /// and complete checked row and column bond maps exactly equal to the
+    /// source spectrum sectors and dimensions; other checked inputs use the
+    /// dense route.
     /// Call `s.materialize()` before `dense_data()` when needed.
     /// Checked factors use the source provider instance; a failure returns no
     /// factors.
