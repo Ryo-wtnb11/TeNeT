@@ -657,6 +657,7 @@ struct CheckedOnlyToy {
     r_queries: AtomicUsize,
     malformed_f: AtomicBool,
     invalid_style: AtomicBool,
+    extra_vacuum_channel: AtomicBool,
     use_product_probe: bool,
     fractional_dim: bool,
     fail_f_on_query: AtomicUsize,
@@ -684,6 +685,7 @@ impl CheckedOnlyToy {
             r_queries: AtomicUsize::new(0),
             malformed_f: AtomicBool::new(false),
             invalid_style: AtomicBool::new(false),
+            extra_vacuum_channel: AtomicBool::new(false),
             use_product_probe: false,
             fractional_dim: false,
             fail_f_on_query: AtomicUsize::new(0),
@@ -736,7 +738,7 @@ impl CheckedOnlyToy {
     }
 
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        if self.use_product_probe {
+        let mut channels = if self.use_product_probe {
             Self::probe_fusion_channels(left, right)
         } else {
             match (left.id(), right.id()) {
@@ -744,7 +746,12 @@ impl CheckedOnlyToy {
                 (3, 3) => [SectorId::new(0), SectorId::new(3)].into_iter().collect(),
                 _ => SectorVec::new(),
             }
+        };
+        if self.extra_vacuum_channel.load(Ordering::Relaxed) && left.id() == 0 && right == self.x()
+        {
+            channels.push(SectorId::new(0));
         }
+        channels
     }
 
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
@@ -2288,7 +2295,7 @@ fn checked_generic_dense_input_svd_publishes_compact_multisector_s() {
 }
 
 #[test]
-fn checked_compact_diagonal_svd_compact_matches_hand_permutation_and_phase() {
+fn checked_compact_diagonal_svd_matches_hand_permutation_and_phase() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let bond =
@@ -2411,12 +2418,41 @@ fn checked_compact_diagonal_svd_compact_matches_hand_permutation_and_phase() {
         .zip(input.materialize().unwrap().dense_data().unwrap())
         .all(|(actual, expected)| (*actual - expected).norm() <= 1e-12));
 
+    let Svd { u, s, vh } = input.svd_full(&[0], &[1]).unwrap();
+    for factor in [&u, &s, &vh] {
+        assert!(std::ptr::eq(factor.provider(), provider.as_ref()));
+    }
+    assert!(s.dense_data().is_err());
+    for (actual, expected) in [(&u, &expected_u), (&vh, &expected_vh)] {
+        assert!(actual
+            .dense_data()
+            .unwrap()
+            .iter()
+            .zip(expected.dense_data().unwrap())
+            .all(|(actual, expected)| (*actual - expected).norm() <= 1e-12));
+    }
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(input.materialize().unwrap().dense_data().unwrap())
+        .all(|(actual, expected)| (*actual - expected).norm() <= 1e-12));
+
     let narrow = input.convert::<Complex32>();
     let Svd { u, s, vh } = narrow.svd_compact(&[0], &[1]).unwrap();
     assert_eq!(
         s.diagview().unwrap()[0].values,
         [Complex32::new(2.0, 0.0), Complex32::new(0.0, 0.0)]
     );
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(narrow.materialize().unwrap().dense_data().unwrap())
+        .all(|(actual, expected)| (*actual - expected).norm() <= 1e-5));
+    let Svd { u, s, vh } = narrow.svd_full(&[0], &[1]).unwrap();
     let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
     assert!(rebuilt
         .dense_data()
@@ -2486,10 +2522,28 @@ fn checked_compact_diagonal_svd_compact_preserves_fallback_error_order() {
         ))
     ));
     assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+
+    provider.invalid_style.store(false, Ordering::Relaxed);
+    provider.fail_algebra.store(true, Ordering::Relaxed);
+    let dense = finite.materialize().unwrap();
+    reset_provider_queries(provider.as_ref());
+    svd_calls.store(0, Ordering::Relaxed);
+    let expected = dense.svd_full(&[0], &[1]).unwrap_err();
+    let expected_queries = provider.queries_since_reset.load(Ordering::Relaxed);
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+    reset_provider_queries(provider.as_ref());
+    svd_calls.store(0, Ordering::Relaxed);
+    let actual = finite.svd_full(&[0], &[1]).unwrap_err();
+    assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+    assert_eq!(
+        provider.queries_since_reset.load(Ordering::Relaxed),
+        expected_queries
+    );
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
-fn checked_compact_diagonal_svd_compact_numeric_admission_matches_dense() {
+fn checked_compact_diagonal_svd_numeric_admission_matches_dense() {
     let svd_calls = Arc::new(AtomicUsize::new(0));
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -2522,25 +2576,42 @@ fn checked_compact_diagonal_svd_compact_numeric_admission_matches_dense() {
                 .unwrap();
                 let dense = input.materialize().unwrap();
                 svd_calls.store(0, Ordering::Relaxed);
-                let got = input.svd_compact(&[0], &[1]);
-                assert_eq!(
-                    svd_calls.load(Ordering::Relaxed),
-                    usize::from(!direct),
-                    "{name}"
-                );
-                let expected = dense.svd_compact(&[0], &[1]);
-                match (got, expected) {
-                    (Ok(got), Ok(expected)) => {
-                        assert_eq!(
-                            got.s.diagview().unwrap(),
-                            expected.s.diagview().unwrap(),
-                            "{name}"
-                        );
+                for full in [false, true] {
+                    svd_calls.store(0, Ordering::Relaxed);
+                    let got = if full {
+                        input.svd_full(&[0], &[1])
+                    } else {
+                        input.svd_compact(&[0], &[1])
+                    };
+                    assert_eq!(
+                        svd_calls.load(Ordering::Relaxed),
+                        usize::from(!direct),
+                        "{name}, full={full}"
+                    );
+                    let expected = if full {
+                        dense.svd_full(&[0], &[1])
+                    } else {
+                        dense.svd_compact(&[0], &[1])
+                    };
+                    match (got, expected) {
+                        (Ok(got), Ok(expected)) => {
+                            assert_eq!(
+                                got.s.diagview().unwrap(),
+                                expected.s.diagview().unwrap(),
+                                "{name}, full={full}"
+                            );
+                        }
+                        (Err(got), Err(expected)) => {
+                            assert_eq!(
+                                format!("{got:?}"),
+                                format!("{expected:?}"),
+                                "{name}, full={full}"
+                            );
+                        }
+                        (got, expected) => {
+                            panic!("{name}, full={full}: {got:?} versus {expected:?}")
+                        }
                     }
-                    (Err(got), Err(expected)) => {
-                        assert_eq!(format!("{got:?}"), format!("{expected:?}"), "{name}");
-                    }
-                    (got, expected) => panic!("{name}: {got:?} versus {expected:?}"),
                 }
             }
         };
@@ -2561,17 +2632,28 @@ fn checked_compact_diagonal_svd_compact_numeric_admission_matches_dense() {
             .unwrap();
             let dense = overflow.materialize().unwrap();
             svd_calls.store(0, Ordering::Relaxed);
-            let got = overflow.svd_compact(&[0], &[1]);
-            assert_eq!(svd_calls.load(Ordering::Relaxed), 1);
-            let expected = dense.svd_compact(&[0], &[1]);
-            match (got, expected) {
-                (Ok(got), Ok(expected)) => {
-                    assert_eq!(got.s.diagview().unwrap(), expected.s.diagview().unwrap());
+            for full in [false, true] {
+                svd_calls.store(0, Ordering::Relaxed);
+                let got = if full {
+                    overflow.svd_full(&[0], &[1])
+                } else {
+                    overflow.svd_compact(&[0], &[1])
+                };
+                assert_eq!(svd_calls.load(Ordering::Relaxed), 1);
+                let expected = if full {
+                    dense.svd_full(&[0], &[1])
+                } else {
+                    dense.svd_compact(&[0], &[1])
+                };
+                match (got, expected) {
+                    (Ok(got), Ok(expected)) => {
+                        assert_eq!(got.s.diagview().unwrap(), expected.s.diagview().unwrap());
+                    }
+                    (Err(got), Err(expected)) => {
+                        assert_eq!(format!("{got:?}"), format!("{expected:?}"));
+                    }
+                    (got, expected) => panic!("full={full}: {got:?} versus {expected:?}"),
                 }
-                (Err(got), Err(expected)) => {
-                    assert_eq!(format!("{got:?}"), format!("{expected:?}"));
-                }
-                (got, expected) => panic!("{got:?} versus {expected:?}"),
             }
         };
     }
@@ -2580,7 +2662,7 @@ fn checked_compact_diagonal_svd_compact_numeric_admission_matches_dense() {
 }
 
 #[test]
-fn checked_compact_diagonal_svd_compact_preserves_dual_and_changed_roles() {
+fn checked_compact_diagonal_svd_preserves_dual_and_changed_roles() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let dual_bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)])
@@ -2604,10 +2686,26 @@ fn checked_compact_diagonal_svd_compact_preserves_dual_and_changed_roles() {
         rebuilt.dense_data().unwrap(),
         input.materialize().unwrap().dense_data().unwrap()
     );
+    let Svd { u, s, vh } = input.svd_full(&[0], &[1]).unwrap();
+    assert!(std::ptr::eq(u.provider(), provider.as_ref()));
+    assert_eq!(s.diagview().unwrap()[0].values, [2.0, 0.0]);
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert_eq!(
+        rebuilt.dense_data().unwrap(),
+        input.materialize().unwrap().dense_data().unwrap()
+    );
     // Changed roles enter the checked transform first; this provider rejects
     // that transform before SVD can inspect the compact payload.
     assert!(matches!(
         input.svd_compact(&[1], &[0]),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Operation(
+                tenet::typed::OperationError::EmptyTransformBlock
+            )
+        ))
+    ));
+    assert!(matches!(
+        input.svd_full(&[1], &[0]),
         Err(GenericTensorError::Plan(
             tenet::typed::CheckedGenericPlanError::Operation(
                 tenet::typed::OperationError::EmptyTransformBlock
@@ -2645,6 +2743,43 @@ fn checked_generic_full_svd_keeps_dense_s_for_equal_total_but_unequal_sector_bon
         .iter()
         .zip(input.dense_data().unwrap())
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
+}
+
+#[test]
+fn checked_compact_diagonal_svd_full_falls_back_for_a_complete_bond_mismatch() {
+    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(PinvFaultExecutor {
+            inner: DefaultDenseExecutor::new(),
+            svd_calls: Arc::clone(&svd_calls),
+            gemm_calls: Arc::new(AtomicUsize::new(0)),
+            fail_svd: None,
+            fail_gemm: None,
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![2.0, -1.0],
+        }],
+    )
+    .unwrap();
+    provider.extra_vacuum_channel.store(true, Ordering::Relaxed);
+
+    let Svd { u, s, vh } = input.svd_full(&[0], &[1]).unwrap();
+
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 1);
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert_eq!(
+        rebuilt.dense_data().unwrap(),
+        input.materialize().unwrap().dense_data().unwrap()
+    );
 }
 
 #[cfg(feature = "racah-generated")]

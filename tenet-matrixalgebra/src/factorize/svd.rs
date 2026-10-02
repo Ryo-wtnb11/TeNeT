@@ -750,6 +750,135 @@ where
     Ok(Some((u, vh, singular_values)))
 }
 
+/// Checked-provider full SVD factors read directly from an admitted compact
+/// diagonal. The full builders remain the publication authority.
+#[doc(hidden)]
+pub fn svd_full_diagonal_factors_dyn_checked_generic<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<CheckedDiagonalFullSvdFactors<R, D, R::Error>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let source = authority.space();
+    if source.nout() != 1
+        || source.nin() != 1
+        || source.homspace().codomain().legs() != source.homspace().domain().legs()
+    {
+        return Ok(CheckedDiagonalFullSvdFactors::NotAdmitted);
+    }
+    let Ok(Some(source_regions)) = checked_sector_regions(source.structure(), 1) else {
+        return Ok(CheckedDiagonalFullSvdFactors::NotAdmitted);
+    };
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != spectrum.len() || spectrum.len() != source_regions.len() {
+        return Ok(CheckedDiagonalFullSvdFactors::NotAdmitted);
+    }
+    let mut source_dimensions = BTreeMap::new();
+    for region in source_regions.iter() {
+        let Some(entry) = by_sector.get(&region.coupled()) else {
+            return Ok(CheckedDiagonalFullSvdFactors::NotAdmitted);
+        };
+        if !region.has_aligned_diagonal()
+            || region.rows() == 0
+            || region.rows() != region.cols()
+            || region.row_trees().len() != 1
+            || region.col_trees().len() != 1
+            || entry.values.len() != region.rows()
+            || source_dimensions
+                .insert(region.coupled(), region.rows())
+                .is_some()
+        {
+            return Ok(CheckedDiagonalFullSvdFactors::NotAdmitted);
+        }
+        for &value in &entry.values {
+            let Some(magnitude) = finite_compact_magnitude(value) else {
+                return Ok(CheckedDiagonalFullSvdFactors::NotAdmitted);
+            };
+            if magnitude > 0.0 && magnitude < D::safe_minimum() {
+                return Ok(CheckedDiagonalFullSvdFactors::NotAdmitted);
+            }
+        }
+    }
+
+    let dimensions = coupled_sector_block_dimensions_generic_checked(
+        source.homspace().codomain(),
+        authority.provider_arc().as_ref(),
+    )
+    .and_then(|rows| {
+        coupled_sector_block_dimensions_generic_checked(
+            source.homspace().domain(),
+            authority.provider_arc().as_ref(),
+        )
+        .map(|cols| (rows, cols))
+    });
+    let (row_dimensions, col_dimensions) = match dimensions {
+        Ok(dimensions) => dimensions,
+        Err(error) => {
+            return Ok(CheckedDiagonalFullSvdFactors::Fallback(Err(error)));
+        }
+    };
+    if row_dimensions != source_dimensions || col_dimensions != source_dimensions {
+        return Ok(CheckedDiagonalFullSvdFactors::Fallback(Ok((
+            row_dimensions,
+            col_dimensions,
+        ))));
+    }
+
+    let mut pairs = Vec::with_capacity(source_regions.len());
+    let mut singular_values = Vec::with_capacity(source_regions.len());
+    for region in source_regions.iter() {
+        let entry = by_sector[&region.coupled()];
+        let (mut left, right, values) = compact_diagonal_svd_sector(&entry.values);
+        let mut right = right;
+        svd_full_gauge(
+            &mut left,
+            region.rows(),
+            region.rows(),
+            &mut right,
+            region.cols(),
+            region.cols(),
+        );
+        pairs.push(FactorPair {
+            sector: region.coupled(),
+            kept: region.rows(),
+            left,
+            left_rows: region.rows(),
+            right,
+            right_leading: region.cols(),
+        });
+        singular_values.push(SectorSpectrum {
+            sector: region.coupled(),
+            values,
+        });
+    }
+    let u = build_bound_factor_generic_checked(
+        authority.provider_arc(),
+        source.homspace(),
+        &source_regions,
+        &mut pairs,
+        &row_dimensions,
+        FactorSide::Left,
+    )?;
+    let vh = build_bound_factor_generic_checked(
+        authority.provider_arc(),
+        source.homspace(),
+        &source_regions,
+        &mut pairs,
+        &col_dimensions,
+        FactorSide::Right,
+    )?;
+    Ok(CheckedDiagonalFullSvdFactors::Direct(SvdFullFactorsDyn {
+        u,
+        vh,
+        singular_values,
+        row_dimensions,
+        col_dimensions,
+        adjoint_space: None,
+    }))
+}
+
 pub fn svd_compact_factors_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -1400,6 +1529,25 @@ pub struct SvdFullFactorsDyn<R, D> {
     row_dimensions: BTreeMap<SectorId, usize>,
     col_dimensions: BTreeMap<SectorId, usize>,
     adjoint_space: Option<BoundDynamicFusionMapSpace<R>>,
+}
+
+#[doc(hidden)]
+pub type CheckedFullSvdDimensions<E> = Result<
+    (BTreeMap<SectorId, usize>, BTreeMap<SectorId, usize>),
+    CheckedGenericFactorPlanError<E>,
+>;
+
+/// Result of compact-diagonal full-SVD admission. A checked dimension result
+/// is returned to the dense fallback so a stateful provider is queried once.
+#[doc(hidden)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "boxing the direct factors would add an allocation to the admitted path"
+)]
+pub enum CheckedDiagonalFullSvdFactors<R, D, E> {
+    NotAdmitted,
+    Direct(SvdFullFactorsDyn<R, D>),
+    Fallback(CheckedFullSvdDimensions<E>),
 }
 
 impl<R, D> SvdFullFactorsDyn<R, D> {
@@ -2612,6 +2760,22 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
+    svd_full_factors_dyn_checked_generic_with_dimensions(dense, input, None)
+}
+
+/// Checked full SVD using a dimension result already obtained during compact
+/// admission. `None` retains the ordinary query path.
+#[doc(hidden)]
+pub fn svd_full_factors_dyn_checked_generic_with_dimensions<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    dimensions: Option<CheckedFullSvdDimensions<R::Error>>,
+) -> Result<SvdFullFactorsDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
     let provider = input.space().provider_arc();
     let space = input.space().space();
     // Why pack rather than borrow admitted regions: `owned_full_svd_stage`
@@ -2619,14 +2783,19 @@ where
     // be copied into an owned buffer anyway.
     let mut matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
-    let row_dimensions = coupled_sector_block_dimensions_generic_checked(
-        space.homspace().codomain(),
-        provider.as_ref(),
-    )?;
-    let col_dimensions = coupled_sector_block_dimensions_generic_checked(
-        space.homspace().domain(),
-        provider.as_ref(),
-    )?;
+    let (row_dimensions, col_dimensions) = match dimensions {
+        Some(dimensions) => dimensions?,
+        None => (
+            coupled_sector_block_dimensions_generic_checked(
+                space.homspace().codomain(),
+                provider.as_ref(),
+            )?,
+            coupled_sector_block_dimensions_generic_checked(
+                space.homspace().domain(),
+                provider.as_ref(),
+            )?,
+        ),
+    };
     let max_rows = matrices.iter().map(|m| m.rows).max().unwrap_or(0);
     let max_cols = matrices.iter().map(|m| m.cols).max().unwrap_or(0);
     let max_rank = matrices

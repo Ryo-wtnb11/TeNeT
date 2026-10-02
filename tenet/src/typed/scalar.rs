@@ -1599,16 +1599,44 @@ where
                 "checked Generic svd_full does not accept lazy adjoints".to_string(),
             )));
         };
-        let mut dense = self.runtime.lease_dense();
-        let payload = body.materialized_dense_data();
-        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let factors =
-            tenet_matrixalgebra::svd_full_factors_dyn_checked_generic(dense.dense(), &input)?;
+        let admission = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            Some(
+                tenet_matrixalgebra::svd_full_diagonal_factors_dyn_checked_generic(
+                    &body.space,
+                    spectrum,
+                )?,
+            )
+        } else {
+            None
+        };
+        let factors = match admission {
+            Some(tenet_matrixalgebra::CheckedDiagonalFullSvdFactors::Direct(factors)) => factors,
+            admission => {
+                let mut dense = self.runtime.lease_dense();
+                let payload = body.materialized_dense_data();
+                let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
+                    .map_err(|error| GenericTensorError::Facade(error.into()))?;
+                match admission {
+                    Some(tenet_matrixalgebra::CheckedDiagonalFullSvdFactors::Fallback(
+                        dimensions,
+                    )) => {
+                        tenet_matrixalgebra::svd_full_factors_dyn_checked_generic_with_dimensions(
+                            dense.dense(),
+                            &input,
+                            Some(dimensions),
+                        )?
+                    }
+                    _ => tenet_matrixalgebra::svd_full_factors_dyn_checked_generic(
+                        dense.dense(),
+                        &input,
+                    )?,
+                }
+            }
+        };
         let (u, vh, mut spectrum, row_dimensions, col_dimensions) = factors.into_parts();
         if full_svd_compact_bond(&u, &vh, &spectrum) {
             let space = tenet_matrixalgebra::diagonal_bond_bound_space_generic_checked(
-                Arc::clone(input.space().provider_arc()),
+                Arc::clone(body.space.provider_arc()),
                 &spectrum,
             )?;
             if full_svd_compact_layout(&space, &spectrum) {
@@ -1620,7 +1648,7 @@ where
             }
         }
         let s = tenet_matrixalgebra::rectangular_diagonal_bond_tensor_generic_checked(
-            Arc::clone(input.space().provider_arc()),
+            Arc::clone(body.space.provider_arc()),
             &spectrum,
             &row_dimensions,
             &col_dimensions,
@@ -1919,8 +1947,12 @@ where
     /// dense storage. On Host, `s` uses compact diagonal storage exactly when
     /// the constructed `W_out` and `W_in` legs coincide, every positive bond
     /// sector has a complete spectrum, and the compact layout is admitted.
-    /// Otherwise it is dense. The admitted owned multiplicity-free compact
-    /// input route also avoids dense input materialization and a solver call.
+    /// Otherwise it is dense. An admitted owned compact input avoids dense
+    /// input materialization and a solver call. For a checked-Generic provider,
+    /// this requires a rank-(1,1) square aligned source with one tree per side
+    /// and complete checked row and column bond maps exactly equal to the
+    /// source spectrum sectors and dimensions; other checked inputs use the
+    /// dense route.
     /// Call `s.materialize()` before `dense_data()` when needed.
     /// Checked factors use the source provider instance; a failure returns no
     /// factors.

@@ -511,9 +511,16 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
         Arc::clone(&checked_provider),
     )
     .unwrap();
+    checked_provider.calls.set(0);
+    assert!(matches!(
+        svd_full_diagonal_factors_dyn_checked_generic::<_, f64>(&checked, &[]).unwrap(),
+        CheckedDiagonalFullSvdFactors::NotAdmitted
+    ));
+    assert_eq!(checked_provider.calls.get(), 0);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut dense = CountingDense::default();
     let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_eq!(dense.svd_calls, 1);
     assert!(Arc::ptr_eq(
         full.u().space().provider_arc(),
         &checked_provider
@@ -533,6 +540,58 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
             BlockKey::FusionTree(key) if key.codomain_tree().coupled() == vacuum
         )
     }));
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_compact_diagonal_full_svd_has_no_post_preflight_provider_query() {
+    let x = SectorId::new(1);
+    let leg = SectorLeg::new([(x, 2)], true);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone()]),
+        FusionProductSpace::new([leg]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let spectrum = [SectorSpectrum {
+        sector: x,
+        values: vec![2.0, 1.0],
+    }];
+
+    let successful_provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let successful = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::clone(&successful_provider),
+    )
+    .unwrap();
+    successful_provider.calls.set(0);
+    coupled_sector_block_dimensions_generic_checked(
+        successful.space().homspace().codomain(),
+        successful_provider.as_ref(),
+    )
+    .unwrap();
+    coupled_sector_block_dimensions_generic_checked(
+        successful.space().homspace().domain(),
+        successful_provider.as_ref(),
+    )
+    .unwrap();
+    let dimension_calls = successful_provider.calls.get();
+    successful_provider.calls.set(0);
+    assert!(matches!(
+        svd_full_diagonal_factors_dyn_checked_generic(&successful, &spectrum).unwrap(),
+        CheckedDiagonalFullSvdFactors::Direct(_)
+    ));
+    assert_eq!(successful_provider.calls.get(), dimension_calls);
 }
 
 #[test]
