@@ -91,15 +91,20 @@ def main():
     for crate in sorted(set(floors) - set(totals)):
         failures.append(f"{crate}: stale floor, no measured files")
 
-    if args.diff_base:
-        report_changed_lines(files, args.diff_base)
-
     if failures:
         print("\nFAILED:")
         for failure in failures:
             print(f"  {failure}")
-        sys.exit(1)
-    print("\nAll crates meet their coverage floors.")
+    else:
+        print("\nAll crates meet their coverage floors.")
+
+    if args.diff_base:
+        try:
+            report_changed_lines(files, args.diff_base)
+        except Exception as error:  # the report must never change the verdict
+            print(f"\nChanged-line report skipped: {error}")
+
+    sys.exit(1 if failures else 0)
 
 
 def report_changed_lines(files, base):

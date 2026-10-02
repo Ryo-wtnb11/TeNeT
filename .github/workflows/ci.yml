@@ -460,12 +460,15 @@ jobs:
       - name: Check per-crate coverage floors
         run: |
           set -euo pipefail
+          diff_base=""
           if [ -n "${BASE_SHA}" ]; then
-            git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-            python3 scripts/check-coverage.py coverage.json --diff-base "${BASE_SHA}"
-          else
-            python3 scripts/check-coverage.py coverage.json
+            if git fetch --no-tags --depth=1 origin "${BASE_SHA}"; then
+              diff_base="${BASE_SHA}"
+            else
+              echo "base fetch failed; skipping changed-line report"
+            fi
           fi
+          python3 scripts/check-coverage.py coverage.json ${diff_base:+--diff-base "${diff_base}"}
         working-directory: tenet
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
