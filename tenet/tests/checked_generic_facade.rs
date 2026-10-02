@@ -2850,6 +2850,52 @@ fn sun_checked_generic_svd_vals_matches_compact_spectrum() {
 }
 
 #[test]
+fn checked_compact_svd_vals_preserves_leg_roles_and_decode_failure() {
+    use tenet::typed::{CheckedGenericPlanError, OperationError};
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let leg =
+        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 2), (Label::X, 3)]).unwrap();
+    let compact: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![-3.0, 0.0, 2.0],
+            },
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![-4.0, 1.0],
+            },
+        ],
+    )
+    .unwrap();
+    let expected = compact.materialize().unwrap();
+    assert_eq!(
+        compact.svd_vals(&[0], &[1]).unwrap(),
+        expected.svd_vals(&[0], &[1]).unwrap()
+    );
+    // Changing the leg roles takes the checked transform boundary before SVD.
+    assert!(matches!(
+        compact.svd_vals(&[1], &[0]),
+        Err(GenericTensorError::Plan(
+            CheckedGenericPlanError::Operation(OperationError::EmptyTransformBlock)
+        ))
+    ));
+
+    provider.fail_decode.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        compact.svd_vals(&[0], &[1]),
+        Err(GenericTensorError::Plan(CheckedGenericPlanError::Provider(
+            _
+        )))
+    ));
+    provider.fail_decode.store(false, Ordering::Relaxed);
+}
+
+#[test]
 fn checked_generic_eigh_vals_preserves_spectrum_and_dtype() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));

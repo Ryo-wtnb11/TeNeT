@@ -1472,11 +1472,26 @@ where
                 "checked Generic svd_vals does not accept lazy adjoints".to_string(),
             )));
         };
-        let mut dense = self.runtime.lease_dense();
-        let payload = body.materialized_dense_data();
-        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let raw = tenet_matrixalgebra::svd_vals_dyn_checked_generic(dense.dense(), &input)?;
+        let direct = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            if is_diagonal_bond_space(body.space.space()) {
+                tenet_matrixalgebra::svd_vals_compact_diagonal_dyn(&body.space, spectrum).map_err(
+                    |error| GenericTensorError::Plan(CheckedGenericPlanError::Operation(error)),
+                )?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let raw = if let Some(raw) = direct {
+            raw
+        } else {
+            let mut dense = self.runtime.lease_dense();
+            let payload = body.materialized_dense_data();
+            let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
+                .map_err(|error| GenericTensorError::Facade(error.into()))?;
+            tenet_matrixalgebra::svd_vals_dyn_checked_generic(dense.dense(), &input)?
+        };
         let provider = self.logical_space().provider();
         let mut decoded = raw
             .into_iter()
@@ -2165,10 +2180,10 @@ where
     /// allocating member of the SVD family when only the spectrum is needed.
     /// Multiplicity-free lazy adjoints are read through their owned parent,
     /// and an owned compact diagonal input with finite, representable magnitudes
-    /// is read and sorted directly without a dense solver. Other compact cases
-    /// retain the dense solver's behavior;
-    /// checked Generic currently requires an owned input and returns
-    /// [`Error::InvalidArgument`] for a lazy adjoint. A dense failure returns
+    /// is read and sorted directly without a dense solver for both
+    /// multiplicity-free and checked-Generic providers. Other compact cases
+    /// retain the dense solver's behavior. Checked Generic requires an owned
+    /// input and returns [`Error::InvalidArgument`] for a lazy adjoint. A dense failure returns
     /// [`Error::Operation`]; if a provider cannot decode a sector label, its
     /// original error is available as the source. See [`Self::svd_compact`] for
     /// the decomposition contract and representative example.

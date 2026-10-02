@@ -3430,6 +3430,201 @@ fn compact_diagonal_svd_vals_uses_only_the_stored_spectrum() {
     assert_eq!(solver_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
 
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
+    use tenet_core::SUNFusionRule;
+
+    let solver_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(FailSecondSvd {
+            record: Some(Arc::clone(&solver_calls)),
+            ..Default::default()
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg =
+        GradedSpace::try_new(Arc::clone(&provider), [(vec![0, 0], 2), (vec![1, 0], 3)]).unwrap();
+    let real: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![3.0, -2.0, 1.0],
+            },
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![-4.0, 0.0],
+            },
+        ],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(
+        real.svd_vals(&[0], &[1]).unwrap(),
+        vec![
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![4.0, 0.0],
+            },
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![3.0, 2.0, 1.0],
+            },
+        ]
+    );
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(solver_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+    let stored = real.spectrum().unwrap();
+    let mut missing = stored.to_vec();
+    missing.pop();
+    assert!(
+        tenet_matrixalgebra::svd_vals_compact_diagonal_dyn(&owned(&real).space, &missing)
+            .unwrap()
+            .is_none()
+    );
+    let mut duplicate = stored.to_vec();
+    duplicate[1].sector = duplicate[0].sector;
+    assert!(
+        tenet_matrixalgebra::svd_vals_compact_diagonal_dyn(&owned(&real).space, &duplicate)
+            .unwrap()
+            .is_none()
+    );
+    let mut short = stored.to_vec();
+    short[0].values.pop();
+    assert!(
+        tenet_matrixalgebra::svd_vals_compact_diagonal_dyn(&owned(&real).space, &short)
+            .unwrap()
+            .is_none()
+    );
+
+    let complex: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![
+                    Complex64::new(-3.0, 4.0),
+                    Complex64::new(0.0, 0.0),
+                    Complex64::new(1.0, 1.0),
+                ],
+            },
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![Complex64::new(-4.0, 0.0), Complex64::new(0.0, 0.0)],
+            },
+        ],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let got = complex.svd_vals(&[0], &[1]).unwrap();
+    assert_eq!(got[0].sector, vec![0, 0]);
+    assert_eq!(got[0].values, [4.0, 0.0]);
+    assert_eq!(got[1].sector, vec![1, 0]);
+    assert_eq!(got[1].values[0], 5.0);
+    assert!((got[1].values[1] - 2.0_f64.sqrt()).abs() < 1e-12);
+    assert_eq!(got[1].values[2], 0.0);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(solver_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+    let dual_leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 0], 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let dual_sector = dual_leg.sectors().unwrap().remove(0);
+    let dual: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &dual_leg,
+        [SectorSpectrum {
+            sector: dual_sector.clone(),
+            values: vec![-2.0, 0.0],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(
+        dual.svd_vals(&[0], &[1]).unwrap(),
+        vec![SectorSpectrum {
+            sector: dual_sector,
+            values: vec![2.0, 0.0]
+        }]
+    );
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(solver_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_compact_diagonal_svd_vals_rounds_at_payload_precision() {
+    use tenet_core::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg = GradedSpace::try_new(provider, [(vec![1, 0], 2)]).unwrap();
+    let real: TensorMap<_, f32> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: vec![1, 0],
+            values: vec![-1.000_000_1, 0.0],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(
+        real.svd_vals(&[0], &[1]).unwrap()[0].values,
+        [1.000_000_1_f32 as f64, 0.0]
+    );
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+
+    let complex: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: vec![1, 0],
+            values: vec![
+                num_complex::Complex32::new(1.0, 1.0),
+                num_complex::Complex32::new(-3.0, 4.0),
+            ],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    assert_eq!(
+        complex.svd_vals(&[0], &[1]).unwrap()[0].values,
+        [5.0, (2.0_f64.sqrt() as f32) as f64]
+    );
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+
+    for value in [
+        num_complex::Complex32::new(f32::NAN, 0.0),
+        num_complex::Complex32::new(f32::INFINITY, 0.0),
+        num_complex::Complex32::new(f32::MAX * 0.75, f32::MAX * 0.75),
+    ] {
+        let input: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
+            &runtime,
+            &leg,
+            [SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![value, num_complex::Complex32::new(0.0, 0.0)],
+            }],
+        )
+        .unwrap();
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        let compact = input.svd_vals(&[0], &[1]);
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+        let dense = input.materialize().unwrap().svd_vals(&[0], &[1]);
+        assert_eq!(compact.is_err(), dense.is_err());
+        if let (Err(compact_error), Err(dense_error)) = (compact, dense) {
+            assert_eq!(compact_error.to_string(), dense_error.to_string());
+        }
+    }
+}
+
 #[test]
 fn compact_diagonal_svd_vals_rounds_at_payload_precision() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
