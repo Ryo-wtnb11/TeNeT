@@ -5750,6 +5750,185 @@ fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
 }
 
 #[test]
+fn checked_only_compact_diagonal_polar_is_direct_and_keeps_dense_fallback() {
+    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let gemm_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(PinvFaultExecutor {
+            inner: DefaultDenseExecutor::new(),
+            svd_calls: Arc::clone(&svd_calls),
+            gemm_calls: Arc::clone(&gemm_calls),
+            fail_svd: None,
+            fail_gemm: None,
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond =
+        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 2), (Label::X, 1)]).unwrap();
+    let source: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![Complex64::new(0.0, -2.0)],
+            },
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![Complex64::new(3.0, 4.0), Complex64::new(0.0, 0.0)],
+            },
+        ],
+    )
+    .unwrap();
+    for left in [true, false] {
+        let (w, p) = if left {
+            let LeftPolar { w, p } = source.left_polar(&[0], &[1]).unwrap();
+            (w, p)
+        } else {
+            let RightPolar { p, wh } = source.right_polar(&[0], &[1]).unwrap();
+            (wh, p)
+        };
+        assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+        assert!(std::ptr::eq(w.provider(), provider.as_ref()));
+        assert!(std::ptr::eq(p.provider(), provider.as_ref()));
+        assert_eq!(w.codomain(), source.codomain());
+        assert_eq!(w.domain(), source.domain());
+        assert!(w.dense_data().is_err());
+        assert!(p.dense_data().is_err());
+        let rebuilt = if left { w.compose(&p) } else { p.compose(&w) }.unwrap();
+        assert_same_checked_generic_layout_and_close(&rebuilt, &source, |a, b| (a - b).norm());
+    }
+
+    let check_real = |source: &TensorMap<CheckedOnlyToy, f64>,
+                      expected_phase: &[SectorSpectrum<Label, f64>],
+                      expected_magnitude: &[SectorSpectrum<Label, f64>]| {
+        for left in [true, false] {
+            let (w, p) = if left {
+                let LeftPolar { w, p } = source.left_polar(&[0], &[1]).unwrap();
+                (w, p)
+            } else {
+                let RightPolar { p, wh } = source.right_polar(&[0], &[1]).unwrap();
+                (wh, p)
+            };
+            assert!(std::ptr::eq(w.provider(), provider.as_ref()));
+            assert!(std::ptr::eq(p.provider(), provider.as_ref()));
+            assert_eq!(w.codomain(), source.codomain());
+            assert_eq!(w.domain(), source.domain());
+            assert_eq!(p.codomain(), source.domain());
+            assert_eq!(p.domain(), source.domain());
+            assert!(w.dense_data().is_err());
+            assert!(p.dense_data().is_err());
+            assert_eq!(w.diagview().unwrap(), expected_phase);
+            assert_eq!(p.diagview().unwrap(), expected_magnitude);
+            let rebuilt = if left { w.compose(&p) } else { p.compose(&w) }.unwrap();
+            assert_same_checked_generic_layout_and_close(&rebuilt, source, |a, b| (a - b).abs());
+        }
+    };
+    let real: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![3.0],
+            },
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![-2.0, 0.0],
+            },
+        ],
+    )
+    .unwrap();
+    check_real(
+        &real,
+        &[
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![-1.0, 1.0],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![1.0],
+            },
+        ],
+        &[
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![2.0, 0.0],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![3.0],
+            },
+        ],
+    );
+    let dual_bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let dual_sector = dual_bond.sectors().unwrap().remove(0);
+    let dual: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &dual_bond,
+        [SectorSpectrum {
+            sector: dual_sector,
+            values: vec![-4.0, 0.0],
+        }],
+    )
+    .unwrap();
+    check_real(
+        &dual,
+        &[SectorSpectrum {
+            sector: dual_sector,
+            values: vec![-1.0, 1.0],
+        }],
+        &[SectorSpectrum {
+            sector: dual_sector,
+            values: vec![4.0, 0.0],
+        }],
+    );
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+
+    for bad_value in [
+        Complex64::new(f64::NAN, 0.0),
+        Complex64::new(f64::MAX, f64::MAX),
+    ] {
+        let bad: TensorMap<_, Complex64> = TensorMap::diagonal(
+            &runtime,
+            &bond,
+            [
+                SectorSpectrum {
+                    sector: Label::Vacuum,
+                    values: vec![bad_value, Complex64::new(1.0, 0.0)],
+                },
+                SectorSpectrum {
+                    sector: Label::X,
+                    values: vec![Complex64::new(2.0, 0.0)],
+                },
+            ],
+        )
+        .unwrap();
+        svd_calls.store(0, Ordering::Relaxed);
+        reset_provider_queries(&provider);
+        let compact_error = bad.left_polar(&[0], &[1]).unwrap_err();
+        let compact_queries = provider.queries_since_reset.load(Ordering::Relaxed);
+        assert!(svd_calls.load(Ordering::Relaxed) > 0);
+        let dense = bad.materialize().unwrap();
+        reset_provider_queries(&provider);
+        let dense_error = dense.left_polar(&[0], &[1]).unwrap_err();
+        assert_eq!(
+            provider.queries_since_reset.load(Ordering::Relaxed),
+            compact_queries
+        );
+        assert_eq!(compact_error.to_string(), dense_error.to_string());
+    }
+}
+
+#[test]
 fn checked_generic_lazy_polar_second_svd_failure_keeps_parent_unchanged() {
     for left in [true, false] {
         let svd_calls = Arc::new(AtomicUsize::new(0));
@@ -5817,6 +5996,15 @@ fn checked_generic_polar_provider_error_precedes_dense_work() {
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
+    let refused_compact: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![f64::NAN, 1.0],
+        }],
+    )
+    .unwrap();
     let before = source.dense_data().unwrap().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     assert!(matches!(
@@ -5828,6 +6016,14 @@ fn checked_generic_polar_provider_error_precedes_dense_work() {
     assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
     assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
     assert_eq!(source.dense_data().unwrap(), before);
+    assert!(matches!(
+        refused_compact.left_polar(&[0], &[1]),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
+        ))
+    ));
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
