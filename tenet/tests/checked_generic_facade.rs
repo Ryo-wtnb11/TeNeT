@@ -2189,12 +2189,70 @@ fn sun_checked_generic_compact_svd_preserves_provider_and_reconstructs() {
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
 }
 
+#[test]
+fn checked_generic_dense_input_svd_publishes_compact_multisector_s() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let leg =
+        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 2), (Label::X, 3)]).unwrap();
+    let real: TensorMap<_, f64> = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, ij| {
+        if ij[0] == ij[1] {
+            (ij[0] + 2) as f64
+        } else {
+            0.25
+        }
+    })
+    .unwrap();
+    let Svd { u, s, vh } = real.svd_compact(&[0], &[1]).unwrap();
+    assert!(std::ptr::eq(s.provider(), provider.as_ref()));
+    assert_eq!(s.codomain(), s.domain());
+    assert!(s.dense_data().is_err());
+    let spectrum = s.diagview().unwrap();
+    assert_eq!(
+        spectrum
+            .iter()
+            .map(|entry| entry.values.len())
+            .sum::<usize>(),
+        5
+    );
+    assert!(spectrum
+        .iter()
+        .all(|entry| entry.values.windows(2).all(|pair| pair[0] >= pair[1])));
+    assert!(s.map_diagonal(f64::sqrt).is_ok());
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(real.dense_data().unwrap())
+        .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
+
+    let complex = real.convert::<Complex64>().scale(Complex64::new(1.0, 0.5));
+    let Svd { u, s, vh } = complex.svd_compact(&[0], &[1]).unwrap();
+    assert!(std::ptr::eq(s.provider(), provider.as_ref()));
+    assert_eq!(s.codomain(), s.domain());
+    assert!(s.dense_data().is_err());
+    assert_eq!(
+        s.diagview()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.values.len())
+            .sum::<usize>(),
+        5
+    );
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(rebuilt
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(complex.dense_data().unwrap())
+        .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
+}
+
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_map_diagonal_keeps_svd_bond_and_principal_branch() {
-    // What: checked SVD publishes `s` densely, so the elementwise root goes
-    // through `diagview` into a compact diagonal on the same bond; the result
-    // keeps the provider, space and runtime, and `Complex64::sqrt` is principal.
+    // Checked compact SVD publishes `s` as a compact diagonal on its bond.
     use tenet::sector::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -2208,10 +2266,8 @@ fn sun_checked_generic_map_diagonal_keeps_svd_bond_and_principal_branch() {
             })
             .unwrap();
         let Svd { s, .. } = source.svd_compact(&[0, 1], &[2]).unwrap();
-        assert!(s.map_diagonal(f64::sqrt).is_err());
-        let bond = s.domain()[0].clone();
-        let compact = TensorMap::diagonal(&runtime, &bond, s.diagview().unwrap()).unwrap();
-        let root = compact.map_diagonal(f64::sqrt).unwrap();
+        assert!(s.dense_data().is_err());
+        let root = s.map_diagonal(f64::sqrt).unwrap();
         assert!(std::ptr::eq(root.provider(), s.provider()));
         assert_eq!(root.codomain(), s.codomain());
         assert_eq!(root.domain(), s.domain());
@@ -2222,7 +2278,7 @@ fn sun_checked_generic_map_diagonal_keeps_svd_bond_and_principal_branch() {
             .dense_data()
             .unwrap()
             .iter()
-            .zip(s.dense_data().unwrap())
+            .zip(s.materialize().unwrap().dense_data().unwrap())
             .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
         let negative: TensorMap<_, Complex64> = TensorMap::diagonal(
