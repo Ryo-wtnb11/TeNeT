@@ -2712,6 +2712,89 @@ fn compact_diagonal_null_uses_coordinate_kernel_without_dense_solver() {
 }
 
 #[test]
+fn compact_diagonal_null_su2_sectors_use_reduced_coordinate_basis() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(CountPolarKernels {
+            svd_calls: Arc::clone(&calls),
+            ..Default::default()
+        }))
+        .build()
+        .unwrap();
+    let spin0 = SU2Irrep::from_twice_spin(0);
+    let half = SU2Irrep::from_twice_spin(1);
+    let leg = GradedSpace::try_new(Arc::new(SU2FusionRule), [(spin0, 3), (half, 2)]).unwrap();
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: spin0,
+                values: vec![3.0, 0.0, -2.0],
+            },
+            SectorSpectrum {
+                sector: half,
+                values: vec![0.0, 4.0],
+            },
+        ],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let left = input.left_null(&[0], &[1]).unwrap();
+    let right = input.right_null(&[0], &[1]).unwrap();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(left.codomain(), input.codomain());
+    assert_eq!(right.domain(), input.domain());
+    for bond in [&left.domain()[0], &right.codomain()[0]] {
+        assert!(!bond.is_dual());
+        assert_eq!(bond.sectors().unwrap().len(), 2);
+        assert_eq!(bond.degeneracy(&spin0).unwrap(), 1);
+        assert_eq!(bond.degeneracy(&half).unwrap(), 1);
+    }
+    let coordinates = [0.0, 1.0, 0.0, 1.0, 0.0];
+    assert_eq!(left.dense_data().unwrap(), coordinates);
+    assert_eq!(right.dense_data().unwrap(), coordinates);
+    assert!(
+        left.adjoint()
+            .unwrap()
+            .compose(&input)
+            .unwrap()
+            .norm(2.0)
+            .unwrap()
+            < 1e-12
+    );
+    assert!(
+        input
+            .compose(&right.adjoint().unwrap())
+            .unwrap()
+            .norm(2.0)
+            .unwrap()
+            < 1e-12
+    );
+    let left_gram = left.adjoint().unwrap().compose(&left).unwrap();
+    let right_gram = right.compose(&right.adjoint().unwrap()).unwrap();
+    let left_eye = TensorMap::isomorphism(&runtime, &left.domain(), &left.domain()).unwrap();
+    let right_eye = TensorMap::isomorphism(&runtime, &right.codomain(), &right.codomain()).unwrap();
+    assert!(
+        left_gram
+            .axpby(1.0, &left_eye, -1.0)
+            .unwrap()
+            .norm(2.0)
+            .unwrap()
+            < 1e-12
+    );
+    assert!(
+        right_gram
+            .axpby(1.0, &right_eye, -1.0)
+            .unwrap()
+            .norm(2.0)
+            .unwrap()
+            < 1e-12
+    );
+}
+
+#[test]
 fn compact_diagonal_null_and_cutoff_fallback_cover_all_scalars() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let runtime = Runtime::builder()
