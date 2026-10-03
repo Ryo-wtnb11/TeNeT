@@ -1,0 +1,495 @@
+use super::*;
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: FactorizationScalar,
+{
+    /// Checked-Generic singular values only for owned host tensors.
+    pub(super) fn svd_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, f64> {
+        let TypedTensorRepr::Owned(body) = &self.repr else {
+            return Err(GenericTensorError::Facade(Error::InvalidArgument(
+                "checked Generic svd_vals does not accept lazy adjoints".to_string(),
+            )));
+        };
+        let direct = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            if is_diagonal_bond_space(body.space.space()) {
+                tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(&body.space, spectrum)
+                    .map_err(|error| {
+                        GenericTensorError::Plan(CheckedGenericPlanError::Operation(error))
+                    })?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let raw = if let Some(raw) = direct {
+            raw
+        } else {
+            let mut dense = self.runtime.lease_dense();
+            let payload = body.materialized_dense_data();
+            let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
+                .map_err(|error| GenericTensorError::Facade(error.into()))?;
+            tenet_matrixalgebra::seam::svd_vals_dyn_checked_generic(dense.dense(), &input)?
+        };
+        let provider = self.logical_space().provider();
+        let mut decoded = raw
+            .into_iter()
+            .map(|entry| {
+                Ok(SectorSpectrum {
+                    sector: provider.try_decode_label(entry.sector)?,
+                    values: entry.values,
+                })
+            })
+            .collect::<Result<Vec<_>, <R as TypedSectorAdmission>::Error>>()
+            .map_err(|error| GenericTensorError::Plan(CheckedGenericPlanError::Provider(error)))?;
+        decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
+        Ok(decoded)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: FactorizationScalar,
+{
+    pub(super) fn svd_full_checked_generic(
+        &self,
+    ) -> Result<Svd<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        let TypedTensorRepr::Owned(body) = &self.repr else {
+            return Err(GenericTensorError::Facade(Error::InvalidArgument(
+                "checked Generic svd_full does not accept lazy adjoints".to_string(),
+            )));
+        };
+        let admission = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            Some(
+                tenet_matrixalgebra::seam::svd_full_diagonal_factors_dyn_checked_generic(
+                    &body.space,
+                    spectrum,
+                )?,
+            )
+        } else {
+            None
+        };
+        let factors = match admission {
+            Some(tenet_matrixalgebra::seam::CheckedDiagonalFullSvdFactors::Direct(factors)) => {
+                factors
+            }
+            admission => {
+                let mut dense = self.runtime.lease_dense();
+                let payload = body.materialized_dense_data();
+                let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
+                    .map_err(|error| GenericTensorError::Facade(error.into()))?;
+                match admission {
+                    Some(tenet_matrixalgebra::seam::CheckedDiagonalFullSvdFactors::Fallback(
+                        dimensions,
+                    )) => {
+                        tenet_matrixalgebra::seam::svd_full_factors_dyn_checked_generic_with_dimensions(
+                            dense.dense(),
+                            &input,
+                            Some(dimensions),
+                        )?
+                    }
+                    _ => tenet_matrixalgebra::seam::svd_full_factors_dyn_checked_generic(
+                        dense.dense(),
+                        &input,
+                    )?,
+                }
+            }
+        };
+        let (u, vh, mut spectrum, row_dimensions, col_dimensions) = factors.into_parts();
+        if full_svd_compact_bond(&u, &vh, &spectrum) {
+            let space = tenet_matrixalgebra::seam::diagonal_bond_bound_space_generic_checked(
+                Arc::clone(body.space.provider_arc()),
+                &spectrum,
+            )?;
+            if full_svd_compact_layout(&space, &spectrum) {
+                return Ok(Svd {
+                    u: wrap_factor_on(&self.runtime, u),
+                    s: diagonal_factor_on_bound(&self.runtime, space, &mut spectrum, D::from_real),
+                    vh: wrap_factor_on(&self.runtime, vh),
+                });
+            }
+        }
+        let s = tenet_matrixalgebra::seam::rectangular_diagonal_bond_tensor_generic_checked(
+            Arc::clone(body.space.provider_arc()),
+            &spectrum,
+            &row_dimensions,
+            &col_dimensions,
+            &D::from_real,
+        )?;
+        Ok(Svd {
+            u: wrap_factor_on(&self.runtime, u),
+            s: wrap_factor_on(&self.runtime, s),
+            vh: wrap_factor_on(&self.runtime, vh),
+        })
+    }
+
+    /// Checked-Generic compact SVD for owned host tensors.
+    pub(super) fn svd_compact_checked_generic(
+        &self,
+    ) -> Result<Svd<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        let TypedTensorRepr::Owned(body) = &self.repr else {
+            return Err(GenericTensorError::Facade(Error::InvalidArgument(
+                "checked Generic svd_compact does not accept lazy adjoints".to_string(),
+            )));
+        };
+        if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            if let Some((u, vh, mut singular_values)) =
+                tenet_matrixalgebra::seam::svd_compact_diagonal_factors_dyn_checked_generic(
+                    &body.space,
+                    spectrum,
+                )?
+            {
+                let s = diagonal_factor_on_checked(
+                    &self.runtime,
+                    Arc::clone(body.space.provider_arc()),
+                    &mut singular_values,
+                    D::from_real,
+                )?;
+                return Ok(Svd {
+                    u: wrap_factor_on(&self.runtime, u),
+                    s,
+                    vh: wrap_factor_on(&self.runtime, vh),
+                });
+            }
+        }
+        let mut dense = self.runtime.lease_dense();
+        let payload = body.materialized_dense_data();
+        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
+            .map_err(|error| GenericTensorError::Facade(error.into()))?;
+        let (u, vh, mut singular_values) =
+            tenet_matrixalgebra::seam::svd_compact_factors_with_spectrum_dyn_checked_generic(
+                dense.dense(),
+                &input,
+            )?;
+        let s = diagonal_factor_on_checked(
+            &self.runtime,
+            Arc::clone(input.space().provider_arc()),
+            &mut singular_values,
+            D::from_real,
+        )?;
+        Ok(Svd {
+            u: wrap_factor_on(&self.runtime, u),
+            s,
+            vh: wrap_factor_on(&self.runtime, vh),
+        })
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
+    /// TensorKit 0.17 / MatrixAlgebraKit `svd_compact`: `t = u * s * vh` with
+    /// the bond `min(rows, cols)` per coupled sector.
+    ///
+    /// Returns an [`Svd`] with `u : codomain <- bond`, `s : bond <- bond`
+    /// and `vh : bond <- domain`.
+    ///
+    /// # Storage
+    ///
+    /// `s` is held in compact diagonal storage — `Σ_c k_c` values, not the
+    /// `Σ_c k_c²` block-diagonal buffer — matching the `DiagonalTensorMap`
+    /// TensorKit's own `svd_compact` returns. A downstream `u.compose(&s)` or
+    /// `s.compose(&vh)` takes the O(d·n) bond-scaling path rather than a dense
+    /// GEMM. [`Self::materialize`] builds the dense buffer on request; a
+    /// caller who only needs the values should reach for
+    /// [`Self::svd_vals`], which builds no factor at all.
+    /// An owned compact-diagonal input with representable magnitudes is sorted
+    /// directly by sector:
+    /// no dense input or dense SVD is needed. The dense `u` and `vh` permutation
+    /// factors still require `Σ_c k_c²` storage and writes; sorting costs
+    /// `O(Σ_c k_c log k_c)`. Nonfinite or unrepresentable spectra retain the
+    /// dense solver's error behavior.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
+    /// straight from the matrix-algebra seam. As everywhere in this facade
+    /// there are no pre-checks here: the seam owns the rules, and a second copy
+    /// would be free to drift.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::sector::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(
+    ///     Arc::new(U1FusionRule),
+    ///     [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+    /// )?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 9)?;
+    ///
+    /// let Svd { u, s, vh } = t.svd_compact(&[0], &[1])?;
+    /// // `u` is an isometry: `u† ∘ u` is the identity on its domain.
+    /// let gram = u.adjoint()?.compose(&u)?;
+    /// let identity = TensorMap::isomorphism(&runtime, &u.domain(), &u.domain())?;
+    /// assert!(gram.axpby(1.0, &identity, -1.0)?.norm(2.0)? <= 1e-12 * gram.norm(2.0)?.max(1.0));
+    /// let rebuilt = u.compose(&s)?.compose(&vh)?;
+    /// let max_err = rebuilt
+    ///     .dense_data()?
+    ///     .iter()
+    ///     .zip(t.dense_data()?)
+    ///     .map(|(a, b)| (a - b).abs())
+    ///     .fold(0.0f64, f64::max);
+    /// assert!(max_err < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
+    pub(super) fn svd_compact_multiplicity_free(&self) -> Result<Svd<Self>, Error>
+    where
+        D: FactorizationScalar,
+    {
+        let compact = match &self.repr {
+            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+                TypedData::Diagonal(spectrum) => {
+                    tenet_matrixalgebra::seam::svd_compact_diagonal_factors_dyn(
+                        &body.space,
+                        spectrum,
+                    )?
+                }
+                TypedData::Dense(_) => None,
+            },
+            TypedTensorRepr::Adjoint(_) => None,
+        };
+        let (u, vh, mut spectrum) = if let Some(factors) = compact {
+            factors
+        } else {
+            // The ordinary route keeps its dense-only lease and its compact-S
+            // factor seam, including the established nonfinite error behavior.
+            let mut dense = self.runtime.lease_dense();
+            match &self.repr {
+                TypedTensorRepr::Adjoint(view) => {
+                    tenet_matrixalgebra::seam::svd_compact_adjoint_factors_dyn(
+                        dense.dense(),
+                        &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
+                    )?
+                }
+                TypedTensorRepr::Owned(_) => {
+                    let (bound_space, bound_payload) = self.bound_payload()?;
+                    tenet_matrixalgebra::seam::svd_compact_factors_dyn(
+                        dense.dense(),
+                        &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+                    )?
+                }
+            }
+        };
+        Ok(Svd {
+            u: self.wrap_bound_factor(u),
+            s: self.diagonal_factor(&mut spectrum, D::from_real)?,
+            vh: self.wrap_bound_factor(vh),
+        })
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `svd_full`: `t = u * s * vh` with
+    /// square unitaries and a rectangular `s` per coupled sector.
+    ///
+    /// Returns an [`Svd`] with `u : codomain <- W`, `s : W <- W'` and
+    /// `vh : W' <- domain`.
+    ///
+    /// `s` is compact when the constructed row and column bond legs coincide
+    /// exactly, its spectrum covers every bond sector, and the rank-(1,1)
+    /// compact layout is admitted. Otherwise `s` is dense and may be
+    /// rectangular. The direct owned compact-diagonal input route also avoids
+    /// dense input materialization and a solver call. Use
+    /// [`Self::materialize`] when a dense singular-value buffer is required.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub(super) fn svd_full_multiplicity_free(&self) -> Result<Svd<Self>, Error>
+    where
+        D: FactorizationScalar,
+    {
+        if let TypedTensorRepr::Owned(body) = &self.repr {
+            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                // A diagonal input has square sectors, so compact and full
+                // factor spaces coincide, including their nondual bond W.
+                if let Some((u, vh, mut spectrum)) =
+                    tenet_matrixalgebra::seam::svd_compact_diagonal_factors_dyn(
+                        &body.space,
+                        spectrum,
+                    )?
+                {
+                    return Ok(Svd {
+                        u: self.wrap_bound_factor(u),
+                        s: self.diagonal_factor(&mut spectrum, D::from_real)?,
+                        vh: self.wrap_bound_factor(vh),
+                    });
+                }
+            }
+        }
+        let mut dense = self.runtime.lease_dense();
+        let factors = match &self.repr {
+            TypedTensorRepr::Adjoint(view) => {
+                tenet_matrixalgebra::seam::svd_full_adjoint_factors_dyn(
+                    dense.dense(),
+                    &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
+                )?
+            }
+            TypedTensorRepr::Owned(_) => {
+                let (bound_space, bound_payload) = self.bound_payload()?;
+                tenet_matrixalgebra::seam::svd_full_factors_dyn(
+                    dense.dense(),
+                    &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+                )?
+            }
+        };
+        let (u, vh, mut spectrum, row_dimensions, col_dimensions) = factors.into_parts();
+        if full_svd_compact_bond(&u, &vh, &spectrum) {
+            let space = tenet_matrixalgebra::seam::diagonal_bond_bound_space_like(
+                self.logical_space(),
+                &spectrum,
+            )?;
+            if full_svd_compact_layout(&space, &spectrum) {
+                return Ok(Svd {
+                    u: self.wrap_bound_factor(u),
+                    s: diagonal_factor_on_bound(&self.runtime, space, &mut spectrum, D::from_real),
+                    vh: self.wrap_bound_factor(vh),
+                });
+            }
+        }
+        let s = tenet_matrixalgebra::seam::rectangular_diagonal_bond_tensor(
+            self.logical_space(),
+            &spectrum,
+            &row_dimensions,
+            &col_dimensions,
+        )?;
+        Ok(Svd {
+            u: self.wrap_bound_factor(u),
+            s: self.wrap_bound_factor(s),
+            vh: self.wrap_bound_factor(vh),
+        })
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `svd_vals`: the singular values per
+    /// coupled sector, and nothing else.
+    ///
+    /// No factor tensor and no bond space is built at all, so this is cheaper
+    /// still than reading [`Self::svd_compact`]'s compact `s`.
+    /// Finite owned compact-diagonal inputs are sorted sectorwise without
+    /// materializing the input or calling a dense SVD.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] from the seam, plus
+    /// [`Error::FusionAlgebra`] when the provider cannot decode a coupled
+    /// sector its own algebra produced.
+    pub(super) fn svd_vals_multiplicity_free(
+        &self,
+    ) -> Result<Vec<SectorSpectrum<R::Sector, f64>>, Error>
+    where
+        D: FactorizationScalar,
+    {
+        if let TypedTensorRepr::Owned(body) = &self.repr {
+            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+                if let Some(raw) =
+                    tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(&body.space, spectrum)?
+                {
+                    return self.decode_spectrum(raw);
+                }
+            }
+        }
+        let mut dense = self.runtime.lease_dense();
+        // Singular values and coupled-sector ids are invariant under adjoint,
+        // so an oriented input or logical-payload copy cannot change this output.
+        let raw = match &self.repr {
+            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::seam::svd_vals_dyn(
+                dense.dense(),
+                &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
+            )?,
+            TypedTensorRepr::Owned(_) => {
+                let (bound_space, bound_payload) = self.bound_payload()?;
+                tenet_matrixalgebra::seam::svd_vals_dyn(
+                    dense.dense(),
+                    &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
+                )?
+            }
+        };
+        self.decode_spectrum(raw)
+    }
+}
+
+impl<R, D> TypedTensorSvdDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: FactorizationScalar,
+{
+    fn svd_compact(tensor: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, Error> {
+        tensor.svd_compact_multiplicity_free()
+    }
+
+    fn svd_full(tensor: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, Error> {
+        tensor.svd_full_multiplicity_free()
+    }
+}
+
+impl<R, D> TypedTensorSvdValsDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = FusionAlgebraError,
+            Mode = MultiplicityFreeAdmissionMode,
+            Sector = <R as SectorCodec>::Sector,
+        > + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: FactorizationScalar,
+{
+    fn svd_vals(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, Error> {
+        tensor.svd_vals_multiplicity_free()
+    }
+}
+
+impl<R, D> TypedTensorSvdDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: FactorizationScalar,
+{
+    fn svd_compact(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<Svd<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        tensor.svd_compact_checked_generic()
+    }
+
+    fn svd_full(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<Svd<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        tensor.svd_full_checked_generic()
+    }
+}
+
+impl<R, D> TypedTensorSvdValsDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: FactorizationScalar,
+{
+    fn svd_vals(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<
+        Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>,
+        GenericTensorError<<R as CheckedGenericFusion>::Error>,
+    > {
+        tensor.svd_vals_checked_generic()
+    }
+}
