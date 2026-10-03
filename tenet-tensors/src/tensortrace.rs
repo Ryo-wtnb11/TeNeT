@@ -2188,7 +2188,10 @@ where
     )
 }
 
-fn tensortrace_fusion_dyn_structure_owned<C, D>(
+/// Executes compiled trace terms into a new payload (the execution half of
+/// the owned trace entries).
+#[doc(hidden)]
+pub fn tensortrace_fusion_dyn_structure_owned<C, D>(
     structure: &TensorTraceFusionStructure<C>,
     dst_space: &DynamicFusionMapSpace,
     src_space: &DynamicFusionMapSpace,
@@ -2267,7 +2270,10 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tensortrace_fusion_dyn_structure_into_raw<C, D>(
+/// Executes compiled trace terms into `dst_data` (the execution half of the
+/// trace-into entries).
+#[doc(hidden)]
+pub fn tensortrace_fusion_dyn_structure_into_raw<C, D>(
     structure: &TensorTraceFusionStructure<C>,
     dst_space: &DynamicFusionMapSpace,
     dst_data: &mut [D],

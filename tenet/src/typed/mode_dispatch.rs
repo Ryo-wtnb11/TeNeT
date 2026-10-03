@@ -34,7 +34,8 @@ where
     }
 
     fn dim(provider: &R, sector: SectorId) -> Result<f64, TypedFacadeError<R>> {
-        <Self as tenet_tensors::CoefficientAlgebra<R>>::dim(provider, sector).map_err(Into::into)
+        <Self as tenet_tensors::RigidCoefficientAlgebra<R>>::dim(provider, sector)
+            .map_err(Into::into)
     }
 }
 
@@ -72,14 +73,14 @@ where
     }
 
     fn dim(provider: &R, sector: SectorId) -> Result<f64, TypedFacadeError<R>> {
-        <Self as tenet_tensors::CoefficientAlgebra<R>>::dim(provider, sector).map_err(|error| {
-            match error {
+        <Self as tenet_tensors::RigidCoefficientAlgebra<R>>::dim(provider, sector).map_err(
+            |error| match error {
                 tenet_tensors::CheckedGenericPlanError::Provider(error) => {
                     <Self as TypedTensorModeDispatch<R>>::map_provider_error(error)
                 }
                 other => GenericTensorError::Plan(other),
-            }
-        })
+            },
+        )
     }
 }
 
@@ -220,7 +221,7 @@ where
         Ok(match &tensor.repr {
             TypedTensorRepr::Owned(parent) => {
                 let logical_space =
-                    tenet_tensors::adjoint_bound_space_dyn_generic_checked(&parent.space)
+                    <Self as tenet_tensors::CoefficientAlgebra<R>>::adjoint_space(&parent.space)
                         .map_err(GenericTensorError::Plan)?;
                 TensorMap {
                     runtime: tensor.runtime.clone(),

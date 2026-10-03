@@ -166,12 +166,13 @@ where
         let TypedData::Dense(destination_data) = destination_data else {
             return Err(internal_layout_error("dense destination checked above"));
         };
-        tenet_tensors::tensortrace_fusion_dyn_into_checked(
-            &space,
+        let structure = <tenet_core::MultiplicityFreeAdmissionMode as tenet_tensors::PivotalCoefficientAlgebra<R>>::trace_terms(&space, source_space, axes)?;
+        tenet_tensors::tensortrace_fusion_dyn_structure_into_raw(
+            &structure,
+            space.space(),
             destination_data,
-            source_space,
+            source_space.space(),
             source_data,
-            axes,
             alpha,
             beta,
         )?;
@@ -1283,11 +1284,12 @@ where
                 &owned_payload
             }
         };
-        let data = tenet_tensors::tensortrace_fusion_dyn_owned_checked(
-            &space,
-            source_space,
+        let structure = <tenet_core::MultiplicityFreeAdmissionMode as tenet_tensors::PivotalCoefficientAlgebra<R>>::trace_terms(&space, source_space, axes)?;
+        let data = tenet_tensors::tensortrace_fusion_dyn_structure_owned(
+            &structure,
+            space.space(),
+            source_space.space(),
             source_data,
-            axes,
             D::from_real(1.0),
         )?;
         Ok(Self {

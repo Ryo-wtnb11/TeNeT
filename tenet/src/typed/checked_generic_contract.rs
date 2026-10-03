@@ -176,13 +176,15 @@ where
     let space = source_space
         .commit_final_homspace_generic_bound_checked(prepared)
         .map_err(CheckedGenericPlanError::Operation)?;
-    let data = tenet_tensors::tensortrace_fusion_dyn_owned_generic_checked(
-        &space,
-        source_space,
+    let structure = <tenet_core::CheckedGenericAdmissionMode as tenet_tensors::PivotalCoefficientAlgebra<R>>::trace_terms(&space, source_space, axes)?;
+    let data = tenet_tensors::tensortrace_fusion_dyn_structure_owned(
+        &structure,
+        space.space(),
+        source_space.space(),
         source_data,
-        axes,
         D::from_real(1.0),
-    )?;
+    )
+    .map_err(CheckedGenericPlanError::Operation)?;
     Ok(TensorMap {
         runtime: tensor.runtime.clone(),
         repr: owned_repr(TypedTensorBody::dense(space, data)),

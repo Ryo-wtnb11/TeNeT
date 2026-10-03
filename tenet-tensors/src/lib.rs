@@ -82,7 +82,7 @@ pub use facade::{
     permute_into_with_context, transpose_into, transpose_into_with, transpose_into_with_context,
 };
 #[doc(hidden)]
-pub use mode::{CoefficientAlgebra, PivotalCoefficientAlgebra};
+pub use mode::{CoefficientAlgebra, PivotalCoefficientAlgebra, RigidCoefficientAlgebra};
 pub(crate) use oriented_elementwise::validate_oriented_fusion_layout;
 #[doc(hidden)]
 pub use oriented_elementwise::{
@@ -157,8 +157,10 @@ pub(crate) use tensortrace::{tensortrace_fusion_dyn_into, tensortrace_fusion_dyn
 pub use tensortrace::{
     tensortrace_fusion_dyn_into_checked, tensortrace_fusion_dyn_owned_checked,
     tensortrace_fusion_dyn_owned_generic_checked, tensortrace_fusion_dyn_selected_homspace_checked,
-    tensortrace_fusion_dyn_selected_homspace_generic_checked, TensorTraceFusionStructure,
-    TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm,
+    tensortrace_fusion_dyn_selected_homspace_generic_checked,
+    tensortrace_fusion_dyn_structure_into_raw, tensortrace_fusion_dyn_structure_owned,
+    TensorTraceFusionStructure, TensorTraceFusionStructureTerm, TensorTraceStructure,
+    TensorTraceStructureTerm,
 };
 pub use tensortrace::{tensortrace_fusion_structure, tensortrace_structure};
 #[cfg(test)]
