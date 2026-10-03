@@ -282,27 +282,19 @@ where
     }
     for tree in [tree_pair.codomain_tree(), tree_pair.domain_tree()] {
         validate_fusion_tree_key_shape(tree)?;
-        match tree.uncoupled().len() {
-            0 if tree.coupled() != rule.vacuum() => {
-                return Err(CoreError::MalformedFusionTree {
-                    message: "rank-0 fusion tree coupled sector must equal the vacuum",
-                }
-                .into());
-            }
-            1 if Some(tree.coupled()) != tree.uncoupled().first().copied() => {
-                return Err(CoreError::MalformedFusionTree {
-                    message: "rank-1 fusion tree coupled sector must equal its uncoupled sector",
-                }
-                .into());
-            }
-            _ => {}
-        }
-        validate_fusion_tree_vertices(tree, |left, right, coupled| {
-            rule.try_fusion_channels(left, right)
-                .map_err(CheckedGenericStructureError::Provider)?;
-            rule.try_nsymbol(left, right, coupled)
-                .map_err(CheckedGenericStructureError::Provider)
-        })?;
+        validate_fusion_tree_checked_after_shape(
+            tree,
+            rule.vacuum(),
+            |left, right| {
+                rule.try_fusion_channels(left, right)
+                    .map(drop)
+                    .map_err(CheckedGenericStructureError::Provider)
+            },
+            |left, right, coupled| {
+                rule.try_nsymbol(left, right, coupled)
+                    .map_err(CheckedGenericStructureError::Provider)
+            },
+        )?;
     }
     validate_fusion_tree_pair_coupled(tree_pair.codomain_tree(), tree_pair.domain_tree())?;
     Ok(())

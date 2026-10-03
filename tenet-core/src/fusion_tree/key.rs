@@ -536,22 +536,19 @@ impl<'tree> ShapeValidatedFusionTree<'tree> {
     where
         R: CheckedFusionAlgebra,
     {
-        validate_fusion_tree_structure_after_shape(rule, self.tree)?;
-        if self.tree.uncoupled().len() == 1 {
-        let multiplicity =
-                rule.try_nsymbol(self.tree.coupled(), rule.vacuum(), self.tree.coupled())?;
-            if multiplicity == 0 {
-                return Err(CoreError::MalformedFusionTree {
-                    message: "rank-1 fusion tree sector is absent from unit fusion",
-                }
-                .into());
-            }
-        }
-        validate_fusion_tree_vertices(self.tree, |left, right, coupled| {
-            rule.try_fusion_channels(left, right)?;
-            rule.try_nsymbol(left, right, coupled)
-                .map_err(CheckedFusionSpaceError::from)
-        })?;
+        validate_fusion_tree_checked_after_shape(
+            self.tree,
+            rule.vacuum(),
+            |left, right| {
+                rule.try_fusion_channels(left, right)
+                    .map(drop)
+                    .map_err(CheckedFusionSpaceError::from)
+            },
+            |left, right, coupled| {
+                rule.try_nsymbol(left, right, coupled)
+                    .map_err(CheckedFusionSpaceError::from)
+            },
+        )?;
         Ok(ValidatedFusionTree {
             rule,
             key: self.tree,
@@ -564,18 +561,40 @@ where
     R: FusionRule,
 {
     validate_fusion_tree_key_shape(tree)?;
-    validate_fusion_tree_structure_after_shape(rule, tree)
+    validate_fusion_tree_structure_after_shape(rule.vacuum(), tree)
 }
 
-fn validate_fusion_tree_structure_after_shape<R>(
-    rule: &R,
+/// Checked admission of one shape-valid fusion tree, shared by every fusion
+/// style: unit-sector structure, the rank-1 `N(c, 1, c)` provider-domain probe,
+/// and every vertex.
+fn validate_fusion_tree_checked_after_shape<E>(
     tree: &FusionTreeKey,
-) -> Result<(), CoreError>
+    vacuum: SectorId,
+    mut fusion_channels: impl FnMut(SectorId, SectorId) -> Result<(), E>,
+    mut nsymbol: impl FnMut(SectorId, SectorId, SectorId) -> Result<usize, E>,
+) -> Result<(), E>
 where
-    R: FusionRule,
+    E: From<CoreError>,
 {
+    validate_fusion_tree_structure_after_shape(vacuum, tree)?;
+    if tree.uncoupled().len() == 1 && nsymbol(tree.coupled(), vacuum, tree.coupled())? == 0 {
+        return Err(CoreError::MalformedFusionTree {
+            message: "rank-1 fusion tree sector is absent from unit fusion",
+        }
+        .into());
+    }
+    validate_fusion_tree_vertices(tree, |left, right, coupled| {
+        fusion_channels(left, right)?;
+        nsymbol(left, right, coupled)
+    })
+}
+
+fn validate_fusion_tree_structure_after_shape(
+    vacuum: SectorId,
+    tree: &FusionTreeKey,
+) -> Result<(), CoreError> {
     match tree.uncoupled().len() {
-        0 if tree.coupled() != rule.vacuum() => Err(CoreError::MalformedFusionTree {
+        0 if tree.coupled() != vacuum => Err(CoreError::MalformedFusionTree {
             message: "rank-0 fusion tree coupled sector must equal the vacuum",
         }),
         1 if Some(tree.coupled()) != tree.uncoupled().first().copied() => {
