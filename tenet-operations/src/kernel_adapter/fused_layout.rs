@@ -120,11 +120,7 @@ impl<'a> BakedFusedLayout<'a> {
                 message: "baked fused layout is not normalized",
             });
         }
-        dims.iter().try_fold(1usize, |product, &dim| {
-            product
-                .checked_mul(dim)
-                .ok_or_else(|| OperationError::ElementCountOverflow)
-        })?;
+        crate::strided::element_count(dims)?;
         Ok(Self {
             dims,
             dst_strides,
@@ -201,11 +197,7 @@ pub(crate) fn normalize_fused_layout(
         scratch.src_strides.push(0);
         return Ok(());
     }
-    shape.iter().try_fold(1usize, |product, &dim| {
-        product
-            .checked_mul(dim)
-            .ok_or_else(|| OperationError::ElementCountOverflow)
-    })?;
+    crate::strided::element_count(shape)?;
 
     for axis in 0..shape.len() {
         if shape[axis] == 1 {

@@ -413,6 +413,7 @@ pub(crate) fn storage_end_exclusive(
 /// Checked product of `dims` (an element count); the TeNeT-side authority
 /// that operations and matrixalgebra map into their own error types.
 #[doc(hidden)]
+#[inline]
 pub fn checked_product(dims: &[usize]) -> Result<usize, CoreError> {
     dims.iter().try_fold(1usize, |acc, &dim| {
         acc.checked_mul(dim)

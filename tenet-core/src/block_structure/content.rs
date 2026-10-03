@@ -237,10 +237,8 @@ impl BlockStructureContent {
     /// the disjoint blocks cover all of it.
     pub(super) fn record_storage_tiling(&self) {
         let covered = self.blocks.iter().try_fold(0usize, |total, block| {
-            block
-                .shape
-                .iter()
-                .try_fold(1usize, |count, &extent| count.checked_mul(extent))
+            checked_product(&block.shape)
+                .ok()
                 .and_then(|count| total.checked_add(count))
         });
         if covered == Some(self.required_len) {
