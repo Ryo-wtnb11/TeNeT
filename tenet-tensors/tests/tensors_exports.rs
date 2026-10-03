@@ -151,6 +151,8 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "reset_global_operation_caches",
         "OperationCachePolicy",
         // contract
+        "tensorcontract_fusion_structure",
+        "tensorcontract_structure",
         "compile_direct_composition_plan",
         "execute_storage_contract_resolution_on_cuda",
         "prepare_tensorcontract_fusion_plan",
@@ -290,6 +292,8 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "WideScalar",
         "ZeroBytes",
         // tensortrace
+        "tensortrace_fusion_structure",
+        "tensortrace_structure",
         "tensortrace_fusion_dyn_into_checked",
         "tensortrace_fusion_dyn_owned_checked",
         "tensortrace_fusion_dyn_owned_generic_checked",

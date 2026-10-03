@@ -86,7 +86,6 @@ pub use dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
 };
-#[cfg(test)]
 pub use fusion::tensorcontract_fusion_structure;
 #[cfg(test)]
 pub(crate) use fusion::{
@@ -99,7 +98,8 @@ pub use fusion::{
 #[cfg(test)]
 pub(crate) use structure::TensorContractDenseRouteKind;
 pub use structure::{
-    TensorContractBlockSpec, TensorContractStructure, TensorContractStructureTerm,
+    tensorcontract_structure, TensorContractBlockSpec, TensorContractStructure,
+    TensorContractStructureTerm,
 };
 pub use tenet_operations::TensorContractFusionProfile;
 #[cfg(test)]

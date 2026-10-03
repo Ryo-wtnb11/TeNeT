@@ -40,6 +40,8 @@ pub(crate) use cache::{
 };
 #[cfg(test)]
 pub(crate) use contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
+#[cfg(test)]
+pub(crate) use contract::TensorContractFusionRoute;
 #[doc(hidden)]
 pub use contract::{
     compile_direct_composition_plan, tensorcompose_fusion_dyn_prelowered_direct_on_storage,
@@ -69,8 +71,7 @@ pub use contract::{
     TensorContractFusionProfile, TensorContractPlanKey, TensorContractStructure,
     TensorContractStructureTerm, TensorContractWorkspace,
 };
-#[cfg(test)]
-pub(crate) use contract::{tensorcontract_fusion_structure, TensorContractFusionRoute};
+pub use contract::{tensorcontract_fusion_structure, tensorcontract_structure};
 pub use contract::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
@@ -147,16 +148,14 @@ pub use tensortrace::tensortrace_fusion_structure_into_on_cuda;
 #[doc(hidden)]
 pub use tensortrace::FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING;
 #[cfg(test)]
-pub(crate) use tensortrace::{
-    tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_owned, tensortrace_fusion_structure,
-    tensortrace_structure,
-};
+pub(crate) use tensortrace::{tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_owned};
 pub use tensortrace::{
     tensortrace_fusion_dyn_into_checked, tensortrace_fusion_dyn_owned_checked,
     tensortrace_fusion_dyn_owned_generic_checked, tensortrace_fusion_dyn_selected_homspace_checked,
     tensortrace_fusion_dyn_selected_homspace_generic_checked, TensorTraceFusionStructure,
     TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm,
 };
+pub use tensortrace::{tensortrace_fusion_structure, tensortrace_structure};
 #[cfg(test)]
 pub(crate) use tree_context::{
     tree_transform_dyn_owned_checked_generic, tree_transform_dyn_owned_checked_generic_in_context,
