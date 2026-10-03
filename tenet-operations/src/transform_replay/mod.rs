@@ -42,6 +42,8 @@ mod entry;
 mod kernels;
 mod member;
 mod owned;
+#[cfg(test)]
+mod tests;
 
 use batched::*;
 use coefficients::*;

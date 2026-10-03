@@ -499,6 +499,86 @@ where
     }
 }
 
+pub(super) fn recoupling_multi_block<C: Copy>(
+    task: TreeTransformTaskView<'_, C>,
+    block_index: usize,
+) -> Result<&TreeTransformBlock, OperationError> {
+    // Lazy error construction: recoupling_multi_block is called per block on the
+    // hot replay path (pack/recouple/scatter). Eager .ok_or built the
+    // BlockIndexOutOfBounds struct on every success too, which the d=4 bisect
+    // (see issue #103) attributed to the compose regression. .ok_or_else only
+    // builds it on the never-taken out-of-bounds path.
+    let block =
+        task.blocks()
+            .get(block_index)
+            .ok_or_else(|| OperationError::BlockIndexOutOfBounds {
+                tensor: "recoupling block",
+                index: block_index,
+                count: task.blocks().len(),
+            })?;
+    match block {
+        TreeTransformBlock::Multi { .. } => Ok(block),
+        TreeTransformBlock::Single { .. } => Err(OperationError::BlockIndexOutOfBounds {
+            tensor: "recoupling block",
+            index: block_index,
+            count: task.blocks().len(),
+        }),
+    }
+}
+
+pub(super) fn scale_inactive_destinations<A, D, C>(
+    kernels: &mut A,
+    zero_strides: &mut Vec<isize>,
+    task: TreeTransformTaskView<'_, C>,
+    dst_data: &mut [D],
+    mode: DestinationMode<D>,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy + PartialEq + Zero + One,
+    C: Copy,
+{
+    match mode {
+        DestinationMode::Axpby(beta) => {
+            if beta == D::one() {
+                return Ok(());
+            }
+            // Scaling the complete storage would also mutate padding not owned by any
+            // block, so compile only the destination layouts with no active replay.
+            for &layout_index in task.inactive_destination_layouts() {
+                let layout = task.layouts().entry(layout_index);
+                kernels.scale_strided(
+                    dst_data,
+                    task.layouts().shape(layout),
+                    task.layouts().strides(layout),
+                    layout.offset,
+                    beta,
+                )?;
+            }
+        }
+        DestinationMode::Overwrite => {
+            let zero = [D::zero()];
+            for &layout_index in task.inactive_destination_layouts() {
+                let layout = task.layouts().entry(layout_index);
+                zero_strides.clear();
+                zero_strides.resize(task.layouts().shape(layout).len(), 0);
+                kernels.copy_scale_strided(
+                    dst_data,
+                    &zero,
+                    task.layouts().shape(layout),
+                    task.layouts().strides(layout),
+                    zero_strides,
+                    layout.offset,
+                    0,
+                    false,
+                    D::one(),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod allocation_replay_tests {
     use super::*;
