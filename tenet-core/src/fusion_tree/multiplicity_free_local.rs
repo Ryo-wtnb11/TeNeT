@@ -35,6 +35,10 @@ impl From<FusionTreeKey> for UnhashedFusionTree {
 }
 
 impl UnhashedFusionTree {
+    pub(crate) fn vertex_at(&self, position: usize) -> Option<MultiplicityIndex> {
+        self.vertices.get(position).copied()
+    }
+
     pub(crate) fn freeze(self) -> FusionTreeKey {
         FusionTreeKey::from_frozen(
             self.uncoupled,
@@ -58,6 +62,7 @@ impl MultiplicityFreeTreeLocalData for UnhashedFusionTree {
     }
 }
 
+#[cfg(test)]
 impl MultiplicityFreeTreeData for UnhashedFusionTree {
     #[inline]
     fn uncoupled(&self) -> &[SectorId] {
@@ -75,87 +80,69 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Mul<Output = R::Scalar>,
 {
-    if rule.fusion_style() != FusionStyleKind::Unique {
-        return Err(CoreError::UnsupportedFusionStyle {
-            expected: FusionStyleKind::Unique,
-            actual: rule.fusion_style(),
-        });
+    let kernel = UniqueK(rule);
+    let site = ArtinSite::new(&kernel, &tree.uncoupled, index, inverse)?;
+    let mut out = InPlaceArtinEdit {
+        innerline_count: tree.innerlines.len(),
+        vertex_count: tree.vertices.len(),
+        index,
+        edit: None,
+    };
+    artin_surgery(&kernel, &site, tree, &mut out)?;
+    let (innerline, vertices, coefficient) = out.edit.ok_or(CoreError::MalformedFusionTree {
+        message: "a unique-fusion braid emits exactly one tree",
+    })?;
+    if let Some((position, sector)) = innerline {
+        Arc::make_mut(&mut tree.innerlines)[position] = sector;
     }
-
-    let rank = tree.uncoupled().len();
-    if index + 1 >= rank {
-        return Err(CoreError::InvalidBraidIndex { index, rank });
+    if vertices == ArtinVertices::SwapUnit {
+        Arc::make_mut(&mut tree.vertices).swap(index - 1, index);
     }
-
-    let left = tree.uncoupled()[index];
-    let right = tree.uncoupled()[index + 1];
-
-    if left == rule.vacuum() || right == rule.vacuum() {
-        if index > 0 {
-            let inner_source = if left == rule.vacuum() {
-                inner_extended_sector(tree, index + 1)?
-            } else {
-                inner_extended_sector(tree, index - 1)?
-            };
-            *Arc::make_mut(&mut tree.innerlines)
-                .get_mut(index - 1)
-                .ok_or(CoreError::MalformedFusionTree {
-                    message: "unit braid past the first adjacent pair requires an innerline",
-                })? = inner_source;
-            if tree.vertices.len() <= index {
-                return Err(CoreError::MalformedFusionTree {
-                    message: "unit braid past the first adjacent pair requires adjacent vertices",
-                });
-            }
-            Arc::make_mut(&mut tree.vertices).swap(index - 1, index);
-        }
-
-        Arc::make_mut(&mut tree.uncoupled).swap(index, index + 1);
-        Arc::make_mut(&mut tree.is_dual).swap(index, index + 1);
-        return Ok(R::Scalar::one());
-    }
-
-    if !rule.braiding_style().has_braiding() {
-        return Err(CoreError::UnsupportedSectorBraid {
-            left,
-            right,
-            style: rule.braiding_style(),
-        });
-    }
-
-    if index == 0 {
-        let coupled = if rank > 2 {
-            tree.innerlines()
-                .first()
-                .copied()
-                .ok_or(CoreError::MalformedFusionTree {
-                    message: "first braid of a rank > 2 tree requires the first innerline",
-                })?
-        } else {
-            tree.coupled()
-        };
-
-        let coefficient = mf_artin_first_coefficient(rule, left, right, coupled, inverse);
-        Arc::make_mut(&mut tree.uncoupled).swap(index, index + 1);
-        Arc::make_mut(&mut tree.is_dual).swap(index, index + 1);
-        return Ok(coefficient);
-    }
-
-    let a = inner_extended_sector(tree, index - 1)?;
-    let b = left;
-    let c = inner_extended_sector(tree, index)?;
-    let d = right;
-    let e = inner_extended_sector(tree, index + 1)?;
-    let c_prime = only_fusion_channel(rule, a, d)?;
-    *Arc::make_mut(&mut tree.innerlines)
-        .get_mut(index - 1)
-        .ok_or(CoreError::MalformedFusionTree {
-            message: "non-first braid requires an innerline to update",
-        })? = c_prime;
-    let coefficient = mf_artin_coefficient(rule, [a, b, c, d, e, c_prime], inverse);
     Arc::make_mut(&mut tree.uncoupled).swap(index, index + 1);
     Arc::make_mut(&mut tree.is_dual).swap(index, index + 1);
     Ok(coefficient)
+}
+
+/// The one output of an in-place unique-fusion swap, validated against the
+/// tree's shape while the surgery still reads it and applied afterwards.
+struct InPlaceArtinEdit<S> {
+    innerline_count: usize,
+    vertex_count: usize,
+    index: usize,
+    edit: Option<(InnerlineEdit, ArtinVertices, S)>,
+}
+
+type InnerlineEdit = Option<(usize, SectorId)>;
+
+impl<S> ArtinWriter<S, CoreError> for InPlaceArtinEdit<S> {
+    type Slot = (InnerlineEdit, ArtinVertices);
+
+    fn begin(
+        &mut self,
+        innerline: Option<(usize, SectorId)>,
+        vertices: ArtinVertices,
+    ) -> Result<Self::Slot, CoreError> {
+        if innerline.is_some_and(|(position, _)| position >= self.innerline_count) {
+            return Err(CoreError::MalformedFusionTree {
+                message: artin_innerline_message(vertices),
+            });
+        }
+        if vertices == ArtinVertices::SwapUnit && self.vertex_count <= self.index {
+            return Err(CoreError::MalformedFusionTree {
+                message: "unit braid past the first adjacent pair requires adjacent vertices",
+            });
+        }
+        Ok((innerline, vertices))
+    }
+
+    fn finish(
+        &mut self,
+        (innerline, vertices): Self::Slot,
+        coefficient: S,
+    ) -> Result<(), CoreError> {
+        self.edit = Some((innerline, vertices, coefficient));
+        Ok(())
+    }
 }
 
 /// First-pair multiplicity-free Artin coefficient: TensorKit
@@ -220,10 +207,12 @@ impl MultiplicityFreeTreeLocalData for FusionTreeKey {
     }
 }
 
+#[cfg(test)]
 pub(super) trait MultiplicityFreeTreeData: MultiplicityFreeTreeLocalData {
     fn uncoupled(&self) -> &[SectorId];
 }
 
+#[cfg(test)]
 impl MultiplicityFreeTreeData for FusionTreeKey {
     #[inline]
     fn uncoupled(&self) -> &[SectorId] {
@@ -686,12 +675,7 @@ where
 
 pub(super) struct PreparedMultiplicityFreeArtin {
     pub(super) output_frame: MultiplicityFreeTreeFrame,
-    rank: usize,
-    first: SectorId,
-    index: usize,
-    inverse: bool,
-    left: SectorId,
-    right: SectorId,
+    site: ArtinSite,
 }
 
 pub(super) fn prepare_multiplicity_free_artin<R>(
@@ -703,155 +687,71 @@ pub(super) fn prepare_multiplicity_free_artin<R>(
 where
     R: MultiplicityFreeFusionSymbols,
 {
-    if !rule.fusion_style().is_multiplicity_free() {
-        return Err(CoreError::UnsupportedFusionStyle {
-            expected: FusionStyleKind::Simple,
-            actual: rule.fusion_style(),
-        });
-    }
-
-    let rank = frame.uncoupled.len();
-    if index + 1 >= rank {
-        return Err(CoreError::InvalidBraidIndex { index, rank });
-    }
-
-    let left = frame.uncoupled[index];
-    let right = frame.uncoupled[index + 1];
+    let site = ArtinSite::new(&SimpleK(rule), &frame.uncoupled, index, inverse)?;
     let mut uncoupled = frame.uncoupled.to_vec();
     uncoupled.swap(index, index + 1);
     let mut is_dual = frame.is_dual.to_vec();
     is_dual.swap(index, index + 1);
-    let frame = MultiplicityFreeTreeFrame {
+    let output_frame = MultiplicityFreeTreeFrame {
         uncoupled: uncoupled.into(),
         is_dual: is_dual.into(),
         vertices: Arc::clone(&frame.vertices),
     };
-
-    if left != rule.vacuum() && right != rule.vacuum() && !rule.braiding_style().has_braiding() {
-        return Err(CoreError::UnsupportedSectorBraid {
-            left,
-            right,
-            style: rule.braiding_style(),
-        });
-    }
-    let first = frame.uncoupled[0];
-    Ok(PreparedMultiplicityFreeArtin {
-        output_frame: frame,
-        rank,
-        first,
-        index,
-        inverse,
-        left,
-        right,
-    })
+    Ok(PreparedMultiplicityFreeArtin { output_frame, site })
 }
 
 impl PreparedMultiplicityFreeArtin {
     // External frame data stays out of this kernel: the block runner must enumerate
     // locals from this prepared frame rather than rebuilding full tree keys.
-    pub(super) fn apply<R, T>(
+    pub(super) fn apply<R>(
         &self,
         rule: &R,
-        tree: &T,
+        tree: &MultiplicityFreeTreeLocal,
     ) -> Result<MultiplicityFreeArtinTerms<R::Scalar>, CoreError>
     where
         R: MultiplicityFreeFusionSymbols,
         R::Scalar: Clone + Mul<Output = R::Scalar>,
-        T: MultiplicityFreeTreeLocalData,
     {
-        let index = self.index;
-        let left = self.left;
-        let right = self.right;
-        if left == rule.vacuum() || right == rule.vacuum() {
-            let mut innerlines = tree.innerlines().to_vec();
-            if index > 0 {
-                let inner_source = if left == rule.vacuum() {
-                    self.inner_extended(tree, index + 1)?
-                } else {
-                    self.inner_extended(tree, index - 1)?
-                };
-                *innerlines
-                    .get_mut(index - 1)
-                    .ok_or(CoreError::MalformedFusionTree {
-                        message: "unit braid past the first adjacent pair requires an innerline",
-                    })? = inner_source;
-            }
-            let mut terms = SmallVec::new();
-            terms.push((
-                MultiplicityFreeTreeLocal {
-                    coupled: tree.coupled(),
-                    innerlines: innerlines.into_iter().collect(),
-                },
-                R::Scalar::one(),
-            ));
-            return Ok(terms);
-        }
+        let mut out = LocalArtinTerms {
+            tree,
+            terms: SmallVec::new(),
+        };
+        artin_surgery(&SimpleK(rule), &self.site, tree, &mut out)?;
+        Ok(out.terms)
+    }
+}
 
-        if index == 0 {
-            let coupled = if self.rank > 2 {
-                tree.innerlines()
-                    .first()
-                    .copied()
-                    .ok_or(CoreError::MalformedFusionTree {
-                        message: "first braid of a rank > 2 tree requires the first innerline",
-                    })?
-            } else {
-                tree.coupled()
-            };
-            let coefficient = mf_artin_first_coefficient(rule, left, right, coupled, self.inverse);
-            let mut terms = SmallVec::new();
-            terms.push((
-                MultiplicityFreeTreeLocal {
-                    coupled: tree.coupled(),
-                    innerlines: tree.innerlines().iter().copied().collect(),
-                },
-                coefficient,
-            ));
-            return Ok(terms);
-        }
+/// Multiplicity-free Artin outputs as compact locals.
+struct LocalArtinTerms<'t, S> {
+    tree: &'t MultiplicityFreeTreeLocal,
+    terms: MultiplicityFreeArtinTerms<S>,
+}
 
-        let a = self.inner_extended(tree, index - 1)?;
-        let b = left;
-        let c = self.inner_extended(tree, index)?;
-        let d = right;
-        let e = self.inner_extended(tree, index + 1)?;
-        let mut terms: MultiplicityFreeArtinTerms<R::Scalar> = SmallVec::new();
-        for c_prime in rule.fusion_channels(a, d) {
-            if rule.nsymbol(c_prime, b, e) == 0 {
-                continue;
-            }
-            let mut innerlines: SectorVec = tree.innerlines().iter().copied().collect();
+impl<S> ArtinWriter<S, CoreError> for LocalArtinTerms<'_, S> {
+    type Slot = MultiplicityFreeTreeLocal;
+
+    fn begin(
+        &mut self,
+        innerline: Option<(usize, SectorId)>,
+        vertices: ArtinVertices,
+    ) -> Result<Self::Slot, CoreError> {
+        let mut innerlines: SectorVec = self.tree.innerlines.iter().copied().collect();
+        if let Some((position, sector)) = innerline {
             *innerlines
-                .get_mut(index - 1)
+                .get_mut(position)
                 .ok_or(CoreError::MalformedFusionTree {
-                    message: "non-first braid requires an innerline to update",
-                })? = c_prime;
-            let braided = MultiplicityFreeTreeLocal {
-                coupled: tree.coupled(),
-                innerlines,
-            };
-            let coefficient = mf_artin_coefficient(rule, [a, b, c, d, e, c_prime], self.inverse);
-            terms.push((braided, coefficient));
+                    message: artin_innerline_message(vertices),
+                })? = sector;
         }
-        Ok(terms)
+        Ok(MultiplicityFreeTreeLocal {
+            coupled: self.tree.coupled,
+            innerlines,
+        })
     }
 
-    fn inner_extended<T>(&self, tree: &T, index: usize) -> Result<SectorId, CoreError>
-    where
-        T: MultiplicityFreeTreeLocalData + ?Sized,
-    {
-        if index == 0 {
-            return Ok(self.first);
-        }
-        if index + 1 == self.rank {
-            return Ok(tree.coupled());
-        }
-        tree.innerlines()
-            .get(index - 1)
-            .copied()
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "inner-extended tree is missing an innerline",
-            })
+    fn finish(&mut self, local: Self::Slot, coefficient: S) -> Result<(), CoreError> {
+        self.terms.push((local, coefficient));
+        Ok(())
     }
 }
 
