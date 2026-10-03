@@ -42,33 +42,32 @@ where
     Ok((locals, columns))
 }
 
-pub(super) fn compact_artin_tree_block_first<R>(
+/// Run one compact move over `basis`: the first move of a chain writes the
+/// source columns directly (`columns == None`); later moves compose through
+/// the previous coefficient matrix. The move itself is `transform`.
+fn apply_compact_block_terms<R, K, F, I>(
     rule: &R,
-    basis: CompactMultiplicityFreeTreeBasis,
-    index: usize,
-    inverse: bool,
-) -> Result<(CompactMultiplicityFreeTreeBasis, DenseColumns<R::Scalar>), CoreError>
+    basis: &[K],
+    columns: Option<&DenseColumns<R::Scalar>>,
+    transform: F,
+) -> Result<(Vec<K>, DenseColumns<R::Scalar>), CoreError>
 where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+    K: Eq + Hash,
+    F: FnMut(&R, &K) -> Result<I, CoreError>,
+    I: IntoIterator<Item = (K, R::Scalar)>,
 {
-    let prepared = prepare_multiplicity_free_artin(rule, &basis.frame, index, inverse)?;
-    let (locals, columns) = apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
-        prepared.apply(rule, local)
-    })?;
-    Ok((
-        CompactMultiplicityFreeTreeBasis {
-            frame: prepared.output_frame,
-            locals,
-        },
-        columns,
-    ))
+    match columns {
+        None => apply_first_compact_block_terms(rule, basis, transform),
+        Some(columns) => compose_compact_block_terms(rule, basis, columns, transform),
+    }
 }
 
-pub(super) fn compact_artin_tree_block_step<R>(
+pub(super) fn compact_artin_tree_block<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreeBasis,
-    columns: &DenseColumns<R::Scalar>,
+    columns: Option<&DenseColumns<R::Scalar>>,
     index: usize,
     inverse: bool,
 ) -> Result<(CompactMultiplicityFreeTreeBasis, DenseColumns<R::Scalar>), CoreError>
@@ -78,7 +77,7 @@ where
 {
     let prepared = prepare_multiplicity_free_artin(rule, &basis.frame, index, inverse)?;
     let (locals, next_columns) =
-        compose_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
+        apply_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
             prepared.apply(rule, local)
         })?;
     Ok((
@@ -111,9 +110,10 @@ where
     rows_per_source
 }
 
-pub(crate) fn compact_bendright_block_first<R>(
+pub(crate) fn compact_bendright_block<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
+    columns: Option<&DenseColumns<R::Scalar>>,
 ) -> Result<
     (
         CompactMultiplicityFreeTreePairBasis,
@@ -126,21 +126,23 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     let prepared = prepare_multiplicity_free_bendright(rule, &basis.frame)?;
-    let (locals, columns) = apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
-        let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-        let coefficient = prepared.coefficient(rule, &validated);
-        Ok(std::iter::once((validated.local, coefficient)))
-    })?;
+    let (locals, next_columns) =
+        apply_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
+            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
+            let coefficient = prepared.coefficient(rule, &validated);
+            Ok(std::iter::once((validated.local, coefficient)))
+        })?;
     let frame = prepared.output_frame(rule)?;
     Ok((
         CompactMultiplicityFreeTreePairBasis { frame, locals },
-        columns,
+        next_columns,
     ))
 }
 
-pub(crate) fn compact_bendleft_block_first<R>(
+pub(crate) fn compact_bendleft_block<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
+    columns: Option<&DenseColumns<R::Scalar>>,
 ) -> Result<
     (
         CompactMultiplicityFreeTreePairBasis,
@@ -153,14 +155,15 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     let prepared = prepare_multiplicity_free_bendleft(rule, &basis.frame)?;
-    let (locals, columns) = apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
-        let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-        Ok(std::iter::once(prepared.finish_local(rule, validated)))
-    })?;
+    let (locals, next_columns) =
+        apply_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
+            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
+            Ok(std::iter::once(prepared.finish_local(rule, validated)))
+        })?;
     let frame = prepared.output_frame(rule)?;
     Ok((
         CompactMultiplicityFreeTreePairBasis { frame, locals },
-        columns,
+        next_columns,
     ))
 }
 
@@ -313,26 +316,10 @@ where
     ))
 }
 
-fn compact_foldright_block_first<R>(
+fn compact_foldleft_block<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
-) -> Result<
-    (
-        CompactMultiplicityFreeTreePairBasis,
-        DenseColumns<R::Scalar>,
-    ),
-    CoreError,
->
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-{
-    compact_foldright_block(rule, basis, None, false, false)
-}
-
-fn compact_foldleft_block_first<R>(
-    rule: &R,
-    basis: CompactMultiplicityFreeTreePairBasis,
+    columns: Option<&DenseColumns<R::Scalar>>,
 ) -> Result<
     (
         CompactMultiplicityFreeTreePairBasis,
@@ -358,161 +345,13 @@ where
             })
             .collect(),
     };
-    compact_foldright_block(rule, swapped, None, true, true)
+    compact_foldright_block(rule, swapped, columns, true, true)
 }
 
-pub(crate) fn compact_codomain_artin_block_first<R>(
+pub(crate) fn compact_codomain_artin_block<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
-    index: usize,
-    inverse: bool,
-) -> Result<
-    (
-        CompactMultiplicityFreeTreePairBasis,
-        DenseColumns<R::Scalar>,
-    ),
-    CoreError,
->
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-{
-    let prepared = prepare_multiplicity_free_artin(rule, &basis.frame.codomain, index, inverse)?;
-    let (locals, columns) = apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
-        let domain = local.domain.clone();
-        Ok(prepared.apply(rule, &local.codomain)?.into_iter().map(
-            move |(codomain, coefficient)| {
-                (
-                    MultiplicityFreeTreePairLocal {
-                        codomain,
-                        domain: domain.clone(),
-                    },
-                    coefficient,
-                )
-            },
-        ))
-    })?;
-    let frame = MultiplicityFreeTreePairFrame {
-        codomain: prepared.output_frame,
-        domain: basis.frame.domain,
-    };
-    Ok((
-        CompactMultiplicityFreeTreePairBasis { frame, locals },
-        columns,
-    ))
-}
-
-pub(super) fn compact_bendright_block_step<R>(
-    rule: &R,
-    basis: CompactMultiplicityFreeTreePairBasis,
-    columns: &DenseColumns<R::Scalar>,
-) -> Result<
-    (
-        CompactMultiplicityFreeTreePairBasis,
-        DenseColumns<R::Scalar>,
-    ),
-    CoreError,
->
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-{
-    let prepared = prepare_multiplicity_free_bendright(rule, &basis.frame)?;
-    let (locals, next_columns) =
-        compose_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
-            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-            let coefficient = prepared.coefficient(rule, &validated);
-            Ok(std::iter::once((validated.local, coefficient)))
-        })?;
-    let frame = prepared.output_frame(rule)?;
-    Ok((
-        CompactMultiplicityFreeTreePairBasis { frame, locals },
-        next_columns,
-    ))
-}
-
-pub(super) fn compact_bendleft_block_step<R>(
-    rule: &R,
-    basis: CompactMultiplicityFreeTreePairBasis,
-    columns: &DenseColumns<R::Scalar>,
-) -> Result<
-    (
-        CompactMultiplicityFreeTreePairBasis,
-        DenseColumns<R::Scalar>,
-    ),
-    CoreError,
->
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-{
-    let prepared = prepare_multiplicity_free_bendleft(rule, &basis.frame)?;
-    let (locals, next_columns) =
-        compose_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
-            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-            Ok(std::iter::once(prepared.finish_local(rule, validated)))
-        })?;
-    let frame = prepared.output_frame(rule)?;
-    Ok((
-        CompactMultiplicityFreeTreePairBasis { frame, locals },
-        next_columns,
-    ))
-}
-
-fn compact_foldright_block_step<R>(
-    rule: &R,
-    basis: CompactMultiplicityFreeTreePairBasis,
-    columns: &DenseColumns<R::Scalar>,
-) -> Result<
-    (
-        CompactMultiplicityFreeTreePairBasis,
-        DenseColumns<R::Scalar>,
-    ),
-    CoreError,
->
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-{
-    compact_foldright_block(rule, basis, Some(columns), false, false)
-}
-
-fn compact_foldleft_block_step<R>(
-    rule: &R,
-    basis: CompactMultiplicityFreeTreePairBasis,
-    columns: &DenseColumns<R::Scalar>,
-) -> Result<
-    (
-        CompactMultiplicityFreeTreePairBasis,
-        DenseColumns<R::Scalar>,
-    ),
-    CoreError,
->
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-{
-    let CompactMultiplicityFreeTreePairBasis { frame, locals } = basis;
-    let swapped = CompactMultiplicityFreeTreePairBasis {
-        frame: MultiplicityFreeTreePairFrame {
-            codomain: frame.domain,
-            domain: frame.codomain,
-        },
-        locals: locals
-            .into_iter()
-            .map(|local| MultiplicityFreeTreePairLocal {
-                codomain: local.domain,
-                domain: local.codomain,
-            })
-            .collect(),
-    };
-    compact_foldright_block(rule, swapped, Some(columns), true, true)
-}
-
-pub(super) fn compact_codomain_artin_block_step<R>(
-    rule: &R,
-    basis: CompactMultiplicityFreeTreePairBasis,
-    columns: &DenseColumns<R::Scalar>,
+    columns: Option<&DenseColumns<R::Scalar>>,
     index: usize,
     inverse: bool,
 ) -> Result<
@@ -528,7 +367,7 @@ where
 {
     let prepared = prepare_multiplicity_free_artin(rule, &basis.frame.codomain, index, inverse)?;
     let (locals, next_columns) =
-        compose_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
+        apply_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
             let domain = local.domain.clone();
             Ok(prepared.apply(rule, &local.codomain)?.into_iter().map(
                 move |(codomain, coefficient)| {
@@ -552,9 +391,10 @@ where
     ))
 }
 
-pub(super) fn compact_cycle_clockwise_block_first<R>(
+pub(super) fn compact_cycle_clockwise_block<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
+    columns: Option<&DenseColumns<R::Scalar>>,
 ) -> Result<
     (
         CompactMultiplicityFreeTreePairBasis,
@@ -567,41 +407,18 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     if basis.frame.codomain.uncoupled.is_empty() {
-        let (basis, columns) = compact_bendleft_block_first(rule, basis)?;
-        compact_foldright_block_step(rule, basis, &columns)
+        let (basis, columns) = compact_bendleft_block(rule, basis, columns)?;
+        compact_foldright_block(rule, basis, Some(&columns), false, false)
     } else {
-        let (basis, columns) = compact_foldright_block_first(rule, basis)?;
-        compact_bendleft_block_step(rule, basis, &columns)
+        let (basis, columns) = compact_foldright_block(rule, basis, columns, false, false)?;
+        compact_bendleft_block(rule, basis, Some(&columns))
     }
 }
 
-pub(super) fn compact_cycle_clockwise_block_step<R>(
+pub(super) fn compact_cycle_anticlockwise_block<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
-    columns: &DenseColumns<R::Scalar>,
-) -> Result<
-    (
-        CompactMultiplicityFreeTreePairBasis,
-        DenseColumns<R::Scalar>,
-    ),
-    CoreError,
->
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-{
-    if basis.frame.codomain.uncoupled.is_empty() {
-        let (basis, columns) = compact_bendleft_block_step(rule, basis, columns)?;
-        compact_foldright_block_step(rule, basis, &columns)
-    } else {
-        let (basis, columns) = compact_foldright_block_step(rule, basis, columns)?;
-        compact_bendleft_block_step(rule, basis, &columns)
-    }
-}
-
-pub(super) fn compact_cycle_anticlockwise_block_first<R>(
-    rule: &R,
-    basis: CompactMultiplicityFreeTreePairBasis,
+    columns: Option<&DenseColumns<R::Scalar>>,
 ) -> Result<
     (
         CompactMultiplicityFreeTreePairBasis,
@@ -614,35 +431,11 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     if basis.frame.domain.uncoupled.is_empty() {
-        let (basis, columns) = compact_bendright_block_first(rule, basis)?;
-        compact_foldleft_block_step(rule, basis, &columns)
+        let (basis, columns) = compact_bendright_block(rule, basis, columns)?;
+        compact_foldleft_block(rule, basis, Some(&columns))
     } else {
-        let (basis, columns) = compact_foldleft_block_first(rule, basis)?;
-        compact_bendright_block_step(rule, basis, &columns)
-    }
-}
-
-pub(super) fn compact_cycle_anticlockwise_block_step<R>(
-    rule: &R,
-    basis: CompactMultiplicityFreeTreePairBasis,
-    columns: &DenseColumns<R::Scalar>,
-) -> Result<
-    (
-        CompactMultiplicityFreeTreePairBasis,
-        DenseColumns<R::Scalar>,
-    ),
-    CoreError,
->
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-{
-    if basis.frame.domain.uncoupled.is_empty() {
-        let (basis, columns) = compact_bendright_block_step(rule, basis, columns)?;
-        compact_foldleft_block_step(rule, basis, &columns)
-    } else {
-        let (basis, columns) = compact_foldleft_block_step(rule, basis, columns)?;
-        compact_bendright_block_step(rule, basis, &columns)
+        let (basis, columns) = compact_foldleft_block(rule, basis, columns)?;
+        compact_bendright_block(rule, basis, Some(&columns))
     }
 }
 
