@@ -5241,7 +5241,9 @@ mod block_structure {
             let rule = CheckedA4Spy::new();
             generic_bendright_tree_pair_checked(&rule, &pair).unwrap();
             assert_eq!(rule.dual_calls.get(), 3);
-            assert_eq!(rule.n_calls.get(), 7);
+            // Includes the rank-1 domain tree's N(c, 1, c) admission probe,
+            // which the multiplicity-free checked validator also makes.
+            assert_eq!(rule.n_calls.get(), 8);
             assert_eq!(rule.f_calls.get(), 1);
             assert_eq!(rule.sqrt_calls.get(), 3);
             assert_eq!(rule.inv_sqrt_calls.get(), 2);
