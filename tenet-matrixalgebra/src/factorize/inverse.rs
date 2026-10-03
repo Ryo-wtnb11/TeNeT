@@ -36,18 +36,14 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    if !input.space().codomain_isomorphic_to_domain()? {
+    let authority = MfAuthority(input.space());
+    let homspace = input.space().space().homspace();
+    if !authority.isomorphic(homspace)? {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: "inv requires isomorphic codomain and domain",
         });
     }
-
-    let source_space = input.space().space();
-    let inverse_homspace = FusionTreeHomSpace::new(
-        source_space.homspace().domain().clone(),
-        source_space.homspace().codomain().clone(),
-    );
-    let output_space = input.space().derive_from_final_homspace(inverse_homspace)?;
+    let output_space = authority.output_space(inverse_homspace(homspace))?;
     inverse_by_sector_dyn_into(dense, input, output_space)
 }
 
@@ -405,19 +401,16 @@ where
             message: "solve requires equal divisor and right-hand-side codomains",
         });
     }
-    if !divisor.space().codomain_isomorphic_to_domain()? {
+    let authority = MfAuthority(divisor.space());
+    if !authority.isomorphic(divisor_space.homspace())? {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: "solve requires an isomorphic divisor codomain and domain",
         });
     }
-
-    let output_homspace = FusionTreeHomSpace::new(
-        divisor_space.homspace().domain().clone(),
-        rhs_space.homspace().domain().clone(),
-    );
-    let output_space = divisor
-        .space()
-        .derive_from_final_homspace(output_homspace)?;
+    let output_space = authority.output_space(solve_homspace(
+        divisor_space.homspace(),
+        rhs_space.homspace(),
+    ))?;
     solve_left_by_sector_dyn_into(dense, divisor, rhs, output_space)
 }
 

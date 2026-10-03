@@ -188,8 +188,8 @@ where
             .into());
         }
 
-        let output = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
-            Arc::clone(lhs_space.provider_arc()),
+        let output = tenet_matrixalgebra::seam::factor_output_space_checked_generic(
+            lhs_space.provider_arc(),
             FusionTreeHomSpace::new(
                 lhs_space.space().homspace().domain().clone(),
                 rhs.logical_space().space().homspace().domain().clone(),

@@ -212,6 +212,7 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              eig_vals_dyn_checked_generic eigh_full_diagonal_dyn \
              eigh_full_diagonal_dyn_checked_generic eigh_full_dyn eigh_full_dyn_checked_generic \
              eigh_vals_diagonal_dyn eigh_vals_dyn eigh_vals_dyn_checked_generic \
+             factor_output_space_checked_generic \
              left_null_diagonal_dyn left_null_diagonal_dyn_checked_generic left_null_dyn \
              left_null_dyn_checked_generic_with_dimensions left_polar_adjoint_parent_dyn \
              left_polar_adjoint_parent_dyn_checked_generic left_polar_diagonal_spectra_dyn \

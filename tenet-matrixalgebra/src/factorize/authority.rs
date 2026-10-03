@@ -40,6 +40,21 @@ pub(super) trait FactorSpaceAuthority<R>: sealed::Sealed {
         &self,
         side: &FusionProductSpace,
     ) -> Result<BTreeMap<SectorId, usize>, Self::Error>;
+
+    /// Whether `homspace`'s codomain and domain have equal coupled-sector
+    /// dimensions (the inverse and solve admission).
+    fn isomorphic(&self, homspace: &FusionTreeHomSpace) -> Result<bool, Self::Error>;
+
+    type RootError;
+
+    /// An output space that needs no shared pre-commit validation, such as the
+    /// swapped space of an inverse or a solve. The checked authority uses the
+    /// root constructor, which checks the provider's fusion style before it
+    /// enumerates; `stage` + `commit` check it after, at publication.
+    fn output_space(
+        &self,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::RootError>;
 }
 
 /// Multiplicity-free factor spaces, derived through the source space's cached
@@ -79,6 +94,26 @@ where
     ) -> Result<BTreeMap<SectorId, usize>, Self::Error> {
         Ok(side.coupled_sector_block_dimensions(self.0.provider())?)
     }
+
+    fn isomorphic(&self, homspace: &FusionTreeHomSpace) -> Result<bool, Self::Error> {
+        if homspace.codomain() == homspace.domain() {
+            return Ok(true);
+        }
+        let dimensions = |side: &FusionProductSpace| {
+            side.coupled_sector_block_dimensions(self.0.provider())
+                .map_err(OperationError::from_core_preserving_context)
+        };
+        Ok(dimensions(homspace.codomain())? == dimensions(homspace.domain())?)
+    }
+
+    type RootError = OperationError;
+
+    fn output_space(
+        &self,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::RootError> {
+        self.0.derive_from_final_homspace(homspace)
+    }
 }
 
 impl<R> FactorSpaceAuthority<R> for CheckedAuthority<'_, R>
@@ -117,6 +152,46 @@ where
     ) -> Result<BTreeMap<SectorId, usize>, Self::Error> {
         coupled_sector_block_dimensions_generic_checked(side, self.0.as_ref())
     }
+
+    fn isomorphic(&self, homspace: &FusionTreeHomSpace) -> Result<bool, Self::Error> {
+        Ok(self.coupled_dimensions(homspace.codomain())?
+            == self.coupled_dimensions(homspace.domain())?)
+    }
+
+    type RootError = CheckedGenericStructureError<R::Error>;
+
+    fn output_space(
+        &self,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::RootError> {
+        BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(self.0),
+            homspace,
+        )
+    }
+}
+
+/// `domain <- codomain` of `homspace`: the space of its inverse.
+pub(super) fn inverse_homspace(homspace: &FusionTreeHomSpace) -> FusionTreeHomSpace {
+    FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone())
+}
+
+/// `domain(divisor) <- domain(rhs)`: the space of `divisor \ rhs`.
+pub(super) fn solve_homspace(
+    divisor: &FusionTreeHomSpace,
+    rhs: &FusionTreeHomSpace,
+) -> FusionTreeHomSpace {
+    FusionTreeHomSpace::new(divisor.domain().clone(), rhs.domain().clone())
+}
+
+/// A checked inverse, pseudo-inverse or solve output space over `provider`,
+/// built by the checked factor-space authority.
+#[doc(hidden)]
+pub fn factor_output_space_checked_generic<R: CheckedGenericFusion>(
+    provider: &Arc<R>,
+    homspace: FusionTreeHomSpace,
+) -> Result<BoundDynamicFusionMapSpace<R>, CheckedGenericStructureError<R::Error>> {
+    CheckedAuthority(provider).output_space(homspace)
 }
 
 #[cfg(test)]
