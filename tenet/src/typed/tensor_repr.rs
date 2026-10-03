@@ -1,4 +1,3 @@
-#[allow(unused_imports)]
 use super::*;
 
 /// Storage shared by every clone of one typed tensor map: the admitted space

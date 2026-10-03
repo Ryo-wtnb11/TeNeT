@@ -1,4 +1,3 @@
-#[allow(unused_imports)]
 use super::*;
 
 pub(super) fn tree_operation_matches_axes(

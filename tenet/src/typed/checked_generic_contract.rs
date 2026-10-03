@@ -1,4 +1,3 @@
-#[allow(unused_imports)]
 use super::*;
 
 impl<R, D> TypedTensorTraceDispatch<R, D> for MultiplicityFreeAdmissionMode

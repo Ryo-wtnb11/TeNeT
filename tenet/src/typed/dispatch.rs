@@ -1,4 +1,3 @@
-#[allow(unused_imports)]
 use super::*;
 
 /// Tensor-side layout admission selected by a provider-owned mode.

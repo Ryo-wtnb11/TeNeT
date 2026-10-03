@@ -1,4 +1,3 @@
-#[allow(unused_imports)]
 use super::*;
 
 /// One side of a tensor map `codomain <- domain`.

@@ -1,4 +1,3 @@
-#[allow(unused_imports)]
 use super::*;
 
 impl ScalarOps for f64 {

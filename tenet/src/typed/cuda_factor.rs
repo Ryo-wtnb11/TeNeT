@@ -1,4 +1,3 @@
-#[allow(unused_imports)]
 use super::*;
 
 #[cfg(all(test, feature = "cuda"))]
