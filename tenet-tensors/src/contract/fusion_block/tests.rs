@@ -1,15 +1,13 @@
 use super::*;
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::cell::Cell;
+use tenet_core::Placement;
 use tenet_core::{
     BlockStructure, BraidingStyleKind, CoreError, FusionProductSpace, FusionStyleKind,
-    FusionTensorMapSpace, FusionTreePairKey, HostReadableStorage, HostWritableStorage,
-    MultiplicityIndex, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorLeg, SectorVec, TensorMap,
-    TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep, Z2FusionRule,
+    FusionTensorMapSpace, FusionTreePairKey, MultiplicityIndex, ProductFusionRule, SU2FusionRule,
+    SU2Irrep, SectorLeg, SectorVec, TensorMapSpace, TensorStorage, U1FusionRule, U1Irrep,
+    Z2FusionRule,
 };
-use tenet_core::{Placement, SimilarStorage};
 use tenet_operations::fusion_replay::HostFusionBlockContractWorkspace;
-use tenet_operations::storage_scratch::StorageFusionBlockContractWorkspace;
 use tenet_operations::ReportsPlacement;
 
 use crate::{DenseTreeTransformOperations, TensorContractWorkspace};
@@ -25,109 +23,6 @@ fn layout_lookups() -> usize {
 
 fn layout_compiles() -> usize {
     FUSION_LAYOUT_COMPILES.get()
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ScratchAllocation {
-    label: &'static str,
-    len: usize,
-}
-
-#[derive(Clone, Debug)]
-struct TrackingStorage<T> {
-    data: Vec<T>,
-    label: &'static str,
-    allocations: Rc<RefCell<Vec<ScratchAllocation>>>,
-}
-
-#[derive(Clone, Debug)]
-struct TrackingScratch<T> {
-    data: Vec<T>,
-}
-
-impl<T> TrackingStorage<T> {
-    fn new(
-        data: Vec<T>,
-        label: &'static str,
-        allocations: Rc<RefCell<Vec<ScratchAllocation>>>,
-    ) -> Self {
-        Self {
-            data,
-            label,
-            allocations,
-        }
-    }
-}
-
-impl<T> TensorStorage<T> for TrackingStorage<T> {
-    fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    fn placement(&self) -> Placement {
-        Placement::Host
-    }
-}
-
-impl<T> HostReadableStorage<T> for TrackingStorage<T> {
-    fn as_slice(&self) -> &[T] {
-        &self.data
-    }
-}
-
-impl<T> HostWritableStorage<T> for TrackingStorage<T> {
-    fn as_mut_slice(&mut self) -> &mut [T] {
-        &mut self.data
-    }
-}
-
-impl<T: Clone> SimilarStorage<T> for TrackingStorage<T> {
-    type Similar = TrackingScratch<T>;
-
-    fn similar_filled(&self, len: usize, value: T) -> Self::Similar
-    where
-        T: Clone,
-    {
-        self.allocations.borrow_mut().push(ScratchAllocation {
-            label: self.label,
-            len,
-        });
-        TrackingScratch {
-            data: vec![value; len],
-        }
-    }
-}
-
-impl<T> TensorStorage<T> for TrackingScratch<T> {
-    fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    fn placement(&self) -> Placement {
-        Placement::Host
-    }
-}
-
-impl<T> HostReadableStorage<T> for TrackingScratch<T> {
-    fn as_slice(&self) -> &[T] {
-        &self.data
-    }
-}
-
-impl<T> HostWritableStorage<T> for TrackingScratch<T> {
-    fn as_mut_slice(&mut self) -> &mut [T] {
-        &mut self.data
-    }
-}
-
-impl<T: Clone> tenet_core::ScratchStorage<T> for TrackingScratch<T> {
-    fn reset_filled(&mut self, len: usize, value: T)
-    where
-        T: Clone,
-    {
-        self.data.clear();
-        self.data.resize(len, value);
-    }
 }
 
 /// Storage with no host-slice access: compiling the storage-direct path
@@ -675,7 +570,7 @@ fn storage_direct_replay_runs_without_host_slice_contract() {
     let mut dst = OpaqueStorage {
         cells: vec![0.0, 0.0],
     };
-    plan.execute_direct_on_storage(&mut NaiveOpaqueGemm, &mut dst, &lhs, &rhs)
+    plan.execute_direct_on_storage_prezeroed(&mut NaiveOpaqueGemm, &mut dst, &lhs, &rhs)
         .unwrap();
 
     // Two 1x1 sector matrices: dst = lhs * rhs per sector.
@@ -737,8 +632,13 @@ fn storage_direct_replay_matches_host_execute_raw() {
 
     let mut direct = vec![0.0; len];
     let mut gemm = HostStorageGemm::new(&mut backend, &mut workspace);
-    plan.execute_direct_on_storage(&mut gemm, &mut direct, &lhs_data.clone(), &rhs_data.clone())
-        .unwrap();
+    plan.execute_direct_on_storage_prezeroed(
+        &mut gemm,
+        &mut direct,
+        &lhs_data.clone(),
+        &rhs_data.clone(),
+    )
+    .unwrap();
 
     assert_eq!(direct, expected);
 }
@@ -1070,14 +970,14 @@ fn storage_direct_replay_on_cuda_matches_host() {
     let mut workspace = TensorContractWorkspace::default();
     let mut expected = vec![0.0; len];
     let mut gemm = HostStorageGemm::new(&mut backend, &mut workspace);
-    plan.execute_direct_on_storage(&mut gemm, &mut expected, &lhs_data, &rhs_data)
+    plan.execute_direct_on_storage_prezeroed(&mut gemm, &mut expected, &lhs_data, &rhs_data)
         .unwrap();
 
     let mut ctx = CudaDenseContext::new(0).unwrap();
     let lhs_dev = CudaStorage::upload(&ctx, &lhs_data).unwrap();
     let rhs_dev = CudaStorage::upload(&ctx, &rhs_data).unwrap();
     let mut dst_dev = CudaStorage::upload(&ctx, &vec![0.0; len]).unwrap();
-    plan.execute_direct_on_storage(
+    plan.execute_direct_on_storage_prezeroed(
         &mut CudaStorageGemm::new(&mut ctx),
         &mut dst_dev,
         &lhs_dev,
@@ -1097,74 +997,4 @@ fn core_fusion_block_workspace_is_explicit_host_workspace() {
     assert_eq!(workspace.placement(), Placement::Host);
     assert!(workspace.is_host_placement());
     assert_eq!(alias.placement(), Placement::Host);
-}
-
-#[test]
-fn core_fusion_block_storage_workspace_allocates_pack_scratch_from_operands_and_output_from_destination(
-) {
-    let rule = Z2FusionRule;
-    let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
-    let fusion_space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes(
-            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-            FusionTreeHomSpace::new(
-                FusionProductSpace::new([leg()]),
-                FusionProductSpace::new([leg()]),
-            ),
-            &rule,
-            [vec![1, 1], vec![1, 1]],
-        )
-        .unwrap()
-    };
-    let allocations = Rc::new(RefCell::new(Vec::new()));
-    let lhs =
-        TensorMap::<f64, 1, 1, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
-            TrackingStorage::new(vec![2.0, 3.0], "lhs", allocations.clone()),
-            fusion_space(),
-        )
-        .unwrap();
-    let rhs =
-        TensorMap::<f64, 1, 1, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
-            TrackingStorage::new(vec![5.0, 7.0], "rhs", allocations.clone()),
-            fusion_space(),
-        )
-        .unwrap();
-    let mut dst =
-        TensorMap::<f64, 1, 1, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
-            TrackingStorage::new(vec![10.0, 20.0], "destination", allocations.clone()),
-            fusion_space(),
-        )
-        .unwrap();
-    let plan = compile_fusion_block_contract_plan(
-        &rule,
-        &DynamicFusionMapSpace::from_typed(dst.fusion_space().unwrap()),
-        &DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap()),
-        &DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap()),
-        TensorContractSpec::with_default_output_order(&[1], &[0]),
-    )
-    .unwrap();
-    let mut backend = DenseTreeTransformOperations::default();
-    let mut workspace = TensorContractWorkspace::default();
-    let mut fusion_workspace = StorageFusionBlockContractWorkspace::<
-        TrackingScratch<f64>,
-        TrackingScratch<f64>,
-        TrackingScratch<f64>,
-    >::default();
-
-    plan.execute_storage_workspace(
-        &mut crate::StridedHostKernelAdapter::default(),
-        &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut workspace),
-        &mut fusion_workspace,
-        &mut dst,
-        &lhs,
-        &rhs,
-        2.0,
-        3.0,
-    )
-    .unwrap();
-
-    assert_eq!(dst.data(), &[50.0, 102.0]);
-    // Pack/scatter scratch is gone from the core route: replay is
-    // direct GEMM on storage, so no workspace allocations occur.
-    assert_eq!(allocations.borrow().as_slice(), &[]);
 }

@@ -10,7 +10,7 @@ use rayon::join as pool_join;
 use num_traits::{One, Zero};
 use tenet_core::{
     BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
-    ScratchStorage, SimilarStorage, TensorMap,
+    TensorMap,
 };
 #[cfg(test)]
 use tenet_dense::DefaultDenseExecutor;
@@ -20,7 +20,7 @@ use crate::host_scratch::HostScratchBuffer;
 use crate::kernel_adapter::for_each_fused_span;
 use crate::owned_overwrite_buffer::initialize_owned;
 use crate::scalar::scale_value;
-use crate::storage_scratch::{StorageTreeTransformWorkspace, TreeTransformScratchBuffers};
+use crate::storage_scratch::TreeTransformScratchBuffers;
 use crate::strided::offset_to_isize;
 use crate::task_view::TreeTransformTaskView;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};

@@ -5,31 +5,15 @@ use tenet_core::{BlockStructure, Placement};
 
 use crate::{task_view::TreeTransformTaskView, OperationError};
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ContextIdentity(pub(crate) u64);
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct StorageDomain(pub(crate) u64);
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AllocationIdentity(pub(crate) u64);
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StorageRegion {
     Empty,
@@ -49,10 +33,6 @@ pub(crate) enum StorageRegion {
 /// snapshot is live. Region, placement, and context must remain stable through
 /// the executor's final completion fence. Adapters unable to prove this
 /// provenance are unsupported and must fail before submission.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct StorageSnapshot {
     pub(crate) active_len: usize,
@@ -62,10 +42,6 @@ pub(crate) struct StorageSnapshot {
     pub(crate) region: StorageRegion,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ExecutorSnapshot {
     pub(crate) placement: Placement,
@@ -86,28 +62,17 @@ pub(crate) struct ExecutorSnapshot {
 
 /// Stage-A-issued checked arithmetic result. Private fields prevent later
 /// operation adapters from weakening Stage C with a forged scratch length.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 pub(crate) struct AdmissionRequirements {
     fused_index_len: usize,
 }
 
 impl AdmissionRequirements {
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "production opaque adapter is deferred")
-    )]
+    #[cfg(test)]
     pub(crate) fn fused_index_len(&self) -> usize {
         self.fused_index_len
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 #[derive(Clone, Debug)]
 pub(crate) struct CoefficientReadiness {
     pub(crate) structure_and_layout: Weak<()>,
@@ -115,10 +80,6 @@ pub(crate) struct CoefficientReadiness {
     pub(crate) context: ContextIdentity,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 #[derive(Clone, Debug)]
 pub(crate) struct WorkspaceSnapshot {
     pub(crate) packed_source: StorageSnapshot,
@@ -129,10 +90,6 @@ pub(crate) struct WorkspaceSnapshot {
     pub(crate) coefficient_readiness: Option<CoefficientReadiness>,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TreeTransformAdmissionError {
     Structure(&'static str),
@@ -183,10 +140,6 @@ impl From<TreeTransformAdmissionError> for OperationError {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 pub(crate) fn validate_stage_a<D: 'static, C: Copy>(
     task: TreeTransformTaskView<'_, C>,
     dst_structure: &Arc<BlockStructure>,
@@ -235,10 +188,6 @@ pub(crate) fn validate_stage_a<D: 'static, C: Copy>(
     Ok(AdmissionRequirements { fused_index_len })
 }
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 pub(crate) fn validate_stage_c<D: 'static, C: Copy>(
     task: TreeTransformTaskView<'_, C>,
     dst: StorageSnapshot,
@@ -320,10 +269,6 @@ pub(crate) fn validate_stage_c<D: 'static, C: Copy>(
     Ok(())
 }
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 fn validate_region<D>(
     name: &'static str,
     storage: StorageSnapshot,
@@ -350,10 +295,6 @@ fn validate_region<D>(
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 fn overlaps(
     left: StorageRegion,
     right: StorageRegion,
@@ -384,10 +325,6 @@ fn overlaps(
     Ok(ld == rd && la == ra && ls < re && rs < le)
 }
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "production opaque adapter is deferred")
-)]
 fn map_task_error(error: OperationError) -> TreeTransformAdmissionError {
     match error {
         OperationError::StructureMismatch { tensor } => {

@@ -1,4 +1,4 @@
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use tenet_core::BlockStructure;
 
@@ -47,11 +47,8 @@ impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
     /// layouts cannot change after compilation, this also identifies the exact
     /// layout ordering used by converted coefficients.
     #[inline]
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "first production opaque adapter is a later leaf")
-    )]
-    pub(crate) fn admission_identity(self) -> Weak<()> {
+    #[cfg(any(feature = "cuda", test))]
+    pub(crate) fn admission_identity(self) -> std::sync::Weak<()> {
         Arc::downgrade(self.structure.identity_marker())
     }
     #[inline]

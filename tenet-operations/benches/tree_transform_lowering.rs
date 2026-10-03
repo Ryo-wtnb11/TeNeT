@@ -104,11 +104,10 @@ impl Fixture {
             (plan.source_len() + plan.destination_len() + plan.coefficient_len())
                 * size_of::<f64>();
         println!(
-            "fixture={} tasks={} jobs={} runs={} structure_charged_bytes={} workspace_payload_lower_bound_bytes={}",
+            "fixture={} tasks={} jobs={} structure_charged_bytes={} workspace_payload_lower_bound_bytes={}",
             self.name,
             self.a.block_count(),
             plan.jobs().len(),
-            plan.runs().len(),
             self.a.charged_payload_bytes(),
             workspace_payload_lower_bound_bytes,
         );
