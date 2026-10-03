@@ -937,3 +937,44 @@ fn checked_generic_full_svd_failure_is_typed_and_nonpublishing() {
     ));
     assert_eq!(source.dense_data().unwrap(), before.as_slice());
 }
+
+/// A dual compact diagonal's SVD bond is the fresh nondual `fuse(V)`, built
+/// by the provider, so a provider that changes its fusion style still fails
+/// `svd_compact` with the typed plan error and runs no dense SVD.
+#[test]
+fn checked_dual_compact_diagonal_svd_compact_propagates_provider_errors() {
+    let svd_calls = Arc::new(SpyCounts::default());
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(pinv_spy(&svd_calls, None, None)))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let diagonal: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![2.0, 1.0],
+        }],
+    )
+    .unwrap();
+    provider.invalid_style.store(true, Ordering::Relaxed);
+    let error = diagonal.svd_compact(&[0], &[1]).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Operation(
+                tenet::typed::OperationError::Core(
+                    tenet::typed::CoreError::UnsupportedFusionStyle { .. }
+                )
+            ))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(svd_calls.total(), 0);
+}

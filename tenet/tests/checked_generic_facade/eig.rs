@@ -1458,3 +1458,33 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
         expected_lazy
     ));
 }
+
+/// A nondual compact diagonal's Hermitian eigenbasis bond is its own bond
+/// (TensorKit `fuse(V) = V`), so `eigh_full` makes no provider query and a
+/// failing or style-changing provider cannot fail it.
+#[test]
+fn checked_nondual_compact_diagonal_eigh_full_makes_no_provider_query() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for fault in ["fail_algebra", "invalid_style"] {
+        let provider = Arc::new(CheckedOnlyToy::new_product_probe(1));
+        let bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+        let diagonal: TensorMap<_, f64> = TensorMap::diagonal(
+            &runtime,
+            &bond,
+            [SectorSpectrum {
+                sector: Label::X,
+                values: vec![2.0, -1.0],
+            }],
+        )
+        .unwrap();
+        match fault {
+            "fail_algebra" => provider.fail_algebra.store(true, Ordering::Relaxed),
+            _ => provider.invalid_style.store(true, Ordering::Relaxed),
+        }
+        reset_provider_queries(&provider);
+        let Eigh { d, v } = diagonal.eigh_full(&[0], &[1]).unwrap();
+        assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 0);
+        assert_eq!(d.codomain(), diagonal.codomain());
+        assert_eq!(v.codomain(), diagonal.codomain());
+    }
+}

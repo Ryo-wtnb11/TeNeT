@@ -479,10 +479,12 @@ fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
             tenet::typed::Error::InvalidArgument(_)
         ))
     ));
-    assert!(matches!(
-        input.pinv(&[0], &[1], 0.25),
-        Err(GenericTensorError::Structure(_))
-    ));
+    // The compact output keeps the input space, so a style-changing provider
+    // is never asked and cannot fail it (#1751).
+    reset_provider_queries(&provider);
+    let again = input.pinv(&[0], &[1], 0.25).unwrap();
+    assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 0);
+    assert_eq!(again.diagview().unwrap(), result.diagview().unwrap());
     provider.invalid_style.store(false, Ordering::Relaxed);
     assert_eq!(svd_calls.of(PINV_SVD), 0);
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
@@ -946,5 +948,41 @@ fn sun_checked_generic_pinv_cross_mu_full_keys_for_both_dtypes() {
             Complex64::new(1.0, 0.5),
             |actual, expected| (actual - expected).norm(),
         );
+    }
+}
+
+/// A compact diagonal's pseudo-inverse keeps the input space, dual included
+/// (TensorKit `pinv(::DiagonalTensorMap)` returns `DiagonalTensorMap(_,
+/// d.domain)`), so no provider query is made and a failing or style-changing
+/// provider cannot fail it.
+#[test]
+fn checked_compact_diagonal_pinv_keeps_the_input_space_without_provider_queries() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for dual in [false, true] {
+        for fault in ["fail_algebra", "invalid_style"] {
+            let provider = Arc::new(CheckedOnlyToy::new_product_probe(1));
+            let mut bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+            if dual {
+                bond = bond.try_dual().unwrap();
+            }
+            let diagonal: TensorMap<_, f64> = TensorMap::diagonal(
+                &runtime,
+                &bond,
+                [SectorSpectrum {
+                    sector: Label::X,
+                    values: vec![2.0, 0.0],
+                }],
+            )
+            .unwrap();
+            match fault {
+                "fail_algebra" => provider.fail_algebra.store(true, Ordering::Relaxed),
+                _ => provider.invalid_style.store(true, Ordering::Relaxed),
+            }
+            reset_provider_queries(&provider);
+            let pseudo = diagonal.pinv(&[0], &[1], 1e-12).unwrap();
+            assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 0);
+            assert_eq!(pseudo.codomain(), diagonal.codomain());
+            assert_eq!(pseudo.domain(), diagonal.domain());
+        }
     }
 }

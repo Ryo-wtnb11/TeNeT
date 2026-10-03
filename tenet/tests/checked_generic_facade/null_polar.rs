@@ -1011,3 +1011,42 @@ fn sun_checked_generic_polar_cross_mu_qh_oracles_for_both_dtypes() {
         );
     }
 }
+
+/// A compact diagonal's polar factors live on the input space for either
+/// orientation (TensorKit: `W = space(t)`, `P = domain <- domain`): no
+/// provider query is made, so a failing or style-changing provider cannot
+/// fail them.
+#[test]
+fn checked_compact_diagonal_polar_publishes_on_the_input_space_without_provider_queries() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for dual in [false, true] {
+        for fault in ["fail_algebra", "invalid_style"] {
+            let provider = Arc::new(CheckedOnlyToy::new_product_probe(1));
+            let mut bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+            if dual {
+                bond = bond.try_dual().unwrap();
+            }
+            let diagonal: TensorMap<_, f64> = TensorMap::diagonal(
+                &runtime,
+                &bond,
+                [SectorSpectrum {
+                    sector: Label::X,
+                    values: vec![2.0, -1.0],
+                }],
+            )
+            .unwrap();
+            match fault {
+                "fail_algebra" => provider.fail_algebra.store(true, Ordering::Relaxed),
+                _ => provider.invalid_style.store(true, Ordering::Relaxed),
+            }
+            reset_provider_queries(&provider);
+            let LeftPolar { w, p } = diagonal.left_polar(&[0], &[1]).unwrap();
+            let RightPolar { p: right_p, wh } = diagonal.right_polar(&[0], &[1]).unwrap();
+            assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 0);
+            for factor in [&w, &p, &right_p, &wh] {
+                assert_eq!(factor.codomain(), diagonal.codomain());
+                assert_eq!(factor.domain(), diagonal.domain());
+            }
+        }
+    }
+}
