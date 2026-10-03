@@ -445,25 +445,16 @@ where
             actual: domain_levels.len(),
         });
     }
-    let permutation = linearize_tree_pair_permutation(
+    let GenericBraidSchedule {
+        permutation,
+        identity,
+        steps,
+    } = generic_braid_schedule(
         codomain_permutation,
         domain_permutation,
-        codomain_rank,
-        domain_rank,
+        codomain_levels,
+        domain_levels,
     )?;
-    validate_permutation_inline(&permutation, codomain_rank + domain_rank)?;
-    let identity = tree_pair_axis_map_is_identity(
-        codomain_permutation,
-        domain_permutation,
-        codomain_rank,
-        domain_rank,
-    );
-
-    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
-    levels.extend_from_slice(codomain_levels);
-    levels.extend(domain_levels.iter().rev().copied());
-    let steps =
-        PreparedTreeBraid::new(&permutation, &levels, codomain_rank + domain_rank)?.artin_steps;
     generic_braid_tree_pair_validated(
         tree_pair,
         codomain_permutation.len(),
@@ -564,24 +555,16 @@ where
     }
     validate_generic_fusion_tree_pair_checked(rule, tree_pair)
         .map_err(map_checked_generic_structure_error)?;
-    let permutation = linearize_tree_pair_permutation(
+    let GenericBraidSchedule {
+        permutation,
+        identity,
+        steps,
+    } = generic_braid_schedule(
         codomain_permutation,
         domain_permutation,
-        codomain_rank,
-        domain_rank,
+        codomain_levels,
+        domain_levels,
     )?;
-    validate_permutation_inline(&permutation, codomain_rank + domain_rank)?;
-    let identity = tree_pair_axis_map_is_identity(
-        codomain_permutation,
-        domain_permutation,
-        codomain_rank,
-        domain_rank,
-    );
-    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
-    levels.extend_from_slice(codomain_levels);
-    levels.extend(domain_levels.iter().rev().copied());
-    let steps =
-        PreparedTreeBraid::new(&permutation, &levels, codomain_rank + domain_rank)?.artin_steps;
     generic_braid_tree_pair_result(
         rule,
         tree_pair,
@@ -682,26 +665,18 @@ where
     }
     let codomain_rank = tree_pair.key.codomain_tree().uncoupled().len();
     let domain_rank = tree_pair.key.domain_tree().uncoupled().len();
-    let permutation = linearize_tree_pair_permutation(
-        codomain_permutation,
-        domain_permutation,
-        codomain_rank,
-        domain_rank,
-    )?;
-    validate_permutation_inline(&permutation, codomain_rank + domain_rank)?;
-    let identity = tree_pair_axis_map_is_identity(
-        codomain_permutation,
-        domain_permutation,
-        codomain_rank,
-        domain_rank,
-    );
     let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
     let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
-    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
-    levels.extend_from_slice(&codomain_levels);
-    levels.extend(domain_levels.iter().rev().copied());
-    let steps =
-        PreparedTreeBraid::new(&permutation, &levels, codomain_rank + domain_rank)?.artin_steps;
+    let GenericBraidSchedule {
+        permutation,
+        identity,
+        steps,
+    } = generic_braid_schedule(
+        codomain_permutation,
+        domain_permutation,
+        &codomain_levels,
+        &domain_levels,
+    )?;
     generic_braid_tree_pair_validated(
         tree_pair,
         codomain_permutation.len(),
@@ -889,4 +864,45 @@ where
             })
         },
     )
+}
+
+/// The linearized permutation, identity flag and prepared Artin schedule of a
+/// Generic tree-pair braid, the `fsbraid` preamble
+/// (`braiding_manipulations.jl:302-306`). The permutation is validated once,
+/// by the prepared schedule.
+pub(super) struct GenericBraidSchedule {
+    pub(super) permutation: Vec<usize>,
+    pub(super) identity: bool,
+    pub(super) steps: SmallVec<[PreparedArtinStep; 28]>,
+}
+
+pub(super) fn generic_braid_schedule(
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_levels: &[usize],
+    domain_levels: &[usize],
+) -> Result<GenericBraidSchedule, CoreError> {
+    let (codomain_rank, domain_rank) = (codomain_levels.len(), domain_levels.len());
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    let identity = tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    );
+    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
+    levels.extend_from_slice(codomain_levels);
+    levels.extend(domain_levels.iter().rev().copied());
+    let steps =
+        PreparedTreeBraid::new(&permutation, &levels, codomain_rank + domain_rank)?.artin_steps;
+    Ok(GenericBraidSchedule {
+        permutation,
+        identity,
+        steps,
+    })
 }

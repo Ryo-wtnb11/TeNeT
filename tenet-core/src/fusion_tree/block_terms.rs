@@ -650,24 +650,16 @@ where
             });
         }
     }
-    let permutation = linearize_tree_pair_permutation(
+    let GenericBraidSchedule {
+        permutation,
+        identity,
+        steps,
+    } = generic_braid_schedule(
         codomain_permutation,
         domain_permutation,
-        codomain_rank,
-        domain_rank,
+        codomain_levels,
+        domain_levels,
     )?;
-    validate_permutation_inline(&permutation, codomain_rank + domain_rank)?;
-    let identity = tree_pair_axis_map_is_identity(
-        codomain_permutation,
-        domain_permutation,
-        codomain_rank,
-        domain_rank,
-    );
-    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
-    levels.extend_from_slice(codomain_levels);
-    levels.extend(domain_levels.iter().rev().copied());
-    let steps =
-        PreparedTreeBraid::new(&permutation, &levels, codomain_rank + domain_rank)?.artin_steps;
 
     let (mut basis, mut columns) = seed_generic_tree_pair_block(rule, src_keys)?;
     if identity {

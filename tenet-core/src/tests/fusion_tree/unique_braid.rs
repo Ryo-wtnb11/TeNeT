@@ -320,55 +320,104 @@ fn unique_artin_braid_at_uses_f_and_r_symbols_for_later_crossing() {
     );
 }
 
-// Independent transcription of TensorKit `permutation2swaps`
-// (`braiding_manipulations.jl`), the oracle for the prepared Artin schedule.
-fn permutation_to_adjacent_swaps(
-    permutation: &[usize],
-    rank: usize,
-) -> Result<Vec<usize>, CoreError> {
-    validate_permutation_inline(permutation, rank)?;
-
-    let mut work = permutation.to_vec();
+// Literal transcription of TensorKit `permutation2swaps`
+// (`src/auxiliary/auxiliary.jl:13`), kept 1-based as written there; the
+// independent oracle for the prepared Artin schedule. Returns 0-based swaps.
+fn tensorkit_permutation2swaps(permutation: &[usize]) -> Vec<usize> {
+    let mut p = permutation.iter().map(|&axis| axis + 1).collect::<Vec<_>>();
+    let n = p.len();
     let mut swaps = Vec::new();
-    for target in 0..rank.saturating_sub(1) {
-        let source = work[target];
-        for swap in (target..source).rev() {
-            swaps.push(swap);
+    for k in 1..n {
+        // append!(swaps, (p[k] - 1):-1:k)
+        let mut s = p[k - 1] - 1;
+        while s >= k {
+            swaps.push(s);
+            s -= 1;
         }
-        for item in work.iter_mut().take(rank).skip(target + 1) {
-            if *item < source {
-                *item += 1;
+        for l in (k + 1)..=n {
+            if p[l - 1] < p[k - 1] {
+                p[l - 1] += 1;
             }
         }
-        work[target] = target;
+        p[k - 1] = k;
     }
-    Ok(swaps)
+    swaps.into_iter().map(|s| s - 1).collect()
+}
+
+// TensorKit `braid` level rule (`braiding_manipulations.jl:238-243`): each
+// swap is inverse when the left level is higher, then the levels swap.
+fn tensorkit_artin_steps(permutation: &[usize], levels: &[usize]) -> Vec<(usize, bool)> {
+    let mut levels = levels.to_vec();
+    tensorkit_permutation2swaps(permutation)
+        .into_iter()
+        .map(|s| {
+            let inverse = levels[s] > levels[s + 1];
+            levels.swap(s, s + 1);
+            (s, inverse)
+        })
+        .collect()
+}
+
+fn all_permutations(n: usize) -> Vec<Vec<usize>> {
+    if n == 0 {
+        return vec![Vec::new()];
+    }
+    let mut out = Vec::new();
+    for p in all_permutations(n - 1) {
+        for i in 0..=p.len() {
+            let mut q = p.clone();
+            q.insert(i, n - 1);
+            out.push(q);
+        }
+    }
+    out
+}
+
+fn all_level_tuples(n: usize) -> Vec<Vec<usize>> {
+    let mut out = vec![Vec::new()];
+    for _ in 0..n {
+        out = out
+            .into_iter()
+            .flat_map(|prefix| {
+                (0..n.max(1)).map(move |level| {
+                    let mut next = prefix.clone();
+                    next.push(level);
+                    next
+                })
+            })
+            .collect();
+    }
+    out
 }
 
 #[test]
-fn permutation_to_adjacent_swaps_matches_tensorkit_order() {
-    assert_eq!(
-        permutation_to_adjacent_swaps(&[2, 0, 1], 3).unwrap(),
-        vec![1, 0]
-    );
-    assert_eq!(
-        permutation_to_adjacent_swaps(&[3, 0, 2, 1], 4).unwrap(),
-        vec![2, 1, 0, 2]
-    );
-    // What: the one prepared schedule every braid executes lowers to the same
-    // adjacent swaps.
-    for (permutation, rank) in [(vec![2usize, 0, 1], 3usize), (vec![3, 0, 2, 1], 4)] {
-        let levels = (0..rank).collect::<Vec<_>>();
-        let steps = PreparedTreeBraid::new(&permutation, &levels, rank)
-            .unwrap()
-            .artin_steps
-            .iter()
-            .map(|step| step.index)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            steps,
-            permutation_to_adjacent_swaps(&permutation, rank).unwrap()
-        );
+fn tensorkit_permutation2swaps_transcription_matches_known_orders() {
+    assert_eq!(tensorkit_permutation2swaps(&[2, 0, 1]), vec![1, 0]);
+    assert_eq!(tensorkit_permutation2swaps(&[3, 0, 2, 1]), vec![2, 1, 0, 2]);
+}
+
+#[test]
+fn prepared_artin_schedule_matches_tensorkit_for_every_permutation_and_level_tuple() {
+    // What: the one prepared schedule every braid executes equals TensorKit's
+    // swap order and inverse flags, exhaustively for rank <= 5 including
+    // level ties.
+    for rank in 0..=5 {
+        let level_tuples = all_level_tuples(rank);
+        for permutation in all_permutations(rank) {
+            for levels in &level_tuples {
+                let prepared = PreparedTreeBraid::new(&permutation, levels, rank)
+                    .unwrap()
+                    .artin_steps
+                    .iter()
+                    .map(|step| (step.index, step.inverse))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    prepared,
+                    tensorkit_artin_steps(&permutation, levels),
+                    "{permutation:?} {levels:?}"
+                );
+            }
+        }
     }
 }
 
@@ -471,7 +520,7 @@ fn symmetric_unique_direct_braid_matches_artin_replay_exactly() {
         let mut replay_tree = UnhashedFusionTree::from(tree.clone());
         let mut replay_coefficient = 1.0;
         let mut replay_levels = levels;
-        for swap in permutation_to_adjacent_swaps(&permutation, 4).unwrap() {
+        for swap in tensorkit_permutation2swaps(&permutation) {
             let inverse = replay_levels[swap] > replay_levels[swap + 1];
             let coefficient = apply_unique_artin_braid_at_with_inverse(
                 &FermionParityFusionRule,
