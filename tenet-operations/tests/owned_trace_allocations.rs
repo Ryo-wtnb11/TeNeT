@@ -1,4 +1,3 @@
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use tenet_core::{
@@ -7,37 +6,11 @@ use tenet_core::{
 };
 use tenet_operations::{try_tensortrace_owned_raw, OwnedTraceTerm};
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 fn fusion_key() -> BlockKey {
     BlockKey::from(
@@ -151,13 +124,11 @@ fn warm_owned_trace_allocates_only_the_output_payload() {
     let structure = canonical_structure();
     let source = vec![2.0; 64];
     drop(execute(&structure, &structure, &source).unwrap());
-
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let output = execute(&structure, &structure, &source).unwrap();
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
 
-    assert_eq!(ALLOCATIONS.get(), 1);
+    assert_eq!(allocs.calls, 1);
     assert_eq!(output, source);
 }
 
@@ -169,14 +140,12 @@ fn padded_destination_declines_without_allocating_output() {
     let destination_structure = padded_structure();
     let source = vec![2.0; 64];
     assert!(execute(&destination_structure, &source_structure, &source).is_none());
-
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let output = execute(&destination_structure, &source_structure, &source);
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
 
     assert!(output.is_none());
-    assert_eq!(ALLOCATIONS.get(), 0);
+    assert_eq!(allocs.calls, 0);
 }
 
 #[test]
@@ -190,9 +159,7 @@ fn incomplete_coupled_grid_declines_before_output_allocation() {
         .is_none());
     let source = vec![1.0; source_structure.required_len().unwrap()];
     let producer_offsets = vec![0; destination_structure.block_count() + 1];
-
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let output = try_tensortrace_owned_raw::<f64, f64, _>(
         &destination_structure,
         2,
@@ -206,10 +173,10 @@ fn incomplete_coupled_grid_declines_before_output_allocation() {
         1.0,
     )
     .unwrap();
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
 
     assert!(output.is_none());
-    assert_eq!(ALLOCATIONS.get(), 0);
+    assert_eq!(allocs.calls, 0);
 }
 
 #[test]
@@ -302,9 +269,7 @@ fn preflight_error_and_mid_write_panic_never_return_partial_output() {
     let short_source = vec![1.0; 1023];
     let producer_indices = [0usize];
     let producer_offsets = [0, 1];
-
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let error = try_tensortrace_owned_raw(
         &structure,
         1,
@@ -318,12 +283,12 @@ fn preflight_error_and_mid_write_panic_never_return_partial_output() {
         1.0,
     )
     .unwrap_err();
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
     assert!(matches!(
         error,
         tenet_operations::OperationError::ElementCountMismatch { .. }
     ));
-    assert_eq!(ALLOCATIONS.get(), 0);
+    assert_eq!(allocs.calls, 0);
 
     let source = vec![1.0; 1024];
     let calls = Cell::new(0usize);

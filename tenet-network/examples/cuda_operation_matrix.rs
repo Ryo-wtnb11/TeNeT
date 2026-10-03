@@ -13,45 +13,11 @@
 //!
 //! Run through `benchmarks/cuda_operation_matrix.sh`.
 
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    cell::Cell,
-};
-
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATION_CALLS: Cell<usize> = const { Cell::new(0) };
-    static REQUESTED_BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATION_CALLS.set(ALLOCATION_CALLS.get() + 1);
-            REQUESTED_BYTES.set(REQUESTED_BYTES.get() + layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATION_CALLS.set(ALLOCATION_CALLS.get() + 1);
-            REQUESTED_BYTES.set(REQUESTED_BYTES.get() + new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 #[cfg(not(feature = "cuda"))]
 fn main() {
@@ -69,7 +35,7 @@ fn main() {
 
 #[cfg(feature = "cuda")]
 mod device {
-    use super::{ALLOCATION_CALLS, COUNTING, REQUESTED_BYTES};
+    use super::counting_alloc;
     use std::{hint::black_box, sync::Arc, time::Instant};
 
     use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
@@ -303,13 +269,11 @@ mod device {
     /// in separate columns.
     fn measure<T>(mut operation: impl FnMut() -> T, mut barrier: impl FnMut()) -> (T, Sample) {
         let before = cuda_transfer_stats();
-        ALLOCATION_CALLS.set(0);
-        REQUESTED_BYTES.set(0);
-        COUNTING.set(true);
+        counting_alloc::start();
         let start = Instant::now();
         let output = operation();
         let nanos = start.elapsed().as_nanos() as u64;
-        COUNTING.set(false);
+        let allocs = counting_alloc::stop();
         black_box(&output);
         let after = cuda_transfer_stats();
         barrier();
@@ -318,8 +282,8 @@ mod device {
             output,
             Sample {
                 nanos,
-                alloc_calls: ALLOCATION_CALLS.get() as u64,
-                alloc_bytes: REQUESTED_BYTES.get() as u64,
+                alloc_calls: allocs.calls,
+                alloc_bytes: allocs.bytes,
                 device: stats_delta(after, before),
                 barrier_d2h_calls: after_barrier.d2h_calls - after.d2h_calls,
                 barrier_d2h_bytes: after_barrier.d2h_bytes - after.d2h_bytes,

@@ -3,44 +3,16 @@
 //! rank up to `RAW_FUSED_RANK_LIMIT`, and above it TeNeT's own loop keeps
 //! them allocation-free.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
 
 use num_complex::Complex64;
 use tenet_operations::tensoradd_raw_strided_kernel;
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 #[test]
 fn raw_combine_actions_allocate_nothing_at_any_rank() {
@@ -81,11 +53,10 @@ fn raw_combine_actions_allocate_nothing_at_any_rank() {
                     .unwrap()
                 };
                 run();
-                ALLOCATIONS.set(0);
-                COUNTING.set(true);
+                counting_alloc::start();
                 run();
-                COUNTING.set(false);
-                assert_eq!(ALLOCATIONS.get(), 0, "rank {rank} alpha {a} beta {b}");
+                let allocs = counting_alloc::stop();
+                assert_eq!(allocs.calls, 0, "rank {rank} alpha {a} beta {b}");
             }
         }
     }
@@ -145,11 +116,10 @@ fn parallel_copy_matches_oracle_without_caller_allocations() {
             let mut allocations = Vec::new();
             while allocations.last() != Some(&0) && allocations.len() <= 2 * THREADS {
                 dst.fill(Complex64::new(0.0, 0.0));
-                ALLOCATIONS.set(0);
-                COUNTING.set(true);
+                counting_alloc::start();
                 run(&mut dst);
-                COUNTING.set(false);
-                allocations.push(ALLOCATIONS.get());
+                let allocs = counting_alloc::stop();
+                allocations.push(allocs.calls as usize);
             }
             (dst, allocations)
         });

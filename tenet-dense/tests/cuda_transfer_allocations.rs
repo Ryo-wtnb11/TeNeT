@@ -9,8 +9,6 @@
 
 #![cfg(feature = "cuda")]
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::Mutex;
 
 use num_complex::Complex64;
@@ -32,43 +30,11 @@ const OWNED_UPLOAD_PAYLOAD_ALLOCATIONS_F64: usize = 2;
 const OWNED_UPLOAD_PAYLOAD_ALLOCATIONS_C64: usize = 3;
 const DOWNLOAD_PAYLOAD_ALLOCATIONS: usize = 1;
 
-struct PayloadProbe;
-
-thread_local! {
-    static TARGET_BYTES: Cell<usize> = const { Cell::new(0) };
-    static HITS: Cell<usize> = const { Cell::new(0) };
-}
-
-fn record(size: usize) {
-    if TARGET_BYTES.get() == size {
-        HITS.set(HITS.get() + 1);
-    }
-}
-
-unsafe impl GlobalAlloc for PayloadProbe {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() {
-            record(layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() {
-            record(new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: PayloadProbe = PayloadProbe;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 static DEVICE: Mutex<()> = Mutex::new(());
 
@@ -76,11 +42,8 @@ static DEVICE: Mutex<()> = Mutex::new(());
 /// `payload_bytes`. A zero target would match nothing, so it is rejected.
 fn measure<T>(payload_bytes: usize, f: impl FnOnce() -> T) -> (T, usize) {
     assert_ne!(payload_bytes, 0, "the probe needs a nonzero payload size");
-    HITS.set(0);
-    TARGET_BYTES.set(payload_bytes);
-    let output = f();
-    TARGET_BYTES.set(0);
-    (output, HITS.get())
+    let (output, allocs) = counting_alloc::measure_matching(payload_bytes..=payload_bytes, f);
+    (output, allocs.matched_calls as usize)
 }
 
 /// Element count large enough to leave Tenferro's pinned small-payload

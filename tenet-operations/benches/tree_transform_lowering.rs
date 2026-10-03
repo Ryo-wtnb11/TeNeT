@@ -2,8 +2,6 @@
 //! Tenferro 0.3 exposes no cache statistics here, so fresh versus reused
 //! `DenseTreeTransformOperations` is the recorded GEMM-analysis proxy.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::mem::size_of;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,40 +14,11 @@ use tenet_operations::{
     TreeTransformReplayProfile, TreeTransformStructure, TreeTransformWorkspace,
 };
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 struct Fixture {
     name: &'static str,
@@ -154,12 +123,10 @@ fn profiled_replay(
 }
 
 fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
-    ALLOCATIONS.set(0);
-    ALLOCATED_BYTES.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let value = operation();
-    COUNTING.set(false);
-    (value, ALLOCATIONS.get(), ALLOCATED_BYTES.get())
+    let allocs = counting_alloc::stop();
+    (value, allocs.calls as usize, allocs.bytes as usize)
 }
 
 fn print_sample(label: &str, profile: TreeTransformReplayProfile, calls: usize, bytes: usize) {

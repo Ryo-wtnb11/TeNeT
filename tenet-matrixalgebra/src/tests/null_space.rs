@@ -650,62 +650,14 @@ fn null_space_second_sector_failure_builds_no_factor() {
     assert_eq!(tensor.data(), before);
 }
 
-/// Caller-thread allocation bytes, so a pack can be compared against its
-/// forced-pack control in the same process.
+// Caller-thread allocation bytes, so a pack can be compared against its
+// forced-pack control in the same process.
 #[allow(unsafe_code)]
-mod allocation_bytes {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
+#[path = "../../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
-    struct CountingAllocator;
-
-    thread_local! {
-        static COUNTING: Cell<bool> = const { Cell::new(false) };
-        static BYTES: Cell<usize> = const { Cell::new(0) };
-    }
-
-    fn record(size: usize) {
-        let _ = COUNTING.try_with(|counting| {
-            if counting.get() {
-                let _ = BYTES.try_with(|bytes| bytes.set(bytes.get() + size));
-            }
-        });
-    }
-
-    // SAFETY: every method forwards to `System` unchanged; `record` only
-    // touches const-initialized thread-locals and never allocates.
-    unsafe impl GlobalAlloc for CountingAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            record(layout.size());
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            record(layout.size());
-            unsafe { System.alloc_zeroed(layout) }
-        }
-
-        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(pointer, layout) }
-        }
-
-        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            record(new_size);
-            unsafe { System.realloc(pointer, layout, new_size) }
-        }
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: CountingAllocator = CountingAllocator;
-
-    pub(super) fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize) {
-        BYTES.set(0);
-        COUNTING.set(true);
-        let value = operation();
-        COUNTING.set(false);
-        (value, BYTES.get())
-    }
-}
+#[global_allocator]
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 /// Byte contract (#1525): per op, the forced-pack control allocates at least
 /// the op's input payload more than the borrowed call, measured in-process
@@ -725,7 +677,8 @@ type OutputBits = Vec<Vec<(u64, u64)>>;
 type FamilyRun = (OutputBits, Vec<usize>);
 
 fn measured_into<T>(bytes: &mut Vec<usize>, operation: impl FnOnce() -> T) -> T {
-    let (value, allocated) = allocation_bytes::measured(operation);
+    let (value, allocs) = counting_alloc::measure(operation);
+    let allocated = allocs.bytes as usize;
     bytes.push(allocated);
     value
 }

@@ -10,8 +10,6 @@
 //! counter, so the warm transform-lookup count and the retained workspace
 //! bytes stand in for it.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tenet::sector::{U1FusionRule, U1Irrep};
@@ -22,36 +20,11 @@ use tenet_network::{plan_cache_stats, tensor};
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
 
-struct CountingAllocator;
-
-static WATCHED_BYTES: AtomicUsize = AtomicUsize::new(0);
-static WATCHED_ALLOCS: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if layout.size() == WATCHED_BYTES.load(Ordering::Relaxed) {
-            WATCHED_ALLOCS.fetch_add(1, Ordering::Relaxed);
-        }
-        // SAFETY: forwards the caller's layout unchanged.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        // SAFETY: `pointer` came from `System` with this layout.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if new_size == WATCHED_BYTES.load(Ordering::Relaxed) {
-            WATCHED_ALLOCS.fetch_add(1, Ordering::Relaxed);
-        }
-        // SAFETY: forwards the caller's pointer and layout unchanged.
-        unsafe { System.realloc(pointer, layout, new_size) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 type Map = TensorMap<U1FusionRule, f64>;
 
@@ -81,7 +54,6 @@ fn split_moving_intermediate_retains_one_buffer_and_one_transform() {
     let b = Map::rand_with_seed(&runtime, [&c], [&y, &z, &u], 2).unwrap();
     let t = Map::rand_with_seed(&runtime, [&y, &z], [&w], 3).unwrap();
     let intermediate_bytes = 11 * 17 * 19 * 23 * size_of::<f64>();
-    WATCHED_BYTES.store(intermediate_bytes, Ordering::SeqCst);
 
     let run = || tensor!([x, u; w] = a[x; c] * b[c; y, z, u] * t[y, z; w]).unwrap();
     let oracle = a
@@ -116,9 +88,9 @@ fn split_moving_intermediate_retains_one_buffer_and_one_transform() {
     }
 
     let lookups_before = transform_lookups(&runtime);
-    let allocs_before = WATCHED_ALLOCS.load(Ordering::SeqCst);
-    drop(run());
-    let warm_allocs = WATCHED_ALLOCS.load(Ordering::SeqCst) - allocs_before;
+    let ((), allocs) =
+        counting_alloc::measure_matching(intermediate_bytes..=intermediate_bytes, || drop(run()));
+    let warm_allocs = allocs.matched_calls;
     let warm_lookups = transform_lookups(&runtime) - lookups_before;
     let retained = plan_cache_stats(&runtime).retained_workspace_bytes;
 
