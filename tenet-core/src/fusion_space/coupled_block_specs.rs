@@ -1,5 +1,26 @@
 use super::*;
 
+/// Strides of one degeneracy block inside a column-major coupled matrix with
+/// `matrix_rows` rows: codomain axes from 1, domain axes from `matrix_rows`.
+fn push_coupled_matrix_strides(
+    strides: &mut impl Extend<usize>,
+    shape: &[usize],
+    nout: usize,
+    matrix_rows: usize,
+) -> Result<(), CoreError> {
+    let mut push = |stride| {
+        strides.extend(Some(stride));
+        Ok(())
+    };
+    try_for_each_column_major_stride(1, &shape[..nout], &mut push, || {
+        CoreError::ElementCountOverflow
+    })?;
+    try_for_each_column_major_stride(matrix_rows, &shape[nout..], push, || {
+        CoreError::ElementCountOverflow
+    })?;
+    Ok(())
+}
+
 fn degeneracy_shape_for_tree_side(
     space: &FusionProductSpace,
     tree: &FusionTreeKey,
@@ -137,20 +158,7 @@ where
                 shape.extend_from_slice(&col_shapes[col]);
 
                 let mut strides = DimVec::new();
-                let mut stride = 1usize;
-                for &dim in &shape[..nout] {
-                    strides.push(stride);
-                    stride = stride
-                        .checked_mul(dim)
-                        .ok_or(CoreError::ElementCountOverflow)?;
-                }
-                let mut stride = matrix_rows;
-                for &dim in &shape[nout..] {
-                    strides.push(stride);
-                    stride = stride
-                        .checked_mul(dim)
-                        .ok_or(CoreError::ElementCountOverflow)?;
-                }
+                push_coupled_matrix_strides(&mut strides, &shape, nout, matrix_rows)?;
                 let offset = sector_offset
                     .checked_add(row_offsets[row])
                     .and_then(|offset| {
@@ -337,20 +345,7 @@ where
                 .expect("column block registered above")]
             .1;
             let mut strides = Vec::with_capacity(rank);
-            let mut stride = 1usize;
-            for &dim in &shape[..nout] {
-                strides.push(stride);
-                stride = stride
-                    .checked_mul(dim)
-                    .ok_or(CoreError::ElementCountOverflow)?;
-            }
-            let mut stride = matrix_rows;
-            for &dim in &shape[nout..] {
-                strides.push(stride);
-                stride = stride
-                    .checked_mul(dim)
-                    .ok_or(CoreError::ElementCountOverflow)?;
-            }
+            push_coupled_matrix_strides(&mut strides, shape, nout, matrix_rows)?;
             let offset = matrix_rows
                 .checked_mul(col_start)
                 .and_then(|column| sector_offset.checked_add(row_start)?.checked_add(column))
@@ -486,20 +481,7 @@ where
                     .ok_or(CoreError::ElementCountOverflow)?;
                 let shape = shapes[index].as_ref();
                 let mut strides = Vec::with_capacity(rank);
-                let mut stride = 1usize;
-                for &dim in &shape[..nout] {
-                    strides.push(stride);
-                    stride = stride
-                        .checked_mul(dim)
-                        .ok_or(CoreError::ElementCountOverflow)?;
-                }
-                let mut stride = matrix_rows;
-                for &dim in &shape[nout..] {
-                    strides.push(stride);
-                    stride = stride
-                        .checked_mul(dim)
-                        .ok_or(CoreError::ElementCountOverflow)?;
-                }
+                push_coupled_matrix_strides(&mut strides, shape, nout, matrix_rows)?;
                 let offset = sector_offset
                     .checked_add(row_offset)
                     .and_then(|offset| {

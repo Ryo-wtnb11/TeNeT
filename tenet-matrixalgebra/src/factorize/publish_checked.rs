@@ -113,9 +113,7 @@ pub(super) fn validate_generic_factor_keys<'a, 'k, M: SectorGeometry>(
 }
 
 pub(super) fn checked_extent(shape: &[usize]) -> Option<usize> {
-    shape
-        .iter()
-        .try_fold(1usize, |extent, &dim| extent.checked_mul(dim))
+    tenet_core::checked_product(shape).ok()
 }
 
 /// `keys` carries the separately enumerated key list of the unchecked paired

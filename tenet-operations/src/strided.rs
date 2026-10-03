@@ -34,36 +34,37 @@ pub fn offset_to_isize(offset: usize) -> Result<isize, OperationError> {
 }
 
 pub fn element_count(shape: &[usize]) -> Result<usize, OperationError> {
-    shape.iter().try_fold(1usize, |acc, &dim| {
-        acc.checked_mul(dim)
-            .ok_or_else(|| OperationError::ElementCountOverflow)
-    })
+    tenet_core::checked_product(shape).map_err(|_| OperationError::ElementCountOverflow)
 }
 
 pub fn column_major_strides_isize(shape: &[usize]) -> Result<Vec<isize>, OperationError> {
-    let mut stride = 1usize;
     let mut strides = Vec::with_capacity(shape.len());
-    for &dim in shape {
-        strides.push(
-            isize::try_from(stride)
-                .map_err(|_| OperationError::StrideOverflow { value: stride })?,
-        );
-        stride = stride
-            .checked_mul(dim)
-            .ok_or_else(|| OperationError::ElementCountOverflow)?;
-    }
+    tenet_core::try_for_each_column_major_stride(
+        1,
+        shape,
+        |stride| {
+            strides.push(
+                isize::try_from(stride)
+                    .map_err(|_| OperationError::StrideOverflow { value: stride })?,
+            );
+            Ok(())
+        },
+        || OperationError::ElementCountOverflow,
+    )?;
     Ok(strides)
 }
 
 pub fn column_major_strides_usize(shape: &[usize]) -> Result<Vec<usize>, OperationError> {
-    let mut stride = 1usize;
     let mut strides = Vec::with_capacity(shape.len());
-    for &dim in shape {
-        strides.push(stride);
-        stride = stride
-            .checked_mul(dim)
-            .ok_or_else(|| OperationError::ElementCountOverflow)?;
-    }
+    tenet_core::try_for_each_column_major_stride(
+        1,
+        shape,
+        |stride| {
+            strides.push(stride);
+            Ok(())
+        },
+        || OperationError::ElementCountOverflow,
+    )?;
     Ok(strides)
 }
 

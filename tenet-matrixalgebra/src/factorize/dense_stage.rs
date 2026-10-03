@@ -103,13 +103,8 @@ pub(super) fn compact_factor_output_owned<D: FactorScalar>(
             ),
         }));
     }
-    let expected_len = shape
-        .iter()
-        .try_fold(1usize, |acc, &dim| match acc.checked_mul(dim) {
-            Some(count) => Ok(count),
-            None => Err(DenseError::ElementCountOverflow),
-        })
-        .map_err(OperationError::Dense)?;
+    let expected_len = tenet_core::checked_product(shape)
+        .map_err(|_| OperationError::Dense(DenseError::ElementCountOverflow))?;
     if source.len() != expected_len {
         return Err(OperationError::Dense(DenseError::Backend {
             backend: DenseBackend::Tenferro,
@@ -140,13 +135,8 @@ pub(super) fn compact_real_spectrum_owned<D: FactorScalar>(
             ),
         }));
     }
-    let expected_len = shape
-        .iter()
-        .try_fold(1usize, |acc, &dim| match acc.checked_mul(dim) {
-            Some(count) => Ok(count),
-            None => Err(DenseError::ElementCountOverflow),
-        })
-        .map_err(OperationError::Dense)?;
+    let expected_len = tenet_core::checked_product(shape)
+        .map_err(|_| OperationError::Dense(DenseError::ElementCountOverflow))?;
     if spectrum.len() != expected_len {
         return Err(OperationError::Dense(DenseError::Backend {
             backend: DenseBackend::Tenferro,

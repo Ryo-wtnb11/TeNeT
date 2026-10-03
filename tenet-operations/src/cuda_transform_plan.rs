@@ -121,18 +121,6 @@ fn offset_to_usize(offset: isize) -> Result<usize, OperationError> {
     usize::try_from(offset).map_err(|_| unsupported("device replay requires a non-negative offset"))
 }
 
-fn packed_strides(dims: &[usize]) -> Result<Vec<usize>, OperationError> {
-    let mut strides = Vec::with_capacity(dims.len());
-    let mut running = 1usize;
-    for &dim in dims {
-        strides.push(running);
-        running = running
-            .checked_mul(dim)
-            .ok_or(OperationError::ElementCountOverflow)?;
-    }
-    Ok(strides)
-}
-
 /// Lowers every Single block of `task` to a device region move and every Multi
 /// block to the host's pack → `Uᵀ` → scatter sequence, skipping the
 /// zero-extent ones, plus every inactive destination layout to a region the
@@ -261,10 +249,7 @@ pub(crate) fn compile_device_plan<C: Copy>(
         if dims.contains(&0) {
             continue;
         }
-        let count = dims
-            .iter()
-            .try_fold(1usize, |count, dim| count.checked_mul(*dim))
-            .ok_or(OperationError::ElementCountOverflow)?;
+        let count = crate::strided::element_count(&dims)?;
         max_zero_len = max_zero_len.max(count);
         zeros.push(DeviceRegionSpec {
             dims,
@@ -402,7 +387,7 @@ fn distinct_plan_signatures(
         seen.insert((
             zero.dims.as_slice(),
             zero.strides.as_slice(),
-            packed_strides(&zero.dims)?,
+            crate::strided::column_major_strides_usize(&zero.dims)?,
             false,
         ));
     }
@@ -414,7 +399,7 @@ fn distinct_plan_signatures(
         seen.insert((
             entry.dims.as_slice(),
             entry.dst_strides.as_slice(),
-            packed_strides(&entry.dims)?,
+            crate::strided::column_major_strides_usize(&entry.dims)?,
             false,
         ));
     }

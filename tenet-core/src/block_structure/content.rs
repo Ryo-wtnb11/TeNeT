@@ -62,7 +62,7 @@ impl CoupledTreeExtent {
 
     /// Checked product of the degeneracy shape.
     pub fn extent(&self) -> Result<usize, CoreError> {
-        checked_element_count(&self.shape)
+        checked_product(&self.shape)
     }
 }
 
