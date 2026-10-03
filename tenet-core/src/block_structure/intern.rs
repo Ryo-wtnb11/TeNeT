@@ -387,8 +387,8 @@ pub(super) fn canonicalize_block_structure_arc(
 /// cleanly. Reset is thus safe to call on its own — no "all layers at once" API
 /// is needed.
 ///
-/// Reset contract: no identity created before or during a reset is published
-/// after it. A build that straddles a reset still returns a correct result,
+/// Reset contract: no identity created before the reset cleared the owning
+/// table is published after it. A build that straddles a reset still returns a correct result,
 /// but the result is not cached. The two intern tables uphold this by
 /// construction, because each mints its identity inside the write-locked
 /// insert, so whatever lands in a cleared table is new. The complete-HomSpace
@@ -401,6 +401,13 @@ pub(super) fn canonicalize_block_structure_arc(
 /// can only be found again by a holder of that same content. A layout is pure
 /// data under a semantic key and carries no identity.
 pub fn reset_core_intern_tables() {
+    // Resets are serialized, so odd parity means exactly "a reset is in
+    // progress". Why not let them overlap: a second reset would turn the
+    // epoch even mid-way through the first, and a build starting then could
+    // intern the first reset's not-yet-cleared content and publish it.
+    let _serial = CORE_RESET_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Odd for the whole reset: a build that starts before or during it holds
     // a stale epoch and cannot publish afterwards.
     CORE_RESET_EPOCH.fetch_add(1, Ordering::SeqCst);
@@ -426,6 +433,9 @@ pub fn reset_core_intern_tables() {
 
 /// Reset epoch of the core identity tables; odd while a reset runs.
 static CORE_RESET_EPOCH: AtomicUsize = AtomicUsize::new(0);
+
+/// Held across a whole reset, both epoch bumps included.
+pub(crate) static CORE_RESET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The epoch a build records before it looks anything up.
 pub(crate) fn core_reset_epoch() -> usize {

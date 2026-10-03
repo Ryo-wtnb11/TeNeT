@@ -455,8 +455,6 @@ impl CompleteHomSpaceStructureCache {
             })
     }
 
-    /// Repoints a retained entry at the canonical wrapper after its previous
-    /// wrapper died; a no-op when the key was evicted meanwhile.
     /// Repoints the entry that still holds `peeked` at `structure`. An entry
     /// that a reset removed, or that a later admission replaced, is left
     /// alone, so a lookup that straddles a reset cannot republish its
@@ -598,8 +596,10 @@ impl CompleteHomSpaceStructureCacheInfo {
         self.hits
     }
     /// Completed builds that reached admission, including bypassed entries
-    /// and racing duplicates. Failed builds are not counted, and a hit peek
-    /// counts no miss, so `hits + misses` is not the lookup count.
+    /// and racing duplicates, excluding builds that straddled a reset
+    /// (counted as neither miss nor bypass). Failed builds are not counted,
+    /// and a hit peek counts no miss, so `hits + misses` is not the lookup
+    /// count.
     pub fn misses(self) -> usize {
         self.misses
     }

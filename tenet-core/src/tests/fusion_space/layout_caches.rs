@@ -816,3 +816,54 @@ fn complete_cache_lookup_straddling_a_reset_keeps_the_newer_entry() {
         .unwrap();
     assert!(Arc::ptr_eq(&after, &newer));
 }
+
+#[test]
+fn overlapping_resets_wait_so_the_epoch_stays_odd_until_the_first_finishes() {
+    let _guard = test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_core_intern_tables();
+    let homspace = reset_test_homspace();
+    // Kept alive so the intern table still resolves its content mid-reset.
+    let source = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+        .unwrap();
+    let source_id = source.content_id();
+    let start = core_reset_epoch();
+    let second_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let second = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let (slot, done, hom) = (
+        std::rc::Rc::clone(&second),
+        Arc::clone(&second_done),
+        homspace.clone(),
+    );
+    crate::block_structure::MID_RESET_HOOK.with(|hook| {
+        hook.set(Some(Box::new(move || {
+            // Reset B starts on another thread while reset A is mid-way.
+            let finished = Arc::clone(&done);
+            *slot.borrow_mut() = Some(std::thread::spawn(move || {
+                reset_core_intern_tables();
+                finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            }));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // What: B cannot run inside A, so the epoch stays odd and a build
+            // here (which interns A's not-yet-cleared content) is not
+            // published.
+            assert!(!done.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(core_reset_epoch(), start + 1);
+            let inside = hom
+                .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+                .unwrap();
+            assert_eq!(inside.content_id(), source_id);
+        })));
+    });
+    reset_core_intern_tables();
+    second.borrow_mut().take().unwrap().join().unwrap();
+
+    assert!(second_done.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(core_reset_epoch(), start + 4);
+    let after = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+        .unwrap();
+    assert_ne!(after.content_id(), source_id);
+}
