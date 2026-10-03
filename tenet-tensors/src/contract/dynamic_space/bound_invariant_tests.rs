@@ -46,24 +46,28 @@ fn typed_z2_matrix_space() -> FusionTensorMapSpace<1, 1> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CheckedGenericSpyError(usize);
+struct FailAtCallError(usize);
 
-impl fmt::Display for CheckedGenericSpyError {
+impl fmt::Display for FailAtCallError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "checked Generic query {} failed", self.0)
     }
 }
 
-impl std::error::Error for CheckedGenericSpyError {}
+impl std::error::Error for FailAtCallError {}
 
-struct CheckedGenericSpy {
+/// A Generic rule (both plain and checked) that counts every query and can
+/// fail the `fail_at`-th checked one. Not `contract::checked_generic`'s
+/// `CheckedGenericSpy`, which records per-query events and injects malformed
+/// symbol shapes; the two exercise different contracts.
+struct FailAtCallRule {
     identity: RuleIdentity,
     style: Cell<FusionStyleKind>,
     calls: Cell<usize>,
     fail_at: Option<usize>,
 }
 
-impl CheckedGenericSpy {
+impl FailAtCallRule {
     fn new() -> Self {
         Self {
             identity: RuleIdentity::of_type::<Self>(),
@@ -73,18 +77,18 @@ impl CheckedGenericSpy {
         }
     }
 
-    fn hit(&self) -> Result<(), CheckedGenericSpyError> {
+    fn hit(&self) -> Result<(), FailAtCallError> {
         let call = self.calls.get() + 1;
         self.calls.set(call);
         if self.fail_at == Some(call) {
-            Err(CheckedGenericSpyError(call))
+            Err(FailAtCallError(call))
         } else {
             Ok(())
         }
     }
 }
 
-impl FusionRule for CheckedGenericSpy {
+impl FusionRule for FailAtCallRule {
     fn rule_identity(&self) -> RuleIdentity {
         self.identity.clone()
     }
@@ -117,8 +121,8 @@ impl FusionRule for CheckedGenericSpy {
     }
 }
 
-impl CheckedGenericFusion for CheckedGenericSpy {
-    type Error = CheckedGenericSpyError;
+impl CheckedGenericFusion for FailAtCallRule {
+    type Error = FailAtCallError;
 
     fn rule_identity(&self) -> RuleIdentity {
         self.identity.clone()
@@ -216,7 +220,7 @@ fn checked_generic_equal_identity_checker_commits_under_source_arc() {
 fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
     let homspace = || FusionTreeHomSpace::from_sector_ids([(0, 1), (0, 1)], [(0, 1)]);
 
-    let wrong_root_style = Arc::new(CheckedGenericSpy::new());
+    let wrong_root_style = Arc::new(FailAtCallRule::new());
     wrong_root_style.style.set(FusionStyleKind::Unique);
     let error = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         Arc::clone(&wrong_root_style),
@@ -232,7 +236,7 @@ fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
     ));
     assert_eq!(wrong_root_style.calls.get(), 0);
 
-    let mut failing_root = CheckedGenericSpy::new();
+    let mut failing_root = FailAtCallRule::new();
     failing_root.fail_at = Some(1);
     let failing_root = Arc::new(failing_root);
     let error = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
@@ -242,17 +246,17 @@ fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
     .unwrap_err();
     assert!(matches!(
         error,
-        CheckedGenericStructureError::Provider(CheckedGenericSpyError(1))
+        CheckedGenericStructureError::Provider(FailAtCallError(1))
     ));
 
-    let source_provider = Arc::new(CheckedGenericSpy::new());
+    let source_provider = Arc::new(FailAtCallRule::new());
     let source = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         Arc::clone(&source_provider),
         homspace(),
     )
     .unwrap();
 
-    let mut wrong_identity = CheckedGenericSpy::new();
+    let mut wrong_identity = FailAtCallRule::new();
     wrong_identity.identity = RuleIdentity::of_type::<Z2FusionRule>();
     let error = source
         .prepare_final_homspace_generic_with_checked(&wrong_identity, homspace())
@@ -264,7 +268,7 @@ fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
     ));
     assert_eq!(wrong_identity.calls.get(), 0);
 
-    let wrong_checker_style = CheckedGenericSpy::new();
+    let wrong_checker_style = FailAtCallRule::new();
     wrong_checker_style.style.set(FusionStyleKind::Unique);
     let error = source
         .prepare_final_homspace_generic_with_checked(&wrong_checker_style, homspace())
@@ -279,7 +283,7 @@ fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
     ));
     assert_eq!(wrong_checker_style.calls.get(), 0);
 
-    let mut failing_checker = CheckedGenericSpy::new();
+    let mut failing_checker = FailAtCallRule::new();
     failing_checker.fail_at = Some(1);
     let error = source
         .prepare_final_homspace_generic_with_checked(&failing_checker, homspace())
@@ -287,15 +291,15 @@ fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
         .unwrap();
     assert!(matches!(
         error,
-        CheckedGenericStructureError::Provider(CheckedGenericSpyError(1))
+        CheckedGenericStructureError::Provider(FailAtCallError(1))
     ));
 
-    let checker = CheckedGenericSpy::new();
+    let checker = FailAtCallRule::new();
     let prepared = source
         .prepare_final_homspace_generic_with_checked(&checker, homspace())
         .unwrap();
     let legacy = BoundDynamicFusionMapSpace::from_final_homspace_generic(
-        Arc::new(CheckedGenericSpy::new()),
+        Arc::new(FailAtCallRule::new()),
         homspace(),
     )
     .unwrap();
@@ -347,8 +351,8 @@ fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
 #[test]
 #[allow(clippy::arc_with_non_send_sync)] // The bound API requires Arc; the single-threaded spy uses Cell counters.
 fn checked_generic_preparation_rejects_legacy_binding_before_checker_queries() {
-    let source_provider = Arc::new(CheckedGenericSpy::new());
-    let checker = CheckedGenericSpy::new();
+    let source_provider = Arc::new(FailAtCallRule::new());
+    let checker = FailAtCallRule::new();
     let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
     let source =
         BoundDynamicFusionMapSpace::from_final_homspace_generic(source_provider, homspace.clone())
@@ -429,7 +433,7 @@ fn checked_generic_prepared_structure_constructor_matches_root_constructor() {
         .prepare_final_homspace_generic_with_checked(provider.as_ref(), homspace)
         .unwrap();
 
-    let spy = Arc::new(CheckedGenericSpy::new());
+    let spy = Arc::new(FailAtCallRule::new());
     let vacuum_hom = FusionTreeHomSpace::from_sector_ids([(0, 2)], [(0, 3)]);
     let prepared = vacuum_hom
         .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(spy.as_ref())
@@ -469,7 +473,7 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
     }
 
     reset_core_intern_tables();
-    let provider = Arc::new(CheckedGenericSpy::new());
+    let provider = Arc::new(FailAtCallRule::new());
     let source_hom = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
     let source =
         BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::clone(&provider), source_hom)
@@ -494,7 +498,7 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
             FusionStyleKind::Unique,
         ),
     ] {
-        let mut spy = CheckedGenericSpy::new();
+        let mut spy = FailAtCallRule::new();
         spy.identity = identity;
         spy.style.set(style);
         let before = snapshots();
@@ -514,7 +518,7 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
     }
 
     let before_prepare = snapshots();
-    let spy = CheckedGenericSpy::new();
+    let spy = FailAtCallRule::new();
     let prepared = source
         .prepare_final_homspace_generic_checked(&spy, final_hom())
         .unwrap();
@@ -544,14 +548,14 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
         before_commit.2.entries() + 1
     );
 
-    let complete = CheckedGenericSpy::new();
+    let complete = FailAtCallRule::new();
     let complete_calls = {
         let _staged = source
             .prepare_final_homspace_generic_checked(&complete, final_hom())
             .unwrap();
         complete.calls.get()
     };
-    let mut failing = CheckedGenericSpy::new();
+    let mut failing = FailAtCallRule::new();
     failing.fail_at = Some(complete_calls);
     let before_failure = snapshots();
     let error = source
@@ -560,14 +564,14 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
         .unwrap();
     assert!(matches!(
         error,
-        CheckedGenericStructureError::Provider(CheckedGenericSpyError(call))
+        CheckedGenericStructureError::Provider(FailAtCallError(call))
             if call == complete_calls
     ));
     assert_eq!(failing.calls.get(), complete_calls);
     assert_eq!(provider.calls.get(), 0);
     assert_eq!(snapshots(), before_failure);
 
-    let spy = CheckedGenericSpy::new();
+    let spy = FailAtCallRule::new();
     let prepared = source
         .prepare_final_homspace_generic_checked(&spy, final_hom())
         .unwrap();
@@ -587,7 +591,7 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
     assert_eq!(snapshots(), before_style_rejected_commit);
     provider.style.set(FusionStyleKind::Generic);
 
-    let spy = CheckedGenericSpy::new();
+    let spy = FailAtCallRule::new();
     let mut corrupted = source
         .prepare_final_homspace_generic_checked(&spy, final_hom())
         .unwrap();
