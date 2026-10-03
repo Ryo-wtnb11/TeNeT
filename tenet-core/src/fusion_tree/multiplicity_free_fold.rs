@@ -13,6 +13,12 @@ pub(super) struct PreparedMultiplicityFreeFoldRight<S> {
 /// `coeff = √d_c·(1/√d_b) · conj(coeff₂) · A(a, b, c) · coeff₁`, times `κ_a`
 /// when the folded leg is dual. The `(b, c)` factors are separable so a block
 /// fold can cache them as TensorKit's `cache₃` does.
+///
+/// The operand order above is TeNeT's preserved evaluation order, which keeps
+/// multiplicity-free coefficients bit-identical across the keyed,
+/// unique-rigid and compact paths. TensorKit writes the same product as
+/// `sqrtdim(c)·invsqrtdim(b)·coeff₁·A·conj(coeff₂)` (pair) and
+/// `coeff₀·(coeff₂'·(Aᵀ·coeff₁))` (block).
 pub(super) struct MultiplicityFreeFoldCoefficient<S> {
     pub(super) first: SectorId,
     first_is_dual: bool,

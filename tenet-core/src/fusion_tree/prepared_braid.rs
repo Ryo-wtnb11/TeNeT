@@ -1112,7 +1112,8 @@ impl<'operation> PreparedTreePairOperation<'operation> {
     }
 
     /// Braid as TensorKit `braid((f₁, f₂), p, levels)` does
-    /// (`braiding_manipulations.jl:281`): repartition every leg into the
+    /// (`braiding_manipulations.jl:281`, via `fsbraid`: pair branch
+    /// `:302-309`, block branch `:317-331`): repartition every leg into the
     /// codomain, braid that tree, and repartition to the target split.
     fn multiplicity_free_braid_via_codomain<R, F>(
         &self,
