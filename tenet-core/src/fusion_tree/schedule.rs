@@ -374,7 +374,15 @@ where
 pub(super) trait BlockDriver {
     type State;
     type Error;
+    /// What one block braid needs besides the state: the prepared Artin
+    /// schedule (and, for Generic trees, the permutation).
+    type BraidSchedule<'s>;
     fn bend(&mut self, state: Self::State, bend: Bend) -> Result<Self::State, Self::Error>;
+    fn braid_codomain(
+        &mut self,
+        state: Self::State,
+        schedule: Self::BraidSchedule<'_>,
+    ) -> Result<Self::State, Self::Error>;
     fn cycle(
         &mut self,
         state: Self::State,
@@ -383,19 +391,20 @@ pub(super) trait BlockDriver {
 }
 
 /// Block `fsbraid` (`braiding_manipulations.jl:317-331`): repartition into
-/// the codomain, apply `braid_codomain`, repartition to the target split.
+/// the codomain, braid it with the driver's schedule, repartition to the
+/// target split.
 pub(super) fn block_braid<D: BlockDriver>(
     driver: &mut D,
     state: D::State,
     codomain_rank: usize,
     all_rank: usize,
     target_codomain_rank: usize,
-    braid_codomain: impl FnOnce(&mut D, D::State) -> Result<D::State, D::Error>,
+    schedule: D::BraidSchedule<'_>,
 ) -> Result<D::State, D::Error> {
     let state = repartition_loop(state, codomain_rank, all_rank, |state, bend| {
         driver.bend(state, bend)
     })?;
-    let state = braid_codomain(driver, state)?;
+    let state = driver.braid_codomain(state, schedule)?;
     repartition_loop(state, all_rank, target_codomain_rank, |state, bend| {
         driver.bend(state, bend)
     })

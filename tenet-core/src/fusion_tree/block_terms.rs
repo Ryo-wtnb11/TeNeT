@@ -388,6 +388,7 @@ where
 {
     type State = (Vec<FusionTreePairKey>, DenseColumns<R::Scalar>);
     type Error = CoreError;
+    type BraidSchedule<'s> = (&'s [usize], &'s [PreparedArtinStep]);
 
     fn bend(
         &mut self,
@@ -398,6 +399,18 @@ where
         compose_block_terms(&basis, &columns, |key| match bend {
             Bend::Left => generic_bendleft_tree_pair(rule, key),
             Bend::Right => generic_bendright_tree_pair(rule, key),
+        })
+    }
+
+    fn braid_codomain(
+        &mut self,
+        (basis, columns): Self::State,
+        (permutation, steps): (&[usize], &[PreparedArtinStep]),
+    ) -> Result<Self::State, CoreError> {
+        let rule = self.rule;
+        compose_block_terms(&basis, &columns, |key| {
+            generic_braid_tree_unchecked(rule, key.codomain_tree(), permutation, steps)
+                .map(|terms| with_domain(key, terms))
         })
     }
 
@@ -486,12 +499,7 @@ where
         codomain_rank,
         permutation.len(),
         codomain_permutation.len(),
-        |_, (basis, columns)| {
-            compose_block_terms(&basis, &columns, |key| {
-                generic_braid_tree_unchecked(rule, key.codomain_tree(), &permutation, &steps)
-                    .map(|terms| with_domain(key, terms))
-            })
-        },
+        (&permutation, &steps),
     )?;
     Ok(order_generic_tree_pair_block(basis, columns))
 }

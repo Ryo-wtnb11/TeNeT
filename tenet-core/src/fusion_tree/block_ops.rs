@@ -491,18 +491,7 @@ where
         codomain_rank,
         all_rank,
         prepared.target_codomain_rank,
-        |_, state| {
-            run_artin_steps(state, steps, |(basis, columns), step| {
-                let (basis, columns) = compact_codomain_artin_block(
-                    rule,
-                    basis,
-                    columns.as_ref(),
-                    step.index,
-                    step.inverse,
-                )?;
-                Ok((basis, Some(columns)))
-            })
-        },
+        steps,
     )?;
 
     // Why not materialize after each braid: both block runners keep the
@@ -1030,6 +1019,7 @@ where
         Option<DenseColumns<R::Scalar>>,
     );
     type Error = CoreError;
+    type BraidSchedule<'s> = PreparedTreePairArtinSteps<'s>;
 
     fn bend(
         &mut self,
@@ -1041,6 +1031,29 @@ where
             Bend::Right => compact_bendright_block(self.rule, basis, columns.as_ref())?,
         };
         Ok((basis, Some(columns)))
+    }
+
+    fn braid_codomain(
+        &mut self,
+        state: Self::State,
+        steps: PreparedTreePairArtinSteps<'_>,
+    ) -> Result<Self::State, CoreError> {
+        // Why a plain loop over a monomorphic move, not `run_artin_steps` with
+        // a step closure: the closure form measured ~1-3% slower on the cold
+        // braid plan build (#1852 B1/B2a bisection).
+        let (mut basis, mut columns) = state;
+        for step in steps {
+            let (next_basis, next_columns) = compact_codomain_artin_block(
+                self.rule,
+                basis,
+                columns.as_ref(),
+                step.index,
+                step.inverse,
+            )?;
+            basis = next_basis;
+            columns = Some(next_columns);
+        }
+        Ok((basis, columns))
     }
 
     fn cycle(
