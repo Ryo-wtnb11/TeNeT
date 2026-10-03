@@ -1878,6 +1878,16 @@ where
 
 #[test]
 fn complete_structure_hit_skips_extent_walk_until_evicted() {
+    // Isolated like prepared_complete_structure_hits_without_rebuilding_layout:
+    // this asserts process-global complete-structure cache counters, which
+    // CACHE_TEST_LOCK does not protect from the crate's many ordinary,
+    // unlocked complete-structure builds landing between two reads (#1903).
+    if test_support::run_isolated_or_return(
+        "TENET_CORE_COMPLETE_STRUCTURE_HIT_SKIPS_WALK_ISOLATED",
+        "tests::fusion_space::complete_structure_hit_skips_extent_walk_until_evicted",
+    ) {
+        return;
+    }
     // What: the miss walks the per-block extents exactly once (inside the
     // builder); a hit walks none; after FIFO eviction the next call is a
     // miss that walks exactly once again.
@@ -1931,6 +1941,16 @@ fn complete_structure_hit_skips_extent_walk_until_evicted() {
 
 #[test]
 fn complete_structure_split_and_fermionic_rule_force_misses() {
+    // Isolated like prepared_complete_structure_hits_without_rebuilding_layout:
+    // this asserts process-global complete-structure cache counters, which
+    // CACHE_TEST_LOCK does not protect from the crate's many ordinary,
+    // unlocked complete-structure builds landing between two reads (#1903).
+    if test_support::run_isolated_or_return(
+        "TENET_CORE_COMPLETE_STRUCTURE_SPLIT_FERMIONIC_ISOLATED",
+        "tests::fusion_space::complete_structure_split_and_fermionic_rule_force_misses",
+    ) {
+        return;
+    }
     // What: equal legs under another codomain/domain split, and equal
     // sectors under Z2 versus fermion parity, are misses that admit their
     // own entries rather than hits on a same-content neighbour.
@@ -1977,6 +1997,16 @@ fn complete_structure_split_and_fermionic_rule_force_misses() {
 
 #[test]
 fn complete_structure_overflow_is_rejected_beside_cached_neighbour() {
+    // Isolated like prepared_complete_structure_hits_without_rebuilding_layout:
+    // this asserts process-global complete-structure cache counters, which
+    // CACHE_TEST_LOCK does not protect from the crate's many ordinary,
+    // unlocked complete-structure builds landing between two reads (#1903).
+    if test_support::run_isolated_or_return(
+        "TENET_CORE_COMPLETE_STRUCTURE_OVERFLOW_ISOLATED",
+        "tests::fusion_space::complete_structure_overflow_is_rejected_beside_cached_neighbour",
+    ) {
+        return;
+    }
     // What: an extent overflow whose sectors and duals equal a cached
     // valid neighbour is still walked and rejected without touching the
     // statistics, and the neighbour keeps hitting without a walk.
@@ -2612,6 +2642,16 @@ fn complete_homspace_layout_cache_is_fifo_bounded_and_bypasses_one_over_limit() 
 
 #[test]
 fn complete_homspace_layout_cache_bounds_bind_by_bytes_and_bypass_outliers() {
+    // Isolated like prepared_complete_structure_hits_without_rebuilding_layout:
+    // this asserts process-global complete-structure cache counters, which
+    // CACHE_TEST_LOCK does not protect from the crate's many ordinary,
+    // unlocked complete-structure builds landing between two reads (#1903).
+    if test_support::run_isolated_or_return(
+        "TENET_CORE_COMPLETE_HOMSPACE_BOUNDS_ISOLATED",
+        "tests::fusion_space::complete_homspace_layout_cache_bounds_bind_by_bytes_and_bypass_outliers",
+    ) {
+        return;
+    }
     // What: at the production bounds the byte budget, not the entry cap,
     // evicts first for entries of the smallest measured median size
     // (4455 bytes, #1365 census); the budget holds two maximum-size
@@ -2695,6 +2735,16 @@ fn complete_homspace_layout_cache_bounds_bind_by_bytes_and_bypass_outliers() {
 
 #[test]
 fn complete_homspace_layout_cache_reuses_semantic_content_and_excludes_regions() {
+    // Isolated like prepared_complete_structure_hits_without_rebuilding_layout:
+    // this asserts process-global complete-structure cache counters, which
+    // CACHE_TEST_LOCK does not protect from the crate's many ordinary,
+    // unlocked complete-structure builds landing between two reads (#1903).
+    if test_support::run_isolated_or_return(
+        "TENET_CORE_COMPLETE_HOMSPACE_REUSE_ISOLATED",
+        "tests::fusion_space::complete_homspace_layout_cache_reuses_semantic_content_and_excludes_regions",
+    ) {
+        return;
+    }
     // What: independently constructed complete multiplicity-free U1,
     // SU2, and product HomSpaces share frozen content by value; cached
     // content never owns a wrapper-local coupled-region state.
