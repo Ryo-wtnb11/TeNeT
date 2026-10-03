@@ -751,7 +751,7 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     let rule = group.rule;
-    let mut current_codomain_rank = group.codomain_rank;
+    let current_codomain_rank = group.codomain_rank;
     if current_codomain_rank == target_codomain_rank {
         let source_len = group.source_len;
         let basis = CompactMultiplicityFreeTreePairBasis::from_group(group)?;
@@ -773,7 +773,7 @@ where
         current_codomain_rank,
         target_codomain_rank,
     )?;
-    let (mut frame, first_local) =
+    let (frame, first_local) =
         MultiplicityFreeTreePairFrame::split(group.projection.pair_at(0).ok_or(
             CoreError::MalformedFusionTree {
                 message: "compact repartition requires at least one source",
@@ -796,28 +796,38 @@ where
         rows.push((source_local, R::Scalar::one()));
     }
 
-    while current_codomain_rank > target_codomain_rank {
-        let prepared = prepare_multiplicity_free_bendright(rule, &frame)?;
-        for (local, coefficient) in &mut rows {
-            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-            let step_coefficient = prepared.coefficient(rule, &validated);
-            *local = validated.local;
-            *coefficient = coefficient.clone() * step_coefficient;
-        }
-        frame = prepared.output_frame(rule)?;
-        current_codomain_rank -= 1;
-    }
-    while current_codomain_rank < target_codomain_rank {
-        let prepared = prepare_multiplicity_free_bendleft(rule, &frame)?;
-        for (local, coefficient) in &mut rows {
-            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-            let (next_local, step_coefficient) = prepared.finish_local(rule, validated);
-            *local = next_local;
-            *coefficient = coefficient.clone() * step_coefficient;
-        }
-        frame = prepared.output_frame(rule)?;
-        current_codomain_rank += 1;
-    }
+    let (frame, rows) = repartition_loop(
+        (frame, rows),
+        current_codomain_rank,
+        target_codomain_rank,
+        |(frame, mut rows), bend| {
+            let frame = match bend {
+                Bend::Right => {
+                    let prepared = prepare_multiplicity_free_bendright(rule, &frame)?;
+                    for (local, coefficient) in &mut rows {
+                        let validated =
+                            prepared.validate_local(rule, &local.codomain, &local.domain)?;
+                        let step_coefficient = prepared.coefficient(rule, &validated);
+                        *local = validated.local;
+                        *coefficient = coefficient.clone() * step_coefficient;
+                    }
+                    prepared.output_frame(rule)?
+                }
+                Bend::Left => {
+                    let prepared = prepare_multiplicity_free_bendleft(rule, &frame)?;
+                    for (local, coefficient) in &mut rows {
+                        let validated =
+                            prepared.validate_local(rule, &local.codomain, &local.domain)?;
+                        let (next_local, step_coefficient) = prepared.finish_local(rule, validated);
+                        *local = next_local;
+                        *coefficient = coefficient.clone() * step_coefficient;
+                    }
+                    prepared.output_frame(rule)?
+                }
+            };
+            Ok::<_, CoreError>((frame, rows))
+        },
+    )?;
     let source_count = rows.len();
     let mut destination_locals = Vec::with_capacity(source_count);
     let mut columns = DenseColumns::with_capacity(source_count, source_count);

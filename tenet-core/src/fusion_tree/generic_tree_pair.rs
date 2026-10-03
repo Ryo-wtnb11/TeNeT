@@ -118,7 +118,7 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    generic_foldleft_tree_pair_with(tree_pair, |key| {
+    left_move_by_swap(tree_pair, |key| {
         generic_foldright_tree_pair_unchecked(rule, key)
     })
 }
@@ -168,7 +168,7 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    generic_cycle_clockwise_tree_pair_with(
+    cycle_clockwise(
         tree_pair,
         |key| generic_bendleft_tree_pair(rule, key),
         |key| generic_foldright_tree_pair_unchecked(rule, key),
@@ -220,7 +220,7 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    generic_cycle_anticlockwise_tree_pair_with(
+    cycle_anticlockwise(
         tree_pair,
         |key| generic_bendright_tree_pair(rule, key),
         |key| generic_foldleft_tree_pair_unchecked(rule, key),
@@ -330,35 +330,9 @@ fn generic_foldleft_tree_pair_result<C>(
 where
     C: CheckedGenericRigidSymbols,
 {
-    generic_foldleft_tree_pair_with(tree_pair, |key| {
+    left_move_by_swap(tree_pair, |key| {
         generic_foldright_tree_pair_result(rule, key)
     })
-}
-
-fn generic_foldleft_tree_pair_with<S, E, F>(
-    tree_pair: &FusionTreePairKey,
-    mut foldright: F,
-) -> Result<GenericTreePairTerms<S>, E>
-where
-    S: CategoricalScalar,
-    F: FnMut(&FusionTreePairKey) -> Result<GenericTreePairTerms<S>, E>,
-{
-    let swapped = FusionTreePairKey::pair(
-        tree_pair.domain_tree().clone(),
-        tree_pair.codomain_tree().clone(),
-    );
-    Ok(foldright(&swapped)?
-        .into_iter()
-        .map(|(folded, coefficient)| {
-            (
-                FusionTreePairKey::pair(
-                    folded.domain_tree().clone(),
-                    folded.codomain_tree().clone(),
-                ),
-                coefficient.conj(),
-            )
-        })
-        .collect())
 }
 
 fn generic_cycle_clockwise_tree_pair_result<C>(
@@ -368,30 +342,11 @@ fn generic_cycle_clockwise_tree_pair_result<C>(
 where
     C: CheckedGenericRigidSymbols,
 {
-    generic_cycle_clockwise_tree_pair_with(
+    cycle_clockwise(
         tree_pair,
         |key| generic_bendleft_tree_pair_result(rule, key),
         |key| generic_foldright_tree_pair_result(rule, key),
     )
-}
-
-fn generic_cycle_clockwise_tree_pair_with<S, E, B, F>(
-    tree_pair: &FusionTreePairKey,
-    mut bendleft: B,
-    mut foldright: F,
-) -> Result<GenericTreePairTerms<S>, E>
-where
-    S: CategoricalScalar,
-    B: FnMut(&FusionTreePairKey) -> Result<GenericTreePairTerms<S>, E>,
-    F: FnMut(&FusionTreePairKey) -> Result<GenericTreePairTerms<S>, E>,
-{
-    if tree_pair.codomain_tree().uncoupled().is_empty() {
-        let first = bendleft(tree_pair)?;
-        compose_generic_tree_pair_terms_result(first, foldright)
-    } else {
-        let first = foldright(tree_pair)?;
-        compose_generic_tree_pair_terms_result(first, bendleft)
-    }
 }
 
 fn generic_cycle_anticlockwise_tree_pair_result<C>(
@@ -401,30 +356,11 @@ fn generic_cycle_anticlockwise_tree_pair_result<C>(
 where
     C: CheckedGenericRigidSymbols,
 {
-    generic_cycle_anticlockwise_tree_pair_with(
+    cycle_anticlockwise(
         tree_pair,
         |key| generic_bendright_tree_pair_result(rule, key),
         |key| generic_foldleft_tree_pair_result(rule, key),
     )
-}
-
-fn generic_cycle_anticlockwise_tree_pair_with<S, E, B, F>(
-    tree_pair: &FusionTreePairKey,
-    mut bendright: B,
-    mut foldleft: F,
-) -> Result<GenericTreePairTerms<S>, E>
-where
-    S: CategoricalScalar,
-    B: FnMut(&FusionTreePairKey) -> Result<GenericTreePairTerms<S>, E>,
-    F: FnMut(&FusionTreePairKey) -> Result<GenericTreePairTerms<S>, E>,
-{
-    if tree_pair.domain_tree().uncoupled().is_empty() {
-        let first = bendright(tree_pair)?;
-        compose_generic_tree_pair_terms_result(first, foldleft)
-    } else {
-        let first = foldleft(tree_pair)?;
-        compose_generic_tree_pair_terms_result(first, bendright)
-    }
 }
 
 /// Generic-fusion `braid` on a full tree pair: bend everything into the codomain,
@@ -509,29 +445,21 @@ where
             actual: domain_levels.len(),
         });
     }
-    let permutation = linearize_tree_pair_permutation(
+    let GenericBraidSchedule {
+        permutation,
+        identity,
+        steps,
+    } = generic_braid_schedule(
         codomain_permutation,
         domain_permutation,
-        codomain_rank,
-        domain_rank,
+        codomain_levels,
+        domain_levels,
     )?;
-    let swaps = permutation_to_adjacent_swaps(&permutation, codomain_rank + domain_rank)?;
-    let identity = tree_pair_axis_map_is_identity(
-        codomain_permutation,
-        domain_permutation,
-        codomain_rank,
-        domain_rank,
-    );
-
-    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
-    levels.extend_from_slice(codomain_levels);
-    levels.extend(domain_levels.iter().rev().copied());
     generic_braid_tree_pair_validated(
         tree_pair,
         codomain_permutation.len(),
         &permutation,
-        &levels,
-        &swaps,
+        &steps,
         identity,
     )
 }
@@ -540,8 +468,7 @@ fn generic_braid_tree_pair_validated<R>(
     tree_pair: ValidatedFusionTreePair<'_, R>,
     target_codomain_rank: usize,
     permutation: &[usize],
-    levels: &[usize],
-    swaps: &[usize],
+    steps: &[PreparedArtinStep],
     identity: bool,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
@@ -554,8 +481,7 @@ where
         tree_pair.key,
         target_codomain_rank,
         permutation,
-        levels,
-        swaps,
+        steps,
         identity,
     )
     .map_err(map_infallible_generic_symbol_error)
@@ -566,8 +492,7 @@ fn generic_braid_tree_pair_result<C>(
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,
     permutation: &[usize],
-    levels: &[usize],
-    swaps: &[usize],
+    steps: &[PreparedArtinStep],
     identity: bool,
 ) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
@@ -576,24 +501,15 @@ where
     if identity {
         return Ok(vec![(tree_pair.clone(), C::Scalar::one())]);
     }
-    let all_rank = permutation.len();
-    let mut current = generic_repartition_tree_pair_result(rule, tree_pair, all_rank)?;
-    current = compose_generic_tree_pair_terms_result(current, |key| {
-        generic_braid_tree_result(rule, key.codomain_tree(), permutation, levels, swaps).map(
-            |terms| {
-                terms
-                    .into_iter()
-                    .map(|(codomain_tree, coefficient)| {
-                        (
-                            FusionTreePairKey::pair(codomain_tree, key.domain_tree().clone()),
-                            coefficient,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
+    let all_codomain = generic_repartition_tree_pair_result(rule, tree_pair, permutation.len())?;
+    let braided = braid_codomain_terms(all_codomain, |codomain| {
+        generic_braid_tree_result(rule, codomain, permutation, steps)
     })?;
-    compose_generic_tree_pair_terms_result(current, |key| {
+    // Why not the whole-list `repartition_loop` that the multiplicity-free and
+    // block schedules use: repartitioning each braided term on its own keeps
+    // the established Generic association bit-for-bit (the list form moves
+    // the last ulp of some coefficients).
+    compose_terms(braided, |key| {
         generic_repartition_tree_pair_result(rule, key, target_codomain_rank)
     })
 }
@@ -639,29 +555,22 @@ where
     }
     validate_generic_fusion_tree_pair_checked(rule, tree_pair)
         .map_err(map_checked_generic_structure_error)?;
-    let permutation = linearize_tree_pair_permutation(
+    let GenericBraidSchedule {
+        permutation,
+        identity,
+        steps,
+    } = generic_braid_schedule(
         codomain_permutation,
         domain_permutation,
-        codomain_rank,
-        domain_rank,
+        codomain_levels,
+        domain_levels,
     )?;
-    let swaps = permutation_to_adjacent_swaps(&permutation, codomain_rank + domain_rank)?;
-    let identity = tree_pair_axis_map_is_identity(
-        codomain_permutation,
-        domain_permutation,
-        codomain_rank,
-        domain_rank,
-    );
-    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
-    levels.extend_from_slice(codomain_levels);
-    levels.extend(domain_levels.iter().rev().copied());
     generic_braid_tree_pair_result(
         rule,
         tree_pair,
         codomain_permutation.len(),
         &permutation,
-        &levels,
-        &swaps,
+        &steps,
         identity,
     )
 }
@@ -756,30 +665,23 @@ where
     }
     let codomain_rank = tree_pair.key.codomain_tree().uncoupled().len();
     let domain_rank = tree_pair.key.domain_tree().uncoupled().len();
-    let permutation = linearize_tree_pair_permutation(
-        codomain_permutation,
-        domain_permutation,
-        codomain_rank,
-        domain_rank,
-    )?;
-    let swaps = permutation_to_adjacent_swaps(&permutation, codomain_rank + domain_rank)?;
-    let identity = tree_pair_axis_map_is_identity(
-        codomain_permutation,
-        domain_permutation,
-        codomain_rank,
-        domain_rank,
-    );
     let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
     let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
-    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
-    levels.extend_from_slice(&codomain_levels);
-    levels.extend(domain_levels.iter().rev().copied());
+    let GenericBraidSchedule {
+        permutation,
+        identity,
+        steps,
+    } = generic_braid_schedule(
+        codomain_permutation,
+        domain_permutation,
+        &codomain_levels,
+        &domain_levels,
+    )?;
     generic_braid_tree_pair_validated(
         tree_pair,
         codomain_permutation.len(),
         &permutation,
-        &levels,
-        &swaps,
+        &steps,
         identity,
     )
 }
@@ -948,21 +850,59 @@ where
     A: FnMut(&FusionTreePairKey) -> Result<Vec<(FusionTreePairKey, S)>, E>,
     C: FnMut(&FusionTreePairKey) -> Result<Vec<(FusionTreePairKey, S)>, E>,
 {
-    let Some(mut position) = position else {
+    let Some(position) = position else {
         return Ok(vec![(tree_pair.clone(), S::one())]);
     };
-    let mut current = repartition(tree_pair, target_codomain_rank)?;
-    if total_rank == 0 || position == 0 {
-        return Ok(current);
-    }
-    let half_rank = total_rank >> 1;
-    while position > 0 && position < half_rank {
-        current = compose_generic_tree_pair_terms_result(current, &mut anticlockwise)?;
-        position -= 1;
-    }
-    while position >= half_rank && position > 0 {
-        current = compose_generic_tree_pair_terms_result(current, &mut clockwise)?;
-        position = (position + 1) % total_rank;
-    }
-    Ok(current)
+    let current = repartition(tree_pair, target_codomain_rank)?;
+    run_cycles(
+        current,
+        transpose_cycles(position, total_rank),
+        |terms, direction| {
+            compose_terms(terms, |key| match direction {
+                PreparedCycleDirection::Clockwise => clockwise(key),
+                PreparedCycleDirection::Anticlockwise => anticlockwise(key),
+            })
+        },
+    )
+}
+
+/// The linearized permutation, identity flag and prepared Artin schedule of a
+/// Generic tree-pair braid, the `fsbraid` preamble
+/// (`braiding_manipulations.jl:302-306`). The permutation is validated once,
+/// by the prepared schedule.
+pub(super) struct GenericBraidSchedule {
+    pub(super) permutation: Vec<usize>,
+    pub(super) identity: bool,
+    pub(super) steps: SmallVec<[PreparedArtinStep; 28]>,
+}
+
+pub(super) fn generic_braid_schedule(
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_levels: &[usize],
+    domain_levels: &[usize],
+) -> Result<GenericBraidSchedule, CoreError> {
+    let (codomain_rank, domain_rank) = (codomain_levels.len(), domain_levels.len());
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    let identity = tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    );
+    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
+    levels.extend_from_slice(codomain_levels);
+    levels.extend(domain_levels.iter().rev().copied());
+    let steps =
+        PreparedTreeBraid::new(&permutation, &levels, codomain_rank + domain_rank)?.artin_steps;
+    Ok(GenericBraidSchedule {
+        permutation,
+        identity,
+        steps,
+    })
 }

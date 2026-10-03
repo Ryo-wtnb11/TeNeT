@@ -9,7 +9,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let mut current = terms;
+    let current = terms;
     let Some((first_key, _)) = current.first() else {
         return Ok(current);
     };
@@ -21,20 +21,29 @@ where
             actual: target_codomain_rank,
         });
     }
-    let mut current_codomain_rank = first_key.codomain_tree().uncoupled().len();
-    while current_codomain_rank < target_codomain_rank {
-        current = compose_tree_pair_terms(rule, current, |rule, key| {
-            multiplicity_free_bendleft_tree_pair(rule, key)
-        })?;
-        current_codomain_rank += 1;
-    }
-    while current_codomain_rank > target_codomain_rank {
-        current = compose_tree_pair_terms(rule, current, |rule, key| {
-            multiplicity_free_bendright_tree_pair(rule, key)
-        })?;
-        current_codomain_rank -= 1;
-    }
-    Ok(current)
+    let codomain_rank = first_key.codomain_tree().uncoupled().len();
+    repartition_loop(
+        current,
+        codomain_rank,
+        target_codomain_rank,
+        |terms, bend| multiplicity_free_bend_terms(rule, terms, bend),
+    )
+}
+
+/// One repartition bend over a multiplicity-free term list.
+pub(super) fn multiplicity_free_bend_terms<R>(
+    rule: &R,
+    terms: Vec<(FusionTreePairKey, R::Scalar)>,
+    bend: Bend,
+) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    compose_terms(terms, |key| match bend {
+        Bend::Left => multiplicity_free_bendleft_tree_pair(rule, key),
+        Bend::Right => multiplicity_free_bendright_tree_pair(rule, key),
+    })
 }
 
 pub(super) struct PreparedMultiplicityFreeBendRight {
@@ -596,54 +605,12 @@ pub(super) fn generic_bendleft_tree_pair_result<C>(
 where
     C: GenericRigidAccess,
 {
-    let swapped = FusionTreePairKey::pair(
-        tree_pair.domain_tree().clone(),
-        tree_pair.codomain_tree().clone(),
-    );
-    Ok(generic_bendright_tree_pair_result(rule, &swapped)?
-        .into_iter()
-        .map(|(bent, coefficient)| {
-            (
-                FusionTreePairKey::pair(bent.domain_tree().clone(), bent.codomain_tree().clone()),
-                coefficient.conj(),
-            )
-        })
-        .collect())
+    left_move_by_swap(tree_pair, |swapped| {
+        generic_bendright_tree_pair_result(rule, swapped)
+    })
 }
 
 #[cfg(test)]
-pub(crate) fn compose_generic_tree_pair_terms<R, F, I>(
-    rule: &R,
-    terms: Vec<(FusionTreePairKey, R::Scalar)>,
-    mut transform: F,
-) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
-where
-    R: GenericRigidSymbols,
-    R::Scalar: CategoricalScalar,
-    F: FnMut(&R, &FusionTreePairKey) -> Result<I, CoreError>,
-    I: IntoIterator<Item = (FusionTreePairKey, R::Scalar)>,
-{
-    compose_generic_tree_pair_terms_result(terms, |key| transform(rule, key))
-}
-
-pub(super) fn compose_generic_tree_pair_terms_result<S, E, F, I>(
-    terms: Vec<(FusionTreePairKey, S)>,
-    mut transform: F,
-) -> Result<Vec<(FusionTreePairKey, S)>, E>
-where
-    S: CategoricalScalar,
-    F: FnMut(&FusionTreePairKey) -> Result<I, E>,
-    I: IntoIterator<Item = (FusionTreePairKey, S)>,
-{
-    let mut output = FusionTermAccumulator::new();
-    for (key, coefficient) in terms {
-        for (next_key, next_coefficient) in transform(&key)? {
-            output.push(next_key, coefficient.clone() * next_coefficient);
-        }
-    }
-    Ok(output.into_vec())
-}
-
 /// Generic-fusion `repartition`: bend legs between codomain and domain until the
 /// codomain has `target_codomain_rank` legs. Verbatim mirror of TensorKit
 /// `repartition` / `_repartition_body` (`duality_manipulations.jl:460-505`): the
@@ -749,20 +716,25 @@ pub(super) fn generic_repartition_tree_pair_result<C>(
 where
     C: GenericRigidAccess,
 {
-    let mut current = vec![(tree_pair.clone(), C::Scalar::one())];
-    let mut current_codomain_rank = tree_pair.codomain_tree().uncoupled().len();
-    // N = numout - target > 0 ⇒ bendright; < 0 ⇒ bendleft (TK :492).
-    while current_codomain_rank < target_codomain_rank {
-        current = compose_generic_tree_pair_terms_result(current, |key| {
-            generic_bendleft_tree_pair_result(rule, key)
-        })?;
-        current_codomain_rank += 1;
-    }
-    while current_codomain_rank > target_codomain_rank {
-        current = compose_generic_tree_pair_terms_result(current, |key| {
-            generic_bendright_tree_pair_result(rule, key)
-        })?;
-        current_codomain_rank -= 1;
-    }
-    Ok(current)
+    repartition_loop(
+        vec![(tree_pair.clone(), C::Scalar::one())],
+        tree_pair.codomain_tree().uncoupled().len(),
+        target_codomain_rank,
+        |terms, bend| generic_bend_terms(rule, terms, bend),
+    )
+}
+
+/// One repartition bend over a Generic term list.
+pub(super) fn generic_bend_terms<C>(
+    rule: &C,
+    terms: GenericTreePairTerms<C::Scalar>,
+    bend: Bend,
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericRigidAccess,
+{
+    compose_terms(terms, |key| match bend {
+        Bend::Left => generic_bendleft_tree_pair_result(rule, key),
+        Bend::Right => generic_bendright_tree_pair_result(rule, key),
+    })
 }

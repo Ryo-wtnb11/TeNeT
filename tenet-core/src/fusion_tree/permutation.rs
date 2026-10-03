@@ -213,29 +213,6 @@ pub(super) fn tree_pair_axis_map_is_identity(
             .eq(codomain_rank..codomain_rank + domain_rank)
 }
 
-pub(crate) fn permutation_to_adjacent_swaps(
-    permutation: &[usize],
-    rank: usize,
-) -> Result<Vec<usize>, CoreError> {
-    validate_permutation_inline(permutation, rank)?;
-
-    let mut work = permutation.to_vec();
-    let mut swaps = Vec::new();
-    for target in 0..rank.saturating_sub(1) {
-        let source = work[target];
-        for swap in (target..source).rev() {
-            swaps.push(swap);
-        }
-        for item in work.iter_mut().take(rank).skip(target + 1) {
-            if *item < source {
-                *item += 1;
-            }
-        }
-        work[target] = target;
-    }
-    Ok(swaps)
-}
-
 fn linearize_tree_pair_axis(axis: usize, codomain_rank: usize, domain_rank: usize) -> usize {
     if axis < codomain_rank {
         axis

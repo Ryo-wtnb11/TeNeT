@@ -170,22 +170,9 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let swapped = FusionTreePairKey::pair(
-        tree_pair.domain_tree().clone(),
-        tree_pair.codomain_tree().clone(),
-    );
-    Ok(multiplicity_free_foldright_tree_pair(rule, &swapped)?
-        .into_iter()
-        .map(|(folded, coefficient)| {
-            (
-                FusionTreePairKey::pair(
-                    folded.domain_tree().clone(),
-                    folded.codomain_tree().clone(),
-                ),
-                (coefficient).conj(),
-            )
-        })
-        .collect())
+    left_move_by_swap(tree_pair, |swapped| {
+        multiplicity_free_foldright_tree_pair(rule, swapped)
+    })
 }
 
 pub(super) fn multiplicity_free_cycle_clockwise_tree_pair<R>(
@@ -196,22 +183,11 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let first: Vec<_> = if tree_pair.codomain_tree().uncoupled().is_empty() {
-        multiplicity_free_bendleft_tree_pair(rule, tree_pair)?
-            .into_iter()
-            .collect()
-    } else {
-        multiplicity_free_foldright_tree_pair(rule, tree_pair)?
-    };
-    if tree_pair.codomain_tree().uncoupled().is_empty() {
-        compose_tree_pair_terms(rule, first, |rule, key| {
-            multiplicity_free_foldright_tree_pair(rule, key)
-        })
-    } else {
-        compose_tree_pair_terms(rule, first, |rule, key| {
-            multiplicity_free_bendleft_tree_pair(rule, key)
-        })
-    }
+    cycle_clockwise(
+        tree_pair,
+        |key| multiplicity_free_bendleft_tree_pair(rule, key),
+        |key| multiplicity_free_foldright_tree_pair(rule, key),
+    )
 }
 
 pub(super) fn multiplicity_free_cycle_anticlockwise_tree_pair<R>(
@@ -222,22 +198,11 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let first: Vec<_> = if tree_pair.domain_tree().uncoupled().is_empty() {
-        multiplicity_free_bendright_tree_pair(rule, tree_pair)?
-            .into_iter()
-            .collect()
-    } else {
-        multiplicity_free_foldleft_tree_pair(rule, tree_pair)?
-    };
-    if tree_pair.domain_tree().uncoupled().is_empty() {
-        compose_tree_pair_terms(rule, first, |rule, key| {
-            multiplicity_free_foldleft_tree_pair(rule, key)
-        })
-    } else {
-        compose_tree_pair_terms(rule, first, |rule, key| {
-            multiplicity_free_bendright_tree_pair(rule, key)
-        })
-    }
+    cycle_anticlockwise(
+        tree_pair,
+        |key| multiplicity_free_bendright_tree_pair(rule, key),
+        |key| multiplicity_free_foldleft_tree_pair(rule, key),
+    )
 }
 
 fn collect_multiplicity_free_tree_locals_for_coupled<R>(

@@ -378,7 +378,7 @@ where
     let identity = (0..total_rank).collect::<Vec<_>>();
     let levels = identity.clone();
     let all_codomain = multiplicity_free_repartition_tree_pair(rule, source, total_rank)?;
-    let braided = compose_tree_pair_terms(rule, all_codomain, |rule, key| {
+    let braided = compose_terms(all_codomain, |key| {
         multiplicity_free_braid_tree(rule, key.codomain_tree(), &identity, &levels).map(|terms| {
             terms
                 .into_iter()
