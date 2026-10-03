@@ -147,21 +147,10 @@ impl<T: Copy> TreeTransformStructure<T> {
         )
     }
 
-    pub fn compile_keyed_structures_with_storage_conjugation(
-        dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
-        specs: &[TreeTransformKeyBlockSpec<T>],
-        storage_conjugate: bool,
-    ) -> Result<Self, OperationError> {
-        Self::compile_keyed_shared_structures(
-            Arc::new(dst_structure.clone()),
-            Arc::new(src_structure.clone()),
-            specs,
-            storage_conjugate,
-        )
-    }
-
-    fn compile_keyed_shared_structures(
+    /// Compiles keyed (Dense, Opaque or FusionTree label) specs against
+    /// shared structures; the result keeps these `Arc`s, so no structure is
+    /// copied.
+    pub fn compile_keyed_shared_structures(
         dst_structure: Arc<BlockStructure>,
         src_structure: Arc<BlockStructure>,
         specs: &[TreeTransformKeyBlockSpec<T>],

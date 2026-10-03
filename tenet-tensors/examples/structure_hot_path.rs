@@ -222,9 +222,9 @@ fn run_tree_multi_keyed_case(group_count: usize, key_order: KeyOrder) {
 
     let compile_iters = iterations(block_count, 100_000);
     let compile_elapsed = elapsed_per_iter(compile_iters, || {
-        let structure = TreeTransformStructure::compile_keyed_structures_with_storage_conjugation(
-            dst.structure(),
-            src.structure(),
+        let structure = TreeTransformStructure::compile_keyed_shared_structures(
+            std::sync::Arc::clone(dst.structure()),
+            std::sync::Arc::clone(src.structure()),
             &specs,
             false,
         )
@@ -232,9 +232,9 @@ fn run_tree_multi_keyed_case(group_count: usize, key_order: KeyOrder) {
         black_box(structure.block_count());
     });
 
-    let structure = TreeTransformStructure::compile_keyed_structures_with_storage_conjugation(
-        dst.structure(),
-        src.structure(),
+    let structure = TreeTransformStructure::compile_keyed_shared_structures(
+        std::sync::Arc::clone(dst.structure()),
+        std::sync::Arc::clone(src.structure()),
         &specs,
         false,
     )

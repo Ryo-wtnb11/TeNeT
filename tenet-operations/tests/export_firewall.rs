@@ -164,6 +164,71 @@ fn firewall_ignores_comments_strings_and_restricted_visibility() {
     );
 }
 
+/// Bodies of the inherent `impl ... <owner><...> { .. }` blocks in stripped
+/// `code` (trait impls, `impl Trait for Owner`, are skipped).
+fn inherent_impl_bodies<'a>(code: &'a str, owner: &str) -> Vec<&'a str> {
+    let mut bodies = Vec::new();
+    for (at, _) in code.match_indices("impl") {
+        let Some(open) = code[at..].find('{').map(|open| at + open) else {
+            break;
+        };
+        let header = &code[at..open];
+        if !header.contains(&format!(" {owner}<")) || header.contains(" for ") {
+            continue;
+        }
+        let mut depth = 0usize;
+        for (offset, ch) in code[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        bodies.push(&code[open..open + offset]);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    bodies
+}
+
+#[test]
+fn inherent_impl_scan_matches_only_the_owner() {
+    let code = strip(
+        "impl<T> Owner<T> { pub fn a() {} }\nimpl<T> Other<T> { pub fn b() {} }\nimpl<T> Tr for Owner<T> { fn c() {} }",
+    );
+    let bodies = inherent_impl_bodies(&code, "Owner");
+    assert_eq!(bodies.len(), 1);
+    assert!(defines_public_fn(bodies[0], "a"));
+    assert!(!defines_public_fn(bodies[0], "b"));
+}
+
+#[test]
+fn tree_transform_structure_has_no_panicking_coefficient_accessor() {
+    // `coefficient(index)` panicked out of range; `single_coefficient`
+    // returns `Option<T>`.
+    let mut files = Vec::new();
+    rust_sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut owner_blocks = 0;
+    for file in &files {
+        let code = strip(&fs::read_to_string(file).unwrap());
+        for body in inherent_impl_bodies(&code, "TreeTransformStructure") {
+            owner_blocks += 1;
+            assert!(
+                !defines_public_fn(body, "coefficient"),
+                "{}: TreeTransformStructure::coefficient is public again",
+                file.display()
+            );
+        }
+    }
+    assert!(owner_blocks > 0, "no TreeTransformStructure impl found");
+}
+
 #[test]
 fn internal_fn_scan_sees_only_unrestricted_definitions() {
     let code = strip(
@@ -312,16 +377,15 @@ const CRATE_INTERNAL: &[&str] = &[
     "tree_transform_structure_with_structural_recoupling_raw_profiled",
     "tree_transform_structure_overwrite_with_structural_recoupling_raw_profiled",
     // Compile constructors without a production caller; the keyed entry is
-    // `compile_keyed_structures_with_storage_conjugation` and grouped specs
-    // compile through `TreeTransformGroupPlan`.
+    // `compile_keyed_shared_structures` (shares the structures by `Arc`) and
+    // grouped specs compile through `TreeTransformGroupPlan`.
     "compile_keyed",
     "compile_keyed_structures",
+    "compile_keyed_structures_with_storage_conjugation",
     "compile_grouped",
     "compile_grouped_structures",
     "compile_grouped_structures_with_storage_conjugation",
     "compile_grouped_shared_structures",
-    // Replaced by the non-panicking `single_coefficient`.
-    "coefficient",
 ];
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {

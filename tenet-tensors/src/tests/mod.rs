@@ -1395,9 +1395,9 @@ fn assert_tree_multi_keyed_dtype<T>(
     let mut dst =
         TensorMap::<T, 2, 0>::from_vec_with_structure(vec![T::zero(); 4], dst_space, dst_structure)
             .unwrap();
-    let structure = TreeTransformStructure::compile_keyed_structures_with_storage_conjugation(
-        dst.structure(),
-        src.structure(),
+    let structure = TreeTransformStructure::compile_keyed_shared_structures(
+        std::sync::Arc::clone(dst.structure()),
+        std::sync::Arc::clone(src.structure()),
         &[TreeTransformKeyBlockSpec::multi(
             vec![key10, key20],
             vec![key100, key200, key300],

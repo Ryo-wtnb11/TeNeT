@@ -148,9 +148,9 @@ fn tree_transform_compile_keyed_rejects_missing_tree_block_key() {
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure)
             .unwrap();
 
-    let err = TreeTransformStructure::compile_keyed_structures_with_storage_conjugation(
-        dst.structure(),
-        src.structure(),
+    let err = TreeTransformStructure::compile_keyed_shared_structures(
+        Arc::clone(dst.structure()),
+        Arc::clone(src.structure()),
         &[TreeTransformKeyBlockSpec::single(key2.clone(), key1, 1.0)],
         false,
     )
@@ -6721,9 +6721,9 @@ fn explicit_keyed_replay_accepts_dense_and_opaque_namespaces() {
         .unwrap();
         let mut dst =
             TensorMap::<f64, 1, 0>::from_vec_with_structure(vec![0.0], space, structure).unwrap();
-        let replay = TreeTransformStructure::compile_keyed_structures_with_storage_conjugation(
-            dst.structure(),
-            src.structure(),
+        let replay = TreeTransformStructure::compile_keyed_shared_structures(
+            Arc::clone(dst.structure()),
+            Arc::clone(src.structure()),
             &[TreeTransformKeyBlockSpec::single(key.clone(), key, 2.0)],
             false,
         )
@@ -6843,9 +6843,9 @@ fn keyed_and_grouped_compile_resolve_every_key_before_structural_validation() {
     let coefficient_mismatch =
         TreeTransformKeyBlockSpec::multi([present.clone()], [present.clone()], Vec::<f64>::new());
     let missing_later = TreeTransformKeyBlockSpec::single(BlockKey::opaque([2]), present, 1.0);
-    let err = TreeTransformStructure::compile_keyed_structures_with_storage_conjugation(
-        &dst_structure,
-        &src_structure,
+    let err = TreeTransformStructure::compile_keyed_shared_structures(
+        Arc::new(dst_structure.clone()),
+        Arc::new(src_structure.clone()),
         &[coefficient_mismatch, missing_later],
         false,
     )
