@@ -383,15 +383,19 @@ mod dispatch;
 use dispatch::{MultiplicityFreeContractExecution, MultiplicityFreeTransformExecution};
 pub use dispatch::{
     TypedSpaceModeDispatch, TypedTensorAddScaleDispatch, TypedTensorAdjointDispatch,
-    TypedTensorConstructionDispatch, TypedTensorContractDispatch, TypedTensorEigDispatch,
-    TypedTensorEigValsDispatch, TypedTensorEighDispatch, TypedTensorEighValsDispatch,
-    TypedTensorExpDispatch, TypedTensorFlipDispatch, TypedTensorFullLqDispatch,
+    TypedTensorConstructionDispatch, TypedTensorContractDispatch, TypedTensorFlipDispatch,
+    TypedTensorModeDispatch, TypedTensorProductDispatch, TypedTensorReductionDispatch,
+    TypedTensorRootDispatch, TypedTensorTraceDispatch, TypedTensorTransformDispatch,
+    TypedTensorTwistDispatch, TypedTruncationDispatch,
+};
+mod factorize;
+pub use factorize::{
+    TypedTensorEigDispatch, TypedTensorEigValsDispatch, TypedTensorEighDispatch,
+    TypedTensorEighValsDispatch, TypedTensorExpDispatch, TypedTensorFullLqDispatch,
     TypedTensorFullQrDispatch, TypedTensorInvDispatch, TypedTensorLqDispatch,
-    TypedTensorModeDispatch, TypedTensorNullDispatch, TypedTensorPinvDispatch,
-    TypedTensorPolarDispatch, TypedTensorProductDispatch, TypedTensorQrDispatch,
-    TypedTensorReductionDispatch, TypedTensorRootDispatch, TypedTensorSolveDispatch,
-    TypedTensorSvdDispatch, TypedTensorSvdValsDispatch, TypedTensorTraceDispatch,
-    TypedTensorTransformDispatch, TypedTensorTwistDispatch, TypedTruncationDispatch,
+    TypedTensorNullDispatch, TypedTensorPinvDispatch, TypedTensorPolarDispatch,
+    TypedTensorQrDispatch, TypedTensorSolveDispatch, TypedTensorSvdDispatch,
+    TypedTensorSvdValsDispatch,
 };
 mod checked_generic_contract;
 mod mode_dispatch;
@@ -400,6 +404,7 @@ pub use checked_generic_contract::{
     reject_non_symmetric_contraction, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED,
 };
 use checked_generic_contract::{trace_pair_axes, write_identity_blocks_generic, TracePairAxes};
+use mode_dispatch::checked_compact_spectrum_layout;
 mod space;
 use space::{
     require_restriction_set, require_selected_leg_of, restricted_space, restriction_starts,
