@@ -9327,7 +9327,7 @@ fn measure_checked_generic_transform_case(
 /// existing counting allocator.
 #[cfg(feature = "racah-generated")]
 #[test]
-#[ignore = "manual checked-Generic transform phase measurement"]
+#[ignore = "benchmark: run via benchmarks.yml"]
 fn measure_checked_generic_transform_phases() {
     println!("call_order=channels,dual,n,sqrt_dim,inv_sqrt_dim,frobenius_schur,f,r");
     println!("spy_instrumented_phase_timings_auxiliary_only=true");

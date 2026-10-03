@@ -915,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "observational allocation and latency sample; no timing gate"]
+    #[ignore = "benchmark: run via benchmarks.yml"]
     fn member_batch_measurement() {
         use std::time::Instant;
 
