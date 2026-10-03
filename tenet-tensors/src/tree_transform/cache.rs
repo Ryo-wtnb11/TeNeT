@@ -196,8 +196,6 @@ impl<T, RuleKey> fmt::Debug for TreeTransformCache<T, RuleKey> {
     }
 }
 
-pub type TreePairTransformCache<T, RuleKey> = TreeTransformCache<T, RuleKey>;
-
 /// Observable completed-structure cache activity.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TreeTransformCacheStats {
@@ -649,50 +647,12 @@ where
         compile(&projection, None).map(Arc::new)
     }
 
-    /// Generic-fusion sibling of [`Self::get_or_compile_tree_pair`].
+    /// Structure-only Generic-fusion sibling of [`Self::get_or_compile_tree_pair`].
     ///
     /// This remains eager because completed-transformer retention for Generic
     /// fusion needs its own measured key and ownership contract. Why not retain
     /// a rule key here: provider-domain validation is the eager boundary, and
     /// this path retains no key or completed structure.
-    pub fn get_or_compile_tree_pair_generic<
-        R,
-        TDst,
-        TSrc,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &mut self,
-        rule: &R,
-        operation: TreeTransformOperation,
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
-    where
-        R: GenericRigidSymbols<Scalar = T>,
-        R::Scalar: CategoricalScalar,
-        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
-        RuleKey: 'static + Send + Sync,
-        DDst: TensorStorage<TDst>,
-        DSrc: TensorStorage<TSrc>,
-    {
-        let source_proof = validate_generic_tree_pair_preflight(rule, &operation, src.structure())?;
-        LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
-            .map_err(OperationError::from_core_preserving_context)?;
-        self.stats.structure_misses += 1;
-        let plan =
-            build_generic_tree_pair_transform_group_plan_validated(&source_proof, operation)?;
-        Ok(Arc::new(plan.compile(dst, src)?))
-    }
-
-    /// Structure-only Generic sibling. It has the same eager ownership and
-    /// provider-domain contracts as [`Self::get_or_compile_tree_pair_generic`].
     pub fn get_or_compile_tree_pair_structures_generic<R>(
         &mut self,
         rule: &R,

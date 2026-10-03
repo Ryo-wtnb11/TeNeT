@@ -468,6 +468,7 @@ fn validate_tree_transform_operation_syntax(
     Ok(())
 }
 
+#[cfg(test)]
 /// Build a TensorKit-style grouped tree-transform plan for multiplicity-free
 /// fusion rules.
 ///
@@ -506,6 +507,7 @@ where
     })
 }
 
+#[cfg(test)]
 fn build_tree_transform_group_plan_validated<T, R, F>(
     source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,
@@ -2198,6 +2200,7 @@ where
     }
 }
 
+#[cfg(test)]
 /// Generic-fusion (outer-multiplicity) tree-pair plan compile — the Stage B2c
 /// dispatch receptacle for outer-multiplicity rules. Parallel entry to
 /// `build_multiplicity_free_tree_pair_transform_group_plan`: non-identity groups
@@ -2370,6 +2373,7 @@ where
     Ok(specs)
 }
 
+#[cfg(test)]
 /// Assemble one group's block specs (destination-key dedup plus the
 /// `U[dst, src]` recoupling coefficient matrix) from per-tree recoupling
 /// rows. Groups are independent, which is what lets the parallel compile map

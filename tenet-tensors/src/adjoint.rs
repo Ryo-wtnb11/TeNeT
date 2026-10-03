@@ -8,8 +8,10 @@
 use core::ops::{Add, Mul};
 use std::sync::Arc;
 
+#[cfg(test)]
+use tenet_core::FusionRule;
 use tenet_core::{
-    BlockKey, BlockStructure, CheckedGenericFusion, CoreError, FusionRule, FusionTensorMapSpace,
+    BlockKey, BlockStructure, CheckedGenericFusion, CoreError, FusionTensorMapSpace,
     FusionTreeHomSpace, FusionTreePairKey, MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
 };
 
@@ -361,6 +363,7 @@ where
     Ok((output, data))
 }
 
+#[cfg(test)]
 /// Generic dynamic-rank adjoint that retains the exact provider allocation of
 /// its checked source space.
 pub fn adjoint_bound_dyn_generic<R, D>(
@@ -390,6 +393,7 @@ where
     BoundDynamicFusionMapSpace::from_derived_like(space, output)
 }
 
+#[cfg(test)]
 /// Generic lazy-adjoint metadata retaining the exact provider allocation of
 /// the checked source space.
 pub fn adjoint_bound_space_dyn_generic<R>(
@@ -437,6 +441,7 @@ where
     .map_err(CheckedGenericPlanError::from)
 }
 
+#[cfg(test)]
 /// Generic-fusion (SU(N)) sibling of [`adjoint_space_dyn`]. The adjoint is a
 /// pure per-block relabel — codomain and domain trees swap wholesale and each
 /// coupled block is transposed — with NO leg bending and NO recoupling, so it
@@ -478,6 +483,7 @@ where
     DynamicFusionMapSpace::from_final_homspace_generic(rule, adjoint_hom)
 }
 
+#[cfg(test)]
 /// Generic-fusion (SU(N)) sibling of [`adjoint_dyn`]: same block relabel +
 /// conjugate-transpose, over the multiplicity-aware adjoint space (see
 /// [`adjoint_space_dyn_generic`]). The data movement is byte-identical to the

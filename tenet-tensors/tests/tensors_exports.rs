@@ -1,0 +1,341 @@
+//! Export firewall for `tenet-tensors` (#1802).
+//!
+//! Pins the exact names `lib.rs` re-exports, under every feature combination
+//! at once, so adding or removing one fails here and is reviewed as an API
+//! change. Every name below is used by another workspace crate, by an
+//! integration test or example of this crate, or by a retained public
+//! signature, or belongs to the static-rank eager facade (`contract/api.rs`,
+//! `facade.rs`, `TensorContractExecutionContext`), which decision A14 keeps
+//! public until a separate static-API decision. The structure caches, the
+//! dynamic-rank `*_dyn_owned` / `*_dyn_into` test entries and the re-exports of
+//! `tenet_operations` internals were narrowed to `pub(crate)`.
+//!
+//! Why a source scan and not an import list: an import list only proves
+//! presence, not absence.
+
+use std::collections::BTreeSet;
+
+/// Drops comments (line, doc and `/* */`) and blanks string literals so that
+/// neither can hide or fake an item.
+fn strip(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(ch) = rest.chars().next() {
+        if rest.starts_with("//") {
+            rest = &rest[rest.find('\n').unwrap_or(rest.len())..];
+        } else if rest.starts_with("/*") {
+            rest = &rest[rest.find("*/").map_or(rest.len(), |end| end + 2)..];
+            out.push(' ');
+        } else if ch == '"' {
+            let mut escaped = false;
+            let end = rest[1..]
+                .find(|c: char| {
+                    let close = c == '"' && !escaped;
+                    escaped = c == '\\' && !escaped;
+                    close
+                })
+                .map_or(rest.len(), |end| end + 2);
+            rest = &rest[end..];
+            out.push_str("\"\"");
+        } else {
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    out
+}
+
+/// Leaf names re-exported by `pub use` in `source`, or an error for any
+/// other inline public item (`pub fn`, `pub enum`, `pub const`, ...) or
+/// `#[macro_export]`, which this firewall would otherwise not see.
+fn exported_names(source: &str) -> Result<BTreeSet<String>, String> {
+    let code = strip(source);
+    if code.contains("macro_export") {
+        return Err("lib.rs exports a macro_rules! macro".into());
+    }
+    let mut names = BTreeSet::new();
+    for (at, _) in code.match_indices("pub") {
+        let before = code[..at].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let after = &code[at + 3..];
+        if after.starts_with('(') || after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+            continue; // `pub(crate)` etc., or an identifier such as `public`
+        }
+        let item = after.trim_start();
+        let Some(tree) = item
+            .strip_prefix("use")
+            .filter(|t| t.starts_with(char::is_whitespace))
+        else {
+            let keyword = item.split_whitespace().next().unwrap_or("");
+            return Err(format!("lib.rs gained an inline `pub {keyword}` item"));
+        };
+        let tree = tree[..tree.find(';').ok_or("unterminated pub use")?].trim();
+        let leaves = match tree.find('{') {
+            Some(open) => {
+                let inner = tree[open + 1..]
+                    .trim_end()
+                    .strip_suffix('}')
+                    .ok_or("bad use tree")?;
+                if inner.contains('{') {
+                    return Err(format!("nested use tree: {tree}"));
+                }
+                inner.split(',').collect::<Vec<_>>()
+            }
+            None => vec![tree],
+        };
+        for leaf in leaves
+            .iter()
+            .map(|leaf| leaf.trim())
+            .filter(|l| !l.is_empty())
+        {
+            let name = leaf.rsplit(" as ").next().unwrap();
+            names.insert(name.rsplit("::").next().unwrap().trim().to_owned());
+        }
+    }
+    Ok(names)
+}
+
+#[test]
+fn firewall_rejects_every_inline_public_item() {
+    for item in [
+        "pub mod m {}",
+        "pub fn f() {}",
+        "pub struct S;",
+        "pub enum E {}",
+        "pub trait T {}",
+        "pub type A = u8;",
+        "pub const C: u8 = 0;",
+        "pub static S: u8 = 0;",
+        "pub union U { a: u8 }",
+        "pub unsafe fn f() {}",
+        "pub extern crate core;",
+        "#[macro_export]\nmacro_rules! m { () => {} }",
+    ] {
+        let source = format!("pub use a::B;\n{item}\n");
+        assert!(exported_names(&source).is_err(), "accepted `{item}`");
+    }
+}
+
+#[test]
+fn firewall_ignores_comments_strings_and_restricted_visibility() {
+    let source = r#"
+        //! pub fn doc() {}
+        /* pub enum Hidden {} */
+        #[path = "pub fn x.rs"]
+        pub(crate) mod inner;
+        pub(super) fn helper() {}
+        pub use a::{B, c::D as E}; // pub struct Trailing;
+        pub use f::G;
+    "#;
+    let names = exported_names(source).unwrap();
+    assert_eq!(names, ["B", "E", "G"].map(str::to_owned).into());
+}
+
+#[test]
+fn tenet_tensors_exports_exactly_the_pinned_names() {
+    let expected = [
+        // adjoint
+        "adjoint",
+        "adjoint_bound_dyn",
+        "adjoint_bound_space_dyn",
+        "adjoint_bound_space_dyn_generic_checked",
+        "materialize_adjoint_data_dyn",
+        "AdjointScalar",
+        // backend_trace
+        "TensorTraceOperationsBackend",
+        // bound_tensor
+        "BoundDynamicTensorRef",
+        // cache
+        "reset_global_operation_caches",
+        "OperationCachePolicy",
+        // contract
+        "tensorcontract_fusion_structure",
+        "tensorcontract_structure",
+        "compile_direct_composition_plan",
+        "execute_storage_contract_resolution_on_cuda",
+        "prepare_tensorcontract_fusion_plan",
+        "prepare_tensorcontract_fusion_plan_dyn",
+        "tensorcompose_fusion_dyn_prelowered_direct_on_storage",
+        "tensorcompose_owned_checked_generic_in_context",
+        "tensorcontract_execute_with",
+        "tensorcontract_fusion_block_specs",
+        "tensorcontract_fusion_into",
+        "tensorcontract_fusion_into_with",
+        "tensorcontract_fusion_into_with_backends",
+        "tensorcontract_fusion_prepared_into",
+        "tensorcontract_fusion_prepared_into_core_dst",
+        "tensorcontract_fusion_prepared_into_core_dst_with",
+        "tensorcontract_fusion_prepared_into_with",
+        "tensorcontract_fusion_via_tree_pair_transforms_into",
+        "tensorcontract_into",
+        "tensorcontract_into_with",
+        "tensorcontract_into_with_context",
+        "tensorcontract_owned_checked_generic_in_context",
+        "tensorproduct_fusion_into",
+        "tensorproduct_fusion_into_with_conjugation",
+        "tensorproduct_into",
+        "tensorproduct_into_with_conjugation",
+        "try_compile_storage_contract_core_route",
+        "zero_copy_contract_order_for_output_permute",
+        "BoundDynamicFusionMapSpace",
+        "CudaContractScratch",
+        "CudaDynamicTreeMembersWorkspace",
+        "DynamicFusionMapSpace",
+        "DynamicTreeMembersWorkspace",
+        "FusionContractOrientation",
+        "FusionContractPlan",
+        "FusionOperand",
+        "HostTensorContractBackend",
+        "HostTensorContractWorkspace",
+        "HostTreeFusionExecutionContext",
+        "PreparedCheckedGenericDynamicSpace",
+        "PreparedTensorContractFusion",
+        "StorageContractResolution",
+        "TensorContractBackend",
+        "TensorContractBlockSpec",
+        "TensorContractCache",
+        "TensorContractCacheStats",
+        "TensorContractExecutionContext",
+        "TensorContractFusionExecutionContext",
+        "TensorContractFusionProfile",
+        "TensorContractPlanKey",
+        "TensorContractStructure",
+        "TensorContractStructureTerm",
+        "TensorContractWorkspace",
+        "ValidatedDynamicFusionLayout",
+        // facade
+        "braid_into",
+        "braid_into_generic",
+        "braid_into_with",
+        "braid_into_with_context",
+        "copy_into",
+        "permute_into",
+        "permute_into_generic",
+        "permute_into_with",
+        "permute_into_with_context",
+        "scaled_add_into",
+        "scaled_assign_into",
+        "tensoradd_add_into",
+        "tensoradd_assign_into",
+        "tensoradd_execute_with",
+        "tensoradd_fusion_into",
+        "tensoradd_fusion_into_with",
+        "tensoradd_fusion_into_with_context",
+        "tensoradd_into",
+        "tensoradd_into_with",
+        "tensoradd_into_with_backend_and_conjugation",
+        "tensoradd_into_with_conjugation",
+        "tensorcopy_into",
+        "tensorcopy_into_with",
+        "tensortrace_execute_with",
+        "tensortrace_fusion_execute_with",
+        "tensortrace_fusion_into",
+        "tensortrace_fusion_into_with",
+        "tensortrace_into",
+        "tensortrace_into_with",
+        "transpose_into",
+        "transpose_into_generic",
+        "transpose_into_with",
+        "transpose_into_with_context",
+        "tree_transform_execute_with",
+        "tree_transform_into",
+        "tree_transform_into_generic",
+        "tree_transform_into_with",
+        "tree_transform_into_with_context",
+        "tree_transform_into_with_generic",
+        "tree_transform_overwrite_execute_with",
+        "tree_transform_overwrite_into",
+        "tree_transform_overwrite_into_with",
+        "tree_transform_overwrite_into_with_context",
+        "tree_transform_structure",
+        "tree_transform_structure_generic",
+        // oriented_elementwise
+        "fusion_scatter_add_assign",
+        "oriented_fusion_add_owned",
+        "oriented_fusion_axpby_into",
+        "oriented_fusion_inner",
+        "oriented_fusion_inner_with",
+        "oriented_fusion_restrict_owned",
+        "stacked_fusion_restrict_owned",
+        "SectorRangeTable",
+        "SectorStartTable",
+        // physical
+        "expand_physical_host",
+        "project_physical_host",
+        "PhysicalConversionError",
+        // tenet_core
+        "RuleIdentity",
+        // tenet_operations
+        "cuda",
+        "host_pool",
+        "try_cat_owned_raw",
+        "zeroed_payload",
+        "ConjugateValue",
+        "ContractDestinationInit",
+        "DenseBlockScalar",
+        "DenseRecouplingScalar",
+        "DenseTreeTransformOperations",
+        "HostAllocator",
+        "HostTensorOperations",
+        "OperationError",
+        "OutputAxisOrder",
+        "OwnedCatCopy",
+        "OwnedCatSide",
+        "RealStructuralCoefficient",
+        "RecouplingCoefficientAction",
+        "ReportsPlacement",
+        "TensorAddStructure",
+        "TensorContractSpec",
+        "TensorOperationsBackend",
+        "TensorTraceAxisSpec",
+        "TreeTransformBackend",
+        "TreeTransformScalar",
+        "TreeTransformStructure",
+        "TreeTransformWorkspace",
+        "WideScalar",
+        "ZeroBytes",
+        // tensortrace
+        "tensortrace_fusion_structure",
+        "tensortrace_structure",
+        "tensortrace_fusion_dyn_into_checked",
+        "tensortrace_fusion_dyn_owned_checked",
+        "tensortrace_fusion_dyn_owned_generic_checked",
+        "tensortrace_fusion_dyn_selected_homspace_checked",
+        "tensortrace_fusion_dyn_selected_homspace_generic_checked",
+        "tensortrace_fusion_structure_into_on_cuda",
+        "FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING",
+        "TensorTraceFusionStructure",
+        "TensorTraceFusionStructureTerm",
+        "TensorTraceStructure",
+        "TensorTraceStructureTerm",
+        // tree_context
+        "tree_transform_dyn_owned_checked_generic_input_in_context",
+        "CheckedTreeTransformInput",
+        "TreeTransformExecutionContext",
+        // tree_transform
+        "build_all_codomain_tree_transform_group_plan",
+        "build_tree_pair_transform_group_plan",
+        "CheckedGenericPlanError",
+        "RuntimeTreeTransformCacheInfo",
+        "RuntimeTreeTransformCacheLedger",
+        "RuntimeTreeTransformStore",
+        "TreeTransformBlockSpec",
+        "TreeTransformCache",
+        "TreeTransformCacheStats",
+        "TreeTransformGroupBlockSpec",
+        "TreeTransformGroupPlan",
+        "TreeTransformKeyBlockSpec",
+        "TreeTransformOperation",
+        "TreeTransformOperationKind",
+        "TreeTransformRuleCacheKey",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        exported_names(include_str!("../src/lib.rs")).unwrap(),
+        expected
+    );
+}

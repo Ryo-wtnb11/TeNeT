@@ -1,15 +1,15 @@
 use num_traits::One;
 use std::sync::Arc;
-use tenet_core::{
-    BlockStructure, HostReadableStorage, HostWritableStorage, Placement, ScratchStorage,
-    SimilarStorage, TensorMap,
-};
+use tenet_core::{BlockStructure, HostReadableStorage, HostWritableStorage, Placement, TensorMap};
+#[cfg(test)]
+use tenet_core::{ScratchStorage, SimilarStorage};
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 use tenet_operations::fusion_replay::{
     direct_slice, direct_slice_mut, MatrixOp, Rank2GemmBatchJob,
 };
 
 use crate::host_scratch::HostScratchBuffer;
+#[cfg(test)]
 use crate::storage_scratch::StorageTensorContractWorkspace;
 use tenet_operations::{scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel};
 
@@ -629,6 +629,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_structure_with_storage_workspace_dense_executor<
     E,

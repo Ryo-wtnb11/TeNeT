@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockKey, CategoricalScalar, FusionRule, FusionTreeHomSpace, FusionTreeKey,
-    FusionTreePairOrientation, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, SectorId,
+    FusionTreePairOrientation, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, SectorId,
 };
+#[cfg(test)]
+use tenet_core::{HostReadableStorage, HostWritableStorage};
 
 use crate::strided::{
     column_major_strides_isize, column_major_strides_usize, element_count, offset_to_isize,
@@ -16,13 +17,15 @@ use crate::strided::{
 use crate::{DenseBlockScalar, HostKernelAdapter, OperationError, RecouplingCoefficientAction};
 use tenet_operations::TensorContractSpec;
 
+#[cfg(test)]
+pub(crate) use tenet_operations::fusion_replay::StorageGemm;
 use tenet_operations::fusion_replay::{
     direct_group_matrix_offset_generic, fusion_scale_block_layouts_excluding,
     FusionBlockContractGroupPlan, FusionBlockMatrixGroup, FusionStridedBlockLayout,
     FusionSubblockMatrixLayout, MatrixOp, Rank2GemmBatchJob,
 };
 pub(crate) use tenet_operations::fusion_replay::{
-    FusionBlockContractPlan, FusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
+    FusionBlockContractPlan, FusionBlockContractWorkspace, Rank2Gemm,
 };
 
 /// Validate category identity before a contraction route reads sectors or

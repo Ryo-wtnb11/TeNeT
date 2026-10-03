@@ -1,12 +1,9 @@
 mod api;
 mod backend;
-// PR A stages the checked Generic transaction; PR B wires the sealed typed caller.
-#[allow(dead_code)]
 mod checked_generic;
 #[doc(hidden)]
 pub use checked_generic::{
-    tensorcompose_owned_checked_generic_in_context, tensorcontract_owned_checked_generic,
-    tensorcontract_owned_checked_generic_in_context,
+    tensorcompose_owned_checked_generic_in_context, tensorcontract_owned_checked_generic_in_context,
 };
 mod context;
 mod dynamic;
@@ -68,12 +65,14 @@ pub use backend::{
     HostTensorContractBackend, HostTensorContractWorkspace, TensorContractBackend,
     TensorContractWorkspace,
 };
+#[cfg(test)]
+pub use context::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
 pub use context::{
     compile_direct_composition_plan, tensorcompose_fusion_dyn_prelowered_direct_on_storage,
-    tensorcontract_fusion_dyn_prelowered_direct_on_storage, tensorcontract_into_with_context,
-    try_compile_storage_contract_core_route, HostTreeFusionExecutionContext,
-    PreparedTensorContractFusion, TensorContractCache, TensorContractCacheStats,
-    TensorContractExecutionContext, TensorContractFusionExecutionContext, TensorContractPlanKey,
+    tensorcontract_into_with_context, try_compile_storage_contract_core_route,
+    HostTreeFusionExecutionContext, PreparedTensorContractFusion, TensorContractCache,
+    TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
+    TensorContractPlanKey,
 };
 #[cfg(test)]
 pub(crate) use dynamic_space::{
@@ -87,14 +86,14 @@ pub use dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
 };
+pub use fusion::tensorcontract_fusion_structure;
 #[cfg(test)]
 pub(crate) use fusion::{
     contracted_fusion_tree_basis_matches, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
 };
 pub use fusion::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,
-    tensorcontract_fusion_block_specs, tensorcontract_fusion_structure,
-    tensorcontract_fusion_structure_dyn, FusionContractPlan,
+    tensorcontract_fusion_block_specs, FusionContractPlan,
 };
 #[cfg(test)]
 pub(crate) use structure::TensorContractDenseRouteKind;
@@ -102,4 +101,6 @@ pub use structure::{
     tensorcontract_structure, TensorContractBlockSpec, TensorContractStructure,
     TensorContractStructureTerm,
 };
-pub use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
+pub use tenet_operations::TensorContractFusionProfile;
+#[cfg(test)]
+pub use tenet_operations::TensorContractFusionRoute;

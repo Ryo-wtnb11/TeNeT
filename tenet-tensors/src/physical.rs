@@ -1,9 +1,11 @@
 use core::fmt;
 use std::collections::HashMap;
 
+#[cfg(test)]
+use tenet_core::RuleIdentity;
 use tenet_core::{
     BlockKey, CategoricalScalar, CoreError, FusionTreeKey, MultiplicityFreeRigidSymbols,
-    PhysicalFusionBasis, RuleIdentity, SectorId, SectorLeg,
+    PhysicalFusionBasis, SectorId, SectorLeg,
 };
 
 use crate::{
@@ -80,11 +82,13 @@ where
         })
     }
 
+    #[cfg(test)]
     #[inline]
     pub fn shape(&self) -> &[usize] {
         &self.stage.shape
     }
 
+    #[cfg(test)]
     /// Stable semantic identity of the provider used to compile this plan.
     pub fn provider_identity(&self) -> RuleIdentity {
         self.space.provider().rule_identity()

@@ -1609,7 +1609,7 @@ where
 // ======================================================================
 
 /// Generic-fusion sibling of [`tree_transform_structure`]: builds the Stage B2c
-/// [`crate::build_generic_tree_pair_transform_group_plan`] and compiles it
+/// `build_generic_tree_pair_transform_group_plan` and compiles it
 /// against the live `dst`/`src` block structures.
 ///
 /// The raw block keys follow [`tree_transform_structure`]'s provider-domain
