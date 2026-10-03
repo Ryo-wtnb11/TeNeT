@@ -557,6 +557,99 @@ fn transpose_tree_pair_block_matches_full_key_su2_cycles_and_repartition() {
     assert!(checked_blocks > 0, "expected at least one block");
 }
 
+// Regression (#1921): a transpose whose last compact step is a bend leaves the
+// output basis in first-appearance order, not HomSpace order. For rank-5
+// SU(2) and Fibonacci `[4,3,2 | 1,0]` from (2,3) that order differs from the
+// HomSpace keys in some uncoupled blocks; values must still match per key.
+fn assert_rank5_transpose_matches_per_pair_by_key<R>(rule: &R, sectors: &[SectorId])
+where
+    R: MultiplicityFreeRigidSymbols + MultiplicityFreeFusionRule,
+    R::Scalar: Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + std::fmt::Debug
+        + TransposeOracleScalar,
+{
+    use std::collections::BTreeMap;
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, 1)), false);
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg(), leg()]),
+    );
+    let mut blocks: BTreeMap<Vec<usize>, Vec<FusionTreePairKey>> = BTreeMap::new();
+    for key in hom.fusion_tree_keys(rule).iter() {
+        let tag = key
+            .codomain_tree()
+            .uncoupled()
+            .iter()
+            .chain(key.domain_tree().uncoupled())
+            .map(|sector| sector.id())
+            .collect();
+        blocks.entry(tag).or_default().push(key.clone());
+    }
+    let (codomain_permutation, domain_permutation) = ([4usize, 3, 2], [1usize, 0]);
+    let tolerance = |expected: &R::Scalar| 1.0e-12 * (1.0 + expected.oracle_magnitude());
+    for sources in blocks.values() {
+        assert_compact_transpose_matches_full_key_oracle(
+            rule,
+            sources,
+            &codomain_permutation,
+            &domain_permutation,
+            true,
+        );
+        let compact = multiplicity_free_transpose_tree_pair_block(
+            rule,
+            sources,
+            &codomain_permutation,
+            &domain_permutation,
+        )
+        .unwrap();
+        for (source, compact_rows) in sources.iter().zip(&compact) {
+            // Independent oracle: the keyed per-pair transpose.
+            let per_pair = crate::testing::multiplicity_free_transpose_tree_pair(
+                rule,
+                source,
+                &codomain_permutation,
+                &domain_permutation,
+            )
+            .unwrap();
+            for (key, expected) in &per_pair {
+                let actual = compact_rows
+                    .iter()
+                    .find(|(candidate, _)| candidate == key)
+                    .map(|(_, coefficient)| coefficient);
+                match actual {
+                    Some(actual) => assert!(
+                        actual.oracle_distance(expected) <= tolerance(expected),
+                        "{key:?}: compact {actual:?} vs per-pair {expected:?}"
+                    ),
+                    None => assert!(
+                        expected.oracle_magnitude() <= 1.0e-12,
+                        "compact omits {key:?} = {expected:?}"
+                    ),
+                }
+            }
+            for (key, actual) in compact_rows {
+                if !per_pair.iter().any(|(candidate, _)| candidate == key) {
+                    assert!(
+                        actual.oracle_magnitude() <= 1.0e-12,
+                        "compact adds {key:?} = {actual:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn rank5_transpose_with_trailing_bend_matches_per_pair_by_key() {
+    assert_rank5_transpose_matches_per_pair_by_key(&SU2FusionRule, &[su2(0), su2(1), su2(2)]);
+    assert_rank5_transpose_matches_per_pair_by_key(
+        &FibonacciFusionRule,
+        &[SectorId::new(0), SectorId::new(1)],
+    );
+}
+
 #[test]
 fn transpose_tree_pair_block_matches_full_key_fermionic_product_cycle() {
     type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;

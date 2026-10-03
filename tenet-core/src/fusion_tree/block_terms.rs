@@ -141,7 +141,11 @@ pub(crate) struct DenseColumns<S> {
 ///
 /// This is an internal crate-boundary vocabulary for lowering reduced blocks.
 /// Destination keys are unique and ordered by source-major first appearance;
-/// columns retain the caller's source order. Structurally absent entries remain
+/// columns retain the caller's source order. The order of the destinations a
+/// single source first reaches is deterministic for identical inputs but
+/// otherwise unspecified (it is neither HomSpace order nor stable across
+/// algorithm changes), so consumers must resolve destinations by key, never by
+/// position. Structurally absent entries remain
 /// distinct from present zero coefficients, and no destination row is wholly
 /// absent.
 #[doc(hidden)]

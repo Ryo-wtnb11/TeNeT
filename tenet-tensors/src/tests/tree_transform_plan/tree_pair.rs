@@ -1586,3 +1586,114 @@ fn tree_transform_execution_context_misses_on_different_tree_pair_operation() {
 
     assert_eq!(context.cache().structure_len(), 2);
 }
+
+// Regression (#1921): rank-5 SU(2) and Fibonacci transposes whose last
+// compact step is a bend emit destination rows in first-appearance order, not
+// HomSpace order. The compact plan must still replay to the same values as
+// the per-pair plan in one shared destination structure.
+// Why a macro, not a generic helper: the replay backend is selected per
+// concrete scalar, and the two fixtures use f64 and Complex64.
+macro_rules! assert_rank5_compact_transpose_replays_like_per_pair {
+    ($rule:expr, $scalar:ty, $sectors:expr) => {{
+        let rule = &$rule;
+        let sectors: &[SectorId] = &$sectors;
+        type T = $scalar;
+        let (codomain_permutation, domain_permutation) = ([4usize, 3, 2], [1usize, 0]);
+        let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, 1)), false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg(), leg()]),
+        );
+        let sources = hom.fusion_tree_keys(rule).to_vec();
+        let src_structure =
+            packed_fixture_structure(5, sources.iter().cloned().map(|key| (key, vec![2usize; 5])))
+                .unwrap();
+        let operation = TreeTransformOperation::transpose(codomain_permutation, domain_permutation);
+        let compact =
+            build_tree_pair_transform_group_plan(rule, operation.clone(), &src_structure).unwrap();
+        let per_pair = build_tree_transform_group_plan(rule, operation, &src_structure, |source| {
+            tenet_core::testing::multiplicity_free_transpose_tree_pair(
+                rule,
+                source,
+                &codomain_permutation,
+                &domain_permutation,
+            )
+            .map_err(OperationError::from_core_preserving_context)
+        })
+        .unwrap();
+
+        // One destination structure holding every destination either plan reaches.
+        let mut destinations = std::collections::BTreeSet::new();
+        for spec in compact.specs().iter().chain(per_pair.specs()) {
+            destinations.extend(spec.dst_keys().iter().cloned());
+        }
+        let dst_structure = packed_fixture_structure(
+            5,
+            destinations.into_iter().map(|key| (key, vec![2usize; 5])),
+        )
+        .unwrap();
+        let compact = compact
+            .compile_structures(&dst_structure, &src_structure)
+            .unwrap();
+        let per_pair = per_pair
+            .compile_structures(&dst_structure, &src_structure)
+            .unwrap();
+
+        let source_len = src_structure.required_len().unwrap();
+        let source_data = (0..source_len)
+            .map(|index| T::from(((index * 37 + 11) % 101) as f64 / 7.0 - 5.0))
+            .collect::<Vec<_>>();
+        let source = TensorMap::<T, 2, 3>::from_vec_with_structure(
+            source_data,
+            TensorMapSpace::<2, 3>::from_dims([1; 2], [1; 3]).unwrap(),
+            src_structure.clone(),
+        )
+        .unwrap();
+        let replay = |compiled: &tenet_operations::TreeTransformStructure<T>| {
+            let mut output = TensorMap::<T, 3, 2>::from_vec_with_structure(
+                vec![T::zero(); dst_structure.required_len().unwrap()],
+                TensorMapSpace::<3, 2>::from_dims([1; 3], [1; 2]).unwrap(),
+                dst_structure.clone(),
+            )
+            .unwrap();
+            tree_transform_execute_with(
+                &mut DenseTreeTransformOperations::default(),
+                &mut TreeTransformWorkspace::default(),
+                compiled,
+                &mut output,
+                &source,
+                T::one(),
+                T::zero(),
+            )
+            .unwrap();
+            output.data().to_vec()
+        };
+        let actual = replay(&compact);
+        let expected = replay(&per_pair);
+        assert_eq!(actual.len(), expected.len());
+        let mut nonzero = 0;
+        for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+            let (actual, expected) = (Complex64::from(actual), Complex64::from(expected));
+            nonzero += usize::from(expected.norm() > 1.0e-9);
+            assert!(
+                (actual - expected).norm() <= 1.0e-10 * (1.0 + expected.norm()),
+                "element {index}: compact {actual} vs per-pair {expected}"
+            );
+        }
+        assert!(nonzero > 0, "replay must exercise nonzero output");
+    }};
+}
+
+#[test]
+fn rank5_compact_transpose_with_trailing_bend_replays_like_per_pair() {
+    assert_rank5_compact_transpose_replays_like_per_pair!(
+        SU2FusionRule,
+        f64,
+        [SectorId::new(0), SectorId::new(1), SectorId::new(2)]
+    );
+    assert_rank5_compact_transpose_replays_like_per_pair!(
+        tenet_core::FibonacciFusionRule,
+        Complex64,
+        [SectorId::new(0), SectorId::new(1)]
+    );
+}

@@ -856,7 +856,7 @@ where
     // Why not materialize after each fold: the external frame is identical for
     // every local row and remains immutable until this ordered API boundary.
     #[cfg(test)]
-    assert_compact_tree_pair_basis_matches_homspace(rule, &basis);
+    assert_compact_tree_pair_basis_in_homspace(rule, &basis);
     Ok(CompactMultiplicityFreeTreePairBlock {
         basis,
         columns: columns.expect("nonidentity transpose executes at least one compact operator"),
