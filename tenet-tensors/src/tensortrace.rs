@@ -2210,6 +2210,9 @@ where
         + RecouplingCoefficientAction<C>
         + strided_kernel::MaybeSendSync,
 {
+    // Why: a public executor must not replay terms compiled for other spaces;
+    // the pointer-equality fast path keeps compiled-in-place callers free.
+    structure.validate_replay_structures(dst_space.structure(), src_space.structure())?;
     let descriptor = structure.descriptor();
     if descriptor.terms().len() != structure.terms().len() {
         return Err(OperationError::CoefficientCountMismatch {
@@ -2294,6 +2297,9 @@ where
         + RecouplingCoefficientAction<C>
         + strided_kernel::MaybeSendSync,
 {
+    // Why: a public executor must not replay terms compiled for other spaces;
+    // the pointer-equality fast path keeps compiled-in-place callers free.
+    structure.validate_replay_structures(dst_space.structure(), src_space.structure())?;
     validate_trace_data_extents(
         dst_space.structure(),
         dst_data.len(),
