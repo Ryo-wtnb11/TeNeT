@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
-    BraidingStyleKind, CheckedGenericRigidSymbols, CoreError, FusionStyleKind, FusionTreeHomSpace,
-    RuleIdentity, StructurallyValidatedFusionTreeSubset,
+    BraidingStyleKind, CheckedGenericRigidSymbols, CoreError, FusionTreeHomSpace, RuleIdentity,
+    StructurallyValidatedFusionTreeSubset,
 };
 #[cfg(test)]
 use tenet_operations::DenseTreeTransformOperations;
@@ -146,35 +146,6 @@ where
         output_rank,
         axis_plan,
     })
-}
-
-fn validate_contract_provider<'a, P>(
-    lhs_space: &'a BoundDynamicFusionMapSpace<P>,
-    rhs_space: &BoundDynamicFusionMapSpace<P>,
-) -> Result<&'a P, CheckedGenericPlanError<P::Error>>
-where
-    P: CheckedGenericRigidSymbols<Scalar = f64>,
-{
-    let provider = lhs_space.provider();
-    let lhs_identity = provider.rule_identity();
-    let rhs_identity = rhs_space.provider().rule_identity();
-    if lhs_identity != rhs_identity {
-        return Err(CoreError::FusionRuleMismatch {
-            expected: lhs_identity,
-            actual: rhs_identity,
-        }
-        .into());
-    }
-    for actual in [provider.fusion_style(), rhs_space.provider().fusion_style()] {
-        if actual != FusionStyleKind::Generic {
-            return Err(CoreError::UnsupportedFusionStyle {
-                expected: FusionStyleKind::Generic,
-                actual,
-            }
-            .into());
-        }
-    }
-    Ok(provider)
 }
 
 /// General-axis contraction may braid, twist, and (for fermions) insert the
@@ -408,7 +379,7 @@ where
         output_rank,
         axis_plan,
     } = validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, dst_nout)?;
-    let provider = validate_contract_provider(lhs_space, rhs_space)?;
+    let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
     require_bosonic_contract_braiding(lhs_space, rhs_space)?;
     let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
         provider,
@@ -483,7 +454,7 @@ where
         output_rank,
         axis_plan,
     } = validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, lhs_nout)?;
-    let provider = validate_contract_provider(lhs_space, rhs_space)?;
+    let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
     let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
         provider,
         lhs_space.space().homspace(),
@@ -618,7 +589,7 @@ where
         candidate_axes,
         dst_nout,
     )?;
-    let provider = validate_contract_provider(lhs_space, rhs_space)?;
+    let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
     require_bosonic_contract_braiding(lhs_space, rhs_space)?;
     let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
         provider,

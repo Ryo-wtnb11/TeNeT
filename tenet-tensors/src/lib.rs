@@ -10,6 +10,7 @@
 //! `tenet-core`.
 
 mod adjoint;
+mod admission;
 mod backend_trace;
 mod bound_tensor;
 mod cache;
@@ -92,6 +93,13 @@ pub use oriented_elementwise::{
 };
 // Stage B3a: Generic-fusion (outer-multiplicity) facade siblings.
 pub use adjoint::adjoint_bound_space_dyn_generic_checked;
+#[doc(hidden)]
+pub use admission::FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING;
+#[doc(hidden)]
+pub use admission::{
+    admit_checked_generic_pair, admit_checked_generic_providers, reject_non_symmetric_contraction,
+    require_symmetric_braiding, SymmetricBraidingOp, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED,
+};
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub use contract::{
@@ -150,8 +158,6 @@ pub use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisS
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub use tensortrace::tensortrace_fusion_structure_into_on_cuda;
-#[doc(hidden)]
-pub use tensortrace::FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING;
 #[cfg(test)]
 pub(crate) use tensortrace::{tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_owned};
 pub use tensortrace::{

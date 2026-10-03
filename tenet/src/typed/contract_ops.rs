@@ -1231,14 +1231,10 @@ where
                 // The dense arm's compile rejects these; a spectrum reduction
                 // must not answer where the categorical trace is undefined
                 // (TensorKit `trace_permute!` requires symmetric braiding).
-                if !self.provider().braiding_style().is_symmetric() {
-                    return Err(
-                        tenet_tensors::OperationError::UnsupportedTensorContractScope {
-                            message: tenet_tensors::FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING,
-                        }
-                        .into(),
-                    );
-                }
+                tenet_tensors::require_symmetric_braiding(
+                    self.provider().braiding_style(),
+                    tenet_tensors::SymmetricBraidingOp::Trace,
+                )?;
                 let traced_leg_is_dual: bool =
                     self.logical_space().space().homspace().codomain().legs()[0].is_dual();
                 let provider: &R = self.logical_space().provider();

@@ -4,7 +4,7 @@ use tenet_core::{
     merge_fusion_trees_generic_checked, merge_fusion_trees_multiplicity_free, BlockKey,
     CanonicalUnitFusionRule, CategoricalScalar, CheckedFusionAlgebra, CheckedFusionSpaceError,
     CheckedGenericFusion, CheckedGenericRigidSymbols, CheckedGenericStructureError,
-    CheckedGenericSymbolError, CoreError, FusionProductSpace, FusionStyleKind, FusionTreeHomSpace,
+    CheckedGenericSymbolError, CoreError, FusionProductSpace, FusionTreeHomSpace,
     FusionTreePairKey, FusionTreePairOrientation, MultiplicityFreeRigidSymbols, MultiplicityIndex,
     OrientedFusionTreeHomSpace, PreparedTreePairOperation, RuleIdentity,
 };
@@ -1124,25 +1124,7 @@ where
     R: CheckedGenericRigidSymbols<Scalar = f64>,
     D: ScalarOps,
 {
-    let rule = lhs_space.provider();
-    let lhs_identity = rule.rule_identity();
-    let rhs_identity = rhs_space.provider().rule_identity();
-    if lhs_identity != rhs_identity {
-        return Err(CoreError::FusionRuleMismatch {
-            expected: lhs_identity,
-            actual: rhs_identity,
-        }
-        .into());
-    }
-    for actual in [rule.fusion_style(), rhs_space.provider().fusion_style()] {
-        if actual != FusionStyleKind::Generic {
-            return Err(CoreError::UnsupportedFusionStyle {
-                expected: FusionStyleKind::Generic,
-                actual,
-            }
-            .into());
-        }
-    }
+    let rule = tenet_tensors::admit_checked_generic_pair(lhs_space, rhs_space)?;
 
     // Local storage validation is deliberately after identity/style rejection
     // and before any provider enumeration or symbol query.

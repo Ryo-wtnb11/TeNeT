@@ -264,17 +264,11 @@ where
             .expect("checked Generic binding is complete")
             .clone();
         let actual = provider.rule_identity();
-        if expected != actual {
-            return Err(CoreError::FusionRuleMismatch { expected, actual }.into());
-        }
-        let actual_style = provider.fusion_style();
-        if actual_style != FusionStyleKind::Generic {
-            return Err(CoreError::UnsupportedFusionStyle {
-                expected: FusionStyleKind::Generic,
-                actual: actual_style,
-            }
-            .into());
-        }
+        crate::admission::admit_checked_generic_providers(
+            &expected,
+            &actual,
+            [provider.fusion_style()],
+        )?;
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
         let structure = homspace
@@ -299,21 +293,12 @@ where
                 tensor: "checked Generic provider binding",
             });
         }
-        let expected = prepared.identity.clone();
-        let actual = self.provider.rule_identity();
-        if expected != actual {
-            return Err(OperationError::from_core_preserving_context(
-                CoreError::FusionRuleMismatch { expected, actual },
-            ));
-        }
-        if self.provider.fusion_style() != FusionStyleKind::Generic {
-            return Err(OperationError::from_core_preserving_context(
-                CoreError::UnsupportedFusionStyle {
-                    expected: FusionStyleKind::Generic,
-                    actual: self.provider.fusion_style(),
-                },
-            ));
-        }
+        crate::admission::admit_checked_generic_providers(
+            &prepared.identity,
+            &self.provider.rule_identity(),
+            [self.provider.fusion_style()],
+        )
+        .map_err(OperationError::from_core_preserving_context)?;
         Ok(Self {
             space: prepared.commit(),
             provider: Arc::clone(&self.provider),
@@ -751,20 +736,12 @@ where
     where
         P: CheckedGenericFusion,
     {
-        let expected = self.provider.rule_identity();
         let actual = provider.rule_identity();
-        if expected != actual {
-            return Err(CoreError::FusionRuleMismatch { expected, actual }.into());
-        }
-        for actual in [self.provider.fusion_style(), provider.fusion_style()] {
-            if actual != FusionStyleKind::Generic {
-                return Err(CoreError::UnsupportedFusionStyle {
-                    expected: FusionStyleKind::Generic,
-                    actual,
-                }
-                .into());
-            }
-        }
+        crate::admission::admit_checked_generic_providers(
+            &self.provider.rule_identity(),
+            &actual,
+            [self.provider.fusion_style(), provider.fusion_style()],
+        )?;
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
         let structure = homspace
@@ -784,14 +761,12 @@ where
         &self,
         prepared: PreparedCheckedGenericDynamicSpace,
     ) -> Result<Self, OperationError> {
-        let expected = prepared.identity.clone();
-        let actual = self.provider.rule_identity();
-        if expected != actual {
-            return Err(OperationError::from_core_preserving_context(
-                CoreError::FusionRuleMismatch { expected, actual },
-            ));
-        }
-        validate_generic_provider_style(self.provider.as_ref())?;
+        crate::admission::admit_checked_generic_providers(
+            &prepared.identity,
+            &self.provider.rule_identity(),
+            [self.provider.fusion_style()],
+        )
+        .map_err(OperationError::from_core_preserving_context)?;
         let space = prepared.commit();
         Self::from_derived_with_capability(Arc::clone(&self.provider), space, self.layout_build)
     }

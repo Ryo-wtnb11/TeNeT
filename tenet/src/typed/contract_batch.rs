@@ -83,9 +83,7 @@ where
         if rhs.signature.placement != placement {
             return Err(Error::PlacementMismatch);
         }
-        super::super::checked_generic_contract::reject_non_symmetric_contraction(
-            lhs.space.provider().braiding_style(),
-        )?;
+        tenet_tensors::reject_non_symmetric_contraction(lhs.space.provider().braiding_style())?;
         let _pool = lhs.runtime.enter_host_pool();
         let output_axes = spec.output_axes();
         let order = OutputAxisOrder::from_axes(&output_axes);
