@@ -1034,59 +1034,14 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                 let (permutation, artin_steps) = plan
                     .owned_braid_parts()
                     .expect("owned braid plan exposes its schedule");
-                let all_rank = self.source_codomain_rank + self.source_domain_rank;
-                let all_codomain =
-                    multiplicity_free_repartition_tree_pair_validated(validated, all_rank)?;
-                let braided = compose_tree_pair_terms(rule, all_codomain, |rule, key| {
-                    execute_multiplicity_free_tree_braid(
-                        rule,
-                        key.codomain_tree(),
-                        permutation,
-                        artin_steps,
-                    )
-                    .map(|terms| {
-                        terms
-                            .into_iter()
-                            .map(|(codomain_tree, coefficient)| {
-                                (
-                                    FusionTreePairKey::pair(
-                                        codomain_tree,
-                                        key.domain_tree().clone(),
-                                    ),
-                                    coefficient,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })?;
-                multiplicity_free_repartition_terms(rule, braided, self.target_codomain_rank)
+                self.multiplicity_free_braid_via_codomain(validated, |rule, codomain| {
+                    execute_multiplicity_free_tree_braid(rule, codomain, permutation, artin_steps)
+                })
             }
             PreparedTreePairPlan::UniqueBraid(braid) => {
-                let all_rank = self.source_codomain_rank + self.source_domain_rank;
-                let all_codomain =
-                    multiplicity_free_repartition_tree_pair_validated(validated, all_rank)?;
-                let braided = compose_tree_pair_terms(rule, all_codomain, |rule, key| {
-                    execute_multiplicity_free_tree_braid_steps(
-                        rule,
-                        key.codomain_tree(),
-                        braid.artin_steps(),
-                    )
-                    .map(|terms| {
-                        terms
-                            .into_iter()
-                            .map(|(codomain_tree, coefficient)| {
-                                (
-                                    FusionTreePairKey::pair(
-                                        codomain_tree,
-                                        key.domain_tree().clone(),
-                                    ),
-                                    coefficient,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })?;
-                multiplicity_free_repartition_terms(rule, braided, self.target_codomain_rank)
+                self.multiplicity_free_braid_via_codomain(validated, |rule, codomain| {
+                    execute_multiplicity_free_tree_braid_steps(rule, codomain, braid.artin_steps())
+                })
             }
             PreparedTreePairPlan::Transpose { direction, count } => {
                 let mut current = multiplicity_free_repartition_tree_pair_validated(
@@ -1156,6 +1111,68 @@ impl<'operation> PreparedTreePairOperation<'operation> {
         self.execute_unique_rigid_validated(validated)
     }
 
+    /// Braid as TensorKit `braid((f₁, f₂), p, levels)` does
+    /// (`braiding_manipulations.jl:281`): repartition every leg into the
+    /// codomain, braid that tree, and repartition to the target split.
+    fn multiplicity_free_braid_via_codomain<R, F>(
+        &self,
+        validated: ValidatedFusionTreePair<'_, R>,
+        braid_codomain: F,
+    ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+        F: Fn(&R, &FusionTreeKey) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>,
+    {
+        let rule = validated.rule;
+        let all_rank = self.source_codomain_rank + self.source_domain_rank;
+        let all_codomain = multiplicity_free_repartition_tree_pair_validated(validated, all_rank)?;
+        let braided = compose_tree_pair_terms(rule, all_codomain, |rule, key| {
+            braid_codomain(rule, key.codomain_tree()).map(|terms| {
+                terms
+                    .into_iter()
+                    .map(|(codomain_tree, coefficient)| {
+                        (
+                            FusionTreePairKey::pair(codomain_tree, key.domain_tree().clone()),
+                            coefficient,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })?;
+        multiplicity_free_repartition_terms(rule, braided, self.target_codomain_rank)
+    }
+
+    /// Unique-fusion form of [`Self::multiplicity_free_braid_via_codomain`]:
+    /// every step has exactly one output, so coefficients multiply directly.
+    fn unique_rigid_braid_via_codomain<R, F>(
+        &self,
+        validated: ValidatedFusionTreePair<'_, R>,
+        braid_codomain: F,
+    ) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Mul<Output = R::Scalar>,
+        F: FnOnce(&R, &FusionTreeKey) -> Result<(FusionTreeKey, R::Scalar), CoreError>,
+    {
+        let rule = validated.rule;
+        let all_rank = self.source_codomain_rank + self.source_domain_rank;
+        let (all_codomain, repartition_to_all) =
+            unique_rigid_repartition_tree_pair_validated(validated, all_rank)?;
+        let (braided_tree, braid_coefficient) = braid_codomain(rule, all_codomain.codomain_tree())?;
+        let braided_pair =
+            FusionTreePairKey::pair(braided_tree, all_codomain.domain_tree().clone());
+        let (destination, repartition_back) = unique_rigid_repartition_tree_pair_unchecked(
+            rule,
+            &braided_pair,
+            self.target_codomain_rank,
+        )?;
+        Ok((
+            destination,
+            repartition_to_all * braid_coefficient * repartition_back,
+        ))
+    }
+
     fn execute_unique_rigid_validated<R>(
         &self,
         validated: ValidatedFusionTreePair<'_, R>,
@@ -1174,45 +1191,14 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                 let (permutation, artin_steps) = plan
                     .owned_braid_parts()
                     .expect("owned braid plan exposes its schedule");
-                let all_rank = self.source_codomain_rank + self.source_domain_rank;
-                let (all_codomain, repartition_to_all) =
-                    unique_rigid_repartition_tree_pair_validated(validated, all_rank)?;
-                let (braided_tree, braid_coefficient) = execute_unique_tree_braid(
-                    rule,
-                    all_codomain.codomain_tree(),
-                    permutation,
-                    artin_steps,
-                )?;
-                let braided_pair =
-                    FusionTreePairKey::pair(braided_tree, all_codomain.domain_tree().clone());
-                let (destination, repartition_back) = unique_rigid_repartition_tree_pair_unchecked(
-                    rule,
-                    &braided_pair,
-                    self.target_codomain_rank,
-                )?;
-                Ok((
-                    destination,
-                    repartition_to_all * braid_coefficient * repartition_back,
-                ))
+                self.unique_rigid_braid_via_codomain(validated, |rule, codomain| {
+                    execute_unique_tree_braid(rule, codomain, permutation, artin_steps)
+                })
             }
-            PreparedTreePairPlan::UniqueBraid(braid) => {
-                let all_rank = self.source_codomain_rank + self.source_domain_rank;
-                let (all_codomain, repartition_to_all) =
-                    unique_rigid_repartition_tree_pair_validated(validated, all_rank)?;
-                let (braided_tree, braid_coefficient) =
-                    execute_unique_tree_braid_borrowed(rule, all_codomain.codomain_tree(), braid)?;
-                let braided_pair =
-                    FusionTreePairKey::pair(braided_tree, all_codomain.domain_tree().clone());
-                let (destination, repartition_back) = unique_rigid_repartition_tree_pair_unchecked(
-                    rule,
-                    &braided_pair,
-                    self.target_codomain_rank,
-                )?;
-                Ok((
-                    destination,
-                    repartition_to_all * braid_coefficient * repartition_back,
-                ))
-            }
+            PreparedTreePairPlan::UniqueBraid(braid) => self
+                .unique_rigid_braid_via_codomain(validated, |rule, codomain| {
+                    execute_unique_tree_braid_borrowed(rule, codomain, braid)
+                }),
             PreparedTreePairPlan::Transpose { direction, count } => {
                 let mut current = unique_rigid_repartition_tree_pair_validated(
                     validated,

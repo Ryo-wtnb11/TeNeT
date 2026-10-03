@@ -216,23 +216,11 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let rule = tree_pair.rule;
-    let tree_pair = tree_pair.key;
-    let mut current = vec![(tree_pair.clone(), R::Scalar::one())];
-    let mut current_codomain_rank = tree_pair.codomain_tree().uncoupled().len();
-    while current_codomain_rank < target_codomain_rank {
-        current = compose_tree_pair_terms(rule, current, |rule, key| {
-            multiplicity_free_bendleft_tree_pair(rule, key)
-        })?;
-        current_codomain_rank += 1;
-    }
-    while current_codomain_rank > target_codomain_rank {
-        current = compose_tree_pair_terms(rule, current, |rule, key| {
-            multiplicity_free_bendright_tree_pair(rule, key)
-        })?;
-        current_codomain_rank -= 1;
-    }
-    Ok(current)
+    multiplicity_free_repartition_terms(
+        tree_pair.rule,
+        vec![(tree_pair.key.clone(), R::Scalar::one())],
+        target_codomain_rank,
+    )
 }
 
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s

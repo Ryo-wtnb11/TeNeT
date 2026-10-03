@@ -17,44 +17,8 @@ where
             rank,
         });
     }
-    // Why not rebuild every Unique key directly: TeNeT's public checked
-    // constructor still accepts noncanonical innerline data, whose legacy
-    // Artin behavior must not be silently normalized into a different key.
-    if rule.braiding_style().is_symmetric()
-        && rule.has_trivial_associator_gauge()
-        && is_unique_direct_braid_source(rule, tree)
-    {
-        let mut coefficient = R::Scalar::one();
-        for right_position in 0..rank {
-            for left_position in 0..right_position {
-                let left_axis = permutation[left_position];
-                let right_axis = permutation[right_position];
-                if left_axis > right_axis {
-                    let left = tree.uncoupled()[left_axis];
-                    let right = tree.uncoupled()[right_axis];
-                    // TensorKit treats a unit crossing as structural identity.
-                    // Why not ask the provider for R(unit, a): providers are
-                    // permitted to omit identity symbols and the Artin path
-                    // already skips them.
-                    if left == rule.vacuum() || right == rule.vacuum() {
-                        continue;
-                    }
-                    let coupled = only_fusion_channel(rule, left, right)?;
-                    coefficient = coefficient * rule.r_symbol_scalar(left, right, coupled);
-                }
-            }
-        }
-        let uncoupled = permutation
-            .iter()
-            .map(|&axis| tree.uncoupled()[axis])
-            .collect::<SmallVec<[SectorId; 8]>>();
-        let is_dual = permutation
-            .iter()
-            .map(|&axis| tree.is_dual()[axis])
-            .collect::<SmallVec<[bool; 8]>>();
-        let coupled = tree.coupled();
-        let destination = rebuild_unique_standard_fusion_tree(rule, &uncoupled, coupled, &is_dual)?;
-        return Ok((destination, coefficient));
+    if let Some(direct) = unique_direct_braid(rule, tree, |position| permutation[position])? {
+        return Ok(direct);
     }
 
     execute_unique_tree_braid_steps(rule, tree, artin_steps.iter().copied())
@@ -78,38 +42,71 @@ where
             rank,
         });
     }
-    if rule.braiding_style().is_symmetric()
-        && rule.has_trivial_associator_gauge()
-        && is_unique_direct_braid_source(rule, tree)
+    if let Some(direct) =
+        unique_direct_braid(rule, tree, |position| braid.permutation_at(position))?
     {
-        let mut coefficient = R::Scalar::one();
-        for right_position in 0..rank {
-            for left_position in 0..right_position {
-                let left_axis = braid.permutation_at(left_position);
-                let right_axis = braid.permutation_at(right_position);
-                if left_axis > right_axis {
-                    let left = tree.uncoupled()[left_axis];
-                    let right = tree.uncoupled()[right_axis];
-                    if left == rule.vacuum() || right == rule.vacuum() {
-                        continue;
-                    }
-                    let coupled = only_fusion_channel(rule, left, right)?;
-                    coefficient = coefficient * rule.r_symbol_scalar(left, right, coupled);
-                }
-            }
-        }
-        let uncoupled = (0..rank)
-            .map(|position| tree.uncoupled()[braid.permutation_at(position)])
-            .collect::<SmallVec<[SectorId; 8]>>();
-        let is_dual = (0..rank)
-            .map(|position| tree.is_dual()[braid.permutation_at(position)])
-            .collect::<SmallVec<[bool; 8]>>();
-        let destination =
-            rebuild_unique_standard_fusion_tree(rule, &uncoupled, tree.coupled(), &is_dual)?;
-        return Ok((destination, coefficient));
+        return Ok(direct);
     }
 
     execute_unique_tree_braid_steps(rule, tree, braid.artin_steps())
+}
+
+/// Symmetric-braiding unique-fusion braid in one step: TensorKit
+/// `braid(f::FusionTree, p, levels)` `SymmetricBraiding` branch
+/// (`braiding_manipulations.jl:217-234`), the product of `R(a, b, a ⊗ b)`
+/// over every inverted pair, then the canonical tree of the permuted legs.
+/// `None` when the source does not satisfy the direct-path invariants.
+///
+/// `permutation(position)` is the source axis at output `position`, for
+/// every position below the tree rank (validated by the caller).
+fn unique_direct_braid<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    permutation: impl Fn(usize) -> usize,
+) -> Result<Option<(FusionTreeKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    // Why not rebuild every Unique key directly: TeNeT's public checked
+    // constructor still accepts noncanonical innerline data, whose legacy
+    // Artin behavior must not be silently normalized into a different key.
+    if !(rule.braiding_style().is_symmetric()
+        && rule.has_trivial_associator_gauge()
+        && is_unique_direct_braid_source(rule, tree))
+    {
+        return Ok(None);
+    }
+    let rank = tree.uncoupled().len();
+    let mut coefficient = R::Scalar::one();
+    for right_position in 0..rank {
+        for left_position in 0..right_position {
+            let left_axis = permutation(left_position);
+            let right_axis = permutation(right_position);
+            if left_axis > right_axis {
+                let left = tree.uncoupled()[left_axis];
+                let right = tree.uncoupled()[right_axis];
+                // TensorKit treats a unit crossing as structural identity.
+                // Why not ask the provider for R(unit, a): providers are
+                // permitted to omit identity symbols and the Artin path
+                // already skips them.
+                if left == rule.vacuum() || right == rule.vacuum() {
+                    continue;
+                }
+                let coupled = only_fusion_channel(rule, left, right)?;
+                coefficient = coefficient * rule.r_symbol_scalar(left, right, coupled);
+            }
+        }
+    }
+    let uncoupled = (0..rank)
+        .map(|position| tree.uncoupled()[permutation(position)])
+        .collect::<SmallVec<[SectorId; 8]>>();
+    let is_dual = (0..rank)
+        .map(|position| tree.is_dual()[permutation(position)])
+        .collect::<SmallVec<[bool; 8]>>();
+    let destination =
+        rebuild_unique_standard_fusion_tree(rule, &uncoupled, tree.coupled(), &is_dual)?;
+    Ok(Some((destination, coefficient)))
 }
 
 pub(crate) fn execute_unique_tree_braid_steps<R, I>(
