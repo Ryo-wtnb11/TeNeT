@@ -222,6 +222,28 @@ impl<T> TreeTransformCoefficients<T> {
     }
 }
 
+/// Every layout of one transform block, from `dst_layout_start` to the table
+/// end, must share the first destination's (source-permuted) shape. Replay
+/// packs each source and scatters each destination in its own shape order,
+/// so equal element counts alone would silently reshape a `[2, 2]` source
+/// into a `[4, 1]` destination (#1739).
+fn validate_uniform_layout_shapes(
+    layouts: &TreeTransformLayoutTable,
+    dst_layout_start: usize,
+) -> Result<(), OperationError> {
+    let expected = layouts.shape(layouts.entry(dst_layout_start));
+    for index in dst_layout_start + 1..layouts.entry_count() {
+        let shape = layouts.shape(layouts.entry(index));
+        if shape != expected {
+            return Err(OperationError::ShapeMismatch {
+                dst: expected.to_vec(),
+                src: shape.to_vec(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Whether a binding's spec has no same-length entry in the shared payload it
 /// was given; the payload is built from the same specs, so this is a
 /// structural check, not a value comparison.
@@ -794,16 +816,9 @@ impl<T: Copy> TreeTransformStructure<T> {
                 }
             }
             let element_count = element_count.expect("validated non-empty block");
+            validate_uniform_layout_shapes(&layouts, dst_layout_start)?;
 
             if src_count == 1 && dst_count == 1 {
-                let dst_layout = layouts.entry(dst_layout_start);
-                let src_layout = layouts.entry(src_layout_start);
-                if layouts.shape(dst_layout) != layouts.shape(src_layout) {
-                    return Err(OperationError::ShapeMismatch {
-                        dst: layouts.shape(dst_layout).to_vec(),
-                        src: layouts.shape(src_layout).to_vec(),
-                    });
-                }
                 if shared_coefficient_mismatch(
                     shared.singles.get(single_end..=single_end),
                     spec_coefficients,
