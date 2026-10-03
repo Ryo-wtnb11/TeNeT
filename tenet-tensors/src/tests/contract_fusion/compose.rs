@@ -12,7 +12,7 @@ pub(super) fn z2_matrix_space_with_homspace(
     homspace: FusionTreeHomSpace,
     block_shape: Vec<usize>,
 ) -> FusionTensorMapSpace<1, 1> {
-    FusionTensorMapSpace::from_degeneracy_shapes(
+    FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace,
         &Z2FusionRule,
@@ -33,7 +33,7 @@ pub(super) fn fermion_parity_matrix_space_with_homspace(
     homspace: FusionTreeHomSpace,
     block_shape: Vec<usize>,
 ) -> FusionTensorMapSpace<1, 1> {
-    FusionTensorMapSpace::from_degeneracy_shapes(
+    FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace,
         &FermionParityFusionRule,
@@ -267,7 +267,7 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     let rule = FermionParityFusionRule;
     let odd = SectorId::new(1);
     let typed_space = |codomain_dual: bool, domain_dual: bool| {
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([SectorLeg::new([(odd, 1)], codomain_dual)]),

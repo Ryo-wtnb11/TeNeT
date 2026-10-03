@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn linearize_tree_pair_permutation(
+pub(crate) fn linearize_tree_pair_permutation(
     codomain_permutation: &[usize],
     domain_permutation: &[usize],
     codomain_rank: usize,

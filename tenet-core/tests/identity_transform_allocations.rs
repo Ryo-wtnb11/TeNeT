@@ -2,15 +2,17 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
 
-use tenet_core::{
+use tenet_core::testing::{
     multiplicity_free_braid_tree_block, multiplicity_free_permute_tree_pair_block,
-    multiplicity_free_permute_tree_pair_block_indexed, unique_permute_tree, BlockKey, BlockSpec,
-    BlockStructure, BraidingStyleKind, FermionParityFusionRule, FusionProductSpace, FusionRule,
-    FusionStyleKind, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
-    FusionTreePairOrientation, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, MultiplicityIndex, PreparedTreePairOperation, RuleIdentity,
-    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, Z2FusionRule,
-    Z2Irrep,
+    unique_permute_tree,
+};
+use tenet_core::{
+    multiplicity_free_permute_tree_pair_block_indexed, BlockKey, BlockSpec, BlockStructure,
+    BraidingStyleKind, FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind,
+    FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, FusionTreePairOrientation,
+    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+    MultiplicityIndex, PreparedTreePairOperation, RuleIdentity, SU2FusionRule, SU2Irrep, SectorId,
+    SectorLeg, SectorStructure, SectorVec, Z2FusionRule, Z2Irrep,
 };
 
 struct CountingAllocator;

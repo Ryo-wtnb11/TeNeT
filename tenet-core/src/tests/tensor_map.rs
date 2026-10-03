@@ -146,7 +146,7 @@ fn product_subblock_by_sectors_handles_simple_fusion_channels_without_manual_tre
         ]),
         FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
     );
-    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         dense,
         hom,
         &rule,
@@ -182,9 +182,13 @@ fn tensormap_subblock_by_sectors_matches_z2_unique() {
             false,
         )]),
     );
-    let fusion_space =
-        FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, [vec![1, 1], vec![1, 1]])
-            .unwrap();
+    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        dense,
+        hom,
+        &rule,
+        [vec![1, 1], vec![1, 1]],
+    )
+    .unwrap();
     let tensor =
         TensorMap::<i32, 1, 1>::from_vec_with_fusion_space(vec![10, 20], fusion_space).unwrap();
 
@@ -205,7 +209,8 @@ fn tensormap_subblock_by_sectors_dualizes_z4_domain_sector() {
         FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], false)]),
     );
     let fusion_space =
-        FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, [vec![1, 1]]).unwrap();
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, hom, &rule, [vec![1, 1]])
+            .unwrap();
     let tensor =
         TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![3.5], fusion_space).unwrap();
 
@@ -223,7 +228,8 @@ fn tensormap_subblock_by_sectors_handles_fermionic_z2_key() {
     let dense = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
     let hom = FusionTreeHomSpace::from_sector_ids([(1, 1)], [(1, 1)]);
     let fusion_space =
-        FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, [vec![1, 1]]).unwrap();
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, hom, &rule, [vec![1, 1]])
+            .unwrap();
     let mut tensor =
         TensorMap::<i32, 1, 1>::from_vec_with_fusion_space(vec![7], fusion_space).unwrap();
 
@@ -249,7 +255,8 @@ fn tensormap_subblock_by_sectors_handles_product_pointed_rule() {
         FusionProductSpace::new([SectorLeg::new([(domain_tree_sector, 1)], false)]),
     );
     let fusion_space =
-        FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, [vec![1, 1]]).unwrap();
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, hom, &rule, [vec![1, 1]])
+            .unwrap();
     let tensor =
         TensorMap::<i32, 1, 1>::from_vec_with_fusion_space(vec![42], fusion_space).unwrap();
 

@@ -1526,7 +1526,7 @@ fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() 
         .unwrap(),
         FusionTreeKey::try_new_for_rule(&SU2FusionRule, [one], one, [true], [], []).unwrap(),
     );
-    let su2_rows = tenet_core::multiplicity_free_transpose_tree_pair(
+    let su2_rows = tenet_core::testing::multiplicity_free_transpose_tree_pair(
         &SU2FusionRule,
         &su2_source,
         &[0, 1],

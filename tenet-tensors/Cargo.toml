@@ -40,4 +40,6 @@ num-complex = "0.4"
 smallvec = { version = "1", features = ["const_generics", "union"] }
 
 [dev-dependencies]
+# Plan tests compare against tenet-core's one-shot tree-pair oracles (#1805).
+tenet-core = { version = "0.1.1", path = "../tenet-core", features = ["testing"] }
 tenet-sectors = { version = "0.1.1", path = "../tenet-sectors" }

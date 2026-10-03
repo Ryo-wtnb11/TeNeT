@@ -63,14 +63,14 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
             .try_bind_rule(&rule)
             .unwrap()
     };
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
         rhs_hom,
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
         dst_hom,
         &rule,
@@ -147,14 +147,14 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
     let rule = SU2FusionRule;
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2), (1, 2), (1, 2)], [(1, 2)]);
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2)], [(1, 2), (1, 2), (1, 2)]);
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
         lhs_hom.clone(),
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
         rhs_hom.clone(),
         &rule,
@@ -190,7 +190,7 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
             1,
         )
         .unwrap();
-        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
             dst_hom,
             &rule,
@@ -256,14 +256,14 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
             lhs_conjugate,
             rhs_conjugate,
         );
-        let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
             lhs_hom.clone(),
             &rule,
             [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
         )
         .unwrap();
-        let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
             rhs_hom.clone(),
             &rule,
@@ -296,7 +296,7 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
             1,
         )
         .unwrap();
-        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
             dst_hom,
             &rule,

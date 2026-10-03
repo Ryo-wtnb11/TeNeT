@@ -1,7 +1,7 @@
 use num_complex::{Complex32, Complex64};
 
 use crate::layout::validate_dense_layout;
-use crate::{DenseDType, DenseError, DensePlacement};
+use crate::{DenseDType, DenseError};
 
 #[derive(Debug)]
 pub struct DenseView<'a, T> {
@@ -74,11 +74,6 @@ impl<'a, T> DenseView<'a, T> {
     pub fn offset(&self) -> usize {
         self.offset
     }
-
-    #[inline]
-    pub fn placement(&self) -> DensePlacement {
-        DensePlacement::Host
-    }
 }
 
 #[derive(Debug)]
@@ -146,11 +141,6 @@ impl<'a, T> DenseViewMut<'a, T> {
     pub fn offset(&self) -> usize {
         self.offset
     }
-
-    #[inline]
-    pub fn placement(&self) -> DensePlacement {
-        DensePlacement::Host
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -188,18 +178,6 @@ impl DenseRead<'_> {
             Self::C64(view) => view.shape(),
         }
     }
-
-    pub fn placement(&self) -> DensePlacement {
-        match self {
-            Self::F32(view) => view.placement(),
-            Self::F64(view) => view.placement(),
-            Self::I32(view) => view.placement(),
-            Self::I64(view) => view.placement(),
-            Self::Bool(view) => view.placement(),
-            Self::C32(view) => view.placement(),
-            Self::C64(view) => view.placement(),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -235,18 +213,6 @@ impl DenseWrite<'_> {
             Self::Bool(view) => view.shape(),
             Self::C32(view) => view.shape(),
             Self::C64(view) => view.shape(),
-        }
-    }
-
-    pub fn placement(&self) -> DensePlacement {
-        match self {
-            Self::F32(view) => view.placement(),
-            Self::F64(view) => view.placement(),
-            Self::I32(view) => view.placement(),
-            Self::I64(view) => view.placement(),
-            Self::Bool(view) => view.placement(),
-            Self::C32(view) => view.placement(),
-            Self::C64(view) => view.placement(),
         }
     }
 }

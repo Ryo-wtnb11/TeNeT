@@ -1,7 +1,7 @@
 # tenet-dense
 
 Expert dense-backend boundary. Symmetric layers use `DenseExecutor`,
-`DenseView`, `DenseViewMut`, `DenseTensor`, `DensePlacement`, and `DenseError`
+`DenseView`, `DenseViewMut`, `DenseTensor`, and `DenseError`
 without depending on a concrete kernel provider. Ordinary applications choose
 their backend through `tenet::typed::RuntimeBuilder` instead.
 

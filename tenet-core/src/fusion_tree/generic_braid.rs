@@ -338,7 +338,8 @@ pub(super) fn mu_index(tree: &FusionTreeKey, vertex_index: usize) -> Result<usiz
 // dead-code warning before Stage B2's recouple wrapper consumes them.
 /// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
 /// precondition.
-pub fn generic_braid_tree<R>(
+#[cfg(test)]
+pub(crate) fn generic_braid_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
     permutation: &[usize],
@@ -366,6 +367,7 @@ where
     generic_braid_tree_validated(validated, permutation, levels, &swaps)
 }
 
+#[cfg(test)]
 fn generic_braid_tree_validated<R>(
     tree: ValidatedFusionTree<'_, R>,
     permutation: &[usize],

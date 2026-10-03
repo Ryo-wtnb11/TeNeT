@@ -4,21 +4,21 @@ use super::*;
 fn tensorcontract_fusion_block_specs_enumerates_su2_innerline_blocks_from_homspace() {
     let rule = SU2FusionRule;
     let half = SectorId::new(1);
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<3, 1>::from_dims([1, 1, 1], [1]).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1)], [(1, 1)]),
         &rule,
         [vec![1, 1, 1, 1], vec![1, 1, 1, 1]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(1, 1)], [(1, 1)]),
         &rule,
         [vec![1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<3, 1>::from_dims([1, 1, 1], [1]).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1)], [(1, 1)]),
         &rule,
@@ -56,7 +56,7 @@ fn tensorcontract_fusion_block_specs_enumerates_su2_innerline_blocks_from_homspa
 fn tensorcontract_fusion_block_specs_rejects_missing_destination_subblock() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg()]),
@@ -66,7 +66,7 @@ fn tensorcontract_fusion_block_specs_rejects_missing_destination_subblock() {
         [vec![1, 1], vec![1, 1]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg()]),
@@ -112,7 +112,7 @@ fn tensorcontract_fusion_block_specs_rejects_missing_destination_subblock() {
 fn tensorcontract_fusion_block_specs_rejects_source_tree_transform_terms() {
     let rule = Z2FusionRule;
     let leg = |is_dual| SectorLeg::new([(SectorId::new(0), 1)], is_dual);
-    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg(false)]),
@@ -122,7 +122,7 @@ fn tensorcontract_fusion_block_specs_rejects_source_tree_transform_terms() {
         [vec![1, 1]],
     )
     .unwrap();
-    let transformed_dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let transformed_dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg(true)]),
@@ -168,7 +168,7 @@ fn tensorcontract_fusion_block_specs_rejects_source_tree_transform_terms() {
 fn tensorcontract_fusion_into_absorbs_source_tree_transform_terms() {
     let rule = Z2FusionRule;
     let leg = |is_dual| SectorLeg::new([(SectorId::new(0), 1)], is_dual);
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg(false)]),
@@ -178,7 +178,7 @@ fn tensorcontract_fusion_into_absorbs_source_tree_transform_terms() {
         [vec![1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg(true)]),
@@ -323,7 +323,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([], []),
         &rule,
@@ -782,35 +782,35 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     )
     .unwrap();
 
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
         lhs_hom,
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
         rhs_hom,
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
         lhs_core_hom,
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
         rhs_core_hom,
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
         dst_hom,
         &rule,

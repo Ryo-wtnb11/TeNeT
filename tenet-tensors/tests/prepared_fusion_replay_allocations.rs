@@ -82,7 +82,7 @@ where
     };
     let space = |hom: FusionTreeHomSpace| {
         let key_count = hom.fusion_tree_keys(rule).len();
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<2, 2>::from_dims(
                 [sectors.len(), sectors.len()],
                 [sectors.len(), sectors.len()],

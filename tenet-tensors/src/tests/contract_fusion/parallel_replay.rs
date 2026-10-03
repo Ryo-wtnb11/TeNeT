@@ -24,7 +24,7 @@ fn tensorcontract_fusion_parallel_transform_replay_matches_serial() {
             let dense =
                 TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap();
             let shapes = vec![vec![degeneracy; 4]; key_count];
-            FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, rule, shapes).unwrap()
+            FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, hom, rule, shapes).unwrap()
         };
 
         let lhs_space = space(homspace());
@@ -146,7 +146,7 @@ fn tensorcontract_fusion_parallel_replay_keeps_fermion_twist_reference() {
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
     let space = |codomain_dual: bool, domain_dual: bool| {
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 2)], codomain_dual)]),

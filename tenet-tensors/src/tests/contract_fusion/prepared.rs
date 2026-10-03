@@ -5,7 +5,7 @@ fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
     let fusion_space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([leg()]),
@@ -116,7 +116,7 @@ fn prepared_tensorcontract_fusion_pins_exact_space_allocations() {
     let rule = Z2FusionRule;
     let fusion_space = || {
         let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([leg()]),

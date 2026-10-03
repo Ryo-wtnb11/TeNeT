@@ -69,7 +69,7 @@ where
         FusionProductSpace::new([leg(), leg()]),
     );
     let key_count = homspace.fusion_tree_keys(rule).len();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
         homspace,
         rule,

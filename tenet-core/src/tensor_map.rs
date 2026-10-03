@@ -82,7 +82,7 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
     /// };
     ///
     /// let rule = Z2FusionRule;
-    /// let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    /// let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
     ///     TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
     ///     FusionTreeHomSpace::from_sectors([(Z2Irrep::EVEN, 1)], [(Z2Irrep::EVEN, 1)]),
     ///     &rule,
@@ -126,7 +126,7 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
     /// };
     ///
     /// let rule = Z2FusionRule;
-    /// let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    /// let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
     ///     TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
     ///     FusionTreeHomSpace::from_sectors([(Z2Irrep::EVEN, 1)], [(Z2Irrep::EVEN, 1)]),
     ///     &rule,
@@ -234,7 +234,7 @@ where
     /// };
     ///
     /// let rule = Z2FusionRule;
-    /// let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    /// let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
     ///     TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
     ///     FusionTreeHomSpace::from_sectors([(Z2Irrep::EVEN, 1)], [(Z2Irrep::EVEN, 1)]),
     ///     &rule,

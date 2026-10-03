@@ -35,8 +35,8 @@ pub use tenet_dense::{
 pub use tenet_dense::{
     CpuBackendKind, DefaultDenseExecutor, DenseBackend, DenseDType, DenseDotConfig, DenseError,
     DenseExecutor, DenseFactorization, DenseGemmBatchJob, DenseLinalgScopeBody, DenseOwned,
-    DensePlacement, DenseRead, DenseScalar, DenseTensor, DenseView, DenseViewMut, DenseWrite,
-    MatrixOp, SharedCpuContext,
+    DenseRead, DenseScalar, DenseTensor, DenseView, DenseViewMut, DenseWrite, MatrixOp,
+    SharedCpuContext,
 };
 /// The device context a CUDA runtime dereferences to, and the device buffer
 /// inside a `CudaStorage`.

@@ -435,7 +435,7 @@ impl DynamicFusionMapSpace {
     /// space plus one caller-supplied degeneracy shape per fusion-tree key (in
     /// [`FusionTreeHomSpace::fusion_tree_keys`] order). The storage layout is
     /// the TensorKit-equivalent coupled-sector matrix layout, identical to
-    /// [`FusionTensorMapSpace::from_degeneracy_shapes`]. Ordinary operation
+    /// [`FusionTensorMapSpace::from_degeneracy_shapes_coupled`]. Ordinary operation
     /// outputs derive the layout from their final hom space instead.
     pub fn from_degeneracy_shapes<R, Shapes>(
         rule: &R,

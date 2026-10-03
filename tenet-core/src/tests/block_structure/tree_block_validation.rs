@@ -96,7 +96,7 @@ fn coupled_layout_embeds_subblocks_into_sector_matrices() {
         .iter()
         .map(|_| vec![2usize, 3, 2, 3])
         .collect::<Vec<_>>();
-    let packed = FusionTensorMapSpace::<2, 2>::from_degeneracy_shapes(
+    let packed = FusionTensorMapSpace::<2, 2>::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 2>::from_dims([10, 10], [10, 10]).unwrap(),
         homspace.clone(),
         &rule,

@@ -462,7 +462,6 @@ const EXPERT: &[&str] = &[
     "DenseGemmBatchJob",
     "DenseLinalgScopeBody",
     "DenseOwned",
-    "DensePlacement",
     "DenseRead",
     "DenseScalar",
     "DenseTensor",

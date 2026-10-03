@@ -4,10 +4,10 @@ use std::sync::{
     Arc,
 };
 
+use tenet_core::testing::{generic_braid_tree_pair, generic_permute_tree_pair};
 use tenet_core::{
-    generic_braid_tree_pair, generic_permute_tree_pair, generic_transpose_tree_pair,
-    CheckedGenericFusion, CheckedGenericRigidSymbols, GenericFArray, GenericFusionSymbols,
-    GenericRMatrix, GenericRigidSymbols,
+    generic_transpose_tree_pair, CheckedGenericFusion, CheckedGenericRigidSymbols, GenericFArray,
+    GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols,
 };
 
 /// Test view of the logical coefficient payload (an explicit copy).

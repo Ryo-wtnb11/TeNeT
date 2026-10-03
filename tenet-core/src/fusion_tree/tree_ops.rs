@@ -2,17 +2,10 @@ use super::*;
 
 /// Exact single-tree permutation lowering for a unique fusion rule.
 ///
-/// Why this one stays public while its siblings are crate-internal: the
-/// zero-allocation contract of the direct unique path is pinned from another
-/// crate (`tenet-core/tests/identity_transform_allocations.rs`), and the
-/// multiplicity-free entry point cannot stand in for it there — it returns a
-/// `Vec`, so the measurement it exists to make would measure the container.
-/// Ordinary callers use the multiplicity-free operation APIs.
-///
 /// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
 /// precondition.
-#[doc(hidden)]
-pub fn unique_permute_tree<R>(
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn unique_permute_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
     permutation: &[usize],
@@ -45,7 +38,8 @@ where
 
 /// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
 /// precondition.
-pub fn multiplicity_free_braid_tree<R>(
+#[cfg(test)]
+pub(crate) fn multiplicity_free_braid_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
     permutation: &[usize],
@@ -156,7 +150,8 @@ where
 
 /// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
 /// precondition.
-pub fn multiplicity_free_permute_tree<R>(
+#[cfg(test)]
+pub(crate) fn multiplicity_free_permute_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
     permutation: &[usize],
@@ -294,7 +289,8 @@ where
 
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
-pub fn multiplicity_free_transpose_tree_pair<R>(
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn multiplicity_free_transpose_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
     codomain_permutation: &[usize],

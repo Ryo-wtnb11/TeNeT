@@ -33,7 +33,7 @@ fn matrix_space() -> DynamicFusionMapSpace {
 
 fn typed_z2_matrix_space() -> FusionTensorMapSpace<1, 1> {
     let leg = || SectorLeg::new([(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)], false);
-    FusionTensorMapSpace::from_degeneracy_shapes(
+    FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::from_dims([2], [2]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg()]),
@@ -764,7 +764,7 @@ fn bind_revalidates_complete_without_replacing_layout() {
     let rule = lowered_product_rule();
     let pair = Fz2U1Codec::encode(Z2Irrep::ODD.sector_id(), U1Irrep::new(2).sector_id());
     let sector = TripleCodec::encode(pair, SU2Irrep::from_twice_spin(1).sector_id());
-    let typed = FusionTensorMapSpace::from_degeneracy_shapes(
+    let typed = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::from_sectors([(sector, 1)], [(sector, 1)]),
         &rule,

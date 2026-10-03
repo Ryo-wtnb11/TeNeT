@@ -24,9 +24,20 @@ use std::fmt::Debug;
 use num_complex::{Complex32, Complex64};
 use tenet_dense::{
     cuda_download_spectra, cuda_eigh_region, cuda_gemm_region_with_ops_into,
-    cuda_is_hermitian_region, cuda_qr_region, cuda_svd_region, CudaDenseContext, CudaDenseStorage,
+    cuda_hermitian_regions, cuda_qr_region, cuda_svd_region, CudaDenseContext, CudaDenseStorage,
     CudaScalar, DenseDType, DenseError, MatrixOp,
 };
+
+/// The one-region case of [`cuda_hermitian_regions`]; test support since no
+/// production caller decides a single region (#1805).
+fn cuda_is_hermitian_region<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    offset: usize,
+    n: usize,
+) -> Result<bool, tenet_dense::DenseError> {
+    Ok(cuda_hermitian_regions::<D>(ctx, src, &[(offset, n)])?[0])
+}
 
 /// The payload dtypes under test, with just enough host arithmetic for a
 /// double-precision oracle over the widened fixture.

@@ -631,9 +631,13 @@ fn fusion_tensor_space_builds_subblockstructure_from_homspace() {
         )]),
     );
 
-    let fusion_space =
-        FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, [vec![1, 2], vec![3, 1]])
-            .unwrap();
+    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        dense,
+        hom,
+        &rule,
+        [vec![1, 2], vec![3, 1]],
+    )
+    .unwrap();
 
     assert_eq!(fusion_space.subblock_structure().block_count(), 2);
     assert_eq!(fusion_space.required_len().unwrap(), 5);

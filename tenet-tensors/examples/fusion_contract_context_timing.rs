@@ -236,35 +236,35 @@ impl Su2NoncoreFixture {
         )
         .unwrap();
 
-        let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
             lhs_hom,
             &rule,
             [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
         )
         .unwrap();
-        let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
             rhs_hom,
             &rule,
             [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
         )
         .unwrap();
-        let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
             lhs_core_hom,
             &rule,
             [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
         )
         .unwrap();
-        let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
             rhs_core_hom,
             &rule,
             [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
         )
         .unwrap();
-        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
             dst_hom,
             &rule,
@@ -736,7 +736,7 @@ impl Su2OutputScratchFixture {
             &rule,
             1,
         );
-        let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
             rhs_hom,
             &rule,
@@ -1030,7 +1030,7 @@ impl ProductComplexFixture {
             .homspace()
             .permute(&rule, &[0, 1, 2], &[])
             .unwrap();
-        let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap(),
             lhs_core_hom,
             &rule,
@@ -1282,7 +1282,7 @@ fn fusion_space_from_hom<const NOUT: usize, const NIN: usize>(
     dim: usize,
 ) -> FusionTensorMapSpace<NOUT, NIN> {
     let count = homspace.fusion_tree_keys(rule).len();
-    FusionTensorMapSpace::from_degeneracy_shapes(
+    FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         dense_space,
         homspace,
         rule,
@@ -1327,14 +1327,14 @@ fn fz2_u1_su2_tree_pair_fixture() -> (
         ]),
         FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
     );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
         src_hom,
         &rule,
         [vec![1, 1, 1], vec![1, 1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
         dst_hom,
         &rule,

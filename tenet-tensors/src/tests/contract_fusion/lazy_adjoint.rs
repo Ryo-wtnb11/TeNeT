@@ -5,7 +5,7 @@ fn tensorcontract_fusion_lowers_lhs_categorical_adjoint_lazily() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
     let space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([leg()]),
@@ -75,7 +75,7 @@ fn tensorcontract_fusion_lowers_rhs_categorical_adjoint_lazily() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
     let space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([leg()]),
@@ -124,7 +124,7 @@ fn tensorcontract_fusion_lowers_both_categorical_adjoint_inputs_lazily() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
     let space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([leg()]),
@@ -149,7 +149,7 @@ fn tensorcontract_fusion_lowers_both_categorical_adjoint_inputs_lazily() {
         1,
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         dst_hom,
         &rule,
@@ -669,7 +669,7 @@ fn tensorcontract_fusion_fermion_both_adjoint_uses_degeneracy_matrix_contract() 
 fn tensorproduct_fusion_lowers_lhs_adjoint_through_source_transform() {
     let rule = Z2FusionRule;
     let sector = SectorId::new(0);
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 0>::from_dims([1], []).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(sector, 1)], false)]),
@@ -679,7 +679,7 @@ fn tensorproduct_fusion_lowers_lhs_adjoint_through_source_transform() {
         [vec![1]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 0>::from_dims([1], []).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(sector, 1)], false)]),
@@ -689,7 +689,7 @@ fn tensorproduct_fusion_lowers_lhs_adjoint_through_source_transform() {
         [vec![1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(sector, 1)], true)]),
@@ -770,7 +770,7 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     let fusion = || {
         let h = hom();
         let count = h.fusion_tree_keys(&rule).len();
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([4], [4]).unwrap(),
             h,
             &rule,
@@ -923,7 +923,7 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     }
 
     let typed_dst_hom = dst_space.homspace().clone();
-    let typed_dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let typed_dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([4], [4]).unwrap(),
         typed_dst_hom.clone(),
         provider.as_ref(),

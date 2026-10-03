@@ -4,7 +4,7 @@ use super::*;
 fn tensorcontract_fusion_fermion_rhs_dual_codomain_twists_like_tensorkit() {
     let rule = FermionParityFusionRule;
     let odd = SectorId::new(1);
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]),
@@ -14,7 +14,7 @@ fn tensorcontract_fusion_fermion_rhs_dual_codomain_twists_like_tensorkit() {
         [vec![1, 1]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(odd, 1)], true)]),
@@ -24,7 +24,7 @@ fn tensorcontract_fusion_fermion_rhs_dual_codomain_twists_like_tensorkit() {
         [vec![1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]),
@@ -78,7 +78,7 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
     let space = |codomain_dual: bool, domain_dual: bool| {
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 2)], codomain_dual)]),
@@ -283,7 +283,7 @@ fn fermion_twist_lands_on_the_smaller_borrowable_operand_by_hand_calculation() {
     let odd = SectorId::new(1);
     let v = |dual: bool| SectorLeg::new([(even, 1), (odd, 2)], dual);
     let w = || SectorLeg::new([(even, 2)], false);
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([v(false)]),
@@ -293,7 +293,7 @@ fn fermion_twist_lands_on_the_smaller_borrowable_operand_by_hand_calculation() {
         [vec![1, 1], vec![2, 2]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 2>::from_dims([3], [3, 2]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([v(true)]),
@@ -303,7 +303,7 @@ fn fermion_twist_lands_on_the_smaller_borrowable_operand_by_hand_calculation() {
         [vec![1, 1, 2], vec![2, 2, 2]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 2>::from_dims([3], [3, 2]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([v(false)]),

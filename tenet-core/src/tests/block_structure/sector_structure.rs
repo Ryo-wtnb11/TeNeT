@@ -617,7 +617,7 @@ fn tensormap_subblocks_by_sectors_returns_all_su2_simple_innerline_blocks() {
     let half = SectorId::new(1);
     let dense = TensorMapSpace::<3, 1>::from_dims([1, 1, 1], [1]).unwrap();
     let hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1)], [(1, 1)]);
-    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         dense,
         hom,
         &rule,

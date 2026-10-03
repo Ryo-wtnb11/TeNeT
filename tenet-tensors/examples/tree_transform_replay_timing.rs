@@ -486,14 +486,14 @@ fn product_fixture() -> (
         ]),
         FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
     );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
         src_hom,
         &rule,
         [vec![1, 1, 1], vec![1, 1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
         dst_hom,
         &rule,
