@@ -266,6 +266,12 @@ pub enum ReplanPolicy {
     /// than this factor (as a ratio, in either direction). Chases the
     /// per-shape-optimal order; only worth it when a network's winning order
     /// genuinely flips between dimension regimes.
+    ///
+    /// The drift is measured from the dimensions the cached order was
+    /// searched at, whichever `tensor!` call site reaches it. With plan
+    /// persistence enabled (`tenet-network`'s `load_plan_cache`), a
+    /// drift-replan of a topology that has a persisted order replays that
+    /// order rather than searching a new one.
     DriftFactor(f64),
 }
 
