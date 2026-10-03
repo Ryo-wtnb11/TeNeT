@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Drafts skip CI (job `if`s below); ready_for_review starts the first run.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -21,8 +23,49 @@ env:
   CI_HEAVY_TEST_DEBUG: '0'
 
 jobs:
-  fmt:
-    name: rustfmt
+  # One runner for the light lint gates: GitHub's per-account job concurrency,
+  # not their runtime, is the CI bottleneck. Each step still reports on its own.
+  lint:
+    name: lint
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - name: Record source revisions
+        run: |
+          git -C tenet log -1 --format='TeNeT %H'
+      # MSRV first so the stable install below remains the default toolchain;
+      # the MSRV step selects 1.96.0 via RUSTUP_TOOLCHAIN.
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: lint
+      - name: rustfmt
+        if: ${{ !cancelled() }}
+        run: cargo fmt --check
+        working-directory: tenet
+      # The workspace is Clippy-clean; deny warnings so new findings cannot silently accumulate.
+      - name: clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: tenet
+      - name: cargo check (Rust 1.96)
+        if: ${{ !cancelled() }}
+        run: cargo check --workspace
+        working-directory: tenet
+        env:
+          RUSTUP_TOOLCHAIN: 1.96.0
+
+  backend-contract-linux:
+    name: backend contract (linux)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,41 +75,30 @@ jobs:
         run: |
           git -C tenet log -1 --format='TeNeT %H'
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --check
-        working-directory: tenet
-
-  msrv:
-    name: cargo check (Rust 1.96)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: tenet
-      - name: Record source revisions
-        run: |
-          git -C tenet log -1 --format='TeNeT %H'
-      - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: msrv-1.96
-      - run: cargo check --workspace
+          key: backend-linux
+      # Former `fail-fast: false` matrix rows: `!cancelled()` keeps every
+      # feature's signal in one run.
+      - name: check cpu-blas-core
+        if: ${{ !cancelled() }}
+        run: cargo check --workspace --all-targets --no-default-features --features "cpu-blas"
+        working-directory: tenet
+      - name: check mkl
+        if: ${{ !cancelled() }}
+        run: cargo check --workspace --all-targets --no-default-features --features "blas-mkl"
+        working-directory: tenet
+      - name: check provider-inject
+        if: ${{ !cancelled() }}
+        run: cargo check --workspace --all-targets --no-default-features --features "provider-inject"
         working-directory: tenet
 
-  backend-contract:
-    name: backend contract (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: cpu-blas-core, os: ubuntu-latest, features: cpu-blas }
-          - { name: mkl, os: ubuntu-latest, features: blas-mkl }
-          - { name: provider-inject, os: ubuntu-latest, features: provider-inject }
-          - { name: accelerate, os: macos-latest, features: blas-accelerate }
+  backend-contract-accelerate:
+    name: backend contract (accelerate)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,24 +108,21 @@ jobs:
           git -C tenet log -1 --format='TeNeT %H'
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Accelerate build toolchain
-        if: matrix.name == 'accelerate'
         run: brew install gcc
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: backend-${{ matrix.name }}
-      - run: cargo check --workspace --all-targets --no-default-features --features "${{ matrix.features }}"
+          key: backend-accelerate
+      - run: cargo check --workspace --all-targets --no-default-features --features "blas-accelerate"
         working-directory: tenet
-      # The rows above are compile-only, so the direct full-SVD path a BLAS
-      # provider takes (#1163) never executed in CI. `accelerate` carries the
-      # runtime gate because its vendor is the system framework, so linking a
-      # test binary needs no setup its runner lacks; `cpu-blas` selects no
-      # vendor at all. Scoped to the two crates that own the path:
-      # the workspace suite is red here for an unrelated 1-ULP equality in
-      # tenet-rs's truncated-SVD adjoint gate.
+      # The compile-only checks never execute the direct full-SVD path a BLAS
+      # provider takes (#1163). `accelerate` carries the runtime gate because
+      # its vendor is the system framework, so linking a test binary needs no
+      # setup its runner lacks; `cpu-blas` selects no vendor at all. Scoped to
+      # the two crates that own the path: the workspace suite is red here for
+      # an unrelated 1-ULP equality in tenet-rs's truncated-SVD adjoint gate.
       - name: Run the BLAS full-SVD suites
-        if: matrix.name == 'accelerate'
         working-directory: tenet
         run: cargo test -p tenet-dense -p tenet-matrixalgebra --no-default-features --features blas-accelerate
 
@@ -114,6 +143,7 @@ jobs:
   # `not(feature = ...)` paths of the other feature.
   feature-contract-network-optimizers:
     name: feature contract (network optimizers)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -131,10 +161,10 @@ jobs:
       - uses: ./tenet/.github/actions/cargo-build-script-cache
         with:
           key: feature-network-optimizers
-      # The top-level `clippy` job only lints default features (#1450), so a
+      # The `lint` job's clippy step only lints default features (#1450), so a
       # lint that only fires under one of these non-default feature sets
       # (e.g. the racah-generated `obfuscated_if_else`s in typed.rs) never ran
-      # in CI. Clippy uses `--all-targets`, mirroring that job's scope, while
+      # in CI. Clippy uses `--all-targets`, mirroring that step's scope, while
       # a test step may filter to fewer targets.
       - name: clippy tenet-network (opt-path)
         if: ${{ !cancelled() }}
@@ -161,6 +191,7 @@ jobs:
   # all packages instead of once per matrix row.
   feature-contract-racah:
     name: feature contract (racah-generated, all crates)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -178,10 +209,10 @@ jobs:
       - uses: ./tenet/.github/actions/cargo-build-script-cache
         with:
           key: feature-racah-all
-      # The top-level `clippy` job only lints default features (#1450), so a
+      # The `lint` job's clippy step only lints default features (#1450), so a
       # lint that only fires under one of these non-default feature sets
       # (e.g. the racah-generated `obfuscated_if_else`s in typed.rs) never ran
-      # in CI. Clippy uses `--all-targets`, mirroring that job's scope, while
+      # in CI. Clippy uses `--all-targets`, mirroring that step's scope, while
       # a test step may filter to fewer targets.
       - name: clippy tenet-sectors (racah-generated)
         if: ${{ !cancelled() }}
@@ -259,6 +290,7 @@ jobs:
   # cache.
   host-pool-audit:
     name: host pool entry audit
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -284,6 +316,7 @@ jobs:
 
   cuda-check:
     name: CUDA compile contract
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     # Why: #436 — Jimver/cuda-toolkit's network setup can stall indefinitely,
     # making an unrelated PR look unstable rather than failing fast and
@@ -336,6 +369,7 @@ jobs:
 
   test-linux:
     name: cargo test (ubuntu-latest)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -388,7 +422,7 @@ jobs:
 
   test-macos:
     name: cargo test (macos-latest)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -421,6 +455,7 @@ jobs:
 
   coverage:
     name: coverage
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -472,25 +507,3 @@ jobs:
         working-directory: tenet
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-
-  clippy:
-    name: clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: tenet
-      - name: Record source revisions
-        run: |
-          git -C tenet log -1 --format='TeNeT %H'
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tenet
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: clippy
-      # The workspace is Clippy-clean; deny warnings so new findings cannot silently accumulate.
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-        working-directory: tenet
