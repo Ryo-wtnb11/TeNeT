@@ -122,9 +122,9 @@ pub use tenet_operations::ContractDestinationInit;
 #[cfg(test)]
 pub(crate) use tenet_operations::HostTreeTransformWorkspace;
 pub use tenet_operations::OperationError;
-pub(crate) use tenet_operations::ReportsPlacement;
+pub use tenet_operations::ReportsPlacement;
 pub use tenet_operations::TensorAddStructure;
-pub(crate) use tenet_operations::TensorOperationsBackend;
+pub use tenet_operations::TensorOperationsBackend;
 pub(crate) use tenet_operations::TreeTransformReplayProfile;
 pub use tenet_operations::TreeTransformStructure;
 pub use tenet_operations::TreeTransformWorkspace;
@@ -133,7 +133,7 @@ pub(crate) use tenet_operations::{host_scratch, storage_scratch, strided};
 pub use tenet_operations::{try_cat_owned_raw, OwnedCatCopy, OwnedCatSide};
 #[doc(hidden)]
 pub use tenet_operations::{zeroed_payload, ZeroBytes};
-pub(crate) use tenet_operations::{ConjugateValue, TreeTransformScalar};
+pub use tenet_operations::{ConjugateValue, RealStructuralCoefficient, TreeTransformScalar};
 pub use tenet_operations::{
     DenseBlockScalar, DenseRecouplingScalar, RecouplingCoefficientAction, WideScalar,
 };
