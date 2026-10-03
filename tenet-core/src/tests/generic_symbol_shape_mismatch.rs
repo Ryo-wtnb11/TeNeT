@@ -1,14 +1,16 @@
 use super::*;
 
 // `A4FoldRule` (N(3,3,3) = 2) with symbols an inconsistent user provider of
-// the open `GenericFusionSymbols` trait could return: R is always 1x1 and B
-// is optionally truncated to a single element.
+// the open `GenericFusionSymbols` trait could return: R is always 1x1 and the
+// bend F-block F(a, b, b̄, a, c, 1) is optionally truncated to one element.
 #[derive(Clone, Copy, Debug)]
 struct TruncatedSymbolRule {
-    truncate_b: bool,
+    truncate_bend_f: bool,
 }
 
-const TRUNCATED_R: TruncatedSymbolRule = TruncatedSymbolRule { truncate_b: false };
+const TRUNCATED_R: TruncatedSymbolRule = TruncatedSymbolRule {
+    truncate_bend_f: false,
+};
 
 impl FusionRule for TruncatedSymbolRule {
     fn rule_identity(&self) -> RuleIdentity {
@@ -45,7 +47,11 @@ impl GenericFusionSymbols for TruncatedSymbolRule {
         e: SectorId,
         f: SectorId,
     ) -> GenericFArray<f64> {
-        A4FoldRule.f_symbol_generic(a, b, c, d, e, f)
+        if self.truncate_bend_f && f == self.vacuum() {
+            GenericFArray::new(vec![1.0], (1, 1, 1, 1))
+        } else {
+            A4FoldRule.f_symbol_generic(a, b, c, d, e, f)
+        }
     }
     fn r_symbol_generic(&self, _a: SectorId, _b: SectorId, _c: SectorId) -> GenericRMatrix<f64> {
         GenericRMatrix::new(vec![1.0], 1, 1)
@@ -61,13 +67,6 @@ impl GenericRigidSymbols for TruncatedSymbolRule {
     }
     fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> f64 {
         A4FoldRule.frobenius_schur_phase_scalar(sector)
-    }
-    fn b_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> GenericRMatrix<f64> {
-        if self.truncate_b {
-            GenericRMatrix::new(vec![1.0], 1, 1)
-        } else {
-            A4FoldRule.b_symbol_generic(a, b, c)
-        }
     }
 }
 
@@ -101,10 +100,17 @@ fn generic_braid_tree_pair_rejects_r_symbol_shape_mismatch() {
 }
 
 #[test]
-fn generic_repartition_rejects_b_symbol_shape_mismatch() {
-    // What: bending the second codomain vertex (mu = 2) reads row 1 of B,
-    // which a 1x1 B for N(3,3,3) = 2 does not have.
-    let rule = TruncatedSymbolRule { truncate_b: true };
+fn generic_repartition_rejects_bend_f_symbol_shape_mismatch() {
+    // What: B is derived from F(3,3,3,3,3,1), shape (2,2,1,1) for N(3,3,3) = 2;
+    // a 1x1x1x1 block is a typed malformed-input error, not a panic.
+    let rule = TruncatedSymbolRule {
+        truncate_bend_f: true,
+    };
     let error = generic_repartition_tree_pair(&rule, &a4_pair_rank2(2), 1).unwrap_err();
-    assert_eq!(error, shape_mismatch());
+    assert_eq!(
+        error,
+        CoreError::MalformedFusionTree {
+            message: "Generic F-symbol shape mismatch",
+        }
+    );
 }

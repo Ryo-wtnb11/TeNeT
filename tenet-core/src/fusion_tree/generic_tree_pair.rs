@@ -56,7 +56,7 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let access = InfallibleGenericRigid(rule);
+    let access = InfallibleGeneric::new(rule);
     generic_foldright_tree_pair_with(
         &access,
         tree_pair,
@@ -548,7 +548,7 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let checked = InfallibleGenericRigid(tree_pair.rule);
+    let checked = InfallibleGeneric::new(tree_pair.rule);
     generic_braid_tree_pair_result(
         &checked,
         tree_pair.key,
