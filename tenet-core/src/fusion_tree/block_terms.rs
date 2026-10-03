@@ -202,18 +202,20 @@ impl<S: Clone> DenseColumns<S> {
     }
 }
 
-#[cfg(test)]
-pub(super) fn compose_block_terms<R, F, I>(
-    rule: &R,
-    basis: &[FusionTreePairKey],
-    columns: &DenseColumns<R::Scalar>,
+/// Compose a column-batched block with one move: every basis row's move
+/// terms are spread across all source columns (`dst += step · source`). The
+/// one block composer for multiplicity-free keys, compact locals and Generic
+/// keys.
+pub(crate) fn compose_block_terms<K, S, E, F, I>(
+    basis: &[K],
+    columns: &DenseColumns<S>,
     mut transform: F,
-) -> Result<(Vec<FusionTreePairKey>, DenseColumns<R::Scalar>), CoreError>
+) -> Result<(Vec<K>, DenseColumns<S>), E>
 where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-    F: FnMut(&R, &FusionTreePairKey) -> Result<I, CoreError>,
-    I: IntoIterator<Item = (FusionTreePairKey, R::Scalar)>,
+    K: Eq + Hash,
+    S: Clone + Add<Output = S> + Mul<Output = S>,
+    F: FnMut(&K) -> Result<I, E>,
+    I: IntoIterator<Item = (K, S)>,
 {
     let num_src = columns.num_src;
     // Dedup destination tree-pairs to dense rows. The key is *moved* into the
@@ -222,11 +224,10 @@ where
     // from the map by row index afterwards. Rows are assigned in first-
     // appearance order, so the rebuilt `next_basis` order — and therefore every
     // coefficient — is bit-for-bit identical to pushing the key eagerly.
-    let mut index: FxHashMap<FusionTreePairKey, usize> = FxHashMap::default();
-    let mut next_columns: DenseColumns<R::Scalar> =
-        DenseColumns::with_capacity(num_src, basis.len());
+    let mut index: FxHashMap<K, usize> = FxHashMap::default();
+    let mut next_columns: DenseColumns<S> = DenseColumns::with_capacity(num_src, basis.len());
     for (source_row, source_key) in basis.iter().enumerate() {
-        for (dst_key, step_coefficient) in transform(rule, source_key)? {
+        for (dst_key, step_coefficient) in transform(source_key)? {
             let row = match index.get(&dst_key) {
                 Some(&row) => row,
                 None => {
@@ -254,11 +255,11 @@ where
     }
     // Rebuild the basis in row order (= first-appearance order). Rows are dense
     // `0..index.len()`, so place each moved key at its row index.
-    let mut slots: Vec<Option<FusionTreePairKey>> = (0..index.len()).map(|_| None).collect();
+    let mut slots: Vec<Option<K>> = (0..index.len()).map(|_| None).collect();
     for (key, row) in index {
         slots[row] = Some(key);
     }
-    let next_basis: Vec<FusionTreePairKey> = slots
+    let next_basis: Vec<K> = slots
         .into_iter()
         .map(|key| key.expect("dense rows 0..len are all filled"))
         .collect();
@@ -339,107 +340,6 @@ impl CompactMultiplicityFreeTreePairBasis {
         }
         Ok(Self { frame, locals })
     }
-}
-
-pub(super) fn compose_compact_block_terms<R, K, F, I>(
-    rule: &R,
-    basis: &[K],
-    columns: &DenseColumns<R::Scalar>,
-    mut transform: F,
-) -> Result<(Vec<K>, DenseColumns<R::Scalar>), CoreError>
-where
-    R: MultiplicityFreeFusionSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-    K: Eq + Hash,
-    F: FnMut(&R, &K) -> Result<I, CoreError>,
-    I: IntoIterator<Item = (K, R::Scalar)>,
-{
-    let num_src = columns.num_src;
-    let mut index: FxHashMap<K, usize> = FxHashMap::default();
-    let mut next_columns = DenseColumns::with_capacity(num_src, basis.len());
-    for (source_row, source_local) in basis.iter().enumerate() {
-        for (destination_local, step_coefficient) in transform(rule, source_local)? {
-            let row = match index.get(&destination_local) {
-                Some(&row) => row,
-                None => {
-                    let row = next_columns.push_empty_row();
-                    index.insert(destination_local, row);
-                    row
-                }
-            };
-            let source_column = columns.row(source_row);
-            let destination_column = next_columns.row_mut(row);
-            for (src, source_coefficient) in source_column.iter().enumerate() {
-                let Some(source_coefficient) = source_coefficient else {
-                    continue;
-                };
-                let contribution = step_coefficient.clone() * source_coefficient.clone();
-                destination_column[src] = Some(match destination_column[src].take() {
-                    Some(existing) => existing + contribution,
-                    None => contribution,
-                });
-            }
-        }
-    }
-    let mut slots: Vec<Option<K>> = (0..index.len()).map(|_| None).collect();
-    for (local, row) in index {
-        slots[row] = Some(local);
-    }
-    let locals = slots
-        .into_iter()
-        .map(|local| local.expect("dense rows 0..len are all filled"))
-        .collect();
-    Ok((locals, next_columns))
-}
-
-pub(crate) fn compose_generic_block_terms<R, F, I>(
-    rule: &R,
-    basis: &[FusionTreePairKey],
-    columns: &DenseColumns<R::Scalar>,
-    mut transform: F,
-) -> Result<(Vec<FusionTreePairKey>, DenseColumns<R::Scalar>), CoreError>
-where
-    R: GenericFusionSymbols,
-    R::Scalar: CategoricalScalar,
-    F: FnMut(&R, &FusionTreePairKey) -> Result<I, CoreError>,
-    I: IntoIterator<Item = (FusionTreePairKey, R::Scalar)>,
-{
-    let num_src = columns.num_src;
-    let mut index: FxHashMap<FusionTreePairKey, usize> = FxHashMap::default();
-    let mut next_columns = DenseColumns::with_capacity(num_src, basis.len());
-    for (source_row, source_key) in basis.iter().enumerate() {
-        for (destination_key, step_coefficient) in transform(rule, source_key)? {
-            let row = match index.get(&destination_key) {
-                Some(&row) => row,
-                None => {
-                    let row = next_columns.push_empty_row();
-                    index.insert(destination_key, row);
-                    row
-                }
-            };
-            let source_column = columns.row(source_row);
-            let destination_column = next_columns.row_mut(row);
-            for (source, source_coefficient) in source_column.iter().enumerate() {
-                let Some(source_coefficient) = source_coefficient else {
-                    continue;
-                };
-                let contribution = step_coefficient.clone() * source_coefficient.clone();
-                destination_column[source] = Some(match destination_column[source].take() {
-                    Some(existing) => existing + contribution,
-                    None => contribution,
-                });
-            }
-        }
-    }
-    let mut slots: Vec<Option<FusionTreePairKey>> = (0..index.len()).map(|_| None).collect();
-    for (key, row) in index {
-        slots[row] = Some(key);
-    }
-    let basis = slots
-        .into_iter()
-        .map(|key| key.expect("dense rows 0..len are all filled"))
-        .collect();
-    Ok((basis, next_columns))
 }
 
 fn seed_generic_tree_pair_block<R>(
@@ -545,8 +445,6 @@ fn order_generic_tree_pair_block<S: Clone>(
 /// The Generic keyed-block driver of the shared block schedule.
 struct GenericTreePairBlockDriver<'a, R> {
     rule: &'a R,
-    permutation: &'a [usize],
-    steps: &'a [PreparedArtinStep],
 }
 
 impl<R> BlockDriver for GenericTreePairBlockDriver<'_, R>
@@ -562,28 +460,10 @@ where
         (basis, columns): Self::State,
         bend: Bend,
     ) -> Result<Self::State, CoreError> {
-        compose_generic_block_terms(self.rule, &basis, &columns, |rule, key| match bend {
+        let rule = self.rule;
+        compose_block_terms(&basis, &columns, |key| match bend {
             Bend::Left => generic_bendleft_tree_pair(rule, key),
             Bend::Right => generic_bendright_tree_pair(rule, key),
-        })
-    }
-
-    fn braid_codomain(&mut self, (basis, columns): Self::State) -> Result<Self::State, CoreError> {
-        let (permutation, steps) = (self.permutation, self.steps);
-        compose_generic_block_terms(self.rule, &basis, &columns, |rule, key| {
-            generic_braid_tree_unchecked(rule, key.codomain_tree(), permutation, steps).map(
-                |terms| {
-                    terms
-                        .into_iter()
-                        .map(|(codomain_tree, coefficient)| {
-                            (
-                                FusionTreePairKey::pair(codomain_tree, key.domain_tree().clone()),
-                                coefficient,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                },
-            )
         })
     }
 
@@ -592,7 +472,8 @@ where
         (basis, columns): Self::State,
         direction: PreparedCycleDirection,
     ) -> Result<Self::State, CoreError> {
-        compose_generic_block_terms(self.rule, &basis, &columns, |rule, key| match direction {
+        let rule = self.rule;
+        compose_block_terms(&basis, &columns, |key| match direction {
             PreparedCycleDirection::Clockwise => {
                 generic_cycle_clockwise_tree_pair_unchecked(rule, key)
             }
@@ -666,15 +547,17 @@ where
         return Ok(order_generic_tree_pair_block(basis, columns));
     }
     (basis, columns) = block_braid(
-        &mut GenericTreePairBlockDriver {
-            rule,
-            permutation: &permutation,
-            steps: &steps,
-        },
+        &mut GenericTreePairBlockDriver { rule },
         (basis, columns),
         codomain_rank,
         permutation.len(),
         codomain_permutation.len(),
+        |_, (basis, columns)| {
+            compose_block_terms(&basis, &columns, |key| {
+                generic_braid_tree_unchecked(rule, key.codomain_tree(), &permutation, &steps)
+                    .map(|terms| with_domain(key, terms))
+            })
+        },
     )?;
     Ok(order_generic_tree_pair_block(basis, columns))
 }
@@ -768,11 +651,7 @@ where
     let total_rank = codomain_rank + domain_rank;
     let (basis, columns) = seed_generic_tree_pair_block(rule, src_keys)?;
     let (basis, columns) = block_transpose(
-        &mut GenericTreePairBlockDriver {
-            rule,
-            permutation: &[],
-            steps: &[],
-        },
+        &mut GenericTreePairBlockDriver { rule },
         (basis, columns),
         codomain_rank,
         codomain_permutation.len(),

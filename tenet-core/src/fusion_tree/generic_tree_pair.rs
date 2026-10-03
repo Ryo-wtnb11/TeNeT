@@ -502,16 +502,22 @@ where
         return Ok(vec![(tree_pair.clone(), C::Scalar::one())]);
     }
     let all_codomain = generic_repartition_tree_pair_result(rule, tree_pair, permutation.len())?;
-    let braided = braid_codomain_terms(all_codomain, |codomain| {
-        generic_braid_tree_result(rule, codomain, permutation, steps)
-    })?;
-    // Why not the whole-list `repartition_loop` that the multiplicity-free and
-    // block schedules use: repartitioning each braided term on its own keeps
-    // the established Generic association bit-for-bit (the list form moves
-    // the last ulp of some coefficients).
-    compose_terms(braided, |key| {
-        generic_repartition_tree_pair_result(rule, key, target_codomain_rank)
-    })
+    braid_via_codomain(
+        all_codomain,
+        |key| {
+            generic_braid_tree_result(rule, key.codomain_tree(), permutation, steps)
+                .map(|terms| with_domain(key, terms))
+        },
+        // Why not the whole-list `repartition_loop` that the multiplicity-free
+        // and block schedules use: repartitioning each braided term on its own
+        // keeps the established Generic association bit-for-bit (the list form
+        // moves the last ulp of some coefficients).
+        |braided| {
+            compose_terms(braided, |key| {
+                generic_repartition_tree_pair_result(rule, key, target_codomain_rank)
+            })
+        },
+    )
 }
 
 /// Checked Generic-fusion braid on a full tree pair.
@@ -841,11 +847,12 @@ fn generic_transpose_tree_pair_with<S, E, P, A, C>(
     total_rank: usize,
     position: Option<usize>,
     mut repartition: P,
-    mut anticlockwise: A,
-    mut clockwise: C,
+    anticlockwise: A,
+    clockwise: C,
 ) -> Result<Vec<(FusionTreePairKey, S)>, E>
 where
     S: CategoricalScalar,
+    E: From<CoreError>,
     P: FnMut(&FusionTreePairKey, usize) -> Result<Vec<(FusionTreePairKey, S)>, E>,
     A: FnMut(&FusionTreePairKey) -> Result<Vec<(FusionTreePairKey, S)>, E>,
     C: FnMut(&FusionTreePairKey) -> Result<Vec<(FusionTreePairKey, S)>, E>,
@@ -854,15 +861,11 @@ where
         return Ok(vec![(tree_pair.clone(), S::one())]);
     };
     let current = repartition(tree_pair, target_codomain_rank)?;
-    run_cycles(
+    run_cycle_terms(
         current,
         transpose_cycles(position, total_rank),
-        |terms, direction| {
-            compose_terms(terms, |key| match direction {
-                PreparedCycleDirection::Clockwise => clockwise(key),
-                PreparedCycleDirection::Anticlockwise => anticlockwise(key),
-            })
-        },
+        clockwise,
+        anticlockwise,
     )
 }
 
