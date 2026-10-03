@@ -410,19 +410,110 @@ pub(crate) fn storage_end_exclusive(
         .ok_or_else(|| CoreError::OffsetOverflow { value: offset })
 }
 
-pub(crate) fn checked_product(dims: &[usize]) -> Result<usize, CoreError> {
+/// Checked product of `dims` (an element count); the TeNeT-side authority
+/// that operations and matrixalgebra map into their own error types.
+#[doc(hidden)]
+#[inline]
+pub fn checked_product(dims: &[usize]) -> Result<usize, CoreError> {
     dims.iter().try_fold(1usize, |acc, &dim| {
         acc.checked_mul(dim)
             .ok_or_else(|| CoreError::ElementCountOverflow)
     })
 }
 
-pub(crate) fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
-    let mut strides = vec![1usize; shape.len()];
-    for index in 1..shape.len() {
-        strides[index] = strides[index - 1]
-            .checked_mul(shape[index - 1])
-            .ok_or_else(|| CoreError::ElementCountOverflow)?;
+/// Feeds the column-major strides of `shape`, starting at `first`, to `push`
+/// in axis order and returns `first * product(shape)`.
+///
+/// Every running product, including the final one, must fit in `usize`;
+/// otherwise `overflow()` is returned at the first overflowing axis, after the
+/// strides before it were pushed.
+#[doc(hidden)]
+pub fn try_for_each_column_major_stride<E>(
+    first: usize,
+    shape: &[usize],
+    mut push: impl FnMut(usize) -> Result<(), E>,
+    overflow: impl Fn() -> E,
+) -> Result<usize, E> {
+    shape.iter().try_fold(first, |stride, &dim| {
+        push(stride)?;
+        stride.checked_mul(dim).ok_or_else(&overflow)
+    })
+}
+
+/// Column-major strides of `shape`. Only the strides themselves must fit in
+/// `usize`; the element count is checked separately by the layout.
+#[doc(hidden)]
+pub fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
+    let mut strides = Vec::with_capacity(shape.len());
+    if let Some((_, leading)) = shape.split_last() {
+        let last = try_for_each_column_major_stride(
+            1,
+            leading,
+            |stride| {
+                strides.push(stride);
+                Ok(())
+            },
+            || CoreError::ElementCountOverflow,
+        )?;
+        strides.push(last);
     }
     Ok(strides)
+}
+
+#[cfg(test)]
+mod layout_arithmetic_tests {
+    use super::*;
+
+    #[test]
+    fn column_major_stride_walk_checks_every_running_product() {
+        let mut pushed = Vec::new();
+        let total = try_for_each_column_major_stride(
+            3,
+            &[2, 4, 5],
+            |stride| {
+                pushed.push(stride);
+                Ok::<(), ()>(())
+            },
+            || (),
+        );
+        assert_eq!((total, pushed), (Ok(120), vec![3, 6, 24]));
+
+        // The final product must fit even though no stride is pushed for it;
+        // strides before the overflow are already pushed.
+        let mut pushed = Vec::new();
+        let total = try_for_each_column_major_stride(
+            1,
+            &[2, usize::MAX],
+            |stride| {
+                pushed.push(stride);
+                Ok::<(), &str>(())
+            },
+            || "overflow",
+        );
+        assert_eq!((total, pushed), (Err("overflow"), vec![1, 2]));
+
+        // A push error wins over a later overflow.
+        let total = try_for_each_column_major_stride(
+            1,
+            &[usize::MAX, 4],
+            |s| if s > 1 { Err(s) } else { Ok(()) },
+            || 0,
+        );
+        assert_eq!(total, Err(usize::MAX));
+    }
+
+    #[test]
+    fn column_major_strides_does_not_require_the_element_count_to_fit() {
+        assert_eq!(column_major_strides(&[]), Ok(vec![]));
+        assert_eq!(column_major_strides(&[2, usize::MAX]), Ok(vec![1, 2]));
+        assert_eq!(
+            column_major_strides(&[usize::MAX, 2, 1]),
+            Err(CoreError::ElementCountOverflow)
+        );
+        assert_eq!(checked_product(&[]), Ok(1));
+        assert_eq!(
+            checked_product(&[usize::MAX, 2]),
+            Err(CoreError::ElementCountOverflow)
+        );
+    }
 }

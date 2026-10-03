@@ -157,7 +157,7 @@ fn insert_coupled_tree_extent<'a>(
     let index = trees.len();
     let offset = *total;
     *total = offset
-        .checked_add(checked_element_count(&shape)?)
+        .checked_add(checked_product(&shape)?)
         .ok_or_else(|| CoreError::ElementCountOverflow)?;
     indexes.insert(tree, index);
     trees.push(CoupledTreeExtent {
@@ -166,14 +166,6 @@ fn insert_coupled_tree_extent<'a>(
         shape,
     });
     Ok(Some(index))
-}
-
-pub(super) fn checked_element_count(shape: &[usize]) -> Result<usize, CoreError> {
-    shape.iter().try_fold(1usize, |count, &extent| {
-        count
-            .checked_mul(extent)
-            .ok_or_else(|| CoreError::ElementCountOverflow)
-    })
 }
 
 fn coupled_sector_strides(
