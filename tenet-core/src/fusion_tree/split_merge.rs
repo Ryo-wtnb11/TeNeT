@@ -144,10 +144,10 @@ pub fn split_fusion_tree_generic_checked<C>(
 where
     C: CheckedGenericFusion,
 {
-    validate_generic_fusion_tree_pair_checked(rule, &FusionTreePairKey::pair(
-        tree.clone(),
-        tree.clone(),
-    ))?;
+    validate_generic_fusion_tree_pair_checked(
+        rule,
+        &FusionTreePairKey::pair(tree.clone(), tree.clone()),
+    )?;
     let rank = tree.uncoupled().len();
     if front_rank > rank {
         return Err(CoreError::DimensionMismatch {
@@ -161,7 +161,13 @@ where
         let coupled = tree.coupled();
         (
             tree.clone(),
-            FusionTreeKey::new([coupled], coupled, [false], Vec::<SectorId>::new(), Vec::<MultiplicityIndex>::new()),
+            FusionTreeKey::new(
+                [coupled],
+                coupled,
+                [false],
+                Vec::<SectorId>::new(),
+                Vec::<MultiplicityIndex>::new(),
+            ),
         )
     } else if front_rank == 1 {
         let first = tree.uncoupled()[0];
@@ -222,12 +228,13 @@ where
             ),
         )
     } else {
-        let intermediate = *tree
-            .innerlines()
-            .get(front_rank - 2)
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "split requires the intermediate innerline",
-            })?;
+        let intermediate =
+            *tree
+                .innerlines()
+                .get(front_rank - 2)
+                .ok_or(CoreError::MalformedFusionTree {
+                    message: "split requires the intermediate innerline",
+                })?;
         let front_tree = FusionTreeKey::new(
             tree.uncoupled()[..front_rank].to_vec(),
             intermediate,
@@ -307,8 +314,7 @@ where
     multiplicity_free_multi_fmove_inv_tree(rule, lhs.coupled(), coupled, rhs, false)?
         .into_iter()
         .map(|(tail, coefficient)| {
-            join_fusion_tree_front_checked(rule, lhs, &tail)
-                .map(|merged| (merged, coefficient))
+            join_fusion_tree_front_checked(rule, lhs, &tail).map(|merged| (merged, coefficient))
         })
         .collect()
 }
@@ -328,22 +334,32 @@ where
     C: CheckedGenericRigidSymbols,
 {
     if !rule.fusion_style().has_multiplicity() {
-        return Err(CheckedGenericSymbolError::Core(CoreError::UnsupportedFusionStyle {
-            expected: FusionStyleKind::Generic,
-            actual: rule.fusion_style(),
-        }));
+        return Err(CheckedGenericSymbolError::Core(
+            CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: rule.fusion_style(),
+            },
+        ));
     }
-    validate_generic_fusion_tree_pair_checked(rule, &FusionTreePairKey::pair(lhs.clone(), lhs.clone()))
-        .map_err(map_checked_generic_structure_error)?;
-    validate_generic_fusion_tree_pair_checked(rule, &FusionTreePairKey::pair(rhs.clone(), rhs.clone()))
-        .map_err(map_checked_generic_structure_error)?;
+    validate_generic_fusion_tree_pair_checked(
+        rule,
+        &FusionTreePairKey::pair(lhs.clone(), lhs.clone()),
+    )
+    .map_err(map_checked_generic_structure_error)?;
+    validate_generic_fusion_tree_pair_checked(
+        rule,
+        &FusionTreePairKey::pair(rhs.clone(), rhs.clone()),
+    )
+    .map_err(map_checked_generic_structure_error)?;
     let n = rule
         .try_nsymbol(lhs.coupled(), rhs.coupled(), coupled)
         .map_err(CheckedGenericSymbolError::Provider)?;
     if root_vertex.get() == 0 || root_vertex.get() > n {
-        return Err(CheckedGenericSymbolError::Core(CoreError::MalformedFusionTree {
-            message: "tensor-product root vertex exceeds Nsymbol",
-        }));
+        return Err(CheckedGenericSymbolError::Core(
+            CoreError::MalformedFusionTree {
+                message: "tensor-product root vertex exceeds Nsymbol",
+            },
+        ));
     }
     if lhs.uncoupled().is_empty() {
         return Ok(vec![(rhs.clone(), C::Scalar::one())]);
@@ -351,22 +367,15 @@ where
     if rhs.uncoupled().is_empty() {
         return Ok(vec![(lhs.clone(), C::Scalar::one())]);
     }
-    let terms = generic_multi_fmove_inv_tree_checked(
-        rule,
-        lhs.coupled(),
-        coupled,
-        rhs,
-        false,
-    )?;
+    let terms = generic_multi_fmove_inv_tree_checked(rule, lhs.coupled(), coupled, rhs, false)?;
     terms
         .into_iter()
         .map(|(tail, coefficients)| {
-            let coefficient = coefficients
-                .get(root_vertex.get() - 1)
-                .cloned()
-                .ok_or(CheckedGenericSymbolError::Core(CoreError::MalformedFusionTree {
+            let coefficient = coefficients.get(root_vertex.get() - 1).cloned().ok_or(
+                CheckedGenericSymbolError::Core(CoreError::MalformedFusionTree {
                     message: "tensor-product root vertex coefficient is absent",
-                }))?;
+                }),
+            )?;
             if coefficient.is_zero() {
                 return Ok(None);
             }
@@ -402,29 +411,52 @@ fn join_fusion_tree_front_generic_checked<C>(
 where
     C: CheckedGenericFusion,
 {
-    let boundary = *tail.uncoupled().first().ok_or(CheckedGenericSymbolError::Core(
-        CoreError::MalformedFusionTree { message: "fusion-tree front join requires a non-empty tail" },
-    ))?;
+    let boundary = *tail
+        .uncoupled()
+        .first()
+        .ok_or(CheckedGenericSymbolError::Core(
+            CoreError::MalformedFusionTree {
+                message: "fusion-tree front join requires a non-empty tail",
+            },
+        ))?;
     if boundary != front.coupled() || tail.is_dual()[0] {
-        return Err(CheckedGenericSymbolError::Core(CoreError::MalformedFusionTree {
-            message: "Generic fusion-tree front join has an invalid boundary",
-        }));
+        return Err(CheckedGenericSymbolError::Core(
+            CoreError::MalformedFusionTree {
+                message: "Generic fusion-tree front join has an invalid boundary",
+            },
+        ));
     }
     let merged = match (front.uncoupled().len(), tail.uncoupled().len()) {
-        (1, _) => FusionTreeKey::new(tail.uncoupled().to_vec(), tail.coupled(), {
-            let mut dual = tail.is_dual().to_vec(); dual[0] = front.is_dual()[0]; dual
-        }, tail.innerlines().to_vec(), tail.vertices().to_vec()),
+        (1, _) => FusionTreeKey::new(
+            tail.uncoupled().to_vec(),
+            tail.coupled(),
+            {
+                let mut dual = tail.is_dual().to_vec();
+                dual[0] = front.is_dual()[0];
+                dual
+            },
+            tail.innerlines().to_vec(),
+            tail.vertices().to_vec(),
+        ),
         (_, 1) => front.clone(),
         (_, _) => {
-            let mut uncoupled = front.uncoupled().to_vec(); uncoupled.extend_from_slice(&tail.uncoupled()[1..]);
-            let mut dual = front.is_dual().to_vec(); dual.extend_from_slice(&tail.is_dual()[1..]);
-            let mut inner = front.innerlines().to_vec(); inner.push(front.coupled()); inner.extend_from_slice(tail.innerlines());
-            let mut vertices = front.vertices().to_vec(); vertices.extend_from_slice(tail.vertices());
+            let mut uncoupled = front.uncoupled().to_vec();
+            uncoupled.extend_from_slice(&tail.uncoupled()[1..]);
+            let mut dual = front.is_dual().to_vec();
+            dual.extend_from_slice(&tail.is_dual()[1..]);
+            let mut inner = front.innerlines().to_vec();
+            inner.push(front.coupled());
+            inner.extend_from_slice(tail.innerlines());
+            let mut vertices = front.vertices().to_vec();
+            vertices.extend_from_slice(tail.vertices());
             FusionTreeKey::new(uncoupled, tail.coupled(), dual, inner, vertices)
         }
     };
-    validate_generic_fusion_tree_pair_checked(rule, &FusionTreePairKey::pair(merged.clone(), merged.clone()))
-        .map_err(map_checked_generic_structure_error)?;
+    validate_generic_fusion_tree_pair_checked(
+        rule,
+        &FusionTreePairKey::pair(merged.clone(), merged.clone()),
+    )
+    .map_err(map_checked_generic_structure_error)?;
     Ok(merged)
 }
 
@@ -487,8 +519,7 @@ where
                 Vec::with_capacity(front.uncoupled().len() + tail.uncoupled().len() - 1);
             uncoupled.extend_from_slice(front.uncoupled());
             uncoupled.extend_from_slice(&tail.uncoupled()[1..]);
-            let mut is_dual =
-                Vec::with_capacity(front.is_dual().len() + tail.is_dual().len() - 1);
+            let mut is_dual = Vec::with_capacity(front.is_dual().len() + tail.is_dual().len() - 1);
             is_dual.extend_from_slice(front.is_dual());
             is_dual.extend_from_slice(&tail.is_dual()[1..]);
             let mut innerlines =
@@ -496,17 +527,10 @@ where
             innerlines.extend_from_slice(front.innerlines());
             innerlines.push(front.coupled());
             innerlines.extend_from_slice(tail.innerlines());
-            let mut vertices =
-                Vec::with_capacity(front.vertices().len() + tail.vertices().len());
+            let mut vertices = Vec::with_capacity(front.vertices().len() + tail.vertices().len());
             vertices.extend_from_slice(front.vertices());
             vertices.extend_from_slice(tail.vertices());
-            FusionTreeKey::new(
-                uncoupled,
-                tail.coupled(),
-                is_dual,
-                innerlines,
-                vertices,
-            )
+            FusionTreeKey::new(uncoupled, tail.coupled(), is_dual, innerlines, vertices)
         }
     };
     merged.validate_for_rule_checked(rule)?;

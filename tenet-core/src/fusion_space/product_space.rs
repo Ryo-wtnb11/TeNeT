@@ -89,9 +89,7 @@ impl FusionProductSpace {
                     for coupled in channels {
                         let contribution = left_dimension
                             .checked_mul(right_degeneracy)
-                            .and_then(|value| {
-                                value.checked_mul(rule.nsymbol(left, right, coupled))
-                            })
+                            .and_then(|value| value.checked_mul(rule.nsymbol(left, right, coupled)))
                             .ok_or(CoreError::ElementCountOverflow)?;
                         if contribution == 0 {
                             continue;

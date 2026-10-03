@@ -40,8 +40,7 @@ where
                         continue;
                     }
                     let coupled = only_fusion_channel(rule, left, right)?;
-                    coefficient =
-                        coefficient * rule.r_symbol_scalar(left, right, coupled);
+                    coefficient = coefficient * rule.r_symbol_scalar(left, right, coupled);
                 }
             }
         }
@@ -54,8 +53,7 @@ where
             .map(|&axis| tree.is_dual()[axis])
             .collect::<SmallVec<[bool; 8]>>();
         let coupled = tree.coupled();
-        let destination =
-            rebuild_unique_standard_fusion_tree(rule, &uncoupled, coupled, &is_dual)?;
+        let destination = rebuild_unique_standard_fusion_tree(rule, &uncoupled, coupled, &is_dual)?;
         return Ok((destination, coefficient));
     }
 
@@ -106,7 +104,8 @@ where
         let is_dual = (0..rank)
             .map(|position| tree.is_dual()[braid.permutation_at(position)])
             .collect::<SmallVec<[bool; 8]>>();
-        let destination = rebuild_unique_standard_fusion_tree(rule, &uncoupled, tree.coupled(), &is_dual)?;
+        let destination =
+            rebuild_unique_standard_fusion_tree(rule, &uncoupled, tree.coupled(), &is_dual)?;
         return Ok((destination, coefficient));
     }
 

@@ -186,7 +186,6 @@ impl MultiplicityFreeTreeLocalData for FusionTreeKey {
     fn innerlines(&self) -> &[SectorId] {
         self.innerlines()
     }
-
 }
 
 pub(super) trait MultiplicityFreeTreeData: MultiplicityFreeTreeLocalData {
@@ -318,10 +317,7 @@ mod multiplicity_free_projection {
     }
 
     impl<'a> Trees<'a> {
-        pub(crate) fn checked<R>(
-            rule: &R,
-            trees: &'a [FusionTreeKey],
-        ) -> Result<Self, CoreError>
+        pub(crate) fn checked<R>(rule: &R, trees: &'a [FusionTreeKey]) -> Result<Self, CoreError>
         where
             R: FusionRule,
         {
@@ -514,7 +510,6 @@ impl MultiplicityFreeTreeLocalData for MultiplicityFreeTreeLocal {
     fn innerlines(&self) -> &[SectorId] {
         &self.innerlines
     }
-
 }
 
 type MultiplicityFreeArtinTerms<S> = SmallVec<[(MultiplicityFreeTreeLocal, S); 2]>;
@@ -530,16 +525,11 @@ impl MultiplicityFreeTreeLocal {
 }
 
 impl MultiplicityFreeTreeFrame {
-    pub(super) fn from_frozen_externals(
-        uncoupled: Arc<[SectorId]>,
-        is_dual: Arc<[bool]>,
-    ) -> Self {
-        let vertices = std::iter::repeat_n(
-            MultiplicityIndex::ONE,
-            uncoupled.len().saturating_sub(1),
-        )
-        .collect::<Vec<_>>()
-        .into();
+    pub(super) fn from_frozen_externals(uncoupled: Arc<[SectorId]>, is_dual: Arc<[bool]>) -> Self {
+        let vertices =
+            std::iter::repeat_n(MultiplicityIndex::ONE, uncoupled.len().saturating_sub(1))
+                .collect::<Vec<_>>()
+                .into();
         Self {
             uncoupled,
             is_dual,
@@ -568,8 +558,7 @@ impl MultiplicityFreeTreeFrame {
     pub(super) fn matches_tree(&self, tree: &FusionTreeKey) -> bool {
         // Why not split and compare frames: every source shares these slices,
         // while collecting rank > 8 frames would allocate once per source.
-        self.uncoupled.as_ref() == tree.uncoupled()
-            && self.is_dual.as_ref() == tree.is_dual()
+        self.uncoupled.as_ref() == tree.uncoupled() && self.is_dual.as_ref() == tree.is_dual()
     }
 
     pub(super) fn materialize(&self, local: MultiplicityFreeTreeLocal) -> FusionTreeKey {
@@ -590,8 +579,7 @@ pub(crate) fn project_multiplicity_free_tree<R>(
 where
     R: FusionRule,
 {
-    let projection =
-        MultiplicityFreeTreeProjection::checked(rule, std::slice::from_ref(tree))?;
+    let projection = MultiplicityFreeTreeProjection::checked(rule, std::slice::from_ref(tree))?;
     Ok(MultiplicityFreeTreeFrame::split(
         projection
             .tree_at(0)
@@ -632,7 +620,10 @@ impl MultiplicityFreeTreePairFrame {
         )
     }
 
-    pub(super) fn matches_tree_pair_ref(&self, tree_pair: ValidatedMultiplicityFreeTreePair<'_>) -> bool {
+    pub(super) fn matches_tree_pair_ref(
+        &self,
+        tree_pair: ValidatedMultiplicityFreeTreePair<'_>,
+    ) -> bool {
         self.codomain.matches_tree(tree_pair.codomain().key())
             && self.domain.matches_tree(tree_pair.domain().key())
     }
@@ -648,13 +639,7 @@ impl MultiplicityFreeTreePairFrame {
 pub(super) fn project_multiplicity_free_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
-) -> Result<
-    (
-        MultiplicityFreeTreePairFrame,
-        MultiplicityFreeTreePairLocal,
-    ),
-    CoreError,
->
+) -> Result<(MultiplicityFreeTreePairFrame, MultiplicityFreeTreePairLocal), CoreError>
 where
     R: FusionRule,
 {
@@ -710,10 +695,7 @@ where
         vertices: Arc::clone(&frame.vertices),
     };
 
-    if left != rule.vacuum()
-        && right != rule.vacuum()
-        && !rule.braiding_style().has_braiding()
-    {
+    if left != rule.vacuum() && right != rule.vacuum() && !rule.braiding_style().has_braiding() {
         return Err(CoreError::UnsupportedSectorBraid {
             left,
             right,
@@ -875,11 +857,6 @@ where
     let terms = prepared.apply(rule, &local)?;
     Ok(terms
         .into_iter()
-        .map(|(local, coefficient)| {
-            (
-                prepared.output_frame.materialize(local),
-                coefficient,
-            )
-        })
+        .map(|(local, coefficient)| (prepared.output_frame.materialize(local), coefficient))
         .collect())
 }

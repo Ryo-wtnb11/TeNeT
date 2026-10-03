@@ -21,8 +21,11 @@ pub(crate) struct FusionTreeHomSpaceLayoutData {
 }
 
 pub(super) fn generic_keys_for_coupled_from_groups(
-    codomain: &[CoupledFusionTrees], codomain_fold: &CoupledSectorFold,
-    domain: &[CoupledFusionTrees], domain_fold: &CoupledSectorFold, coupled: SectorId,
+    codomain: &[CoupledFusionTrees],
+    codomain_fold: &CoupledSectorFold,
+    domain: &[CoupledFusionTrees],
+    domain_fold: &CoupledSectorFold,
+    coupled: SectorId,
     outside_table_error: impl Fn(&str, &CoupledSectorFold, SectorId) -> CoreError,
 ) -> Result<Vec<FusionTreePairKey>, CoreError> {
     for (side, fold) in [("codomain", codomain_fold), ("domain", domain_fold)] {
@@ -30,10 +33,23 @@ pub(super) fn generic_keys_for_coupled_from_groups(
             return Err(outside_table_error(side, fold, coupled));
         }
     }
-    let codomain = codomain.iter().find(|g| g.coupled == coupled).map_or(&[][..], |g| g.trees.as_slice());
-    let domain = domain.iter().find(|g| g.coupled == coupled).map_or(&[][..], |g| g.trees.as_slice());
+    let codomain = codomain
+        .iter()
+        .find(|g| g.coupled == coupled)
+        .map_or(&[][..], |g| g.trees.as_slice());
+    let domain = domain
+        .iter()
+        .find(|g| g.coupled == coupled)
+        .map_or(&[][..], |g| g.trees.as_slice());
     let mut keys = Vec::with_capacity(codomain.len() * domain.len());
-    for domain_tree in domain { for codomain_tree in codomain { keys.push(FusionTreePairKey::pair(codomain_tree.clone(), domain_tree.clone())); } }
+    for domain_tree in domain {
+        for codomain_tree in codomain {
+            keys.push(FusionTreePairKey::pair(
+                codomain_tree.clone(),
+                domain_tree.clone(),
+            ));
+        }
+    }
     Ok(keys)
 }
 
@@ -255,8 +271,7 @@ pub(crate) fn coupled_grid_build_observations() -> (usize, usize) {
 #[cfg(test)]
 fn observe_coupled_grid_reconstruction_insert() {
     COUPLED_GRID_BUILD_OBSERVATIONS.set({
-        let (reconstruction_inserts, side_derivations) =
-            COUPLED_GRID_BUILD_OBSERVATIONS.get();
+        let (reconstruction_inserts, side_derivations) = COUPLED_GRID_BUILD_OBSERVATIONS.get();
         (reconstruction_inserts + 1, side_derivations)
     });
 }
@@ -264,8 +279,7 @@ fn observe_coupled_grid_reconstruction_insert() {
 #[cfg(test)]
 pub(super) fn observe_coupled_grid_side_derivation() {
     COUPLED_GRID_BUILD_OBSERVATIONS.set({
-        let (reconstruction_inserts, side_derivations) =
-            COUPLED_GRID_BUILD_OBSERVATIONS.get();
+        let (reconstruction_inserts, side_derivations) = COUPLED_GRID_BUILD_OBSERVATIONS.get();
         (reconstruction_inserts, side_derivations + 1)
     });
 }
@@ -320,9 +334,7 @@ pub(crate) fn reconstructed_fusion_tree_layout_data_from_keys(
         let mut row_key_offsets = Vec::new();
         let mut col_key_offsets = Vec::new();
         let mut entries = Vec::new();
-        while run_end < keys.len()
-            && keys[run_end].codomain_tree().coupled() == coupled
-        {
+        while run_end < keys.len() && keys[run_end].codomain_tree().coupled() == coupled {
             let row = match row_indices.get(keys[run_end].codomain_tree()) {
                 Some(&index) => index,
                 None => {

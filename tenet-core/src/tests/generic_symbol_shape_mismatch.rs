@@ -8,15 +8,24 @@ struct TruncatedSymbolRule {
     truncate_b: bool,
 }
 
-const TRUNCATED_R: TruncatedSymbolRule =
-    TruncatedSymbolRule { truncate_b: false };
+const TRUNCATED_R: TruncatedSymbolRule = TruncatedSymbolRule { truncate_b: false };
 
 impl FusionRule for TruncatedSymbolRule {
-    fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
-    fn fusion_style(&self) -> FusionStyleKind { A4FoldRule.fusion_style() }
-    fn braiding_style(&self) -> BraidingStyleKind { A4FoldRule.braiding_style() }
-    fn vacuum(&self) -> SectorId { A4FoldRule.vacuum() }
-    fn dual(&self, sector: SectorId) -> SectorId { A4FoldRule.dual(sector) }
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        A4FoldRule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        A4FoldRule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        A4FoldRule.vacuum()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        A4FoldRule.dual(sector)
+    }
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
         A4FoldRule.fusion_channels(left, right)
     }
@@ -44,7 +53,9 @@ impl GenericFusionSymbols for TruncatedSymbolRule {
 }
 
 impl GenericRigidSymbols for TruncatedSymbolRule {
-    fn sqrt_dim_scalar(&self, sector: SectorId) -> f64 { A4FoldRule.sqrt_dim_scalar(sector) }
+    fn sqrt_dim_scalar(&self, sector: SectorId) -> f64 {
+        A4FoldRule.sqrt_dim_scalar(sector)
+    }
     fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> f64 {
         A4FoldRule.inv_sqrt_dim_scalar(sector)
     }
@@ -71,8 +82,7 @@ fn generic_braid_tree_rejects_r_symbol_shape_mismatch() {
     // What: a 1x1 R for N(3,3,3) = 2 is a typed malformed-input error on the
     // infallible braid, as on the sibling F-move path, not a panic.
     let tree = a4_pair_rank2(1).codomain_tree().clone();
-    let error =
-        generic_braid_tree(&TRUNCATED_R, &tree, &[1, 0], &[0, 1]).unwrap_err();
+    let error = generic_braid_tree(&TRUNCATED_R, &tree, &[1, 0], &[0, 1]).unwrap_err();
     assert_eq!(error, shape_mismatch());
 }
 

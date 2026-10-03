@@ -70,12 +70,10 @@ where
             }
             let frozen_uncoupled: Arc<[SectorId]> = uncoupled.clone().into();
             let frozen_is_dual: Arc<[bool]> = is_dual.clone().into();
-            let frozen_vertices: Arc<[MultiplicityIndex]> = std::iter::repeat_n(
-                MultiplicityIndex::ONE,
-                uncoupled.len().saturating_sub(1),
-            )
-            .collect::<Vec<_>>()
-            .into();
+            let frozen_vertices: Arc<[MultiplicityIndex]> =
+                std::iter::repeat_n(MultiplicityIndex::ONE, uncoupled.len().saturating_sub(1))
+                    .collect::<Vec<_>>()
+                    .into();
             for coupled in reachable_coupled_sectors(rule, &effective) {
                 let trees = collect_fusion_trees_for_coupled_frozen(
                     rule,
@@ -209,22 +207,16 @@ where
     // `inner_rev` accumulates the inner lines outermost-first as the walk
     // descends; the stored key wants innermost-first, so emit reverses it.
     let mut inner_rev: Vec<SectorId> = Vec::new();
-    try_visit_fusion_trees_checked(
-        rule,
-        effective,
-        coupled,
-        &mut inner_rev,
-        &mut |inner_rev| {
-            out.push(FusionTreeKey::from_frozen(
-                Arc::clone(uncoupled),
-                coupled,
-                Arc::clone(is_dual),
-                inner_rev.iter().rev().copied().collect::<Vec<_>>().into(),
-                Arc::clone(vertices),
-            ));
-            Ok(())
-        },
-    )?;
+    try_visit_fusion_trees_checked(rule, effective, coupled, &mut inner_rev, &mut |inner_rev| {
+        out.push(FusionTreeKey::from_frozen(
+            Arc::clone(uncoupled),
+            coupled,
+            Arc::clone(is_dual),
+            inner_rev.iter().rev().copied().collect::<Vec<_>>().into(),
+            Arc::clone(vertices),
+        ));
+        Ok(())
+    })?;
     Ok(out)
 }
 
@@ -322,15 +314,14 @@ where
     .into();
     let mut grouped = Vec::new();
     for coupled in reachable_coupled_sectors(rule, &effective) {
-        let trees =
-            collect_fusion_trees_for_coupled_frozen(
-                rule,
-                &frozen_uncoupled,
-                &frozen_is_dual,
-                &frozen_vertices,
-                &effective,
-                coupled,
-            );
+        let trees = collect_fusion_trees_for_coupled_frozen(
+            rule,
+            &frozen_uncoupled,
+            &frozen_is_dual,
+            &frozen_vertices,
+            &effective,
+            coupled,
+        );
         if !trees.is_empty() {
             grouped.push(CoupledFusionTrees { coupled, trees });
         }
@@ -388,40 +379,40 @@ where
     let mut is_dual = Vec::with_capacity(space.len());
     let mut effective = Vec::with_capacity(space.len());
     space.try_visit_selected_leg_tuples(&mut |tuple| {
-            // `effective_sectors` is the uncoupled sectors verbatim (it ignores the
-            // rule); inlined here to avoid its mult-free bound.
-            uncoupled.clear();
-            is_dual.clear();
-            effective.clear();
-            for leg in tuple {
-                uncoupled.push(leg.sector());
-                is_dual.push(leg.is_dual());
-                effective.push(leg.sector());
-            }
-            let frozen_uncoupled: Arc<[SectorId]> = uncoupled.clone().into();
-            let frozen_is_dual: Arc<[bool]> = is_dual.clone().into();
-            let fold = rule
-                .try_coupled_sector_fold(&effective)
-                .map_err(CheckedGenericStructureError::Provider)?;
-            for &coupled in fold.clean() {
-                let trees = collect_generic_fusion_trees_for_coupled_frozen_checked(
-                    rule,
-                    &frozen_uncoupled,
-                    &frozen_is_dual,
-                    &effective,
-                    coupled,
-                )?;
-                match index.get(&coupled) {
-                    Some(&i) => grouped[i].trees.extend(trees),
-                    None => {
-                        index.insert(coupled, grouped.len());
-                        grouped.push(CoupledFusionTrees { coupled, trees });
-                    }
+        // `effective_sectors` is the uncoupled sectors verbatim (it ignores the
+        // rule); inlined here to avoid its mult-free bound.
+        uncoupled.clear();
+        is_dual.clear();
+        effective.clear();
+        for leg in tuple {
+            uncoupled.push(leg.sector());
+            is_dual.push(leg.is_dual());
+            effective.push(leg.sector());
+        }
+        let frozen_uncoupled: Arc<[SectorId]> = uncoupled.clone().into();
+        let frozen_is_dual: Arc<[bool]> = is_dual.clone().into();
+        let fold = rule
+            .try_coupled_sector_fold(&effective)
+            .map_err(CheckedGenericStructureError::Provider)?;
+        for &coupled in fold.clean() {
+            let trees = collect_generic_fusion_trees_for_coupled_frozen_checked(
+                rule,
+                &frozen_uncoupled,
+                &frozen_is_dual,
+                &effective,
+                coupled,
+            )?;
+            match index.get(&coupled) {
+                Some(&i) => grouped[i].trees.extend(trees),
+                None => {
+                    index.insert(coupled, grouped.len());
+                    grouped.push(CoupledFusionTrees { coupled, trees });
                 }
             }
-            aggregate.absorb(fold);
-            Ok::<(), CheckedGenericStructureError<R::Error>>(())
-        })?;
+        }
+        aggregate.absorb(fold);
+        Ok::<(), CheckedGenericStructureError<R::Error>>(())
+    })?;
     // Tainted-anywhere beats clean-somewhere, and an unknown split anywhere
     // demotes every candidate; both live in the builder's seal.
     let aggregate = aggregate.seal();
@@ -542,12 +533,10 @@ where
 {
     let frozen_uncoupled = Arc::from(uncoupled);
     let frozen_is_dual = Arc::from(is_dual);
-    let frozen_vertices = std::iter::repeat_n(
-        MultiplicityIndex::ONE,
-        uncoupled.len().saturating_sub(1),
-    )
-    .collect::<Vec<_>>()
-    .into();
+    let frozen_vertices =
+        std::iter::repeat_n(MultiplicityIndex::ONE, uncoupled.len().saturating_sub(1))
+            .collect::<Vec<_>>()
+            .into();
     collect_fusion_trees_for_coupled_frozen(
         rule,
         &frozen_uncoupled,
@@ -595,14 +584,7 @@ fn visit_fusion_trees<R, F>(
     R: MultiplicityFreeFusionRule,
     F: FnMut(&[SectorId]),
 {
-    visit_fusion_trees_where(
-        rule,
-        effective,
-        coupled,
-        inner_rev,
-        &|_, _| true,
-        emit,
-    );
+    visit_fusion_trees_where(rule, effective, coupled, inner_rev, &|_, _| true, emit);
 }
 
 pub(super) fn visit_fusion_trees_where<R, P, F>(

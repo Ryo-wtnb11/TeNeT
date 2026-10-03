@@ -193,8 +193,7 @@ impl SectorStructure {
             }
         }
         let mut fusion_tree_groups = Vec::<FusionTreeBlockGroup>::new();
-        let mut fusion_tree_group_indices =
-            FxHashMap::<FusionTreeGroupKey, usize>::default();
+        let mut fusion_tree_group_indices = FxHashMap::<FusionTreeGroupKey, usize>::default();
         for (index, block) in blocks.iter().enumerate() {
             let Some(group_key) = block.key().fusion_tree_group_key() else {
                 continue;
@@ -311,11 +310,7 @@ impl SectorStructure {
                 BlockKey::FusionTree(storage_key) => storage_key
                     .codomain_tree()
                     .cmp(logical_key.domain_tree())
-                    .then_with(|| {
-                        storage_key
-                            .domain_tree()
-                            .cmp(logical_key.codomain_tree())
-                    }),
+                    .then_with(|| storage_key.domain_tree().cmp(logical_key.codomain_tree())),
                 _ => std::cmp::Ordering::Less,
             })
             .ok()

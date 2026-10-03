@@ -195,7 +195,8 @@ impl BlockStructure {
     }
 
     pub fn from_blocks_with_rank(rank: usize, blocks: Vec<BlockSpec>) -> Result<Self, CoreError> {
-        PreparedBlockStructure::from_blocks_with_rank(rank, blocks).map(|prepared| prepared.commit())
+        PreparedBlockStructure::from_blocks_with_rank(rank, blocks)
+            .map(|prepared| prepared.commit())
     }
 
     pub fn from_parts(
@@ -368,9 +369,7 @@ impl BlockStructure {
     }
 
     pub fn pair_block_indices_from(&self, src: &BlockStructure) -> Result<Vec<usize>, CoreError> {
-        self.content
-            .sector
-            .pair_indices_from(&src.content.sector)
+        self.content.sector.pair_indices_from(&src.content.sector)
     }
 
     pub fn only_block(&self) -> Result<BlockRef<'_>, CoreError> {
@@ -392,11 +391,11 @@ impl BlockStructure {
     }
 
     pub fn block_by_key(&self, key: &BlockKey) -> Result<BlockRef<'_>, CoreError> {
-        let index = self
-            .find_block_index_by_key(key)
-            .ok_or_else(|| CoreError::MissingBlockKey {
-                key: Box::new(key.clone()),
-            })?;
+        let index =
+            self.find_block_index_by_key(key)
+                .ok_or_else(|| CoreError::MissingBlockKey {
+                    key: Box::new(key.clone()),
+                })?;
         self.block(index)
     }
 
@@ -465,8 +464,7 @@ impl BlockStructure {
             .coupled_region_cache
             .get_or_init(|| new_coupled_region_cache(self.rank()))[nout]
             .get_or_init(|| {
-                compile_coupled_sector_regions(self, nout)
-                    .map(|regions| regions.map(Arc::from))
+                compile_coupled_sector_regions(self, nout).map(|regions| regions.map(Arc::from))
             })
             .clone()
     }

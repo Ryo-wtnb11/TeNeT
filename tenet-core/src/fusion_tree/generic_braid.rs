@@ -103,13 +103,7 @@ where
             (Arc::clone(&tree.innerlines), Arc::clone(&tree.vertices))
         };
         return Ok(vec![(
-            FusionTreeKey::from_frozen(
-                uncoupled,
-                tree.coupled(),
-                is_dual,
-                innerlines,
-                vertices,
-            ),
+            FusionTreeKey::from_frozen(uncoupled, tree.coupled(), is_dual, innerlines, vertices),
             C::Scalar::one(),
         )]);
     }
@@ -166,11 +160,9 @@ where
             }
             // vertices′ = setindex(vertices, ν, 1)  (:143)
             let mut vertices: MultiplicityVec = tree.vertices().iter().copied().collect();
-            *vertices
-                .get_mut(0)
-                .ok_or(CoreError::MalformedFusionTree {
-                    message: "first braid of a Generic tree requires a vertex",
-                })? = MultiplicityIndex::new(nu0 + 1)
+            *vertices.get_mut(0).ok_or(CoreError::MalformedFusionTree {
+                message: "first braid of a Generic tree requires a vertex",
+            })? = MultiplicityIndex::new(nu0 + 1)
                 .expect("enumerated Generic multiplicity labels are one-based");
             out.push((
                 FusionTreeKey::from_frozen(
@@ -236,10 +228,18 @@ where
         let fmat = checked_generic_f_symbol(rule, d, a, b, e, c_prime, c)?;
         // Output vertex ranges σ ∈ 1:N(a,d,c'), λ ∈ 1:N(c',b,e)  (:177-178);
         // inner-sum ranges ρ ∈ 1:N(d,c,e), κ ∈ 1:N(d,a,c')  (:180).
-        let n_sigma = rule.try_nsymbol(a, d, c_prime).map_err(CheckedGenericSymbolError::Provider)?;
-        let n_lambda = rule.try_nsymbol(c_prime, b, e).map_err(CheckedGenericSymbolError::Provider)?;
-        let n_rho = rule.try_nsymbol(d, c, e).map_err(CheckedGenericSymbolError::Provider)?;
-        let n_kappa = rule.try_nsymbol(d, a, c_prime).map_err(CheckedGenericSymbolError::Provider)?;
+        let n_sigma = rule
+            .try_nsymbol(a, d, c_prime)
+            .map_err(CheckedGenericSymbolError::Provider)?;
+        let n_lambda = rule
+            .try_nsymbol(c_prime, b, e)
+            .map_err(CheckedGenericSymbolError::Provider)?;
+        let n_rho = rule
+            .try_nsymbol(d, c, e)
+            .map_err(CheckedGenericSymbolError::Provider)?;
+        let n_kappa = rule
+            .try_nsymbol(d, a, c_prime)
+            .map_err(CheckedGenericSymbolError::Provider)?;
         for sigma0 in 0..n_sigma {
             for lambda0 in 0..n_lambda {
                 // coeff = zero(oneT)  (:179)

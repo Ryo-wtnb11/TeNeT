@@ -33,8 +33,7 @@ where
         return Ok(None);
     };
     let same_group = |key: &FusionTreeKey| {
-        key.uncoupled() == reference.uncoupled()
-            && key.is_dual() == reference.is_dual()
+        key.uncoupled() == reference.uncoupled() && key.is_dual() == reference.is_dual()
     };
     for source in src_keys {
         // Why not compare `coupled`: distinct coupled labels are basis states
@@ -142,19 +141,10 @@ where
     let mut columns = None;
     for step in &prepared.artin_steps {
         let (next_basis, next_columns) = match &columns {
-            Some(columns) => compact_artin_tree_block_step(
-                rule,
-                basis,
-                columns,
-                step.index,
-                step.inverse,
-            )?,
-            None => compact_artin_tree_block_first(
-                rule,
-                basis,
-                step.index,
-                step.inverse,
-            )?,
+            Some(columns) => {
+                compact_artin_tree_block_step(rule, basis, columns, step.index, step.inverse)?
+            }
+            None => compact_artin_tree_block_first(rule, basis, step.index, step.inverse)?,
         };
         basis = next_basis;
         columns = Some(next_columns);
@@ -470,10 +460,7 @@ where
             return compact_repartition_tree_pair_block(group, codomain_rank);
         }
         PreparedTreePairPlan::Repartition => {
-            return compact_repartition_tree_pair_block(
-                group,
-                prepared.target_codomain_rank,
-            );
+            return compact_repartition_tree_pair_block(group, prepared.target_codomain_rank);
         }
         PreparedTreePairPlan::Braid(_)
         | PreparedTreePairPlan::SimpleBraid(_)
@@ -512,19 +499,10 @@ where
         .expect("braid preparation has Artin steps")
     {
         let (next_basis, next_columns) = match columns.take() {
-            Some(columns) => compact_codomain_artin_block_step(
-                rule,
-                basis,
-                &columns,
-                step.index,
-                step.inverse,
-            )?,
-            None => compact_codomain_artin_block_first(
-                rule,
-                basis,
-                step.index,
-                step.inverse,
-            )?,
+            Some(columns) => {
+                compact_codomain_artin_block_step(rule, basis, &columns, step.index, step.inverse)?
+            }
+            None => compact_codomain_artin_block_first(rule, basis, step.index, step.inverse)?,
         };
         basis = next_basis;
         columns = Some(next_columns);
@@ -815,14 +793,9 @@ where
             return compact_repartition_tree_pair_block(group, codomain_rank);
         }
         PreparedTreePairPlan::Repartition => {
-            return compact_repartition_tree_pair_block(
-                group,
-                prepared.target_codomain_rank,
-            );
+            return compact_repartition_tree_pair_block(group, prepared.target_codomain_rank);
         }
-        PreparedTreePairPlan::Transpose { direction, count } => {
-            (*direction, *count)
-        }
+        PreparedTreePairPlan::Transpose { direction, count } => (*direction, *count),
         PreparedTreePairPlan::Braid(_)
         | PreparedTreePairPlan::SimpleBraid(_)
         | PreparedTreePairPlan::UniqueBraid(_) => {
@@ -903,14 +876,13 @@ where
         });
     }
     let a = codomain.uncoupled()[0];
-    let is_dual_a =
-        codomain
-            .is_dual()
-            .first()
-            .copied()
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "codomain tree is missing the first duality flag",
-            })?;
+    let is_dual_a = codomain
+        .is_dual()
+        .first()
+        .copied()
+        .ok_or(CoreError::MalformedFusionTree {
+            message: "codomain tree is missing the first duality flag",
+        })?;
     let kappa = rule.frobenius_schur_phase_scalar(a);
     let c = codomain.coupled();
 

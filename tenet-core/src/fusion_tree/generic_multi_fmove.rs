@@ -84,11 +84,7 @@ where
 {
     let checked = InfallibleGeneric::new(rule);
     match collect_generic_fusion_trees_for_coupled_frozen_checked(
-        &checked,
-        uncoupled,
-        is_dual,
-        effective,
-        coupled,
+        &checked, uncoupled, is_dual, effective, coupled,
     ) {
         Ok(trees) => trees,
         Err(CheckedGenericStructureError::Provider(never)) => match never {},
@@ -122,23 +118,21 @@ where
         &mut inner_rev,
         &mut vtx_rev,
         &mut |inner_rev, vtx_rev| {
-            out.push(
-                FusionTreeKey::from_frozen(
-                    Arc::clone(uncoupled),
-                    coupled,
-                    Arc::clone(is_dual),
-                    inner_rev.iter().rev().copied().collect::<Vec<_>>().into(),
-                    vtx_rev
-                        .iter()
-                        .rev()
-                        .map(|&label| {
-                            MultiplicityIndex::new(label)
-                                .expect("enumerated Generic multiplicity labels are one-based")
-                        })
-                        .collect::<Vec<_>>()
-                        .into(),
-                )
-            );
+            out.push(FusionTreeKey::from_frozen(
+                Arc::clone(uncoupled),
+                coupled,
+                Arc::clone(is_dual),
+                inner_rev.iter().rev().copied().collect::<Vec<_>>().into(),
+                vtx_rev
+                    .iter()
+                    .rev()
+                    .map(|&label| {
+                        MultiplicityIndex::new(label)
+                            .expect("enumerated Generic multiplicity labels are one-based")
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            ));
         },
     )?;
     Ok(out)
@@ -272,18 +266,16 @@ where
     }
     if rank == 2 {
         let n = rule
-            .try_nsymbol(
-                long.uncoupled()[0],
-                long.uncoupled()[1],
-                long.coupled(),
-            )
+            .try_nsymbol(long.uncoupled()[0], long.uncoupled()[1], long.coupled())
             .map_err(CheckedGenericSymbolError::Provider)?;
         let mut values = vec![C::Scalar::zero(); n];
-        let slot = values.get_mut(mu_index(long, 0)?).ok_or(
-            CheckedGenericSymbolError::Core(CoreError::MalformedFusionTree {
-                message: "multi_associator: vertex label exceeds Nsymbol",
-            }),
-        )?;
+        let slot = values
+            .get_mut(mu_index(long, 0)?)
+            .ok_or(CheckedGenericSymbolError::Core(
+                CoreError::MalformedFusionTree {
+                    message: "multi_associator: vertex label exceeds Nsymbol",
+                },
+            ))?;
         *slot = C::Scalar::one();
         return Ok(Some(values));
     }
@@ -295,7 +287,7 @@ where
     let mut coeff = vec![C::Scalar::one()];
     for tensor_kit_k in 2..rank {
         let right_sector = long.uncoupled()[tensor_kit_k]; // c
-        // vertex_info(long, k+1) = (e, d); ν = its vertex label.
+                                                           // vertex_info(long, k+1) = (e, d); ν = its vertex label.
         let (middle_left, middle_right) = fusion_tree_vertex_neighbors(long, tensor_kit_k)?;
         let nu0 = mu_index(long, tensor_kit_k - 1)?;
         // vertex_info(short, k) = (b, e′); κ = its vertex label.
@@ -386,14 +378,22 @@ where
         SectorId,
     ) -> Result<Vec<FusionTreeKey>, CheckedGenericSymbolError<C::Error>>,
 {
-    if rule.try_nsymbol(leading, tree.coupled(), coupled)
-        .map_err(CheckedGenericSymbolError::Provider)? == 0 {
-        return Err(CheckedGenericSymbolError::Core(CoreError::SectorMismatch { expected: coupled, actual: tree.coupled() }));
+    if rule
+        .try_nsymbol(leading, tree.coupled(), coupled)
+        .map_err(CheckedGenericSymbolError::Provider)?
+        == 0
+    {
+        return Err(CheckedGenericSymbolError::Core(CoreError::SectorMismatch {
+            expected: coupled,
+            actual: tree.coupled(),
+        }));
     }
     let mut uncoupled = Vec::with_capacity(tree.uncoupled().len() + 1);
-    uncoupled.push(leading); uncoupled.extend_from_slice(tree.uncoupled());
+    uncoupled.push(leading);
+    uncoupled.extend_from_slice(tree.uncoupled());
     let mut dual = Vec::with_capacity(tree.is_dual().len() + 1);
-    dual.push(leading_is_dual); dual.extend_from_slice(tree.is_dual());
+    dual.push(leading_is_dual);
+    dual.extend_from_slice(tree.is_dual());
     let frozen_uncoupled: Arc<[SectorId]> = Arc::from(uncoupled);
     let frozen_dual: Arc<[bool]> = Arc::from(dual);
     let effective = frozen_uncoupled.to_vec();
@@ -401,7 +401,10 @@ where
     let mut terms = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         if let Some(values) = generic_multi_associator_result(rule, &candidate, tree)? {
-            terms.push((candidate, values.into_iter().map(|value| value.conj()).collect()));
+            terms.push((
+                candidate,
+                values.into_iter().map(|value| value.conj()).collect(),
+            ));
         }
     }
     Ok(terms)
@@ -414,16 +417,12 @@ pub(super) fn generic_multi_fmove_tree_checked<C>(
 where
     C: CheckedGenericRigidSymbols,
 {
-    generic_multi_fmove_tree_with(
-        rule,
-        tree,
-        |uncoupled, dual, effective, coupled| {
-            collect_generic_fusion_trees_for_coupled_frozen_checked(
-                rule, uncoupled, dual, effective, coupled,
-            )
-            .map_err(map_checked_generic_structure_error)
-        },
-    )
+    generic_multi_fmove_tree_with(rule, tree, |uncoupled, dual, effective, coupled| {
+        collect_generic_fusion_trees_for_coupled_frozen_checked(
+            rule, uncoupled, dual, effective, coupled,
+        )
+        .map_err(map_checked_generic_structure_error)
+    })
 }
 
 fn generic_multi_fmove_tree_with<C, F>(
@@ -464,13 +463,14 @@ where
             .try_nsymbol(tree.uncoupled()[0], tree.uncoupled()[1], tree.coupled())
             .map_err(CheckedGenericSymbolError::Provider)?;
         let mut coefficients = vec![C::Scalar::zero(); n];
-        let slot = coefficients
-            .get_mut(mu_index(tree, 0)?)
-            .ok_or(CheckedGenericSymbolError::Core(
-                CoreError::MalformedFusionTree {
-                    message: "multi_Fmove: vertex label exceeds Nsymbol",
-                },
-            ))?;
+        let slot =
+            coefficients
+                .get_mut(mu_index(tree, 0)?)
+                .ok_or(CheckedGenericSymbolError::Core(
+                    CoreError::MalformedFusionTree {
+                        message: "multi_Fmove: vertex label exceeds Nsymbol",
+                    },
+                ))?;
         *slot = C::Scalar::one();
         return Ok(vec![(
             FusionTreeKey::new(
@@ -525,15 +525,11 @@ where
     R::Scalar: CategoricalScalar,
 {
     let access = InfallibleGenericFR(rule);
-    generic_multi_fmove_tree_with(
-        &access,
-        tree,
-        |uncoupled, dual, effective, coupled| {
-            Ok(collect_generic_fusion_trees_for_coupled_frozen(
-                rule, uncoupled, dual, effective, coupled,
-            ))
-        },
-    )
+    generic_multi_fmove_tree_with(&access, tree, |uncoupled, dual, effective, coupled| {
+        Ok(collect_generic_fusion_trees_for_coupled_frozen(
+            rule, uncoupled, dual, effective, coupled,
+        ))
+    })
     .map_err(map_infallible_generic_symbol_error)
 }
 

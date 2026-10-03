@@ -349,13 +349,7 @@ impl FusionTreeKey {
     ///
     /// Sector values are provider-local IDs. Vertex values are one-based
     /// outer-multiplicity labels.
-    pub fn try_from_sector_ids_for_rule_checked<
-        R,
-        Uncoupled,
-        Dual,
-        Innerlines,
-        Vertices,
-    >(
+    pub fn try_from_sector_ids_for_rule_checked<R, Uncoupled, Dual, Innerlines, Vertices>(
         rule: &R,
         uncoupled: Uncoupled,
         coupled: usize,
@@ -432,10 +426,7 @@ impl FusionTreeKey {
     }
 
     /// Validate this raw key through checked finite algebra.
-    pub fn validate_for_rule_checked<R>(
-        &self,
-        rule: &R,
-    ) -> Result<(), CheckedFusionSpaceError>
+    pub fn validate_for_rule_checked<R>(&self, rule: &R) -> Result<(), CheckedFusionSpaceError>
     where
         R: CheckedFusionAlgebra,
     {
@@ -449,11 +440,8 @@ const FROZEN_SLICE_CONTROL_BYTES: usize = 2 * std::mem::size_of::<usize>();
 fn charge_frozen_slice<T>(seen: &mut rustc_hash::FxHashSet<usize>, slice: &Arc<[T]>) -> usize {
     let pointer = Arc::as_ptr(slice) as *const T as usize;
     if seen.insert(pointer) {
-        FROZEN_SLICE_CONTROL_BYTES.saturating_add(
-            slice
-                .len()
-                .saturating_mul(std::mem::size_of::<T>()),
-        )
+        FROZEN_SLICE_CONTROL_BYTES
+            .saturating_add(slice.len().saturating_mul(std::mem::size_of::<T>()))
     } else {
         0
     }
@@ -650,9 +638,8 @@ impl FusionTreePairKey {
     /// across calls that share `seen`.
     #[doc(hidden)]
     pub fn charge_retained_backings(&self, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {
-        charge_fusion_tree_key_backings(seen, &self.codomain_tree).saturating_add(
-            charge_fusion_tree_key_backings(seen, &self.domain_tree),
-        )
+        charge_fusion_tree_key_backings(seen, &self.codomain_tree)
+            .saturating_add(charge_fusion_tree_key_backings(seen, &self.domain_tree))
     }
 
     /// Validate both trees and their shared coupled sector.
@@ -671,10 +658,7 @@ impl FusionTreePairKey {
 
     /// Validate both trees and their shared coupled sector through checked
     /// finite algebra.
-    pub fn validate_for_rule_checked<R>(
-        &self,
-        rule: &R,
-    ) -> Result<(), CheckedFusionSpaceError>
+    pub fn validate_for_rule_checked<R>(&self, rule: &R) -> Result<(), CheckedFusionSpaceError>
     where
         R: CheckedFusionAlgebra,
     {

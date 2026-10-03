@@ -200,7 +200,8 @@ impl<S: Clone> DenseColumns<S> {
     /// Append a new all-empty row, returning its index.
     pub(crate) fn push_empty_row(&mut self) -> usize {
         let row = self.num_rows;
-        self.data.resize_with(self.data.len() + self.num_src, || None);
+        self.data
+            .resize_with(self.data.len() + self.num_src, || None);
         self.num_rows += 1;
         row
     }
@@ -239,7 +240,8 @@ where
     // appearance order, so the rebuilt `next_basis` order — and therefore every
     // coefficient — is bit-for-bit identical to pushing the key eagerly.
     let mut index: FxHashMap<FusionTreePairKey, usize> = FxHashMap::default();
-    let mut next_columns: DenseColumns<R::Scalar> = DenseColumns::with_capacity(num_src, basis.len());
+    let mut next_columns: DenseColumns<R::Scalar> =
+        DenseColumns::with_capacity(num_src, basis.len());
     for (source_row, source_key) in basis.iter().enumerate() {
         for (dst_key, step_coefficient) in transform(rule, source_key)? {
             let row = match index.get(&dst_key) {
@@ -290,14 +292,12 @@ impl CompactMultiplicityFreeTreeBasis {
         group: ValidatedFusionTreeBlockGroup<'_, R>,
     ) -> Result<Self, CoreError> {
         let src_keys = group.src_keys;
-        let (frame, first_local) = MultiplicityFreeTreeFrame::split(
-            group
-                .projection
-                .tree_at(0)
-                .ok_or(CoreError::MalformedFusionTree {
+        let (frame, first_local) =
+            MultiplicityFreeTreeFrame::split(group.projection.tree_at(0).ok_or(
+                CoreError::MalformedFusionTree {
                     message: "compact block basis requires at least one source",
-                })?,
-        );
+                },
+            )?);
         let mut locals = Vec::with_capacity(src_keys.len());
         locals.push(first_local);
         for (index, source) in src_keys.iter().enumerate().skip(1) {
@@ -334,14 +334,12 @@ impl CompactMultiplicityFreeTreePairBasis {
     pub(crate) fn from_group<R>(
         group: ValidatedTreePairBlockGroup<'_, R>,
     ) -> Result<Self, CoreError> {
-        let (frame, first_local) = MultiplicityFreeTreePairFrame::split(
-            group
-                .projection
-                .pair_at(0)
-                .ok_or(CoreError::MalformedFusionTree {
+        let (frame, first_local) =
+            MultiplicityFreeTreePairFrame::split(group.projection.pair_at(0).ok_or(
+                CoreError::MalformedFusionTree {
                     message: "compact block basis requires at least one source",
-                })?,
-        );
+                },
+            )?);
         let mut locals = Vec::with_capacity(group.source_len);
         locals.push(first_local);
         for index in 1..group.source_len {
@@ -354,9 +352,7 @@ impl CompactMultiplicityFreeTreePairBasis {
                     message: TREE_PAIR_BLOCK_GROUP_ERROR,
                 });
             }
-            locals.push(MultiplicityFreeTreePairLocal::from_proven(
-                source,
-            ));
+            locals.push(MultiplicityFreeTreePairLocal::from_proven(source));
         }
         Ok(Self { frame, locals })
     }
@@ -547,7 +543,11 @@ fn order_generic_tree_pair_block<S: Clone>(
             Vec::with_capacity(ordered_basis_rows.len().saturating_mul(source_count));
         for basis_row in ordered_basis_rows {
             let row_start = basis_row * source_count;
-            coefficients.extend(columns.data[row_start..row_start + source_count].iter().cloned());
+            coefficients.extend(
+                columns.data[row_start..row_start + source_count]
+                    .iter()
+                    .cloned(),
+            );
         }
         OrderedBlockLinearStorage::DenseDstSrc(coefficients)
     };
@@ -572,7 +572,8 @@ where
     let Some(first) = basis.first() else {
         return Ok((basis, columns));
     };
-    let total_rank = first.codomain_tree().uncoupled().len() + first.domain_tree().uncoupled().len();
+    let total_rank =
+        first.codomain_tree().uncoupled().len() + first.domain_tree().uncoupled().len();
     if target_codomain_rank > total_rank {
         return Err(CoreError::DimensionMismatch {
             expected: total_rank,
@@ -779,8 +780,7 @@ where
         }
     };
     let total_rank = codomain_rank + domain_rank;
-    let (mut basis, mut columns) =
-        seed_generic_tree_pair_block(rule, src_keys)?;
+    let (mut basis, mut columns) = seed_generic_tree_pair_block(rule, src_keys)?;
     (basis, columns) = generic_repartition_tree_pair_block_terms(
         rule,
         basis,

@@ -33,8 +33,8 @@ where
                     actual: block.key().kind(),
                 });
             };
-            let key_rank = key.codomain_tree().uncoupled().len()
-                + key.domain_tree().uncoupled().len();
+            let key_rank =
+                key.codomain_tree().uncoupled().len() + key.domain_tree().uncoupled().len();
             if key_rank != structure.rank() {
                 return Err(CoreError::StructureRankMismatch {
                     expected: structure.rank(),
@@ -137,8 +137,7 @@ where
         I: IntoIterator<Item = usize>,
     {
         validate_multiplicity_free_execution_style(self.rule)?;
-        operation
-            .validate_block_preflight(self.rule, PreparedTreePairFamily::BraidLike)?;
+        operation.validate_block_preflight(self.rule, PreparedTreePairFamily::BraidLike)?;
         if operation.is_identity() {
             let indices = indices.into_iter();
             let (lower, upper) = indices.size_hint();
@@ -153,8 +152,7 @@ where
             }
             return Ok(rows);
         }
-        let batch =
-            ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
+        let batch = ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
         multiplicity_free_braid_tree_pair_block_proven(batch, &operation)
     }
 
@@ -166,9 +164,7 @@ where
     where
         I: IntoIterator<Item = usize>,
     {
-        self.execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(
-            indices, &operation,
-        )
+        self.execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(indices, &operation)
     }
 
     #[doc(hidden)]
@@ -181,10 +177,8 @@ where
         I: IntoIterator<Item = usize>,
     {
         validate_multiplicity_free_execution_style(self.rule)?;
-        operation
-            .validate_block_preflight(self.rule, PreparedTreePairFamily::BraidLike)?;
-        let batch =
-            ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
+        operation.validate_block_preflight(self.rule, PreparedTreePairFamily::BraidLike)?;
+        let batch = ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
         multiplicity_free_braid_tree_pair_block_ordered_proven(batch, operation)
     }
 
@@ -216,8 +210,7 @@ where
             }
             return Ok(rows);
         }
-        let batch =
-            ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
+        let batch = ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
         multiplicity_free_transpose_tree_pair_block_proven(batch, &operation)
     }
 
@@ -245,8 +238,7 @@ where
     {
         validate_multiplicity_free_execution_style(self.rule)?;
         operation.validate_block_preflight(self.rule, PreparedTreePairFamily::Transpose)?;
-        let batch =
-            ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
+        let batch = ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
         multiplicity_free_transpose_tree_pair_block_ordered_proven(batch, operation)
     }
 }
@@ -333,8 +325,7 @@ where
         I: IntoIterator<Item = usize>,
     {
         validate_multiplicity_free_execution_style(self.rule)?;
-        let batch =
-            ValidatedMultiplicityFreeTreeBatch::from_locally_validated(self, indices)?;
+        let batch = ValidatedMultiplicityFreeTreeBatch::from_locally_validated(self, indices)?;
         multiplicity_free_braid_tree_block_proven(batch, permutation, levels)
     }
 

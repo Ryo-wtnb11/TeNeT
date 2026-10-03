@@ -13,10 +13,18 @@ impl TwoSectorTable {
 }
 
 impl FusionRule for TwoSectorTable {
-    fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
-    fn fusion_style(&self) -> FusionStyleKind { FusionStyleKind::Generic }
-    fn braiding_style(&self) -> BraidingStyleKind { BraidingStyleKind::Bosonic }
-    fn vacuum(&self) -> SectorId { SectorId::new(0) }
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Generic
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
         smallvec![SectorId::new(left.id() ^ right.id())]
     }
@@ -50,10 +58,18 @@ impl CheckedFusionAlgebra for TwoSectorTable {
 
 impl CheckedGenericFusion for TwoSectorTable {
     type Error = FusionAlgebraError;
-    fn rule_identity(&self) -> RuleIdentity { FusionRule::rule_identity(self) }
-    fn fusion_style(&self) -> FusionStyleKind { FusionRule::fusion_style(self) }
-    fn braiding_style(&self) -> BraidingStyleKind { FusionRule::braiding_style(self) }
-    fn vacuum(&self) -> SectorId { FusionRule::vacuum(self) }
+    fn rule_identity(&self) -> RuleIdentity {
+        FusionRule::rule_identity(self)
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionRule::fusion_style(self)
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        FusionRule::braiding_style(self)
+    }
+    fn vacuum(&self) -> SectorId {
+        FusionRule::vacuum(self)
+    }
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
         Self::check(sector)
     }

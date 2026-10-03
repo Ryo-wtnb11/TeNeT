@@ -41,22 +41,14 @@ pub(super) fn tensorcontract_descriptor<'a>(
     }
 
     let mut open_legs = SmallVec::<[OrientedLegView<'a>; 8]>::new();
-    open_legs.extend(
-        lhs_open_axes
-            .iter()
-        .map(|&axis| {
-            lhs.external_axis_leg_view(axis)
-                .expect("validated axis belongs to the lhs")
-        }),
-    );
-    open_legs.extend(
-        rhs_open_axes
-            .iter()
-        .map(|&axis| {
-            rhs.external_axis_leg_view(axis)
-                .expect("validated axis belongs to the rhs")
-        }),
-    );
+    open_legs.extend(lhs_open_axes.iter().map(|&axis| {
+        lhs.external_axis_leg_view(axis)
+            .expect("validated axis belongs to the lhs")
+    }));
+    open_legs.extend(rhs_open_axes.iter().map(|&axis| {
+        rhs.external_axis_leg_view(axis)
+            .expect("validated axis belongs to the rhs")
+    }));
     // Why not materialize two permuted operands and their composition: output
     // ordering observes only these final external views, and doing so would
     // repeat orientation arithmetic before the final HomSpace exists.
@@ -89,7 +81,10 @@ fn validate_axis_subset_inline(
     Ok(seen)
 }
 
-pub(crate) fn validate_permutation_inline(permutation: &[usize], rank: usize) -> Result<(), CoreError> {
+pub(crate) fn validate_permutation_inline(
+    permutation: &[usize],
+    rank: usize,
+) -> Result<(), CoreError> {
     if permutation.len() != rank {
         return Err(CoreError::InvalidPermutation {
             permutation: permutation.to_vec(),
@@ -216,10 +211,12 @@ where
     R: CheckedFusionAlgebra,
 {
     if lhs_domain.is_dual() != rhs_codomain.is_dual() {
-        return Err(
-            contracted_leg_duality_mismatch(axes, lhs_domain.is_dual(), rhs_codomain.is_dual())
-                .into(),
-        );
+        return Err(contracted_leg_duality_mismatch(
+            axes,
+            lhs_domain.is_dual(),
+            rhs_codomain.is_dual(),
+        )
+        .into());
     }
     if lhs_domain.source.sectors().len() != rhs_codomain.source.sectors().len() {
         return Err(CoreError::DimensionMismatch {
@@ -264,10 +261,12 @@ where
     R: CheckedGenericFusion,
 {
     if lhs_domain.is_dual() != rhs_codomain.is_dual() {
-        return Err(
-            contracted_leg_duality_mismatch(axes, lhs_domain.is_dual(), rhs_codomain.is_dual())
-                .into(),
-        );
+        return Err(contracted_leg_duality_mismatch(
+            axes,
+            lhs_domain.is_dual(),
+            rhs_codomain.is_dual(),
+        )
+        .into());
     }
     if lhs_domain.source.sectors().len() != rhs_codomain.source.sectors().len() {
         return Err(CoreError::DimensionMismatch {

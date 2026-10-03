@@ -272,9 +272,8 @@ impl BlockStructureContent {
                 BlockKey::Dense => 0,
                 BlockKey::Opaque(key) => spilled_smallvec_heap_bytes(&key.words),
                 BlockKey::FusionTree(pair) => {
-                    charge_fusion_tree_key_backings(seen, pair.codomain_tree()).saturating_add(
-                        charge_fusion_tree_key_backings(seen, pair.domain_tree()),
-                    )
+                    charge_fusion_tree_key_backings(seen, pair.codomain_tree())
+                        .saturating_add(charge_fusion_tree_key_backings(seen, pair.domain_tree()))
                 }
             }
         }
@@ -295,9 +294,11 @@ impl BlockStructureContent {
                         &group.group_key,
                     ))
             });
-        let compact_lookup = self.sector.compact_lookup.as_ref().map_or(0, |lookup| {
-            spilled_smallvec_heap_bytes(&lookup.indices)
-        });
+        let compact_lookup = self
+            .sector
+            .compact_lookup
+            .as_ref()
+            .map_or(0, |lookup| spilled_smallvec_heap_bytes(&lookup.indices));
         let degeneracy = self.degeneracy.blocks.iter().fold(0usize, |bytes, block| {
             bytes
                 .saturating_add(spilled_smallvec_heap_bytes(&block.shape))
@@ -311,7 +312,12 @@ impl BlockStructureContent {
         });
 
         std::mem::size_of::<BlockStructureContent>()
-            .saturating_add(self.sector.blocks.capacity().saturating_mul(std::mem::size_of::<SectorBlock>()))
+            .saturating_add(
+                self.sector
+                    .blocks
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<SectorBlock>()),
+            )
             .saturating_add(sector_blocks)
             .saturating_add(
                 self.sector

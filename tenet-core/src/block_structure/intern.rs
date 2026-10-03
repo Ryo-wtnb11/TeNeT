@@ -60,7 +60,10 @@ impl BlockStructureInternTable {
         }
     }
 
-    pub(crate) fn lookup(&self, key: &BlockStructureInternKey) -> Option<Arc<BlockStructureContent>> {
+    pub(crate) fn lookup(
+        &self,
+        key: &BlockStructureInternKey,
+    ) -> Option<Arc<BlockStructureContent>> {
         self.entries
             .peek(key)
             .and_then(|entry| entry.content.upgrade())
@@ -91,16 +94,12 @@ impl BlockStructureInternTable {
             || charged_key_bytes > self.max_entry_bytes
             || charged_key_bytes > self.byte_budget
         {
-            self.oversized_admission_bypasses =
-                self.oversized_admission_bypasses.saturating_add(1);
+            self.oversized_admission_bypasses = self.oversized_admission_bypasses.saturating_add(1);
             return content;
         }
 
         while self.entries.len() >= self.entry_capacity
-            || self
-                .charged_key_bytes
-                .saturating_add(charged_key_bytes)
-                > self.byte_budget
+            || self.charged_key_bytes.saturating_add(charged_key_bytes) > self.byte_budget
         {
             let Some((_, evicted)) = self.entries.pop_lru() else {
                 break;
@@ -221,36 +220,33 @@ where
 
 pub(crate) fn charged_block_structure_intern_key_bytes(key: &BlockStructureInternKey) -> usize {
     let mut frozen_backings = rustc_hash::FxHashSet::default();
-    key.blocks
-        .iter()
-        .fold(
-            std::mem::size_of::<BlockStructureInternKey>()
-                .saturating_add(std::mem::size_of::<BlockStructureInternEntry>())
-                .saturating_add(
-                    key.blocks
-                        .len()
-                        .saturating_mul(std::mem::size_of::<BlockStructureContentBlock>()),
-                )
-                .saturating_add(BLOCK_STRUCTURE_INTERN_CONTROL_ALLOWANCE_BYTES),
-            |charged, block| {
-                let key_heap = match &block.key {
-                    BlockKey::Dense => 0,
-                    BlockKey::Opaque(key) => spilled_smallvec_heap_bytes(&key.words),
-                    BlockKey::FusionTree(pair) => charge_fusion_tree_key_backings(
-                        &mut frozen_backings,
-                        pair.codomain_tree(),
-                    )
-                    .saturating_add(charge_fusion_tree_key_backings(
-                        &mut frozen_backings,
-                        pair.domain_tree(),
-                    )),
-                };
-                charged
-                    .saturating_add(key_heap)
-                    .saturating_add(spilled_smallvec_heap_bytes(&block.shape))
-                    .saturating_add(spilled_smallvec_heap_bytes(&block.strides))
-            },
-        )
+    key.blocks.iter().fold(
+        std::mem::size_of::<BlockStructureInternKey>()
+            .saturating_add(std::mem::size_of::<BlockStructureInternEntry>())
+            .saturating_add(
+                key.blocks
+                    .len()
+                    .saturating_mul(std::mem::size_of::<BlockStructureContentBlock>()),
+            )
+            .saturating_add(BLOCK_STRUCTURE_INTERN_CONTROL_ALLOWANCE_BYTES),
+        |charged, block| {
+            let key_heap = match &block.key {
+                BlockKey::Dense => 0,
+                BlockKey::Opaque(key) => spilled_smallvec_heap_bytes(&key.words),
+                BlockKey::FusionTree(pair) => {
+                    charge_fusion_tree_key_backings(&mut frozen_backings, pair.codomain_tree())
+                        .saturating_add(charge_fusion_tree_key_backings(
+                            &mut frozen_backings,
+                            pair.domain_tree(),
+                        ))
+                }
+            };
+            charged
+                .saturating_add(key_heap)
+                .saturating_add(spilled_smallvec_heap_bytes(&block.shape))
+                .saturating_add(spilled_smallvec_heap_bytes(&block.strides))
+        },
+    )
 }
 
 /// Process-global, strictly-monotonic id source for interned block-structure
@@ -357,7 +353,9 @@ fn block_structure_arc_table() -> &'static RwLock<BlockStructureArcTable> {
     })
 }
 
-pub(super) fn canonicalize_block_structure_arc(structure: Arc<BlockStructure>) -> Arc<BlockStructure> {
+pub(super) fn canonicalize_block_structure_arc(
+    structure: Arc<BlockStructure>,
+) -> Arc<BlockStructure> {
     let id = structure.content_id();
     let table = block_structure_arc_table();
     // Read-lock fast path uses `peek` (does not bump recency; `get` needs `&mut`).

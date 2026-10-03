@@ -267,10 +267,7 @@ pub struct OrientedFusionTreeHomSpace<'a> {
 
 impl<'a> OrientedFusionTreeHomSpace<'a> {
     #[doc(hidden)]
-    pub fn new(
-        source: &'a FusionTreeHomSpace,
-        orientation: FusionTreePairOrientation,
-    ) -> Self {
+    pub fn new(source: &'a FusionTreeHomSpace, orientation: FusionTreePairOrientation) -> Self {
         Self {
             source,
             orientation,
@@ -397,7 +394,8 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
 
     #[doc(hidden)]
     pub fn external_axis_is_dual(self, axis: usize) -> Option<bool> {
-        self.external_axis_leg_view(axis).map(OrientedLegView::is_dual)
+        self.external_axis_leg_view(axis)
+            .map(OrientedLegView::is_dual)
     }
 
     #[doc(hidden)]
@@ -610,12 +608,10 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
     ) -> Result<HomSpaceDescriptor<'a>, CoreError> {
         validate_axis_selection(codomain_axes, domain_axes, self.rank())?;
         Ok(HomSpaceDescriptor::new(
-            codomain_axes
-                .iter()
-                .map(|&axis| {
-                    self.external_axis_leg_view(axis)
-                        .expect("validated axis belongs to the source")
-                }),
+            codomain_axes.iter().map(|&axis| {
+                self.external_axis_leg_view(axis)
+                    .expect("validated axis belongs to the source")
+            }),
             domain_axes.iter().map(|&axis| {
                 self.external_axis_leg_view(axis)
                     .expect("validated axis belongs to the source")

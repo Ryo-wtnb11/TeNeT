@@ -66,7 +66,10 @@ impl PreparedMultiplicityFreeBendRight {
             .map(|_| ())
     }
 
-    pub(super) fn output_frame<R>(&self, rule: &R) -> Result<MultiplicityFreeTreePairFrame, CoreError>
+    pub(super) fn output_frame<R>(
+        &self,
+        rule: &R,
+    ) -> Result<MultiplicityFreeTreePairFrame, CoreError>
     where
         R: FusionRule,
     {
@@ -113,11 +116,13 @@ impl PreparedMultiplicityFreeBendRight {
         let left_coupled = match self.codomain_rank {
             1 => rule.vacuum(),
             2 => self.codomain_first,
-            _ => codomain.innerlines().last().copied().ok_or(
-                CoreError::MalformedFusionTree {
+            _ => codomain
+                .innerlines()
+                .last()
+                .copied()
+                .ok_or(CoreError::MalformedFusionTree {
                     message: "bendright requires the last codomain innerline",
-                },
-            )?,
+                })?,
         };
         let bent_is_dual = self.bent_is_dual.ok_or(CoreError::MalformedFusionTree {
             message: "codomain tree is missing a duality flag",
@@ -225,7 +230,10 @@ impl PreparedMultiplicityFreeBendLeft {
         self.right.validate_output_frame()
     }
 
-    pub(super) fn output_frame<R>(&self, rule: &R) -> Result<MultiplicityFreeTreePairFrame, CoreError>
+    pub(super) fn output_frame<R>(
+        &self,
+        rule: &R,
+    ) -> Result<MultiplicityFreeTreePairFrame, CoreError>
     where
         R: FusionRule,
     {
@@ -528,12 +536,10 @@ where
                 .vertices()
                 .iter()
                 .copied()
-                .chain(
-                    (domain_rank > 0).then(|| {
-                        MultiplicityIndex::new(nu0 + 1)
-                            .expect("enumerated Generic multiplicity labels are one-based")
-                    }),
-                )
+                .chain((domain_rank > 0).then(|| {
+                    MultiplicityIndex::new(nu0 + 1)
+                        .expect("enumerated Generic multiplicity labels are one-based")
+                }))
                 .collect::<Vec<_>>()
                 .into(),
         );
