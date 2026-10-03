@@ -149,6 +149,7 @@ impl PreparedFusionTreeLayout {
         homspace: &FusionTreeHomSpace,
     ) -> Result<Arc<BlockStructure>, CoreError> {
         self.validate_homspace_signature(homspace)?;
+        let epoch = core_reset_epoch();
         let key = CompleteHomSpaceStructureCacheKey {
             rule: self.cache_key().rule.clone(),
             homspace: Arc::clone(&homspace.content),
@@ -164,7 +165,7 @@ impl PreparedFusionTreeLayout {
         }
 
         let built = self.build_from_leg_degeneracies(homspace)?;
-        Ok(admit_complete_hom_space_structure(key, built))
+        Ok(admit_complete_hom_space_structure(key, built, epoch))
     }
 
     /// Publishes the prepared layout and returns its shared key storage.

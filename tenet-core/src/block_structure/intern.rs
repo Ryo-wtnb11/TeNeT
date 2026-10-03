@@ -385,10 +385,34 @@ pub(super) fn canonicalize_block_structure_arc(
 /// keyed by an old content id can only be re-hit by the same content `Arc` that
 /// minted it; content re-interned after this reset gets a fresh id and misses
 /// cleanly. Reset is thus safe to call on its own — no "all layers at once" API
+/// is needed.
+///
+/// Reset contract: no identity created before or during a reset is published
+/// after it. A build that straddles a reset still returns a correct result,
+/// but the result is not cached. The two intern tables uphold this by
+/// construction, because each mints its identity inside the write-locked
+/// insert, so whatever lands in a cleared table is new. The complete-HomSpace
+/// cache publishes a structure built earlier, so its admission checks
+/// [`may_publish_since`] under its write lock, and its hit-path refresh only
+/// repoints an entry that still holds the content it looked up.
+///
+/// Why not the arc dedup table or the fusion-tree layout cache: an arc-table
+/// entry is keyed by its own never-reused content id, so a straddling insert
+/// can only be found again by a holder of that same content. A layout is pure
+/// data under a semantic key and carries no identity.
 pub fn reset_core_intern_tables() {
+    // Odd for the whole reset: a build that starts before or during it holds
+    // a stale epoch and cannot publish afterwards.
+    CORE_RESET_EPOCH.fetch_add(1, Ordering::SeqCst);
     // Clear the sole strong complete-layout owner before weak canonicalizers.
     // Live wrappers keep their own content and region state through reset.
     reset_complete_hom_space_structure_cache();
+    #[cfg(test)]
+    MID_RESET_HOOK.with(|hook| {
+        if let Some(hook) = hook.take() {
+            hook();
+        }
+    });
     reset_hom_space_intern_table();
     if let Ok(mut table) = block_structure_intern_table().write() {
         table.clear();
@@ -397,4 +421,27 @@ pub fn reset_core_intern_tables() {
         table.clear();
     }
     reset_fusion_tree_layout_caches();
+    CORE_RESET_EPOCH.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Reset epoch of the core identity tables; odd while a reset runs.
+static CORE_RESET_EPOCH: AtomicUsize = AtomicUsize::new(0);
+
+/// The epoch a build records before it looks anything up.
+pub(crate) fn core_reset_epoch() -> usize {
+    CORE_RESET_EPOCH.load(Ordering::SeqCst)
+}
+
+/// Whether an identity built since `epoch` may be published: no reset started
+/// since then, and none was running at the time.
+pub(crate) fn may_publish_since(epoch: usize) -> bool {
+    epoch.is_multiple_of(2) && CORE_RESET_EPOCH.load(Ordering::SeqCst) == epoch
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Runs once inside the next reset on this thread, after the complete
+    /// cache is cleared and before the intern tables are.
+    pub(crate) static MID_RESET_HOOK: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
 }
