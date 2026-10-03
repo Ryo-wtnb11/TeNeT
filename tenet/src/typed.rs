@@ -327,11 +327,9 @@ pub use serialization::{
 
 // --- split leaf #1587: generated module wiring below ---
 mod scalar;
+use linear_ops::{host_add_impl, host_axpby_into, host_scale_impl};
 pub(crate) use scalar::ScalarOps;
-use scalar::{host_add_impl, host_axpby_into, host_scale_impl};
-pub use scalar::{
-    AdvancedLinalgScalar, FactorizationScalar, NetworkDegeneracyRestriction, TensorScalar,
-};
+pub use scalar::{AdvancedLinalgScalar, FactorizationScalar, TensorScalar};
 #[cfg(feature = "cuda")]
 pub use scalar::{CudaFactorizationPayload, CudaPayload};
 mod numeric;
@@ -434,14 +432,36 @@ pub use tensor_repr::{
     NetworkPayloadStorage, NetworkReuseClass, PayloadConversion, PhysicalDense,
     RuntimeDetachedTensorMap, TensorMap, TensorRef,
 };
+mod cat;
+mod construction;
+mod contract_ops;
+pub use contract_ops::ContractSpec;
+#[cfg(feature = "cuda")]
+mod cuda_contract;
+#[cfg(feature = "cuda")]
+pub use cuda_contract::CudaTracePairs;
+#[cfg(feature = "cuda")]
 mod cuda_ops;
 #[cfg(feature = "cuda")]
-pub use cuda_ops::CudaTracePairs;
+mod cuda_scalar;
+#[cfg(feature = "cuda")]
+mod cuda_transfer;
+#[cfg(feature = "cuda")]
+use cuda_transfer::unique_cuda_destination;
+#[cfg(feature = "cuda")]
+mod cuda_transform;
+mod inspection;
+mod linear_ops;
+mod network_seam;
+pub use network_seam::NetworkDegeneracyRestriction;
+mod reduction_ops;
+mod restrict;
 mod transform_ops;
+mod twist_flip;
 use transform_ops::map_spectrum_dtype;
+pub use transform_ops::TypedTensorUnitDispatch;
 #[cfg(feature = "cuda")]
 use transform_ops::{braid_operation, tree_operation_matches_axes};
-pub use transform_ops::{ContractSpec, TypedTensorUnitDispatch};
 
 /// Representation gates for [`TypedTensorBody`] (#580 PR 0).
 ///
