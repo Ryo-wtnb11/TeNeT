@@ -273,17 +273,11 @@ fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
         (None, Some(2), 2, 2),
         (None, Some(4), 2, 4),
     ] {
-        let svd_calls = Arc::new(AtomicUsize::new(0));
-        let gemm_calls = Arc::new(AtomicUsize::new(0));
+        let svd_calls = Arc::new(SpyCounts::default());
+        let gemm_calls = Arc::clone(&svd_calls);
         let runtime = Runtime::builder()
             .dense_threads(1)
-            .with_dense_executor(Box::new(PinvFaultExecutor {
-                inner: DefaultDenseExecutor::new(),
-                svd_calls: Arc::clone(&svd_calls),
-                gemm_calls: Arc::clone(&gemm_calls),
-                fail_svd,
-                fail_gemm,
-            }))
+            .with_dense_executor(Box::new(pinv_spy(&svd_calls, fail_svd, fail_gemm)))
             .build()
             .unwrap();
         let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -312,25 +306,20 @@ fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
             assert!(std::ptr::eq(w.provider(), provider.as_ref()));
             assert!(std::ptr::eq(p.provider(), provider.as_ref()));
         }
-        assert_eq!(svd_calls.load(Ordering::Relaxed), expected_svd);
-        assert_eq!(gemm_calls.load(Ordering::Relaxed), expected_gemm);
+        assert_eq!(svd_calls.of(PINV_SVD), expected_svd);
+        assert_eq!(gemm_calls.of(Kernel::GEMM), expected_gemm);
+        assert_eq!(svd_calls.total(), expected_svd + expected_gemm);
         assert_eq!(source.dense_data().unwrap(), before.as_slice());
     }
 }
 
 #[test]
 fn checked_only_compact_diagonal_polar_is_direct_and_keeps_dense_fallback() {
-    let svd_calls = Arc::new(AtomicUsize::new(0));
-    let gemm_calls = Arc::new(AtomicUsize::new(0));
+    let svd_calls = Arc::new(SpyCounts::default());
+    let gemm_calls = Arc::clone(&svd_calls);
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(PinvFaultExecutor {
-            inner: DefaultDenseExecutor::new(),
-            svd_calls: Arc::clone(&svd_calls),
-            gemm_calls: Arc::clone(&gemm_calls),
-            fail_svd: None,
-            fail_gemm: None,
-        }))
+        .with_dense_executor(Box::new(pinv_spy(&svd_calls, None, None)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
@@ -359,8 +348,9 @@ fn checked_only_compact_diagonal_polar_is_direct_and_keeps_dense_fallback() {
             let RightPolar { p, wh } = source.right_polar(&[0], &[1]).unwrap();
             (wh, p)
         };
-        assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(svd_calls.of(PINV_SVD), 0);
+        assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+        assert_eq!(gemm_calls.total(), 0);
         assert!(std::ptr::eq(w.provider(), provider.as_ref()));
         assert!(std::ptr::eq(p.provider(), provider.as_ref()));
         assert_eq!(w.codomain(), source.codomain());
@@ -459,8 +449,9 @@ fn checked_only_compact_diagonal_polar_is_direct_and_keeps_dense_fallback() {
             values: vec![4.0, 0.0],
         }],
     );
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+    assert_eq!(gemm_calls.total(), 0);
 
     for bad_value in [
         Complex64::new(f64::NAN, 0.0),
@@ -481,11 +472,11 @@ fn checked_only_compact_diagonal_polar_is_direct_and_keeps_dense_fallback() {
             ],
         )
         .unwrap();
-        svd_calls.store(0, Ordering::Relaxed);
+        svd_calls.reset();
         reset_provider_queries(&provider);
         let compact_error = bad.left_polar(&[0], &[1]).unwrap_err();
         let compact_queries = provider.queries_since_reset.load(Ordering::Relaxed);
-        assert!(svd_calls.load(Ordering::Relaxed) > 0);
+        assert!(svd_calls.of(PINV_SVD) > 0);
         let dense = bad.materialize().unwrap();
         reset_provider_queries(&provider);
         let dense_error = dense.left_polar(&[0], &[1]).unwrap_err();
@@ -500,17 +491,11 @@ fn checked_only_compact_diagonal_polar_is_direct_and_keeps_dense_fallback() {
 #[test]
 fn checked_generic_lazy_polar_second_svd_failure_keeps_parent_unchanged() {
     for left in [true, false] {
-        let svd_calls = Arc::new(AtomicUsize::new(0));
-        let gemm_calls = Arc::new(AtomicUsize::new(0));
+        let svd_calls = Arc::new(SpyCounts::default());
+        let gemm_calls = Arc::clone(&svd_calls);
         let runtime = Runtime::builder()
             .dense_threads(1)
-            .with_dense_executor(Box::new(PinvFaultExecutor {
-                inner: DefaultDenseExecutor::new(),
-                svd_calls: Arc::clone(&svd_calls),
-                gemm_calls: Arc::clone(&gemm_calls),
-                fail_svd: Some(2),
-                fail_gemm: None,
-            }))
+            .with_dense_executor(Box::new(pinv_spy(&svd_calls, Some(2), None)))
             .build()
             .unwrap();
         let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -539,8 +524,9 @@ fn checked_generic_lazy_polar_second_svd_failure_keeps_parent_unchanged() {
                 tenet::typed::CheckedGenericPlanError::Operation(_)
             ))
         ));
-        assert_eq!(svd_calls.load(Ordering::Relaxed), 2);
-        assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(svd_calls.of(PINV_SVD), 2);
+        assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+        assert_eq!(gemm_calls.total(), 2);
         assert_eq!(source.dense_data().unwrap(), before.as_slice());
     }
 }
@@ -549,17 +535,11 @@ fn checked_generic_lazy_polar_second_svd_failure_keeps_parent_unchanged() {
 fn checked_generic_polar_provider_error_precedes_dense_work() {
     // What: complete codomain dimensions are queried before domain,
     // direction, admission, and dense work.
-    let svd_calls = Arc::new(AtomicUsize::new(0));
-    let gemm_calls = Arc::new(AtomicUsize::new(0));
+    let svd_calls = Arc::new(SpyCounts::default());
+    let gemm_calls = Arc::clone(&svd_calls);
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(PinvFaultExecutor {
-            inner: DefaultDenseExecutor::new(),
-            svd_calls: Arc::clone(&svd_calls),
-            gemm_calls: Arc::clone(&gemm_calls),
-            fail_svd: None,
-            fail_gemm: None,
-        }))
+        .with_dense_executor(Box::new(pinv_spy(&svd_calls, None, None)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -582,8 +562,9 @@ fn checked_generic_polar_provider_error_precedes_dense_work() {
             tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
         ))
     ));
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+    assert_eq!(gemm_calls.total(), 0);
     assert_eq!(source.dense_data().unwrap(), before);
     assert!(matches!(
         refused_compact.left_polar(&[0], &[1]),
@@ -591,8 +572,9 @@ fn checked_generic_polar_provider_error_precedes_dense_work() {
             tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
         ))
     ));
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+    assert_eq!(gemm_calls.total(), 0);
 }
 
 #[test]
@@ -686,16 +668,10 @@ fn checked_generic_null_spaces_cover_rank_cutoff_zero_disjoint_and_side_only_sec
 fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
     // What: a later sector SVD failure crosses the public Generic facade as a
     // typed plan error without changing the source or returning a partial null.
-    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(PinvFaultExecutor {
-            inner: DefaultDenseExecutor::new(),
-            svd_calls: Arc::clone(&svd_calls),
-            gemm_calls: Arc::new(AtomicUsize::new(0)),
-            fail_svd: Some(2),
-            fail_gemm: None,
-        }))
+        .with_dense_executor(Box::new(pinv_spy(&svd_calls, Some(2), None)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -709,23 +685,17 @@ fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
             tenet::typed::CheckedGenericPlanError::Operation(_)
         ))
     ));
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(svd_calls.of(PINV_SVD), 2);
     assert_eq!(source.dense_data().unwrap(), before);
     assert!(std::ptr::eq(source.provider(), provider.as_ref()));
 }
 
 #[test]
 fn checked_compact_null_fallback_reuses_the_admission_dimension_query() {
-    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(PinvFaultExecutor {
-            inner: DefaultDenseExecutor::new(),
-            svd_calls: Arc::clone(&svd_calls),
-            gemm_calls: Arc::new(AtomicUsize::new(0)),
-            fail_svd: None,
-            fail_gemm: None,
-        }))
+        .with_dense_executor(Box::new(pinv_spy(&svd_calls, None, None)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
@@ -744,16 +714,16 @@ fn checked_compact_null_fallback_reuses_the_admission_dimension_query() {
     reset_provider_queries(&provider);
     source.left_null(&[0], &[1]).unwrap();
     let compact_queries = provider.queries_since_reset.load(Ordering::Relaxed);
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(svd_calls.of(PINV_SVD), 1);
 
     reset_provider_queries(&provider);
-    svd_calls.store(0, Ordering::Relaxed);
+    svd_calls.reset();
     dense.left_null(&[0], &[1]).unwrap();
     assert_eq!(
         provider.queries_since_reset.load(Ordering::Relaxed),
         compact_queries
     );
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(svd_calls.of(PINV_SVD), 1);
 }
 
 // Why not fewer args: each parameter is an independent fixture input for one

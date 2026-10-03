@@ -41,45 +41,12 @@ fn sun_checked_generic_compact_qr_preserves_provider_and_reconstructs() {
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
 }
 
-struct QrCallCounter {
-    inner: DefaultDenseExecutor,
-    calls: Arc<AtomicUsize>,
-}
-
-impl DenseExecutor for QrCallCounter {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.svd(input)
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.eigh(input)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.inner.dot_general_into(output, lhs, rhs, config)
-    }
-}
-
 #[test]
 fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
-    let calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(QrCallCounter {
-            inner: DefaultDenseExecutor::new(),
-            calls: Arc::clone(&calls),
-        }))
+        .with_dense_executor(Box::new(SpyExecutor::counting(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
@@ -164,7 +131,8 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
     ] {
         assert_factors(&q, &l);
     }
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(calls.of(Kernel::QR), 0);
+    assert_eq!(calls.total(), 0);
 
     let narrow = input.convert::<Complex32>();
     for factor in [
@@ -270,7 +238,8 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
         assert_eq!(factor.codomain(), dual.codomain());
         assert_eq!(factor.domain(), dual.domain());
     }
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(calls.of(Kernel::QR), 0);
+    assert_eq!(calls.total(), 0);
 
     // Materialized dual input keeps the dense route and its fresh nondual W.
     let dense_dual = dual.materialize().unwrap();
@@ -294,18 +263,15 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
         );
         assert!(!factor.domain()[0].is_dual());
     }
-    assert_eq!(calls.load(Ordering::Relaxed), 8);
+    assert_eq!(calls.of(Kernel::QR), 8);
 }
 
 #[test]
 fn checked_compact_diagonal_qr_preserves_numeric_and_provider_error_order() {
-    let calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(QrCallCounter {
-            inner: DefaultDenseExecutor::new(),
-            calls: Arc::clone(&calls),
-        }))
+        .with_dense_executor(Box::new(SpyExecutor::counting(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
@@ -320,7 +286,7 @@ fn checked_compact_diagonal_qr_preserves_numeric_and_provider_error_order() {
     )
     .unwrap();
     let _ = nonfinite.qr_compact(&[0], &[1]);
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(calls.of(Kernel::QR), 1);
 
     let failing_provider = Arc::new(CheckedOnlyToy::new_product_probe(1));
     let failing_bond =
@@ -342,7 +308,7 @@ fn checked_compact_diagonal_qr_preserves_numeric_and_provider_error_order() {
             ToyError::Algebra
         ))
     ));
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(calls.of(Kernel::QR), 1);
 }
 
 /// A bosonic Abelian rule exposed only through the checked-Generic contract,
@@ -490,7 +456,7 @@ macro_rules! assert_dual_diagonal_qr_lq {
         let source = input.diagview().unwrap();
         let dense = input.materialize().unwrap();
         let identity = TensorMap::isomorphism(&$runtime, [bond], [bond]).unwrap();
-        let before = $calls.load(Ordering::Relaxed);
+        let before = $calls.total();
         let results = [
             input.qr_compact(&[0], &[1]).map(|Qr { q, r }| (q, r, true)),
             input.qr_full(&[0], &[1]).map(|Qr { q, r }| (q, r, true)),
@@ -499,7 +465,7 @@ macro_rules! assert_dual_diagonal_qr_lq {
                 .map(|Lq { l, q }| (q, l, false)),
             input.lq_full(&[0], &[1]).map(|Lq { l, q }| (q, l, false)),
         ];
-        assert_eq!($calls.load(Ordering::Relaxed), before);
+        assert_eq!($calls.total(), before);
         for result in results {
             let (phase, magnitude, qr) = result.unwrap();
             for factor in [&phase, &magnitude] {
@@ -575,13 +541,10 @@ fn real_spectra<S: Clone>(sectors: [S; 2], values: [&[f64]; 2]) -> Vec<SectorSpe
 fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_rules() {
     use tenet::sector::{U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep};
 
-    let calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(QrCallCounter {
-            inner: DefaultDenseExecutor::new(),
-            calls: Arc::clone(&calls),
-        }))
+        .with_dense_executor(Box::new(SpyExecutor::counting(&calls)))
         .build()
         .unwrap();
     // Unequal degeneracies, zero and nonreal entries in every case.
@@ -647,7 +610,8 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
     assert_dual_diagonal_qr_lq!(runtime, u1_real.convert::<f32>(), calls);
     // The compact adjoint of an admitted diagonal is itself admitted.
     assert_dual_diagonal_qr_lq!(runtime, u1_complex.adjoint().unwrap(), calls);
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(calls.of(Kernel::QR), 0);
+    assert_eq!(calls.total(), 0);
 
     // Swapped leg roles: checked `permute` publishes a dense `V' <- V'`
     // view, so QR/LQ keep the dense route and its nondual W.
@@ -664,7 +628,7 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
     );
     let Qr { q, r } = nondual.qr_compact(&[1], &[0]).unwrap();
     let Lq { l, q: lq_q } = nondual.lq_compact(&[1], &[0]).unwrap();
-    assert_eq!(calls.load(Ordering::Relaxed), 4);
+    assert_eq!(calls.of(Kernel::QR), 4);
     assert!(
         tenet::typed::__network::network_reuse_class(&r, false) == NetworkReuseClass::OwnedDense
     );
@@ -678,7 +642,7 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
             2,
         );
     }
-    calls.store(0, Ordering::Relaxed);
+    calls.reset();
 
     // Ineligible dual inputs keep the dense route and its fresh nondual W:
     // materialized payload and a nonfinite spectrum. U(1) W is `flip(V')`,
@@ -693,12 +657,12 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
         .iter()
         .enumerate()
     {
-        let before = calls.load(Ordering::Relaxed);
+        let before = calls.of(Kernel::QR);
         let Qr { r, .. } = input.qr_compact(&[0], &[1]).unwrap();
         let Qr { r: full_r, .. } = input.qr_full(&[0], &[1]).unwrap();
         let Lq { l, .. } = input.lq_compact(&[0], &[1]).unwrap();
         let Lq { l: full_l, .. } = input.lq_full(&[0], &[1]).unwrap();
-        assert_eq!(calls.load(Ordering::Relaxed), before + 8, "input {index}");
+        assert_eq!(calls.of(Kernel::QR), before + 8, "input {index}");
         for bond in [
             &r.codomain()[0],
             &full_r.codomain()[0],
@@ -719,7 +683,7 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
 
     // A lazy adjoint of a dense dual tensor keeps its typed refusal.
     let lazy = u1_real.materialize().unwrap().adjoint().unwrap();
-    let before = calls.load(Ordering::Relaxed);
+    let before = calls.total();
     for error in [
         lazy.qr_compact(&[0], &[1]).err(),
         lazy.qr_full(&[0], &[1]).err(),
@@ -736,7 +700,7 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
             ))
         ));
     }
-    assert_eq!(calls.load(Ordering::Relaxed), before);
+    assert_eq!(calls.total(), before);
 }
 
 /// Provider failures during admission keep their typed error and publish no
@@ -745,13 +709,10 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
 /// needs no fallible fusion query.
 #[test]
 fn checked_dual_diagonal_qr_lq_propagates_output_provider_errors() {
-    let calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(QrCallCounter {
-            inner: DefaultDenseExecutor::new(),
-            calls: Arc::clone(&calls),
-        }))
+        .with_dense_executor(Box::new(SpyExecutor::counting(&calls)))
         .build()
         .unwrap();
     for dual in [false, true] {
@@ -792,7 +753,8 @@ fn checked_dual_diagonal_qr_lq_propagates_output_provider_errors() {
             assert_eq!(factor.codomain()[0].is_dual(), dual);
         }
     }
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(calls.of(Kernel::QR), 0);
+    assert_eq!(calls.total(), 0);
 }
 
 #[cfg(feature = "racah-generated")]

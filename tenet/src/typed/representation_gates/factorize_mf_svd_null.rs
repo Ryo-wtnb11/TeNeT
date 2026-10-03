@@ -2,13 +2,10 @@ use super::*;
 
 #[test]
 fn compact_diagonal_svd_full_preserves_spaces_without_materialization_or_solver() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(CountPolarKernels {
-            svd_calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(polar_spy(&calls)))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(2), 3)])
@@ -27,12 +24,12 @@ fn compact_diagonal_svd_full_preserves_spaces_without_materialization_or_solver(
     let w = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(-2), 3)]).unwrap();
     let dense = input.materialize().unwrap();
     let old = dense.svd_full(&[0], &[1]).unwrap();
-    assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
-    calls.store(0, std::sync::atomic::Ordering::Relaxed);
+    assert!(calls.of(POLAR_SVD) > 0);
+    calls.reset();
     DIAGONAL_MATERIALIZATIONS.set(0);
     let out = input.svd_full(&[0], &[1]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.of(POLAR_SVD), 0);
     assert_eq!(out.u.codomain(), input.codomain());
     assert_eq!(out.vh.domain(), input.domain());
     assert_eq!(out.u.domain(), vec![w.clone()]);
@@ -152,12 +149,9 @@ fn dense_multisector_full_svd_publishes_compact_s_for_real_and_complex() {
 
 #[test]
 fn compact_diagonal_null_uses_coordinate_kernel_without_dense_solver() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountPolarKernels {
-            svd_calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(polar_spy(&calls)))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(
@@ -184,7 +178,7 @@ fn compact_diagonal_null_uses_coordinate_kernel_without_dense_solver() {
     let left = input.left_null(&[0], &[1]).unwrap();
     let right = input.right_null(&[0], &[1]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.of(POLAR_SVD), 0);
     assert_eq!(left.codomain(), input.codomain());
     assert_eq!(right.domain(), input.domain());
     assert_eq!(left.domain()[0].sectors().unwrap().len(), 2);
@@ -217,12 +211,9 @@ fn compact_diagonal_null_uses_coordinate_kernel_without_dense_solver() {
 
 #[test]
 fn compact_diagonal_null_su2_sectors_use_reduced_coordinate_basis() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountPolarKernels {
-            svd_calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(polar_spy(&calls)))
         .build()
         .unwrap();
     let spin0 = SU2Irrep::from_twice_spin(0);
@@ -247,7 +238,7 @@ fn compact_diagonal_null_su2_sectors_use_reduced_coordinate_basis() {
     let left = input.left_null(&[0], &[1]).unwrap();
     let right = input.right_null(&[0], &[1]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.of(POLAR_SVD), 0);
     assert_eq!(left.codomain(), input.codomain());
     assert_eq!(right.domain(), input.domain());
     for bond in [&left.domain()[0], &right.codomain()[0]] {
@@ -300,12 +291,9 @@ fn compact_diagonal_null_su2_sectors_use_reduced_coordinate_basis() {
 
 #[test]
 fn compact_diagonal_null_and_cutoff_fallback_cover_all_scalars() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountPolarKernels {
-            svd_calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(polar_spy(&calls)))
         .build()
         .unwrap();
     let near_runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -322,11 +310,11 @@ fn compact_diagonal_null_and_cutoff_fallback_cover_all_scalars() {
                 }],
             )
             .unwrap();
-            calls.store(0, std::sync::atomic::Ordering::Relaxed);
+            calls.reset();
             DIAGONAL_MATERIALIZATIONS.set(0);
             let left = input.left_null(&[0], &[1]).unwrap();
             let right = input.right_null(&[0], &[1]).unwrap();
-            assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(calls.of(POLAR_SVD), 0);
             assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
             let coordinates = [
                 ($convert)(1.0),
@@ -350,11 +338,11 @@ fn compact_diagonal_null_and_cutoff_fallback_cover_all_scalars() {
                 }],
             )
             .unwrap();
-            calls.store(0, std::sync::atomic::Ordering::Relaxed);
+            calls.reset();
             DIAGONAL_MATERIALIZATIONS.set(0);
             let full_left = full.left_null(&[0], &[1]).unwrap();
             let full_right = full.right_null(&[0], &[1]).unwrap();
-            assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(calls.of(POLAR_SVD), 0);
             assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
             assert!(full_left.dense_data().unwrap().is_empty());
             assert!(full_right.dense_data().unwrap().is_empty());
@@ -790,12 +778,9 @@ fn compact_diagonal_svd_uses_spectrum_without_dense_input() {
 
 #[test]
 fn compact_diagonal_svd_vals_uses_only_the_stored_spectrum() {
-    let solver_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let solver_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(FailSecondSvd {
-            record: Some(Arc::clone(&solver_calls)),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(fail_second_svd(&solver_calls)))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(
@@ -852,7 +837,7 @@ fn compact_diagonal_svd_vals_uses_only_the_stored_spectrum() {
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert_eq!(dual.svd_vals(&[0], &[1]).unwrap()[0].values, [2.0, 1.0]);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(solver_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(solver_calls.total(), 0);
 }
 
 #[test]

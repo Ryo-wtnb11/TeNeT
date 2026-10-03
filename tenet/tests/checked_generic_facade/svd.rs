@@ -318,16 +318,10 @@ fn checked_compact_diagonal_svd_matches_hand_permutation_and_phase() {
 
 #[test]
 fn checked_compact_diagonal_svd_compact_preserves_fallback_error_order() {
-    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(PinvFaultExecutor {
-            inner: DefaultDenseExecutor::new(),
-            svd_calls: Arc::clone(&svd_calls),
-            gemm_calls: Arc::new(AtomicUsize::new(0)),
-            fail_svd: Some(1),
-            fail_gemm: None,
-        }))
+        .with_dense_executor(Box::new(pinv_spy(&svd_calls, Some(1), None)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
@@ -352,7 +346,7 @@ fn checked_compact_diagonal_svd_compact_preserves_fallback_error_order() {
         ),
         "{error:?}"
     );
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(svd_calls.of(PINV_SVD), 1);
 
     provider.fail_algebra.store(false, Ordering::Relaxed);
     let finite: TensorMap<_, f64> = TensorMap::diagonal(
@@ -364,7 +358,7 @@ fn checked_compact_diagonal_svd_compact_preserves_fallback_error_order() {
         }],
     )
     .unwrap();
-    svd_calls.store(0, Ordering::Relaxed);
+    svd_calls.reset();
     provider.invalid_style.store(true, Ordering::Relaxed);
     let error = finite.svd_compact(&[0], &[1]).unwrap_err();
     assert!(matches!(
@@ -375,39 +369,36 @@ fn checked_compact_diagonal_svd_compact_preserves_fallback_error_order() {
             )
         ))
     ));
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(svd_calls.total(), 0);
 
     provider.invalid_style.store(false, Ordering::Relaxed);
     provider.fail_algebra.store(true, Ordering::Relaxed);
     let dense = finite.materialize().unwrap();
     reset_provider_queries(provider.as_ref());
-    svd_calls.store(0, Ordering::Relaxed);
+    svd_calls.reset();
     let expected = dense.svd_full(&[0], &[1]).unwrap_err();
     let expected_queries = provider.queries_since_reset.load(Ordering::Relaxed);
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(svd_calls.total(), 0);
     reset_provider_queries(provider.as_ref());
-    svd_calls.store(0, Ordering::Relaxed);
+    svd_calls.reset();
     let actual = finite.svd_full(&[0], &[1]).unwrap_err();
     assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
     assert_eq!(
         provider.queries_since_reset.load(Ordering::Relaxed),
         expected_queries
     );
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(svd_calls.total(), 0);
 }
 
 #[test]
 fn checked_compact_diagonal_svd_numeric_admission_matches_dense() {
-    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(PinvFaultExecutor {
-            inner: DefaultDenseExecutor::new(),
-            svd_calls: Arc::clone(&svd_calls),
-            gemm_calls: Arc::new(AtomicUsize::new(0)),
-            fail_svd: None,
-            fail_gemm: None,
-        }))
+        .with_dense_executor(Box::new(pinv_spy(&svd_calls, None, None)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
@@ -429,16 +420,16 @@ fn checked_compact_diagonal_svd_numeric_admission_matches_dense() {
                 )
                 .unwrap();
                 let dense = input.materialize().unwrap();
-                svd_calls.store(0, Ordering::Relaxed);
+                svd_calls.reset();
                 for full in [false, true] {
-                    svd_calls.store(0, Ordering::Relaxed);
+                    svd_calls.reset();
                     let got = if full {
                         input.svd_full(&[0], &[1])
                     } else {
                         input.svd_compact(&[0], &[1])
                     };
                     assert_eq!(
-                        svd_calls.load(Ordering::Relaxed),
+                        svd_calls.of(PINV_SVD),
                         usize::from(!direct),
                         "{name}, full={full}"
                     );
@@ -485,15 +476,15 @@ fn checked_compact_diagonal_svd_numeric_admission_matches_dense() {
             )
             .unwrap();
             let dense = overflow.materialize().unwrap();
-            svd_calls.store(0, Ordering::Relaxed);
+            svd_calls.reset();
             for full in [false, true] {
-                svd_calls.store(0, Ordering::Relaxed);
+                svd_calls.reset();
                 let got = if full {
                     overflow.svd_full(&[0], &[1])
                 } else {
                     overflow.svd_compact(&[0], &[1])
                 };
-                assert_eq!(svd_calls.load(Ordering::Relaxed), 1);
+                assert_eq!(svd_calls.of(PINV_SVD), 1);
                 let expected = if full {
                     dense.svd_full(&[0], &[1])
                 } else {
@@ -601,16 +592,10 @@ fn checked_generic_full_svd_keeps_dense_s_for_equal_total_but_unequal_sector_bon
 
 #[test]
 fn checked_compact_diagonal_svd_full_falls_back_for_a_complete_bond_mismatch() {
-    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(PinvFaultExecutor {
-            inner: DefaultDenseExecutor::new(),
-            svd_calls: Arc::clone(&svd_calls),
-            gemm_calls: Arc::new(AtomicUsize::new(0)),
-            fail_svd: None,
-            fail_gemm: None,
-        }))
+        .with_dense_executor(Box::new(pinv_spy(&svd_calls, None, None)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
@@ -628,7 +613,7 @@ fn checked_compact_diagonal_svd_full_falls_back_for_a_complete_bond_mismatch() {
 
     let Svd { u, s, vh } = input.svd_full(&[0], &[1]).unwrap();
 
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(svd_calls.of(PINV_SVD), 1);
     let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
     assert_eq!(
         rebuilt.dense_data().unwrap(),

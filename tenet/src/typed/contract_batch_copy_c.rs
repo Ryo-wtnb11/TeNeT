@@ -172,8 +172,8 @@ mod tests {
     use crate::typed::{ContractSpec, GradedSpace, TensorMap};
     use std::sync::Arc;
     use tenet_dense::{
-        DefaultDenseExecutor, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob,
-        DenseRead, DenseScalar, DenseTensor, DenseWrite,
+        DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor,
+        DenseGemmBatchJob, DenseRead, DenseScalar, DenseTensor, DenseWrite, MatrixOp,
     };
     use tenet_operations::Rank2Gemm;
 
@@ -215,57 +215,7 @@ mod tests {
         }
     }
 
-    struct TransformCount {
-        inner: DefaultDenseExecutor,
-        calls: usize,
-        jobs: usize,
-    }
-
-    impl Default for TransformCount {
-        fn default() -> Self {
-            Self {
-                inner: DefaultDenseExecutor::new(),
-                calls: 0,
-                jobs: 0,
-            }
-        }
-    }
-
-    impl DenseExecutor for TransformCount {
-        fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-            self.inner.svd(input)
-        }
-        fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-            self.inner.qr(input)
-        }
-        fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-            self.inner.eigh(input)
-        }
-        fn dot_general_into(
-            &mut self,
-            output: DenseWrite<'_>,
-            lhs: DenseRead<'_>,
-            rhs: DenseRead<'_>,
-            config: &DenseDotConfig,
-        ) -> Result<(), DenseError> {
-            self.inner.dot_general_into(output, lhs, rhs, config)
-        }
-        fn matmul_batch_axpby_into(
-            &mut self,
-            output: DenseWrite<'_>,
-            lhs: DenseRead<'_>,
-            rhs: DenseRead<'_>,
-            jobs: &[DenseGemmBatchJob],
-            runs: &[usize],
-            alpha: DenseScalar,
-            beta: DenseScalar,
-        ) -> Result<(), DenseError> {
-            self.calls += 1;
-            self.jobs += jobs.len();
-            self.inner
-                .matmul_batch_axpby_into(output, lhs, rhs, jobs, runs, alpha, beta)
-        }
-    }
+    include!("../../tests/common/spy_executor.rs");
 
     #[test]
     fn poisoned_temporary_and_output_are_overwritten_on_warm_replay() {
@@ -624,7 +574,8 @@ mod tests {
             assert_eq!(core.jobs, core_jobs_per_member * members);
 
             let mut output = vec![f64::NAN; expected.len()];
-            let mut transform = TransformCount::default();
+            let transform_counts = Arc::new(SpyCounts::default());
+            let mut transform = SpyExecutor::counting(&transform_counts);
             tree_transform_members_overwrite_raw(
                 &mut StridedHostKernelAdapter::default(),
                 &mut transform,
@@ -639,7 +590,7 @@ mod tests {
             )
             .unwrap();
             if members == 1 {
-                transform_jobs_per_member = transform.jobs;
+                transform_jobs_per_member = transform_counts.batch_jobs();
             }
             assert_eq!(
                 transform_jobs_per_member,
@@ -647,7 +598,10 @@ mod tests {
             );
             assert_eq!(transform_jobs_per_member, 0);
             assert_eq!(
-                (transform.calls, transform.jobs),
+                (
+                    transform_counts.of(&[Kernel::MatmulBatch, Kernel::MatmulBatchOps]),
+                    transform_counts.batch_jobs()
+                ),
                 (
                     usize::from(transform_jobs_per_member > 0),
                     transform_jobs_per_member * members

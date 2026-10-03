@@ -1,52 +1,12 @@
 use super::*;
 
+/// Solve only; every solve fails with `failure` when one is given.
 #[cfg(feature = "racah-generated")]
-struct CountingSolve {
-    inner: DefaultDenseExecutor,
-    calls: Arc<std::sync::atomic::AtomicUsize>,
-    failure: Option<&'static str>,
-}
-
-#[cfg(feature = "racah-generated")]
-impl DenseExecutor for CountingSolve {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises solve")
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises solve")
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises solve")
-    }
-
-    fn solve_into(
-        &mut self,
-        a: DenseRead<'_>,
-        b: DenseRead<'_>,
-        x: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Some(message) = self.failure {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "solve_into",
-                message: message.to_string(),
-            });
-        }
-        self.inner.solve_into(a, b, x)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises solve")
+fn solve_spy(counts: &Arc<SpyCounts>, failure: Option<&'static str>) -> SpyExecutor {
+    let spy = SpyExecutor::counting(counts).only(&[Kernel::Solve], "test only exercises solve");
+    match failure {
+        Some(message) => spy.failing(&[Kernel::Solve], None, message),
+        None => spy,
     }
 }
 
@@ -916,13 +876,9 @@ where
 {
     use tenet_core::SUNFusionRule;
 
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountingSolve {
-            inner: DefaultDenseExecutor::default(),
-            calls: Arc::clone(&calls),
-            failure: None,
-        }))
+        .with_dense_executor(Box::new(solve_spy(&calls, None)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -967,13 +923,13 @@ where
         };
         let lhs_before = divisor.dense_data().unwrap().to_vec();
         let rhs_before = rhs.dense_data().unwrap().to_vec();
-        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        calls.reset();
         let solution = lhs
             .solve(&[0, 1], &[2, 3], &right, &[0, 1], &[2, 3])
             .unwrap();
         assert!(matches!(solution.repr, TypedTensorRepr::Owned(_)));
         assert_eq!(
-            calls.load(std::sync::atomic::Ordering::Relaxed),
+            calls.total(),
             5,
             "the SU(3) μ=2 fixture has five nonempty coupled-sector solve routes"
         );
@@ -1013,13 +969,12 @@ fn checked_generic_solves_are_owned_uncached_and_one_call_per_route() {
 fn checked_generic_left_solve_preserves_injected_backend_provenance() {
     use tenet_core::SUNFusionRule;
 
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountingSolve {
-            inner: DefaultDenseExecutor::default(),
-            calls: Arc::clone(&calls),
-            failure: Some("injected checked solve failure"),
-        }))
+        .with_dense_executor(Box::new(solve_spy(
+            &calls,
+            Some("injected checked solve failure"),
+        )))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -1037,7 +992,7 @@ fn checked_generic_left_solve_preserves_injected_backend_provenance() {
                 DenseError::Backend { op: "solve_into", ref message, .. }
             ) if message == "injected checked solve failure")
     ));
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(calls.total(), 1);
     assert_eq!(lhs.dense_data().unwrap(), before_lhs.as_slice());
     assert_eq!(rhs.dense_data().unwrap(), before_rhs.as_slice());
 }
@@ -1139,7 +1094,7 @@ fn pinv_redirect_late_svd_failure_keeps_parent_and_receiver_cold() {
     // What: a successful first-sector SVD cannot publish factors, mutate
     // parent bytes, or initialize the lazy receiver when sector two fails.
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(FailSecondSvd::default()))
+        .with_dense_executor(Box::new(fail_second_svd(&Arc::default())))
         .build()
         .unwrap();
     let provider = Arc::new(U1FusionRule);
