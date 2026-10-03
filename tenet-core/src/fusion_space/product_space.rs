@@ -67,10 +67,49 @@ impl FusionProductSpace {
     where
         R: FusionRule,
     {
+        // Why no catalog-completeness guard: an infallible `FusionRule` is
+        // unbounded by construction, so every channel it names is
+        // representable. A provider with a finite table implements
+        // `CheckedGenericFusion` and reaches the checked sibling instead.
+        self.fold_coupled_sector_block_dimensions(
+            rule.vacuum(),
+            |left, right| Ok(rule.fusion_channels(left, right)),
+            |left, right, coupled| Ok(rule.nsymbol(left, right, coupled)),
+        )
+    }
+
+    /// Checked sibling of [`Self::coupled_sector_block_dimensions`]: the same
+    /// fold over a provider whose channel and multiplicity queries may fail.
+    pub fn coupled_sector_block_dimensions_checked<R>(
+        &self,
+        rule: &R,
+    ) -> Result<BTreeMap<SectorId, usize>, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        self.fold_coupled_sector_block_dimensions(
+            rule.vacuum(),
+            |left, right| {
+                rule.try_fusion_channels(left, right)
+                    .map_err(CheckedGenericStructureError::Provider)
+            },
+            |left, right, coupled| {
+                rule.try_nsymbol(left, right, coupled)
+                    .map_err(CheckedGenericStructureError::Provider)
+            },
+        )
+    }
+
+    fn fold_coupled_sector_block_dimensions<E: From<CoreError>>(
+        &self,
+        vacuum: SectorId,
+        mut channels: impl FnMut(SectorId, SectorId) -> Result<SectorVec, E>,
+        mut nsymbol: impl FnMut(SectorId, SectorId, SectorId) -> Result<usize, E>,
+    ) -> Result<BTreeMap<SectorId, usize>, E> {
         // Why not cache or enumerate fusion trees: this map is a small
         // structural preflight, and the dynamic program computes only the
         // dimensions that the caller needs.
-        let mut dimensions = BTreeMap::from([(rule.vacuum(), 1usize)]);
+        let mut dimensions = BTreeMap::from([(vacuum, 1usize)]);
         for leg in self.legs() {
             let mut next = BTreeMap::<SectorId, usize>::new();
             for (&left, &left_dimension) in &dimensions {
@@ -78,18 +117,14 @@ impl FusionProductSpace {
                     // Why not dualize `right` from `SectorLeg::is_dual`: stored
                     // sector IDs are already outward labels; the flag controls
                     // pivotal and braiding data, not ProductSpace block dimensions.
-                    // Why no catalog-completeness guard: an infallible
-                    // `FusionRule` is unbounded by construction, so every
-                    // channel it names is representable. A provider with a
-                    // finite table implements `CheckedGenericFusion` and
-                    // reaches the checked preflight instead.
-                    let mut channels = rule.fusion_channels(left, right);
+                    let mut channels = channels(left, right)?;
                     channels.sort_unstable();
                     channels.dedup();
                     for coupled in channels {
+                        let multiplicity = nsymbol(left, right, coupled)?;
                         let contribution = left_dimension
                             .checked_mul(right_degeneracy)
-                            .and_then(|value| value.checked_mul(rule.nsymbol(left, right, coupled)))
+                            .and_then(|value| value.checked_mul(multiplicity))
                             .ok_or(CoreError::ElementCountOverflow)?;
                         if contribution == 0 {
                             continue;

@@ -2,6 +2,7 @@ use super::*;
 
 mod block_key;
 mod content;
+mod coupled_matrix;
 mod coupled_regions;
 mod degeneracy;
 mod intern;
@@ -12,6 +13,7 @@ mod validated;
 
 pub use block_key::*;
 pub use content::*;
+pub use coupled_matrix::*;
 use coupled_regions::*;
 pub use degeneracy::*;
 pub use intern::*;

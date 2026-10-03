@@ -2259,8 +2259,7 @@ where
     if let Some(plan) = compact_factor_plan_generic(input.space())? {
         return svd_compact_direct_regions(dense, input, &plan, CompactSvdGauge::Left, None);
     }
-    let matricizations =
-        sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
+    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_compact_svd_input_pack(&matricizations);
 
@@ -2572,7 +2571,7 @@ where
     // Why pack rather than borrow admitted regions: `owned_full_svd_stage`
     // moves each matrix into the dense provider, so a borrowed region would
     // be copied into an owned buffer anyway.
-    let mut matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+    let mut matrices = sector_matricizations(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
     let (row_dimensions, col_dimensions) = match dimensions {
         Some(dimensions) => dimensions?,

@@ -185,6 +185,8 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "CoreError",
         "CoupledSectorFold",
         "CoupledSectorFoldBuilder",
+        "CoupledMatricizationBuilder",
+        "CoupledMatrixPlacement",
         "CoupledSectorRegion",
         "CoupledTreeExtent",
         "DegeneracyBlock",

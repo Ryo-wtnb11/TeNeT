@@ -1058,7 +1058,7 @@ where
     if let Some(plan) = compact_factor_plan_generic(input.space())? {
         return qr_compact_direct_regions(dense, input, &plan).map(|(q, r)| Qr { q, r });
     }
-    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
+    let matrices = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_compact_qr_input_pack(&matrices);
     let blocks = matrices
@@ -1341,7 +1341,7 @@ where
     if let Some(plan) = compact_factor_plan_generic(input.space())? {
         return lq_compact_direct_regions(dense, input, &plan).map(|(l, q)| Lq { l, q });
     }
-    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
+    let matrices = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_compact_lq_input_pack(&matrices);
     let mut pairs = Vec::with_capacity(matrices.len());
