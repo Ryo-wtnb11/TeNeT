@@ -52,40 +52,8 @@ fn unique_rigid_bendright_tree_pair<R>(
 ) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
-    let prepared = prepare_multiplicity_free_bendright(rule, &frame)?;
-    let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-    let output_frame = prepared.output_frame(rule)?;
-    let coefficient = prepared.coefficient(rule, &validated);
-    Ok((output_frame.materialize(validated.local), coefficient))
-}
-
-struct UniqueRigidTreePairState {
-    frame: MultiplicityFreeTreePairFrame,
-    local: MultiplicityFreeTreePairLocal,
-}
-
-fn unique_rigid_bendright_state<R>(
-    rule: &R,
-    state: UniqueRigidTreePairState,
-) -> Result<(UniqueRigidTreePairState, R::Scalar), CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
-{
-    let prepared = prepare_multiplicity_free_bendright(rule, &state.frame)?;
-    let validated = prepared.validate_local(rule, &state.local.codomain, &state.local.domain)?;
-    let output_frame = prepared.output_frame(rule)?;
-    let coefficient = prepared.coefficient(rule, &validated);
-    Ok((
-        UniqueRigidTreePairState {
-            frame: output_frame,
-            local: validated.local,
-        },
-        coefficient,
-    ))
+    unique_rigid_bend_tree_pair(rule, tree_pair, Bend::Right)
 }
 
 fn unique_rigid_bendleft_tree_pair<R>(
@@ -94,35 +62,41 @@ fn unique_rigid_bendleft_tree_pair<R>(
 ) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
-    let prepared = prepare_multiplicity_free_bendleft(rule, &frame)?;
-    let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-    let output_frame = prepared.output_frame(rule)?;
-    let (output_local, coefficient) = prepared.finish_local(rule, validated);
-    Ok((output_frame.materialize(output_local), coefficient))
+    unique_rigid_bend_tree_pair(rule, tree_pair, Bend::Left)
 }
 
-fn unique_rigid_bendleft_state<R>(
+fn unique_rigid_bend_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreePairKey,
+    bend: Bend,
+) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+{
+    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
+    let (state, coefficient) =
+        unique_rigid_bend_state(rule, UniqueRigidTreePairState { frame, local }, bend)?;
+    Ok((state.frame.materialize(state.local), coefficient))
+}
+
+struct UniqueRigidTreePairState {
+    frame: MultiplicityFreeTreePairFrame,
+    local: MultiplicityFreeTreePairLocal,
+}
+
+fn unique_rigid_bend_state<R>(
     rule: &R,
     state: UniqueRigidTreePairState,
+    bend: Bend,
 ) -> Result<(UniqueRigidTreePairState, R::Scalar), CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let prepared = prepare_multiplicity_free_bendleft(rule, &state.frame)?;
-    let validated = prepared.validate_local(rule, &state.local.codomain, &state.local.domain)?;
-    let output_frame = prepared.output_frame(rule)?;
-    let (local, coefficient) = prepared.finish_local(rule, validated);
-    Ok((
-        UniqueRigidTreePairState {
-            frame: output_frame,
-            local,
-        },
-        coefficient,
-    ))
+    let prepared = MultiplicityFreeBend::prepare(&state.frame, bend)?;
+    let (local, coefficient) = prepared.apply(&UniqueK(rule), &state.local)?;
+    let frame = prepared.output_frame(rule, &state.frame)?;
+    Ok((UniqueRigidTreePairState { frame, local }, coefficient))
 }
 
 fn unique_rigid_foldright_tree_pair<R>(
@@ -255,10 +229,7 @@ where
         codomain_rank,
         target_codomain_rank,
         |(state, coefficient), bend| {
-            let (next, step_coefficient) = match bend {
-                Bend::Left => unique_rigid_bendleft_state(rule, state)?,
-                Bend::Right => unique_rigid_bendright_state(rule, state)?,
-            };
+            let (next, step_coefficient) = unique_rigid_bend_state(rule, state, bend)?;
             Ok::<_, CoreError>((next, coefficient * step_coefficient))
         },
     )?;

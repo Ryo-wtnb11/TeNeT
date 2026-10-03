@@ -123,13 +123,31 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let prepared = prepare_multiplicity_free_bendright(rule, &basis.frame)?;
+    compact_bend_block(rule, basis, columns, Bend::Right)
+}
+
+fn compact_bend_block<R>(
+    rule: &R,
+    basis: CompactMultiplicityFreeTreePairBasis,
+    columns: Option<&DenseColumns<R::Scalar>>,
+    bend: Bend,
+) -> Result<
+    (
+        CompactMultiplicityFreeTreePairBasis,
+        DenseColumns<R::Scalar>,
+    ),
+    CoreError,
+>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let prepared = MultiplicityFreeBend::prepare(&basis.frame, bend)?;
+    let kernel = SimpleK(rule);
     let (locals, next_columns) = apply_compact_block_terms(&basis.locals, columns, |local| {
-        let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-        let coefficient = prepared.coefficient(rule, &validated);
-        Ok(std::iter::once((validated.local, coefficient)))
+        Ok(std::iter::once(prepared.apply(&kernel, local)?))
     })?;
-    let frame = prepared.output_frame(rule)?;
+    let frame = prepared.output_frame(rule, &basis.frame)?;
     Ok((
         CompactMultiplicityFreeTreePairBasis { frame, locals },
         next_columns,
@@ -151,16 +169,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let prepared = prepare_multiplicity_free_bendleft(rule, &basis.frame)?;
-    let (locals, next_columns) = apply_compact_block_terms(&basis.locals, columns, |local| {
-        let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-        Ok(std::iter::once(prepared.finish_local(rule, validated)))
-    })?;
-    let frame = prepared.output_frame(rule)?;
-    Ok((
-        CompactMultiplicityFreeTreePairBasis { frame, locals },
-        next_columns,
-    ))
+    compact_bend_block(rule, basis, columns, Bend::Left)
 }
 
 fn compact_foldright_block<R>(
@@ -682,16 +691,16 @@ where
     } else {
         (Bend::Left, target_codomain_rank - current_codomain_rank)
     };
-    let mut steps: SmallVec<[PreparedStructuralBend; 8]> = SmallVec::new();
+    let mut steps: SmallVec<[MultiplicityFreeBend; 8]> = SmallVec::new();
     let mut frame = initial_frame.clone();
     let mut local = first_local;
     for step in 0..num_steps {
-        let prepared = PreparedStructuralBend::prepare(rule, &frame, bend)?;
-        local = prepared.next_local(rule, &local)?;
+        let prepared = MultiplicityFreeBend::prepare(&frame, bend)?;
+        local = prepared.next_local(rule.vacuum(), &local)?;
         if step + 1 == num_steps {
             prepared.validate_output_frame()?;
         } else {
-            frame = prepared.output_frame(rule)?;
+            frame = prepared.output_frame(rule, &frame)?;
         }
         steps.push(prepared);
     }
@@ -708,70 +717,10 @@ where
             });
         }
         for prepared in &steps {
-            local = prepared.next_local(rule, &local)?;
+            local = prepared.next_local(rule.vacuum(), &local)?;
         }
     }
     Ok(())
-}
-
-/// The structural part of one repartition bend (no coefficient), for the
-/// source-major preflight.
-enum PreparedStructuralBend {
-    Right(PreparedMultiplicityFreeBendRight),
-    Left(PreparedMultiplicityFreeBendLeft),
-}
-
-impl PreparedStructuralBend {
-    fn prepare<R>(
-        rule: &R,
-        frame: &MultiplicityFreeTreePairFrame,
-        bend: Bend,
-    ) -> Result<Self, CoreError>
-    where
-        R: MultiplicityFreeRigidSymbols,
-    {
-        Ok(match bend {
-            Bend::Right => Self::Right(prepare_multiplicity_free_bendright(rule, frame)?),
-            Bend::Left => Self::Left(prepare_multiplicity_free_bendleft(rule, frame)?),
-        })
-    }
-
-    fn next_local<R>(
-        &self,
-        rule: &R,
-        local: &MultiplicityFreeTreePairLocal,
-    ) -> Result<MultiplicityFreeTreePairLocal, CoreError>
-    where
-        R: FusionRule,
-    {
-        Ok(match self {
-            Self::Right(prepared) => {
-                prepared
-                    .validate_local(rule, &local.codomain, &local.domain)?
-                    .local
-            }
-            Self::Left(prepared) => PreparedMultiplicityFreeBendLeft::finish_local_structure(
-                prepared.validate_local(rule, &local.codomain, &local.domain)?,
-            ),
-        })
-    }
-
-    fn validate_output_frame(&self) -> Result<(), CoreError> {
-        match self {
-            Self::Right(prepared) => prepared.validate_output_frame(),
-            Self::Left(prepared) => prepared.validate_output_frame(),
-        }
-    }
-
-    fn output_frame<R: FusionRule>(
-        &self,
-        rule: &R,
-    ) -> Result<MultiplicityFreeTreePairFrame, CoreError> {
-        match self {
-            Self::Right(prepared) => prepared.output_frame(rule),
-            Self::Left(prepared) => prepared.output_frame(rule),
-        }
-    }
 }
 
 pub(super) fn compact_repartition_tree_pair_block<R>(
@@ -828,35 +777,19 @@ where
         rows.push((source_local, R::Scalar::one()));
     }
 
+    let kernel = SimpleK(rule);
     let (frame, rows) = repartition_loop(
         (frame, rows),
         current_codomain_rank,
         target_codomain_rank,
         |(frame, mut rows), bend| {
-            let frame = match bend {
-                Bend::Right => {
-                    let prepared = prepare_multiplicity_free_bendright(rule, &frame)?;
-                    for (local, coefficient) in &mut rows {
-                        let validated =
-                            prepared.validate_local(rule, &local.codomain, &local.domain)?;
-                        let step_coefficient = prepared.coefficient(rule, &validated);
-                        *local = validated.local;
-                        *coefficient = coefficient.clone() * step_coefficient;
-                    }
-                    prepared.output_frame(rule)?
-                }
-                Bend::Left => {
-                    let prepared = prepare_multiplicity_free_bendleft(rule, &frame)?;
-                    for (local, coefficient) in &mut rows {
-                        let validated =
-                            prepared.validate_local(rule, &local.codomain, &local.domain)?;
-                        let (next_local, step_coefficient) = prepared.finish_local(rule, validated);
-                        *local = next_local;
-                        *coefficient = coefficient.clone() * step_coefficient;
-                    }
-                    prepared.output_frame(rule)?
-                }
-            };
+            let prepared = MultiplicityFreeBend::prepare(&frame, bend)?;
+            for (local, coefficient) in &mut rows {
+                let (next_local, step_coefficient) = prepared.apply(&kernel, local)?;
+                *local = next_local;
+                *coefficient = coefficient.clone() * step_coefficient;
+            }
+            let frame = prepared.output_frame(rule, &frame)?;
             Ok::<_, CoreError>((frame, rows))
         },
     )?;

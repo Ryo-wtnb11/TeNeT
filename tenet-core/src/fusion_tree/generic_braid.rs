@@ -153,23 +153,6 @@ impl<S, E> ArtinWriter<S, CheckedGenericSymbolError<E>> for KeyArtinTerms<'_, S>
     }
 }
 
-/// Read the 0-based outer-multiplicity matrix index of the vertex at position
-/// `vertex_index`. [`MultiplicityIndex`] stores the one-based categorical
-/// label, and TensorKit's `Rmat[μ, ν]` / `Fmat[κ, λ, μ, ρ]` are
-/// 1-based Julia indices, so the stored label maps to the 0-based Rust index by
-/// subtracting one.
-pub(super) fn mu_index(tree: &FusionTreeKey, vertex_index: usize) -> Result<usize, CoreError> {
-    let label = tree
-        .vertices()
-        .get(vertex_index)
-        .copied()
-        .ok_or(CoreError::MalformedFusionTree {
-            message: "Generic braid requires a vertex label at the braided position",
-        })?
-        .get();
-    Ok(label - 1)
-}
-
 /// Braid the uncoupled legs of a Generic-fusion tree by `permutation` under the
 /// given `levels`, the outer-multiplicity mirror of
 /// [`multiplicity_free_braid_tree`] and of TensorKit's `braid(f, p, levels)`
