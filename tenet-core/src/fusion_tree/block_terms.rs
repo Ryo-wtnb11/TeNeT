@@ -425,13 +425,8 @@ where
         direction: PreparedCycleDirection,
     ) -> Result<Self::State, CoreError> {
         let rule = self.rule;
-        compose_block_terms(&basis, &columns, |key| match direction {
-            PreparedCycleDirection::Clockwise => {
-                generic_cycle_clockwise_tree_pair_unchecked(rule, key)
-            }
-            PreparedCycleDirection::Anticlockwise => {
-                generic_cycle_anticlockwise_tree_pair_unchecked(rule, key)
-            }
+        compose_block_terms(&basis, &columns, |key| {
+            generic_cycle_tree_pair_unchecked(rule, key, direction)
         })
     }
 }

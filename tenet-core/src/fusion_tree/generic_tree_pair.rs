@@ -48,6 +48,7 @@ where
     generic_foldright_tree_pair_unchecked(rule, tree_pair.key)
 }
 
+#[cfg(test)]
 fn generic_foldright_tree_pair_unchecked<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -100,6 +101,7 @@ where
     generic_foldleft_tree_pair_unchecked(rule, tree_pair.key)
 }
 
+#[cfg(test)]
 fn generic_foldleft_tree_pair_unchecked<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -147,22 +149,20 @@ where
     R::Scalar: CategoricalScalar,
 {
     let rule = tree_pair.rule;
-    generic_cycle_clockwise_tree_pair_unchecked(rule, tree_pair.key)
+    generic_cycle_tree_pair_unchecked(rule, tree_pair.key, PreparedCycleDirection::Clockwise)
 }
 
-pub(super) fn generic_cycle_clockwise_tree_pair_unchecked<R>(
+pub(super) fn generic_cycle_tree_pair_unchecked<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
+    direction: PreparedCycleDirection,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    cycle_clockwise(
-        tree_pair,
-        |key| generic_bendleft_tree_pair(rule, key),
-        |key| generic_foldright_tree_pair_unchecked(rule, key),
-    )
+    generic_cycle_tree_pair_result(&InfallibleGenericFR(rule), tree_pair, direction)
+        .map_err(map_infallible_generic_symbol_error)
 }
 
 /// Generic-fusion `cycleanticlockwise` = foldleft ∘ bendright (or the reverse
@@ -199,22 +199,7 @@ where
     R::Scalar: CategoricalScalar,
 {
     let rule = tree_pair.rule;
-    generic_cycle_anticlockwise_tree_pair_unchecked(rule, tree_pair.key)
-}
-
-pub(super) fn generic_cycle_anticlockwise_tree_pair_unchecked<R>(
-    rule: &R,
-    tree_pair: &FusionTreePairKey,
-) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
-where
-    R: GenericRigidSymbols,
-    R::Scalar: CategoricalScalar,
-{
-    cycle_anticlockwise(
-        tree_pair,
-        |key| generic_bendright_tree_pair(rule, key),
-        |key| generic_foldleft_tree_pair_unchecked(rule, key),
-    )
+    generic_cycle_tree_pair_unchecked(rule, tree_pair.key, PreparedCycleDirection::Anticlockwise)
 }
 
 fn generic_foldright_tree_pair_result<C>(
@@ -231,35 +216,22 @@ where
     Ok(terms.into_vec())
 }
 
-fn generic_cycle_clockwise_tree_pair_result<C>(
+fn generic_cycle_tree_pair_result<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
+    direction: PreparedCycleDirection,
 ) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
-    C: CheckedGenericRigidSymbols,
+    C: GenericRigidAccess,
 {
-    cycle_clockwise(
+    cycle(
         tree_pair,
-        |key| generic_bendleft_tree_pair_result(rule, key),
-        |key| generic_foldright_tree_pair_result(rule, key),
-    )
-}
-
-fn generic_cycle_anticlockwise_tree_pair_result<C>(
-    rule: &C,
-    tree_pair: &FusionTreePairKey,
-) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
-where
-    C: CheckedGenericRigidSymbols,
-{
-    cycle_anticlockwise(
-        tree_pair,
-        |key| generic_bendright_tree_pair_result(rule, key),
-        |key| {
-            left_move_by_swap(key, |swapped| {
-                generic_foldright_tree_pair_result(rule, swapped)
-            })
+        direction,
+        |key, bend| match bend {
+            Bend::Left => generic_bendleft_tree_pair_result(rule, key),
+            Bend::Right => generic_bendright_tree_pair_result(rule, key),
         },
+        |key| generic_foldright_tree_pair_result(rule, key),
     )
 }
 
@@ -687,8 +659,7 @@ where
         total_rank,
         position,
         |key, rank| generic_repartition_tree_pair_unchecked(rule, key, rank),
-        |key| generic_cycle_anticlockwise_tree_pair_unchecked(rule, key),
-        |key| generic_cycle_clockwise_tree_pair_unchecked(rule, key),
+        |key, direction| generic_cycle_tree_pair_unchecked(rule, key, direction),
     )
 }
 
@@ -736,37 +707,29 @@ where
         codomain_rank + domain_rank,
         permutation.iter().position(|&axis| axis == 0),
         |key, rank| generic_repartition_tree_pair_result(rule, key, rank),
-        |key| generic_cycle_anticlockwise_tree_pair_result(rule, key),
-        |key| generic_cycle_clockwise_tree_pair_result(rule, key),
+        |key, direction| generic_cycle_tree_pair_result(rule, key, direction),
     )
 }
 
-fn generic_transpose_tree_pair_with<S, E, P, A, C>(
+fn generic_transpose_tree_pair_with<S, E, P, C>(
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,
     total_rank: usize,
     position: Option<usize>,
     mut repartition: P,
-    anticlockwise: A,
-    clockwise: C,
+    cycle: C,
 ) -> Result<Vec<(FusionTreePairKey, S)>, E>
 where
     S: CategoricalScalar,
     E: From<CoreError>,
     P: FnMut(&FusionTreePairKey, usize) -> Result<Vec<(FusionTreePairKey, S)>, E>,
-    A: FnMut(&FusionTreePairKey) -> Result<Vec<(FusionTreePairKey, S)>, E>,
-    C: FnMut(&FusionTreePairKey) -> Result<Vec<(FusionTreePairKey, S)>, E>,
+    C: FnMut(&FusionTreePairKey, PreparedCycleDirection) -> Result<Vec<(FusionTreePairKey, S)>, E>,
 {
     let Some(position) = position else {
         return Ok(vec![(tree_pair.clone(), S::one())]);
     };
     let current = repartition(tree_pair, target_codomain_rank)?;
-    run_cycle_terms(
-        current,
-        transpose_cycles(position, total_rank),
-        clockwise,
-        anticlockwise,
-    )
+    run_cycle_terms(current, transpose_cycles(position, total_rank), cycle)
 }
 
 /// The linearized permutation, identity flag and prepared Artin schedule of a

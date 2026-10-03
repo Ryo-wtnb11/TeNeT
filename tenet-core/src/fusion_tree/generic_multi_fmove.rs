@@ -249,13 +249,15 @@ where
 /// Returns `None` iff the uncoupled/dual tails do not match (the `zero(...)`
 /// early return at TK `:141-142`), so callers filter exactly as the mult-free
 /// tree functions do.
-pub(crate) fn generic_multi_associator_result<C>(
+pub(crate) fn generic_multi_associator_result<C, L, S>(
     rule: &C,
-    long: &FusionTreeKey,
-    short: &FusionTreeKey,
+    long: &L,
+    short: &S,
 ) -> Result<Option<Vec<C::Scalar>>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericFRAccess,
+    L: FramedTree + ?Sized,
+    S: FramedTree + ?Sized,
 {
     let rank = long.uncoupled().len();
     if short.uncoupled().len() + 1 != rank
@@ -288,10 +290,12 @@ where
     for tensor_kit_k in 2..rank {
         let right_sector = long.uncoupled()[tensor_kit_k]; // c
                                                            // vertex_info(long, k+1) = (e, d); ν = its vertex label.
-        let (middle_left, middle_right) = fusion_tree_vertex_neighbors(long, tensor_kit_k)?;
+        let (middle_left, middle_right) =
+            fusion_tree_vertex_neighbors_from_parts(long.uncoupled(), long, tensor_kit_k)?;
         let nu0 = mu_index(long, tensor_kit_k - 1)?;
         // vertex_info(short, k) = (b, e′); κ = its vertex label.
-        let (short_left, short_right) = fusion_tree_vertex_neighbors(short, tensor_kit_k - 1)?;
+        let (short_left, short_right) =
+            fusion_tree_vertex_neighbors_from_parts(short.uncoupled(), short, tensor_kit_k - 1)?;
         let kappa0 = mu_index(short, tensor_kit_k - 2)?;
         if rule
             .try_nsymbol(first, short_right, middle_right)
@@ -336,73 +340,27 @@ where
     Ok(Some(coeff))
 }
 
-pub(super) fn generic_multi_fmove_inv_tree_result<C>(
-    rule: &C,
-    leading: SectorId,
-    coupled: SectorId,
-    tree: &FusionTreeKey,
-    leading_is_dual: bool,
-) -> Result<GenericFmoveTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
-where
-    C: GenericFRAccess,
-{
-    if rule
-        .try_nsymbol(leading, tree.coupled(), coupled)
-        .map_err(CheckedGenericSymbolError::Provider)?
-        == 0
-    {
-        return Err(CheckedGenericSymbolError::Core(CoreError::SectorMismatch {
-            expected: coupled,
-            actual: tree.coupled(),
-        }));
-    }
-    let uncoupled: Arc<[SectorId]> = std::iter::once(leading)
-        .chain(tree.uncoupled().iter().copied())
-        .collect();
-    let dual: Arc<[bool]> = std::iter::once(leading_is_dual)
-        .chain(tree.is_dual().iter().copied())
-        .collect();
-    let candidates = rule.try_fusion_trees(&uncoupled, &dual, coupled)?;
-    let mut terms = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        if let Some(values) = generic_multi_associator_result(rule, &candidate, tree)? {
-            terms.push((
-                candidate,
-                values.into_iter().map(|value| value.conj()).collect(),
-            ));
-        }
-    }
-    Ok(terms)
-}
+impl<C: GenericFRAccess> MultiFKernel for GenericK<'_, C> {
+    type Moves = GenericFmoveTerms<C::Scalar>;
+    type Lift = (SectorId, bool);
 
-pub(super) fn generic_multi_fmove_tree_result<C>(
-    rule: &C,
-    tree: &FusionTreeKey,
-) -> Result<GenericFmoveTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
-where
-    C: GenericFRAccess,
-{
-    let rank = tree.uncoupled().len();
-    if rank == 0 {
-        return Err(CoreError::MalformedFusionTree {
-            message: "multi_Fmove requires at least one uncoupled sector",
-        }
-        .into());
-    }
-    if rank == 1 {
-        return Ok(vec![(
+    fn unit_tail<T: FramedTree + ?Sized>(&self, _: &T) -> Result<Self::Moves, Self::E> {
+        Ok(vec![(
             FusionTreeKey::new(
                 Vec::<SectorId>::new(),
-                rule.vacuum(),
+                self.0.vacuum(),
                 Vec::<bool>::new(),
                 Vec::<SectorId>::new(),
                 Vec::<MultiplicityIndex>::new(),
             ),
             vec![C::Scalar::one()],
-        )]);
+        )])
     }
-    if rank == 2 {
-        let n = rule
+
+    // The one-hot vector over N(a, b, c) at the source vertex μ (TK `:221-233`).
+    fn single_tail<T: FramedTree + ?Sized>(&self, tree: &T) -> Result<Self::Moves, Self::E> {
+        let n = self
+            .0
             .try_nsymbol(tree.uncoupled()[0], tree.uncoupled()[1], tree.coupled())
             .map_err(CheckedGenericSymbolError::Provider)?;
         let mut coefficients = vec![C::Scalar::zero(); n];
@@ -415,7 +373,7 @@ where
                     },
                 ))?;
         *slot = C::Scalar::one();
-        return Ok(vec![(
+        Ok(vec![(
             FusionTreeKey::new(
                 [tree.uncoupled()[1]],
                 tree.uncoupled()[1],
@@ -424,27 +382,86 @@ where
                 [],
             ),
             coefficients,
-        )]);
+        )])
     }
 
-    let first = tree.uncoupled()[0];
-    let tail_uncoupled: Arc<[SectorId]> = tree.uncoupled()[1..].into();
-    let tail_is_dual: Arc<[bool]> = tree.is_dual()[1..].into();
-    let mut terms = Vec::new();
-    let dual_first = rule
-        .try_dual(first)
-        .map_err(CheckedGenericSymbolError::Provider)?;
-    for tail_coupled in rule
-        .try_fusion_channels_in_table(dual_first, tree.coupled())
-        .map_err(CheckedGenericSymbolError::Provider)?
-    {
-        for tail in rule.try_fusion_trees(&tail_uncoupled, &tail_is_dual, tail_coupled)? {
-            if let Some(coefficients) = generic_multi_associator_result(rule, tree, &tail)? {
-                terms.push((tail, coefficients));
+    // Stage 1 over the provider's checked channel table, Stage 2 as the
+    // associator vector chain.
+    fn tails<T: FramedTree + ?Sized>(&self, tree: &T) -> Result<Self::Moves, Self::E> {
+        let rule = self.0;
+        let first = tree.uncoupled()[0];
+        let tail_uncoupled: Arc<[SectorId]> = tree.uncoupled()[1..].into();
+        let tail_is_dual: Arc<[bool]> = tree.is_dual()[1..].into();
+        let mut terms = Vec::new();
+        let dual_first = rule
+            .try_dual(first)
+            .map_err(CheckedGenericSymbolError::Provider)?;
+        for tail_coupled in rule
+            .try_fusion_channels_in_table(dual_first, tree.coupled())
+            .map_err(CheckedGenericSymbolError::Provider)?
+        {
+            for tail in rule.try_fusion_trees(&tail_uncoupled, &tail_is_dual, tail_coupled)? {
+                if let Some(coefficients) = generic_multi_associator_result(rule, tree, &tail)? {
+                    terms.push((tail, coefficients));
+                }
             }
         }
+        Ok(terms)
     }
-    Ok(terms)
+
+    fn lift_leading(&(leading, _): &(SectorId, bool)) -> SectorId {
+        leading
+    }
+
+    fn admit_lift(
+        &self,
+        leading: SectorId,
+        tree_coupled: SectorId,
+        coupled: SectorId,
+    ) -> Result<(), Self::E> {
+        if self
+            .0
+            .try_nsymbol(leading, tree_coupled, coupled)
+            .map_err(CheckedGenericSymbolError::Provider)?
+            == 0
+        {
+            return Err(CheckedGenericSymbolError::Core(CoreError::SectorMismatch {
+                expected: coupled,
+                actual: tree_coupled,
+            }));
+        }
+        Ok(())
+    }
+
+    // Every lifted tree with the conjugated associator vector: TK's inverse
+    // Stage 2 applies the adjoint of the same F-slices in the same order
+    // (`:437-439, 460-462`), so `w = conj(v)` and no separate inverse chain
+    // is needed.
+    fn lifts<T: FramedTree + ?Sized>(
+        &self,
+        &(leading, leading_is_dual): &(SectorId, bool),
+        coupled: SectorId,
+        tree: &T,
+    ) -> Result<Self::Moves, Self::E> {
+        let rule = self.0;
+        let uncoupled: Arc<[SectorId]> = std::iter::once(leading)
+            .chain(tree.uncoupled().iter().copied())
+            .collect();
+        let dual: Arc<[bool]> = std::iter::once(leading_is_dual)
+            .chain(tree.is_dual().iter().copied())
+            .collect();
+        let candidates = rule.try_fusion_trees(&uncoupled, &dual, coupled)?;
+        let mut terms = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if let Some(values) = generic_multi_associator_result(rule, &candidate, tree)? {
+                terms.push((
+                    candidate,
+                    values.into_iter().map(|value| value.conj()).collect(),
+                ));
+            }
+        }
+        Ok(terms)
+    }
 }
 
 /// Generic-fusion `multi_Fmove`: recouple a splitting tree to split off its
@@ -463,7 +480,7 @@ where
     R: GenericFusionSymbols,
     R::Scalar: CategoricalScalar,
 {
-    generic_multi_fmove_tree_result(&InfallibleGenericFR(rule), tree)
+    multi_fmove_surgery(&GenericK(&InfallibleGenericFR(rule)), tree)
         .map_err(map_infallible_generic_symbol_error)
 }
 
@@ -492,12 +509,11 @@ where
     R: GenericFusionSymbols,
     R::Scalar: CategoricalScalar,
 {
-    generic_multi_fmove_inv_tree_result(
-        &InfallibleGenericFR(rule),
-        leading_sector,
+    multi_fmove_inv_surgery(
+        &GenericK(&InfallibleGenericFR(rule)),
+        &(leading_sector, leading_is_dual),
         coupled,
         tree,
-        leading_is_dual,
     )
     .map_err(map_infallible_generic_symbol_error)
 }

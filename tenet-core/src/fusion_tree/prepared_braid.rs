@@ -1039,12 +1039,9 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                     validated,
                     self.target_codomain_rank,
                 )?;
-                run_cycle_terms(
-                    current,
-                    Some((*direction, *count)),
-                    |key| multiplicity_free_cycle_clockwise_tree_pair(rule, key),
-                    |key| multiplicity_free_cycle_anticlockwise_tree_pair(rule, key),
-                )
+                run_cycle_terms(current, Some((*direction, *count)), |key, direction| {
+                    multiplicity_free_cycle_tree_pair(rule, key, direction)
+                })
             }
         }
     }
@@ -1184,12 +1181,9 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                     validated,
                     self.target_codomain_rank,
                 )?;
-                run_cycle_terms(
-                    current,
-                    Some((*direction, *count)),
-                    |key| unique_rigid_cycle_clockwise_tree_pair(rule, key),
-                    |key| unique_rigid_cycle_anticlockwise_tree_pair(rule, key),
-                )
+                run_cycle_terms(current, Some((*direction, *count)), |key, direction| {
+                    unique_rigid_cycle_tree_pair(rule, key, direction)
+                })
             }
         }
     }

@@ -110,7 +110,8 @@ where
         return Ok(vec![(lhs.clone(), R::Scalar::one())]);
     }
 
-    multiplicity_free_multi_fmove_inv_tree(rule, lhs.coupled(), coupled, rhs, false)?
+    SimpleK(rule)
+        .multi_fmove_inv(lhs.coupled(), coupled, rhs, false)?
         .into_iter()
         .map(|(tail, coefficient)| {
             join_fusion_tree_front_checked(rule, lhs, &tail).map(|merged| (merged, coefficient))
@@ -166,7 +167,7 @@ where
     if rhs.uncoupled().is_empty() {
         return Ok(vec![(lhs.clone(), C::Scalar::one())]);
     }
-    let terms = generic_multi_fmove_inv_tree_result(rule, lhs.coupled(), coupled, rhs, false)?;
+    let terms = multi_fmove_inv_surgery(&GenericK(rule), &(lhs.coupled(), false), coupled, rhs)?;
     terms
         .into_iter()
         .map(|(tail, coefficients)| {

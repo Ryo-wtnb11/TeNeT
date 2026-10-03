@@ -162,32 +162,32 @@ fn fibonacci_multi_fmove_low_ranks_keep_their_existing_contracts() {
     // What: forward rank 0/1/2 and inverse rank 0/1 retain their prior
     // results and do not enter an F-symbol provider.
     assert_eq!(
-        multiplicity_free_multi_fmove_tree(&rule, &empty),
-        multiplicity_free_multi_fmove_tree(&FibonacciFusionRule, &empty)
+        SimpleK(&rule).multi_fmove(&empty),
+        SimpleK(&FibonacciFusionRule).multi_fmove(&empty)
     );
     assert_eq!(
-        multiplicity_free_multi_fmove_tree(&rule, &rank_one),
-        multiplicity_free_multi_fmove_tree(&FibonacciFusionRule, &rank_one)
+        SimpleK(&rule).multi_fmove(&rank_one),
+        SimpleK(&FibonacciFusionRule).multi_fmove(&rank_one)
     );
     assert_eq!(
-        multiplicity_free_multi_fmove_tree(&rule, &rank_two),
-        multiplicity_free_multi_fmove_tree(&FibonacciFusionRule, &rank_two)
+        SimpleK(&rule).multi_fmove(&rank_two),
+        SimpleK(&FibonacciFusionRule).multi_fmove(&rank_two)
     );
     assert_eq!(
-        multiplicity_free_multi_fmove_inv_tree(&rule, tau, tau, &empty, false),
-        multiplicity_free_multi_fmove_inv_tree(&FibonacciFusionRule, tau, tau, &empty, false,)
+        SimpleK(&rule).multi_fmove_inv(tau, tau, &empty, false),
+        SimpleK(&FibonacciFusionRule).multi_fmove_inv(tau, tau, &empty, false,)
     );
     assert_eq!(
-        multiplicity_free_multi_fmove_inv_tree(&rule, tau, vacuum, &rank_one, false),
-        multiplicity_free_multi_fmove_inv_tree(&FibonacciFusionRule, tau, vacuum, &rank_one, false,)
+        SimpleK(&rule).multi_fmove_inv(tau, vacuum, &rank_one, false),
+        SimpleK(&FibonacciFusionRule).multi_fmove_inv(tau, vacuum, &rank_one, false,)
     );
     assert!(rule.take_calls().is_empty());
 
     // What: inverse rank 2 still performs its one associator step, with
     // unchanged data and an admissible provider call.
     assert_eq!(
-        multiplicity_free_multi_fmove_inv_tree(&rule, tau, tau, &rank_two, false),
-        multiplicity_free_multi_fmove_inv_tree(&FibonacciFusionRule, tau, tau, &rank_two, false,)
+        SimpleK(&rule).multi_fmove_inv(tau, tau, &rank_two, false),
+        SimpleK(&FibonacciFusionRule).multi_fmove_inv(tau, tau, &rank_two, false,)
     );
     let calls = rule.take_calls();
     assert!(!calls.is_empty());
@@ -332,8 +332,8 @@ fn unique_multi_fmove_callers_preserve_admissible_z2_results() {
     // What: the Unique-fusion wrappers that share the associator boundary
     // retain exact output trees, coefficients, and conjugation direction.
     assert_eq!(
-        unique_rigid_multi_fmove_tree(&rule, &long),
-        unique_rigid_multi_fmove_tree(&Z2FusionRule, &long)
+        multi_fmove_surgery(&UniqueK(&rule), &long),
+        multi_fmove_surgery(&UniqueK(&Z2FusionRule), &long)
     );
     let calls = rule.take_calls();
     assert!(!calls.is_empty());
@@ -345,8 +345,8 @@ fn unique_multi_fmove_callers_preserve_admissible_z2_results() {
     }
 
     assert_eq!(
-        unique_rigid_multi_fmove_inv_tree(&rule, odd, even, &short, false),
-        unique_rigid_multi_fmove_inv_tree(&Z2FusionRule, odd, even, &short, false)
+        multi_fmove_inv_surgery(&UniqueK(&rule), &(odd, false), even, &short),
+        multi_fmove_inv_surgery(&UniqueK(&Z2FusionRule), &(odd, false), even, &short)
     );
     let calls = rule.take_calls();
     assert!(!calls.is_empty());

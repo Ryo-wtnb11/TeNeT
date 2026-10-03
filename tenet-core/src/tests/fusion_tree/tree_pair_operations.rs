@@ -819,12 +819,18 @@ fn prepared_transpose_fixes_both_cycle_directions_once() {
             unique_rigid_repartition_tree_pair_unchecked(&Z2FusionRule, &source, codomain.len())
                 .unwrap();
         let (oracle_tree, cycle_coefficient) = match expected_direction {
-            PreparedCycleDirection::Clockwise => {
-                unique_rigid_cycle_clockwise_tree_pair(&Z2FusionRule, &repartitioned.0).unwrap()
-            }
-            PreparedCycleDirection::Anticlockwise => {
-                unique_rigid_cycle_anticlockwise_tree_pair(&Z2FusionRule, &repartitioned.0).unwrap()
-            }
+            PreparedCycleDirection::Clockwise => unique_rigid_cycle_tree_pair(
+                &Z2FusionRule,
+                &repartitioned.0,
+                PreparedCycleDirection::Clockwise,
+            )
+            .unwrap(),
+            PreparedCycleDirection::Anticlockwise => unique_rigid_cycle_tree_pair(
+                &Z2FusionRule,
+                &repartitioned.0,
+                PreparedCycleDirection::Anticlockwise,
+            )
+            .unwrap(),
         };
         let oracle = (oracle_tree, repartitioned.1 * cycle_coefficient);
         assert_eq!(actual, oracle);
