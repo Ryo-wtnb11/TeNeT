@@ -222,6 +222,7 @@ impl<T: Copy> TreeTransformStructure<T> {
         let mut blocks = Vec::with_capacity(specs.len());
         let mut single_end = 0usize;
         let mut matrix_end = shared.singles.len();
+        let mut matrix = 0u32;
         let mut touched_dst_blocks = vec![false; dst_structure.block_count()];
 
         for spec in specs {
@@ -313,7 +314,7 @@ impl<T: Copy> TreeTransformStructure<T> {
                 });
                 single_end += 1;
             } else {
-                if shared_coefficient_mismatch(shared.matrix(dst_layout_start), spec_coefficients) {
+                if shared_coefficient_mismatch(shared.matrix(matrix), spec_coefficients) {
                     return Err(shared_payload_mismatch());
                 }
                 let coefficient_start = matrix_end;
@@ -327,7 +328,11 @@ impl<T: Copy> TreeTransformStructure<T> {
                     src_count,
                     coefficient_start,
                     element_count,
+                    matrix,
                 });
+                matrix = matrix
+                    .checked_add(1)
+                    .ok_or(OperationError::ElementCountOverflow)?;
             }
         }
         let mut inactive_dst_layouts = Vec::new();

@@ -188,6 +188,7 @@ pub(crate) fn compile_device_plan<C: Copy>(
             src_count,
             coefficient_start,
             element_count,
+            ..
         } = *block
         else {
             return Err(unsupported(

@@ -378,7 +378,6 @@ pub trait HostKernelAdapter<T> {
         destination: &mut [T],
         source: &[T],
         recoupling_coefficients_dst_src: &[C],
-        coefficient_start: usize,
         element_count: usize,
         src_count: usize,
         dst_count: usize,
@@ -1192,7 +1191,6 @@ where
         destination: &mut [T],
         source: &[T],
         recoupling_coefficients_dst_src: &[C],
-        coefficient_start: usize,
         element_count: usize,
         src_count: usize,
         dst_count: usize,
@@ -1205,14 +1203,13 @@ where
             destination.len(),
             source.len(),
             recoupling_coefficients_dst_src.len(),
-            coefficient_start,
             element_count,
             src_count,
             dst_count,
         )?;
         for dst_index in 0..dst_count {
             let dst_column_start = dst_index * element_count;
-            let coefficient_row_start = coefficient_start + dst_index * src_count;
+            let coefficient_row_start = dst_index * src_count;
             for element in 0..element_count {
                 let mut sum = T::zero();
                 for src_index in 0..src_count {
@@ -1235,7 +1232,6 @@ pub(crate) fn validate_recoupling_lens(
     destination_len: usize,
     source_len: usize,
     coefficient_len: usize,
-    coefficient_start: usize,
     element_count: usize,
     src_count: usize,
     dst_count: usize,
@@ -1248,9 +1244,6 @@ pub(crate) fn validate_recoupling_lens(
         .ok_or_else(|| OperationError::ElementCountOverflow)?;
     let coefficient_count = src_count
         .checked_mul(dst_count)
-        .ok_or_else(|| OperationError::ElementCountOverflow)?;
-    let coefficient_end = coefficient_start
-        .checked_add(coefficient_count)
         .ok_or_else(|| OperationError::ElementCountOverflow)?;
 
     if source_len != expected_source_len {
@@ -1265,9 +1258,9 @@ pub(crate) fn validate_recoupling_lens(
             actual: destination_len,
         });
     }
-    if coefficient_len < coefficient_end {
+    if coefficient_len < coefficient_count {
         return Err(OperationError::CoefficientCountMismatch {
-            expected: coefficient_end,
+            expected: coefficient_count,
             actual: coefficient_len,
         });
     }

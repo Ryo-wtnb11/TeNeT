@@ -261,7 +261,6 @@ where
                 dst_count,
                 src_layout_start,
                 src_count,
-                0,
                 element_count,
                 structure.block_matrix(block_index).unwrap_or_default(),
                 structure.storage_conjugate(),
