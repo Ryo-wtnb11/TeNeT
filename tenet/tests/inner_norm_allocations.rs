@@ -1,17 +1,15 @@
 use std::collections::BTreeSet;
-use std::fmt;
 use std::hint::black_box;
 use std::sync::Arc;
 
 use tenet::sector::{
-    product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId,
+    product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
+#[cfg(feature = "racah-generated")]
+use tenet::sector::{CheckedGenericRigidSymbols, TypedSectorAdmission};
 use tenet::sector::{
-    BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
-    CheckedGenericRigidSymbols, FusionStyleKind, Fz2SectorLayout, GenericFArray, GenericRMatrix,
-    PackedProductCodec, ProductSectorLayout, RuleIdentity, SectorVec, Su2SectorLayout,
-    TypedSectorAdmission, U1SectorLayout,
+    Fz2SectorLayout, PackedProductCodec, ProductSectorLayout, Su2SectorLayout, U1SectorLayout,
 };
 use tenet::typed::TensorScalar;
 use tenet::typed::{Complex32, Complex64, GradedSpace, Runtime, SectorSpectrum, TensorMap};
@@ -186,199 +184,16 @@ fn warmed_compact_dense_inner_does_not_allocate() {
     }
 }
 
-/// Checked Generic toy with outer multiplicity two on `X (x) X -> X` and an
-/// allocation-free `dim`, so the rows below measure the reduction owners and
-/// not the provider.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-enum CheckedLabel {
-    Vacuum,
-    X,
-}
+// The shared checked Generic toy: outer multiplicity two on `X (x) X -> X`
+// and an allocation-free `dim`, so the rows below measure the reduction
+// owners and not the provider.
+#[path = "../../tests/support/toy_rules.rs"]
+mod toy_rules;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CheckedError;
-
-impl fmt::Display for CheckedError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid synthetic checked sector")
-    }
-}
-
-impl std::error::Error for CheckedError {}
-
-struct CheckedToy;
-
-impl CheckedToy {
-    const VACUUM: SectorId = SectorId::new(0);
-    const X: SectorId = SectorId::new(1);
-
-    fn channels(left: SectorId, right: SectorId) -> Result<SectorVec, CheckedError> {
-        match (left, right) {
-            (Self::VACUUM, sector) | (sector, Self::VACUUM)
-                if sector == Self::VACUUM || sector == Self::X =>
-            {
-                Ok([sector].into_iter().collect())
-            }
-            (Self::X, Self::X) => Ok([Self::VACUUM, Self::X].into_iter().collect()),
-            _ => Err(CheckedError),
-        }
-    }
-
-    fn multiplicity(left: SectorId, right: SectorId, coupled: SectorId) -> usize {
-        if (left, right, coupled) == (Self::X, Self::X, Self::X) {
-            2
-        } else {
-            usize::from(
-                Self::channels(left, right).is_ok_and(|channels| channels.contains(&coupled)),
-            )
-        }
-    }
-}
-
-impl CheckedGenericFusion for CheckedToy {
-    type Error = CheckedError;
-
-    fn rule_identity(&self) -> RuleIdentity {
-        RuleIdentity::from_canonical_bytes::<Self>(0x1219, Arc::<[u8]>::from(*b"checked-toy"))
-    }
-
-    fn fusion_style(&self) -> FusionStyleKind {
-        FusionStyleKind::Generic
-    }
-
-    fn braiding_style(&self) -> BraidingStyleKind {
-        BraidingStyleKind::Bosonic
-    }
-
-    fn vacuum(&self) -> SectorId {
-        Self::VACUUM
-    }
-
-    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
-        match sector {
-            Self::VACUUM | Self::X => Ok(sector),
-            _ => Err(CheckedError),
-        }
-    }
-
-    fn try_fusion_channels(
-        &self,
-        left: SectorId,
-        right: SectorId,
-    ) -> Result<SectorVec, Self::Error> {
-        Self::channels(left, right)
-    }
-
-    fn try_fusion_channels_in_table(
-        &self,
-        left: SectorId,
-        right: SectorId,
-    ) -> Result<SectorVec, Self::Error> {
-        Self::channels(left, right)
-    }
-
-    fn try_nsymbol(
-        &self,
-        left: SectorId,
-        right: SectorId,
-        coupled: SectorId,
-    ) -> Result<usize, Self::Error> {
-        Ok(Self::multiplicity(left, right, coupled))
-    }
-}
-
-impl CheckedGenericRigidSymbols for CheckedToy {
-    type Scalar = f64;
-
-    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
-        match sector {
-            Self::VACUUM => Ok(1.0),
-            Self::X => Ok((1.0 + 2.0_f64.sqrt()).sqrt()),
-            _ => Err(CheckedError),
-        }
-    }
-
-    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
-        Ok(self.try_sqrt_dim_scalar(sector)?.recip())
-    }
-
-    fn try_frobenius_schur_phase_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
-        self.try_dual(sector).map(|_| 1.0)
-    }
-
-    fn try_f_symbol_generic(
-        &self,
-        a: SectorId,
-        b: SectorId,
-        c: SectorId,
-        d: SectorId,
-        e: SectorId,
-        f: SectorId,
-    ) -> Result<GenericFArray<f64>, Self::Error> {
-        let shape = (
-            Self::multiplicity(a, b, e),
-            Self::multiplicity(e, c, d),
-            Self::multiplicity(b, c, f),
-            Self::multiplicity(a, f, d),
-        );
-        let rows = shape.0 * shape.1;
-        let cols = shape.2 * shape.3;
-        Ok(GenericFArray::new(
-            (0..rows * cols)
-                .map(|index| f64::from(index / cols == index % cols))
-                .collect(),
-            shape,
-        ))
-    }
-
-    fn try_r_symbol_generic(
-        &self,
-        a: SectorId,
-        b: SectorId,
-        c: SectorId,
-    ) -> Result<GenericRMatrix<f64>, Self::Error> {
-        let size = Self::multiplicity(a, b, c);
-        Ok(GenericRMatrix::new(
-            (0..size * size)
-                .map(|index| f64::from(index / size == index % size))
-                .collect(),
-            size,
-            size,
-        ))
-    }
-}
-
-impl TypedSectorAdmission for CheckedToy {
-    type Sector = CheckedLabel;
-    type Error = CheckedError;
-    type Mode = CheckedGenericAdmissionMode;
-
-    fn typed_rule_identity(&self) -> RuleIdentity {
-        CheckedGenericFusion::rule_identity(self)
-    }
-
-    fn try_encode_label(&self, sector: &Self::Sector) -> Result<SectorId, Self::Error> {
-        Ok(match sector {
-            CheckedLabel::Vacuum => Self::VACUUM,
-            CheckedLabel::X => Self::X,
-        })
-    }
-
-    fn try_decode_label(&self, sector: SectorId) -> Result<Self::Sector, Self::Error> {
-        match sector {
-            Self::VACUUM => Ok(CheckedLabel::Vacuum),
-            Self::X => Ok(CheckedLabel::X),
-            _ => Err(CheckedError),
-        }
-    }
-
-    fn try_dual_id(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
-        self.try_dual(sector)
-    }
-}
+use toy_rules::{GenericLabel, GenericToy};
 
 fn block_value<D: TensorScalar>(
-    trees: &tenet::typed::BlockFusionTrees<CheckedLabel>,
+    trees: &tenet::typed::BlockFusionTrees<GenericLabel>,
     indices: &[usize],
 ) -> D {
     let vertex = trees.codomain_vertices()[0].get() as f64;
@@ -414,15 +229,15 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
     // Before #1219 every warm call allocated once (a std `HashMap`) for owned
     // and lazy-adjoint inputs alike.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let provider = Arc::new(CheckedToy);
+    let provider = Arc::new(GenericToy);
     let leg = GradedSpace::try_new(
         Arc::clone(&provider),
-        [(CheckedLabel::Vacuum, 1), (CheckedLabel::X, 2)],
+        [(GenericLabel::Vacuum, 1), (GenericLabel::X, 2)],
     )
     .unwrap();
-    let lhs: TensorMap<CheckedToy, Complex64> =
+    let lhs: TensorMap<GenericToy, Complex64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], block_value).unwrap();
-    let rhs: TensorMap<CheckedToy, Complex64> =
+    let rhs: TensorMap<GenericToy, Complex64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
             block_value::<Complex64>(trees, indices) * Complex64::new(0.5, -1.5)
         })
@@ -574,34 +389,34 @@ fn warmed_su3_checked_inner_and_norm_allocate_only_through_the_provider() {
 #[test]
 fn checked_generic_single_precision_norm_accumulates_wide() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let provider = Arc::new(CheckedToy);
+    let provider = Arc::new(GenericToy);
     let leg = GradedSpace::try_new(
         Arc::clone(&provider),
-        [(CheckedLabel::Vacuum, 1), (CheckedLabel::X, 2)],
+        [(GenericLabel::Vacuum, 1), (GenericLabel::X, 2)],
     )
     .unwrap();
 
     let check = |what: &str,
                  value: &dyn Fn(
-        &tenet::typed::BlockFusionTrees<CheckedLabel>,
+        &tenet::typed::BlockFusionTrees<GenericLabel>,
         &[usize],
     ) -> Complex32| {
-        let real32: TensorMap<CheckedToy, f32> =
+        let real32: TensorMap<GenericToy, f32> =
             TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
                 value(trees, indices).re
             })
             .unwrap();
-        let real64: TensorMap<CheckedToy, f64> =
+        let real64: TensorMap<GenericToy, f64> =
             TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
                 f64::from(value(trees, indices).re)
             })
             .unwrap();
-        let complex32: TensorMap<CheckedToy, Complex32> =
+        let complex32: TensorMap<GenericToy, Complex32> =
             TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
                 value(trees, indices)
             })
             .unwrap();
-        let complex64: TensorMap<CheckedToy, Complex64> =
+        let complex64: TensorMap<GenericToy, Complex64> =
             TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
                 let z = value(trees, indices);
                 Complex64::new(z.re.into(), z.im.into())
