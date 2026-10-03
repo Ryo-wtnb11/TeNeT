@@ -122,6 +122,49 @@ fn dimension_drift_replans_without_put_before_residency_recheck() {
 }
 
 #[test]
+fn drift_is_measured_from_the_planned_dims_across_call_sites() {
+    // Two `tensor!` sites with different written specs lower to one network
+    // topology: site B traces `l` away, leaving the same unsplit `[j, k]`
+    // operand as site A. B's static alias must remember the dims the shared
+    // plan was searched at (10), not the dims B first saw (15), so 28 is a
+    // 2.8x drift and replans under DriftFactor(2).
+    let runtime = Runtime::builder().build().unwrap();
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            replan: ReplanPolicy::DriftFactor(2.0),
+            ..Default::default()
+        },
+    );
+    let provider = Arc::new(U1FusionRule);
+    let traced = space(Arc::clone(&provider), 2);
+    let site_a = |chi: usize, seed: u64| {
+        let (a, b) = pair(&runtime, &space(Arc::clone(&provider), chi), seed);
+        drop(tensor!([i; k] = a[i; j] * b[j, k]).unwrap());
+    };
+    let site_b = |chi: usize, seed: u64| {
+        let leg = space(Arc::clone(&provider), chi);
+        let a =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&leg], [&leg], seed).unwrap();
+        let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(
+            &runtime,
+            [&leg, &traced],
+            [&leg, &traced],
+            seed + 1,
+        )
+        .unwrap();
+        drop(tensor!([i; k] = a[i; j] * t[j, l; k, l]).unwrap());
+    };
+    site_a(10, 45);
+    site_b(15, 46);
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!((stats.misses, stats.hits, stats.replans), (1, 1, 0));
+    site_b(28, 48);
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!((stats.misses, stats.hits, stats.replans), (1, 1, 1));
+}
+
+#[test]
 fn disabled_cache_keeps_entries_and_counters_empty() {
     let runtime = Runtime::builder().build().unwrap();
     configure_plan_cache(

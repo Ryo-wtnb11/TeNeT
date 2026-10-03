@@ -825,6 +825,12 @@ pub fn save_plan_cache(runtime: &Runtime) -> String {
 /// does not match this build is ignored (returns 0): a stale file would
 /// replay now-suboptimal orders and silently drift truncation, so it is
 /// dropped rather than trusted. Returns the number of orders loaded.
+///
+/// Loading any blob with a matching header, even an empty one, turns
+/// persistence on for this runtime. From then on a topology that has a
+/// persisted order replays it instead of searching, on a cold miss *and* on a
+/// [`ReplanPolicy::DriftFactor`] drift-replan: drift still rebuilds the plan
+/// for the current dimensions, but it no longer re-searches the order.
 pub fn load_plan_cache(runtime: &Runtime, text: &str) -> usize {
     let mut lines = text.lines();
     // An empty blob is a fresh persistence file (first run): activate
@@ -1230,9 +1236,12 @@ where
         .collect::<Result<_, _>>()?;
     let topology = topology_for(&network, tensors, optimizer);
 
-    #[derive(Clone)]
+    // A hit carries the entry's planning-time dims: the static alias must
+    // measure drift from them, not from this caller's dims, or each site that
+    // reaches the entry through a topology hit would re-base the snapshot and
+    // let drift compound to factor² across sites (#1740).
     enum Outcome {
-        Hit(CachedPlan),
+        Hit(CachedPlan, Vec<Vec<usize>>),
         Replan,
         Miss,
     }
@@ -1250,21 +1259,22 @@ where
                         planned: Arc::clone(&entry.planned),
                         workspaces: Arc::clone(&entry.workspaces),
                     };
+                    let snapshot = entry.dims_snapshot.clone();
                     cache.hits += 1;
                     cache.map.promote(&topology);
-                    Ok(Outcome::Hit(planned))
+                    Ok(Outcome::Hit(planned, snapshot))
                 }
                 Some(_) => Ok(Outcome::Replan),
                 None => Ok(Outcome::Miss),
             }
         })?;
-    if let Outcome::Hit(planned) = outcome.clone() {
+    if let Outcome::Hit(planned, snapshot) = outcome {
         runtime.with_plan_cache(|config, slot| {
             install_static_alias(
                 cache_mut(slot, config.workspace_budget_bytes),
                 key,
                 codomain_ranks.to_vec(),
-                dims,
+                snapshot,
                 topology,
                 &planned,
                 lru_capacity(config.capacity),
@@ -1320,13 +1330,14 @@ where
             if cache.map.cap() != capacity {
                 cache.map.resize(capacity);
             }
-            let cached = match cache.map.peek(&topology) {
+            let (cached, snapshot) = match cache.map.peek(&topology) {
                 Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
                     cache.hits += 1;
-                    CachedPlan {
+                    let cached = CachedPlan {
                         planned: Arc::clone(&entry.planned),
                         workspaces: Arc::clone(&entry.workspaces),
-                    }
+                    };
+                    (cached, entry.dims_snapshot.clone())
                 }
                 _ => {
                     cache.topology_materializations += 1;
@@ -1348,7 +1359,7 @@ where
                             dims_snapshot: dims.clone(),
                         },
                     );
-                    cached
+                    (cached, dims.clone())
                 }
             };
             cache.map.promote(&topology);
@@ -1356,7 +1367,7 @@ where
                 cache,
                 key,
                 codomain_ranks.to_vec(),
-                dims.clone(),
+                snapshot,
                 topology.clone(),
                 &cached,
                 capacity,
