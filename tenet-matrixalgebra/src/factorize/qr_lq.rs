@@ -77,20 +77,18 @@ where
     Some(Qr { q, r })
 }
 
-#[allow(clippy::type_complexity)]
-fn checked_diagonal_qr_lq<R, D>(
+/// Phases (`q`) and magnitudes (`r`) of an admitted checked compact diagonal
+/// `V <- V`,
+/// or `None` when dense execution must decide. Every QR/LQ factor of the
+/// diagonal lives on the input space itself, so no factor space is built.
+///
+/// Why not a `FactorSpaceAuthority` step: reusing the admitted input space is
+/// the same, provider-free identity in both modes (the multiplicity-free
+/// `qr_diagonal_dyn` does the same), so there is no mode-dependent work to own.
+fn checked_diagonal_phase_magnitude<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-    full_product: Option<&FusionProductSpace>,
-) -> Result<
-    Option<(
-        BoundDynamicFusionMapSpace<R>,
-        BoundDynamicFusionMapSpace<R>,
-        Vec<SectorSpectrum<D>>,
-        Vec<SectorSpectrum<D>>,
-    )>,
-    CheckedGenericFactorPlanError<R::Error>,
->
+) -> Option<Qr<Vec<SectorSpectrum<D>>>>
 where
     R: CheckedGenericFusion,
     D: FactorScalar,
@@ -100,38 +98,29 @@ where
         || source.nin() != 1
         || source.homspace().codomain() != source.homspace().domain()
     {
-        return Ok(None);
+        return None;
     }
-    let Ok(Some(source_regions)) = checked_sector_regions(source.structure(), 1) else {
-        return Ok(None);
-    };
+    let source_regions = checked_sector_regions(source.structure(), 1).ok()??;
     // TensorKit's diagonal dispatch (`diagonal.jl:16-42`) keeps `W = V`, dual
     // orientation included. Why not `compact_bond_leg` for a dual `V`: that is
     // the dense route's fresh nondual `W = fuse(V)`, which the diagonal
-    // convention deliberately does not share; the provider-prepared factor
-    // regions below are the structural check on both orientations.
+    // convention deliberately does not share.
     let bond = &source.homspace().codomain().legs()[0];
     if !bond.is_dual() && compact_bond_leg(&source_regions) != *bond {
-        return Ok(None);
+        return None;
     }
-    let Some(by_sector) = aligned_diagonal_spectrum_by_sector(&source_regions, spectrum) else {
-        return Ok(None);
-    };
+    let by_sector = aligned_diagonal_spectrum_by_sector(&source_regions, spectrum)?;
     let mut phases = Vec::with_capacity(source_regions.len());
     let mut magnitudes = Vec::with_capacity(source_regions.len());
     for region in source_regions.iter() {
-        let Some(entry) = by_sector.get(&region.coupled()) else {
-            return Ok(None);
-        };
+        let entry = by_sector.get(&region.coupled())?;
         if region.row_trees().len() != 1 || region.col_trees().len() != 1 {
-            return Ok(None);
+            return None;
         }
         let mut sector_phases = Vec::with_capacity(entry.values.len());
         let mut sector_magnitudes = Vec::with_capacity(entry.values.len());
         for &value in &entry.values {
-            let Some((phase, magnitude)) = diagonal_phase_magnitude(value) else {
-                return Ok(None);
-            };
+            let (phase, magnitude) = diagonal_phase_magnitude(value)?;
             sector_phases.push(phase);
             sector_magnitudes.push(magnitude);
         }
@@ -144,116 +133,39 @@ where
             values: sector_magnitudes,
         });
     }
-
-    if let Some(product) = full_product {
-        let dimensions =
-            coupled_sector_block_dimensions_generic_checked(product, authority.provider())?;
-        let source_dimensions = spectrum
-            .iter()
-            .map(|entry| (entry.sector, entry.values.len()))
-            .collect::<BTreeMap<_, _>>();
-        if dimensions != source_dimensions {
-            return Ok(None);
-        }
-    }
-
-    let bond = bond.clone();
-    let left_hom = FusionTreeHomSpace::new(
-        source.homspace().codomain().clone(),
-        FusionProductSpace::new([bond.clone()]),
-    );
-    let left_prepared = left_hom
-        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(
-            authority.provider(),
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    let left_regions = checked_sector_regions(left_prepared.structure(), 1)?.ok_or(
-        CheckedGenericFactorPlanError::Operation(OperationError::UnsupportedTensorContractScope {
-            message: "compact diagonal QR/LQ left output is not a coupled-sector matrix layout",
-        }),
-    )?;
-    let right_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([bond]),
-        source.homspace().domain().clone(),
-    );
-    let right_prepared = right_hom
-        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(
-            authority.provider(),
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    let right_regions = checked_sector_regions(right_prepared.structure(), 1)?.ok_or(
-        CheckedGenericFactorPlanError::Operation(OperationError::UnsupportedTensorContractScope {
-            message: "compact diagonal QR/LQ right output is not a coupled-sector matrix layout",
-        }),
-    )?;
-    if !source_factor_tree_extents_match(&source_regions, &left_regions, &right_regions) {
-        return Ok(None);
-    }
-    // For a conforming deterministic provider the admitted rank-1 endomorphism
-    // fixes these three region sets to the same HomSpace. Keep the complete
-    // route check before publication as a defensive structural boundary.
-    if compile_compact_factor_routes(&source_regions, &left_regions, &right_regions).is_err() {
-        return Ok(None);
-    }
-    let left = BoundDynamicFusionMapSpace::from_prepared_final_homspace_generic_checked(
-        Arc::clone(authority.provider_arc()),
-        left_hom,
-        left_prepared,
-    )
-    .map_err(CheckedGenericFactorPlanError::from)?;
-    let right = BoundDynamicFusionMapSpace::from_prepared_final_homspace_generic_checked(
-        Arc::clone(authority.provider_arc()),
-        right_hom,
-        right_prepared,
-    )
-    .map_err(CheckedGenericFactorPlanError::from)?;
-    Ok(Some((left, right, phases, magnitudes)))
+    Some(Qr {
+        q: phases,
+        r: magnitudes,
+    })
 }
 
+/// Checked-Generic sibling of [`qr_diagonal_dyn`]: `q` holds the phases and
+/// `r` the magnitudes, both on the input bond; full and compact QR coincide.
 #[doc(hidden)]
-#[allow(clippy::type_complexity)]
 pub fn qr_diagonal_dyn_checked_generic<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-    full: bool,
-) -> Result<
-    Option<(
-        BoundDynamicFusionMapSpace<R>,
-        BoundDynamicFusionMapSpace<R>,
-        Vec<SectorSpectrum<D>>,
-        Vec<SectorSpectrum<D>>,
-    )>,
-    CheckedGenericFactorPlanError<R::Error>,
->
+) -> Option<Qr<Vec<SectorSpectrum<D>>>>
 where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    let full_product = full.then(|| authority.space().homspace().codomain());
-    checked_diagonal_qr_lq(authority, spectrum, full_product)
+    checked_diagonal_phase_magnitude(authority, spectrum)
 }
 
+/// Checked-Generic diagonal LQ: `l` holds the magnitudes and `q` the phases,
+/// both on the input bond; full and compact LQ coincide.
 #[doc(hidden)]
-#[allow(clippy::type_complexity)]
 pub fn lq_diagonal_dyn_checked_generic<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-    full: bool,
-) -> Result<
-    Option<(
-        BoundDynamicFusionMapSpace<R>,
-        BoundDynamicFusionMapSpace<R>,
-        Vec<SectorSpectrum<D>>,
-        Vec<SectorSpectrum<D>>,
-    )>,
-    CheckedGenericFactorPlanError<R::Error>,
->
+) -> Option<Lq<Vec<SectorSpectrum<D>>>>
 where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    let full_product = full.then(|| authority.space().homspace().domain());
-    checked_diagonal_qr_lq(authority, spectrum, full_product)
+    let Qr { q, r } = checked_diagonal_phase_magnitude(authority, spectrum)?;
+    Some(Lq { l: r, q })
 }
 
 pub(super) fn full_qr_numerical_stage<E, D>(
