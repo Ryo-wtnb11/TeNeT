@@ -1,10 +1,23 @@
-include!("fusion_space/product_space.rs");
-include!("fusion_space/hom_space.rs");
-include!("fusion_space/unit_layout.rs");
-include!("fusion_space/layout_cache.rs");
-include!("fusion_space/layout.rs");
-include!("fusion_space/hom_space_id.rs");
-include!("fusion_space/oriented.rs");
-include!("fusion_space/compose_validation.rs");
-include!("fusion_space/coupled_block_specs.rs");
-include!("fusion_space/tensor_map_space.rs");
+use super::*;
+
+mod compose_validation;
+mod coupled_block_specs;
+mod hom_space;
+mod hom_space_id;
+mod layout;
+mod layout_cache;
+mod oriented;
+mod product_space;
+mod tensor_map_space;
+mod unit_layout;
+
+pub(crate) use compose_validation::*;
+pub(crate) use coupled_block_specs::*;
+pub use hom_space::*;
+pub use hom_space_id::*;
+pub use layout::*;
+pub use layout_cache::*;
+pub use oriented::*;
+pub use product_space::*;
+pub use tensor_map_space::*;
+pub use unit_layout::*;

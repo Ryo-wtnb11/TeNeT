@@ -1,11 +1,13 @@
+use super::*;
+
 #[derive(Debug, Eq, PartialEq, Hash)]
-struct FusionTreeHomSpaceContent {
-    codomain: FusionProductSpace,
-    domain: FusionProductSpace,
+pub(crate) struct FusionTreeHomSpaceContent {
+    pub(super) codomain: FusionProductSpace,
+    pub(super) domain: FusionProductSpace,
 }
 
 impl FusionTreeHomSpaceContent {
-    fn charged_retained_bytes(&self) -> usize {
+    pub(super) fn charged_retained_bytes(&self) -> usize {
         fn product_space_bytes(space: &FusionProductSpace) -> usize {
             std::mem::size_of::<FusionProductSpace>()
                 .saturating_add(spilled_smallvec_heap_bytes(&space.legs))
@@ -26,7 +28,7 @@ impl FusionTreeHomSpaceContent {
 }
 
 pub struct FusionTreeHomSpace {
-    content: Arc<FusionTreeHomSpaceContent>,
+    pub(crate) content: Arc<FusionTreeHomSpaceContent>,
     id: OnceLock<HomSpaceId>,
 }
 
@@ -39,13 +41,13 @@ pub enum UnitLegInsertion {
 }
 
 impl UnitLegInsertion {
-    fn position(self) -> usize {
+    pub(super) fn position(self) -> usize {
         match self {
             Self::Left { position, .. } | Self::Right { position, .. } => position,
         }
     }
 
-    fn dual(self) -> bool {
+    pub(super) fn dual(self) -> bool {
         match self {
             Self::Left { dual, .. } | Self::Right { dual, .. } => dual,
         }
@@ -769,7 +771,7 @@ impl FusionTreeHomSpace {
         f(layout.keys.as_ref())
     }
 
-    fn cached_fusion_tree_layout<R>(&self, rule: &R) -> Arc<FusionTreeHomSpaceLayout>
+    pub(crate) fn cached_fusion_tree_layout<R>(&self, rule: &R) -> Arc<FusionTreeHomSpaceLayout>
     where
         R: MultiplicityFreeFusionRule,
     {
@@ -938,7 +940,7 @@ impl FusionTreeHomSpace {
     }
 
     #[cfg(test)]
-    fn degeneracy_shape_for_key(
+    pub(crate) fn degeneracy_shape_for_key(
         &self,
         key: &FusionTreePairKey,
     ) -> Result<DimVec, CoreError> {
@@ -974,7 +976,7 @@ impl FusionTreeHomSpace {
     }
 
     #[cfg(test)]
-    fn fusion_tree_keys_uncached<R>(&self, rule: &R) -> Vec<FusionTreePairKey>
+    pub(crate) fn fusion_tree_keys_uncached<R>(&self, rule: &R) -> Vec<FusionTreePairKey>
     where
         R: MultiplicityFreeFusionRule,
     {
@@ -1007,7 +1009,7 @@ impl FusionTreeHomSpace {
         keys
     }
 
-    fn fusion_tree_layout_data_uncached<R>(&self, rule: &R) -> FusionTreeHomSpaceLayoutData
+    pub(crate) fn fusion_tree_layout_data_uncached<R>(&self, rule: &R) -> FusionTreeHomSpaceLayoutData
     where
         R: MultiplicityFreeFusionRule,
     {
@@ -1016,7 +1018,7 @@ impl FusionTreeHomSpace {
         fusion_tree_layout_data_from_groups(&codomain, &domain)
     }
 
-    fn try_fusion_tree_layout_data_uncached_checked<R>(
+    pub(crate) fn try_fusion_tree_layout_data_uncached_checked<R>(
         &self,
         rule: &R,
     ) -> Result<FusionTreeHomSpaceLayoutData, FusionAlgebraError>

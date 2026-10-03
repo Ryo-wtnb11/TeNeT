@@ -1,3 +1,5 @@
+use super::*;
+
 /// Proof that one exact fusion-tree block subset matches a HomSpace.
 ///
 /// The proof is provider-free: it covers ranks, tree shapes, external-sector

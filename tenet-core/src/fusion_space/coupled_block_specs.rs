@@ -1,3 +1,5 @@
+use super::*;
+
 fn degeneracy_shape_for_tree_side(
     space: &FusionProductSpace,
     tree: &FusionTreeKey,
@@ -31,7 +33,7 @@ fn degeneracy_shape_for_tree_side(
 /// and `col < col_count` once, and the sector matrices follow each other from
 /// offset zero. The blocks are therefore pairwise disjoint and each reaches
 /// its window once, independent of tree identity.
-fn coupled_subblock_parts_from_leg_degeneracies(
+pub(crate) fn coupled_subblock_parts_from_leg_degeneracies(
     homspace: &FusionTreeHomSpace,
     layout: &FusionTreeHomSpaceLayoutData,
 ) -> Result<(SectorStructure, DegeneracyStructure), CoreError> {
@@ -183,7 +185,7 @@ where
 /// at that (row block, column block) position. Full coverage of the
 /// `rows × columns` grid is required so the sector matrix has no
 /// uninitialized holes.
-fn coupled_sector_matrix_block_specs<K, S>(
+pub(crate) fn coupled_sector_matrix_block_specs<K, S>(
     nout: usize,
     rank: usize,
     keys: &[K],
@@ -197,7 +199,7 @@ where
     coupled_sector_matrix_block_specs_after_dimension_validation(nout, rank, keys, shapes)
 }
 
-fn validate_coupled_sector_matrix_dimensions<'shape, S>(
+pub(crate) fn validate_coupled_sector_matrix_dimensions<'shape, S>(
     nout: usize,
     rank: usize,
     shapes: impl IntoIterator<Item = &'shape S>,
@@ -223,7 +225,7 @@ where
     Ok(())
 }
 
-fn coupled_sector_matrix_block_specs_after_dimension_validation<K, S>(
+pub(crate) fn coupled_sector_matrix_block_specs_after_dimension_validation<K, S>(
     nout: usize,
     rank: usize,
     keys: &[K],
@@ -376,7 +378,7 @@ where
     Ok(specs)
 }
 
-fn coupled_sector_matrix_block_specs_from_layout<S>(
+pub(super) fn coupled_sector_matrix_block_specs_from_layout<S>(
     nout: usize,
     rank: usize,
     layout: &FusionTreeHomSpaceLayout,

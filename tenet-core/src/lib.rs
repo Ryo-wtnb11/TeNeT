@@ -42,7 +42,9 @@ pub use tenet_sectors::{SUNFusionRule, SUNFusionRuleError};
 include!("storage.rs");
 include!("space.rs");
 include!("sector.rs");
-include!("fusion_space.rs");
+#[rustfmt::skip] // #1817 formats the former include! fragments in a separate formatting-only PR.
+mod fusion_space;
+pub use fusion_space::*;
 #[rustfmt::skip] // #1817 formats the former include! fragments in a separate formatting-only PR.
 mod fusion_tree;
 pub use fusion_tree::*;
