@@ -171,7 +171,7 @@ impl<K, S> OrderedBlockLinearMap<K, S> {
     }
 }
 
-impl<S: Clone> DenseColumns<S> {
+impl<S> DenseColumns<S> {
     pub(crate) fn with_capacity(num_src: usize, rows_hint: usize) -> Self {
         Self {
             data: Vec::with_capacity(rows_hint.saturating_mul(num_src)),
@@ -369,11 +369,16 @@ where
     Ok((basis, columns))
 }
 
-fn order_generic_tree_pair_block<S: Clone>(
+fn order_generic_tree_pair_block<S>(
     basis: Vec<FusionTreePairKey>,
     columns: DenseColumns<S>,
 ) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
-    order_block_columns(basis.len(), columns, |basis_row| basis[basis_row].clone())
+    let mut slots = basis.into_iter().map(Some).collect::<Vec<_>>();
+    order_block_columns(slots.len(), columns, |basis_row| {
+        slots[basis_row]
+            .take()
+            .expect("ordered block rows contain each basis row once")
+    })
 }
 
 /// The Generic keyed-block driver of the shared block schedule.

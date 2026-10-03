@@ -249,9 +249,11 @@ pub(super) fn run_cycles<T, E>(
 }
 
 /// Apply a prepared Artin schedule one adjacent swap at a time
-/// (`braiding_manipulations.jl` `braid`: `for s in permutation2swaps(p)`).
-/// The one step runner for term lists, single unique-fusion states and
-/// column-batched blocks.
+/// (`braiding_manipulations.jl` `braid`: `for s in permutation2swaps(p)`),
+/// for term lists, single unique-fusion states and the compact tree block.
+/// The compact pair-block braid runs its own plain loop in
+/// `CompactTreePairDriver::braid_codomain` (a step closure measured slower on
+/// the cold braid plan build).
 #[inline]
 pub(super) fn run_artin_steps<T, E>(
     mut state: T,

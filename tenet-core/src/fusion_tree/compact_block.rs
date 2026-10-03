@@ -494,7 +494,7 @@ pub(crate) fn order_compact_block<S: Clone>(
 /// (the [`OrderedBlockLinearMap`] contract), moving each coefficient out of
 /// `columns`. `destination(basis_row)` materializes a basis row's key; it is
 /// called once per present row, in output order.
-pub(super) fn order_block_columns<S: Clone>(
+pub(super) fn order_block_columns<S>(
     basis_row_count: usize,
     mut columns: DenseColumns<S>,
     mut destination: impl FnMut(usize) -> FusionTreePairKey,
