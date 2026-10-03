@@ -1,9 +1,11 @@
+use super::*;
+
 #[derive(Clone, Copy)]
-struct ValidatedFusionTreeBlockGroup<'a, R> {
+pub(super) struct ValidatedFusionTreeBlockGroup<'a, R> {
     rule: &'a R,
-    src_keys: &'a [FusionTreeKey],
+    pub(super) src_keys: &'a [FusionTreeKey],
     rank: usize,
-    projection: MultiplicityFreeTreeProjection<'a>,
+    pub(super) projection: MultiplicityFreeTreeProjection<'a>,
 }
 
 fn validate_fusion_tree_block_group_for_rule<'a, R>(
@@ -198,17 +200,17 @@ where
 }
 
 #[derive(Clone, Copy)]
-struct ValidatedTreePairBlockGroup<'a, R> {
-    rule: &'a R,
-    source_len: usize,
-    codomain_rank: usize,
-    domain_rank: usize,
-    projection: MultiplicityFreePairProjection<'a>,
+pub(crate) struct ValidatedTreePairBlockGroup<'a, R> {
+    pub(super) rule: &'a R,
+    pub(super) source_len: usize,
+    pub(crate) codomain_rank: usize,
+    pub(crate) domain_rank: usize,
+    pub(super) projection: MultiplicityFreePairProjection<'a>,
 }
 
-const TREE_PAIR_BLOCK_GROUP_ERROR: &str = "fusion-tree block keys must share one group";
+pub(crate) const TREE_PAIR_BLOCK_GROUP_ERROR: &str = "fusion-tree block keys must share one group";
 
-fn validate_tree_pair_block_group_for_rule<'a, R>(
+pub(crate) fn validate_tree_pair_block_group_for_rule<'a, R>(
     rule: &'a R,
     src_keys: &'a [FusionTreePairKey],
 ) -> Result<Option<ValidatedTreePairBlockGroup<'a, R>>, CoreError>
@@ -785,7 +787,7 @@ where
         .map(scatter_compact_tree_pair_block)
 }
 
-fn multiplicity_free_transpose_tree_pair_block_ordered_validated<R>(
+pub(crate) fn multiplicity_free_transpose_tree_pair_block_ordered_validated<R>(
     group: ValidatedTreePairBlockGroup<'_, R>,
     prepared: &PreparedTreePairOperation<'_>,
 ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
@@ -1024,7 +1026,7 @@ where
 }
 
 #[cfg(test)]
-fn multiplicity_free_transpose_tree_pair_block_full_key_oracle<R>(
+pub(crate) fn multiplicity_free_transpose_tree_pair_block_full_key_oracle<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
     codomain_permutation: &[usize],

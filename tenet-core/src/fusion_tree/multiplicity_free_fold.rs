@@ -1,11 +1,13 @@
-struct PreparedMultiplicityFreeFoldRight<S> {
-    first: SectorId,
-    first_is_dual: bool,
-    frobenius_schur_phase: S,
-    output_frame: MultiplicityFreeTreePairFrame,
+use super::*;
+
+pub(super) struct PreparedMultiplicityFreeFoldRight<S> {
+    pub(super) first: SectorId,
+    pub(super) first_is_dual: bool,
+    pub(super) frobenius_schur_phase: S,
+    pub(super) output_frame: MultiplicityFreeTreePairFrame,
 }
 
-fn prepare_multiplicity_free_foldright<R>(
+pub(super) fn prepare_multiplicity_free_foldright<R>(
     rule: &R,
     frame: &MultiplicityFreeTreePairFrame,
 ) -> Result<PreparedMultiplicityFreeFoldRight<R::Scalar>, CoreError>
@@ -48,7 +50,7 @@ where
     })
 }
 
-fn multiplicity_free_foldright_tree_pair<R>(
+pub(crate) fn multiplicity_free_foldright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -126,7 +128,7 @@ where
         .collect())
 }
 
-fn multiplicity_free_cycle_clockwise_tree_pair<R>(
+pub(super) fn multiplicity_free_cycle_clockwise_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -152,7 +154,7 @@ where
     }
 }
 
-fn multiplicity_free_cycle_anticlockwise_tree_pair<R>(
+pub(super) fn multiplicity_free_cycle_anticlockwise_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -222,7 +224,7 @@ where
     locals
 }
 
-fn collect_multiplicity_free_tree_pair_locals_for_frame<R>(
+pub(super) fn collect_multiplicity_free_tree_pair_locals_for_frame<R>(
     rule: &R,
     frame: &MultiplicityFreeTreePairFrame,
 ) -> Vec<MultiplicityFreeTreePairLocal>
@@ -342,7 +344,7 @@ where
         ) != 0
 }
 
-fn multiplicity_free_multi_fmove_local<R>(
+pub(super) fn multiplicity_free_multi_fmove_local<R>(
     rule: &R,
     frame: &MultiplicityFreeTreeFrame,
     local: &MultiplicityFreeTreeLocal,
@@ -422,7 +424,7 @@ where
         .collect())
 }
 
-fn multiplicity_free_multi_fmove_inv_local<R>(
+pub(super) fn multiplicity_free_multi_fmove_inv_local<R>(
     rule: &R,
     coupled: SectorId,
     source_frame: &MultiplicityFreeTreeFrame,
@@ -486,7 +488,7 @@ where
         .collect())
 }
 
-fn multiplicity_free_multi_fmove_tree<R>(
+pub(crate) fn multiplicity_free_multi_fmove_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
 ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
@@ -506,7 +508,7 @@ where
         .collect())
 }
 
-fn multiplicity_free_multi_fmove_inv_tree<R>(
+pub(crate) fn multiplicity_free_multi_fmove_inv_tree<R>(
     rule: &R,
     leading_sector: SectorId,
     coupled: SectorId,
@@ -618,7 +620,7 @@ where
 }
 
 #[cfg(test)]
-fn multiplicity_free_multi_fmove_tree_legacy_oracle<R>(
+pub(crate) fn multiplicity_free_multi_fmove_tree_legacy_oracle<R>(
     rule: &R,
     tree: &FusionTreeKey,
 ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
@@ -682,7 +684,7 @@ where
 }
 
 #[cfg(test)]
-fn multiplicity_free_multi_fmove_inv_tree_legacy_oracle<R>(
+pub(crate) fn multiplicity_free_multi_fmove_inv_tree_legacy_oracle<R>(
     rule: &R,
     leading_sector: SectorId,
     coupled: SectorId,
@@ -928,7 +930,7 @@ where
     )
 }
 
-fn multiplicity_free_multi_associator_scalar<R>(
+pub(crate) fn multiplicity_free_multi_associator_scalar<R>(
     rule: &R,
     long: &FusionTreeKey,
     short: &FusionTreeKey,
@@ -1001,7 +1003,7 @@ where
     Ok(Some(coefficient))
 }
 
-fn fusion_tree_vertex_neighbors(
+pub(crate) fn fusion_tree_vertex_neighbors(
     tree: &FusionTreeKey,
     leg_index: usize,
 ) -> Result<(SectorId, SectorId), CoreError> {

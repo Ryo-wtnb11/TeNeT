@@ -1,9 +1,11 @@
+use super::*;
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FusionTreeGroupKey {
-    codomain_uncoupled: Arc<[SectorId]>,
-    domain_uncoupled: Arc<[SectorId]>,
-    codomain_is_dual: Arc<[bool]>,
-    domain_is_dual: Arc<[bool]>,
+    pub(crate) codomain_uncoupled: Arc<[SectorId]>,
+    pub(crate) domain_uncoupled: Arc<[SectorId]>,
+    pub(crate) codomain_is_dual: Arc<[bool]>,
+    pub(crate) domain_is_dual: Arc<[bool]>,
 }
 
 impl FusionTreeGroupKey {
@@ -34,7 +36,7 @@ impl FusionTreeGroupKey {
         }
     }
 
-    fn from_frozen(
+    pub(crate) fn from_frozen(
         codomain_uncoupled: Arc<[SectorId]>,
         domain_uncoupled: Arc<[SectorId]>,
         codomain_is_dual: Arc<[bool]>,
@@ -96,16 +98,16 @@ impl FusionTreeGroupKey {
 // `Ord` and `Debug`, and is never persisted.
 #[derive(Clone)]
 pub struct FusionTreeKey {
-    uncoupled: Arc<[SectorId]>,
-    coupled: SectorId,
-    is_dual: Arc<[bool]>,
-    innerlines: Arc<[SectorId]>,
-    vertices: Arc<[MultiplicityIndex]>,
-    hash: u64,
+    pub(crate) uncoupled: Arc<[SectorId]>,
+    pub(super) coupled: SectorId,
+    pub(crate) is_dual: Arc<[bool]>,
+    pub(crate) innerlines: Arc<[SectorId]>,
+    pub(crate) vertices: Arc<[MultiplicityIndex]>,
+    pub(super) hash: u64,
 }
 
 #[inline]
-fn fusion_tree_key_hash(
+pub(crate) fn fusion_tree_key_hash(
     uncoupled: &[SectorId],
     coupled: SectorId,
     is_dual: &[bool],
@@ -260,7 +262,7 @@ impl FusionTreeKey {
         )
     }
 
-    fn from_frozen(
+    pub(crate) fn from_frozen(
         uncoupled: Arc<[SectorId]>,
         coupled: SectorId,
         is_dual: Arc<[bool]>,
@@ -457,7 +459,7 @@ fn charge_frozen_slice<T>(seen: &mut rustc_hash::FxHashSet<usize>, slice: &Arc<[
     }
 }
 
-fn charge_fusion_tree_key_backings(
+pub(crate) fn charge_fusion_tree_key_backings(
     seen: &mut rustc_hash::FxHashSet<usize>,
     tree: &FusionTreeKey,
 ) -> usize {
@@ -467,7 +469,7 @@ fn charge_fusion_tree_key_backings(
         .saturating_add(charge_frozen_slice(seen, &tree.vertices))
 }
 
-fn charge_fusion_tree_group_key_backings(
+pub(crate) fn charge_fusion_tree_group_key_backings(
     seen: &mut rustc_hash::FxHashSet<usize>,
     group: &FusionTreeGroupKey,
 ) -> usize {
@@ -478,12 +480,12 @@ fn charge_fusion_tree_group_key_backings(
 }
 
 #[derive(Clone, Copy)]
-struct ValidatedFusionTree<'a, R> {
-    rule: &'a R,
-    key: &'a FusionTreeKey,
+pub(crate) struct ValidatedFusionTree<'a, R> {
+    pub(crate) rule: &'a R,
+    pub(crate) key: &'a FusionTreeKey,
 }
 
-fn validate_fusion_tree_for_rule<'a, R>(
+pub(super) fn validate_fusion_tree_for_rule<'a, R>(
     rule: &'a R,
     tree: &'a FusionTreeKey,
 ) -> Result<ValidatedFusionTree<'a, R>, CoreError>
@@ -498,7 +500,7 @@ where
     Ok(ValidatedFusionTree { rule, key: tree })
 }
 
-fn validate_fusion_tree_for_rule_checked<'a, R>(
+pub(crate) fn validate_fusion_tree_for_rule_checked<'a, R>(
     rule: &'a R,
     tree: &'a FusionTreeKey,
 ) -> Result<ValidatedFusionTree<'a, R>, CheckedFusionSpaceError>
@@ -508,7 +510,7 @@ where
     ShapeValidatedFusionTree::try_new(tree)?.validate_for_rule_checked(rule)
 }
 
-fn validate_fusion_tree_for_rule_checked_after_shape<'tree, R>(
+pub(crate) fn validate_fusion_tree_for_rule_checked_after_shape<'tree, R>(
     rule: &'tree R,
     tree: &'tree FusionTreeKey,
 ) -> Result<ValidatedFusionTree<'tree, R>, CheckedFusionSpaceError>
@@ -519,12 +521,12 @@ where
 }
 
 #[derive(Clone, Copy)]
-struct ShapeValidatedFusionTree<'tree> {
+pub(crate) struct ShapeValidatedFusionTree<'tree> {
     tree: &'tree FusionTreeKey,
 }
 
 impl<'tree> ShapeValidatedFusionTree<'tree> {
-    fn try_new(tree: &'tree FusionTreeKey) -> Result<Self, CoreError> {
+    pub(crate) fn try_new(tree: &'tree FusionTreeKey) -> Result<Self, CoreError> {
         validate_fusion_tree_key_shape(tree)?;
         Ok(Self { tree })
     }
@@ -567,7 +569,7 @@ where
 /// Checked admission of one shape-valid fusion tree, shared by every fusion
 /// style: unit-sector structure, the rank-1 `N(c, 1, c)` provider-domain probe,
 /// and every vertex.
-fn validate_fusion_tree_checked_after_shape<E>(
+pub(super) fn validate_fusion_tree_checked_after_shape<E>(
     tree: &FusionTreeKey,
     vacuum: SectorId,
     mut fusion_channels: impl FnMut(SectorId, SectorId) -> Result<(), E>,
@@ -682,9 +684,9 @@ impl FusionTreePairKey {
 }
 
 #[derive(Clone, Copy)]
-struct ValidatedFusionTreePair<'a, R> {
-    rule: &'a R,
-    key: &'a FusionTreePairKey,
+pub(crate) struct ValidatedFusionTreePair<'a, R> {
+    pub(crate) rule: &'a R,
+    pub(crate) key: &'a FusionTreePairKey,
 }
 
 #[doc(hidden)]
@@ -694,7 +696,7 @@ pub enum FusionTreePairOrientation {
     Adjoint,
 }
 
-fn validate_fusion_tree_pair_for_rule<'a, R>(
+pub(super) fn validate_fusion_tree_pair_for_rule<'a, R>(
     rule: &'a R,
     tree_pair: &'a FusionTreePairKey,
 ) -> Result<ValidatedFusionTreePair<'a, R>, CoreError>
@@ -726,7 +728,7 @@ where
     })
 }
 
-fn validate_fusion_tree_pair_coupled(
+pub(crate) fn validate_fusion_tree_pair_coupled(
     codomain: &FusionTreeKey,
     domain: &FusionTreeKey,
 ) -> Result<(), CoreError> {
@@ -739,7 +741,7 @@ fn validate_fusion_tree_pair_coupled(
     }
 }
 
-fn validate_fusion_tree_key_shape(tree: &FusionTreeKey) -> Result<(), CoreError> {
+pub(crate) fn validate_fusion_tree_key_shape(tree: &FusionTreeKey) -> Result<(), CoreError> {
     let rank = tree.uncoupled().len();
     if tree.is_dual().len() != rank {
         return Err(CoreError::MalformedFusionTree {

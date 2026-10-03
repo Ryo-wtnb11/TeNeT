@@ -1,4 +1,6 @@
-fn execute_unique_tree_braid<R>(
+use super::*;
+
+pub(crate) fn execute_unique_tree_braid<R>(
     rule: &R,
     tree: &FusionTreeKey,
     permutation: &[usize],
@@ -60,7 +62,7 @@ where
     execute_unique_tree_braid_steps(rule, tree, artin_steps.iter().copied())
 }
 
-fn execute_unique_tree_braid_borrowed<R>(
+pub(crate) fn execute_unique_tree_braid_borrowed<R>(
     rule: &R,
     tree: &FusionTreeKey,
     braid: &UniqueBorrowedTreePairBraid<'_>,
@@ -111,7 +113,7 @@ where
     execute_unique_tree_braid_steps(rule, tree, braid.artin_steps())
 }
 
-fn execute_unique_tree_braid_steps<R, I>(
+pub(crate) fn execute_unique_tree_braid_steps<R, I>(
     rule: &R,
     tree: &FusionTreeKey,
     steps: I,
@@ -133,7 +135,7 @@ where
     Ok((current.freeze(), coefficient))
 }
 
-fn is_unique_direct_braid_source<R>(rule: &R, tree: &FusionTreeKey) -> bool
+pub(crate) fn is_unique_direct_braid_source<R>(rule: &R, tree: &FusionTreeKey) -> bool
 where
     R: MultiplicityFreeFusionRule,
 {
@@ -216,7 +218,7 @@ where
 }
 
 #[cfg(test)]
-fn immutable_unique_artin_braid_at_with_inverse_oracle<R>(
+pub(crate) fn immutable_unique_artin_braid_at_with_inverse_oracle<R>(
     rule: &R,
     tree: &FusionTreeKey,
     index: usize,

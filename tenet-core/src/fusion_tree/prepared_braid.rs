@@ -1,17 +1,19 @@
+use super::*;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PreparedArtinStep {
-    index: usize,
-    inverse: bool,
+pub(crate) struct PreparedArtinStep {
+    pub(crate) index: usize,
+    pub(crate) inverse: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct PreparedTreeBraid {
-    permutation: SmallVec<[usize; 8]>,
-    artin_steps: SmallVec<[PreparedArtinStep; 28]>,
+pub(crate) struct PreparedTreeBraid {
+    pub(crate) permutation: SmallVec<[usize; 8]>,
+    pub(crate) artin_steps: SmallVec<[PreparedArtinStep; 28]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct SimplePreparedTreeBraid {
+pub(crate) struct SimplePreparedTreeBraid {
     permutation: Arc<[usize]>,
     artin_steps: Vec<PreparedArtinStep>,
 }
@@ -26,11 +28,11 @@ enum UniqueBorrowedBraidLevels<'operation> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct UniqueBorrowedTreePairBraid<'operation> {
+pub(crate) struct UniqueBorrowedTreePairBraid<'operation> {
     codomain_permutation: &'operation [usize],
     domain_permutation: &'operation [usize],
-    source_codomain_rank: usize,
-    source_domain_rank: usize,
+    pub(super) source_codomain_rank: usize,
+    pub(super) source_domain_rank: usize,
     raw_axis_positions: Option<&'operation [usize]>,
     levels: UniqueBorrowedBraidLevels<'operation>,
 }
@@ -42,17 +44,17 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn reset_unique_borrowed_position_queries() {
+pub(crate) fn reset_unique_borrowed_position_queries() {
     UNIQUE_BORROWED_POSITION_QUERIES.with(|queries| queries.set(0));
 }
 
 #[cfg(test)]
-fn unique_borrowed_position_queries() -> usize {
+pub(crate) fn unique_borrowed_position_queries() -> usize {
     UNIQUE_BORROWED_POSITION_QUERIES.with(std::cell::Cell::get)
 }
 
 impl<'operation> UniqueBorrowedTreePairBraid<'operation> {
-    fn permutation_at(&self, position: usize) -> usize {
+    pub(super) fn permutation_at(&self, position: usize) -> usize {
         linearized_tree_pair_axis_at(
             self.codomain_permutation,
             self.domain_permutation,
@@ -118,7 +120,7 @@ impl<'operation> UniqueBorrowedTreePairBraid<'operation> {
         }
     }
 
-    fn artin_steps(&self) -> UniqueBorrowedArtinSteps<'_> {
+    pub(super) fn artin_steps(&self) -> UniqueBorrowedArtinSteps<'_> {
         UniqueBorrowedArtinSteps {
             braid: self,
             target: 0,
@@ -129,7 +131,7 @@ impl<'operation> UniqueBorrowedTreePairBraid<'operation> {
     }
 }
 
-struct UniqueBorrowedArtinSteps<'operation> {
+pub(crate) struct UniqueBorrowedArtinSteps<'operation> {
     braid: &'operation UniqueBorrowedTreePairBraid<'operation>,
     target: usize,
     source_axis: Option<usize>,
@@ -179,7 +181,7 @@ impl Iterator for UniqueBorrowedArtinSteps<'_> {
 }
 
 impl PreparedTreeBraid {
-    fn new(permutation: &[usize], levels: &[usize], rank: usize) -> Result<Self, CoreError> {
+    pub(crate) fn new(permutation: &[usize], levels: &[usize], rank: usize) -> Result<Self, CoreError> {
         validate_permutation_inline(permutation, rank)?;
         debug_assert_eq!(levels.len(), rank);
 
@@ -220,13 +222,13 @@ impl SimplePreparedTreeBraid {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PreparedCycleDirection {
+pub(crate) enum PreparedCycleDirection {
     Clockwise,
     Anticlockwise,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PreparedTreePairFamily {
+pub(crate) enum PreparedTreePairFamily {
     BraidLike,
     Transpose,
 }
@@ -238,7 +240,7 @@ const PREPARED_TRANSPOSE_BLOCK_FAMILY_ERROR: &str =
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum PreparedTreePairPlan<'operation> {
+pub(crate) enum PreparedTreePairPlan<'operation> {
     Identity,
     Repartition,
     Braid(PreparedTreeBraid),
@@ -250,7 +252,7 @@ enum PreparedTreePairPlan<'operation> {
     },
 }
 
-enum PreparedTreePairArtinSteps<'operation> {
+pub(crate) enum PreparedTreePairArtinSteps<'operation> {
     Owned(std::slice::Iter<'operation, PreparedArtinStep>),
     Unique(UniqueBorrowedArtinSteps<'operation>),
 }
@@ -278,7 +280,7 @@ impl PreparedTreePairPlan<'_> {
         }
     }
 
-    fn artin_steps(&self) -> Option<PreparedTreePairArtinSteps<'_>> {
+    pub(crate) fn artin_steps(&self) -> Option<PreparedTreePairArtinSteps<'_>> {
         match self {
             Self::Braid(braid) => Some(PreparedTreePairArtinSteps::Owned(braid.artin_steps.iter())),
             Self::SimpleBraid(braid) => {
@@ -304,10 +306,10 @@ impl PreparedTreePairPlan<'_> {
 pub struct PreparedTreePairOperation<'operation> {
     source_codomain_rank: usize,
     source_domain_rank: usize,
-    target_codomain_rank: usize,
+    pub(super) target_codomain_rank: usize,
     requires_symmetric_braiding: bool,
     family: PreparedTreePairFamily,
-    plan: PreparedTreePairPlan<'operation>,
+    pub(crate) plan: PreparedTreePairPlan<'operation>,
 }
 
 impl<'operation> PreparedTreePairOperation<'operation> {
@@ -934,7 +936,7 @@ impl<'operation> PreparedTreePairOperation<'operation> {
         Ok(())
     }
 
-    fn validate_block_preflight<R>(
+    pub(crate) fn validate_block_preflight<R>(
         &self,
         rule: &R,
         expected_family: PreparedTreePairFamily,
@@ -953,7 +955,7 @@ impl<'operation> PreparedTreePairOperation<'operation> {
         self.validate_rule_capabilities(rule)
     }
 
-    fn validate_source_split(
+    pub(crate) fn validate_source_split(
         &self,
         source_codomain_rank: usize,
         source_domain_rank: usize,

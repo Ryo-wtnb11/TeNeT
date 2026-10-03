@@ -1,3 +1,5 @@
+use super::*;
+
 /// Elementary Artin braid of neighbouring uncoupled legs `index` and `index+1`
 /// for an outer-multiplicity (`FusionStyleKind::Generic`) rule — the verbatim
 /// mirror of TensorKit's `GenericFusion` branches of
@@ -18,7 +20,7 @@
 /// braid to every output of the `inverse=false` braid recovers the original
 /// tree with coefficient 1 (unit F/R), which the tests check.
 #[cfg(test)]
-fn generic_artin_braid_at_with_inverse<R>(
+pub(crate) fn generic_artin_braid_at_with_inverse<R>(
     rule: &R,
     tree: &FusionTreeKey,
     index: usize,
@@ -33,7 +35,7 @@ where
         .map_err(map_infallible_generic_symbol_error)
 }
 
-fn generic_artin_braid_at_with_inverse_checked<C>(
+pub(crate) fn generic_artin_braid_at_with_inverse_checked<C>(
     rule: &C,
     tree: &FusionTreeKey,
     index: usize,
@@ -305,7 +307,7 @@ where
 /// label, and TensorKit's `Rmat[μ, ν]` / `Fmat[κ, λ, μ, ρ]` are
 /// 1-based Julia indices, so the stored label maps to the 0-based Rust index by
 /// subtracting one.
-fn mu_index(tree: &FusionTreeKey, vertex_index: usize) -> Result<usize, CoreError> {
+pub(super) fn mu_index(tree: &FusionTreeKey, vertex_index: usize) -> Result<usize, CoreError> {
     let label = tree
         .vertices()
         .get(vertex_index)
@@ -378,7 +380,7 @@ where
     generic_braid_tree_unchecked(rule, tree.key, permutation, levels, swaps)
 }
 
-fn generic_braid_tree_unchecked<R>(
+pub(super) fn generic_braid_tree_unchecked<R>(
     rule: &R,
     tree: &FusionTreeKey,
     permutation: &[usize],
@@ -394,7 +396,7 @@ where
         .map_err(map_infallible_generic_symbol_error)
 }
 
-fn generic_braid_tree_result<C>(
+pub(super) fn generic_braid_tree_result<C>(
     rule: &C,
     tree: &FusionTreeKey,
     permutation: &[usize],

@@ -1,3 +1,5 @@
+use super::*;
+
 /// Exact single-tree permutation lowering for a unique fusion rule.
 ///
 /// Why this one stays public while its siblings are crate-internal: the
@@ -71,7 +73,7 @@ where
     execute_multiplicity_free_tree_braid_proven(validated, prepared)
 }
 
-fn execute_multiplicity_free_tree_braid_proven<R>(
+pub(crate) fn execute_multiplicity_free_tree_braid_proven<R>(
     validated: ValidatedFusionTree<'_, R>,
     prepared: PreparedTreeBraid,
 ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
@@ -105,7 +107,7 @@ where
     )
 }
 
-fn execute_multiplicity_free_tree_braid<R>(
+pub(crate) fn execute_multiplicity_free_tree_braid<R>(
     rule: &R,
     tree: &FusionTreeKey,
     permutation: &[usize],
@@ -124,7 +126,7 @@ where
     execute_multiplicity_free_tree_braid_steps(rule, tree, artin_steps.iter().copied())
 }
 
-fn execute_multiplicity_free_tree_braid_steps<R, I>(
+pub(super) fn execute_multiplicity_free_tree_braid_steps<R, I>(
     rule: &R,
     tree: &FusionTreeKey,
     steps: I,
@@ -218,7 +220,7 @@ where
     multiplicity_free_repartition_tree_pair_validated(validated, target_codomain_rank)
 }
 
-fn multiplicity_free_repartition_tree_pair_validated<R>(
+pub(super) fn multiplicity_free_repartition_tree_pair_validated<R>(
     tree_pair: ValidatedFusionTreePair<'_, R>,
     target_codomain_rank: usize,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>

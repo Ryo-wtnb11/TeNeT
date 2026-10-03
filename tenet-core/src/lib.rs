@@ -43,7 +43,9 @@ include!("storage.rs");
 include!("space.rs");
 include!("sector.rs");
 include!("fusion_space.rs");
-include!("fusion_tree.rs");
+#[rustfmt::skip] // #1817 formats the former include! fragments in a separate formatting-only PR.
+mod fusion_tree;
+pub use fusion_tree::*;
 include!("block_structure.rs");
 include!("tensor_map.rs");
 include!("error.rs");
