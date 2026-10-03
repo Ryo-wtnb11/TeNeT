@@ -207,6 +207,15 @@ impl CheckedOnlyToy {
     }
 
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        // The injected vacuum channel carries a real multiplicity: a listed
+        // channel with N = 0 violates the provider contract.
+        if self.extra_vacuum_channel.load(Ordering::Relaxed)
+            && left.id() == 0
+            && right == self.x()
+            && coupled.id() == 0
+        {
+            return 1;
+        }
         if self.use_product_probe {
             Self::probe_nsymbol(left, right, coupled)
         } else if (left.id(), right.id(), coupled.id()) == (3, 3, 3) {

@@ -295,13 +295,13 @@ where
     // builder's multi-leg order fails): a region lists its sector and tree
     // extents in first-appearance block order and proves the dense column-major
     // matrix at `range`, which is exactly the matrix, sector order and tree
-    // order `sector_matricizations_generic` would pack from the same tiling.
+    // order `sector_matricizations` would pack from the same tiling.
     // Every consumer therefore sees the same matricization either way; output
     // tree order is proven per output by `factor_output_is_canonical` (else a
     // by-tree scatter), and the eigenvalue ops check endomorphism stacking.
     Ok(match input_regions(structure, nout)? {
         Some(regions) => InputMatricizations::Regions { data, regions },
-        None => InputMatricizations::Packed(sector_matricizations_generic(structure, data, nout)?),
+        None => InputMatricizations::Packed(sector_matricizations(structure, data, nout)?),
     })
 }
 
@@ -352,7 +352,9 @@ where
 }
 
 /// Packs every coupled sector of the source data into its dense column-major
-/// matricization, independent of the storage layout.
+/// matricization, independent of the storage layout. Core's
+/// [`CoupledMatricizationBuilder`] owns the sector, row and column placement;
+/// this only records the trees and moves the data.
 pub(super) fn sector_matricizations<D>(
     structure: &BlockStructure,
     data: &[D],
@@ -361,10 +363,8 @@ pub(super) fn sector_matricizations<D>(
 where
     D: FactorScalar,
 {
+    let mut layout = tenet_core::CoupledMatricizationBuilder::new();
     let mut matricizations: Vec<SectorMatricization<D>> = Vec::new();
-    let mut matrix_indices = FxHashMap::default();
-    let mut row_offsets: Vec<FxHashMap<&FusionTreeKey, usize>> = Vec::new();
-    let mut col_offsets: Vec<FxHashMap<&FusionTreeKey, usize>> = Vec::new();
     let mut routes = Vec::with_capacity(structure.block_count());
 
     for index in 0..structure.block_count() {
@@ -377,60 +377,49 @@ where
                 index,
             });
         };
-        let sector = coupled_of(key.codomain_tree());
-        let row_dim: usize = block.shape()[..nout].iter().product();
-        let col_dim: usize = block.shape()[nout..].iter().product();
-        let matrix_index = match matrix_indices.get(&sector) {
-            Some(&matrix_index) => matrix_index,
-            None => {
-                let matrix_index = matricizations.len();
-                matricizations.push(SectorMatricization::<D> {
-                    sector,
-                    rows: 0,
-                    cols: 0,
-                    row_trees: Vec::new(),
-                    col_trees: Vec::new(),
-                    data: Vec::new(),
-                });
-                matrix_indices.insert(sector, matrix_index);
-                row_offsets.push(FxHashMap::default());
-                col_offsets.push(FxHashMap::default());
-                matrix_index
-            }
-        };
-        let matrix = &mut matricizations[matrix_index];
-        let row_offset = match row_offsets[matrix_index].get(key.codomain_tree()) {
-            Some(&offset) => offset,
-            None => {
-                let offset = matrix.rows;
-                matrix.row_trees.push((
-                    key.codomain_tree().clone(),
-                    offset,
-                    block.shape()[..nout].to_vec(),
-                ));
-                matrix.rows += row_dim;
-                row_offsets[matrix_index].insert(key.codomain_tree(), offset);
-                offset
-            }
-        };
-        let col_offset = match col_offsets[matrix_index].get(key.domain_tree()) {
-            Some(&offset) => offset,
-            None => {
-                let offset = matrix.cols;
-                matrix.col_trees.push((
-                    key.domain_tree().clone(),
-                    offset,
-                    block.shape()[nout..].to_vec(),
-                ));
-                matrix.cols += col_dim;
-                col_offsets[matrix_index].insert(key.domain_tree(), offset);
-                offset
-            }
-        };
-        routes.push((matrix_index, row_offset, col_offset));
+        let (row_shape, col_shape) = block.shape().split_at(nout);
+        let overflow = |_| OperationError::ElementCountOverflow;
+        let placement = layout
+            .place(
+                key,
+                tenet_core::checked_product(row_shape).map_err(overflow)?,
+                tenet_core::checked_product(col_shape).map_err(overflow)?,
+            )
+            .map_err(overflow)?;
+        if placement.new_sector {
+            matricizations.push(SectorMatricization::<D> {
+                sector: key.codomain_tree().coupled(),
+                rows: 0,
+                cols: 0,
+                row_trees: Vec::new(),
+                col_trees: Vec::new(),
+                data: Vec::new(),
+            });
+        }
+        let matrix = &mut matricizations[placement.sector];
+        if placement.new_row {
+            matrix.row_trees.push((
+                key.codomain_tree().clone(),
+                placement.row_offset,
+                row_shape.to_vec(),
+            ));
+        }
+        if placement.new_col {
+            matrix.col_trees.push((
+                key.domain_tree().clone(),
+                placement.col_offset,
+                col_shape.to_vec(),
+            ));
+        }
+        routes.push((placement.sector, placement.row_offset, placement.col_offset));
     }
     for matrix in &mut matricizations {
-        matrix.data = vec![D::zero(); matrix.rows * matrix.cols];
+        (matrix.rows, matrix.cols) = layout.extents(matrix.sector);
+        let len = matrix
+            .rows
+            .checked_mul(matrix.cols)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        matrix.data = vec![D::zero(); len];
     }
 
     for (index, (matrix_index, row_offset, col_offset)) in routes.into_iter().enumerate() {
@@ -438,15 +427,12 @@ where
             .block(index)
             .map_err(OperationError::from_core_preserving_context)?;
         let matrix = &mut matricizations[matrix_index];
-        let shape = block.shape();
-        let strides = block.strides();
-        let offset = block.offset();
         let rows = matrix.rows;
         copy_tensor_block_to_matrix(
             data,
-            shape,
-            strides,
-            offset,
+            block.shape(),
+            block.strides(),
+            block.offset(),
             nout,
             &mut matrix.data,
             rows,
@@ -487,9 +473,9 @@ pub(super) fn coupled_of_generic(tree: &FusionTreeKey) -> SectorId {
     tree.coupled()
 }
 
-/// Fallible coupled-sector reduced dimensions for checked Generic providers.
-/// This is a structural dynamic program: it never expands dense tensor data or
-/// publishes a factor-space cache.
+/// Fallible coupled-sector reduced dimensions for checked Generic providers:
+/// core's [`FusionProductSpace::coupled_sector_block_dimensions_checked`] with
+/// this crate's error wrapping.
 #[doc(hidden)]
 pub fn coupled_sector_block_dimensions_generic_checked<R>(
     product: &FusionProductSpace,
@@ -498,153 +484,19 @@ pub fn coupled_sector_block_dimensions_generic_checked<R>(
 where
     R: CheckedGenericFusion,
 {
-    let mut dimensions = BTreeMap::from([(rule.vacuum(), 1usize)]);
-    for leg in product.legs() {
-        let mut next = BTreeMap::<SectorId, usize>::new();
-        for (&left, &left_dimension) in &dimensions {
-            for (right, right_degeneracy) in leg.iter() {
-                let channels = rule
-                    .try_fusion_channels(left, right)
-                    .map_err(CheckedGenericFactorPlanError::Provider)?;
-                for coupled in channels {
-                    let multiplicity = rule
-                        .try_nsymbol(left, right, coupled)
-                        .map_err(CheckedGenericFactorPlanError::Provider)?;
-                    let contribution = left_dimension
-                        .checked_mul(right_degeneracy)
-                        .and_then(|value| value.checked_mul(multiplicity))
-                        .ok_or(CheckedGenericFactorPlanError::Operation(
-                            OperationError::ElementCountOverflow,
-                        ))?;
-                    let entry = next.entry(coupled).or_default();
-                    *entry = entry.checked_add(contribution).ok_or(
-                        CheckedGenericFactorPlanError::Operation(
-                            OperationError::ElementCountOverflow,
-                        ),
-                    )?;
-                }
+    product
+        .coupled_sector_block_dimensions_checked(rule)
+        .map_err(|error| match error {
+            CheckedGenericStructureError::Provider(error) => {
+                CheckedGenericFactorPlanError::Provider(error)
             }
-        }
-        dimensions = next;
-    }
-    Ok(dimensions)
-}
-
-/// Generic sibling of [`sector_matricizations`]: identical two-pass stacking
-/// (vertex-labelled trees are distinct keys, so OM trees get distinct rows /
-/// columns of the coupled block, exactly TensorKit's `block(t, c)` layout).
-pub(super) fn sector_matricizations_generic<D>(
-    structure: &BlockStructure,
-    data: &[D],
-    nout: usize,
-) -> Result<Vec<SectorMatricization<D>>, OperationError>
-where
-    D: FactorScalar,
-{
-    #[derive(Clone, Copy, Default)]
-    struct TreePlacement {
-        pub(super) row_offset: Option<usize>,
-        pub(super) col_offset: Option<usize>,
-    }
-
-    let mut matricizations: Vec<SectorMatricization<D>> = Vec::new();
-    let mut matrix_indices = FxHashMap::default();
-    let mut tree_placements = FxHashMap::default();
-    let mut routes = Vec::with_capacity(structure.block_count());
-
-    for index in 0..structure.block_count() {
-        let block = structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            return Err(OperationError::ExpectedFusionTreeBlock {
-                tensor: "tsvd",
-                index,
-            });
-        };
-        let sector = coupled_of_generic(key.codomain_tree());
-        let row_dim: usize = block.shape()[..nout].iter().product();
-        let col_dim: usize = block.shape()[nout..].iter().product();
-        let matrix_index = match matrix_indices.get(&sector).copied() {
-            Some(matrix_index) => matrix_index,
-            None => {
-                let matrix_index = matricizations.len();
-                matricizations.push(SectorMatricization::<D> {
-                    sector,
-                    rows: 0,
-                    cols: 0,
-                    row_trees: Vec::new(),
-                    col_trees: Vec::new(),
-                    data: Vec::new(),
-                });
-                matrix_indices.insert(sector, matrix_index);
-                matrix_index
+            CheckedGenericStructureError::Core(CoreError::ElementCountOverflow) => {
+                CheckedGenericFactorPlanError::Operation(OperationError::ElementCountOverflow)
             }
-        };
-        let matrix = &mut matricizations[matrix_index];
-        let row_placement = tree_placements
-            .entry((matrix_index, key.codomain_tree()))
-            .or_insert_with(TreePlacement::default);
-        if row_placement.row_offset.is_none() {
-            let offset = matrix.rows;
-            matrix.row_trees.push((
-                key.codomain_tree().clone(),
-                offset,
-                block.shape()[..nout].to_vec(),
-            ));
-            matrix.rows += row_dim;
-            row_placement.row_offset = Some(offset);
-        }
-        let row_offset = row_placement.row_offset.expect("row tree registered above");
-        let col_placement = tree_placements
-            .entry((matrix_index, key.domain_tree()))
-            .or_insert_with(TreePlacement::default);
-        if col_placement.col_offset.is_none() {
-            let offset = matrix.cols;
-            matrix.col_trees.push((
-                key.domain_tree().clone(),
-                offset,
-                block.shape()[nout..].to_vec(),
-            ));
-            matrix.cols += col_dim;
-            col_placement.col_offset = Some(offset);
-        }
-        let col_offset = col_placement
-            .col_offset
-            .expect("column tree registered above");
-        routes.push((matrix_index, row_offset, col_offset));
-    }
-    drop(matrix_indices);
-    drop(tree_placements);
-    for matrix in &mut matricizations {
-        matrix.data = vec![D::zero(); matrix.rows * matrix.cols];
-    }
-
-    for (index, (matrix_index, row_offset, col_offset)) in routes.into_iter().enumerate() {
-        let block = structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let matrix = &mut matricizations[matrix_index];
-
-        let shape = block.shape();
-        let strides = block.strides();
-        let offset = block.offset();
-        let rows = matrix.rows;
-        copy_tensor_block_to_matrix(
-            data,
-            shape,
-            strides,
-            offset,
-            nout,
-            &mut matrix.data,
-            rows,
-            row_offset,
-            col_offset,
-        );
-    }
-    #[cfg(test)]
-    record_input_pack_bytes(&matricizations);
-    Ok(matricizations)
+            CheckedGenericStructureError::Core(error) => CheckedGenericFactorPlanError::Operation(
+                OperationError::from_core_preserving_context(error),
+            ),
+        })
 }
 
 /// Row `i` and column `i` of every sector name the same tree state (tree key

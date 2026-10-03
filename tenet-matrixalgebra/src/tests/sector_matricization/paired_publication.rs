@@ -591,7 +591,7 @@ fn z4_generic_geometry<D: FactorScalar>(
     )
     .unwrap();
     let zeros = vec![D::zero(); space.space().required_len().unwrap()];
-    let matrices = sector_matricizations_generic(space.space().structure(), &zeros, 2).unwrap();
+    let matrices = sector_matricizations(space.space().structure(), &zeros, 2).unwrap();
     (homspace, matrices)
 }
 

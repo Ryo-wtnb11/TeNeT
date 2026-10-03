@@ -766,3 +766,46 @@ fn direct_simple_preparation_does_not_freeze_compiler_owners() {
     // compiler-owned runtime storage is introduced only after this API returns.
     assert_eq!(allocations, 0);
 }
+
+#[test]
+fn coupled_matricization_builder_allocates_per_map_growth_not_per_block() {
+    let leg = SectorLeg::new(
+        (0..5).map(|spin| (SU2Irrep::from_twice_spin(spin).sector_id(), spin + 1)),
+        false,
+    );
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let structure = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
+        .unwrap();
+    let blocks = (0..structure.block_count())
+        .map(|index| {
+            let block = structure.block(index).unwrap();
+            let BlockKey::FusionTree(key) = block.key() else {
+                unreachable!("coupled structures carry fusion-tree keys")
+            };
+            let (rows, cols) = block.shape().split_at(2);
+            (key, rows.iter().product(), cols.iter().product())
+        })
+        .collect::<Vec<(_, usize, usize)>>();
+    assert!(blocks.len() >= 256);
+
+    let (_, allocations) = measured_allocations(|| {
+        let mut layout = tenet_core::CoupledMatricizationBuilder::new();
+        for &(key, rows, cols) in &blocks {
+            black_box(layout.place(key, rows, cols).unwrap());
+        }
+        black_box(layout)
+    });
+
+    // What: the shared coupled-sector placement keeps only its sector and
+    // tree maps, so placing every block of a large SU(2) grid costs map
+    // growth (logarithmic in the entry count), never an allocation per block.
+    assert!(
+        allocations <= 32,
+        "{allocations} allocations for {} blocks",
+        blocks.len()
+    );
+}

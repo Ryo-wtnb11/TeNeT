@@ -210,7 +210,7 @@ fn packed_and_region_geometry_preserve_dual_and_innerline_tree_identity() {
         .map(|value| value as f64)
         .collect::<Vec<_>>();
     let regions = structure.coupled_sector_regions(3).unwrap().unwrap();
-    let packed = sector_matricizations_generic(&structure, &data, 3).unwrap();
+    let packed = sector_matricizations(&structure, &data, 3).unwrap();
     assert_eq!(regions.len(), 1);
     assert_eq!(packed.len(), 1);
     assert!(matches!(
@@ -444,7 +444,7 @@ fn generic_sector_matricizations_preserve_full_tree_identity_and_exact_layout() 
         11.0, 12.0, 21.0, 13.0, 14.0, 22.0, 0.0, 0.0, 31.0, 0.0, 0.0, 32.0, 0.0, 0.0, 33.0,
     ];
 
-    let matrices = sector_matricizations_generic(&structure, &real, 2).unwrap();
+    let matrices = sector_matricizations(&structure, &real, 2).unwrap();
     assert_eq!(
         matrices
             .iter()
@@ -476,7 +476,7 @@ fn generic_sector_matricizations_preserve_full_tree_identity_and_exact_layout() 
         .iter()
         .map(|&value| Complex64::new(value, -value / 10.0))
         .collect::<Vec<_>>();
-    let complex_matrices = sector_matricizations_generic(&structure, &complex, 2).unwrap();
+    let complex_matrices = sector_matricizations(&structure, &complex, 2).unwrap();
     assert_eq!(
         complex_matrices[0].data,
         expected.map(|value| Complex64::new(value, -value / 10.0))
@@ -484,7 +484,7 @@ fn generic_sector_matricizations_preserve_full_tree_identity_and_exact_layout() 
     assert_eq!(complex_matrices[1].data, [Complex64::new(90.0, -9.0)]);
 
     let empty = BlockStructure::from_blocks_with_rank(4, Vec::new()).unwrap();
-    assert!(sector_matricizations_generic::<f64>(&empty, &[], 2)
+    assert!(sector_matricizations::<f64>(&empty, &[], 2)
         .unwrap()
         .is_empty());
 
@@ -496,7 +496,7 @@ fn generic_sector_matricizations_preserve_full_tree_identity_and_exact_layout() 
     )
     .unwrap();
     assert_eq!(
-        sector_matricizations_generic(&scalar, &[0.0, 7.0], 0).unwrap()[0].data,
+        sector_matricizations(&scalar, &[0.0, 7.0], 0).unwrap()[0].data,
         [7.0]
     );
 
@@ -511,7 +511,7 @@ fn generic_sector_matricizations_preserve_full_tree_identity_and_exact_layout() 
         .unwrap()],
     )
     .unwrap();
-    let zero_matrix = sector_matricizations_generic::<f64>(&zero_extent, &[], 2).unwrap();
+    let zero_matrix = sector_matricizations::<f64>(&zero_extent, &[], 2).unwrap();
     assert_eq!((zero_matrix[0].rows, zero_matrix[0].cols), (0, 1));
     assert!(zero_matrix[0].data.is_empty());
 
@@ -521,7 +521,7 @@ fn generic_sector_matricizations_preserve_full_tree_identity_and_exact_layout() 
     )
     .unwrap();
     assert!(matches!(
-        sector_matricizations_generic::<f64>(&non_fusion, &[1.0], 1),
+        sector_matricizations::<f64>(&non_fusion, &[1.0], 1),
         Err(OperationError::ExpectedFusionTreeBlock {
             tensor: "tsvd",
             index: 0
@@ -572,7 +572,7 @@ fn generic_sector_matricizations_keep_tree_offsets_matrix_local() {
     data[4..6].copy_from_slice(&[21.0, 22.0]);
     data[8..10].copy_from_slice(&[31.0, 32.0]);
 
-    let matrices = sector_matricizations_generic(&structure, &data, 2).unwrap();
+    let matrices = sector_matricizations(&structure, &data, 2).unwrap();
 
     assert_eq!(matrices.len(), 2);
     assert_eq!(matrices[0].sector, SectorId::new(1));
