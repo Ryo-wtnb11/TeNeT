@@ -142,12 +142,8 @@ where
     let mut basis = CompactMultiplicityFreeTreeBasis::from_group(group)?;
     let mut columns = None;
     for step in &prepared.artin_steps {
-        let (next_basis, next_columns) = match &columns {
-            Some(columns) => {
-                compact_artin_tree_block_step(rule, basis, columns, step.index, step.inverse)?
-            }
-            None => compact_artin_tree_block_first(rule, basis, step.index, step.inverse)?,
-        };
+        let (next_basis, next_columns) =
+            compact_artin_tree_block(rule, basis, columns.as_ref(), step.index, step.inverse)?;
         basis = next_basis;
         columns = Some(next_columns);
     }
@@ -484,10 +480,7 @@ where
     // Step A: repartition everything into the codomain (bendleft chain).
     let mut current_codomain_rank = codomain_rank;
     while current_codomain_rank < all_rank {
-        let (next_basis, next_columns) = match columns.take() {
-            Some(columns) => compact_bendleft_block_step(rule, basis, &columns)?,
-            None => compact_bendleft_block_first(rule, basis)?,
-        };
+        let (next_basis, next_columns) = compact_bendleft_block(rule, basis, columns.as_ref())?;
         basis = next_basis;
         columns = Some(next_columns);
         current_codomain_rank += 1;
@@ -503,12 +496,8 @@ where
         .artin_steps()
         .expect("braid preparation has Artin steps")
     {
-        let (next_basis, next_columns) = match columns.take() {
-            Some(columns) => {
-                compact_codomain_artin_block_step(rule, basis, &columns, step.index, step.inverse)?
-            }
-            None => compact_codomain_artin_block_first(rule, basis, step.index, step.inverse)?,
-        };
+        let (next_basis, next_columns) =
+            compact_codomain_artin_block(rule, basis, columns.as_ref(), step.index, step.inverse)?;
         basis = next_basis;
         columns = Some(next_columns);
     }
@@ -516,19 +505,13 @@ where
     // Step C: repartition back to the requested codomain rank.
     let target_codomain_rank = prepared.target_codomain_rank;
     while current_codomain_rank > target_codomain_rank {
-        let (next_basis, next_columns) = match columns.take() {
-            Some(columns) => compact_bendright_block_step(rule, basis, &columns)?,
-            None => compact_bendright_block_first(rule, basis)?,
-        };
+        let (next_basis, next_columns) = compact_bendright_block(rule, basis, columns.as_ref())?;
         basis = next_basis;
         columns = Some(next_columns);
         current_codomain_rank -= 1;
     }
     while current_codomain_rank < target_codomain_rank {
-        let (next_basis, next_columns) = match columns.take() {
-            Some(columns) => compact_bendleft_block_step(rule, basis, &columns)?,
-            None => compact_bendleft_block_first(rule, basis)?,
-        };
+        let (next_basis, next_columns) = compact_bendleft_block(rule, basis, columns.as_ref())?;
         basis = next_basis;
         columns = Some(next_columns);
         current_codomain_rank += 1;
@@ -816,37 +799,25 @@ where
     let target_codomain_rank = prepared.target_codomain_rank;
     let mut current_codomain_rank = codomain_rank;
     while current_codomain_rank < target_codomain_rank {
-        let (next_basis, next_columns) = match columns.take() {
-            Some(columns) => compact_bendleft_block_step(rule, basis, &columns)?,
-            None => compact_bendleft_block_first(rule, basis)?,
-        };
+        let (next_basis, next_columns) = compact_bendleft_block(rule, basis, columns.as_ref())?;
         basis = next_basis;
         columns = Some(next_columns);
         current_codomain_rank += 1;
     }
     while current_codomain_rank > target_codomain_rank {
-        let (next_basis, next_columns) = match columns.take() {
-            Some(columns) => compact_bendright_block_step(rule, basis, &columns)?,
-            None => compact_bendright_block_first(rule, basis)?,
-        };
+        let (next_basis, next_columns) = compact_bendright_block(rule, basis, columns.as_ref())?;
         basis = next_basis;
         columns = Some(next_columns);
         current_codomain_rank -= 1;
     }
 
     for _ in 0..cycle.1 {
-        let (next_basis, next_columns) = match (cycle.0, columns.take()) {
-            (PreparedCycleDirection::Clockwise, Some(columns)) => {
-                compact_cycle_clockwise_block_step(rule, basis, &columns)?
+        let (next_basis, next_columns) = match cycle.0 {
+            PreparedCycleDirection::Clockwise => {
+                compact_cycle_clockwise_block(rule, basis, columns.as_ref())?
             }
-            (PreparedCycleDirection::Clockwise, None) => {
-                compact_cycle_clockwise_block_first(rule, basis)?
-            }
-            (PreparedCycleDirection::Anticlockwise, Some(columns)) => {
-                compact_cycle_anticlockwise_block_step(rule, basis, &columns)?
-            }
-            (PreparedCycleDirection::Anticlockwise, None) => {
-                compact_cycle_anticlockwise_block_first(rule, basis)?
+            PreparedCycleDirection::Anticlockwise => {
+                compact_cycle_anticlockwise_block(rule, basis, columns.as_ref())?
             }
         };
         basis = next_basis;

@@ -352,7 +352,7 @@ where
             .unwrap()
             .unwrap();
         let basis = CompactMultiplicityFreeTreePairBasis::from_group(group).unwrap();
-        let (basis, columns) = compact_bendleft_block_first(rule, basis).unwrap();
+        let (basis, columns) = compact_bendleft_block(rule, basis, None).unwrap();
         let got = scatter_compact_block(basis, columns);
         let want = cohort
             .iter()
@@ -370,7 +370,7 @@ where
             .unwrap()
             .unwrap();
         let basis = CompactMultiplicityFreeTreePairBasis::from_group(group).unwrap();
-        let (basis, columns) = compact_bendright_block_first(rule, basis).unwrap();
+        let (basis, columns) = compact_bendright_block(rule, basis, None).unwrap();
         let got = scatter_compact_block(basis, columns);
         let want = cohort
             .iter()
@@ -388,7 +388,7 @@ where
             .unwrap()
             .unwrap();
         let basis = CompactMultiplicityFreeTreePairBasis::from_group(group).unwrap();
-        let (basis, columns) = compact_codomain_artin_block_first(rule, basis, 3, false).unwrap();
+        let (basis, columns) = compact_codomain_artin_block(rule, basis, None, 3, false).unwrap();
         let got = scatter_compact_block(basis, columns);
         let want = cohort
             .iter()
