@@ -145,13 +145,12 @@ where
         .ok_or(CoreError::MalformedFusionTree {
             message: "codomain tree is missing the first duality flag",
         })?;
-    let kappa = rule.frobenius_schur_phase_scalar(a);
+    let fold = MultiplicityFreeFoldCoefficient::new(rule, a, is_dual_a);
     let c = codomain.coupled();
 
     let (codomain_prime, coeff1) = unique_rigid_multi_fmove_tree(rule, codomain)?;
     let b = codomain_prime.coupled();
-    let a_symbol = rule.a_symbol_scalar(a, b, c);
-    let coeff0 = rule.sqrt_dim_scalar(c) * rule.inv_sqrt_dim_scalar(b);
+    let factors = fold.sector_factors(rule, b, c);
     let (domain_prime, coeff2) = unique_rigid_multi_fmove_inv_tree(
         rule,
         rule.dual(a),
@@ -159,13 +158,9 @@ where
         tree_pair.domain_tree(),
         !is_dual_a,
     )?;
-    let mut coefficient = coeff0 * (coeff2).conj() * a_symbol * coeff1;
-    if is_dual_a {
-        coefficient = coefficient * kappa;
-    }
     Ok((
         FusionTreePairKey::pair(codomain_prime, domain_prime),
-        coefficient,
+        fold.coefficient(&factors, &coeff1, &coeff2),
     ))
 }
 

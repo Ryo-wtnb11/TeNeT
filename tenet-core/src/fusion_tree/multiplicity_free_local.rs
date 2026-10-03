@@ -135,11 +135,7 @@ where
             tree.coupled()
         };
 
-        let coefficient = if inverse {
-            (rule.r_symbol_scalar(right, left, coupled)).conj()
-        } else {
-            rule.r_symbol_scalar(left, right, coupled)
-        };
+        let coefficient = mf_artin_first_coefficient(rule, left, right, coupled, inverse);
         Arc::make_mut(&mut tree.uncoupled).swap(index, index + 1);
         Arc::make_mut(&mut tree.is_dual).swap(index, index + 1);
         return Ok(coefficient);
@@ -156,8 +152,47 @@ where
         .ok_or(CoreError::MalformedFusionTree {
             message: "non-first braid requires an innerline to update",
         })? = c_prime;
+    let coefficient = mf_artin_coefficient(rule, [a, b, c, d, e, c_prime], inverse);
+    Arc::make_mut(&mut tree.uncoupled).swap(index, index + 1);
+    Arc::make_mut(&mut tree.is_dual).swap(index, index + 1);
+    Ok(coefficient)
+}
+
+/// First-pair multiplicity-free Artin coefficient: TensorKit
+/// `artin_braid(f::FusionTree, i; inv)` at `i == 1`
+/// (`braiding_manipulations.jl:56`), `inv ? conj(R(b, a, c)) : R(a, b, c)`.
+pub(super) fn mf_artin_first_coefficient<R>(
+    rule: &R,
+    left: SectorId,
+    right: SectorId,
+    coupled: SectorId,
+    inverse: bool,
+) -> R::Scalar
+where
+    R: MultiplicityFreeFusionSymbols,
+{
+    if inverse {
+        rule.r_symbol_scalar(right, left, coupled).conj()
+    } else {
+        rule.r_symbol_scalar(left, right, coupled)
+    }
+}
+
+/// The one multiplicity-free Artin coefficient for a braid past the first
+/// pair, over the inner-extended lines `[a, b, c, d, e, c′]`: TensorKit
+/// `artin_braid(f::FusionTree, i; inv)` (`braiding_manipulations.jl:70-73`),
+/// `inv ? conj(R(d, c, e)·F(d, a, b, e, c′, c))·R(d, a, c′)
+///      : R(c, d, e)·conj(F(d, a, b, e, c′, c)·R(a, d, c′))`.
+pub(super) fn mf_artin_coefficient<R>(
+    rule: &R,
+    [a, b, c, d, e, c_prime]: [SectorId; 6],
+    inverse: bool,
+) -> R::Scalar
+where
+    R: MultiplicityFreeFusionSymbols,
+{
     let f_symbol = rule.f_symbol_scalar(d, a, b, e, c_prime, c);
-    let coefficient = if inverse {
+    if inverse {
         let left = rule.r_symbol_scalar(d, c, e);
         let right = rule.r_symbol_scalar(d, a, c_prime);
         (left * f_symbol).conj() * right
@@ -165,10 +200,7 @@ where
         let left = rule.r_symbol_scalar(c, d, e);
         let right = rule.r_symbol_scalar(a, d, c_prime);
         left * (f_symbol * right).conj()
-    };
-    Arc::make_mut(&mut tree.uncoupled).swap(index, index + 1);
-    Arc::make_mut(&mut tree.is_dual).swap(index, index + 1);
-    Ok(coefficient)
+    }
 }
 
 pub(super) trait MultiplicityFreeTreeLocalData {
@@ -766,11 +798,7 @@ impl PreparedMultiplicityFreeArtin {
             } else {
                 tree.coupled()
             };
-            let coefficient = if self.inverse {
-                (rule.r_symbol_scalar(right, left, coupled)).conj()
-            } else {
-                rule.r_symbol_scalar(left, right, coupled)
-            };
+            let coefficient = mf_artin_first_coefficient(rule, left, right, coupled, self.inverse);
             let mut terms = SmallVec::new();
             terms.push((
                 MultiplicityFreeTreeLocal {
@@ -802,16 +830,7 @@ impl PreparedMultiplicityFreeArtin {
                 coupled: tree.coupled(),
                 innerlines,
             };
-            let f_symbol = rule.f_symbol_scalar(d, a, b, e, c_prime, c);
-            let coefficient = if self.inverse {
-                let left = rule.r_symbol_scalar(d, c, e);
-                let right = rule.r_symbol_scalar(d, a, c_prime);
-                (left * f_symbol).conj() * right
-            } else {
-                let left = rule.r_symbol_scalar(c, d, e);
-                let right = rule.r_symbol_scalar(a, d, c_prime);
-                left * (f_symbol * right).conj()
-            };
+            let coefficient = mf_artin_coefficient(rule, [a, b, c, d, e, c_prime], self.inverse);
             terms.push((braided, coefficient));
         }
         Ok(terms)

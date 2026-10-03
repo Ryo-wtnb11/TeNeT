@@ -1,10 +1,74 @@
 use super::*;
 
 pub(super) struct PreparedMultiplicityFreeFoldRight<S> {
-    pub(super) first: SectorId,
-    pub(super) first_is_dual: bool,
-    pub(super) frobenius_schur_phase: S,
+    pub(super) coefficient: MultiplicityFreeFoldCoefficient<S>,
     pub(super) output_frame: MultiplicityFreeTreePairFrame,
+}
+
+/// The one multiplicity-free `foldright` coefficient authority, shared by the
+/// keyed, unique-rigid and compact-block folds.
+///
+/// TensorKit `foldright((f₁, f₂)::FusionTreePair)` and
+/// `foldright(src::FusionTreeBlock)` (`duality_manipulations.jl:220-293`):
+/// `coeff = √d_c·(1/√d_b) · conj(coeff₂) · A(a, b, c) · coeff₁`, times `κ_a`
+/// when the folded leg is dual. The `(b, c)` factors are separable so a block
+/// fold can cache them as TensorKit's `cache₃` does.
+///
+/// The operand order above is TeNeT's preserved evaluation order, which keeps
+/// multiplicity-free coefficients bit-identical across the keyed,
+/// unique-rigid and compact paths. TensorKit writes the same product as
+/// `sqrtdim(c)·invsqrtdim(b)·coeff₁·A·conj(coeff₂)` (pair) and
+/// `coeff₀·(coeff₂'·(Aᵀ·coeff₁))` (block).
+pub(super) struct MultiplicityFreeFoldCoefficient<S> {
+    pub(super) first: SectorId,
+    first_is_dual: bool,
+    frobenius_schur_phase: S,
+}
+
+impl<S: CategoricalScalar> MultiplicityFreeFoldCoefficient<S> {
+    pub(super) fn new<R>(rule: &R, first: SectorId, first_is_dual: bool) -> Self
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = S>,
+    {
+        Self {
+            first,
+            first_is_dual,
+            frobenius_schur_phase: rule.frobenius_schur_phase_scalar(first),
+        }
+    }
+
+    /// `(√d_c/√d_b, A(a, b, c))` for tail coupled `b` and coupled `c`.
+    pub(super) fn sector_factors<R>(
+        &self,
+        rule: &R,
+        tail_coupled: SectorId,
+        coupled: SectorId,
+    ) -> (S, S)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = S>,
+    {
+        (
+            rule.sqrt_dim_scalar(coupled) * rule.inv_sqrt_dim_scalar(tail_coupled),
+            rule.a_symbol_scalar(self.first, tail_coupled, coupled),
+        )
+    }
+
+    pub(super) fn coefficient(
+        &self,
+        (normalization, a_symbol): &(S, S),
+        codomain_coefficient: &S,
+        domain_coefficient: &S,
+    ) -> S {
+        let coefficient = normalization.clone()
+            * domain_coefficient.conj()
+            * a_symbol.clone()
+            * codomain_coefficient.clone();
+        if self.first_is_dual {
+            coefficient * self.frobenius_schur_phase.clone()
+        } else {
+            coefficient
+        }
+    }
 }
 
 pub(super) fn prepare_multiplicity_free_foldright<R>(
@@ -47,9 +111,7 @@ where
         ),
     };
     Ok(PreparedMultiplicityFreeFoldRight {
-        first,
-        first_is_dual,
-        frobenius_schur_phase: rule.frobenius_schur_phase_scalar(first),
+        coefficient: MultiplicityFreeFoldCoefficient::new(rule, first, first_is_dual),
         output_frame,
     })
 }
@@ -77,14 +139,13 @@ where
         .ok_or(CoreError::MalformedFusionTree {
             message: "codomain tree is missing the first duality flag",
         })?;
-    let kappa = rule.frobenius_schur_phase_scalar(a);
+    let fold = MultiplicityFreeFoldCoefficient::new(rule, a, is_dual_a);
     let c = codomain.coupled();
 
     let mut terms = FusionTermAccumulator::new();
     for (codomain_prime, coeff1) in multiplicity_free_multi_fmove_tree(rule, codomain)? {
         let b = codomain_prime.coupled();
-        let a_symbol = rule.a_symbol_scalar(a, b, c);
-        let coeff0 = rule.sqrt_dim_scalar(c) * rule.inv_sqrt_dim_scalar(b);
+        let factors = fold.sector_factors(rule, b, c);
         for (domain_prime, coeff2) in multiplicity_free_multi_fmove_inv_tree(
             rule,
             rule.dual(a),
@@ -92,14 +153,9 @@ where
             tree_pair.domain_tree(),
             !is_dual_a,
         )? {
-            let mut coefficient =
-                coeff0.clone() * (coeff2).conj() * a_symbol.clone() * coeff1.clone();
-            if is_dual_a {
-                coefficient = coefficient * kappa.clone();
-            }
             terms.push(
                 FusionTreePairKey::pair(codomain_prime.clone(), domain_prime),
-                coefficient,
+                fold.coefficient(&factors, &coeff1, &coeff2),
             );
         }
     }

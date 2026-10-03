@@ -244,12 +244,13 @@ where
                 .expect("inverse fold table inserted above");
             let cache_key = (tail_coupled, coupled);
             if let Entry::Vacant(entry) = coefficient_cache.entry(cache_key) {
-                entry.insert((
-                    rule.sqrt_dim_scalar(coupled) * rule.inv_sqrt_dim_scalar(tail_coupled),
-                    rule.a_symbol_scalar(prepared.first, tail_coupled, coupled),
-                ));
+                entry.insert(
+                    prepared
+                        .coefficient
+                        .sector_factors(rule, tail_coupled, coupled),
+                );
             }
-            let (normalization, a_symbol) = coefficient_cache
+            let factors = coefficient_cache
                 .get(&cache_key)
                 .expect("fold coefficient table inserted above");
             for (domain, domain_coefficient) in inverse {
@@ -270,13 +271,11 @@ where
                             message:
                                 "compact fold destination is outside the canonical output basis",
                         })?;
-                let mut coefficient = normalization.clone()
-                    * (domain_coefficient.clone()).conj()
-                    * a_symbol.clone()
-                    * codomain_coefficient.clone();
-                if prepared.first_is_dual {
-                    coefficient = coefficient * prepared.frobenius_schur_phase.clone();
-                }
+                let mut coefficient = prepared.coefficient.coefficient(
+                    factors,
+                    codomain_coefficient,
+                    domain_coefficient,
+                );
                 if conjugate_step {
                     coefficient = (coefficient).conj();
                 }
