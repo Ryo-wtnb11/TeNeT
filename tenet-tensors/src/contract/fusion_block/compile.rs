@@ -695,10 +695,10 @@ where
 /// matrix that shares this GEMM index. Empty trees occupy no position and are
 /// ignored; any other tree must appear on both sides with one dimension.
 fn adopt_tree_offsets(
-    offsets: &mut CoupledMatrixSide<FusionTreeKey>,
-    reference: &CoupledMatrixSide<FusionTreeKey>,
+    offsets: &mut CoupledMatrixSide<FusionTreeKey, TreeMatrixOffset>,
+    reference: &CoupledMatrixSide<FusionTreeKey, TreeMatrixOffset>,
 ) -> Result<(), OperationError> {
-    let nonempty = |side: &CoupledMatrixSide<FusionTreeKey>| {
+    let nonempty = |side: &CoupledMatrixSide<FusionTreeKey, TreeMatrixOffset>| {
         side.iter().filter(|(_, placed)| placed.dim != 0).count()
     };
     let mut aligned = true;
@@ -722,7 +722,9 @@ fn adopt_tree_offsets(
         });
     }
     if !aligned {
-        offsets.rebase(|tree| reference.get(tree).map_or(0, |target| target.offset));
+        for (tree, placed) in offsets.iter_mut() {
+            placed.offset = reference.get(tree).map_or(0, |target| target.offset);
+        }
     }
     Ok(())
 }
@@ -745,14 +747,12 @@ pub(super) struct FusionBlockMatrixGroupBuilder {
     coupled: SectorId,
     // Core's placement rule owns each tree's (offset, dim); the contraction
     // takes the maps by value and re-bases them in place (#1517).
-    row_offsets: CoupledMatrixSide<FusionTreeKey>,
-    col_offsets: CoupledMatrixSide<FusionTreeKey>,
+    row_offsets: CoupledMatrixSide<FusionTreeKey, TreeMatrixOffset>,
+    col_offsets: CoupledMatrixSide<FusionTreeKey, TreeMatrixOffset>,
     tree_pairs: HashSet<(FusionTreeKey, FusionTreeKey)>,
     blocks: Vec<usize>,
     logical_blocks: Option<Vec<usize>>,
     occupied_elements: usize,
-    rows: usize,
-    cols: usize,
 }
 
 impl FusionBlockMatrixGroupBuilder {
@@ -765,8 +765,6 @@ impl FusionBlockMatrixGroupBuilder {
             blocks: Vec::new(),
             logical_blocks: None,
             occupied_elements: 0,
-            rows: 0,
-            cols: 0,
         }
     }
 
@@ -812,7 +810,7 @@ impl FusionBlockMatrixGroupBuilder {
         let overflow = || OperationError::ElementCountOverflow;
         let (row, new_row) =
             self.row_offsets
-                .place(row_tree, &mut self.rows, || Ok(row_dim), overflow)?;
+                .place(row_tree, || Ok(row_dim), overflow, TreeMatrixOffset::from)?;
         if !new_row && row.dim != row_dim {
             return Err(OperationError::ShapeMismatch {
                 dst: vec![row.dim],
@@ -821,7 +819,7 @@ impl FusionBlockMatrixGroupBuilder {
         }
         let (col, new_col) =
             self.col_offsets
-                .place(col_tree, &mut self.cols, || Ok(col_dim), overflow)?;
+                .place(col_tree, || Ok(col_dim), overflow, TreeMatrixOffset::from)?;
         if !new_col && col.dim != col_dim {
             return Err(OperationError::ShapeMismatch {
                 dst: vec![col.dim],
@@ -871,7 +869,7 @@ impl FusionBlockMatrixGroupBuilder {
             let domain_strides = column_major_strides_usize(&block.shape()[space.nout()..])?;
             for stride in domain_strides {
                 let matrix_stride = stride
-                    .checked_mul(self.rows)
+                    .checked_mul(self.row_offsets.extent())
                     .ok_or(OperationError::ElementCountOverflow)?;
                 matrix_strides.push(isize::try_from(matrix_stride).map_err(|_| {
                     OperationError::StrideOverflow {
@@ -881,7 +879,7 @@ impl FusionBlockMatrixGroupBuilder {
             }
             let matrix_offset = col
                 .offset
-                .checked_mul(self.rows)
+                .checked_mul(self.row_offsets.extent())
                 .and_then(|offset| offset.checked_add(row.offset))
                 .ok_or(OperationError::ElementCountOverflow)?;
             let matrix_offset = offset_to_isize(matrix_offset)?;
@@ -901,15 +899,16 @@ impl FusionBlockMatrixGroupBuilder {
             });
         }
         let matrix_elements = self
-            .rows
-            .checked_mul(self.cols)
+            .row_offsets
+            .extent()
+            .checked_mul(self.col_offsets.extent())
             .ok_or(OperationError::ElementCountOverflow)?;
         let covers_matrix = self.occupied_elements == matrix_elements;
         let direct_offset = direct_group_matrix_offset_generic(&subblocks, covers_matrix);
         Ok(FusionBlockMatrixGroup {
             coupled: self.coupled,
-            rows: self.rows,
-            cols: self.cols,
+            rows: self.row_offsets.extent(),
+            cols: self.col_offsets.extent(),
             needs_clear: !covers_matrix,
             direct_offset,
             block_indices,
@@ -929,8 +928,8 @@ impl FusionBlockMatrixGroupBuilder {
     {
         let storage = source.storage_space();
         let physical_rows = match op {
-            MatrixOp::Identity => self.rows,
-            MatrixOp::Transpose | MatrixOp::Adjoint => self.cols,
+            MatrixOp::Identity => self.row_offsets.extent(),
+            MatrixOp::Transpose | MatrixOp::Adjoint => self.col_offsets.extent(),
         };
         let logical_blocks =
             self.logical_blocks
@@ -971,11 +970,11 @@ impl FusionBlockMatrixGroupBuilder {
             let matrix_offset = match op {
                 MatrixOp::Identity => col
                     .offset
-                    .checked_mul(self.rows)
+                    .checked_mul(self.row_offsets.extent())
                     .and_then(|offset| offset.checked_add(row.offset)),
                 MatrixOp::Transpose | MatrixOp::Adjoint => row
                     .offset
-                    .checked_mul(self.cols)
+                    .checked_mul(self.col_offsets.extent())
                     .and_then(|offset| offset.checked_add(col.offset)),
             }
             .ok_or(OperationError::ElementCountOverflow)?;
@@ -991,15 +990,16 @@ impl FusionBlockMatrixGroupBuilder {
             });
         }
         let matrix_elements = self
-            .rows
-            .checked_mul(self.cols)
+            .row_offsets
+            .extent()
+            .checked_mul(self.col_offsets.extent())
             .ok_or(OperationError::ElementCountOverflow)?;
         let covers_matrix = self.occupied_elements == matrix_elements;
         let direct_offset = direct_group_matrix_offset_generic(&subblocks, covers_matrix);
         Ok(FusionBlockMatrixGroup {
             coupled: self.coupled,
-            rows: self.rows,
-            cols: self.cols,
+            rows: self.row_offsets.extent(),
+            cols: self.col_offsets.extent(),
             needs_clear: !covers_matrix,
             direct_offset,
             block_indices: self.blocks,
@@ -1044,7 +1044,7 @@ impl FusionBlockMatrixGroupBuilder {
             let domain_strides = column_major_strides_usize(&block.shape()[nout..])?;
             for stride in domain_strides {
                 let matrix_stride = stride
-                    .checked_mul(self.rows)
+                    .checked_mul(self.row_offsets.extent())
                     .ok_or(OperationError::ElementCountOverflow)?;
                 matrix_strides.push(isize::try_from(matrix_stride).map_err(|_| {
                     OperationError::StrideOverflow {
@@ -1054,7 +1054,7 @@ impl FusionBlockMatrixGroupBuilder {
             }
             let matrix_offset = col
                 .offset
-                .checked_mul(self.rows)
+                .checked_mul(self.row_offsets.extent())
                 .and_then(|offset| offset.checked_add(row.offset))
                 .ok_or(OperationError::ElementCountOverflow)?;
             let matrix_offset = offset_to_isize(matrix_offset)?;
@@ -1075,20 +1075,36 @@ impl FusionBlockMatrixGroupBuilder {
             });
         }
         let matrix_elements = self
-            .rows
-            .checked_mul(self.cols)
+            .row_offsets
+            .extent()
+            .checked_mul(self.col_offsets.extent())
             .ok_or(OperationError::ElementCountOverflow)?;
         let covers_matrix = self.occupied_elements == matrix_elements;
         let direct_offset = direct_group_matrix_offset_generic(&subblocks, covers_matrix);
         Ok(FusionBlockMatrixGroup {
             coupled: self.coupled,
-            rows: self.rows,
-            cols: self.cols,
+            rows: self.row_offsets.extent(),
+            cols: self.col_offsets.extent(),
             needs_clear: !covers_matrix,
             direct_offset,
             block_indices,
             subblocks,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TreeMatrixOffset {
+    offset: usize,
+    dim: usize,
+}
+
+impl From<CoupledTreePlacement> for TreeMatrixOffset {
+    fn from(placed: CoupledTreePlacement) -> Self {
+        Self {
+            offset: placed.offset,
+            dim: placed.dim,
+        }
     }
 }
 

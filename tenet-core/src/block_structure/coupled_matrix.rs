@@ -37,14 +37,12 @@ struct SectorExtent {
     index: usize,
     rows: usize,
     cols: usize,
-    row_trees: usize,
-    col_trees: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 struct TreeOffsets {
-    row: Option<TreeExtent>,
-    col: Option<TreeExtent>,
+    row: Option<usize>,
+    col: Option<usize>,
 }
 
 impl<'a> CoupledMatricizationBuilder<'a> {
@@ -72,8 +70,6 @@ impl<'a> CoupledMatricizationBuilder<'a> {
                     index: next_index,
                     rows: 0,
                     cols: 0,
-                    row_trees: 0,
-                    col_trees: 0,
                 }
             });
         let sector = extent.index;
@@ -82,17 +78,17 @@ impl<'a> CoupledMatricizationBuilder<'a> {
             .entry((sector, key.codomain_tree()))
             .or_default()
             .row;
-        let (row, new_row) = place_in_slot(row, &mut extent.rows, &mut extent.row_trees, row_dim)?;
+        let (row_offset, new_row) = place_offset(row, &mut extent.rows, row_dim)?;
         let col = &mut self
             .trees
             .entry((sector, key.domain_tree()))
             .or_default()
             .col;
-        let (col, new_col) = place_in_slot(col, &mut extent.cols, &mut extent.col_trees, col_dim)?;
+        let (col_offset, new_col) = place_offset(col, &mut extent.cols, col_dim)?;
         Ok(CoupledMatrixPlacement {
             sector,
-            row_offset: row.offset,
-            col_offset: col.offset,
+            row_offset,
+            col_offset,
             new_sector,
             new_row,
             new_col,
@@ -108,30 +104,27 @@ impl<'a> CoupledMatricizationBuilder<'a> {
     }
 }
 
-fn place_in_slot(
-    slot: &mut Option<TreeExtent>,
+/// The builder keeps one map for every sector and both sides, so it applies
+/// the rule to its own slot and per-sector extent rather than through a
+/// [`CoupledMatrixSide`] (which owns a single extent).
+fn place_offset(
+    slot: &mut Option<usize>,
     extent: &mut usize,
-    count: &mut usize,
     dim: usize,
-) -> Result<(TreeExtent, bool), CoreError> {
-    if let Some(placed) = *slot {
-        return Ok((placed, false));
+) -> Result<(usize, bool), CoreError> {
+    if let Some(offset) = *slot {
+        return Ok((offset, false));
     }
-    let placed = first_seen_tree(
-        extent,
-        *count,
-        || Ok(dim),
-        || CoreError::ElementCountOverflow,
-    )?;
-    *count += 1;
-    *slot = Some(placed);
-    Ok((placed, true))
+    let placed = first_seen_tree(extent, 0, || Ok(dim), || CoreError::ElementCountOverflow)?;
+    *slot = Some(placed.offset);
+    Ok((placed.offset, true))
 }
 
-/// One fusion tree's row or column block inside a coupled-sector matrix.
+/// Where the placement rule put one fusion tree on one side of a
+/// coupled-sector matrix.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TreeExtent {
+pub struct CoupledTreePlacement {
     /// First-appearance position among this side's trees.
     pub index: usize,
     /// Row (column) offset from the start of the matrix.
@@ -149,54 +142,61 @@ fn first_seen_tree<E>(
     index: usize,
     dim: impl FnOnce() -> Result<usize, E>,
     overflow: impl FnOnce() -> E,
-) -> Result<TreeExtent, E> {
+) -> Result<CoupledTreePlacement, E> {
     let dim = dim()?;
     let offset = *extent;
     *extent = offset.checked_add(dim).ok_or_else(overflow)?;
-    Ok(TreeExtent { index, offset, dim })
+    Ok(CoupledTreePlacement { index, offset, dim })
 }
 
-/// The rows or the columns of one coupled-sector matrix: each tree's
-/// [`TreeExtent`] under the first-appearance rule. The running extent stays
-/// with the caller, so a side's map can be owned (moved into a contraction
-/// plan and re-based there) or borrowed scratch reused across sectors.
+/// The rows or the columns of one coupled-sector matrix under the
+/// first-appearance rule: its running extent and, per tree, the projection
+/// `V` of the [`CoupledTreePlacement`] its owner needs (an index, an offset
+/// and dimension, ...), so the map stores no more than that.
 #[doc(hidden)]
 #[derive(Clone, Debug)]
-pub struct CoupledMatrixSide<K> {
-    trees: FxHashMap<K, TreeExtent>,
+pub struct CoupledMatrixSide<K, V> {
+    trees: FxHashMap<K, V>,
+    extent: usize,
 }
 
-impl<K> Default for CoupledMatrixSide<K> {
+impl<K, V> Default for CoupledMatrixSide<K, V> {
     fn default() -> Self {
         Self {
             trees: FxHashMap::default(),
+            extent: 0,
         }
     }
 }
 
-impl<K: core::hash::Hash + Eq> CoupledMatrixSide<K> {
-    /// Places `tree`: a known tree returns its first extent with `false`; a
-    /// new tree is placed at `*extent`, which advances by `dim()`, and
-    /// returns `true`. One hash per call.
+impl<K: core::hash::Hash + Eq, V: Copy> CoupledMatrixSide<K, V> {
+    /// Places `tree`: a known tree returns its stored value with `false`; a
+    /// new tree is placed at the side's extent, which advances by `dim()`,
+    /// and stores `project(placement)` with `true`. One hash per call.
     pub fn place<E>(
         &mut self,
         tree: K,
-        extent: &mut usize,
         dim: impl FnOnce() -> Result<usize, E>,
         overflow: impl FnOnce() -> E,
-    ) -> Result<(TreeExtent, bool), E> {
+        project: impl FnOnce(CoupledTreePlacement) -> V,
+    ) -> Result<(V, bool), E> {
         let index = self.trees.len();
         match self.trees.entry(tree) {
             std::collections::hash_map::Entry::Occupied(entry) => Ok((*entry.get(), false)),
             std::collections::hash_map::Entry::Vacant(entry) => {
-                let placed = first_seen_tree(extent, index, dim, overflow)?;
-                entry.insert(placed);
-                Ok((placed, true))
+                let value = project(first_seen_tree(&mut self.extent, index, dim, overflow)?);
+                entry.insert(value);
+                Ok((value, true))
             }
         }
     }
 
-    pub fn get<Q>(&self, tree: &Q) -> Option<&TreeExtent>
+    /// Rows (columns) placed so far.
+    pub fn extent(&self) -> usize {
+        self.extent
+    }
+
+    pub fn get<Q>(&self, tree: &Q) -> Option<&V>
     where
         K: core::borrow::Borrow<Q>,
         Q: core::hash::Hash + Eq + ?Sized,
@@ -204,8 +204,15 @@ impl<K: core::hash::Hash + Eq> CoupledMatrixSide<K> {
         self.trees.get(tree)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &TreeExtent)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.trees.iter()
+    }
+
+    /// Mutable stored values, for an owner that re-bases its trees (a
+    /// contraction aligning one operand's tree order to another); the
+    /// extent is unchanged.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.trees.iter_mut()
     }
 
     pub fn len(&self) -> usize {
@@ -216,17 +223,11 @@ impl<K: core::hash::Hash + Eq> CoupledMatrixSide<K> {
         self.trees.is_empty()
     }
 
-    /// Moves every tree to `offset_of(tree)`, keeping its index and
-    /// dimension (a contraction aligning one operand's tree order to another).
-    pub fn rebase(&mut self, mut offset_of: impl FnMut(&K) -> usize) {
-        for (tree, placed) in &mut self.trees {
-            placed.offset = offset_of(tree);
-        }
-    }
-
-    /// Forgets every tree, keeping the allocation for the next sector.
+    /// Starts the next sector: forgets every tree and the extent, keeping
+    /// the allocation.
     pub fn clear(&mut self) {
         self.trees.clear();
+        self.extent = 0;
     }
 }
 
@@ -235,76 +236,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn side_places_first_sight_once_and_rebases_offsets_only() {
-        let mut side = CoupledMatrixSide::<&str>::default();
-        let mut extent = 0usize;
+    fn side_places_first_sight_once_and_projects_what_it_stores() {
+        let mut side = CoupledMatrixSide::<&str, (usize, usize)>::default();
         let overflow = || CoreError::ElementCountOverflow;
-        let place = |side: &mut CoupledMatrixSide<&'static str>, extent: &mut usize, tree, dim| {
-            side.place(tree, extent, || Ok::<_, CoreError>(dim), overflow)
+        let project = |placed: CoupledTreePlacement| (placed.offset, placed.dim);
+        let place = |side: &mut CoupledMatrixSide<&'static str, (usize, usize)>, tree, dim| {
+            side.place(tree, || Ok::<_, CoreError>(dim), overflow, project)
         };
-        assert_eq!(
-            place(&mut side, &mut extent, "a", 2).unwrap(),
-            (
-                TreeExtent {
-                    index: 0,
-                    offset: 0,
-                    dim: 2
-                },
-                true
-            )
-        );
-        assert_eq!(
-            place(&mut side, &mut extent, "b", 3).unwrap(),
-            (
-                TreeExtent {
-                    index: 1,
-                    offset: 2,
-                    dim: 3
-                },
-                true
-            )
-        );
-        // A known tree keeps its first extent and never evaluates `dim`.
+        assert_eq!(place(&mut side, "a", 2).unwrap(), ((0, 2), true));
+        assert_eq!(place(&mut side, "b", 3).unwrap(), ((2, 3), true));
+        // A known tree keeps its first placement and never evaluates `dim`.
         let known = side.place(
             "a",
-            &mut extent,
             || -> Result<usize, CoreError> { unreachable!("dim is evaluated only for a new tree") },
             overflow,
+            project,
         );
+        assert_eq!(known.unwrap(), ((0, 2), false));
+        assert_eq!(side.extent(), 5);
         assert_eq!(
-            known.unwrap(),
-            (
-                TreeExtent {
-                    index: 0,
-                    offset: 0,
-                    dim: 2
-                },
-                false
-            )
-        );
-        assert_eq!(extent, 5);
-        assert_eq!(
-            place(&mut side, &mut extent, "c", usize::MAX),
+            place(&mut side, "c", usize::MAX),
             Err(CoreError::ElementCountOverflow)
         );
         assert!(side.get("c").is_none());
+        assert_eq!(side.extent(), 5);
 
-        side.rebase(|tree| if *tree == "a" { 3 } else { 0 });
+        let mut indexed = CoupledMatrixSide::<&str, usize>::default();
+        indexed
+            .place("x", || Ok::<_, CoreError>(4), overflow, |p| p.index)
+            .unwrap();
         assert_eq!(
-            side.get("a"),
-            Some(&TreeExtent {
-                index: 0,
-                offset: 3,
-                dim: 2
-            })
+            indexed
+                .place("y", || Ok::<_, CoreError>(1), overflow, |p| p.index)
+                .unwrap(),
+            (1, true)
         );
-        assert_eq!(
-            side.get("b"),
-            Some(&TreeExtent {
-                index: 1,
-                offset: 0,
-                dim: 3
-            })
-        );
+        indexed.clear();
+        assert_eq!((indexed.len(), indexed.extent()), (0, 0));
     }
 }

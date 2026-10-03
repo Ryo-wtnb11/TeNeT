@@ -19,8 +19,8 @@ pub(super) fn compile_coupled_sector_regions(
     // Each region still owns one exact-length tree list.
     let mut row_trees = Vec::<CoupledTreeExtent>::new();
     let mut col_trees = Vec::<CoupledTreeExtent>::new();
-    let mut row_side = CoupledMatrixSide::<&FusionTreeKey>::default();
-    let mut col_side = CoupledMatrixSide::<&FusionTreeKey>::default();
+    let mut row_side = CoupledMatrixSide::<&FusionTreeKey, usize>::default();
+    let mut col_side = CoupledMatrixSide::<&FusionTreeKey, usize>::default();
     let mut tree_pairs = Vec::<(usize, usize)>::new();
     let mut seen_pairs = Vec::<bool>::new();
     let mut block_index = 0usize;
@@ -42,8 +42,6 @@ pub(super) fn compile_coupled_sector_regions(
         row_side.clear();
         col_side.clear();
         tree_pairs.clear();
-        let mut rows = 0usize;
-        let mut cols = 0usize;
         let mut end = block_index;
         while end < structure.block_count() {
             let block = structure.block(end)?;
@@ -63,7 +61,6 @@ pub(super) fn compile_coupled_sector_regions(
                 &mut row_side,
                 key.codomain_tree(),
                 row_shape,
-                &mut rows,
             )?
             else {
                 return Ok(None);
@@ -73,7 +70,6 @@ pub(super) fn compile_coupled_sector_regions(
                 &mut col_side,
                 key.domain_tree(),
                 col_shape,
-                &mut cols,
             )?
             else {
                 return Ok(None);
@@ -82,6 +78,7 @@ pub(super) fn compile_coupled_sector_regions(
             end += 1;
         }
 
+        let (rows, cols) = (row_side.extent(), col_side.extent());
         let expected_blocks = row_trees
             .len()
             .checked_mul(col_trees.len())
@@ -149,26 +146,29 @@ pub(super) fn compile_coupled_sector_regions(
 /// layout is then not the canonical tiling).
 fn insert_coupled_tree_extent<'a>(
     trees: &mut Vec<CoupledTreeExtent>,
-    side: &mut CoupledMatrixSide<&'a FusionTreeKey>,
+    side: &mut CoupledMatrixSide<&'a FusionTreeKey, usize>,
     tree: &'a FusionTreeKey,
     shape: DimVec,
-    total: &mut usize,
 ) -> Result<Option<usize>, CoreError> {
-    let (placed, new) = side.place(
+    let mut offset = 0;
+    let (index, new) = side.place(
         tree,
-        total,
         || checked_product(&shape),
         || CoreError::ElementCountOverflow,
+        |placed| {
+            offset = placed.offset;
+            placed.index
+        },
     )?;
     if !new {
-        return Ok((trees[placed.index].shape() == shape.as_slice()).then_some(placed.index));
+        return Ok((trees[index].shape() == shape.as_slice()).then_some(index));
     }
     trees.push(CoupledTreeExtent {
         tree: tree.clone(),
-        offset: placed.offset,
+        offset,
         shape,
     });
-    Ok(Some(placed.index))
+    Ok(Some(index))
 }
 
 fn coupled_sector_strides(
