@@ -29,7 +29,7 @@ where
             for (&a, &b) in left.values.iter().zip(&right.values) {
                 partial = partial + FactorScalar::adjoint(a.widen()) * b.widen();
             }
-            total += partial.widen_complex() * provider.dim_scalar(left.sector);
+            total += partial.widen_complex() * multiplicity_free_dim(provider, left.sector)?;
         }
         Ok(total)
     }
@@ -111,8 +111,8 @@ where
                         (false, true) => dense_value * compact_value,
                     };
             }
-            total +=
-                partial.widen_complex() * dense.logical_space().provider().dim_scalar(entry.sector);
+            total += partial.widen_complex()
+                * multiplicity_free_dim(dense.logical_space().provider(), entry.sector)?;
         }
         Ok(total)
     }
@@ -138,9 +138,9 @@ where
                 2.0,
                 || Self::spectrum_max_abs(spectrum),
                 |max| {
-                    Ok(Self::spectrum_weighted_sum(spectrum, provider, |value| {
+                    Self::spectrum_weighted_sum(spectrum, provider, |value| {
                         scaled_power(value, max, 2.0)
-                    }))
+                    })
                 },
             );
         }
@@ -165,7 +165,7 @@ where
                     self.logical_space().space().structure(),
                     self.logical_space().space().nout(),
                     data,
-                    |coupled| Ok::<_, Error>(provider.dim_scalar(coupled)),
+                    |coupled| multiplicity_free_dim(provider, coupled),
                     |value| scaled_power(value, max, 2.0),
                 )
             },
@@ -188,14 +188,12 @@ where
         spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
         provider: &R,
         term: impl Fn(D) -> f64,
-    ) -> f64 {
-        spectrum
-            .iter()
-            .map(|entry| {
-                provider.dim_scalar(entry.sector)
-                    * entry.values.iter().map(|&value| term(value)).sum::<f64>()
-            })
-            .sum()
+    ) -> Result<f64, Error> {
+        spectrum.iter().try_fold(0.0, |total, entry| {
+            Ok(total
+                + multiplicity_free_dim(provider, entry.sector)?
+                    * entry.values.iter().map(|&value| term(value)).sum::<f64>())
+        })
     }
 
     /// The `p == Inf` arm of [`Self::norm`]: the largest stored magnitude,
@@ -240,13 +238,13 @@ where
         let power = |value: D| value.widen_complex().norm().powf(p);
         if let Some(spectrum) = self.spectrum() {
             return rescaled_power_norm(
-                Self::spectrum_weighted_sum(spectrum, provider, power),
+                Self::spectrum_weighted_sum(spectrum, provider, power)?,
                 p,
                 || Self::spectrum_max_abs(spectrum),
                 |max| {
-                    Ok(Self::spectrum_weighted_sum(spectrum, provider, |value| {
+                    Self::spectrum_weighted_sum(spectrum, provider, |value| {
                         scaled_power(value, max, p)
-                    }))
+                    })
                 },
             );
         }
@@ -257,7 +255,7 @@ where
             .expect("owned norm input")
             .materialized_dense_data();
         let data: &[D] = &data_payload;
-        let weight_of = |coupled| Ok::<_, Error>(provider.dim_scalar(coupled));
+        let weight_of = |coupled| multiplicity_free_dim(provider, coupled);
         rescaled_power_norm(
             coupled_region_weighted_sum(structure, nout, data, weight_of, power)?,
             p,
@@ -335,22 +333,22 @@ where
             let (rhs_operand, rhs_data) = other.fusion_operand_and_data();
             let value = match (&self.repr, &other.repr) {
                 (TypedTensorRepr::Adjoint(lhs), TypedTensorRepr::Adjoint(rhs)) => {
-                    tenet_tensors::oriented_fusion_inner(
+                    tenet_tensors::oriented_fusion_inner_with(
                         lhs.parent.space.space().structure(),
                         tenet_tensors::FusionOperand::direct(rhs.parent.space.space()),
                         rhs.parent_data(),
                         tenet_tensors::FusionOperand::direct(lhs.parent.space.space()),
                         lhs.parent_data(),
-                        |sector| provider.dim_scalar(sector),
+                        |sector| multiplicity_free_dim(provider, sector),
                     )?
                 }
-                _ => tenet_tensors::oriented_fusion_inner(
+                _ => tenet_tensors::oriented_fusion_inner_with(
                     self.logical_space().space().structure(),
                     lhs_operand,
                     &lhs_data,
                     rhs_operand,
                     &rhs_data,
-                    |sector| provider.dim_scalar(sector),
+                    |sector| multiplicity_free_dim(provider, sector),
                 )?,
             };
             return Ok(value);
@@ -405,7 +403,7 @@ where
                 for &value in &entry.values {
                     partial = partial + value.widen();
                 }
-                total += partial.widen_complex() * provider.dim_scalar(entry.sector);
+                total += partial.widen_complex() * multiplicity_free_dim(provider, entry.sector)?;
             }
             return Ok(D::from_complex64(total));
         }
@@ -424,7 +422,7 @@ where
                 .expect("owned trace input")
                 .materialized_dense_data()
                 .as_ref(),
-            |sector| Ok::<_, Error>(provider.dim_scalar(sector)),
+            |sector| multiplicity_free_dim(provider, sector),
         )?))
     }
 

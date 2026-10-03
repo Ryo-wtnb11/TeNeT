@@ -69,7 +69,7 @@ pub trait PivotalCoefficientAlgebra<R>: RigidCoefficientAlgebra<R> {
 
 impl<R> CoefficientAlgebra<R> for MultiplicityFreeAdmissionMode
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     type Coeff = f64;
     type Error = OperationError;
@@ -83,7 +83,7 @@ where
 
 impl<R> RigidCoefficientAlgebra<R> for MultiplicityFreeAdmissionMode
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     fn dim(provider: &R, sector: SectorId) -> Result<f64, Self::Error> {
         Ok(provider.dim_scalar(sector))

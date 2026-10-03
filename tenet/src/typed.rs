@@ -335,7 +335,7 @@ pub use scalar::{CudaFactorizationPayload, CudaPayload};
 mod numeric;
 pub(crate) use numeric::{
     absorb_compact_source, absorb_mapped, coupled_region_inner, coupled_region_weighted_sum,
-    sector_regions, validate_norm_p, weighted_inner, weighted_trace,
+    multiplicity_free_dim, sector_regions, validate_norm_p, weighted_inner, weighted_trace,
 };
 use numeric::{max_abs, pinv_seam_error, scaled_power};
 mod block_layout;

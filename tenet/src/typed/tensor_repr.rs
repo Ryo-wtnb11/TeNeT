@@ -945,9 +945,10 @@ where
     /// Contraction planners use it as a size/FLOP proxy.
     ///
     /// The rounding formula is
-    /// `Σ_sector round(degeneracy * dim(sector))` per leg. The provider
-    /// abstraction carries `dim_scalar` uniformly, so there is deliberately
-    /// no group-specific branch.
+    /// `Σ_sector round(degeneracy * dim(sector))` per leg, with `dim` read
+    /// through the mode's `RigidCoefficientAlgebra::dim` (crate helper
+    /// `multiplicity_free_dim`), so there is deliberately no group-specific
+    /// branch.
     ///
     /// # Complexity
     ///
@@ -961,24 +962,23 @@ where
     pub fn leg_dims(&self) -> Result<Vec<usize>, Error> {
         let hom = self.logical_space().space().homspace();
         let provider = self.logical_space().provider();
-        Ok(hom
-            .codomain()
+        hom.codomain()
             .legs()
             .iter()
             .chain(hom.domain().legs())
             .map(|leg| Self::weighted_leg_dim(provider, leg))
-            .collect())
+            .collect()
     }
 
     /// Quantum dimensions are generally irrational (SU(2) `sqrt` products,
     /// anyonic golden ratios), so the per-sector weight is computed in `f64`
     /// and rounded once.
-    fn weighted_leg_dim(provider: &R, leg: &SectorLeg) -> usize {
+    fn weighted_leg_dim(provider: &R, leg: &SectorLeg) -> Result<usize, Error> {
         leg.sectors()
             .iter()
             .zip(leg.degeneracies())
             .map(|(&sector, &degeneracy)| {
-                (degeneracy as f64 * provider.dim_scalar(sector)).round() as usize
+                Ok((degeneracy as f64 * multiplicity_free_dim(provider, sector)?).round() as usize)
             })
             .sum()
     }

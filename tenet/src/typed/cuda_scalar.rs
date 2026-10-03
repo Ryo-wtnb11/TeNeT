@@ -482,19 +482,15 @@ where
         let values = download_cuda_reduction_partials(&partials, cuda)?;
         drop(lease);
 
-        Ok(regions
-            .iter()
-            .zip(values)
-            .map(|(region, value)| {
-                value.widen()
-                    * <<E as tenet_tensors::WideScalar>::Wide as FactorScalar>::from_real(
-                        self.logical_space().provider().dim_scalar(region.coupled()),
-                    )
-            })
-            .fold(
-                <<E as tenet_tensors::WideScalar>::Wide as FactorScalar>::from_real(0.0),
-                |total, term| total + term,
-            ))
+        regions.iter().zip(values).try_fold(
+            <<E as tenet_tensors::WideScalar>::Wide as FactorScalar>::from_real(0.0),
+            |total, (region, value)| {
+                let dim = multiplicity_free_dim(self.logical_space().provider(), region.coupled())?;
+                Ok(total
+                    + value.widen()
+                        * <<E as tenet_tensors::WideScalar>::Wide as FactorScalar>::from_real(dim))
+            },
+        )
     }
 
     /// Quantum-dimension-weighted Frobenius norm of a device tensor: the
