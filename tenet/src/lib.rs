@@ -87,8 +87,6 @@ pub mod sector;
 mod tensor_core;
 pub mod typed;
 
-#[doc(hidden)]
-pub use runtime::RuntimeIdentity;
 /// Formula-first explanation of TeNeT's tensor-map convention, duals,
 /// contractions, block layout, and weighted norms.
 pub mod mathematics {

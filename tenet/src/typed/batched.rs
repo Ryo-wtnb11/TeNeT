@@ -28,8 +28,8 @@ use super::{
     TypedTensorRepr, TypedTensorRootDispatch,
 };
 use crate::error::Error;
+use crate::runtime::RuntimeIdentity;
 use crate::tensor_core::internal_layout_error;
-use crate::RuntimeIdentity;
 
 #[path = "contract_batch.rs"]
 mod contract_batch;
@@ -130,13 +130,6 @@ impl StructureSignature {
         } else {
             None
         }
-    }
-
-    /// The process-local block-structure intern id, for diagnostics and
-    /// tests only. It is not part of equality.
-    #[doc(hidden)]
-    pub fn content_id(&self) -> usize {
-        self.structure.id()
     }
 }
 

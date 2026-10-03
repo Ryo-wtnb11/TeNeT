@@ -20,10 +20,11 @@ use tenet::sector::{
     CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
     SectorVec, TypedSectorAdmission,
 };
+use tenet::typed::__network::NetworkReuseClass;
 use tenet::typed::CheckedGenericStructureError;
 use tenet::typed::{
-    CheckedGenericTensorProductError, Eig, Eigh, GradedSpace, LeftPolar, Lq, NetworkReuseClass, Qr,
-    RightPolar, Svd, TensorMap, Truncation, TypedTensorConstructionDispatch,
+    CheckedGenericTensorProductError, Eig, Eigh, GradedSpace, LeftPolar, Lq, Qr, RightPolar, Svd,
+    TensorMap, Truncation, TypedTensorConstructionDispatch,
 };
 use tenet::typed::{Complex32, Complex64, GenericTensorError, Runtime, SectorSpectrum};
 

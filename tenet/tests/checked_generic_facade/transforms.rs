@@ -146,7 +146,9 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
     // 3x3 [2,1] and 2x2 [0,0] blocks: 6 + 2 off-diagonal entries.
     assert_positive_zeros(&adjoint, 8);
     assert_eq!(bits(&adjoint), bits(&expected));
-    assert!(adjoint.network_reuse_class(false) == NetworkReuseClass::Compact);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&adjoint, false) == NetworkReuseClass::Compact
+    );
     assert_eq!(
         tenet::expert::diagonal_spectrum(&adjoint).unwrap(),
         tenet::expert::diagonal_spectrum(&expected).unwrap()
@@ -262,7 +264,10 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
     )
     .unwrap();
     let real_adjoint = real.adjoint().unwrap();
-    assert!(real_adjoint.network_reuse_class(false) == NetworkReuseClass::Compact);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&real_adjoint, false)
+            == NetworkReuseClass::Compact
+    );
     assert_eq!(real_adjoint.codomain(), real.codomain());
     assert_eq!(
         tenet::expert::diagonal_spectrum(&real_adjoint).unwrap(),
@@ -293,7 +298,10 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
         .unwrap()
     };
     let mf_adjoint = u1_diagonal(false).adjoint().unwrap();
-    assert!(mf_adjoint.network_reuse_class(false) == NetworkReuseClass::Compact);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&mf_adjoint, false)
+            == NetworkReuseClass::Compact
+    );
     assert_eq!(bits(&mf_adjoint), bits(&u1_diagonal(true)));
     assert_positive_zeros(&mf_adjoint, 8);
 }

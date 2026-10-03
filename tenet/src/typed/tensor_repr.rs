@@ -408,8 +408,7 @@ where
     /// This is storage-generic: a device destination parks its resident buffer
     /// exactly as a Host destination parks its `Vec`, because detaching only
     /// drops the [`Runtime`] and provider handles.
-    #[doc(hidden)]
-    pub fn detach_runtime(self) -> Option<RuntimeDetachedTensorMap<D, S>> {
+    pub(crate) fn detach_runtime(self) -> Option<RuntimeDetachedTensorMap<D, S>> {
         let TensorMap { runtime, repr } = self;
         let TypedTensorRepr::Owned(body) = repr else {
             return None;
@@ -526,8 +525,7 @@ impl<R, D, S> TensorMap<R, D, S> {
     /// Identity and retained bytes of the dense payload allocation owned by
     /// this tensor. Network metering uses the identity to avoid charging Arc
     /// aliases twice.
-    #[doc(hidden)]
-    pub fn network_owned_payload(&self) -> Option<(usize, usize)>
+    pub(crate) fn network_owned_payload(&self) -> Option<(usize, usize)>
     where
         S: NetworkPayloadStorage<D>,
     {
@@ -542,8 +540,7 @@ impl<R, D, S> TensorMap<R, D, S> {
     }
 
     /// Classifies the representation produced after an optional adjoint.
-    #[doc(hidden)]
-    pub fn network_reuse_class(&self, adjoint: bool) -> NetworkReuseClass {
+    pub(crate) fn network_reuse_class(&self, adjoint: bool) -> NetworkReuseClass {
         match &self.repr {
             TypedTensorRepr::Owned(body) => match body.data.as_ref() {
                 TypedData::Diagonal(_) => NetworkReuseClass::Compact,
@@ -556,8 +553,7 @@ impl<R, D, S> TensorMap<R, D, S> {
     }
 
     /// Matches the metadata produced after an optional adjoint without allocation.
-    #[doc(hidden)]
-    pub fn network_input_metadata_matches(
+    pub(crate) fn network_input_metadata_matches(
         &self,
         adjoint: bool,
         expected_legs: &[SectorLeg],
@@ -586,8 +582,7 @@ impl<R, D, S> TensorMap<R, D, S> {
     /// The logical leg of source axis `axis` as stored (a domain leg is not
     /// dualised), borrowed so network admission compares legs without
     /// allocating.
-    #[doc(hidden)]
-    pub fn network_source_leg(&self, axis: usize) -> Option<&SectorLeg> {
+    pub(crate) fn network_source_leg(&self, axis: usize) -> Option<&SectorLeg> {
         let homspace = self.logical_space().space().homspace();
         if axis < self.codomain_rank() {
             homspace.codomain().legs().get(axis)

@@ -18,7 +18,7 @@
 //! Storage is per-[`Runtime`]: the configuration value types live in
 //! `tenet::plancache` (set them on `Runtime::builder()` or with
 //! [`configure_plan_cache`]), and the cache state sits in the runtime's
-//! type-erased plan-cache slot, claimed and downcast by this crate. The
+//! type-keyed extension slot, under this crate's own cache type. The
 //! operands' runtime is resolved per call, so different runtimes never share
 //! plans or counters.
 
@@ -50,7 +50,7 @@ use crate::network::{
     StaticTopologySpec,
 };
 use crate::optimizer::GreedyDenseOptimizer;
-use tenet::typed::NetworkPayloadStorage;
+use tenet::typed::__network::{self, ExtensionSlot, NetworkPayloadStorage};
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct OperandTopology {
@@ -651,7 +651,7 @@ fn topology_text(topology: &NetworkTopology) -> String {
     text
 }
 
-// The cache lives in the runtime's `dyn Any + Send` slot; plans are
+// The cache lives in the runtime's `Any + Send` extension slot; plans are
 // step lists + label vectors, so this holds by construction.
 const _: fn() = || {
     fn assert_send<T: Send>() {}
@@ -659,24 +659,15 @@ const _: fn() = || {
 };
 
 /// The runtime slot's cache, claimed (created) on first use.
-fn cache_mut(
-    slot: &mut Option<Box<dyn Any + Send>>,
-    workspace_budget_bytes: usize,
-) -> &mut PlanCache {
-    slot.get_or_insert_with(|| Box::new(PlanCache::new(workspace_budget_bytes)))
-        .downcast_mut::<PlanCache>()
-        .expect("runtime plan-cache slot claimed by another type")
+fn cache_mut(slot: &mut ExtensionSlot, workspace_budget_bytes: usize) -> &mut PlanCache {
+    slot.get_or_insert_with(|| PlanCache::new(workspace_budget_bytes))
 }
 
 /// Read/write access that preserves an unclaimed runtime extension slot.
 /// Rejected device plans must not make an otherwise-cold runtime own an empty
 /// cache merely by probing it.
-fn existing_cache_mut(slot: &mut Option<Box<dyn Any + Send>>) -> Option<&mut PlanCache> {
-    slot.as_deref_mut().map(|cache| {
-        cache
-            .downcast_mut::<PlanCache>()
-            .expect("runtime plan-cache slot claimed by another type")
-    })
+fn existing_cache_mut(slot: &mut ExtensionSlot) -> Option<&mut PlanCache> {
+    slot.get_mut::<PlanCache>()
 }
 
 /// Replaces the runtime's plan-cache configuration after build; the only
@@ -690,7 +681,7 @@ fn existing_cache_mut(slot: &mut Option<Box<dyn Any + Send>>) -> Option<&mut Pla
 /// fit; lowering `workspace_budget_bytes` releases idle workspace storage
 /// synchronously. Raising either bound retains everything.
 pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
-    runtime.replace_plan_cache_config(config, |previous, next, slot| {
+    __network::replace_plan_cache_config(runtime, config, |previous, next, slot| {
         let Some(cache) = existing_cache_mut(slot) else {
             return;
         };
@@ -728,7 +719,7 @@ pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
 /// Hit/miss/re-plan counters and the current entry count.
 #[allow(deprecated)]
 pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
-    runtime.with_plan_cache(|config, slot| {
+    __network::with_plan_cache(runtime, |config, slot| {
         let cache = cache_mut(slot, config.workspace_budget_bytes);
         let (workspaces_created, workspace_reuses, workspace_slot_grows) =
             cache
@@ -781,7 +772,7 @@ pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
 /// [`load_plan_cache`], so the next miss searches afresh. Files the
 /// application wrote from [`save_plan_cache`] are not touched.
 pub fn clear_plan_cache(runtime: &Runtime) {
-    runtime.with_plan_cache(|config, slot| {
+    __network::with_plan_cache(runtime, |config, slot| {
         let cache = cache_mut(slot, config.workspace_budget_bytes);
         cache.map.clear();
         cache.static_aliases.clear();
@@ -801,7 +792,7 @@ pub fn clear_plan_cache(runtime: &Runtime) {
 /// to skip the cold optimal-order search. The order is topology-only and thus
 /// dimension-independent, so one saved file serves every χ.
 pub fn save_plan_cache(runtime: &Runtime) -> String {
-    runtime.with_plan_cache(|config, slot| {
+    __network::with_plan_cache(runtime, |config, slot| {
         let cache = cache_mut(slot, config.workspace_budget_bytes);
         let mut text = String::from(PLAN_CACHE_FILE_VERSION);
         text.push('\n');
@@ -855,7 +846,7 @@ pub fn load_plan_cache(runtime: &Runtime, text: &str) -> usize {
     if header.is_some() && header != Some(PLAN_CACHE_FILE_VERSION) {
         return 0;
     }
-    runtime.with_plan_cache(|config, slot| {
+    __network::with_plan_cache(runtime, |config, slot| {
         let cache = cache_mut(slot, config.workspace_budget_bytes);
         // The application opted into persistence: from now on record and reuse
         // orders through the disk map (even if this file was empty).
@@ -1205,8 +1196,9 @@ where
         spec,
         optimizer: topology_optimizer(optimizer),
     };
-    let lookup =
-        runtime.with_plan_cache(|config, slot| -> Result<Lookup, HostNetworkError<R>> {
+    let lookup = __network::with_plan_cache(
+        runtime,
+        |config, slot| -> Result<Lookup, HostNetworkError<R>> {
             if !config.enabled {
                 return Ok(Lookup::Disabled);
             }
@@ -1234,7 +1226,8 @@ where
                 Some(cached) => Lookup::Hit(cached),
                 None => Lookup::Miss,
             })
-        })?;
+        },
+    )?;
     if let Lookup::Hit(cached) = lookup {
         return Ok(cached);
     }
@@ -1263,8 +1256,9 @@ where
         Replan,
         Miss,
     }
-    let outcome =
-        runtime.with_plan_cache(|config, slot| -> Result<Outcome, HostNetworkError<R>> {
+    let outcome = __network::with_plan_cache(
+        runtime,
+        |config, slot| -> Result<Outcome, HostNetworkError<R>> {
             let Some(cache) = existing_cache_mut(slot) else {
                 return Ok(Outcome::Miss);
             };
@@ -1285,9 +1279,10 @@ where
                 Some(_) => Ok(Outcome::Replan),
                 None => Ok(Outcome::Miss),
             }
-        })?;
+        },
+    )?;
     if let Outcome::Hit(planned, snapshot) = outcome {
-        runtime.with_plan_cache(|config, slot| {
+        __network::with_plan_cache(runtime, |config, slot| {
             install_static_alias(
                 cache_mut(slot, config.workspace_budget_bytes),
                 key,
@@ -1309,7 +1304,7 @@ where
     // persistence is off the disk map is never touched, keeping in-memory
     // replan numerics byte-identical.
     let topo_key = topology_text(&topology);
-    let disk_plan = runtime.with_extension_slot(|slot| {
+    let disk_plan = __network::with_extension_slot(runtime, |slot| {
         existing_cache_mut(slot).and_then(|cache| {
             cache
                 .persist
@@ -1330,15 +1325,16 @@ where
             (fresh, plan_copy)
         }
     };
-    let workspace_budget = runtime.with_plan_cache(|config, slot| {
+    let workspace_budget = __network::with_plan_cache(runtime, |config, slot| {
         Arc::clone(&cache_mut(slot, config.workspace_budget_bytes).workspace_budget)
     });
     let candidate = CachedPlan {
         planned,
         workspaces: Arc::new(WorkspacePools::new(workspace_budget)),
     };
-    let winner =
-        runtime.with_plan_cache(|config, slot| -> Result<CachedPlan, HostNetworkError<R>> {
+    let winner = __network::with_plan_cache(
+        runtime,
+        |config, slot| -> Result<CachedPlan, HostNetworkError<R>> {
             let cache = cache_mut(slot, config.workspace_budget_bytes);
             if !config.enabled {
                 candidate.workspaces.deactivate_all();
@@ -1394,7 +1390,8 @@ where
                 capacity,
             );
             Ok(cached)
-        })?;
+        },
+    )?;
     Ok(winner)
 }
 
@@ -1444,7 +1441,7 @@ mod tests {
     fn cache_state(runtime: &tenet::typed::Runtime) -> CacheState {
         CacheState {
             stats: super::plan_cache_stats(runtime),
-            aliases: runtime.with_extension_slot(|slot| {
+            aliases: super::__network::with_extension_slot(runtime, |slot| {
                 super::existing_cache_mut(slot).map(|cache| {
                     cache
                         .static_aliases
@@ -1470,7 +1467,7 @@ mod tests {
         extra: &dyn Fn() -> X,
     ) -> String {
         let clear_aliases = || {
-            runtime.with_extension_slot(|slot| {
+            super::__network::with_extension_slot(runtime, |slot| {
                 super::existing_cache_mut(slot)
                     .unwrap()
                     .static_aliases

@@ -206,7 +206,7 @@ where
     }));
     let inverse = source.inv(&[0, 1], &[2, 3]).unwrap();
     assert!(std::ptr::eq(inverse.provider(), provider.as_ref()));
-    assert!(source.runtime().shares_state_with(inverse.runtime()));
+    assert!(tenet::typed::__network::runtime_identity(source.runtime()).matches(inverse.runtime()));
     assert_eq!(inverse.codomain(), source.domain());
     assert_eq!(inverse.domain(), source.codomain());
     // Hand oracle: `source` is `2·1` on its tree diagonal, so both products
@@ -450,7 +450,7 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
     let direct = source.exp(&[0], &[1]).unwrap();
     assert_no_provider_queries(&provider);
     assert!(std::ptr::eq(direct.provider(), provider.as_ref()));
-    assert!(direct.runtime().shares_state_with(source.runtime()));
+    assert!(tenet::typed::__network::runtime_identity(direct.runtime()).matches(source.runtime()));
     assert_eq!(direct.codomain(), source.codomain());
     assert_eq!(direct.domain(), source.domain());
     assert_eq!(direct.subblock_count(), source.subblock_count());
@@ -463,7 +463,9 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
     let lazy = source.adjoint().unwrap();
     let lazy_exp = lazy.exp(&[0], &[1]).unwrap();
     assert!(std::ptr::eq(lazy_exp.provider(), provider.as_ref()));
-    assert!(lazy_exp.runtime().shares_state_with(source.runtime()));
+    assert!(
+        tenet::typed::__network::runtime_identity(lazy_exp.runtime()).matches(source.runtime())
+    );
     assert_eq!(lazy_exp.codomain(), lazy.codomain());
     assert_eq!(lazy_exp.domain(), lazy.domain());
     assert_eq!(lazy_exp.subblock_count(), lazy.subblock_count());
@@ -481,7 +483,9 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
     let complex_exp = complex.exp(&[0], &[1]).unwrap();
     assert_no_provider_queries(&provider);
     assert!(std::ptr::eq(complex_exp.provider(), provider.as_ref()));
-    assert!(complex_exp.runtime().shares_state_with(source.runtime()));
+    assert!(
+        tenet::typed::__network::runtime_identity(complex_exp.runtime()).matches(source.runtime())
+    );
     assert_eq!(complex_exp.codomain(), complex.codomain());
     assert_eq!(complex_exp.domain(), complex.domain());
     assert!(complex_exp
@@ -585,7 +589,9 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
     );
     let real_output = source.exp(&[0, 1], &[2, 3]).unwrap();
     assert!(std::ptr::eq(real_output.provider(), provider.as_ref()));
-    assert!(real_output.runtime().shares_state_with(source.runtime()));
+    assert!(
+        tenet::typed::__network::runtime_identity(real_output.runtime()).matches(source.runtime())
+    );
     assert_eq!(real_output.codomain(), source.codomain());
     assert_eq!(real_output.domain(), source.domain());
     for index in 0..source.subblock_count() {
@@ -620,7 +626,7 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
         .scale(Complex64::new(1.0, 0.2));
     let output = input.exp(&[0, 1], &[2, 3]).unwrap();
     assert!(std::ptr::eq(output.provider(), provider.as_ref()));
-    assert!(output.runtime().shares_state_with(source.runtime()));
+    assert!(tenet::typed::__network::runtime_identity(output.runtime()).matches(source.runtime()));
     assert_eq!(output.codomain(), input.codomain());
     assert_eq!(output.domain(), input.domain());
     assert_eq!(output.subblock_count(), input.subblock_count());
@@ -720,7 +726,7 @@ fn checked_generic_inv_accepts_unequal_isomorphic_spaces_and_rejects_nonisomorph
     assert_eq!(inverse.codomain(), source.domain());
     assert_eq!(inverse.domain(), source.codomain());
     assert!(std::ptr::eq(inverse.provider(), provider.as_ref()));
-    assert!(source.runtime().shares_state_with(inverse.runtime()));
+    assert!(tenet::typed::__network::runtime_identity(source.runtime()).matches(inverse.runtime()));
     // Hand oracle: `source` is `2·1`, so both products are `source / 2`.
     let terms = endomorphism_terms(source.dense_data().unwrap().len());
     numerics::assert_slices_close(

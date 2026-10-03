@@ -11,8 +11,7 @@ where
     /// argument: the authority id is decoded by this tensor's provider, dualized
     /// exactly once for a partner occurrence, and checked against the actual
     /// effective leg before any destination is allocated.
-    #[doc(hidden)]
-    pub fn network_restrict_degeneracies(
+    pub(crate) fn network_restrict_degeneracies(
         &self,
         adjoint: bool,
         restrictions: &[NetworkDegeneracyRestriction],
@@ -166,13 +165,11 @@ where
         })
     }
 
-    #[doc(hidden)]
-    pub fn network_has_compact_payload(&self) -> bool {
+    pub(crate) fn network_has_compact_payload(&self) -> bool {
         matches!(self.storage_body().data.as_ref(), TypedData::Diagonal(_))
     }
 
-    #[doc(hidden)]
-    pub fn network_zeros_from_effective_legs(
+    pub(crate) fn network_zeros_from_effective_legs(
         &self,
         codomain: &[GradedSpace<R>],
         domain: &[GradedSpace<R>],
@@ -232,8 +229,7 @@ where
     D: TensorScalar,
 {
     /// Adds every source block into the matching destination block rectangle.
-    #[doc(hidden)]
-    pub fn network_scatter_add_assign(
+    pub(crate) fn network_scatter_add_assign(
         &mut self,
         source: &Self,
         ranges: &[Option<std::ops::Range<usize>>],

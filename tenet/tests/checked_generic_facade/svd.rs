@@ -112,7 +112,9 @@ fn checked_generic_dense_input_svd_publishes_compact_multisector_s() {
         assert!(std::ptr::eq(s.provider(), provider.as_ref()));
         assert_eq!(s.codomain(), s.domain());
         assert!(s.dense_data().is_err());
-        assert!(s.network_reuse_class(false) == NetworkReuseClass::Compact);
+        assert!(
+            tenet::typed::__network::network_reuse_class(&s, false) == NetworkReuseClass::Compact
+        );
         let values = s.diagview().unwrap();
         assert_eq!(values.len(), 2);
         assert_eq!(values[0].sector, Label::Vacuum);
@@ -656,7 +658,7 @@ fn sun_checked_generic_map_diagonal_keeps_svd_bond_and_principal_branch() {
         assert!(std::ptr::eq(root.provider(), s.provider()));
         assert_eq!(root.codomain(), s.codomain());
         assert_eq!(root.domain(), s.domain());
-        assert!(root.runtime().shares_state_with(s.runtime()));
+        assert!(tenet::typed::__network::runtime_identity(root.runtime()).matches(s.runtime()));
         assert!(root
             .compose(&root)
             .unwrap()

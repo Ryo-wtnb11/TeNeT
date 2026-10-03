@@ -30,7 +30,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     let rhs_data = rhs.materialize().unwrap().dense_data().unwrap().to_vec();
     let lhs_provider = lhs.provider() as *const U1FusionRule;
     let rhs_provider = rhs.provider() as *const U1FusionRule;
-    let runtime_id = runtime.identity();
+    let runtime_id = tenet::typed::__network::runtime_identity(&runtime);
     let lhs_device = lhs.to_cuda().unwrap();
     let rhs_device = rhs.to_cuda().unwrap();
 

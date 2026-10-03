@@ -42,7 +42,9 @@ fn checked_generic_diagonal_is_compact_canonical_and_provider_owned() {
     );
     let adjoint = real.adjoint().unwrap();
     assert!(std::ptr::eq(adjoint.provider(), provider.as_ref()));
-    assert!(adjoint.network_reuse_class(false) == NetworkReuseClass::Compact);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&adjoint, false) == NetworkReuseClass::Compact
+    );
     assert_eq!(
         real.materialize().unwrap().dense_data().unwrap(),
         &[1.0, 2.0, 0.0, 0.0, 3.0]

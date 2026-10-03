@@ -367,7 +367,7 @@ fn checked_generic_exp_lazy_is_owned_and_stays_cold() {
         expected.materialize().unwrap().dense_data().unwrap()
     );
     assert!(std::ptr::eq(actual.provider(), provider.as_ref()));
-    assert!(actual.runtime().shares_state_with(source.runtime()));
+    assert!(actual.runtime().same_runtime(source.runtime()));
     assert_eq!(actual.codomain(), lazy.codomain());
     assert_eq!(actual.domain(), lazy.domain());
 }
@@ -402,7 +402,7 @@ fn checked_generic_lazy_flip_stays_cold_and_keeps_logical_duality() {
     assert_eq!(flipped.codomain(), expected.codomain());
     assert_eq!(flipped.domain(), expected.domain());
     assert!(std::ptr::eq(flipped.provider(), provider.as_ref()));
-    assert!(flipped.runtime().shares_state_with(expected.runtime()));
+    assert!(flipped.runtime().same_runtime(expected.runtime()));
 }
 
 #[test]

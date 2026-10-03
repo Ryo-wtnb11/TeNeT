@@ -14,7 +14,7 @@ where
     let Some(first) = tensors.first() else {
         return Ok(None);
     };
-    let runtime = first.runtime().identity();
+    let runtime = __network::runtime_identity(first.runtime());
     let identity = TypedSectorAdmission::typed_rule_identity(first.provider());
     for (index, tensor) in tensors.iter().enumerate().skip(1) {
         if !runtime.matches(tensor.runtime()) {
@@ -153,7 +153,7 @@ where
         } else {
             axis
         };
-        let stored = tensor.network_source_leg(source).ok_or_else(missing)?;
+        let stored = __network::network_source_leg(tensor, source).ok_or_else(missing)?;
         Ok::<_, HostNetworkError<R>>((stored, (source >= codomain_rank) != adjoint))
     };
     // A pairing this pass does not accept would skip a space check or panic,

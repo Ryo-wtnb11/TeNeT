@@ -1,7 +1,10 @@
 //! `StructureSignature` is content identity (#1495, leaf L0 of #1287).
 //!
 //! Every test takes one process-wide lock: the eviction, reset and
-//! pointer-sharing cases observe the global intern tables.
+//! pointer-sharing cases observe the global intern tables. Those cases read
+//! the intern content id from the `Debug` rendering: two signatures of the
+//! same rule, placement and live runtime render differently only when their
+//! content ids differ.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -243,8 +246,8 @@ fn equal_across_reset_core_intern_tables() {
     reset_core_intern_tables();
     let after = u1_signature(&runtime, &u1_leg(-2..=2, 3));
     assert_ne!(
-        before.content_id(),
-        after.content_id(),
+        format!("{before:?}"),
+        format!("{after:?}"),
         "premise: fresh content"
     );
     assert_same(&before, &after, "reset");
@@ -269,7 +272,11 @@ fn equal_across_interner_eviction() {
     }
     assert!(block_structure_intern_cache_info().pressure_evictions() > evictions);
     let after = u1_signature(&runtime, &u1_leg(-3..=3, 5));
-    assert_ne!(before.content_id(), after.content_id(), "premise: evicted");
+    assert_ne!(
+        format!("{before:?}"),
+        format!("{after:?}"),
+        "premise: evicted"
+    );
     assert_same(&before, &after, "eviction");
 }
 
@@ -289,8 +296,8 @@ fn equal_for_oversized_structures_that_bypass_the_interner() {
     let after = signature();
     assert!(block_structure_intern_cache_info().oversized_admission_bypasses() >= bypasses + 2);
     assert_ne!(
-        before.content_id(),
-        after.content_id(),
+        format!("{before:?}"),
+        format!("{after:?}"),
         "premise: not interned"
     );
     assert_same(&before, &after, "oversized");
@@ -303,7 +310,11 @@ fn shared_structure_comparison_does_not_allocate() {
     let leg = u1_leg(-2..=2, 2);
     let first = u1_signature(&runtime, &leg);
     let second = u1_signature(&runtime, &leg);
-    assert_eq!(first.content_id(), second.content_id(), "premise: shared");
+    assert_eq!(
+        format!("{first:?}"),
+        format!("{second:?}"),
+        "premise: shared"
+    );
     let (equal, allocations) = measured(|| first == second);
     assert!(equal);
     assert_eq!(allocations, 0, "pointer fast path");

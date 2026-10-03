@@ -296,6 +296,7 @@ pub use tenet_tensors::RecouplingCoefficientAction;
 use tenet_matrixalgebra::seam::{rescaled_power_norm, CheckedGenericFactorPlanError};
 use tenet_matrixalgebra::BoundDynFactor;
 
+use crate::runtime::RuntimeIdentity;
 use crate::runtime::{Ctx, Ctxs};
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
@@ -306,7 +307,6 @@ use crate::tensor_core::{
     tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
     tree_transform_owned_multiplicity_free_into, OrientedContractionKind,
 };
-use crate::RuntimeIdentity;
 
 mod batched;
 #[allow(deprecated)]
@@ -433,18 +433,13 @@ use tensor_repr::{
 use tensor_repr::{
     observe_adjoint_materialization, DIAGONAL_MATERIALIZATIONS, UNCACHED_ADJOINT_MATERIALIZATIONS,
 };
-pub use tensor_repr::{
-    NetworkPayloadStorage, NetworkReuseClass, PayloadConversion, PhysicalDense,
-    RuntimeDetachedTensorMap, TensorMap, TensorRef,
-};
+pub use tensor_repr::{PayloadConversion, PhysicalDense, TensorMap, TensorRef};
 mod cat;
 mod construction;
 mod contract_ops;
 pub use contract_ops::ContractSpec;
 #[cfg(feature = "cuda")]
 mod cuda_contract;
-#[cfg(feature = "cuda")]
-pub use cuda_contract::CudaTracePairs;
 #[cfg(feature = "cuda")]
 mod cuda_ops;
 #[cfg(feature = "cuda")]
@@ -453,12 +448,16 @@ mod cuda_scalar;
 mod cuda_transfer;
 #[cfg(feature = "cuda")]
 use cuda_transfer::unique_cuda_destination;
+/// The seam `tenet-network` drives; not part of the facade.
+#[doc(hidden)]
+pub mod __network;
 #[cfg(feature = "cuda")]
 mod cuda_transform;
 mod inspection;
 mod linear_ops;
 mod network_seam;
-pub use network_seam::NetworkDegeneracyRestriction;
+#[cfg(test)]
+use network_seam::NetworkDegeneracyRestriction;
 mod reduction_ops;
 mod restrict;
 mod transform_ops;

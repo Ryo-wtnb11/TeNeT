@@ -16,8 +16,9 @@ use std::sync::{Arc, Mutex};
 
 use tenet::sector::TypedSectorAdmission;
 use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::__network::{self, NetworkDegeneracyRestriction};
 use tenet::typed::{GradedSpace, LegSelection, Runtime, TensorMap};
-use tenet::typed::{NetworkDegeneracyRestriction, StackedTensorMap, Svd};
+use tenet::typed::{StackedTensorMap, Svd};
 
 const ZEROED_LOG_CAPACITY: usize = 64;
 
@@ -303,18 +304,14 @@ fn the_network_restriction_of_several_axes_fills_no_payload() {
         },
     ];
 
-    let warm = source
-        .network_restrict_degeneracies(false, &restrictions)
-        .unwrap();
+    let warm = __network::network_restrict_degeneracies(&source, false, &restrictions).unwrap();
     let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
     assert_eq!(warm.dense_data().unwrap().len(), 3 * 4);
 
     let mut output = None;
     let measurement = measure(|| {
         output = Some(black_box(
-            source
-                .network_restrict_degeneracies(false, &restrictions)
-                .unwrap(),
+            __network::network_restrict_degeneracies(&source, false, &restrictions).unwrap(),
         ));
     });
     assert_eq!(

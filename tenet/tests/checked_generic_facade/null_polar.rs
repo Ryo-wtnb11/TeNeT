@@ -37,7 +37,7 @@ fn checked_generic_polar_matches_independent_real_and_complex_qh_oracles() {
     } = left.left_polar(&[0], &[1]).unwrap();
     assert!(std::ptr::eq(actual_q.provider(), provider.as_ref()));
     assert!(std::ptr::eq(actual_h.provider(), provider.as_ref()));
-    assert!(actual_q.runtime().shares_state_with(left.runtime()));
+    assert!(tenet::typed::__network::runtime_identity(actual_q.runtime()).matches(left.runtime()));
     assert_same_checked_generic_layout_and_close(&actual_q, &q_tensor, |a, b| (a - b).abs());
     assert_same_checked_generic_layout_and_close(&actual_h, &h_tensor, |a, b| (a - b).abs());
     let RightPolar {
@@ -167,7 +167,9 @@ fn checked_generic_polar_lazy_redirects_to_the_opposite_parent_operation() {
         |a, b| (a - b).norm(),
     );
     assert!(std::ptr::eq(actual_w.provider(), provider.as_ref()));
-    assert!(actual_w.runtime().shares_state_with(source.runtime()));
+    assert!(
+        tenet::typed::__network::runtime_identity(actual_w.runtime()).matches(source.runtime())
+    );
 
     let tall = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)]).unwrap();
     let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();

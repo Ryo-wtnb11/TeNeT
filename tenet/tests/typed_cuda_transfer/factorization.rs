@@ -59,7 +59,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let provider = source.provider() as *const R;
-    let runtime = source.runtime().identity();
+    let runtime = tenet::typed::__network::runtime_identity(source.runtime());
     let source_bits: Vec<_> = source
         .dense_data()
         .unwrap()

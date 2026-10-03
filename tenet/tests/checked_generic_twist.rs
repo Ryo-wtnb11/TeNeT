@@ -698,7 +698,9 @@ where
     assert_eq!(lazy_flipped.codomain(), direct.codomain());
     assert_eq!(lazy_flipped.domain(), direct.domain());
     assert!(std::ptr::eq(lazy_flipped.provider(), provider.as_ref()));
-    assert!(lazy_flipped.runtime().shares_state_with(direct.runtime()));
+    assert!(
+        tenet::typed::__network::runtime_identity(lazy_flipped.runtime()).matches(direct.runtime())
+    );
     assert_eq!(source.dense_data().unwrap(), before);
     assert_eq!(source.codomain(), source_codomain);
     assert_eq!(source.domain(), source_domain);

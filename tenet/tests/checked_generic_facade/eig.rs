@@ -347,8 +347,8 @@ fn assert_checked_generic_eigh_factors<D>(
     let Eigh { d, v } = source.eigh_full(&[0], &[1]).unwrap();
     assert!(std::ptr::eq(d.provider(), source.provider()));
     assert!(std::ptr::eq(v.provider(), source.provider()));
-    assert!(d.runtime().shares_state_with(source.runtime()));
-    assert!(v.runtime().shares_state_with(source.runtime()));
+    assert!(tenet::typed::__network::runtime_identity(d.runtime()).matches(source.runtime()));
+    assert!(tenet::typed::__network::runtime_identity(v.runtime()).matches(source.runtime()));
     assert_eq!(v.codomain(), source.codomain());
     assert_eq!(d.codomain(), d.domain());
     assert_eq!(v.domain(), d.codomain());
@@ -453,9 +453,15 @@ fn checked_generic_eigh_lazy_success_and_failure_leave_the_view_lazy() {
         })
         .unwrap();
     let lazy = hermitian.adjoint().unwrap();
-    assert!(lazy.network_reuse_class(false) == tenet::typed::NetworkReuseClass::LazyAdjoint);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&lazy, false)
+            == tenet::typed::__network::NetworkReuseClass::LazyAdjoint
+    );
     assert!(lazy.eigh_full(&[0], &[1]).is_ok());
-    assert!(lazy.network_reuse_class(false) == tenet::typed::NetworkReuseClass::LazyAdjoint);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&lazy, false)
+            == tenet::typed::__network::NetworkReuseClass::LazyAdjoint
+    );
 
     let nonhermitian: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
@@ -464,7 +470,10 @@ fn checked_generic_eigh_lazy_success_and_failure_leave_the_view_lazy() {
         .unwrap();
     let lazy = nonhermitian.adjoint().unwrap();
     assert!(lazy.eigh_full(&[0], &[1]).is_err());
-    assert!(lazy.network_reuse_class(false) == tenet::typed::NetworkReuseClass::LazyAdjoint);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&lazy, false)
+            == tenet::typed::__network::NetworkReuseClass::LazyAdjoint
+    );
 }
 
 #[test]
@@ -906,8 +915,8 @@ fn assert_checked_generic_eig_reconstruction(
 ) {
     assert!(std::ptr::eq(d.provider(), source.provider()));
     assert!(std::ptr::eq(v.provider(), source.provider()));
-    assert!(d.runtime().shares_state_with(source.runtime()));
-    assert!(v.runtime().shares_state_with(source.runtime()));
+    assert!(tenet::typed::__network::runtime_identity(d.runtime()).matches(source.runtime()));
+    assert!(tenet::typed::__network::runtime_identity(v.runtime()).matches(source.runtime()));
     assert_eq!(v.codomain(), source.codomain());
     assert_eq!(v.domain(), d.codomain());
     let av = source.compose(v).unwrap();
@@ -1178,9 +1187,15 @@ fn checked_generic_eig_lazy_calls_leave_the_source_view_lazy() {
         })
         .unwrap();
     let lazy = source.adjoint().unwrap();
-    assert!(lazy.network_reuse_class(false) == tenet::typed::NetworkReuseClass::LazyAdjoint);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&lazy, false)
+            == tenet::typed::__network::NetworkReuseClass::LazyAdjoint
+    );
     assert!(lazy.eig_full(&[0], &[1]).is_ok());
-    assert!(lazy.network_reuse_class(false) == tenet::typed::NetworkReuseClass::LazyAdjoint);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&lazy, false)
+            == tenet::typed::__network::NetworkReuseClass::LazyAdjoint
+    );
 }
 
 #[test]

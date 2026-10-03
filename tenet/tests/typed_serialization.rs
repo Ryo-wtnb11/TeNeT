@@ -10,10 +10,11 @@ use tenet::sector::{
 use tenet::sector::{
     FermionParityFusionRule, SU2FusionRule, SU2Irrep, SectorId, U1FusionRule, U1Irrep, Z2Irrep,
 };
+use tenet::typed::__network::NetworkReuseClass;
 use tenet::typed::{Complex32, Complex64, Runtime};
 use tenet::typed::{
-    DecodeError, DecodeLimits, GradedSpace, NetworkReuseClass, PersistedScalar, SectorSpectrum,
-    TensorMap, TypedPersistenceCodec,
+    DecodeError, DecodeLimits, GradedSpace, PersistedScalar, SectorSpectrum, TensorMap,
+    TypedPersistenceCodec,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -505,7 +506,7 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
     .unwrap();
     assert!(std::ptr::eq(restored_complex.provider(), provider.as_ref()));
     assert!(matches!(
-        restored_complex.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&restored_complex, false),
         NetworkReuseClass::OwnedDense
     ));
     assert!(restored_complex
@@ -531,7 +532,7 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         provider.as_ref()
     ));
     assert!(matches!(
-        restored_complex_lazy.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&restored_complex_lazy, false),
         NetworkReuseClass::LazyAdjoint
     ));
     assert!(restored_complex_lazy
@@ -549,13 +550,13 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
     let hermitian = source.axpby(1.0, &source.adjoint().unwrap(), 1.0).unwrap();
     let factor = hermitian.eigh_full(&[0, 1], &[2, 3]).unwrap().d;
     assert!(matches!(
-        factor.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&factor, false),
         NetworkReuseClass::Compact
     ));
     // TensorKit `adjoint(::DiagonalTensorMap)` is again a diagonal (#1449).
     let factor_adjoint = factor.adjoint().unwrap();
     assert!(matches!(
-        factor_adjoint.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&factor_adjoint, false),
         NetworkReuseClass::Compact
     ));
     let restored_adjoint = TensorMap::<GenericToy, f64>::from_bytes_with(
@@ -567,7 +568,8 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
     .unwrap();
     assert!(std::ptr::eq(restored_adjoint.provider(), provider.as_ref()));
     assert!(
-        restored_adjoint.network_reuse_class(false) == factor_adjoint.network_reuse_class(false)
+        tenet::typed::__network::network_reuse_class(&restored_adjoint, false)
+            == tenet::typed::__network::network_reuse_class(&factor_adjoint, false)
     );
     assert_eq!(
         restored_adjoint
@@ -578,10 +580,7 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         factor_adjoint.materialize().unwrap().dense_data().unwrap()
     );
     assert!(matches!(
-        restored_adjoint
-            .adjoint()
-            .unwrap()
-            .network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&restored_adjoint.adjoint().unwrap(), false),
         NetworkReuseClass::Compact
     ));
 
@@ -594,7 +593,7 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         .unwrap();
     let complex_factor = complex_hermitian.eigh_full(&[0, 1], &[2, 3]).unwrap().d;
     assert!(matches!(
-        complex_factor.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&complex_factor, false),
         NetworkReuseClass::Compact
     ));
     let restored_complex_factor = TensorMap::<GenericToy, Complex64>::from_bytes_with(
@@ -609,7 +608,7 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         provider.as_ref()
     ));
     assert!(matches!(
-        restored_complex_factor.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&restored_complex_factor, false),
         NetworkReuseClass::Compact
     ));
     assert!(restored_complex_factor
@@ -637,7 +636,7 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         provider.as_ref()
     ));
     assert!(matches!(
-        restored_complex_factor_lazy.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&restored_complex_factor_lazy, false),
         NetworkReuseClass::Compact
     ));
     assert!(restored_complex_factor_lazy
@@ -658,10 +657,10 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
                 == (expected.re.to_bits(), expected.im.to_bits())
         }));
     assert!(matches!(
-        restored_complex_factor_lazy
-            .adjoint()
-            .unwrap()
-            .network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(
+            &restored_complex_factor_lazy.adjoint().unwrap(),
+            false
+        ),
         NetworkReuseClass::Compact
     ));
 }
@@ -873,7 +872,7 @@ fn compact_and_lazy_representations_survive_roundtrip() {
     )
     .unwrap();
     assert!(matches!(
-        restored_compact.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&restored_compact, false),
         NetworkReuseClass::Compact
     ));
     let actual = tenet::expert::diagonal_spectrum(&restored_compact)
@@ -910,7 +909,7 @@ fn compact_and_lazy_representations_survive_roundtrip() {
         provider.as_ref()
     ));
     assert!(matches!(
-        restored_compact_complex.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&restored_compact_complex, false),
         NetworkReuseClass::Compact
     ));
     assert!(restored_compact_complex
@@ -929,7 +928,7 @@ fn compact_and_lazy_representations_survive_roundtrip() {
     // not a lazy parent-backed view.
     let compact_complex_adjoint = compact_complex.adjoint().unwrap();
     assert!(matches!(
-        compact_complex_adjoint.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&compact_complex_adjoint, false),
         NetworkReuseClass::Compact
     ));
     let restored_compact_adjoint = TensorMap::<SU2FusionRule, Complex64>::from_bytes_with(
@@ -944,7 +943,7 @@ fn compact_and_lazy_representations_survive_roundtrip() {
         provider.as_ref()
     ));
     assert!(matches!(
-        restored_compact_adjoint.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&restored_compact_adjoint, false),
         NetworkReuseClass::Compact
     ));
     assert!(restored_compact_adjoint
@@ -979,7 +978,7 @@ fn compact_and_lazy_representations_survive_roundtrip() {
     )
     .unwrap();
     assert!(matches!(
-        restored_lazy.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&restored_lazy, false),
         NetworkReuseClass::LazyAdjoint
     ));
     assert_eq!(
@@ -1014,7 +1013,7 @@ fn compact_and_lazy_representations_survive_roundtrip() {
         provider.as_ref()
     ));
     assert!(matches!(
-        restored_lazy_complex.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&restored_lazy_complex, false),
         NetworkReuseClass::LazyAdjoint
     ));
     assert!(restored_lazy_complex
@@ -1067,7 +1066,9 @@ fn legacy_adjoint_diagonal_records_decode_to_the_owned_conjugated_diagonal() {
     )
     .unwrap();
     let adjoint = diagonal.adjoint().unwrap();
-    assert!(decoded.network_reuse_class(false) == NetworkReuseClass::Compact);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&decoded, false) == NetworkReuseClass::Compact
+    );
     assert_eq!(
         decoded.materialize().unwrap().dense_data().unwrap().bits(),
         adjoint.materialize().unwrap().dense_data().unwrap().bits()
@@ -1102,7 +1103,9 @@ fn legacy_adjoint_diagonal_records_decode_to_the_owned_conjugated_diagonal() {
     )
     .unwrap();
     let adjoint = diagonal.adjoint().unwrap();
-    assert!(decoded.network_reuse_class(false) == NetworkReuseClass::Compact);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&decoded, false) == NetworkReuseClass::Compact
+    );
     assert_eq!(
         decoded.materialize().unwrap().dense_data().unwrap().bits(),
         adjoint.materialize().unwrap().dense_data().unwrap().bits()
@@ -1335,7 +1338,7 @@ fn version_one_golden_files_decode_and_reencode_byte_for_byte() {
     let dense = decode_f64(&dense_bytes);
     let expected = golden_dense_f64(&runtime, &provider);
     assert!(matches!(
-        dense.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&dense, false),
         NetworkReuseClass::OwnedDense
     ));
     assert_eq!(
@@ -1348,7 +1351,7 @@ fn version_one_golden_files_decode_and_reencode_byte_for_byte() {
     let adjoint_bytes = golden("su2_adjoint_f64_v1.bin");
     let adjoint = decode_f64(&adjoint_bytes);
     assert!(matches!(
-        adjoint.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&adjoint, false),
         NetworkReuseClass::LazyAdjoint
     ));
     assert_eq!(
@@ -1374,7 +1377,7 @@ fn version_one_golden_files_decode_and_reencode_byte_for_byte() {
     .unwrap();
     let expected = golden_diagonal_c64(&runtime, &provider);
     assert!(matches!(
-        diagonal.network_reuse_class(false),
+        tenet::typed::__network::network_reuse_class(&diagonal, false),
         NetworkReuseClass::Compact
     ));
     assert_eq!(
@@ -1490,12 +1493,12 @@ macro_rules! single_precision_roundtrip {
                 C: TypedPersistenceCodec<R>,
                 TensorMap<R, $scalar>: RoundTrip<R, C>,
             {
-                assert!(source.network_reuse_class(false) == class);
+                assert!(tenet::typed::__network::network_reuse_class(&source, false) == class);
                 let bytes = source.encode(codec);
                 assert_eq!(bytes[11], <$scalar as Tag>::TAG);
                 let restored = TensorMap::<R, $scalar>::decode(runtime, &bytes, codec);
                 assert!(std::ptr::eq(restored.provider(), source.provider()));
-                assert!(restored.network_reuse_class(false) == class);
+                assert!(tenet::typed::__network::network_reuse_class(&restored, false) == class);
                 assert_eq!(
                     restored.materialize().unwrap().dense_data().unwrap().bits(),
                     source.materialize().unwrap().dense_data().unwrap().bits()
