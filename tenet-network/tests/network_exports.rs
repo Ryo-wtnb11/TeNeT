@@ -11,27 +11,75 @@
 
 use std::collections::BTreeSet;
 
-fn exported_names() -> BTreeSet<String> {
-    let source = include_str!("../src/lib.rs");
-    let code = source
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        !code.contains("pub mod ") && !code.contains("pub fn ") && !code.contains("pub struct "),
-        "lib.rs gained an inline public item; extend this firewall"
-    );
+/// Drops comments (line, doc and `/* */`) and blanks string literals so that
+/// neither can hide or fake an item.
+fn strip(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(ch) = rest.chars().next() {
+        if rest.starts_with("//") {
+            rest = &rest[rest.find('\n').unwrap_or(rest.len())..];
+        } else if rest.starts_with("/*") {
+            rest = &rest[rest.find("*/").map_or(rest.len(), |end| end + 2)..];
+            out.push(' ');
+        } else if ch == '"' {
+            let mut escaped = false;
+            let end = rest[1..]
+                .find(|c: char| {
+                    let close = c == '"' && !escaped;
+                    escaped = c == '\\' && !escaped;
+                    close
+                })
+                .map_or(rest.len(), |end| end + 2);
+            rest = &rest[end..];
+            out.push_str("\"\"");
+        } else {
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    out
+}
+
+/// Leaf names re-exported by `pub use` in `source`, or an error for any
+/// other inline public item (`pub fn`, `pub enum`, `pub const`, ...) or
+/// `#[macro_export]`, which this firewall would otherwise not see.
+fn exported_names(source: &str) -> Result<BTreeSet<String>, String> {
+    let code = strip(source);
+    if code.contains("macro_export") {
+        return Err("lib.rs exports a macro_rules! macro".into());
+    }
     let mut names = BTreeSet::new();
-    for item in code.split("pub use ").skip(1) {
-        let tree = &item[..item.find(';').expect("unterminated pub use")];
+    for (at, _) in code.match_indices("pub") {
+        let before = code[..at].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let after = &code[at + 3..];
+        if after.starts_with('(') || after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+            continue; // `pub(crate)` etc., or an identifier such as `public`
+        }
+        let item = after.trim_start();
+        let Some(tree) = item
+            .strip_prefix("use")
+            .filter(|t| t.starts_with(char::is_whitespace))
+        else {
+            let keyword = item.split_whitespace().next().unwrap_or("");
+            return Err(format!("lib.rs gained an inline `pub {keyword}` item"));
+        };
+        let tree = tree[..tree.find(';').ok_or("unterminated pub use")?].trim();
         let leaves = match tree.find('{') {
             Some(open) => {
-                let inner = tree[open + 1..].trim_end().strip_suffix('}').unwrap();
-                assert!(!inner.contains('{'), "nested use tree: {tree}");
-                inner.split(',').map(str::to_owned).collect::<Vec<_>>()
+                let inner = tree[open + 1..]
+                    .trim_end()
+                    .strip_suffix('}')
+                    .ok_or("bad use tree")?;
+                if inner.contains('{') {
+                    return Err(format!("nested use tree: {tree}"));
+                }
+                inner.split(',').collect::<Vec<_>>()
             }
-            None => vec![tree.to_owned()],
+            None => vec![tree],
         };
         for leaf in leaves
             .iter()
@@ -39,10 +87,46 @@ fn exported_names() -> BTreeSet<String> {
             .filter(|l| !l.is_empty())
         {
             let name = leaf.rsplit(" as ").next().unwrap();
-            names.insert(name.rsplit("::").next().unwrap().to_owned());
+            names.insert(name.rsplit("::").next().unwrap().trim().to_owned());
         }
     }
-    names
+    Ok(names)
+}
+
+#[test]
+fn firewall_rejects_every_inline_public_item() {
+    for item in [
+        "pub mod m {}",
+        "pub fn f() {}",
+        "pub struct S;",
+        "pub enum E {}",
+        "pub trait T {}",
+        "pub type A = u8;",
+        "pub const C: u8 = 0;",
+        "pub static S: u8 = 0;",
+        "pub union U { a: u8 }",
+        "pub unsafe fn f() {}",
+        "pub extern crate core;",
+        "#[macro_export]\nmacro_rules! m { () => {} }",
+    ] {
+        let source = format!("pub use a::B;\n{item}\n");
+        assert!(exported_names(&source).is_err(), "accepted `{item}`");
+    }
+}
+
+#[test]
+fn firewall_ignores_comments_strings_and_restricted_visibility() {
+    let source = r#"
+        //! pub fn doc() {}
+        /* pub enum Hidden {} */
+        #[path = "pub fn x.rs"]
+        pub(crate) mod inner;
+        pub(super) fn helper() {}
+        pub use a::{B, c::D as E}; // pub struct Trailing;
+        pub use f::G;
+    "#;
+    let names = exported_names(source).unwrap();
+    assert_eq!(names, ["B", "E", "G"].map(str::to_owned).into());
 }
 
 #[test]
@@ -137,5 +221,8 @@ fn tenet_network_exports_exactly_the_pinned_names() {
     .into_iter()
     .map(str::to_owned)
     .collect::<BTreeSet<_>>();
-    assert_eq!(exported_names(), expected);
+    assert_eq!(
+        exported_names(include_str!("../src/lib.rs")).unwrap(),
+        expected
+    );
 }
