@@ -5606,28 +5606,28 @@ fn checked_compact_diagonal_pinv_does_not_materialize_the_input() {
     };
     let source = &owned(&input).space;
     let destination = &owned(&output).space;
-    assert!(super::mode_dispatch::checked_compact_pinv_layout(
+    assert!(super::mode_dispatch::checked_compact_spectrum_layout(
         source,
         destination,
         spectrum
     ));
     let mut missing = spectrum.clone();
     missing.pop();
-    assert!(!super::mode_dispatch::checked_compact_pinv_layout(
+    assert!(!super::mode_dispatch::checked_compact_spectrum_layout(
         source,
         destination,
         &missing
     ));
     let mut duplicate = spectrum.clone();
     duplicate[1].sector = duplicate[0].sector;
-    assert!(!super::mode_dispatch::checked_compact_pinv_layout(
+    assert!(!super::mode_dispatch::checked_compact_spectrum_layout(
         source,
         destination,
         &duplicate
     ));
     let mut short = spectrum.clone();
     short[0].values.pop();
-    assert!(!super::mode_dispatch::checked_compact_pinv_layout(
+    assert!(!super::mode_dispatch::checked_compact_spectrum_layout(
         source,
         destination,
         &short
@@ -5642,11 +5642,270 @@ fn checked_compact_diagonal_pinv_does_not_materialize_the_input() {
         }],
     )
     .unwrap();
-    assert!(!super::mode_dispatch::checked_compact_pinv_layout(
+    assert!(!super::mode_dispatch::checked_compact_spectrum_layout(
         source,
         &owned(&wrong).space,
         spectrum
     ));
+}
+
+/// #1735: checked `inv`/`exp`/`solve` of a compact diagonal map the spectrum
+/// elementwise (TensorKit `inv`/`exp`/`\` on `DiagonalTensorMap`) and never
+/// densify it; hand-computed values and a dense LU oracle are independent.
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_compact_diagonal_inv_exp_solve_stay_compact() {
+    use num_complex::Complex64;
+    use tenet_core::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let bond =
+        GradedSpace::try_new(Arc::clone(&provider), [(vec![0, 0], 2), (vec![1, 0], 3)]).unwrap();
+    let column =
+        GradedSpace::try_new(Arc::clone(&provider), [(vec![0, 0], 1), (vec![1, 0], 2)]).unwrap();
+
+    macro_rules! compact_values {
+        ($tensor:expr) => {{
+            let tensor = $tensor;
+            assert!(tensor.dense_data().is_err(), "result must stay compact");
+            tensor
+                .diagview()
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.values)
+                .collect::<Vec<_>>()
+        }};
+    }
+
+    let real: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![2.0, -4.0],
+            },
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![0.5, 1.0, -0.25],
+            },
+        ],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let inverse = real.inv(&[0], &[1]).unwrap();
+    let exponential = real.exp(&[0], &[1]).unwrap();
+    let compact_solve = real.solve(&[0], &[1], &real, &[0], &[1]).unwrap();
+    let rhs = TensorMap::<_, f64>::rand_with_seed(&runtime, [&bond], [&column], 7).unwrap();
+    let dense_solve = real.solve(&[0], &[1], &rhs, &[0], &[1]).unwrap();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(
+        compact_values!(&inverse),
+        [vec![0.5, -0.25], vec![2.0, 1.0, -4.0]]
+    );
+    let expected_exp = [
+        vec![2.0_f64.exp(), (-4.0_f64).exp()],
+        vec![0.5_f64.exp(), 1.0_f64.exp(), (-0.25_f64).exp()],
+    ];
+    for (got, want) in compact_values!(&exponential).iter().zip(&expected_exp) {
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() <= 1e-15 * w.abs(), "{g} vs {w}");
+        }
+    }
+    assert_eq!(
+        compact_values!(&compact_solve),
+        [vec![1.0, 1.0], vec![1.0, 1.0, 1.0]]
+    );
+    let lu = real
+        .materialize()
+        .unwrap()
+        .solve(&[0], &[1], &rhs, &[0], &[1])
+        .unwrap();
+    assert_eq!(dense_solve.codomain(), lu.codomain());
+    assert_eq!(dense_solve.domain(), lu.domain());
+    for (g, w) in dense_solve
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(lu.dense_data().unwrap())
+    {
+        assert!((g - w).abs() <= 1e-14 * (1.0 + w.abs()), "{g} vs {w}");
+    }
+
+    // A dual bond: the scaled leg's charge is the dual of the stored sector
+    // label, so a mis-keyed scaling would disagree with the LU oracle.
+    let dual = bond.try_dual().unwrap();
+    let dual_spectrum = [
+        SectorSpectrum {
+            sector: vec![0, 0],
+            values: vec![2.0, -4.0],
+        },
+        SectorSpectrum {
+            sector: vec![0, 1],
+            values: vec![0.5, 1.0, -0.25],
+        },
+    ];
+    let dual_real: TensorMap<_, f64> = TensorMap::diagonal(&runtime, &dual, dual_spectrum).unwrap();
+    let dual_rhs = TensorMap::<_, f64>::rand_with_seed(&runtime, [&dual], [&column], 11).unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let dual_solve = dual_real.solve(&[0], &[1], &dual_rhs, &[0], &[1]).unwrap();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    let lu = dual_real
+        .materialize()
+        .unwrap()
+        .solve(&[0], &[1], &dual_rhs, &[0], &[1])
+        .unwrap();
+    for (g, w) in dual_solve
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(lu.dense_data().unwrap())
+    {
+        assert!((g - w).abs() <= 1e-14 * (1.0 + w.abs()), "{g} vs {w}");
+    }
+
+    let z = |re, im| Complex64::new(re, im);
+    let complex: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![z(1.0, 1.0), z(0.0, -2.0)],
+            },
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![z(4.0, 0.0), z(-0.5, 0.5), z(0.0, 0.25)],
+            },
+        ],
+    )
+    .unwrap();
+    let source = compact_values!(&complex);
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let inverse = complex.inv(&[0], &[1]).unwrap();
+    let exponential = complex.exp(&[0], &[1]).unwrap();
+    let rhs = TensorMap::<_, Complex64>::rand_with_seed(&runtime, [&bond], [&column], 9).unwrap();
+    let dense_solve = complex.solve(&[0], &[1], &rhs, &[0], &[1]).unwrap();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    for ((inv, exp), values) in compact_values!(&inverse)
+        .iter()
+        .zip(compact_values!(&exponential))
+        .zip(&source)
+    {
+        for ((i, e), v) in inv.iter().zip(&exp).zip(values) {
+            assert!((i - z(1.0, 0.0) / v).norm() <= 1e-15 * i.norm());
+            assert!((e - v.exp()).norm() <= 1e-15 * e.norm());
+        }
+    }
+    let lu = complex
+        .materialize()
+        .unwrap()
+        .solve(&[0], &[1], &rhs, &[0], &[1])
+        .unwrap();
+    for (g, w) in dense_solve
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(lu.dense_data().unwrap())
+    {
+        assert!((g - w).norm() <= 1e-14 * (1.0 + w.norm()), "{g} vs {w}");
+    }
+}
+
+/// #1735: checked and multiplicity-free compact arms share one spectrum map,
+/// so the same spectrum gives bitwise-equal values and equal errors.
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_compact_diagonal_spectrum_maps_match_multiplicity_free() {
+    use tenet_core::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let su3 = GradedSpace::try_new(
+        Arc::new(SUNFusionRule::new(3).unwrap()),
+        [(vec![0, 0], 2), (vec![1, 0], 3)],
+    )
+    .unwrap();
+    let u1 = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
+    )
+    .unwrap();
+    let cases: [[Vec<f64>; 2]; 3] = [
+        [vec![2.0, -4.0], vec![0.5, 3.0, -0.25]],
+        [vec![2.0, 0.0], vec![0.5, 3.0, -0.25]],
+        [vec![2.0, f64::NAN], vec![0.5, f64::INFINITY, -0.25]],
+    ];
+    let bits = |result: Result<Vec<Vec<f64>>, String>| {
+        result.map(|values| {
+            values
+                .into_iter()
+                .map(|entry| entry.into_iter().map(f64::to_bits).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        })
+    };
+    for [first, second] in cases {
+        let checked: TensorMap<_, f64> = TensorMap::diagonal(
+            &runtime,
+            &su3,
+            [
+                SectorSpectrum {
+                    sector: vec![0, 0],
+                    values: first.clone(),
+                },
+                SectorSpectrum {
+                    sector: vec![1, 0],
+                    values: second.clone(),
+                },
+            ],
+        )
+        .unwrap();
+        let free: TensorMap<_, f64> = TensorMap::diagonal(
+            &runtime,
+            &u1,
+            [
+                SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: first,
+                },
+                SectorSpectrum {
+                    sector: U1Irrep::new(1),
+                    values: second,
+                },
+            ],
+        )
+        .unwrap();
+        macro_rules! spectrum_of {
+            ($result:expr) => {
+                $result
+                    .map(|tensor| {
+                        assert!(tensor.dense_data().is_err());
+                        tensor
+                            .diagview()
+                            .unwrap()
+                            .into_iter()
+                            .map(|entry| entry.values)
+                            .collect::<Vec<_>>()
+                    })
+                    .map_err(|error| error.to_string())
+            };
+        }
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        let checked_results = [
+            spectrum_of!(checked.inv(&[0], &[1])),
+            spectrum_of!(checked.exp(&[0], &[1])),
+            spectrum_of!(checked.solve(&[0], &[1], &checked, &[0], &[1])),
+        ];
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        let free_results = [
+            spectrum_of!(free.inv(&[0], &[1])),
+            spectrum_of!(free.exp(&[0], &[1])),
+            spectrum_of!(free.solve(&[0], &[1], &free, &[0], &[1])),
+        ];
+        for (checked, free) in checked_results.into_iter().zip(free_results) {
+            assert_eq!(bits(checked), bits(free));
+        }
+    }
 }
 
 #[test]

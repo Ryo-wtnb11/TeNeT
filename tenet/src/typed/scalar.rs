@@ -680,12 +680,16 @@ where
     /// TensorKit's right solve `self / rhs` can be composed from adjoints
     /// and this left solve with roles chosen in the adjointed axis order.
     ///
-    /// Dense input uses one linear solve per coupled sector. A
-    /// multiplicity-free compact diagonal divisor instead applies its
-    /// elementwise reciprocal and bond scaling; checked Generic materializes
-    /// compact inputs for the dense route, and a compact right-hand side of a
-    /// dense divisor is densified into the solve buffer. Lazy adjoints are
-    /// materialized only for this call.
+    /// Dense input uses one linear solve per coupled sector. A compact
+    /// diagonal divisor instead applies its elementwise reciprocal: a compact
+    /// right-hand side on the same bond gives a compact quotient, and a dense
+    /// one has its leading (bond) axis scaled, `O(Σ_c k_c m_c)` with no LU.
+    /// Checked Generic takes that arm only for an aligned bond layout whose
+    /// right-hand side space is the destination, and otherwise materializes
+    /// both operands for the dense route. An exact zero divisor entry is the
+    /// dense route's singular-block operation error in every mode. A compact
+    /// right-hand side of a dense divisor is densified into the solve buffer.
+    /// Lazy adjoints are materialized only for this call.
     ///
     /// # Errors
     ///

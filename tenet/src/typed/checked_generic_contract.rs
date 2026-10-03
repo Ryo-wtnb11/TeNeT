@@ -805,9 +805,10 @@ where
     /// Checked Generic performs the same isomorphism preflight, admits the
     /// swapped output with the source provider `Arc` before output allocation
     /// or dense work, and preserves provider admission failures as typed errors.
-    /// Standalone compact construction is supported, but checked `inv` has no
-    /// elementwise compact arm: it materializes that input and publishes a dense
-    /// result.
+    /// A checked compact input on an aligned bond layout takes the same
+    /// elementwise-reciprocal arm, with the same zero-entry error and the same
+    /// NaN/infinity pass-through, and stays compact; any other layout keeps the
+    /// dense LU route.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
@@ -847,9 +848,10 @@ where
     ///
     /// The multiplicity-free **compact** arm is TensorKit's
     /// `exp(::DiagonalTensorMap)`: unconditionally elementwise, with no
-    /// hermiticity gate. Standalone checked-Generic compact construction is
-    /// supported, but checked `exp` has no compact dispatch: it materializes
-    /// that input and publishes the dense Padé result.
+    /// hermiticity gate. Checked Generic shares that arm for a compact input on
+    /// an aligned bond layout (nonfinite entries map through `exp` without an
+    /// error, as in multiplicity-free mode); any other layout keeps the dense
+    /// Padé route.
     ///
     /// # Errors
     ///
@@ -868,8 +870,8 @@ where
     /// checked-Generic, use six GEMMs, one solve and the necessary Padé
     /// squarings per sector with `O(max_c n_c²)` workspace. Coupled sectors are
     /// never mixed. A dense lazy adjoint builds one operation-local logical
-    /// payload per call, released with the call. Compact
-    /// multiplicity-free input remains `O(rank)` elementwise.
+    /// payload per call, released with the call. Compact input remains
+    /// `O(rank)` elementwise in every fusion mode.
     ///
     /// TensorKit's diagonal implementation is the reference for the compact
     /// branch; this method never panics for a supported tensor contract.
