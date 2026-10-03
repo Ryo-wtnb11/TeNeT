@@ -146,18 +146,79 @@ where
     D: FactorScalar,
     M: SectorGeometry,
 {
-    let space = build_bound_factor_space(
-        authority,
+    publish_one_sided_factor(
+        &MfAuthority(authority),
         homspace,
-        SectorLeg::new(
-            dimensions
-                .iter()
-                .map(|(&sector, &dimension)| (sector, dimension)),
-            false,
-        ),
+        matricizations,
+        pairs,
+        dimensions,
         side,
-    )?;
-    let required_len = space.space().required_len()?;
+        placement,
+    )
+}
+
+/// Publishes one factor `codomain <- W` (left) or `W <- domain` (right) with
+/// bond `W` sized by `dimensions`: the per-sector factor columns of `pairs`
+/// where the source has the sector, identity completion where it does not.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn publish_one_sided_factor<A, R, D, M>(
+    authority: &A,
+    homspace: &FusionTreeHomSpace,
+    matricizations: &[M],
+    pairs: &mut [FactorPair<D>],
+    dimensions: &BTreeMap<SectorId, usize>,
+    side: FactorSide,
+    placement: FactorPlacement,
+) -> Result<BoundDynFactor<R, D>, A::Error>
+where
+    A: FactorSpaceAuthority<R>,
+    D: FactorScalar,
+    M: SectorGeometry,
+{
+    let bond = FusionProductSpace::new([SectorLeg::new(
+        dimensions
+            .iter()
+            .map(|(&sector, &dimension)| (sector, dimension)),
+        false,
+    )]);
+    let output_hom = match side {
+        FactorSide::Left => FusionTreeHomSpace::new(homspace.codomain().clone(), bond),
+        FactorSide::Right => FusionTreeHomSpace::new(bond, homspace.domain().clone()),
+    };
+    let source_trees = match (side, placement) {
+        (FactorSide::Left, FactorPlacement::Direct)
+        | (FactorSide::Right, FactorPlacement::Adjoint) => FactorSide::Left,
+        (FactorSide::Right, FactorPlacement::Direct)
+        | (FactorSide::Left, FactorPlacement::Adjoint) => FactorSide::Right,
+    };
+    let staged = authority.stage(output_hom)?;
+    let mut routes = matricizations
+        .iter()
+        .map(|matrix| (matrix.sector(), None))
+        .collect::<FxHashMap<SectorId, Option<&FactorPair<D>>>>();
+    let mut validated_placements = None;
+    let space = authority.commit(staged, |structure| {
+        let placements = PlacementIndex::new(matricizations, &[source_trees]);
+        for block in structure.blocks() {
+            let BlockKey::FusionTree(key) = block.key() else {
+                continue;
+            };
+            let tree = match side {
+                FactorSide::Left => key.codomain_tree(),
+                FactorSide::Right => key.domain_tree(),
+            };
+            let sector = coupled_of(tree);
+            if routes.contains_key(&sector) {
+                placements.placement(sector, source_trees, tree)?;
+            }
+        }
+        validated_placements = Some(placements);
+        Ok(())
+    })?;
+    let required_len = space
+        .space()
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
     #[cfg(test)]
     FACTOR_BUFFER_BUILD_COUNTS.set({
         let (left, right) = FACTOR_BUFFER_BUILD_COUNTS.get();
@@ -166,10 +227,6 @@ where
             FactorSide::Right => (left, right + 1),
         }
     });
-    let mut routes = matricizations
-        .iter()
-        .map(|matrix| (matrix.sector(), (matrix, None)))
-        .collect::<FxHashMap<_, _>>();
     for pair in pairs.iter() {
         let route =
             routes
@@ -177,13 +234,11 @@ where
                 .ok_or(OperationError::UnsupportedTensorContractScope {
                     message: "factor sector absent from the source tensor",
                 })?;
-        route.1 = Some(pair);
+        *route = Some(pair);
     }
-    let source_trees = match (side, placement) {
-        (FactorSide::Left, FactorPlacement::Direct)
-        | (FactorSide::Right, FactorPlacement::Adjoint) => FactorSide::Left,
-        (FactorSide::Right, FactorPlacement::Direct)
-        | (FactorSide::Left, FactorPlacement::Adjoint) => FactorSide::Right,
+    let (nout, nin) = match side {
+        FactorSide::Left => (space.space().nout(), 1),
+        FactorSide::Right => (1, space.space().nin()),
     };
     if let Some(identities) = one_sided_factor_output_plan(
         space.space().structure(),
@@ -195,18 +250,18 @@ where
         source_trees,
     ) {
         let data = take_one_sided_factors(pairs, &identities, required_len, side);
-        let (nout, nin) = match side {
-            FactorSide::Left => (space.space().nout(), 1),
-            FactorSide::Right => (1, space.space().nin()),
-        };
-        return BoundDynFactor::from_bound(space, data, nout, nin);
+        return Ok(BoundDynFactor::from_bound(space, data, nout, nin)?);
     }
     record_one_sided_fallback_publication();
     let mut data = vec![D::zero(); required_len];
     let mut missing_offsets = FxHashMap::<SectorId, usize>::default();
-    let placements = PlacementIndex::new(matricizations, &[source_trees]);
-    for index in 0..space.space().structure().block_count() {
-        let block = space.space().structure().block(index)?;
+    let placements = validated_placements
+        .unwrap_or_else(|| PlacementIndex::new(matricizations, &[source_trees]));
+    let structure = Arc::clone(space.space().structure());
+    for index in 0..structure.block_count() {
+        let block = structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
@@ -214,7 +269,10 @@ where
             FactorSide::Left => (coupled_of(key.codomain_tree()), block.shape().len() - 1),
             FactorSide::Right => (coupled_of(key.domain_tree()), 0),
         };
-        if let Some(&(_, Some(pair))) = routes.get(&sector) {
+        if let Some(&route) = routes.get(&sector) {
+            let pair = route.ok_or(OperationError::UnsupportedTensorContractScope {
+                message: "factor rank absent for a populated source sector",
+            })?;
             let tree = match side {
                 FactorSide::Left => key.codomain_tree(),
                 FactorSide::Right => key.domain_tree(),
@@ -237,12 +295,12 @@ where
             );
             continue;
         }
-        if routes.contains_key(&sector) {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "factor rank absent for a populated source sector",
-            });
-        }
-        let dimension = dimensions[&sector];
+        let dimension =
+            *dimensions
+                .get(&sector)
+                .ok_or(OperationError::UnsupportedTensorContractScope {
+                    message: "factor sector absent from the source tensor",
+                })?;
         let side_offset = missing_offsets.entry(sector).or_default();
         let extent = block
             .shape()
@@ -258,7 +316,8 @@ where
             return Err(OperationError::ElementCountMismatch {
                 expected: dimension,
                 actual: side_end,
-            });
+            }
+            .into());
         }
         scatter_identity_matrix_block(
             &mut data,
@@ -272,11 +331,7 @@ where
         )?;
         *side_offset = side_end;
     }
-    let (nout, nin) = match side {
-        FactorSide::Left => (space.space().nout(), 1),
-        FactorSide::Right => (1, space.space().nin()),
-    };
-    BoundDynFactor::from_bound(space, data, nout, nin)
+    Ok(BoundDynFactor::from_bound(space, data, nout, nin)?)
 }
 
 pub(super) fn scatter_left_sector_blocks<D, M>(
