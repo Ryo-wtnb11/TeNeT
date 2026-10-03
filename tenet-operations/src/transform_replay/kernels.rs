@@ -120,7 +120,7 @@ where
             dst_strides
                 .push(isize::try_from(stride).map_err(|_| OperationError::ElementCountOverflow)?);
         }
-        kernels.copy_scale_strided(
+        kernels.copy_scale_strided_baked(
             dst_data,
             &zero,
             block.shape(),
@@ -130,6 +130,8 @@ where
             0,
             false,
             D::one(),
+            None,
+            None,
         )?;
     }
     Ok(())
@@ -386,33 +388,19 @@ where
     let shape = layouts.shape(layout);
     let baked = layouts.fused_baked(entry_index);
     let packed_offset = offset_to_isize(packed_offset)?;
-    match fused_index {
-        Some(index) => kernels.copy_scale_strided_baked_with_index(
-            packed,
-            src_data,
-            shape,
-            layouts.packed_strides(layout),
-            layouts.strides(layout),
-            packed_offset,
-            layout.offset,
-            source_conjugate,
-            T::one(),
-            baked,
-            index,
-        ),
-        None => kernels.copy_scale_strided_baked(
-            packed,
-            src_data,
-            shape,
-            layouts.packed_strides(layout),
-            layouts.strides(layout),
-            packed_offset,
-            layout.offset,
-            source_conjugate,
-            T::one(),
-            baked,
-        ),
-    }
+    kernels.copy_scale_strided_baked(
+        packed,
+        src_data,
+        shape,
+        layouts.packed_strides(layout),
+        layouts.strides(layout),
+        packed_offset,
+        layout.offset,
+        source_conjugate,
+        T::one(),
+        baked,
+        fused_index,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -435,37 +423,9 @@ where
     let layout = layouts.entry(entry_index);
     let shape = layouts.shape(layout);
     let baked = layouts.fused_baked(entry_index);
-    match (mode, fused_index) {
-        (DestinationMode::Axpby(beta), Some(index)) => {
-            zero_strides.clear();
-            kernels.axpby_strided_baked_with_index(
-                dst_data,
-                packed,
-                shape,
-                layouts.strides(layout),
-                layouts.packed_strides(layout),
-                layout.offset,
-                offset_to_isize(packed_offset)?,
-                alpha,
-                beta,
-                baked,
-                index,
-            )
-        }
-        (DestinationMode::Overwrite, Some(index)) => kernels.copy_scale_strided_baked_with_index(
-            dst_data,
-            packed,
-            shape,
-            layouts.strides(layout),
-            layouts.packed_strides(layout),
-            layout.offset,
-            offset_to_isize(packed_offset)?,
-            false,
-            alpha,
-            baked,
-            index,
-        ),
-        (DestinationMode::Axpby(beta), None) => {
+    let packed_offset = offset_to_isize(packed_offset)?;
+    match mode {
+        DestinationMode::Axpby(beta) => {
             zero_strides.clear();
             kernels.axpby_strided_baked(
                 dst_data,
@@ -474,23 +434,25 @@ where
                 layouts.strides(layout),
                 layouts.packed_strides(layout),
                 layout.offset,
-                offset_to_isize(packed_offset)?,
+                packed_offset,
                 alpha,
                 beta,
                 baked,
+                fused_index,
             )
         }
-        (DestinationMode::Overwrite, None) => kernels.copy_scale_strided_baked(
+        DestinationMode::Overwrite => kernels.copy_scale_strided_baked(
             dst_data,
             packed,
             shape,
             layouts.strides(layout),
             layouts.packed_strides(layout),
             layout.offset,
-            offset_to_isize(packed_offset)?,
+            packed_offset,
             false,
             alpha,
             baked,
+            fused_index,
         ),
     }
 }
@@ -558,7 +520,7 @@ where
                 let layout = task.layouts().entry(layout_index);
                 zero_strides.clear();
                 zero_strides.resize(task.layouts().shape(layout).len(), 0);
-                kernels.copy_scale_strided(
+                kernels.copy_scale_strided_baked(
                     dst_data,
                     &zero,
                     task.layouts().shape(layout),
@@ -568,6 +530,8 @@ where
                     0,
                     false,
                     D::one(),
+                    None,
+                    None,
                 )?;
             }
         }

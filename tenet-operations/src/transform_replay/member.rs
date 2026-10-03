@@ -294,7 +294,7 @@ where
     src_strides.clear();
     src_strides.extend_from_slice(local_src_strides);
     src_strides.push(src_member_stride);
-    kernels.copy_scale_strided(
+    kernels.copy_scale_strided_baked(
         dst,
         src,
         shape,
@@ -304,6 +304,8 @@ where
         src_offset,
         conjugate,
         scale,
+        None,
+        None,
     )
 }
 
