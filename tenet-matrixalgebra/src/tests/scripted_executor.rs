@@ -132,7 +132,7 @@ pub enum Call<'c, 'v> {
 }
 
 /// A reply that replaces the scripted action: owned outputs (empty for a
-/// destination entry, one tensor for a values-only entry) or an error.
+/// destination entry) or an error. Values-only entries take none.
 pub type Reply = Result<Vec<DenseTensor>, DenseError>;
 
 /// Per-test observation and scripting. Every method defaults to doing nothing.
@@ -146,8 +146,11 @@ pub trait Observer {
         None
     }
 
-    /// Sees the owned outputs of a forwarded or defaulted call.
-    fn outputs(&mut self, _op: Op, _outputs: &mut Vec<DenseTensor>) {}
+    /// Sees the owned outputs of a forwarded or defaulted `svd`, `qr`,
+    /// `eigh` or `eig`. Destination, values-only, full-SVD, solve and GEMM
+    /// entries have no owned outputs to show; `factorize_batch` has
+    /// [`Observer::batch_outputs`].
+    fn outputs(&mut self, _op: Op, _outputs: &[DenseTensor]) {}
 
     /// Sees the outputs of a forwarded `factorize_batch`.
     fn batch_outputs(&mut self, _outputs: &mut Vec<Vec<DenseTensor>>) {}
@@ -289,11 +292,35 @@ impl<O: Observer> DenseExecutor for Defaulted<'_, O> {
     ) -> Result<(), DenseError> {
         self.0.dot_general_into(output, lhs, rhs, config)
     }
+    // The one provided entry another default body calls (`eig_vals`).
+    fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.0.eig(input)
+    }
 }
 
-fn single(mut outputs: Vec<DenseTensor>) -> DenseTensor {
-    assert_eq!(outputs.len(), 1, "a values-only reply holds one tensor");
-    outputs.pop().unwrap()
+/// Runs the trait's default `eig` (which calls nothing), for `eig` itself:
+/// [`Defaulted`] routes `eig` back into the scripted executor.
+struct DefaultEig;
+
+impl DenseExecutor for DefaultEig {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        unreachable!("the default eig calls no other entry")
+    }
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        unreachable!("the default eig calls no other entry")
+    }
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        unreachable!("the default eig calls no other entry")
+    }
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        unreachable!("the default eig calls no other entry")
+    }
 }
 
 impl<O: Observer> ScriptedExecutor<O> {
@@ -312,11 +339,11 @@ impl<O: Observer> ScriptedExecutor<O> {
         if let Some(reply) = self.observer.call(Call::Read(op, &input)) {
             return reply;
         }
-        let mut outputs = match action {
+        let outputs = match action {
             Action::Forward => forward(&mut self.script.inner, input),
             _ => default(&mut Defaulted(self), input),
         }?;
-        self.observer.outputs(op, &mut outputs);
+        self.observer.outputs(op, &outputs);
         Ok(outputs)
     }
 
@@ -329,9 +356,10 @@ impl<O: Observer> ScriptedExecutor<O> {
         default: fn(&mut Defaulted<'_, O>, DenseRead<'_>) -> Result<DenseTensor, DenseError>,
     ) -> Result<DenseTensor, DenseError> {
         let action = self.script.enter(op)?;
-        if let Some(reply) = self.observer.call(Call::Read(op, &input)) {
-            return reply.map(single);
-        }
+        assert!(
+            self.observer.call(Call::Read(op, &input)).is_none(),
+            "values-only entries take no observer reply"
+        );
         match action {
             Action::Forward => forward(&mut self.script.inner, input),
             _ => default(&mut Defaulted(self), input),
@@ -363,7 +391,7 @@ impl<O: Observer> DenseExecutor for ScriptedExecutor<O> {
     }
 
     fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.owned(Op::Eig, input, |e, i| e.eig(i), |e, i| e.eig(i))
+        self.owned(Op::Eig, input, |e, i| e.eig(i), |_, i| DefaultEig.eig(i))
     }
 
     fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {

@@ -125,7 +125,7 @@ impl Observer for RejectSvdInto {
         None
     }
 
-    fn outputs(&mut self, op: Op, outputs: &mut Vec<DenseTensor>) {
+    fn outputs(&mut self, op: Op, outputs: &[DenseTensor]) {
         if op == Op::Svd {
             self.output_ptrs.push((
                 dense_tensor_pointer(&outputs[0]),
@@ -160,7 +160,7 @@ impl Observer for RejectEighInto {
             );
     }
 
-    fn outputs(&mut self, op: Op, outputs: &mut Vec<DenseTensor>) {
+    fn outputs(&mut self, op: Op, outputs: &[DenseTensor]) {
         if op == Op::Eigh {
             self.vector_ptrs.push(dense_tensor_pointer(&outputs[1]));
         }
@@ -528,7 +528,7 @@ impl Observer for RecordingEigh {
             .set(Op::Eigh, Action::Forward);
     }
 
-    fn outputs(&mut self, op: Op, outputs: &mut Vec<DenseTensor>) {
+    fn outputs(&mut self, op: Op, outputs: &[DenseTensor]) {
         if op == Op::Eigh {
             self.raw_values
                 .push(outputs[0].as_f64_slice().unwrap().to_vec());

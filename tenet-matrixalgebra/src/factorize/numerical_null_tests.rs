@@ -20,7 +20,7 @@ impl Observer for OwnedSvdSpy {
             );
     }
 
-    fn outputs(&mut self, op: Op, outputs: &mut Vec<DenseTensor>) {
+    fn outputs(&mut self, op: Op, outputs: &[DenseTensor]) {
         if op == Op::Svd {
             self.u_pointer = Some(
                 outputs[0]
