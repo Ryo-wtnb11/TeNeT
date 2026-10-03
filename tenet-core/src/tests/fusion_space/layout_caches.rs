@@ -674,3 +674,193 @@ fn explicit_shape_coupled_structure_reuses_the_bounded_leg_cache() {
     assert!(Arc::ptr_eq(&first, &from_legs));
     assert!(first.storage_tiling_proven());
 }
+
+fn reset_test_homspace() -> FusionTreeHomSpace {
+    FusionTreeHomSpace::from_sectors([(U1Irrep::new(3), 2)], [(U1Irrep::new(3), 5)])
+}
+
+/// One build of the complete structure, as `coupled_subblock_structure_from_leg_degeneracies`
+/// performs it before admission.
+fn complete_build(
+    homspace: &FusionTreeHomSpace,
+) -> (CompleteHomSpaceStructureCacheKey, Arc<BlockStructure>) {
+    let key = CompleteHomSpaceStructureCacheKey::new(&U1FusionRule, homspace);
+    let layout = homspace.cached_fusion_tree_layout(&U1FusionRule);
+    let (sector, degeneracy) =
+        coupled_subblock_parts_from_leg_degeneracies(homspace, &layout).unwrap();
+    let built = BlockStructure::from_parts(sector, degeneracy)
+        .unwrap()
+        .into_shared();
+    (key, built)
+}
+
+#[test]
+fn complete_cache_publishes_a_build_that_saw_no_reset() {
+    let _guard = test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_core_intern_tables();
+    let homspace = reset_test_homspace();
+    let epoch = core_reset_epoch();
+    let (key, built) = complete_build(&homspace);
+
+    let published = admit_complete_hom_space_structure(key, Arc::clone(&built), epoch);
+
+    // What: the epoch check does not block an ordinary miss.
+    assert!(Arc::ptr_eq(&published, &built));
+    let hit = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+        .unwrap();
+    assert!(Arc::ptr_eq(&hit, &built));
+}
+
+#[test]
+fn complete_cache_drops_a_build_that_started_before_a_reset() {
+    let _guard = test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_core_intern_tables();
+    let homspace = reset_test_homspace();
+    // A1: a build records its epoch and interns content, then a reset runs,
+    // then the build admits.
+    let epoch = core_reset_epoch();
+    let (key, stale) = complete_build(&homspace);
+    reset_core_intern_tables();
+
+    let returned = admit_complete_hom_space_structure(key, Arc::clone(&stale), epoch);
+
+    // What: the straddling build keeps its correct result, but the cache does
+    // not publish it, so a post-reset build mints a fresh content identity.
+    assert!(Arc::ptr_eq(&returned, &stale));
+    let fresh = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+        .unwrap();
+    assert_ne!(fresh.content_id(), stale.content_id());
+    assert_eq!(fresh.as_ref(), stale.as_ref());
+}
+
+#[test]
+fn complete_cache_drops_a_build_that_ran_inside_a_reset() {
+    let _guard = test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_core_intern_tables();
+    let homspace = reset_test_homspace();
+    let source = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+        .unwrap();
+    // A2: a build runs after the reset cleared the complete cache but before
+    // it cleared the intern tables, so it interns the pre-reset content.
+    let during = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = std::rc::Rc::clone(&during);
+    let hom = homspace.clone();
+    crate::block_structure::MID_RESET_HOOK.with(|hook| {
+        hook.set(Some(Box::new(move || {
+            let epoch = core_reset_epoch();
+            *slot.borrow_mut() = Some((epoch, complete_build(&hom)));
+        })));
+    });
+    reset_core_intern_tables();
+    let (epoch, (key, stale)) = during.borrow_mut().take().unwrap();
+    assert_eq!(stale.content_id(), source.content_id());
+
+    admit_complete_hom_space_structure(key, stale, epoch);
+
+    // What: no pre-reset content identity is published after the reset.
+    let fresh = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+        .unwrap();
+    assert_ne!(fresh.content_id(), source.content_id());
+}
+
+#[test]
+fn complete_cache_lookup_straddling_a_reset_keeps_the_newer_entry() {
+    let _guard = test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_core_intern_tables();
+    let homspace = reset_test_homspace();
+    // A cached entry whose wrapper died: the next lookup hits its content and
+    // rebuilds the wrapper before repointing the entry.
+    let stale_id = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+        .unwrap()
+        .content_id();
+    let hom = homspace.clone();
+    let newer = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = std::rc::Rc::clone(&newer);
+    LOOKUP_REFRESH_HOOK.with(|hook| {
+        hook.set(Some(Box::new(move || {
+            reset_core_intern_tables();
+            *slot.borrow_mut() = Some(
+                hom.coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+                    .unwrap(),
+            );
+        })));
+    });
+
+    let straddling = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+        .unwrap();
+    let newer = newer.borrow_mut().take().unwrap();
+
+    // What: the straddling lookup returns its own (pre-reset) result but does
+    // not overwrite the entry admitted after the reset.
+    assert_eq!(straddling.content_id(), stale_id);
+    assert_ne!(newer.content_id(), stale_id);
+    let after = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+        .unwrap();
+    assert!(Arc::ptr_eq(&after, &newer));
+}
+
+#[test]
+fn overlapping_resets_wait_so_the_epoch_stays_odd_until_the_first_finishes() {
+    let _guard = test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_core_intern_tables();
+    let homspace = reset_test_homspace();
+    // Kept alive so the intern table still resolves its content mid-reset.
+    let source = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+        .unwrap();
+    let source_id = source.content_id();
+    let start = core_reset_epoch();
+    let second_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let second = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let (slot, done, hom) = (
+        std::rc::Rc::clone(&second),
+        Arc::clone(&second_done),
+        homspace.clone(),
+    );
+    crate::block_structure::MID_RESET_HOOK.with(|hook| {
+        hook.set(Some(Box::new(move || {
+            // Reset B starts on another thread while reset A is mid-way.
+            let finished = Arc::clone(&done);
+            *slot.borrow_mut() = Some(std::thread::spawn(move || {
+                reset_core_intern_tables();
+                finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            }));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // What: B cannot run inside A, so the epoch stays odd and a build
+            // here (which interns A's not-yet-cleared content) is not
+            // published.
+            assert!(!done.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(core_reset_epoch(), start + 1);
+            let inside = hom
+                .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+                .unwrap();
+            assert_eq!(inside.content_id(), source_id);
+        })));
+    });
+    reset_core_intern_tables();
+    second.borrow_mut().take().unwrap().join().unwrap();
+
+    assert!(second_done.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(core_reset_epoch(), start + 4);
+    let after = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+        .unwrap();
+    assert_ne!(after.content_id(), source_id);
+}

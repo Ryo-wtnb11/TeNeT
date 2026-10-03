@@ -816,6 +816,7 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
+        let epoch = core_reset_epoch();
         let key = CompleteHomSpaceStructureCacheKey::new(rule, self);
         if let Some(structure) = complete_hom_space_structure_cached(&key) {
             return Ok(structure);
@@ -825,7 +826,11 @@ impl FusionTreeHomSpace {
         let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
         let built = BlockStructure::from_parts(sector, degeneracy)?;
         built.record_storage_tiling();
-        Ok(admit_complete_hom_space_structure(key, built.into_shared()))
+        Ok(admit_complete_hom_space_structure(
+            key,
+            built.into_shared(),
+            epoch,
+        ))
     }
 
     #[doc(hidden)]

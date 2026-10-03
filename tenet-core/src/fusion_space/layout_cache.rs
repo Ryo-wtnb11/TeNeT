@@ -455,14 +455,21 @@ impl CompleteHomSpaceStructureCache {
             })
     }
 
-    /// Repoints a retained entry at the canonical wrapper after its previous
-    /// wrapper died; a no-op when the key was evicted meanwhile.
+    /// Repoints the entry that still holds `peeked` at `structure`. An entry
+    /// that a reset removed, or that a later admission replaced, is left
+    /// alone, so a lookup that straddles a reset cannot republish its
+    /// pre-reset content.
     fn refresh(
         &mut self,
         key: &CompleteHomSpaceStructureCacheKey,
+        peeked: &Arc<BlockStructureContent>,
         structure: &Arc<BlockStructure>,
     ) {
-        if let Some(entry) = self.entries.peek_mut(key) {
+        if let Some(entry) = self
+            .entries
+            .peek_mut(key)
+            .filter(|entry| Arc::ptr_eq(&entry.content, peeked))
+        {
             // Content and wrapper must come from one interning generation:
             // a racing admit after intern-table eviction could otherwise pair
             // an old content id with a wrapper minted under a new one.
@@ -491,8 +498,8 @@ impl CompleteHomSpaceStructureCache {
     ) -> Arc<BlockStructure> {
         match self.peek(&key) {
             Some(CompleteHomSpaceStructureLookup::Wrapper(existing)) => return existing,
-            Some(CompleteHomSpaceStructureLookup::Content(_)) => {
-                self.refresh(&key, &structure);
+            Some(CompleteHomSpaceStructureLookup::Content(peeked)) => {
+                self.refresh(&key, &peeked, &structure);
                 return structure;
             }
             None => {}
@@ -589,8 +596,10 @@ impl CompleteHomSpaceStructureCacheInfo {
         self.hits
     }
     /// Completed builds that reached admission, including bypassed entries
-    /// and racing duplicates. Failed builds are not counted, and a hit peek
-    /// counts no miss, so `hits + misses` is not the lookup count.
+    /// and racing duplicates, excluding builds that straddled a reset
+    /// (counted as neither miss nor bypass). Failed builds are not counted,
+    /// and a hit peek counts no miss, so `hits + misses` is not the lookup
+    /// count.
     pub fn misses(self) -> usize {
         self.misses
     }
@@ -646,25 +655,47 @@ pub(super) fn complete_hom_space_structure_cached(
     match found? {
         CompleteHomSpaceStructureLookup::Wrapper(structure) => Some(structure),
         CompleteHomSpaceStructureLookup::Content(content) => {
-            let structure = BlockStructure::from_content(content).into_shared();
+            let structure = BlockStructure::from_content(Arc::clone(&content)).into_shared();
+            #[cfg(test)]
+            LOOKUP_REFRESH_HOOK.with(|hook| {
+                if let Some(hook) = hook.take() {
+                    hook();
+                }
+            });
             cache
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .refresh(key, &structure);
+                .refresh(key, &content, &structure);
             Some(structure)
         }
     }
 }
 
-pub(super) fn admit_complete_hom_space_structure(
+#[cfg(test)]
+std::thread_local! {
+    /// Runs once on this thread between a content-only hit and its refresh.
+    pub(crate) static LOOKUP_REFRESH_HOOK: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Admits a structure whose build began at reset epoch `epoch`. A build that
+/// straddles a reset returns its result unpublished (the reset contract at
+/// `reset_core_intern_tables`).
+pub(crate) fn admit_complete_hom_space_structure(
     key: CompleteHomSpaceStructureCacheKey,
     structure: Arc<BlockStructure>,
+    epoch: usize,
 ) -> Arc<BlockStructure> {
     let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &structure.content_key());
-    complete_hom_space_structure_cache()
+    let mut cache = complete_hom_space_structure_cache()
         .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .admit_built(Arc::new(key), structure, charged_bytes)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Checked under the write lock: a reset bumps the epoch before it takes
+    // this lock to clear, so an insert that passes is wiped by that clear.
+    if !may_publish_since(epoch) {
+        return structure;
+    }
+    cache.admit_built(Arc::new(key), structure, charged_bytes)
 }
 
 pub(crate) fn charged_complete_hom_space_structure_bytes(
