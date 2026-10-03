@@ -1,5 +1,7 @@
 use super::*;
 
+/// Test-only oracle helper; production swaps read lines through `ArtinSite`.
+#[cfg(test)]
 pub(super) fn inner_extended_sector<T>(tree: &T, index: usize) -> Result<SectorId, CoreError>
 where
     T: MultiplicityFreeTreeData + ?Sized,
