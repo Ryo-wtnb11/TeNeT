@@ -186,6 +186,8 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "CoupledSectorFold",
         "CoupledSectorFoldBuilder",
         "CoupledMatricizationBuilder",
+        "CoupledMatrixSide",
+        "CoupledTreePlacement",
         "CoupledMatrixPlacement",
         "CoupledSectorRegion",
         "CoupledTreeExtent",

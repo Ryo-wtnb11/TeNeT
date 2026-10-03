@@ -13,20 +13,21 @@ struct CoupledSectorMatrix<'a> {
 }
 
 impl<'a> CoupledSectorMatrix<'a> {
+    /// `rows` (`cols`) is the side's extent, as the placement produced it.
     fn new(
         base: usize,
         row_offsets: &'a [usize],
-        row_dims: &[usize],
+        rows: usize,
         col_offsets: &'a [usize],
-        col_dims: &[usize],
-    ) -> Result<Self, CoreError> {
-        Ok(Self {
+        cols: usize,
+    ) -> Self {
+        Self {
             base,
-            rows: matrix_extent(row_offsets, row_dims)?,
-            cols: matrix_extent(col_offsets, col_dims)?,
+            rows,
+            cols,
             row_offsets,
             col_offsets,
-        })
+        }
     }
 
     /// Pushes the strides of block `(row, col)` with degeneracy `shape`
@@ -65,15 +66,6 @@ impl<'a> CoupledSectorMatrix<'a> {
             .checked_mul(self.cols)
             .and_then(|len| self.base.checked_add(len))
             .ok_or(CoreError::ElementCountOverflow)
-    }
-}
-
-fn matrix_extent(offsets: &[usize], dims: &[usize]) -> Result<usize, CoreError> {
-    match offsets.last().zip(dims.last()) {
-        Some((&offset, &dim)) => offset
-            .checked_add(dim)
-            .ok_or(CoreError::ElementCountOverflow),
-        None => Ok(0),
     }
 }
 
@@ -192,15 +184,10 @@ where
             col_dims.push(dim);
         }
 
-        prefix_offsets_into(&row_dims, &mut row_offsets)?;
-        prefix_offsets_into(&col_dims, &mut col_offsets)?;
-        let matrix = CoupledSectorMatrix::new(
-            sector_offset,
-            &row_offsets,
-            &row_dims,
-            &col_offsets,
-            &col_dims,
-        )?;
+        let rows = prefix_offsets_into(&row_dims, &mut row_offsets)?;
+        let cols = prefix_offsets_into(&col_dims, &mut col_offsets)?;
+        let matrix =
+            CoupledSectorMatrix::new(sector_offset, &row_offsets, rows, &col_offsets, cols);
 
         for col in 0..sector.col_count {
             for row in 0..sector.row_count {
@@ -282,6 +269,10 @@ where
     let mut specs = Vec::with_capacity(keys.len());
     let mut sector_offset = 0usize;
     let mut run_start = 0usize;
+    let mut row_side = CoupledMatrixSide::<&FusionTreeKey, usize>::default();
+    let mut col_side = CoupledMatrixSide::<&FusionTreeKey, usize>::default();
+    let (mut row_offsets, mut row_dims) = (DimVec::new(), DimVec::new());
+    let (mut col_offsets, mut col_dims) = (DimVec::new(), DimVec::new());
     while run_start < keys.len() {
         let coupled = keys[run_start].borrow().codomain_tree().coupled();
         let mut run_end = run_start;
@@ -294,29 +285,28 @@ where
             run_end += 1;
         }
 
-        // Row/column blocks keep first-seen order (offsets are cumulative), with
-        // a hash side-index for O(1) tree lookup instead of a linear scan: a run
-        // can hold many blocks, so the scan was O(run^1.5).
-        let mut row_offsets = DimVec::new();
-        let mut row_dims = DimVec::new();
-        let mut col_offsets = DimVec::new();
-        let mut col_dims = DimVec::new();
-        let mut row_index: FxHashMap<&FusionTreeKey, usize> = FxHashMap::default();
-        let mut col_index: FxHashMap<&FusionTreeKey, usize> = FxHashMap::default();
+        // Row/column blocks keep first-seen order through core's placement
+        // rule; the positional offsets and dimensions feed the sector matrix.
+        row_side.clear();
+        col_side.clear();
+        row_offsets.clear();
+        row_dims.clear();
+        col_offsets.clear();
+        col_dims.clear();
         for index in run_start..run_end {
             let key = keys[index].borrow();
             let shape = shapes[index].as_ref();
             let row_dim = checked_product(&shape[..nout])?;
             let col_dim = checked_product(&shape[nout..])?;
             register_first_seen_block(
-                &mut row_index,
+                &mut row_side,
                 &mut row_offsets,
                 &mut row_dims,
                 key.codomain_tree(),
                 row_dim,
             )?;
             register_first_seen_block(
-                &mut col_index,
+                &mut col_side,
                 &mut col_offsets,
                 &mut col_dims,
                 key.domain_tree(),
@@ -336,16 +326,20 @@ where
         let matrix = CoupledSectorMatrix::new(
             sector_offset,
             &row_offsets,
-            &row_dims,
+            row_side.extent(),
             &col_offsets,
-            &col_dims,
-        )?;
+            col_side.extent(),
+        );
 
         for index in run_start..run_end {
             let key = keys[index].borrow();
             let shape = shapes[index].as_ref();
-            let row = row_index[key.codomain_tree()];
-            let col = col_index[key.domain_tree()];
+            let row = *row_side
+                .get(key.codomain_tree())
+                .expect("row tree placed above");
+            let col = *col_side
+                .get(key.domain_tree())
+                .expect("column tree placed above");
             let mut strides = Vec::with_capacity(rank);
             let offset = matrix.place(row, col, shape, nout, &mut strides)?;
             specs.push(BlockSpec::with_key(
@@ -364,30 +358,36 @@ where
 
 /// Registers `tree`'s row or column block on first sight, after the
 /// previously seen blocks; a repeated tree must keep its first extent.
+/// Places `tree`'s row or column block through core's placement rule; a
+/// repeated tree must keep its first dimension.
 fn register_first_seen_block<'k>(
-    index: &mut FxHashMap<&'k FusionTreeKey, usize>,
+    side: &mut CoupledMatrixSide<&'k FusionTreeKey, usize>,
     offsets: &mut DimVec,
     dims: &mut DimVec,
     tree: &'k FusionTreeKey,
     dim: usize,
 ) -> Result<(), CoreError> {
-    if let Some(&existing) = index.get(tree) {
-        return if dims[existing] == dim {
-            Ok(())
-        } else {
-            Err(CoreError::DimensionMismatch {
-                expected: dims[existing],
-                actual: dim,
-            })
-        };
+    let (index, new) = side.place(
+        tree,
+        || Ok(dim),
+        || CoreError::ElementCountOverflow,
+        |placed| {
+            offsets.push(placed.offset);
+            dims.push(placed.dim);
+            placed.index
+        },
+    )?;
+    if !new && dims[index] != dim {
+        return Err(CoreError::DimensionMismatch {
+            expected: dims[index],
+            actual: dim,
+        });
     }
-    offsets.push(matrix_extent(offsets, dims)?);
-    dims.push(dim);
-    index.insert(tree, dims.len() - 1);
     Ok(())
 }
 
-fn prefix_offsets_into(dims: &[usize], offsets: &mut DimVec) -> Result<(), CoreError> {
+/// Fills `offsets` with the running sums of `dims` and returns their total.
+fn prefix_offsets_into(dims: &[usize], offsets: &mut DimVec) -> Result<usize, CoreError> {
     offsets.clear();
     offsets.reserve(dims.len());
     let mut offset = 0usize;
@@ -397,5 +397,5 @@ fn prefix_offsets_into(dims: &[usize], offsets: &mut DimVec) -> Result<(), CoreE
             .checked_add(dim)
             .ok_or(CoreError::ElementCountOverflow)?;
     }
-    Ok(())
+    Ok(offset)
 }

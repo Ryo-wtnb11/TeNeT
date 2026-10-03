@@ -19,8 +19,8 @@ pub(super) fn compile_coupled_sector_regions(
     // Each region still owns one exact-length tree list.
     let mut row_trees = Vec::<CoupledTreeExtent>::new();
     let mut col_trees = Vec::<CoupledTreeExtent>::new();
-    let mut row_indexes = FxHashMap::<&FusionTreeKey, usize>::default();
-    let mut col_indexes = FxHashMap::<&FusionTreeKey, usize>::default();
+    let mut row_side = CoupledMatrixSide::<&FusionTreeKey, usize>::default();
+    let mut col_side = CoupledMatrixSide::<&FusionTreeKey, usize>::default();
     let mut tree_pairs = Vec::<(usize, usize)>::new();
     let mut seen_pairs = Vec::<bool>::new();
     let mut block_index = 0usize;
@@ -39,11 +39,9 @@ pub(super) fn compile_coupled_sector_regions(
 
         row_trees.clear();
         col_trees.clear();
-        row_indexes.clear();
-        col_indexes.clear();
+        row_side.clear();
+        col_side.clear();
         tree_pairs.clear();
-        let mut rows = 0usize;
-        let mut cols = 0usize;
         let mut end = block_index;
         while end < structure.block_count() {
             let block = structure.block(end)?;
@@ -60,20 +58,18 @@ pub(super) fn compile_coupled_sector_regions(
             let col_shape: DimVec = block.shape()[nout..].iter().copied().collect();
             let Some(row_index) = insert_coupled_tree_extent(
                 &mut row_trees,
-                &mut row_indexes,
+                &mut row_side,
                 key.codomain_tree(),
                 row_shape,
-                &mut rows,
             )?
             else {
                 return Ok(None);
             };
             let Some(col_index) = insert_coupled_tree_extent(
                 &mut col_trees,
-                &mut col_indexes,
+                &mut col_side,
                 key.domain_tree(),
                 col_shape,
-                &mut cols,
             )?
             else {
                 return Ok(None);
@@ -82,6 +78,7 @@ pub(super) fn compile_coupled_sector_regions(
             end += 1;
         }
 
+        let (rows, cols) = (row_side.extent(), col_side.extent());
         let expected_blocks = row_trees
             .len()
             .checked_mul(col_trees.len())
@@ -144,22 +141,28 @@ pub(super) fn compile_coupled_sector_regions(
     Ok(Some(regions))
 }
 
+/// Places one row or column tree of a canonical region through the shared
+/// placement rule; `None` when a repeated tree changes its shape (the
+/// layout is then not the canonical tiling).
 fn insert_coupled_tree_extent<'a>(
     trees: &mut Vec<CoupledTreeExtent>,
-    indexes: &mut FxHashMap<&'a FusionTreeKey, usize>,
+    side: &mut CoupledMatrixSide<&'a FusionTreeKey, usize>,
     tree: &'a FusionTreeKey,
     shape: DimVec,
-    total: &mut usize,
 ) -> Result<Option<usize>, CoreError> {
-    if let Some(&index) = indexes.get(tree) {
+    let mut offset = 0;
+    let (index, new) = side.place(
+        tree,
+        || checked_product(&shape),
+        || CoreError::ElementCountOverflow,
+        |placed| {
+            offset = placed.offset;
+            placed.index
+        },
+    )?;
+    if !new {
         return Ok((trees[index].shape() == shape.as_slice()).then_some(index));
     }
-    let index = trees.len();
-    let offset = *total;
-    *total = offset
-        .checked_add(checked_product(&shape)?)
-        .ok_or_else(|| CoreError::ElementCountOverflow)?;
-    indexes.insert(tree, index);
     trees.push(CoupledTreeExtent {
         tree: tree.clone(),
         offset,

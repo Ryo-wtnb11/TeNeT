@@ -1512,3 +1512,42 @@ fn block_validation_is_source_major_and_runs_once_per_source() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rule.n_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
 }
+
+#[test]
+fn keyed_coupled_layout_reports_extent_overflow_when_the_tree_is_placed() {
+    // One coupled sector with two row trees whose extents together exceed
+    // `usize` and two column trees.
+    let tree = |a: usize, b: usize| {
+        FusionTreeKey::try_from_sector_ids([a, b], 1, [false, false], [], [1]).unwrap()
+    };
+    let huge = usize::MAX / 2 + 1;
+    let (row_a, row_b, col_c, col_d) = (tree(1, 100), tree(2, 101), tree(10, 200), tree(11, 201));
+    let grid = [
+        (row_a.clone(), col_c.clone()),
+        (row_b.clone(), col_c.clone()),
+        (row_a, col_d.clone()),
+        (row_b, col_d),
+    ];
+    let keys = grid
+        .iter()
+        .map(|(row, col)| FusionTreePairKey::pair(row.clone(), col.clone()))
+        .collect::<Vec<_>>();
+    let shape = |dim: usize| vec![dim, 1, 1, 1];
+
+    // What: the placement rule reports the overflow as soon as the second
+    // row tree is placed, ahead of a later grid hole or extent change.
+    let holed = coupled_sector_matrix_block_specs(
+        2,
+        4,
+        &keys[..3],
+        &[shape(huge), shape(huge), shape(huge)],
+    );
+    assert_eq!(holed.unwrap_err(), CoreError::ElementCountOverflow);
+    let changed = coupled_sector_matrix_block_specs(
+        2,
+        4,
+        &keys,
+        &[shape(huge), shape(huge), shape(huge), shape(1)],
+    );
+    assert_eq!(changed.unwrap_err(), CoreError::ElementCountOverflow);
+}
