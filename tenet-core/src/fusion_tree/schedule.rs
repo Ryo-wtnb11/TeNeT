@@ -252,12 +252,16 @@ pub(super) fn run_cycles<T, E>(
 /// (`braiding_manipulations.jl` `braid`: `for s in permutation2swaps(p)`).
 /// The one step runner for term lists, single unique-fusion states and
 /// column-batched blocks.
+#[inline]
 pub(super) fn run_artin_steps<T, E>(
-    state: T,
+    mut state: T,
     steps: impl IntoIterator<Item = PreparedArtinStep>,
-    step: impl FnMut(T, PreparedArtinStep) -> Result<T, E>,
+    mut step: impl FnMut(T, PreparedArtinStep) -> Result<T, E>,
 ) -> Result<T, E> {
-    steps.into_iter().try_fold(state, step)
+    for artin in steps {
+        state = step(state, artin)?;
+    }
+    Ok(state)
 }
 
 /// The adjacent-swap braid of one tree as a term list, with `one` as the seed.

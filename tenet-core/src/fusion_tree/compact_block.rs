@@ -1,21 +1,19 @@
 use super::*;
 
-fn apply_first_compact_block_terms<R, K, F, I>(
-    rule: &R,
+fn apply_first_compact_block_terms<S, K, F, I>(
     basis: &[K],
     mut transform: F,
-) -> Result<(Vec<K>, DenseColumns<R::Scalar>), CoreError>
+) -> Result<(Vec<K>, DenseColumns<S>), CoreError>
 where
-    R: MultiplicityFreeFusionSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar>,
+    S: Clone + Add<Output = S>,
     K: Eq + Hash,
-    F: FnMut(&R, &K) -> Result<I, CoreError>,
-    I: IntoIterator<Item = (K, R::Scalar)>,
+    F: FnMut(&K) -> Result<I, CoreError>,
+    I: IntoIterator<Item = (K, S)>,
 {
     let mut index: FxHashMap<K, usize> = FxHashMap::default();
     let mut columns = DenseColumns::with_capacity(basis.len(), basis.len());
     for (source, source_local) in basis.iter().enumerate() {
-        for (destination_local, coefficient) in transform(rule, source_local)? {
+        for (destination_local, coefficient) in transform(source_local)? {
             let row = match index.get(&destination_local) {
                 Some(&row) => row,
                 None => {
@@ -45,22 +43,20 @@ where
 /// Run one compact move over `basis`: the first move of a chain writes the
 /// source columns directly (`columns == None`); later moves compose through
 /// the previous coefficient matrix. The move itself is `transform`.
-fn apply_compact_block_terms<R, K, F, I>(
-    rule: &R,
+fn apply_compact_block_terms<S, K, F, I>(
     basis: &[K],
-    columns: Option<&DenseColumns<R::Scalar>>,
-    mut transform: F,
-) -> Result<(Vec<K>, DenseColumns<R::Scalar>), CoreError>
+    columns: Option<&DenseColumns<S>>,
+    transform: F,
+) -> Result<(Vec<K>, DenseColumns<S>), CoreError>
 where
-    R: MultiplicityFreeFusionSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+    S: Clone + Add<Output = S> + Mul<Output = S>,
     K: Eq + Hash,
-    F: FnMut(&R, &K) -> Result<I, CoreError>,
-    I: IntoIterator<Item = (K, R::Scalar)>,
+    F: FnMut(&K) -> Result<I, CoreError>,
+    I: IntoIterator<Item = (K, S)>,
 {
     match columns {
-        None => apply_first_compact_block_terms(rule, basis, transform),
-        Some(columns) => compose_block_terms(basis, columns, |key| transform(rule, key)),
+        None => apply_first_compact_block_terms(basis, transform),
+        Some(columns) => compose_block_terms(basis, columns, transform),
     }
 }
 
@@ -77,9 +73,7 @@ where
 {
     let prepared = prepare_multiplicity_free_artin(rule, &basis.frame, index, inverse)?;
     let (locals, next_columns) =
-        apply_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
-            prepared.apply(rule, local)
-        })?;
+        apply_compact_block_terms(&basis.locals, columns, |local| prepared.apply(rule, local))?;
     Ok((
         CompactMultiplicityFreeTreeBasis {
             frame: prepared.output_frame,
@@ -126,12 +120,11 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     let prepared = prepare_multiplicity_free_bendright(rule, &basis.frame)?;
-    let (locals, next_columns) =
-        apply_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
-            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-            let coefficient = prepared.coefficient(rule, &validated);
-            Ok(std::iter::once((validated.local, coefficient)))
-        })?;
+    let (locals, next_columns) = apply_compact_block_terms(&basis.locals, columns, |local| {
+        let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
+        let coefficient = prepared.coefficient(rule, &validated);
+        Ok(std::iter::once((validated.local, coefficient)))
+    })?;
     let frame = prepared.output_frame(rule)?;
     Ok((
         CompactMultiplicityFreeTreePairBasis { frame, locals },
@@ -155,11 +148,10 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     let prepared = prepare_multiplicity_free_bendleft(rule, &basis.frame)?;
-    let (locals, next_columns) =
-        apply_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
-            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-            Ok(std::iter::once(prepared.finish_local(rule, validated)))
-        })?;
+    let (locals, next_columns) = apply_compact_block_terms(&basis.locals, columns, |local| {
+        let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
+        Ok(std::iter::once(prepared.finish_local(rule, validated)))
+    })?;
     let frame = prepared.output_frame(rule)?;
     Ok((
         CompactMultiplicityFreeTreePairBasis { frame, locals },
@@ -366,21 +358,20 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     let prepared = prepare_multiplicity_free_artin(rule, &basis.frame.codomain, index, inverse)?;
-    let (locals, next_columns) =
-        apply_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
-            let domain = local.domain.clone();
-            Ok(prepared.apply(rule, &local.codomain)?.into_iter().map(
-                move |(codomain, coefficient)| {
-                    (
-                        MultiplicityFreeTreePairLocal {
-                            codomain,
-                            domain: domain.clone(),
-                        },
-                        coefficient,
-                    )
-                },
-            ))
-        })?;
+    let (locals, next_columns) = apply_compact_block_terms(&basis.locals, columns, |local| {
+        let domain = local.domain.clone();
+        Ok(prepared.apply(rule, &local.codomain)?.into_iter().map(
+            move |(codomain, coefficient)| {
+                (
+                    MultiplicityFreeTreePairLocal {
+                        codomain,
+                        domain: domain.clone(),
+                    },
+                    coefficient,
+                )
+            },
+        ))
+    })?;
     let frame = MultiplicityFreeTreePairFrame {
         codomain: prepared.output_frame,
         domain: basis.frame.domain,
