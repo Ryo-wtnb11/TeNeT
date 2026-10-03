@@ -25,21 +25,6 @@ pub(super) struct GenericFactorPairSpaces<R> {
     pub(super) ordered: bool,
 }
 
-#[cfg(test)]
-thread_local! {
-    pub(super) static FACTOR_BUFFER_BUILD_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_factor_buffer_build_counts_for_test() {
-    FACTOR_BUFFER_BUILD_COUNTS.set((0, 0));
-}
-
-#[cfg(test)]
-pub(crate) fn factor_buffer_build_counts_for_test() -> (usize, usize) {
-    FACTOR_BUFFER_BUILD_COUNTS.get()
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum FactorSide {
     Left,
@@ -424,32 +409,6 @@ pub(crate) fn reorder_columns_in_place_for_test<D: Copy>(
     reorder_columns_in_place(vectors, n, order, visited, column_scratch);
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct PlacementIndexProbe {
-    /// Index tables allocated (one per owner call).
-    pub index_builds: usize,
-    /// `(matricization, side)` pairs inserted into a table.
-    pub indexed_sides: usize,
-    pub indexed_trees: usize,
-    pub lookups: usize,
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(super) static PLACEMENT_INDEX_PROBE: Cell<PlacementIndexProbe> = Cell::default();
-}
-
-#[cfg(test)]
-pub(crate) fn reset_placement_index_probe() {
-    PLACEMENT_INDEX_PROBE.set(PlacementIndexProbe::default());
-}
-
-#[cfg(test)]
-pub(crate) fn placement_index_probe() -> PlacementIndexProbe {
-    PLACEMENT_INDEX_PROBE.get()
-}
-
 /// Call-local first-match index of source trees by `(sector, side, key)`,
 /// built once per publication call over every matricization.
 ///
@@ -539,47 +498,6 @@ impl<'a> PlacementIndex<'a> {
             },
         )
     }
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ScatterVisitProbe {
-    /// Output blocks scanned by the grouping pass, per side (`B`).
-    pub left_grouped: usize,
-    pub right_grouped: usize,
-    /// Groupings built, per side (one per publication call).
-    pub left_groups_built: usize,
-    pub right_groups_built: usize,
-    /// Output blocks iterated by the paired scatter helpers, per side (`F`).
-    pub left_visits: usize,
-    pub right_visits: usize,
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(super) static SCATTER_VISIT_PROBE: Cell<ScatterVisitProbe> = Cell::default();
-}
-
-#[cfg(test)]
-pub(crate) fn reset_scatter_visit_probe() {
-    SCATTER_VISIT_PROBE.set(ScatterVisitProbe::default());
-}
-
-#[cfg(test)]
-pub(crate) fn scatter_visit_probe() -> ScatterVisitProbe {
-    SCATTER_VISIT_PROBE.get()
-}
-
-#[cfg(test)]
-pub(super) fn record_scatter_visit(side: FactorSide) {
-    SCATTER_VISIT_PROBE.with(|probe| {
-        let mut value = probe.get();
-        match side {
-            FactorSide::Left => value.left_visits += 1,
-            FactorSide::Right => value.right_visits += 1,
-        }
-        probe.set(value);
-    });
 }
 
 /// Output block indices of one factor side grouped by the coupled sector of

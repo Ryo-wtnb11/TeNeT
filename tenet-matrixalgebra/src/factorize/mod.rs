@@ -57,6 +57,7 @@ mod inverse;
 mod matricize;
 mod null_space;
 mod polar;
+mod probes;
 mod publish_checked;
 mod publish_mf;
 mod qr_lq;
@@ -96,6 +97,12 @@ pub(crate) use publish_checked::*;
 pub(crate) use publish_mf::*;
 #[cfg(not(test))]
 use publish_mf::*;
+// `probes` holds the thread-local test probes; outside tests it keeps only
+// the no-op recorders the publication paths call unconditionally.
+#[cfg(test)]
+pub(crate) use probes::*;
+#[cfg(not(test))]
+use probes::*;
 pub(crate) use qr_lq::*;
 pub(crate) use svd::*;
 

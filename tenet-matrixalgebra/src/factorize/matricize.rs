@@ -176,69 +176,6 @@ impl<'a, D: FactorScalar> InputMatricizations<'a, D> {
     }
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CheckedCompactOperation {
-    Qr,
-    Svd,
-    Lq,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CheckedCompactInputObservation {
-    pub operation: CheckedCompactOperation,
-    pub input_pointer: usize,
-    pub matrix_pointer: usize,
-    pub adjoint_pointer: Option<usize>,
-    pub elements: usize,
-}
-
-#[cfg(test)]
-pub(crate) fn reset_checked_compact_input_observations() {
-    CHECKED_COMPACT_INPUT_OBSERVATIONS.with(|observations| observations.borrow_mut().clear());
-}
-
-#[cfg(test)]
-pub(crate) fn checked_compact_input_observations() -> Vec<CheckedCompactInputObservation> {
-    CHECKED_COMPACT_INPUT_OBSERVATIONS.with(|observations| observations.borrow().clone())
-}
-
-#[cfg(test)]
-pub(super) fn record_checked_compact_input<D>(
-    operation: CheckedCompactOperation,
-    input: &[D],
-    matrix: &[D],
-    adjoint: Option<&[D]>,
-) {
-    CHECKED_COMPACT_INPUT_OBSERVATIONS.with(|observations| {
-        observations
-            .borrow_mut()
-            .push(CheckedCompactInputObservation {
-                operation,
-                input_pointer: input.as_ptr() as usize,
-                matrix_pointer: matrix.as_ptr() as usize,
-                adjoint_pointer: adjoint.map(|data| data.as_ptr() as usize),
-                elements: matrix.len(),
-            });
-    });
-}
-
-#[cfg(test)]
-pub(crate) fn reset_values_matricization_fallbacks() {
-    VALUES_MATRICIZATION_FALLBACKS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn values_matricization_fallbacks() -> usize {
-    VALUES_MATRICIZATION_FALLBACKS.with(Cell::get)
-}
-
-#[cfg(test)]
-pub(super) fn record_values_matricization_fallback() {
-    VALUES_MATRICIZATION_FALLBACKS.with(|count| count.set(count.get() + 1));
-}
-
 #[cfg(feature = "diagnostics")]
 #[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -396,41 +333,6 @@ pub(super) fn input_regions(
         return Ok(None);
     }
     checked_sector_regions(structure, nout)
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(super) static FORCE_INPUT_PACK: Cell<bool> = const { Cell::new(false) };
-    pub(super) static INPUT_PACK_BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-/// Runs `f` with region admission disabled, so every input packs.
-#[cfg(test)]
-pub(crate) fn with_forced_input_pack<T>(f: impl FnOnce() -> T) -> T {
-    let previous = FORCE_INPUT_PACK.with(|force| force.replace(true));
-    let result = f();
-    FORCE_INPUT_PACK.with(|force| force.set(previous));
-    result
-}
-
-#[cfg(test)]
-pub(crate) fn reset_input_pack_bytes() {
-    INPUT_PACK_BYTES.with(|bytes| bytes.set(0));
-}
-
-/// Bytes allocated by `sector_matricizations{,_generic}` on this thread.
-#[cfg(test)]
-pub(crate) fn input_pack_bytes() -> usize {
-    INPUT_PACK_BYTES.with(Cell::get)
-}
-
-#[cfg(test)]
-pub(super) fn record_input_pack_bytes<D>(matricizations: &[SectorMatricization<D>]) {
-    let bytes = matricizations
-        .iter()
-        .map(|matrix| matrix.data.len() * std::mem::size_of::<D>())
-        .sum::<usize>();
-    INPUT_PACK_BYTES.with(|total| total.set(total.get() + bytes));
 }
 
 pub(super) fn value_matricizations<'a, D>(

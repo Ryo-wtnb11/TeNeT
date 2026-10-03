@@ -189,21 +189,6 @@ where
 }
 
 #[cfg(test)]
-thread_local! {
-    pub(super) static GENERIC_FACTOR_PLAN_FINISH_CALLS: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_generic_factor_plan_finish_calls() {
-    GENERIC_FACTOR_PLAN_FINISH_CALLS.with(|calls| calls.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn generic_factor_plan_finish_calls() -> usize {
-    GENERIC_FACTOR_PLAN_FINISH_CALLS.with(Cell::get)
-}
-
-#[cfg(test)]
 pub(crate) fn prepare_compact_factor_plan_generic_checked_for_test<R, P>(
     input: &BoundDynamicFusionMapSpace<R>,
     provider: &P,
