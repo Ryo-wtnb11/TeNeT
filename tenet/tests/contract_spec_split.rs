@@ -11,12 +11,18 @@
 //! adjoint and compact diagonal operands, in real and complex payloads.
 
 mod common;
+#[path = "../../tests/support"]
+mod support {
+    use num_complex::{Complex32, Complex64};
+    pub mod numerics;
+}
+use support::numerics;
 #[allow(unused_macros)]
 mod contract_cases;
 
 use std::sync::Arc;
 
-use contract_cases::{assert_close, fermion_u1, fill, su2, u1_non_self_dual, Payload};
+use contract_cases::{fermion_u1, fill, su2, u1_non_self_dual, Payload};
 use num_complex::Complex64;
 use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::sector::{FibonacciFusionRule, FibonacciSector};
@@ -79,11 +85,11 @@ where
             let got = lhs.contract(rhs, &spec).unwrap();
             assert_eq!(got.codomain(), expected.codomain(), "{label}: codomain");
             assert_eq!(got.domain(), expected.domain(), "{label}: domain");
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                &label,
                 got.dense_data().unwrap(),
                 expected.dense_data().unwrap(),
                 terms,
-                &label,
             );
             let mut destination = expected.scale(D::entry(7.5, 0.0));
             lhs.contract_into(
@@ -95,11 +101,11 @@ where
             )
             .unwrap();
             assert_eq!(destination.codomain(), expected.codomain(), "{label}");
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                &format!("{label} overwrite"),
                 destination.dense_data().unwrap(),
                 expected.dense_data().unwrap(),
                 terms,
-                &format!("{label} overwrite"),
             );
             checked += 1;
         }
@@ -213,11 +219,11 @@ where
                 let got = lhs.contract(rhs, &spec).unwrap();
                 assert_eq!(got.codomain(), expected.codomain(), "{label}");
                 assert_eq!(got.domain(), expected.domain(), "{label}");
-                assert_close(
+                numerics::assert_nonzero_slices_close(
+                    &label,
                     got.dense_data().unwrap(),
                     expected.dense_data().unwrap(),
                     64,
-                    &label,
                 );
             }
         }

@@ -34,28 +34,6 @@ use tenet::typed::{BlockFusionTrees, ContractSpec, GradedSpace, Runtime, TensorM
 
 pub use crate::common::Payload;
 
-/// `terms` is the longest sum an entry of the result combines; the bound is
-/// `64 * sqrt(terms) * eps(D)` relative to the largest reference magnitude.
-pub fn assert_close<D: Payload>(actual: &[D], expected: &[D], terms: usize, what: &str) {
-    assert_eq!(actual.len(), expected.len(), "{what}: payload length");
-    let scale = expected
-        .iter()
-        .map(|value| value.magnitude())
-        .fold(0.0_f64, f64::max);
-    assert!(
-        scale > 0.0,
-        "{what}: the reference is all zero, so it proves nothing"
-    );
-    let tolerance = 64.0 * (terms.max(1) as f64).sqrt() * D::EPS * (1.0 + scale);
-    for (index, (&left, &right)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            left.distance(right) <= tolerance,
-            "{what} [{}]: element {index} is {left:?}, expected {right:?} (tolerance {tolerance:e})",
-            D::NAME
-        );
-    }
-}
-
 /// Dyadic counting fill, distinct per `salt`.
 pub fn fill<S, D: Payload>(salt: usize) -> impl FnMut(&BlockFusionTrees<S>, &[usize]) -> D {
     let mut next = salt;

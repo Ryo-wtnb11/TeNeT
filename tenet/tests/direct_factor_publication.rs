@@ -13,15 +13,10 @@ use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::{Complex32, Complex64, Runtime};
 use tenet::typed::{GradedSpace, Lq, TensorMap, TensorScalar};
 
-/// The receiver's own split as leg roles: `rows = 0..nout`.
-fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (0..t.codomain_rank()).collect()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
 
-/// The receiver's own split as leg roles: `cols = nout..rank`.
-fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (t.codomain_rank()..t.rank()).collect()
-}
+use fixtures::{codomain_axes, domain_axes};
 
 #[path = "../../tests/support/counting_alloc.rs"]
 mod counting_alloc;

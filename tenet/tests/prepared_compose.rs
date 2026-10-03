@@ -23,7 +23,7 @@ use tenet::typed::{
 };
 
 use common::Payload;
-use prepared::{assert_close, compose_oracle, filled, fz2u1_legs, members, su2_legs, u1_legs};
+use prepared::{compose_oracle, filled, fz2u1_legs, members, su2_legs, u1_legs};
 
 const MEMBER_COUNTS: [usize; 3] = [1, 2, 17];
 
@@ -150,11 +150,11 @@ where
                 eager.subblock_count() > unreached + 1,
                 "{label}: several active blocks"
             );
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                &format!("{label}: eager"),
                 eager.dense_data().unwrap(),
                 &oracle,
                 terms,
-                &format!("{label}: eager"),
             );
             oracles.push(oracle);
         }
@@ -164,11 +164,11 @@ where
         assert!(*output.signature() == a[0].compose(&b[0]).unwrap().structure_signature());
         for (index, oracle) in oracles.iter().enumerate() {
             let member = output.member(index).unwrap();
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                &format!("{label}: member {index}"),
                 member.dense_data().unwrap(),
                 oracle,
                 terms,
-                &format!("{label}: member {index}"),
             );
         }
 
@@ -183,11 +183,11 @@ where
             handle.execute_into(&lhs, &rhs, &mut dst).unwrap();
             for (index, oracle) in oracles.iter().enumerate() {
                 let member = dst.member(index).unwrap();
-                assert_close(
+                numerics::assert_nonzero_slices_close(
+                    &format!("{label}: execute_into over {name}, member {index}"),
                     member.dense_data().unwrap(),
                     oracle,
                     terms,
-                    &format!("{label}: execute_into over {name}, member {index}"),
                 );
             }
         }
@@ -260,11 +260,11 @@ fn warm_replay_retains_the_same_bytes_and_a_new_member_count_resizes() {
         handle.execute_into(&lhs, &rhs, &mut dst).unwrap();
         for (index, (x, y)) in a.iter().zip(&b).enumerate() {
             let (oracle, _) = compose_oracle(x, y, &x.compose(y).unwrap());
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                &format!("execute_into at B={count}, member {index}"),
                 dst.member(index).unwrap().dense_data().unwrap(),
                 &oracle,
                 x.dense_data().unwrap().len(),
-                &format!("execute_into at B={count}, member {index}"),
             );
         }
     }

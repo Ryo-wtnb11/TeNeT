@@ -382,11 +382,17 @@ where
         (&contract, &expected_contract),
         (&compose, &expected_compose),
     ] {
-        assert_close_c64(
-            actual.dense_data().unwrap(),
-            expected.dense_data().unwrap(),
-            1e-12,
-        );
+        // Why not `numerics`: these entries reach magnitude 271 next to exact
+        // zeros, where the rule's slice-wide bound would exceed the per-entry
+        // `1e-12 * (1 + |want|)` this gate holds.
+        let (got, want) = (actual.dense_data().unwrap(), expected.dense_data().unwrap());
+        assert_eq!(got.len(), want.len());
+        for (got, want) in got.iter().zip(want) {
+            assert!(
+                (got - want).norm() <= 1e-12 * (1.0 + want.norm()),
+                "{got} vs {want}"
+            );
+        }
         assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
     }
 
@@ -401,10 +407,11 @@ where
         .unwrap()
         .to_host()
         .unwrap();
-    assert_close_c64(
+    numerics::assert_slices_close(
+        "device_left",
         device_left.dense_data().unwrap(),
         host_left.dense_data().unwrap(),
-        1e-12,
+        CONTRACT_TERMS,
     );
     let host_right = rhs.compose(&rhs.adjoint().unwrap()).unwrap();
     let device_right = rhs_device
@@ -412,10 +419,11 @@ where
         .unwrap()
         .to_host()
         .unwrap();
-    assert_close_c64(
+    numerics::assert_slices_close(
+        "device_right",
         device_right.dense_data().unwrap(),
         host_right.dense_data().unwrap(),
-        1e-12,
+        CONTRACT_TERMS,
     );
 }
 

@@ -29,6 +29,12 @@
 #![cfg(feature = "cuda")]
 
 mod common;
+#[path = "../../tests/support"]
+mod support {
+    use num_complex::{Complex32, Complex64};
+    pub mod numerics;
+}
+use support::numerics;
 
 /// TensorKit's argument-free `transpose(t)`: the full planar rotation, which
 /// carries every codomain leg across the boundary and every domain leg back.

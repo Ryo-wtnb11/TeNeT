@@ -87,15 +87,17 @@ where
     }
     let left = left_device.to_host().unwrap();
     let right = right_device.to_host().unwrap();
-    assert_close(
+    numerics::assert_slices_close(
+        "left",
         left.dense_data().unwrap(),
         expected_left.dense_data().unwrap(),
-        1e-10,
+        FACTOR_TERMS,
     );
-    assert_close(
+    numerics::assert_slices_close(
+        "right",
         right.dense_data().unwrap(),
         expected_right.dense_data().unwrap(),
-        1e-10,
+        FACTOR_TERMS,
     );
     assert_eq!(
         structural_snapshot(&left),
@@ -106,10 +108,11 @@ where
         structural_snapshot(&expected_right)
     );
     let rebuilt = left.compose(&right).unwrap();
-    assert_close(
+    numerics::assert_slices_close(
+        "rebuilt",
         rebuilt.dense_data().unwrap(),
         source.dense_data().unwrap(),
-        1e-10,
+        FACTOR_TERMS,
     );
     assert_eq!(
         source_device
@@ -470,10 +473,11 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
         structural_snapshot(&expected_multi_right)
     );
     let rebuilt = left.compose(&right).unwrap();
-    assert_close(
+    numerics::assert_slices_close(
+        "rebuilt",
         rebuilt.dense_data().unwrap(),
         multi_tree.dense_data().unwrap(),
-        1e-10,
+        FACTOR_TERMS,
     );
 
     let zero = TensorMap::from_subblock_fn(&runtime, [&wide], [&wide], |_, _| 0.0).unwrap();
@@ -487,10 +491,11 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let zero_left = zero_left.to_host().unwrap();
     let zero_right = zero_right.to_host().unwrap();
     let zero_rebuilt = zero_left.compose(&zero_right).unwrap();
-    assert_close(
+    numerics::assert_slices_close(
+        "zero_rebuilt",
         zero_rebuilt.dense_data().unwrap(),
         zero.dense_data().unwrap(),
-        1e-10,
+        FACTOR_TERMS,
     );
     assert_finite_r_diagonal_nonnegative(&zero_right);
 
@@ -516,14 +521,15 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let rank_left = rank_left.to_host().unwrap();
     let rank_right = rank_right.to_host().unwrap();
     assert!(is_isometric!(rank_left, 1e-10));
-    assert_close(
+    numerics::assert_slices_close(
+        "rank_left .compose(rank_right)",
         rank_left
             .compose(&rank_right)
             .unwrap()
             .dense_data()
             .unwrap(),
         rank_deficient.dense_data().unwrap(),
-        1e-10,
+        FACTOR_TERMS,
     );
     assert_finite_r_diagonal_nonnegative(&rank_right);
 
@@ -550,14 +556,15 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
         .unwrap();
     let tiny_left = tiny_left.to_host().unwrap();
     let tiny_right = tiny_right.to_host().unwrap();
-    assert_close(
+    numerics::assert_slices_close(
+        "tiny_left .compose(tiny_right)",
         tiny_left
             .compose(&tiny_right)
             .unwrap()
             .dense_data()
             .unwrap(),
         tiny_negative.dense_data().unwrap(),
-        1e-10,
+        FACTOR_TERMS,
     );
     assert_finite_r_diagonal_nonnegative(&tiny_right);
 
@@ -584,15 +591,17 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
         let actual = device
             .qr_compact(&codomain_axes(&device), &domain_axes(&device))
             .unwrap();
-        assert_close(
+        numerics::assert_slices_close(
+            "actual.q",
             actual.q.to_host().unwrap().dense_data().unwrap(),
             expected_left.dense_data().unwrap(),
-            1e-10,
+            FACTOR_TERMS,
         );
-        assert_close(
+        numerics::assert_slices_close(
+            "actual.r",
             actual.r.to_host().unwrap().dense_data().unwrap(),
             expected_right.dense_data().unwrap(),
-            1e-10,
+            FACTOR_TERMS,
         );
     }
     std::thread::scope(|scope| {
@@ -607,23 +616,27 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
             .collect();
         for worker in workers {
             let actual = worker.join().unwrap();
-            assert_close(
+            numerics::assert_slices_close(
+                "actual.q",
                 actual.q.to_host().unwrap().dense_data().unwrap(),
                 expected_left.dense_data().unwrap(),
-                1e-10,
+                FACTOR_TERMS,
             );
-            assert_close(
+            numerics::assert_slices_close(
+                "actual.r",
                 actual.r.to_host().unwrap().dense_data().unwrap(),
                 expected_right.dense_data().unwrap(),
-                1e-10,
+                FACTOR_TERMS,
             );
         }
     });
 }
 
 /// Device QR is gauge-fixed like Host QR (positive diagonal), so the factors
-/// compare pointwise, at `64 sqrt(n) eps(f64) kappa` relative to the source
-/// norm, `kappa` the measured `sigma_max / sigma_min` of the source.
+/// compare pointwise, within the `numerics` rule
+/// `32 eps(f64) sqrt(n) max(1, L) kappa`: `n` the stored entries, `L` the
+/// largest compared magnitude, `kappa = sigma_max / sigma_min` of the source
+/// from its `svd_vals`.
 fn assert_c64_qr_matches_host<R>(source: &TensorMap<R, Complex64>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -640,11 +653,11 @@ where
         }
     }
     assert!(smallest > 0.0, "the QR fixture must have full rank");
-    let tolerance = 64.0
-        * f64::EPSILON
-        * (source_data.len().max(1) as f64).sqrt()
-        * source.norm(2.0).unwrap().max(1.0)
-        * (largest / smallest);
+    // `kappa` conditions the rule by the source's singular-value spread. The
+    // slice scale `L` (largest |entry| of Q, R or QR) never exceeds `||A||_F`,
+    // so the bound stays within the former `64 sqrt(n) eps ||A|| kappa`.
+    let terms = source_data.len().max(1);
+    let kappa = largest / smallest;
     let Qr {
         q: host_q,
         r: host_r,
@@ -663,20 +676,26 @@ where
     let r = r_device.to_host().unwrap();
     assert_eq!(structural_snapshot(&q), structural_snapshot(&host_q));
     assert_eq!(structural_snapshot(&r), structural_snapshot(&host_r));
-    assert_close_c64(
+    numerics::assert_slices_close_scaled(
+        "q",
         q.dense_data().unwrap(),
         host_q.dense_data().unwrap(),
-        tolerance,
+        terms,
+        kappa,
     );
-    assert_close_c64(
+    numerics::assert_slices_close_scaled(
+        "r",
         r.dense_data().unwrap(),
         host_r.dense_data().unwrap(),
-        tolerance,
+        terms,
+        kappa,
     );
-    assert_close_c64(
+    numerics::assert_slices_close_scaled(
+        "q.compose(r)",
         q.compose(&r).unwrap().dense_data().unwrap(),
         &source_data,
-        tolerance,
+        terms,
+        kappa,
     );
     assert_eq!(device.to_host().unwrap().dense_data().unwrap(), source_data);
 }
@@ -759,7 +778,7 @@ fn assert_c64_eigh_trunc_composition_matches_host<R>(
     for (actual, expected) in kept.iter().zip(&expected.eigenvalues) {
         assert_eq!(actual.sector, expected.sector);
         let values: Vec<f64> = actual.values.iter().map(|value| value.re).collect();
-        assert_close(&values, &expected.values, 1e-9);
+        numerics::assert_slices_close("values", &values, &expected.values, FACTOR_TERMS);
     }
     assert!((found.error - expected.error).abs() <= 1e-9 * (1.0 + expected.error));
 
@@ -770,7 +789,12 @@ fn assert_c64_eigh_trunc_composition_matches_host<R>(
             .unwrap()
             .compose(&v.adjoint().unwrap())
             .unwrap();
-        assert_close_c64(rebuilt.dense_data().unwrap(), &source_data, 1e-9);
+        numerics::assert_slices_close(
+            "rebuilt",
+            rebuilt.dense_data().unwrap(),
+            &source_data,
+            FACTOR_TERMS,
+        );
     }
     assert_eq!(device.to_host().unwrap().dense_data().unwrap(), source_data);
 }
@@ -799,7 +823,8 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
     let d = d.to_host().unwrap();
     let v = v.to_host().unwrap();
     assert!(is_isometric!(v, 1e-10), "V^H V = I");
-    assert_close_c64(
+    numerics::assert_slices_close(
+        "v.compose(d)  .compose(v.adjoint())",
         v.compose(&d)
             .unwrap()
             .compose(&v.adjoint().unwrap())
@@ -807,7 +832,7 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
             .dense_data()
             .unwrap(),
         hermitian.dense_data().unwrap(),
-        1e-9,
+        FACTOR_TERMS,
     );
 
     let su2 = GradedSpace::try_new(
@@ -894,7 +919,7 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
         .map(|z| z.re)
         .collect();
     values.sort_by(f64::total_cmp);
-    assert_close(&values, &[0.0, 0.0, 0.0, 2.0], 1e-10);
+    numerics::assert_slices_close("values", &values, &[0.0, 0.0, 0.0, 2.0], FACTOR_TERMS);
 
     let hand_symmetric =
         TensorMap::<_, Complex64>::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {

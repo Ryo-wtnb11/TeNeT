@@ -26,6 +26,12 @@
 #![cfg(feature = "cuda")]
 
 mod common;
+#[path = "../../tests/support"]
+mod support {
+    use num_complex::{Complex32, Complex64};
+    pub mod numerics;
+}
+use support::numerics;
 #[allow(unused_macros)] // the fermionic contraction fixture macro
 mod contract_cases;
 mod trace_cases;
@@ -33,7 +39,7 @@ mod trace_cases;
 use std::sync::Arc;
 
 use common::{DevicePayload, DeviceRule};
-use contract_cases::{assert_close, fill, u1};
+use contract_cases::{fill, u1};
 use num_complex::{Complex32, Complex64};
 use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
 use tenet::sector::PhysicalFusionBasis;
@@ -85,18 +91,18 @@ fn check<R: DeviceRule, D: DevicePayload>(case: &TraceCase<R, D>) -> TensorMap<R
         case.name
     );
     assert_eq!(actual.rank(), host.rank(), "{}", case.name);
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         actual.dense_data().unwrap(),
         host.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
     if let Some(identity) = &case.identity {
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            case.name,
             actual.dense_data().unwrap(),
             identity.dense_data().unwrap(),
             case.terms(),
-            case.name,
         );
     }
     // The same legs through a device lazy adjoint of the device parent.
@@ -109,11 +115,11 @@ fn check<R: DeviceRule, D: DevicePayload>(case: &TraceCase<R, D>) -> TensorMap<R
         "{} lazy",
         case.name
     );
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         lazy.dense_data().unwrap(),
         host_lazy.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
     actual
 }
@@ -126,7 +132,12 @@ where
     let actual = check(case);
     if case.dense {
         let physical = actual.to_physical_dense().unwrap().data;
-        assert_close(&physical, &dense_trace(case), case.terms(), case.name);
+        numerics::assert_nonzero_slices_close(
+            case.name,
+            &physical,
+            &dense_trace(case),
+            case.terms(),
+        );
     }
 }
 
@@ -183,11 +194,11 @@ fn device_fz2_trace_is_the_hand_valued_supertrace() {
             })
             .unwrap();
         let traced = device(&tensor.to_cuda().unwrap(), &[(0, 1)]);
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            "fZ2 supertrace",
             traced.dense_data().unwrap(),
             &[D::entry(-13.0, 0.0)],
             8,
-            "fZ2 supertrace",
         );
     }
     let runtime = Runtime::builder().cuda(0).build().unwrap();
@@ -235,7 +246,7 @@ fn repeated_destinations_accumulate_every_producer() {
     let sum: Vec<f64> = (0..full.dense_data().unwrap().len())
         .map(|index| parts.iter().map(|part| part[index]).sum())
         .collect();
-    assert_close(full.dense_data().unwrap(), &sum, 64, "sum of producers");
+    numerics::assert_nonzero_slices_close("sum of producers", full.dense_data().unwrap(), &sum, 64);
     let overlapping =
         (0..sum.len()).any(|index| parts.iter().filter(|part| part[index] != 0.0).count() >= 2);
     assert!(
@@ -354,11 +365,11 @@ fn a_warm_trace_past_the_default_plan_bound_rebuilds_no_plan() {
     assert_eq!(host.subblock_count(), 81);
     let source = host.to_cuda().unwrap();
     let cold = source.trace_pairs(&[(0, 2)]).unwrap();
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        "81-signature trace",
         cold.to_host().unwrap().dense_data().unwrap(),
         host.trace_pairs(&[(0, 2)]).unwrap().dense_data().unwrap(),
         64,
-        "81-signature trace",
     );
     let plans = runtime.cuda_plan_cache_stats().unwrap().unwrap();
     let _ = source.trace_pairs(&[(0, 2)]).unwrap();

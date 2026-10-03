@@ -54,10 +54,15 @@ use common::{DevicePayload, DeviceRule};
 // Tolerances
 // ---------------------------------------------------------------------------
 
-/// Elementwise bound for a result that combined `terms` values of magnitude
-/// `scale`: `8 * sqrt(terms) * eps(real(D)) * scale`.
-fn elementwise_tolerance<D: DevicePayload>(terms: usize, scale: f64) -> f64 {
-    8.0 * (terms as f64).sqrt() * D::EPS * scale.max(1.0)
+/// A result that combined `terms` values of magnitude at most `scale`.
+#[derive(Clone, Copy)]
+struct Combined {
+    terms: usize,
+    scale: f64,
+}
+
+fn combined(terms: usize, scale: f64) -> Combined {
+    Combined { terms, scale }
 }
 
 /// Absolute bound `2 * terms * eps(real(D)) * scale` for the `norm` check,
@@ -69,20 +74,29 @@ fn reduction_tolerance<D: DevicePayload>(terms: usize, scale: f64) -> f64 {
     2.0 * (terms as f64) * D::EPS * scale.max(1.0)
 }
 
-/// Compares against `tolerance * (1 + |expected|)`, the relative bound of the
-/// elementwise families.
-fn assert_close<D: DevicePayload>(actual: &[D], expected: &[D], tolerance: f64, what: &str) {
-    assert_eq!(actual.len(), expected.len(), "{what} [{}]: length", D::NAME);
-    for (index, (&left, &right)) in actual.iter().zip(expected).enumerate() {
-        let bound = tolerance * (1.0 + right.magnitude());
-        assert!(
-            left.distance(right) <= bound,
-            "{what} [{}]: element {index} is {left:?}, expected {right:?} \
-             (distance {}, bound {bound})",
-            D::NAME,
-            left.distance(right)
-        );
-    }
+/// The `numerics` rule over `combined.terms`. Why the extra assertion: this
+/// gate's earlier per-entry bound, `8 sqrt(terms) eps(D) scale (1 + |want_i|)`,
+/// was relative per entry, while the rule's bound is one per slice; the
+/// assertion keeps the rule's bound within the earlier one on the fixture
+/// actually compared, so moving to the shared rule never loosens the gate.
+#[track_caller]
+fn assert_matches_host<D: DevicePayload>(got: &[D], want: &[D], combined: Combined, what: &str) {
+    let what = format!("{what} [{}]", D::NAME);
+    let largest = want.iter().map(|v| v.magnitude()).fold(0.0_f64, f64::max);
+    let smallest = want
+        .iter()
+        .map(|v| v.magnitude())
+        .fold(f64::INFINITY, f64::min);
+    let former = 8.0
+        * (combined.terms as f64).sqrt()
+        * <D as numerics::Numeric>::EPS
+        * combined.scale.max(1.0)
+        * (1.0 + smallest.min(largest));
+    assert!(
+        numerics::tolerance::<D>(combined.terms, largest) <= former,
+        "{what}: the rule's bound would exceed the gate's former bound {former:e}"
+    );
+    numerics::assert_slices_close(&what, got, want, combined.terms);
 }
 
 fn assert_bit_exact<D: DevicePayload>(actual: &[D], expected: &[D], what: &str) {
@@ -106,9 +120,10 @@ fn assert_moved<D: DevicePayload>(source: &[D], transformed: &[D], what: &str) {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-fn runtime() -> Runtime {
-    Runtime::builder().cuda(0).dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::cuda_runtime;
 
 /// Dyadic, index-dependent, and complex-nontrivial where the dtype allows it.
 fn fill<D: DevicePayload, S>(seed: f64) -> impl FnMut(&BlockFusionTrees<S>, &[usize]) -> D {
@@ -207,7 +222,7 @@ where
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_transfer_round_trips_bit_exactly_at_every_payload() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let u1 = u1_leg();
     let su2 = su2_leg();
     let fz2su2 = fz2_su2_leg();
@@ -247,13 +262,13 @@ where
     let alpha = D::entry(2.0, -3.0);
     let beta = D::entry(-0.5, 1.25);
     let terms = a.materialize().unwrap().dense_data().unwrap().len();
-    let tolerance = elementwise_tolerance::<D>(2, 8.0);
+    let tolerance = combined(2, 8.0);
 
     let device_a = a.to_cuda().unwrap();
     let device_b = b.to_cuda().unwrap();
 
     let scaled = device_a.scale(alpha).unwrap().to_host().unwrap();
-    assert_close(
+    assert_matches_host(
         scaled.materialize().unwrap().dense_data().unwrap(),
         a.scale(alpha).materialize().unwrap().dense_data().unwrap(),
         tolerance,
@@ -270,7 +285,7 @@ where
         .unwrap()
         .to_host()
         .unwrap();
-    assert_close(
+    assert_matches_host(
         summed.materialize().unwrap().dense_data().unwrap(),
         a.axpby(alpha, &b, beta).unwrap().dense_data().unwrap(),
         tolerance,
@@ -292,7 +307,7 @@ where
         .unwrap()
         .axpby(alpha, &b.adjoint().unwrap(), beta)
         .unwrap();
-    assert_close(
+    assert_matches_host(
         lazy_a
             .axpby(alpha, &lazy_b, beta)
             .unwrap()
@@ -306,7 +321,7 @@ where
         tolerance,
         "lazy adjoint fold",
     );
-    assert_close(
+    assert_matches_host(
         lazy_a
             .scale(alpha)
             .unwrap()
@@ -338,7 +353,7 @@ where
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_arithmetic_matches_the_host_at_every_payload() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let u1 = u1_leg();
     let su2 = su2_leg();
 
@@ -418,7 +433,7 @@ where
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_reductions_match_the_host() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let u1 = u1_leg();
     let su2 = su2_leg();
 
@@ -552,7 +567,7 @@ fn fz2_u1_leg() -> GradedSpace<FermionU1> {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_norm_matches_the_host_where_a_payload_sum_would_overflow_or_underflow() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let u1 = u1_leg();
     let su2 = su2_leg();
     let fz2_u1 = fz2_u1_leg();
@@ -646,7 +661,7 @@ fn assert_inner_survives_overflowing_products<R, D>(
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_inner_matches_the_host_where_single_precision_products_overflow() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
@@ -726,7 +741,7 @@ fn a_warm_single_precision_reduction_costs_one_extra_device_allocation_per_opera
         ]
     }
 
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let leg = u1_leg();
     for (single, double, what) in [
         (
@@ -823,7 +838,7 @@ fn a_zero_scale_into_clears_a_nan_poisoned_destination() {
         }
     }
 
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let u1 = u1_leg();
     assert_cleared::<_, f64>(&runtime, &u1);
     assert_cleared::<_, Complex64>(&runtime, &u1);
@@ -843,7 +858,7 @@ where
     let a = TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(1.5)).unwrap();
     let b =
         TensorMap::<R, D>::from_subblock_fn(runtime, [leg], [leg], fill::<D, _>(-2.25)).unwrap();
-    let tolerance = elementwise_tolerance::<D>(a.dense_data().unwrap().len(), 64.0);
+    let tolerance = combined(a.dense_data().unwrap().len(), 64.0);
 
     let device_a = a.to_cuda().unwrap();
     let device_b = b.to_cuda().unwrap();
@@ -859,7 +874,7 @@ where
             },
         )
         .unwrap();
-    assert_close(
+    assert_matches_host(
         device_a
             .contract(
                 &device_b,
@@ -881,7 +896,7 @@ where
     );
 
     let host_compose = a.compose(&b).unwrap();
-    assert_close(
+    assert_matches_host(
         device_a
             .compose(&device_b)
             .unwrap()
@@ -896,7 +911,7 @@ where
 
     // A lazy adjoint operand: `A^H . B` on both sides.
     let host_lazy = a.adjoint().unwrap().compose(&b).unwrap();
-    assert_close(
+    assert_matches_host(
         device_a
             .adjoint()
             .unwrap()
@@ -939,7 +954,7 @@ where
             D::entry(0.0, 0.0),
         )
         .unwrap();
-    assert_close(
+    assert_matches_host(
         destination.to_host().unwrap().dense_data().unwrap(),
         host_contract.dense_data().unwrap(),
         tolerance,
@@ -962,7 +977,7 @@ where
             D::entry(0.0, 0.0),
         )
         .unwrap();
-    assert_close(
+    assert_matches_host(
         destination.to_host().unwrap().dense_data().unwrap(),
         host_contract.dense_data().unwrap(),
         tolerance,
@@ -973,7 +988,7 @@ where
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_contract_and_compose_match_the_host_at_every_payload() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let u1 = u1_leg();
     let su2 = su2_leg();
     let fz2su2 = fz2_su2_leg();
@@ -996,7 +1011,7 @@ fn device_contract_and_compose_match_the_host_at_every_payload() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_fermionic_signs_are_exact_at_every_payload() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let provider = Arc::new(FermionParityFusionRule);
     let odd = || GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)]).unwrap();
     let odd_dual = || odd().try_dual().unwrap();
@@ -1090,11 +1105,11 @@ where
     let device = host.to_cuda().unwrap();
     // A recoupling combines at most the tree cardinality of one block; three
     // legs over these fixtures keeps that small, so `16` is generous.
-    let tolerance = elementwise_tolerance::<D>(16, 16.0);
+    let tolerance = combined(16, 16.0);
 
     let host_permuted = host.permute(&[1, 2], &[0]).unwrap();
     let device_permuted = device.permute(&[1, 2], &[0]).unwrap().to_host().unwrap();
-    assert_close(
+    assert_matches_host(
         device_permuted.dense_data().unwrap(),
         host_permuted.dense_data().unwrap(),
         tolerance,
@@ -1107,7 +1122,7 @@ where
     );
 
     let levels: Vec<usize> = (0..host.rank()).collect();
-    assert_close(
+    assert_matches_host(
         device
             .braid(&[1, 2], &[0], &levels)
             .unwrap()
@@ -1123,7 +1138,7 @@ where
         "braid",
     );
 
-    assert_close(
+    assert_matches_host(
         device
             .repartition(1)
             .unwrap()
@@ -1136,7 +1151,7 @@ where
         "repartition",
     );
 
-    assert_close(
+    assert_matches_host(
         device
             .transpose(&[2], &[1, 0])
             .unwrap()
@@ -1165,7 +1180,7 @@ where
         device
             .permute_into(&[1, 2], &[0], &mut destination, alpha, D::from_real(0.0))
             .unwrap();
-        assert_close(
+        assert_matches_host(
             destination.to_host().unwrap().dense_data().unwrap(),
             host_permuted.scale(alpha).dense_data().unwrap(),
             tolerance,
@@ -1177,7 +1192,7 @@ where
         device
             .repartition_into(&mut bent, alpha, D::from_real(0.0))
             .unwrap();
-        assert_close(
+        assert_matches_host(
             bent.to_host().unwrap().dense_data().unwrap(),
             host_bent.scale(alpha).dense_data().unwrap(),
             tolerance,
@@ -1189,7 +1204,7 @@ where
         device
             .transpose_into(&[2], &[1, 0], &mut cyclic, alpha, D::from_real(0.0))
             .unwrap();
-        assert_close(
+        assert_matches_host(
             cyclic.to_host().unwrap().dense_data().unwrap(),
             host_cyclic.scale(alpha).dense_data().unwrap(),
             tolerance,
@@ -1199,7 +1214,7 @@ where
 
     // Round trip: permuting back reproduces the source at the payload's own
     // precision.
-    assert_close(
+    assert_matches_host(
         device
             .permute(&[1, 2], &[0])
             .unwrap()
@@ -1218,7 +1233,7 @@ where
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_transforms_match_the_host_at_every_payload() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let u1 = u1_leg();
     let su2 = su2_leg();
     let fz2su2 = fz2_su2_leg();
@@ -1243,7 +1258,7 @@ fn device_transforms_match_the_host_at_every_payload() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_warm_single_precision_into_transfers_nothing() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let leg = u1_leg();
 
     fn run<D: DevicePayload>(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) {
@@ -1368,7 +1383,7 @@ fn a_warm_single_precision_into_transfers_nothing() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn single_precision_costs_the_same_device_calls_and_half_the_bytes() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let leg = u1_leg();
 
     fn measure<D: DevicePayload>(

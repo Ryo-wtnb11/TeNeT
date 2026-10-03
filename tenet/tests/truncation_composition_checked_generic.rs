@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
 use tenet::sector::SUNFusionRule;
+use tenet::typed::TensorMap;
 use tenet::typed::{Eig, Eigh, GradedSpace, Svd};
-use tenet::typed::{Runtime, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -36,9 +36,10 @@ use truncation_oracle::{
     Offer,
 };
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 fn fill(state: &mut u64) -> f64 {
     *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -308,7 +309,7 @@ fn su3_svd_composition_matches_the_oracle_for_every_policy() {
     let (provider, leg) = su3_legs();
     let mut state = 0x5150_2701u64;
     let source: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime(), [&leg, &leg], [&leg], move |_, _| {
+        TensorMap::from_subblock_fn(&host_runtime(), [&leg, &leg], [&leg], move |_, _| {
             fill(&mut state)
         })
         .unwrap();
@@ -329,7 +330,7 @@ fn su3_complex_svd_composition_matches_the_oracle_for_every_policy() {
     let (provider, leg) = su3_legs();
     let mut state = 0x5150_2703u64;
     let source: TensorMap<_, Complex64> =
-        TensorMap::from_subblock_fn(&runtime(), [&leg, &leg], [&leg], move |_, _| {
+        TensorMap::from_subblock_fn(&host_runtime(), [&leg, &leg], [&leg], move |_, _| {
             Complex64::new(fill(&mut state), fill(&mut state))
         })
         .unwrap();
@@ -341,8 +342,10 @@ fn su3_eigh_composition_matches_the_oracle_for_every_policy() {
     let (provider, leg) = su3_legs();
     let mut state = 0x5150_2702u64;
     let raw: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state))
-            .unwrap();
+        TensorMap::from_subblock_fn(&host_runtime(), [&leg], [&leg], move |_, _| {
+            fill(&mut state)
+        })
+        .unwrap();
     let source = raw.axpby(1.0, &raw.adjoint().unwrap(), 1.0).unwrap();
     assert_su3_eigh_composition!(source, 1.0, su3_target(&provider), "su3 eigh f64");
 }
@@ -352,7 +355,7 @@ fn su3_complex_eigh_composition_matches_the_oracle_for_every_policy() {
     let (provider, leg) = su3_legs();
     let mut state = 0x5150_2704u64;
     let raw: TensorMap<_, Complex64> =
-        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| {
+        TensorMap::from_subblock_fn(&host_runtime(), [&leg], [&leg], move |_, _| {
             Complex64::new(fill(&mut state), fill(&mut state))
         })
         .unwrap();
@@ -371,7 +374,7 @@ fn su3_eig_composition_matches_the_oracle_for_every_policy() {
     let (provider, leg) = su3_legs();
     let mut state = 0x5150_2705u64;
     let source: TensorMap<_, f64> = TensorMap::from_subblock_fn(
-        &runtime(),
+        &host_runtime(),
         [&leg],
         [&leg],
         move |_, indices| match indices[0].cmp(&indices[1]) {

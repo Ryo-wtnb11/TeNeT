@@ -247,26 +247,6 @@ fn add<D: Payload>(a: D, b: D) -> D {
     D::entry(ar + br, ai + bi)
 }
 
-/// The `docs/testing_numerics.md` rule (`numerics::K`) elementwise, over the
-/// largest oracle magnitude; `terms` bounds the sum reaching one entry.
-#[track_caller]
-pub fn assert_close<D: Payload>(actual: &[D], expected: &[D], terms: usize, what: &str) {
-    assert_eq!(actual.len(), expected.len(), "{what}: length");
-    let scale = expected
-        .iter()
-        .map(|value| value.magnitude())
-        .fold(0.0_f64, f64::max);
-    assert!(scale > 0.0, "{what}: an all-zero oracle proves nothing");
-    let tolerance = crate::numerics::K * (terms.max(1) as f64).sqrt() * D::EPS * scale.max(1.0);
-    for (index, (&got, &want)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            got.distance(want) <= tolerance,
-            "{what} [{}]: element {index} is {got:?}, oracle {want:?} (tolerance {tolerance:e})",
-            D::NAME
-        );
-    }
-}
-
 /// The plan entries a device handle for `a · b` must reserve, derived from
 /// the public block trees alone: one per distinct coupled-sector GEMM shape
 /// `(m, k, n)` over the sectors both operands carry, plus one per distinct

@@ -230,10 +230,10 @@ pub fn permute_dense<D: Copy>(shape: &[usize], data: &[D], perm: &[usize]) -> (V
 /// `entry` never receives an un-suffixed float literal in a single-precision
 /// context: the caller passes `f64` and each impl performs its own conversion,
 /// which is also what keeps the fixtures dyadic and therefore exact.
-pub trait Payload: tenet::typed::TensorScalar + Copy + PartialEq + std::fmt::Debug {
+pub trait Payload:
+    tenet::typed::TensorScalar + Copy + PartialEq + std::fmt::Debug + crate::numerics::Numeric
+{
     const NAME: &'static str;
-    /// `eps` of the payload's *real lane* — the precision the device sums in.
-    const EPS: f64;
 
     fn entry(real: f64, imaginary: f64) -> Self;
     fn parts(self) -> (f64, f64);
@@ -252,7 +252,6 @@ pub trait Payload: tenet::typed::TensorScalar + Copy + PartialEq + std::fmt::Deb
 
 impl Payload for f64 {
     const NAME: &'static str = "f64";
-    const EPS: f64 = f64::EPSILON;
 
     fn entry(real: f64, _imaginary: f64) -> Self {
         real
@@ -265,7 +264,6 @@ impl Payload for f64 {
 
 impl Payload for num_complex::Complex64 {
     const NAME: &'static str = "c64";
-    const EPS: f64 = f64::EPSILON;
 
     fn entry(real: f64, imaginary: f64) -> Self {
         Self::new(real, imaginary)
@@ -278,7 +276,6 @@ impl Payload for num_complex::Complex64 {
 
 impl Payload for f32 {
     const NAME: &'static str = "f32";
-    const EPS: f64 = f32::EPSILON as f64;
 
     fn entry(real: f64, _imaginary: f64) -> Self {
         real as f32
@@ -291,7 +288,6 @@ impl Payload for f32 {
 
 impl Payload for num_complex::Complex32 {
     const NAME: &'static str = "c32";
-    const EPS: f64 = f32::EPSILON as f64;
 
     fn entry(real: f64, imaginary: f64) -> Self {
         Self::new(real as f32, imaginary as f32)

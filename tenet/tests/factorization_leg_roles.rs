@@ -35,9 +35,10 @@ fn measure<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
     (value, allocs.calls as usize, allocs.bytes as usize)
 }
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 /// Tree transforms executed so far: every transform looks its layout up once.
 fn transforms(runtime: &Runtime) -> usize {
@@ -301,7 +302,7 @@ macro_rules! check_fixture {
 #[test]
 fn leg_roles_equal_the_permute_composition() {
     let _serial = counting_alloc::serial();
-    let runtime = runtime();
+    let runtime = host_runtime();
     check_fixture!(runtime, u1_legs(), f64, 1553, "u1 f64");
     check_fixture!(runtime, u1_legs(), Complex64, 1553, "u1 c64");
     check_fixture!(runtime, su2_legs(), f64, 1553, "su2 f64");
@@ -315,7 +316,7 @@ fn leg_roles_equal_the_permute_composition() {
 fn checked_generic_leg_roles_equal_the_permute_composition() {
     let _serial = counting_alloc::serial();
     use tenet::sector::SUNFusionRule;
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let v =
         GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 2), (vec![0, 0], 1)]).unwrap();
@@ -330,7 +331,7 @@ fn checked_generic_leg_roles_equal_the_permute_composition() {
 #[test]
 fn lazy_adjoint_leg_roles_equal_the_permute_composition() {
     let _serial = counting_alloc::serial();
-    let runtime = runtime();
+    let runtime = host_runtime();
     let (v, w) = su2_legs();
     let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &w], [&w, &v], 7).unwrap();
     let adjoint = t.adjoint().unwrap();
@@ -349,7 +350,7 @@ fn lazy_adjoint_leg_roles_equal_the_permute_composition() {
 #[test]
 fn space_preserving_roles_cost_the_current_split_plus_one_permute() {
     let _serial = counting_alloc::serial();
-    let runtime = runtime();
+    let runtime = host_runtime();
     let (v, w) = su2_legs();
     let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &v], [&w, &w], 9).unwrap();
     let (rows, cols) = ([1, 0], [3, 2]);
@@ -393,7 +394,7 @@ fn space_preserving_roles_cost_the_current_split_plus_one_permute() {
 #[test]
 fn leg_roles_cost_exactly_the_explicit_composition() {
     let _serial = counting_alloc::serial();
-    let runtime = runtime();
+    let runtime = host_runtime();
     let (v, w) = su2_legs();
     let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &w], [&w, &v], 3).unwrap();
     let (rows, cols) = ([2, 0], [3, 1]);
@@ -440,7 +441,7 @@ fn leg_roles_cost_exactly_the_explicit_composition() {
 #[test]
 fn solve_roles_cost_the_two_explicit_permutations() {
     let _serial = counting_alloc::serial();
-    let runtime = runtime();
+    let runtime = host_runtime();
     let (v, w) = su2_legs();
     let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v, &w], [&v, &w]).unwrap();
     let b: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &w], [&v, &w], 77).unwrap();
@@ -520,7 +521,7 @@ fn solve_roles_cost_the_two_explicit_permutations() {
 #[test]
 fn malformed_roles_are_rejected_before_the_operation() {
     let _serial = counting_alloc::serial();
-    let runtime = runtime();
+    let runtime = host_runtime();
     let (v, w) = u1_legs();
     let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &w], [&w, &v], 1).unwrap();
     let invalid = |error: Error| {
@@ -576,7 +577,7 @@ fn malformed_roles_are_rejected_before_the_operation() {
 #[test]
 fn fermionic_boundary_crossing_square_roles_equal_the_permute_composition() {
     let _serial = counting_alloc::serial();
-    let runtime = runtime();
+    let runtime = host_runtime();
     let (v, w) = fz2_u1_legs();
     let t: TensorMap<_, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&v, &w], [&v, &w], 1555).unwrap();

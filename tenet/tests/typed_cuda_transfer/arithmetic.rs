@@ -418,10 +418,11 @@ fn typed_cuda_c64_inner_is_conjugate_linear_in_the_first_argument() {
         assert!((inner - host_inner).norm() <= tolerance);
         assert!((b_device.inner(&a_device).unwrap() - inner.conj()).norm() <= tolerance);
         let scaled = a_device.scale(i).unwrap();
-        assert_close_c64(
+        numerics::assert_slices_close(
+            "scaled",
             scaled.to_host().unwrap().dense_data().unwrap(),
             a.scale(i).dense_data().unwrap(),
-            1e-12,
+            ELEMENTWISE_TERMS,
         );
         assert!((scaled.inner(&b_device).unwrap() - (-i) * inner).norm() <= tolerance);
         assert!(
@@ -459,7 +460,8 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
     let a_device = a.to_cuda().unwrap();
     let b_device = b.to_cuda().unwrap();
 
-    assert_close_c64(
+    numerics::assert_slices_close(
+        "a_device .scale(alpha)",
         a_device
             .scale(alpha)
             .unwrap()
@@ -470,9 +472,10 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
             .dense_data()
             .unwrap(),
         a.scale(alpha).materialize().unwrap().dense_data().unwrap(),
-        1e-12,
+        ELEMENTWISE_TERMS,
     );
-    assert_close_c64(
+    numerics::assert_slices_close(
+        "a_device .axpby(alpha, b_device, beta)",
         a_device
             .axpby(alpha, &b_device, beta)
             .unwrap()
@@ -483,9 +486,9 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
             .dense_data()
             .unwrap(),
         a.axpby(alpha, &b, beta).unwrap().dense_data().unwrap(),
-        1e-12,
+        ELEMENTWISE_TERMS,
     );
-    assert_close_c64(
+    assert_eq!(
         a_device
             .zeros_like()
             .unwrap()
@@ -495,8 +498,7 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
             .unwrap()
             .dense_data()
             .unwrap(),
-        &vec![Complex64::new(0.0, 0.0); a.materialize().unwrap().dense_data().unwrap().len()],
-        0.0,
+        &vec![Complex64::new(0.0, 0.0); a.materialize().unwrap().dense_data().unwrap().len()]
     );
 
     // `(alpha A^H + beta B^H) == (conj(alpha) A + conj(beta) B)^H`.
@@ -507,7 +509,8 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
         .unwrap()
         .axpby(alpha, &b.adjoint().unwrap(), beta)
         .unwrap();
-    assert_close_c64(
+    numerics::assert_slices_close(
+        "lazy_a .axpby(alpha, lazy_b, beta)",
         lazy_a
             .axpby(alpha, &lazy_b, beta)
             .unwrap()
@@ -518,10 +521,11 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
             .dense_data()
             .unwrap(),
         host_fold.materialize().unwrap().dense_data().unwrap(),
-        1e-12,
+        ELEMENTWISE_TERMS,
     );
     for factor in [Complex64::new(0.0, 1.0), Complex64::new(1.0, 2.0), alpha] {
-        assert_close_c64(
+        numerics::assert_slices_close(
+            "lazy_a .scale(factor)",
             lazy_a
                 .scale(factor)
                 .unwrap()
@@ -538,7 +542,7 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
                 .unwrap()
                 .dense_data()
                 .unwrap(),
-            1e-12,
+            ELEMENTWISE_TERMS,
         );
     }
     assert!(matches!(

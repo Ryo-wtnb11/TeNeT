@@ -27,17 +27,12 @@ use prepared::eigh::{
     check_member, degenerate_entry, has_degenerate_group, has_plus_minus_tie, hermitian_members,
     plus_minus_entry, single_leg,
 };
-use prepared::{assert_close, fz2u1_legs, members, su2_legs, u1_legs};
+use prepared::{fz2u1_legs, members, su2_legs, u1_legs};
 
-/// The receiver's own split as leg roles: `rows = 0..nout`.
-fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (0..t.codomain_rank()).collect()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
 
-/// The receiver's own split as leg roles: `cols = nout..rank`.
-fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (t.codomain_rank()..t.rank()).collect()
-}
+use fixtures::{codomain_axes, domain_axes};
 
 const MEMBER_COUNTS: [usize; 3] = [1, 2, 7];
 
@@ -90,17 +85,17 @@ where
             );
         }
         let terms = input.dense_data().unwrap().len();
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            &format!("{what}: gauge-fixed v"),
             v.dense_data().unwrap(),
             eager_v.dense_data().unwrap(),
             terms,
-            &format!("{what}: gauge-fixed v"),
         );
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            &format!("{what}: d"),
             d.dense_data().unwrap(),
             eager_d.materialize().unwrap().dense_data().unwrap(),
             terms,
-            &format!("{what}: d"),
         );
         assert!(
             output.spectra[member]

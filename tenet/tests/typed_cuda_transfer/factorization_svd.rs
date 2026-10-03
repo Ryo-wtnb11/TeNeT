@@ -88,7 +88,12 @@ fn assert_typed_cuda_svd_trunc_composition_matches_host<R>(
     assert_eq!(kept.len(), expected.singular_values.len());
     for (actual, expected) in kept.iter().zip(&expected.singular_values) {
         assert_eq!(actual.sector, expected.sector);
-        assert_close(&actual.values, &expected.values, 1e-10);
+        numerics::assert_slices_close(
+            "actual.values",
+            &actual.values,
+            &expected.values,
+            FACTOR_TERMS,
+        );
     }
     assert!((found.error - expected.error).abs() <= 1e-10 * (1.0 + expected.error));
 
@@ -101,10 +106,11 @@ fn assert_typed_cuda_svd_trunc_composition_matches_host<R>(
         .unwrap()
         .compose(&expected.vh)
         .unwrap();
-    assert_close(
+    numerics::assert_slices_close(
+        "actual_rebuilt",
         actual_rebuilt.dense_data().unwrap(),
         expected_rebuilt.dense_data().unwrap(),
-        1e-10,
+        FACTOR_TERMS,
     );
     assert_eq!(
         source_device
@@ -517,7 +523,7 @@ fn assert_c64_svd_trunc_composition_matches_host<R>(
     for (actual, expected) in kept.iter().zip(&expected.singular_values) {
         assert_eq!(actual.sector, expected.sector);
         let values: Vec<f64> = actual.values.iter().map(|value| value.re).collect();
-        assert_close(&values, &expected.values, 1e-9);
+        numerics::assert_slices_close("values", &values, &expected.values, FACTOR_TERMS);
     }
     assert!((found.error - expected.error).abs() <= 1e-9 * (1.0 + expected.error));
 
@@ -530,10 +536,11 @@ fn assert_c64_svd_trunc_composition_matches_host<R>(
         .unwrap()
         .compose(&expected.vh)
         .unwrap();
-    assert_close_c64(
+    numerics::assert_slices_close(
+        "actual_rebuilt",
         actual_rebuilt.dense_data().unwrap(),
         expected_rebuilt.dense_data().unwrap(),
-        1e-9,
+        FACTOR_TERMS,
     );
     assert_eq!(device.to_host().unwrap().dense_data().unwrap(), source_data);
 }

@@ -8,23 +8,23 @@
 use num_complex::Complex64;
 use std::sync::Arc;
 
-use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, LegSelection, StackedTensorMap, TensorMap};
 
 #[macro_use]
 #[path = "stacked/fixtures.rs"]
 mod fixtures;
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod shared_fixtures;
+
+use shared_fixtures::host_runtime;
 
 macro_rules! restrict_members {
     ($label:expr, $leg:expr) => {{
         let leg = $leg;
         let a = leg(0);
         let dual = a.try_dual().unwrap();
-        let runtime = runtime();
+        let runtime = host_runtime();
         restrict_members!(@dtype $label, &runtime, &a, &dual, f64);
         restrict_members!(@dtype $label, &runtime, &a, &dual, Complex64);
     }};
@@ -88,7 +88,7 @@ macro_rules! multi_axis_members {
         let leg = $leg;
         let a = leg(0);
         let dual = a.try_dual().unwrap();
-        let runtime = runtime();
+        let runtime = host_runtime();
         multi_axis_members!(@dtype $label, &runtime, &a, &dual, f64);
         multi_axis_members!(@dtype $label, &runtime, &a, &dual, Complex64);
     }};
@@ -142,7 +142,7 @@ macro_rules! malformed {
         let a = leg(0);
         let dual = a.try_dual().unwrap();
         let other = leg(1);
-        let runtime = runtime();
+        let runtime = host_runtime();
         let members = mixed_members!(&runtime, &a, &dual, f64, 2);
         let stack = StackedTensorMap::pack(&members).unwrap();
         let on_a = &selections(&a)[0];
@@ -186,7 +186,7 @@ fn restrict_leg_rejects_what_eager_rejects() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn a_selection_of_another_rule_instance_is_a_rule_mismatch() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let leg = |rank: usize, trivial: Vec<i64>| {
         let rule = Arc::new(tenet::sector::SUNFusionRule::new(rank).unwrap());
         GradedSpace::try_new(rule, [(trivial, 2)]).unwrap()
@@ -209,7 +209,7 @@ fn a_selection_of_another_rule_instance_is_a_rule_mismatch() {
 
 #[test]
 fn restrict_leg_of_a_blockless_structure_is_empty() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let q = fixtures::U1Irrep::new;
     let charged = GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(1), 2)]).unwrap();
     let neutral = GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(0), 2)]).unwrap();

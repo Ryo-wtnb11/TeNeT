@@ -16,7 +16,7 @@ use tenet::sector::{
     MultiplicityFreeRigidSymbols, PackedProductCodec, ProductSectorLayout, SectorCodec,
     Su2SectorLayout, U1SectorLayout,
 };
-use tenet::typed::{Complex64, GradedSpace, Runtime, TensorMap, Truncation};
+use tenet::typed::{Complex64, GradedSpace, TensorMap, Truncation};
 use tenet::typed::{Eig, Eigh, LeftPolar, Lq, Qr, RightPolar, Svd};
 
 type Fz2SectorLayout = tenet::sector::Fz2SectorLayout;
@@ -26,9 +26,10 @@ type Fz2U1Su2Codec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
 type Fz2U1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
 type Fz2U1Su2Rule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, Fz2U1Su2Codec>;
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 macro_rules! assert_close {
     ($actual:expr, $expected:expr) => {{
@@ -79,7 +80,7 @@ macro_rules! assert_provider {
 /// observable without pinning a dense-factor gauge.
 macro_rules! factor_conformance {
     ($name:expr, $rule:expr, $pairs:expr) => {{
-        let rt = runtime();
+        let rt = host_runtime();
         let provider = Arc::new($rule);
         let pairs = $pairs;
         let endo_space = GradedSpace::try_new(Arc::clone(&provider), pairs.clone()).unwrap();

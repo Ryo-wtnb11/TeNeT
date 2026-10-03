@@ -21,8 +21,8 @@ use num_complex::{Complex32, Complex64};
 use tenet::sector::{
     FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
+use tenet::typed::TensorMap;
 use tenet::typed::{Eig, GradedSpace};
-use tenet::typed::{Runtime, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -31,19 +31,10 @@ mod truncation_oracle;
 
 use truncation_oracle::{discarded_norm, select, triangular_eigenvalues, ClosedFormDim, Offer};
 
-/// The receiver's own split as leg roles: `rows = 0..nout`.
-fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (0..t.codomain_rank()).collect()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
 
-/// The receiver's own split as leg roles: `cols = nout..rank`.
-fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (t.codomain_rank()..t.rank()).collect()
-}
-
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+use fixtures::{codomain_axes, domain_axes, host_runtime};
 
 fn fill(state: &mut u64) -> f64 {
     *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -203,7 +194,7 @@ where
         + tenet::sector::SectorCodec,
     D: tenet::typed::TensorScalar,
 {
-    TensorMap::from_subblock_fn(&runtime(), [leg], [leg], |_, indices| {
+    TensorMap::from_subblock_fn(&host_runtime(), [leg], [leg], |_, indices| {
         match indices[0].cmp(&indices[1]) {
             std::cmp::Ordering::Equal => diagonal(),
             std::cmp::Ordering::Less => upper(),
@@ -308,7 +299,7 @@ fn lazy_adjoint_eig_composition_matches_the_hand_selection() {
 fn a_whole_sector_is_dropped_from_the_eig_bond() {
     let leg = u1_leg(&[(0, 3), (1, 2)]);
     let source: TensorMap<_, f64> =
-        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], |trees, indices| {
+        TensorMap::from_subblock_fn(&host_runtime(), [&leg], [&leg], |trees, indices| {
             let scale = if trees.coupled() == &U1Irrep::new(0) {
                 1.0
             } else {
@@ -349,7 +340,7 @@ where
     R::Sector: Ord + Clone,
 {
     let mut state = seed;
-    TensorMap::from_subblock_fn(&runtime(), codomain, codomain, |trees, indices| {
+    TensorMap::from_subblock_fn(&host_runtime(), codomain, codomain, |trees, indices| {
         let row = (
             trees.codomain_uncoupled().to_vec(),
             trees.codomain_innerlines().to_vec(),
