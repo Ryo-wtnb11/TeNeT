@@ -1,18 +1,287 @@
 //! Export firewall for `tenet-operations` (#1804).
 //!
-//! Raw kernels, fusion-tree helpers and unrouted replay entries are crate
-//! internals: no workspace crate calls them, and keeping them public froze
-//! signatures that the one-pipeline refactors (#1851) must change. This test
-//! fails when one of them becomes `pub` again, so re-exposing one is reviewed
-//! as an API change.
+//! Two pins, both over every feature combination at once:
+//! - the exact public modules and `pub use` leaves of `lib.rs`, so adding or
+//!   removing a crate-root export fails here and is reviewed as an API change;
+//! - the raw kernels, fusion-tree helpers, unrouted replay entries and compile
+//!   constructors narrowed in #1804, which live inside public or glob-exported
+//!   modules and so are invisible to the `lib.rs` pin. No workspace crate
+//!   calls them, and keeping them public froze signatures that the
+//!   one-pipeline refactors (#1851) must change.
 //!
-//! Why a source scan and not `compile_fail` doctests: one doctest proves the
-//! absence of one path at a time, and the crate root re-exports whole modules
-//! by glob, so the definition's visibility is the single place that decides
-//! whether a name escapes.
+//! Why a source scan and not an import list: an import list only proves
+//! presence, not absence.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Drops comments (line, doc and `/* */`) and blanks string literals so that
+/// neither can hide or fake an item.
+fn strip(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(ch) = rest.chars().next() {
+        if rest.starts_with("//") {
+            rest = &rest[rest.find('\n').unwrap_or(rest.len())..];
+        } else if rest.starts_with("/*") {
+            rest = &rest[rest.find("*/").map_or(rest.len(), |end| end + 2)..];
+            out.push(' ');
+        } else if ch == '"' {
+            let mut escaped = false;
+            let end = rest[1..]
+                .find(|c: char| {
+                    let close = c == '"' && !escaped;
+                    escaped = c == '\\' && !escaped;
+                    close
+                })
+                .map_or(rest.len(), |end| end + 2);
+            rest = &rest[end..];
+            out.push_str("\"\"");
+        } else {
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    out
+}
+
+/// Public names of `lib.rs`: `mod <name>` for each `pub mod <name>;`, the
+/// leaf of each `pub use` (`<path>::*` for a glob), or an error for any other
+/// inline public item (`pub fn`, `pub mod m { .. }`, ...) or
+/// `#[macro_export]`, which this firewall would otherwise not see.
+fn exported_names(source: &str) -> Result<BTreeSet<String>, String> {
+    let code = strip(source);
+    if code.contains("macro_export") {
+        return Err("lib.rs exports a macro_rules! macro".into());
+    }
+    let mut names = BTreeSet::new();
+    for (at, _) in code.match_indices("pub") {
+        let before = code[..at].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let after = &code[at + 3..];
+        if after.starts_with('(') || after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+            continue; // `pub(crate)` etc., or an identifier such as `public`
+        }
+        let item = after.trim_start();
+        if let Some(module) = item
+            .strip_prefix("mod")
+            .filter(|t| t.starts_with(char::is_whitespace))
+        {
+            let end = module.find([';', '{']).ok_or("unterminated pub mod")?;
+            if module[end..].starts_with('{') {
+                return Err("lib.rs gained an inline `pub mod` body".into());
+            }
+            names.insert(format!("mod {}", module[..end].trim()));
+            continue;
+        }
+        let Some(tree) = item
+            .strip_prefix("use")
+            .filter(|t| t.starts_with(char::is_whitespace))
+        else {
+            let keyword = item.split_whitespace().next().unwrap_or("");
+            return Err(format!("lib.rs gained an inline `pub {keyword}` item"));
+        };
+        let tree = tree[..tree.find(';').ok_or("unterminated pub use")?].trim();
+        let leaves = match tree.find('{') {
+            Some(open) => {
+                let inner = tree[open + 1..]
+                    .trim_end()
+                    .strip_suffix('}')
+                    .ok_or("bad use tree")?;
+                if inner.contains('{') {
+                    return Err(format!("nested use tree: {tree}"));
+                }
+                inner.split(',').collect::<Vec<_>>()
+            }
+            None => vec![tree],
+        };
+        for leaf in leaves
+            .iter()
+            .map(|leaf| leaf.trim())
+            .filter(|l| !l.is_empty())
+        {
+            if leaf.ends_with('*') {
+                names.insert(leaf.split_whitespace().collect());
+                continue;
+            }
+            let name = leaf.rsplit(" as ").next().unwrap();
+            names.insert(name.rsplit("::").next().unwrap().trim().to_owned());
+        }
+    }
+    Ok(names)
+}
+
+/// Whether stripped `code` defines `name` as an unrestricted `pub fn`.
+fn defines_public_fn(code: &str, name: &str) -> bool {
+    ['(', '<']
+        .iter()
+        .any(|open| code.contains(&format!("pub fn {name}{open}")))
+}
+
+#[test]
+fn firewall_rejects_every_inline_public_item() {
+    for item in [
+        "pub mod m {}",
+        "pub fn f() {}",
+        "pub struct S;",
+        "pub enum E {}",
+        "pub trait T {}",
+        "pub type A = u8;",
+        "pub const C: u8 = 0;",
+        "pub static S: u8 = 0;",
+        "pub union U { a: u8 }",
+        "pub unsafe fn f() {}",
+        "pub extern crate core;",
+        "#[macro_export]\nmacro_rules! m { () => {} }",
+    ] {
+        let source = format!("pub use a::B;\n{item}\n");
+        assert!(exported_names(&source).is_err(), "accepted `{item}`");
+    }
+}
+
+#[test]
+fn firewall_ignores_comments_strings_and_restricted_visibility() {
+    let source = r#"
+        //! pub fn doc() {}
+        /* pub enum Hidden {} */
+        #[path = "pub fn x.rs"]
+        pub(crate) mod inner;
+        pub(super) fn helper() {}
+        pub mod visible;
+        pub use a::{B, c::D as E}; // pub struct Trailing;
+        pub use f::G;
+        pub use h::*;
+    "#;
+    let names = exported_names(source).unwrap();
+    assert_eq!(
+        names,
+        ["B", "E", "G", "h::*", "mod visible"]
+            .map(str::to_owned)
+            .into()
+    );
+}
+
+#[test]
+fn internal_fn_scan_sees_only_unrestricted_definitions() {
+    let code = strip(
+        "// pub fn hidden()\npub(crate) fn narrowed() {}\npub fn open<T>() {}\nlet _ = \"pub fn s()\";",
+    );
+    assert!(!defines_public_fn(&code, "hidden"));
+    assert!(!defines_public_fn(&code, "narrowed"));
+    assert!(!defines_public_fn(&code, "s"));
+    assert!(defines_public_fn(&code, "open"));
+}
+
+#[test]
+fn tenet_operations_root_exports_exactly_the_pinned_names() {
+    let expected = [
+        // public modules
+        "mod axis",
+        "mod cuda",
+        "mod cuda_transform",
+        "mod fusion_replay",
+        "mod host_pool",
+        "mod host_scratch",
+        "mod kernel_adapter",
+        "mod replay_backend",
+        "mod stacked",
+        "mod storage_scratch",
+        "mod strided",
+        "mod structure_identity",
+        "mod tensoradd",
+        "mod transform_plan",
+        "mod transform_replay",
+        "mod transform_structure",
+        // glob re-exports
+        "axis::*",
+        "replay_backend::*",
+        "tensoradd::*",
+        "transform_replay::*",
+        "transform_structure::*",
+        // checked block layout (hidden)
+        "take_checked_block_passes",
+        "CheckedBlockLayout",
+        "CheckedBlockPasses",
+        // cuda transform
+        "CudaTreeTransformDestination",
+        "CudaTreeTransformExecutor",
+        "DEFAULT_COEFFICIENT_BUDGET_BYTES",
+        "DEFAULT_PLAN_CACHE_BUDGET_BYTES",
+        // error
+        "OperationError",
+        // fusion replay
+        "fusion_scale_block_layouts_excluding",
+        "ContractDestinationInit",
+        "FusionBlockContractGroupPlan",
+        "FusionBlockContractPlan",
+        "FusionBlockContractWorkspace",
+        "FusionBlockMatrixGroup",
+        "FusionScaleBlockLayout",
+        "FusionStridedBlockLayout",
+        "FusionSubblockMatrixLayout",
+        "HostFusionBlockContractWorkspace",
+        "Rank2Gemm",
+        "StorageGemm",
+        // routed host scalar kernels
+        "axpby_raw_strided_kernel_trusted",
+        "scale_raw_strided_kernel_trusted",
+        "tensoradd_raw_strided_kernel",
+        "bilinear_raw_strided_kernel_mapped",
+        "tensortrace_raw_strided_kernel_add_with_coefficient_trusted",
+        "tensortrace_raw_strided_kernel_trusted",
+        // kernel adapter
+        "BakedFusedLayout",
+        "HostKernelAdapter",
+        "StridedHostKernelAdapter",
+        // placement / profile
+        "ReportsPlacement",
+        "TensorContractFusionProfile",
+        "TensorContractFusionRoute",
+        // scalar
+        "scale_value",
+        "ConjugateValue",
+        "DenseBlockScalar",
+        "DenseRecouplingScalar",
+        "RealStructuralCoefficient",
+        "RecouplingCoefficientAction",
+        "TransformScale",
+        "TreeTransformScalar",
+        "WideScalar",
+        // transform key / plan / profile
+        "TreeTransformOperation",
+        "TreeTransformOperationKind",
+        "TreeTransformBlockSpec",
+        "TreeTransformGroupBlockSpec",
+        "TreeTransformGroupPlan",
+        "TreeTransformKeyBlockSpec",
+        "TreeTransformReplayProfile",
+        // owned buffers (hidden)
+        "take_owned_block_prefills",
+        "overwrite_owned_blocks",
+        "overwrite_owned_member_blocks",
+        "BlockOverwrite",
+        "zeroed_payload",
+        "ZeroBytes",
+        "try_cat_owned_c64_raw",
+        "try_cat_owned_mixed_raw",
+        "try_cat_owned_raw",
+        "OwnedCatC64Source",
+        "OwnedCatCopy",
+        "OwnedCatSide",
+        "try_tensortrace_owned_raw",
+        "OwnedTraceTerm",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        exported_names(include_str!("../src/lib.rs")).unwrap(),
+        expected
+    );
+}
 
 const CRATE_INTERNAL: &[&str] = &[
     // Raw kernels; the `_trusted` drivers are the routed entries.
@@ -67,23 +336,20 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn crate_internal_items_stay_out_of_the_public_api() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+fn crate_internal_functions_stay_out_of_the_public_api() {
     let mut files = Vec::new();
-    rust_sources(&src, &mut files);
+    rust_sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
     let mut escaped = Vec::new();
     for file in &files {
-        let source = fs::read_to_string(file).unwrap();
+        let code = strip(&fs::read_to_string(file).unwrap());
         for name in CRATE_INTERNAL {
-            for open in ['(', '<'] {
-                if source.contains(&format!("pub fn {name}{open}")) {
-                    escaped.push(format!("{}: {name}", file.display()));
-                }
+            if defines_public_fn(&code, name) {
+                escaped.push(format!("{}: {name}", file.display()));
             }
         }
     }
     assert!(escaped.is_empty(), "public again: {escaped:#?}");
-
-    let lib = fs::read_to_string(src.join("lib.rs")).unwrap();
-    assert!(!lib.contains("pub mod transform_helpers;"));
 }
