@@ -7,10 +7,8 @@ struct LoweredTypedNetwork<R> {
     rule_identity: RuleIdentity,
 }
 
-#[allow(dead_code)]
 pub(crate) struct BoundSymmetricSlicedPlan<R> {
     plan: SymmetricSlicedPlan,
-    authorities: Vec<GradedSpace<R>>,
     occurrences: Vec<Vec<BoundSliceOccurrence>>,
     output_effective: Vec<GradedSpace<R>>,
     output_codomain_rank: usize,
@@ -21,13 +19,6 @@ struct BoundSliceOccurrence {
     slice_index: usize,
     effective_axis: usize,
     partner: bool,
-}
-
-#[allow(dead_code)]
-impl<R> BoundSymmetricSlicedPlan<R> {
-    pub(crate) fn plan(&self) -> &SymmetricSlicedPlan {
-        &self.plan
-    }
 }
 
 impl Network {
@@ -185,7 +176,6 @@ impl Network {
         lower_symmetric_sliced_plan(&lowered.ir, lowered.rule_identity, &legs, sliced)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn bind_symmetric_sliced_plan<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
@@ -213,7 +203,6 @@ impl Network {
             });
         }
 
-        let mut authorities = Vec::with_capacity(plan.slices().indices().len());
         let mut specs = Vec::with_capacity(plan.slices().indices().len());
         for index in plan.slices().indices() {
             let edge = lowered.ir.edge(index.label()).ok_or_else(|| {
@@ -232,16 +221,15 @@ impl Network {
                     },
                 ));
             }
-            let actual = lowered
+            let actual_leg = lowered
                 .spaces
                 .get(authority.tensor().index())
                 .and_then(|spaces| spaces.get(authority.axis()))
-                .cloned()
+                .map(|space| space.network_sector_leg().clone())
                 .ok_or_else(|| SymmetricSliceLowerError::MissingAuthority {
                     label: index.label().clone(),
                     authority,
                 })?;
-            let actual_leg = actual.network_sector_leg().clone();
             if index.authority_leg() != &actual_leg {
                 return Err(SymmetricSliceLowerError::AuthorityLegMismatch {
                     label: index.label().clone(),
@@ -250,7 +238,6 @@ impl Network {
                     actual: index.authority_leg().clone(),
                 });
             }
-            authorities.push(actual);
             specs.push(SymmetricSliceSpec::new(
                 index.label().clone(),
                 authority,
@@ -291,7 +278,6 @@ impl Network {
         let plan = SymmetricSlicedPlan::new(plan.plan().clone(), rebound);
         Ok(BoundSymmetricSlicedPlan {
             plan,
-            authorities,
             occurrences,
             output_effective,
             output_codomain_rank,

@@ -279,10 +279,9 @@ fn symmetric_slice_binding_checks_adjoint_orientation_leg_and_rule() {
     let valid = network
         .lower_symmetric_sliced_plan(&[&tensor], dense)
         .unwrap();
-    let bound = network
+    network
         .bind_symmetric_sliced_plan(&[&tensor], valid.clone())
         .unwrap();
-    assert_eq!(bound.plan(), &valid);
 
     let index = &valid.slices().indices()[0];
     assert_eq!(index.authority_leg().sectors(), &[U1Irrep::new(-1).into()]);

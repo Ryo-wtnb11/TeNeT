@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use crate::cost::{BlockSparseCostModel, BlockSparseTensorInfo, DenseCostModel};
+use crate::cost::DenseCostModel;
 use crate::error::{ContractError, Result};
 use crate::ir::NetworkIR;
 use crate::labels::{TemporaryLabel, TensorId};
@@ -150,18 +150,6 @@ pub trait DenseContractionOptimizer {
         -> Result<Vec<ContractionStep>>;
 }
 
-/// Optimizer interface for Abelian block-sparse contraction plans.
-///
-/// The optimizer receives a block-aware cost model, so it can select a different
-/// order than dense-shape FLOP estimates would suggest.
-pub trait BlockSparseContractionOptimizer<S: Ord + Clone> {
-    fn optimize(
-        &self,
-        ir: &NetworkIR,
-        cost_model: &BlockSparseCostModel<S>,
-    ) -> Result<Vec<ContractionStep>>;
-}
-
 /// Default dense greedy contraction optimizer.
 ///
 /// This is cheap to run and deterministic. For hard networks, import an
@@ -177,20 +165,6 @@ impl DenseContractionOptimizer for GreedyDenseOptimizer {
         cost_model: &DenseCostModel,
     ) -> Result<Vec<ContractionStep>> {
         greedy_order(ir, cost_model)
-    }
-}
-
-/// Default Abelian block-sparse greedy contraction optimizer.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct GreedyBlockSparseOptimizer;
-
-impl<S: Ord + Clone> BlockSparseContractionOptimizer<S> for GreedyBlockSparseOptimizer {
-    fn optimize(
-        &self,
-        ir: &NetworkIR,
-        cost_model: &BlockSparseCostModel<S>,
-    ) -> Result<Vec<ContractionStep>> {
-        greedy_order_block_sparse(ir, cost_model)
     }
 }
 
@@ -244,16 +218,6 @@ impl DenseContractionOptimizer for LabelOrderDenseOptimizer {
         cost_model: &DenseCostModel,
     ) -> Result<Vec<ContractionStep>> {
         dense_order_from_labels(ir, cost_model, &self.order)
-    }
-}
-
-impl<S: Ord + Clone> BlockSparseContractionOptimizer<S> for LabelOrderDenseOptimizer {
-    fn optimize(
-        &self,
-        ir: &NetworkIR,
-        cost_model: &BlockSparseCostModel<S>,
-    ) -> Result<Vec<ContractionStep>> {
-        block_sparse_order_from_labels(ir, cost_model, &self.order)
     }
 }
 
@@ -654,241 +618,4 @@ fn validate_explicit_order_labels(ir: &NetworkIR, order: &[TemporaryLabel]) -> R
         }
     }
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct ActiveBlockSparseTensor<S: Ord + Clone> {
-    id: TensorId,
-    labels: Vec<TemporaryLabel>,
-    info: BlockSparseTensorInfo<S>,
-}
-
-fn greedy_order_block_sparse<S: Ord + Clone>(
-    ir: &NetworkIR,
-    cost_model: &BlockSparseCostModel<S>,
-) -> Result<Vec<ContractionStep>> {
-    if ir.tensors().len() < 2 {
-        return Err(ContractError::NotEnoughTensors);
-    }
-
-    let mut active = ir
-        .tensors()
-        .iter()
-        .map(|tensor| {
-            Ok(ActiveBlockSparseTensor {
-                id: tensor.id(),
-                labels: tensor.labels().to_vec(),
-                info: cost_model.tensor_info(tensor.id())?.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut steps = Vec::new();
-
-    while active.len() > 1 {
-        let mut best = None::<(usize, usize, usize)>;
-        for lhs_index in 0..active.len() {
-            for rhs_index in (lhs_index + 1)..active.len() {
-                let cost =
-                    cost_model.pair_cost(&active[lhs_index].info, &active[rhs_index].info)?;
-                match best {
-                    Some((_, _, best_cost)) if best_cost <= cost => {}
-                    _ => best = Some((lhs_index, rhs_index, cost)),
-                }
-            }
-        }
-
-        let (lhs_index, rhs_index, cost) = best.ok_or(ContractError::NotEnoughTensors)?;
-        let rhs = active.remove(rhs_index);
-        let lhs = active.remove(lhs_index);
-        let remaining_labels = active
-            .iter()
-            .map(|tensor| tensor.labels.clone())
-            .collect::<Vec<_>>();
-        let result_info = cost_model.contraction_result_info(
-            &lhs.info,
-            &rhs.info,
-            &remaining_labels,
-            ir.output_labels(),
-        )?;
-        let result_id = TensorId::new(ir.tensors().len() + steps.len());
-        let result_labels = contraction_result_labels(
-            &lhs.labels,
-            &rhs.labels,
-            &remaining_labels,
-            ir.output_labels(),
-        );
-        steps.push(ContractionStep::new(
-            lhs.id,
-            rhs.id,
-            result_id,
-            cost,
-            result_labels.clone(),
-        ));
-        active.push(ActiveBlockSparseTensor {
-            id: result_id,
-            labels: result_labels,
-            info: result_info,
-        });
-    }
-
-    Ok(steps)
-}
-
-pub fn block_sparse_order_from_labels<S: Ord + Clone>(
-    ir: &NetworkIR,
-    cost_model: &BlockSparseCostModel<S>,
-    order: &[TemporaryLabel],
-) -> Result<Vec<ContractionStep>> {
-    if ir.tensors().len() < 2 {
-        return Err(ContractError::NotEnoughTensors);
-    }
-
-    validate_explicit_order_labels(ir, order)?;
-
-    let mut active = ir
-        .tensors()
-        .iter()
-        .map(|tensor| {
-            Ok(ActiveBlockSparseTensor {
-                id: tensor.id(),
-                labels: tensor.labels().to_vec(),
-                info: cost_model.tensor_info(tensor.id())?.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut steps = Vec::new();
-
-    let mut remaining_order = order.to_vec();
-    while let Some(label) = remaining_order.first().cloned() {
-        let Some(lhs_index) = active
-            .iter()
-            .position(|tensor| tensor.labels.contains(&label))
-        else {
-            remaining_order.remove(0);
-            continue;
-        };
-        let Some(rhs_index) = active
-            .iter()
-            .enumerate()
-            .skip(lhs_index + 1)
-            .find_map(|(position, tensor)| tensor.labels.contains(&label).then_some(position))
-        else {
-            remaining_order.remove(0);
-            continue;
-        };
-
-        let shared_order_labels = active[lhs_index]
-            .labels
-            .iter()
-            .filter(|candidate| {
-                active[rhs_index].labels.contains(candidate) && remaining_order.contains(candidate)
-            })
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        remaining_order.retain(|candidate| !shared_order_labels.contains(candidate));
-        push_block_sparse_active_contraction_step(
-            ir,
-            cost_model,
-            &mut active,
-            &mut steps,
-            lhs_index,
-            rhs_index,
-        )?;
-    }
-
-    while active.len() > 1 {
-        let rhs_index = active.len() - 1;
-        let lhs_index = active.len() - 2;
-        push_block_sparse_active_contraction_step(
-            ir,
-            cost_model,
-            &mut active,
-            &mut steps,
-            lhs_index,
-            rhs_index,
-        )?;
-    }
-
-    Ok(steps)
-}
-
-fn push_block_sparse_active_contraction_step<S: Ord + Clone>(
-    ir: &NetworkIR,
-    cost_model: &BlockSparseCostModel<S>,
-    active: &mut Vec<ActiveBlockSparseTensor<S>>,
-    steps: &mut Vec<ContractionStep>,
-    lhs_index: usize,
-    rhs_index: usize,
-) -> Result<()> {
-    if lhs_index >= rhs_index || rhs_index >= active.len() {
-        return Err(ContractError::InvalidContractionPlan(format!(
-            "invalid active pair ({lhs_index}, {rhs_index}) for {} active tensors",
-            active.len()
-        )));
-    }
-
-    let rhs = active.remove(rhs_index);
-    let lhs = active.remove(lhs_index);
-    let remaining_labels = active
-        .iter()
-        .map(|tensor| tensor.labels.clone())
-        .collect::<Vec<_>>();
-    let result_info = cost_model.contraction_result_info(
-        &lhs.info,
-        &rhs.info,
-        &remaining_labels,
-        ir.output_labels(),
-    )?;
-    let cost = cost_model.pair_cost(&lhs.info, &rhs.info)?;
-    let result_labels = contraction_result_labels(
-        &lhs.labels,
-        &rhs.labels,
-        &remaining_labels,
-        ir.output_labels(),
-    );
-    let result_id = TensorId::new(ir.tensors().len() + steps.len());
-    steps.push(ContractionStep::new(
-        lhs.id,
-        rhs.id,
-        result_id,
-        cost,
-        result_labels.clone(),
-    ));
-    active.push(ActiveBlockSparseTensor {
-        id: result_id,
-        labels: result_labels,
-        info: result_info,
-    });
-    Ok(())
-}
-
-fn contraction_result_labels(
-    lhs: &[TemporaryLabel],
-    rhs: &[TemporaryLabel],
-    remaining_labels: &[Vec<TemporaryLabel>],
-    output_labels: &[TemporaryLabel],
-) -> Vec<TemporaryLabel> {
-    let contracted = lhs
-        .iter()
-        .filter(|label| {
-            rhs.contains(label)
-                && !output_labels.contains(label)
-                && !remaining_labels.iter().any(|labels| labels.contains(label))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut labels = lhs
-        .iter()
-        .filter(|label| !contracted.contains(label))
-        .cloned()
-        .collect::<Vec<_>>();
-    for label in rhs {
-        if !contracted.contains(label) && !labels.contains(label) {
-            labels.push(label.clone());
-        }
-    }
-    if remaining_labels.is_empty() {
-        return output_labels.to_vec();
-    }
-    labels
 }
