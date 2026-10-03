@@ -105,52 +105,31 @@ fn unique_rigid_foldright_tree_pair<R>(
 ) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
+    // Why not `fold_surgery`: a unique fold has exactly one forward and one
+    // inverse move, and threading that single term through the surgery's
+    // move iterators measurably slows cold unique transposes (#1852 B2c).
+    // These are the surgery's steps, unrolled, with the multiplicity-free
+    // coefficient kernel.
+    let kernel = SimpleK(rule);
     let codomain = tree_pair.codomain_tree();
-    if codomain.uncoupled().is_empty() {
-        return Err(CoreError::MalformedFusionTree {
-            message: "foldright requires at least one codomain leg",
-        });
-    }
-    let a = codomain.uncoupled()[0];
-    let is_dual_a = codomain
-        .is_dual()
-        .first()
-        .copied()
-        .ok_or(CoreError::MalformedFusionTree {
-            message: "codomain tree is missing the first duality flag",
-        })?;
-    let fold = MultiplicityFreeFoldCoefficient::new(rule, a, is_dual_a);
-    let c = codomain.coupled();
-
+    let site = FoldSite::new(codomain.uncoupled(), codomain.is_dual())?;
+    let (fold, dual_first) = kernel.fold_begin(&site)?;
     let (codomain_prime, coeff1) = unique_rigid_multi_fmove_tree(rule, codomain)?;
-    let b = codomain_prime.coupled();
-    let factors = fold.sector_factors(rule, b, c);
+    let tail_coupled = codomain_prime.coupled();
+    let factors = kernel.fold_factors(&fold, tail_coupled, codomain.coupled())?;
     let (domain_prime, coeff2) = unique_rigid_multi_fmove_inv_tree(
         rule,
-        rule.dual(a),
-        b,
+        dual_first,
+        tail_coupled,
         tree_pair.domain_tree(),
-        !is_dual_a,
+        !site.first_is_dual,
     )?;
+    let coefficient = kernel.fold_coefficient(&fold, &factors, &coeff1, &coeff2)?;
     Ok((
         FusionTreePairKey::pair(codomain_prime, domain_prime),
-        fold.coefficient(&factors, &coeff1, &coeff2),
+        coefficient,
     ))
-}
-
-fn unique_rigid_foldleft_tree_pair<R>(
-    rule: &R,
-    tree_pair: &FusionTreePairKey,
-) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
-{
-    left_move_by_swap(tree_pair, |swapped| {
-        unique_rigid_foldright_tree_pair(rule, swapped)
-    })
 }
 
 pub(crate) fn unique_rigid_cycle_clockwise_tree_pair<R>(
@@ -179,7 +158,11 @@ where
     cycle_anticlockwise(
         tree_pair,
         |key| unique_rigid_bendright_tree_pair(rule, key),
-        |key| unique_rigid_foldleft_tree_pair(rule, key),
+        |key| {
+            left_move_by_swap(key, |swapped| {
+                unique_rigid_foldright_tree_pair(rule, swapped)
+            })
+        },
     )
 }
 

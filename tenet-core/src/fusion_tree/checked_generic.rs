@@ -134,6 +134,14 @@ pub(crate) trait GenericFRAccess {
         b: SectorId,
         c: SectorId,
     ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error>;
+    /// Every standard-form tree over the externals with the given coupled
+    /// sector, in canonical order.
+    fn try_fusion_trees(
+        &self,
+        uncoupled: &Arc<[SectorId]>,
+        is_dual: &Arc<[bool]>,
+        coupled: SectorId,
+    ) -> Result<Vec<FusionTreeKey>, CheckedGenericSymbolError<Self::Error>>;
 }
 
 pub(crate) trait GenericRigidAccess: GenericFRAccess {
@@ -219,6 +227,51 @@ where
     ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
         Ok(self.0.r_symbol_generic(a, b, c))
     }
+    fn try_fusion_trees(
+        &self,
+        uncoupled: &Arc<[SectorId]>,
+        is_dual: &Arc<[bool]>,
+        coupled: SectorId,
+    ) -> Result<Vec<FusionTreeKey>, CheckedGenericSymbolError<Self::Error>> {
+        Ok(collect_generic_fusion_trees_for_coupled_frozen(
+            self.0, uncoupled, is_dual, uncoupled, coupled,
+        ))
+    }
+}
+
+impl<R> GenericRigidAccess for InfallibleGenericFR<'_, R>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: CategoricalScalar,
+{
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.0.sqrt_dim_scalar(sector))
+    }
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.0.inv_sqrt_dim_scalar(sector))
+    }
+    fn try_frobenius_schur_phase_scalar(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.0.frobenius_schur_phase_scalar(sector))
+    }
+    fn try_b_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> {
+        checked_generic_b_symbol(self, a, b, c)
+    }
+    fn try_a_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> {
+        checked_generic_a_symbol(self, a, b, c)
+    }
 }
 
 impl<P: CheckedGenericRigidSymbols> GenericFRAccess for P {
@@ -275,6 +328,17 @@ impl<P: CheckedGenericRigidSymbols> GenericFRAccess for P {
         c: SectorId,
     ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
         CheckedGenericRigidSymbols::try_r_symbol_generic(self, a, b, c)
+    }
+    fn try_fusion_trees(
+        &self,
+        uncoupled: &Arc<[SectorId]>,
+        is_dual: &Arc<[bool]>,
+        coupled: SectorId,
+    ) -> Result<Vec<FusionTreeKey>, CheckedGenericSymbolError<Self::Error>> {
+        collect_generic_fusion_trees_for_coupled_frozen_checked(
+            self, uncoupled, is_dual, uncoupled, coupled,
+        )
+        .map_err(map_checked_generic_structure_error)
     }
 }
 
@@ -431,7 +495,7 @@ fn checked_generic_b_symbol<C>(
     c: SectorId,
 ) -> Result<GenericRMatrix<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
-    C: CheckedGenericRigidSymbols,
+    C: GenericRigidAccess,
 {
     let rows = rule
         .try_nsymbol(a, b, c)
@@ -472,7 +536,7 @@ fn checked_generic_a_symbol<C>(
     c: SectorId,
 ) -> Result<GenericRMatrix<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
-    C: CheckedGenericRigidSymbols,
+    C: GenericRigidAccess,
 {
     let rows = rule
         .try_nsymbol(a, b, c)

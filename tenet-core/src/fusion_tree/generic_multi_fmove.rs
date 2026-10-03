@@ -72,7 +72,7 @@ where
     }
 }
 
-fn collect_generic_fusion_trees_for_coupled_frozen<R>(
+pub(super) fn collect_generic_fusion_trees_for_coupled_frozen<R>(
     rule: &R,
     uncoupled: &Arc<[SectorId]>,
     is_dual: &Arc<[bool]>,
@@ -336,47 +336,15 @@ where
     Ok(Some(coeff))
 }
 
-pub(super) fn generic_multi_fmove_inv_tree_checked<C>(
+pub(super) fn generic_multi_fmove_inv_tree_result<C>(
     rule: &C,
     leading: SectorId,
     coupled: SectorId,
     tree: &FusionTreeKey,
     leading_is_dual: bool,
-) -> Result<GenericFmoveTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
-where
-    C: CheckedGenericRigidSymbols,
-{
-    generic_multi_fmove_inv_tree_with(
-        rule,
-        leading,
-        coupled,
-        tree,
-        leading_is_dual,
-        |uncoupled, dual, effective, coupled| {
-            collect_generic_fusion_trees_for_coupled_frozen_checked(
-                rule, uncoupled, dual, effective, coupled,
-            )
-            .map_err(map_checked_generic_structure_error)
-        },
-    )
-}
-
-fn generic_multi_fmove_inv_tree_with<C, F>(
-    rule: &C,
-    leading: SectorId,
-    coupled: SectorId,
-    tree: &FusionTreeKey,
-    leading_is_dual: bool,
-    enumerate: F,
 ) -> Result<GenericFmoveTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericFRAccess,
-    F: FnOnce(
-        &Arc<[SectorId]>,
-        &Arc<[bool]>,
-        &[SectorId],
-        SectorId,
-    ) -> Result<Vec<FusionTreeKey>, CheckedGenericSymbolError<C::Error>>,
 {
     if rule
         .try_nsymbol(leading, tree.coupled(), coupled)
@@ -388,16 +356,13 @@ where
             actual: tree.coupled(),
         }));
     }
-    let mut uncoupled = Vec::with_capacity(tree.uncoupled().len() + 1);
-    uncoupled.push(leading);
-    uncoupled.extend_from_slice(tree.uncoupled());
-    let mut dual = Vec::with_capacity(tree.is_dual().len() + 1);
-    dual.push(leading_is_dual);
-    dual.extend_from_slice(tree.is_dual());
-    let frozen_uncoupled: Arc<[SectorId]> = Arc::from(uncoupled);
-    let frozen_dual: Arc<[bool]> = Arc::from(dual);
-    let effective = frozen_uncoupled.to_vec();
-    let candidates = enumerate(&frozen_uncoupled, &frozen_dual, &effective, coupled)?;
+    let uncoupled: Arc<[SectorId]> = std::iter::once(leading)
+        .chain(tree.uncoupled().iter().copied())
+        .collect();
+    let dual: Arc<[bool]> = std::iter::once(leading_is_dual)
+        .chain(tree.is_dual().iter().copied())
+        .collect();
+    let candidates = rule.try_fusion_trees(&uncoupled, &dual, coupled)?;
     let mut terms = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         if let Some(values) = generic_multi_associator_result(rule, &candidate, tree)? {
@@ -410,34 +375,12 @@ where
     Ok(terms)
 }
 
-pub(super) fn generic_multi_fmove_tree_checked<C>(
+pub(super) fn generic_multi_fmove_tree_result<C>(
     rule: &C,
     tree: &FusionTreeKey,
-) -> Result<GenericFmoveTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
-where
-    C: CheckedGenericRigidSymbols,
-{
-    generic_multi_fmove_tree_with(rule, tree, |uncoupled, dual, effective, coupled| {
-        collect_generic_fusion_trees_for_coupled_frozen_checked(
-            rule, uncoupled, dual, effective, coupled,
-        )
-        .map_err(map_checked_generic_structure_error)
-    })
-}
-
-fn generic_multi_fmove_tree_with<C, F>(
-    rule: &C,
-    tree: &FusionTreeKey,
-    mut enumerate: F,
 ) -> Result<GenericFmoveTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericFRAccess,
-    F: FnMut(
-        &Arc<[SectorId]>,
-        &Arc<[bool]>,
-        &[SectorId],
-        SectorId,
-    ) -> Result<Vec<FusionTreeKey>, CheckedGenericSymbolError<C::Error>>,
 {
     let rank = tree.uncoupled().len();
     if rank == 0 {
@@ -495,12 +438,7 @@ where
         .try_fusion_channels_in_table(dual_first, tree.coupled())
         .map_err(CheckedGenericSymbolError::Provider)?
     {
-        for tail in enumerate(
-            &tail_uncoupled,
-            &tail_is_dual,
-            &tail_uncoupled,
-            tail_coupled,
-        )? {
+        for tail in rule.try_fusion_trees(&tail_uncoupled, &tail_is_dual, tail_coupled)? {
             if let Some(coefficients) = generic_multi_associator_result(rule, tree, &tail)? {
                 terms.push((tail, coefficients));
             }
@@ -516,6 +454,7 @@ where
 /// [`multiplicity_free_multi_fmove_tree`] — same Stage 1 tail enumeration, but
 /// coefficients are the `generic_multi_associator` vectors (see the convention
 /// block above for the vector index).
+#[cfg(test)]
 pub(crate) fn generic_multi_fmove_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -524,13 +463,8 @@ where
     R: GenericFusionSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let access = InfallibleGenericFR(rule);
-    generic_multi_fmove_tree_with(&access, tree, |uncoupled, dual, effective, coupled| {
-        Ok(collect_generic_fusion_trees_for_coupled_frozen(
-            rule, uncoupled, dual, effective, coupled,
-        ))
-    })
-    .map_err(map_infallible_generic_symbol_error)
+    generic_multi_fmove_tree_result(&InfallibleGenericFR(rule), tree)
+        .map_err(map_infallible_generic_symbol_error)
 }
 
 /// Generic-fusion `multi_Fmove_inv`: fuse a leading sector `a` onto an existing
@@ -546,6 +480,7 @@ where
 /// forward associator computes `v = Tₙ⋯T₂·seed`, while the inverse computes
 /// `w = conj(Tₙ)⋯conj(T₃)·conj(T₂·seed) = conj(v)` (TK `:437-439, 460-462`,
 /// the `conj!`/`'` on each factor). No separate inverse F-chain is needed.
+#[cfg(test)]
 pub(crate) fn generic_multi_fmove_inv_tree<R>(
     rule: &R,
     leading_sector: SectorId,
@@ -557,18 +492,12 @@ where
     R: GenericFusionSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let access = InfallibleGenericFR(rule);
-    generic_multi_fmove_inv_tree_with(
-        &access,
+    generic_multi_fmove_inv_tree_result(
+        &InfallibleGenericFR(rule),
         leading_sector,
         coupled,
         tree,
         leading_is_dual,
-        |uncoupled, dual, effective, coupled| {
-            Ok(collect_generic_fusion_trees_for_coupled_frozen(
-                rule, uncoupled, dual, effective, coupled,
-            ))
-        },
     )
     .map_err(map_infallible_generic_symbol_error)
 }
