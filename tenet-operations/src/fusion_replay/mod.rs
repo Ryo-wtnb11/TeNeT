@@ -8,10 +8,7 @@ use std::ops::Mul;
 use std::sync::Arc;
 
 use num_traits::{One, Zero};
-use tenet_core::{
-    BlockStructure, CoupledSectorRegion, HostReadableStorage, HostWritableStorage, Placement,
-    ScratchStorage, SectorId, SimilarStorage, TensorStorage,
-};
+use tenet_core::{BlockStructure, CoupledSectorRegion, Placement, SectorId, TensorStorage};
 pub use tenet_dense::MatrixOp;
 use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
 
@@ -19,7 +16,6 @@ use crate::host_scalar_kernels::validate_raw_strided_bounds;
 use crate::host_scratch::HostScratchBuffer;
 use crate::placement::ReportsPlacement;
 use crate::profile::TensorContractFusionProfile;
-use crate::storage_scratch::StorageFusionBlockContractWorkspace;
 use crate::strided::{offset_to_isize, strides_to_isize};
 use crate::structure_identity::validate_structure_identity;
 use crate::transform_structure::validate_destination_layouts_injective;

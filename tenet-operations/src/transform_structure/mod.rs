@@ -5,7 +5,7 @@ use smallvec::SmallVec;
 use tenet_core::{
     validate_block_storage_injective, BlockStructure, CoreError, TensorMap, TensorStorage,
 };
-use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
+use tenet_dense::DenseGemmBatchJob;
 
 use crate::kernel_adapter::{normalize_fused_layout, BakedFusedLayout, FusedLayoutScratch};
 use crate::strided::offset_to_isize;
@@ -134,10 +134,6 @@ impl<T> TreeTransformStructure<T> {
             .saturating_add(vector_bytes(
                 self.recoupling_plan.jobs.capacity(),
                 core::mem::size_of::<DenseGemmBatchJob>(),
-            ))
-            .saturating_add(vector_bytes(
-                self.recoupling_plan.runs.capacity(),
-                core::mem::size_of::<usize>(),
             ))
             .saturating_add(vector_bytes(
                 self.parallel_schedule.singles.capacity(),
@@ -401,17 +397,6 @@ mod tests {
     use super::*;
     use tenet_core::{BlockKey, BlockSpec};
 
-    fn multi(element_count: usize, src_count: usize, dst_count: usize) -> TreeTransformBlock {
-        TreeTransformBlock::Multi {
-            dst_layout_start: 0,
-            dst_count,
-            src_layout_start: 0,
-            src_count,
-            coefficient_start: 0,
-            element_count,
-        }
-    }
-
     #[test]
     fn compiled_fused_layouts_match_the_production_normalizer() {
         // What: a runtime-rank layout is admitted and bakes the same normalized
@@ -467,24 +452,6 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, OperationError::ElementCountOverflow));
-    }
-
-    #[test]
-    fn recoupling_plan_bakes_run_partition() {
-        // Two same-shape Multi blocks fold into one length-2 constant-stride
-        // run; a third differently-shaped block is a singleton. The compiled
-        // plan stores that partition (issue #103) so the backend routes it
-        // without recomputing, and it always covers every job.
-        let blocks = vec![multi(2, 2, 2), multi(2, 2, 2), multi(3, 1, 1)];
-        let plan = compile_recoupling_plan(&blocks).unwrap();
-        assert_eq!(plan.jobs().len(), 3);
-        assert_eq!(plan.runs(), &[2, 1]);
-        assert_eq!(plan.runs(), strided_batch_runs(plan.jobs()));
-        assert_eq!(
-            plan.runs().iter().sum::<usize>(),
-            plan.jobs().len(),
-            "run partition must cover all jobs"
-        );
     }
 
     #[test]

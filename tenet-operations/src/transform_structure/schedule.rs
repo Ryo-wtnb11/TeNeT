@@ -7,9 +7,6 @@ pub struct TreeTransformRecouplingPlan {
     coefficient_len: usize,
     pub(super) block_indices: Vec<usize>,
     pub(super) jobs: Vec<DenseGemmBatchJob>,
-    // Plan-time run partition of `jobs` (see issue #103): the dense backend
-    // reads it to route each run without recomputing the partition per replay.
-    pub(super) runs: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,13 +70,6 @@ impl TreeTransformRecouplingPlan {
     #[inline]
     pub fn jobs(&self) -> &[DenseGemmBatchJob] {
         &self.jobs
-    }
-
-    /// Plan-time run partition of [`Self::jobs`]; handed to the backend so it
-    /// routes runs without recomputing the partition (see issue #103).
-    #[inline]
-    pub fn runs(&self) -> &[usize] {
-        &self.runs
     }
 
     #[inline]
@@ -354,14 +344,12 @@ pub(super) fn compile_recoupling_plan(
             .checked_add(block_coefficient_len)
             .ok_or(OperationError::ElementCountOverflow)?;
     }
-    let runs = strided_batch_runs(&jobs);
     Ok(TreeTransformRecouplingPlan {
         source_len,
         destination_len,
         coefficient_len,
         block_indices,
         jobs,
-        runs,
     })
 }
 

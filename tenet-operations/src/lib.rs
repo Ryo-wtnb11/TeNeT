@@ -108,6 +108,7 @@ pub use tree_profile::TreeTransformReplayProfile;
 // Why not retain crate-level `forbid`: Rust does not permit a narrower module
 // to override it. `deny` keeps every other module unsafe-free while this one
 // owns the audited Vec length transition.
+#[cfg(any(feature = "cuda", test))]
 mod opaque_admission;
 mod owned_blocks;
 mod owned_cat;

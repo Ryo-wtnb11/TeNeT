@@ -6,13 +6,11 @@ use num_traits::Zero;
 use tenet_core::{
     BlockKey, BlockStructure, CategoricalScalar, CheckedGenericRigidSymbols, GenericRigidSymbols,
     HostReadableStorage, HostWritableStorage, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, Placement, RuleIdentity, ScratchStorage, SimilarStorage,
-    TensorMap,
+    MultiplicityFreeRigidSymbols, Placement, RuleIdentity, TensorMap,
 };
 
 use crate::cache::OperationCachePolicy;
 use crate::contract::{BoundDynamicFusionMapSpace, FusionOperand};
-use crate::storage_scratch::StorageTreeTransformWorkspace;
 use crate::tree_transform::{
     build_checked_generic_tree_pair_transform_group_plan_validated,
     validate_checked_generic_tree_pair_plan_preflight, CheckedGenericPlanError, TreeTransformCache,
@@ -23,7 +21,6 @@ use crate::{
     TreeTransformReplayProfile, TreeTransformStructure,
 };
 use tenet_dense::DefaultDenseExecutor;
-use tenet_operations::tree_transform_structure_with_storage_workspace_strided_kernel;
 use tenet_operations::OperationError;
 use tenet_operations::TreeTransformScalar;
 use tenet_operations::{DenseTreeTransformOperations, TreeTransformBackend};
@@ -794,56 +791,6 @@ where
             dst_data,
             src_data,
             alpha,
-        )
-    }
-
-    #[allow(dead_code)]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the storage-workspace replay helper keeps its extra storage resource distinct from cached transform context state"
-    )]
-    pub(crate) fn tree_transform_into_storage_workspace<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &mut self,
-        storage_workspace: &mut StorageTreeTransformWorkspace<DSrc::Similar, DDst::Similar>,
-        rule: &R,
-        operation: TreeTransformOperation,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        C: Clone,
-        D: RecouplingCoefficientAction<C>,
-        DDst: HostWritableStorage<D> + SimilarStorage<D>,
-        DSrc: HostReadableStorage<D> + SimilarStorage<D>,
-        DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-        DSrc::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-    {
-        self.cache
-            .set_recoupling_threads(self.backend.recoupling_threads());
-        let structure = self
-            .cache
-            .get_or_compile_tree_pair(rule, operation, dst, src)?;
-        tree_transform_structure_with_storage_workspace_strided_kernel(
-            &mut crate::StridedHostKernelAdapter::default(),
-            storage_workspace,
-            &structure,
-            dst,
-            src,
-            alpha,
-            beta,
         )
     }
 

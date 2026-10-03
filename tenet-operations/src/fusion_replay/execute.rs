@@ -394,87 +394,6 @@ where
         }
     }
 
-    #[allow(dead_code)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_storage_workspace<
-        A,
-        G,
-        D,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        &self,
-        kernels: &mut A,
-        gemm: &mut G,
-        fusion_workspace: &mut StorageFusionBlockContractWorkspace<
-            DLhs::Similar,
-            DRhs::Similar,
-            DDst::Similar,
-        >,
-        dst: &mut tenet_core::TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &tenet_core::TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &tenet_core::TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        A: HostKernelAdapter<D>,
-        G: Rank2Gemm<D>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
-        DDst: HostWritableStorage<D> + SimilarStorage<D>,
-        DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-        DLhs: HostReadableStorage<D> + SimilarStorage<D>,
-        DLhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-        DRhs: HostReadableStorage<D> + SimilarStorage<D>,
-        DRhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-    {
-        let dst_structure = Arc::clone(dst.structure());
-        let lhs_structure = Arc::clone(lhs.structure());
-        let rhs_structure = Arc::clone(rhs.structure());
-        self.validate_replay_inputs(
-            &dst_structure,
-            dst.storage().len(),
-            &lhs_structure,
-            lhs.storage().len(),
-            &rhs_structure,
-            rhs.storage().len(),
-        )?;
-        self.require_fully_direct_storage()?;
-        self.require_identity_storage_ops()?;
-        self.require_unit_direct_batch_alpha()?;
-        self.init_inactive_blocks(
-            kernels,
-            &mut Vec::new(),
-            dst.data_mut(),
-            ContractDestinationInit::Axpby(beta),
-        )?;
-
-        let lhs_data = lhs.data();
-        let rhs_data = rhs.data();
-        let _ = fusion_workspace;
-        self.execute_batch(
-            gemm,
-            dst.data_mut(),
-            lhs_data,
-            rhs_data,
-            &self.direct_batch,
-            self.direct_batch_runs(),
-            alpha,
-            beta,
-        )?;
-        Ok(())
-    }
-
     pub(crate) fn direct_batch(&self) -> &[Rank2GemmBatchJob] {
         &self.direct_batch
     }
@@ -575,200 +494,23 @@ where
 
     /// Plan-time run partition of [`Self::direct_batch`]; handed to the backend
     /// alongside the jobs so it routes runs without recomputing the partition.
+    #[cfg(test)]
     pub(super) fn direct_batch_runs(&self) -> &[usize] {
         &self.direct_batch_runs
     }
 
-    /// Storage-aware raw replay for callers whose operands are scratch buffers
-    /// rather than `TensorMap`s (the dynamic core route).
-    ///
-    /// Pack scratch allocation origins are passed explicitly: LHS pack scratch
-    /// from `lhs_alloc`, RHS pack scratch from `rhs_alloc`, and matmul output
-    /// scratch from `dst_alloc`, while replay itself consumes the raw slices.
-    #[allow(dead_code)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_storage_raw<A, G, D, SLhs, SRhs, SDst>(
-        &self,
-        kernels: &mut A,
-        gemm: &mut G,
-        fusion_workspace: &mut StorageFusionBlockContractWorkspace<
-            SLhs::Similar,
-            SRhs::Similar,
-            SDst::Similar,
-        >,
-        _lhs_alloc: &SLhs,
-        _rhs_alloc: &SRhs,
-        _dst_alloc: &SDst,
-        dst_structure: &Arc<BlockStructure>,
-        dst_data: &mut [D],
-        lhs_structure: &Arc<BlockStructure>,
-        lhs_data: &[D],
-        rhs_structure: &Arc<BlockStructure>,
-        rhs_data: &[D],
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        A: HostKernelAdapter<D>,
-        G: Rank2Gemm<D>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
-        SLhs: SimilarStorage<D>,
-        SLhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-        SRhs: SimilarStorage<D>,
-        SRhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-        SDst: SimilarStorage<D>,
-        SDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-    {
-        self.validate_replay_inputs(
-            dst_structure,
-            dst_data.len(),
-            lhs_structure,
-            lhs_data.len(),
-            rhs_structure,
-            rhs_data.len(),
-        )?;
-        self.require_fully_direct_storage()?;
-        self.require_identity_storage_ops()?;
-        self.require_unit_direct_batch_alpha()?;
-        self.init_inactive_blocks(
-            kernels,
-            &mut Vec::new(),
-            dst_data,
-            ContractDestinationInit::Axpby(beta),
-        )?;
-
-        let _ = fusion_workspace;
-        self.execute_batch(
-            gemm,
-            dst_data,
-            lhs_data,
-            rhs_data,
-            &self.direct_batch,
-            self.direct_batch_runs(),
-            alpha,
-            beta,
-        )?;
-        Ok(())
-    }
-
-    /// Storage-aware replay writing into a destination `TensorMap` while the
-    /// LHS/RHS operands are raw core scratch slices (the dynamic route
-    /// with an identity output transform).
-    ///
-    /// Pack scratch allocation origins: LHS pack from `lhs_alloc`, RHS pack
-    /// from `rhs_alloc`, and matmul output scratch from the destination
-    /// tensor's own storage.
-    #[allow(dead_code)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_storage_raw_sources<
-        A,
-        G,
-        D,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-    >(
-        &self,
-        kernels: &mut A,
-        gemm: &mut G,
-        fusion_workspace: &mut StorageFusionBlockContractWorkspace<
-            SLhs::Similar,
-            SRhs::Similar,
-            DDst::Similar,
-        >,
-        _lhs_alloc: &SLhs,
-        _rhs_alloc: &SRhs,
-        dst: &mut tenet_core::TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs_structure: &Arc<BlockStructure>,
-        lhs_data: &[D],
-        rhs_structure: &Arc<BlockStructure>,
-        rhs_data: &[D],
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        A: HostKernelAdapter<D>,
-        G: Rank2Gemm<D>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
-        SLhs: SimilarStorage<D>,
-        SLhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-        SRhs: SimilarStorage<D>,
-        SRhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-        DDst: HostWritableStorage<D> + SimilarStorage<D>,
-        DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
-    {
-        let dst_structure = Arc::clone(dst.structure());
-        self.validate_replay_inputs(
-            &dst_structure,
-            dst.storage().len(),
-            lhs_structure,
-            lhs_data.len(),
-            rhs_structure,
-            rhs_data.len(),
-        )?;
-        self.require_fully_direct_storage()?;
-        self.require_identity_storage_ops()?;
-        self.require_unit_direct_batch_alpha()?;
-        self.init_inactive_blocks(
-            kernels,
-            &mut Vec::new(),
-            dst.data_mut(),
-            ContractDestinationInit::Axpby(beta),
-        )?;
-
-        let _ = fusion_workspace;
-        self.execute_batch(
-            gemm,
-            dst.data_mut(),
-            lhs_data,
-            rhs_data,
-            &self.direct_batch,
-            self.direct_batch_runs(),
-            alpha,
-            beta,
-        )?;
-        Ok(())
-    }
-
-    /// Executes the contraction purely over storage handles.
+    /// Executes the contraction purely over storage handles, for a
+    /// destination the caller guarantees is zero-filled.
     ///
     /// This is the device-side replay seam: the bounds require only
     /// [`TensorStorage`], so no host-slice contract leaks into the path. It
     /// supports exactly the fully-direct coupled-layout case with one scalar
-    /// per GEMM job, `beta = 0` and no inactive destination blocks; every other case must
-    /// use the host replay paths until the corresponding device kernels
-    /// (pack/scatter, scale, tree transforms) exist behind their own seams.
-    #[allow(dead_code)]
-    pub fn execute_direct_on_storage<G, D, DDst, DLhs, DRhs>(
-        &self,
-        gemm: &mut G,
-        dst: &mut DDst,
-        lhs: &DLhs,
-        rhs: &DRhs,
-    ) -> Result<(), OperationError>
-    where
-        G: StorageGemm<D, DDst, DLhs, DRhs>,
-        D: RecouplingCoefficientAction<C>,
-        DDst: TensorStorage<D>,
-        DLhs: TensorStorage<D>,
-        DRhs: TensorStorage<D>,
-    {
-        if !self.inactive_dst_scale_blocks.is_empty() {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "storage-direct replay requires full destination coverage",
-            });
-        }
-        self.execute_direct_on_storage_prezeroed(gemm, dst, lhs, rhs)
-    }
-
-    /// [`Self::execute_direct_on_storage`] for a destination the caller
-    /// guarantees is zero-filled: destination blocks with no contributing
-    /// GEMM (the ones the host path scales by `beta = 0`) are left
-    /// untouched, which is exactly the overwrite semantics on a zeroed
-    /// buffer. The active blocks are still fully overwritten.
+    /// per GEMM job; every other case must use the host replay paths until the
+    /// corresponding device kernels (pack/scatter, scale, tree transforms)
+    /// exist behind their own seams. Destination blocks with no contributing
+    /// GEMM (the ones the host path scales by `beta = 0`) are left untouched,
+    /// which is exactly the overwrite semantics on a zeroed buffer. The active
+    /// blocks are still fully overwritten.
     pub fn execute_direct_on_storage_prezeroed<G, D, DDst, DLhs, DRhs>(
         &self,
         gemm: &mut G,

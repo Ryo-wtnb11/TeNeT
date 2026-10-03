@@ -159,19 +159,6 @@ fn overwrite_single_does_not_read_nan_destinations_in_any_driver() {
 
     let (mut dst, src, structure) = fixture();
     dst.data_mut().fill(f64::NAN);
-    tree_transform_structure_overwrite_with_storage_workspace_strided_kernel(
-        &mut StridedHostKernelAdapter::default(),
-        &mut StorageTreeTransformWorkspace::<Vec<f64>, Vec<f64>>::default(),
-        &structure,
-        &mut dst,
-        &src,
-        1.0,
-    )
-    .unwrap();
-    assert_eq!(dst.data(), &[6.0, 0.0]);
-
-    let (mut dst, src, structure) = fixture();
-    dst.data_mut().fill(f64::NAN);
     tree_transform_structure_overwrite_with_strided_kernel_raw(
         &mut StridedHostKernelAdapter::default(),
         &mut TreeTransformWorkspace::default(),
@@ -258,7 +245,7 @@ fn overwrite_multi_c64_does_not_read_nan_destinations() {
 }
 
 #[test]
-fn overwrite_threaded_single_multi_and_storage_multi_ignore_destination_bits() {
+fn overwrite_threaded_single_and_multi_ignore_destination_bits() {
     let src_structure = Arc::new(
         BlockStructure::packed_column_major(1, [vec![1], vec![1], vec![1], vec![1]]).unwrap(),
     );
@@ -296,29 +283,6 @@ fn overwrite_threaded_single_multi_and_storage_multi_ignore_destination_bits() {
         .unwrap();
         assert_eq!(dst, expected);
     }
-
-    let src: TestTensor = TensorMap::from_vec_with_structure(
-        src.to_vec(),
-        TensorMapSpace::from_dims([4], []).unwrap(),
-        Arc::unwrap_or_clone(src_structure),
-    )
-    .unwrap();
-    let mut dst: TestTensor = TensorMap::from_vec_with_structure(
-        vec![f64::NAN; 5],
-        TensorMapSpace::from_dims([5], []).unwrap(),
-        Arc::unwrap_or_clone(dst_structure),
-    )
-    .unwrap();
-    tree_transform_structure_overwrite_with_storage_workspace_strided_kernel(
-        &mut StridedHostKernelAdapter::default(),
-        &mut StorageTreeTransformWorkspace::<Vec<f64>, Vec<f64>>::default(),
-        &structure,
-        &mut dst,
-        &src,
-        1.0,
-    )
-    .unwrap();
-    assert_eq!(dst.data(), &expected);
 }
 
 #[test]
@@ -493,24 +457,6 @@ fn structural_threaded_replay_scales_inactive_destinations() {
             1.0,
             beta,
             2,
-        )
-        .unwrap();
-        assert_eq!(dst.data(), &expected(beta));
-    }
-}
-
-#[test]
-fn storage_workspace_replay_scales_inactive_destinations() {
-    for beta in [0.0, 0.5, 1.0] {
-        let (mut dst, src, structure) = fixture();
-        tree_transform_structure_with_storage_workspace_strided_kernel(
-            &mut StridedHostKernelAdapter::default(),
-            &mut StorageTreeTransformWorkspace::<Vec<f64>, Vec<f64>>::default(),
-            &structure,
-            &mut dst,
-            &src,
-            1.0,
-            beta,
         )
         .unwrap();
         assert_eq!(dst.data(), &expected(beta));
