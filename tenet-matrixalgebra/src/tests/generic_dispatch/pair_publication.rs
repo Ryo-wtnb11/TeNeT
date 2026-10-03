@@ -23,9 +23,9 @@ fn one_sector_generic_factorization_input(
     (space, data)
 }
 
-fn assert_generic_factor_close(
-    actual: &BoundDynFactor<FactorGenericRule, f64>,
-    expected: &BoundDynFactor<FactorGenericRule, f64>,
+fn assert_generic_factor_close<R>(
+    actual: &BoundDynFactor<R, f64>,
+    expected: &BoundDynFactor<R, f64>,
 ) {
     assert_eq!(
         actual.space().space().homspace(),
@@ -40,16 +40,20 @@ fn assert_generic_factor_close(
 #[test]
 fn provider_neutral_generic_compact_factorizations_remain_covered() {
     let (space, data) = generic_factorization_input();
+    let (provider, space) = bind_checked_layout(&space);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    assert!(!svd_vals_dyn_generic(&mut dense, &input).unwrap().is_empty());
-    let (u, vh, values) = svd_compact_factors_dyn_generic(&mut dense, &input).unwrap();
+    assert!(!svd_vals_dyn_checked_generic(&mut dense, &input)
+        .unwrap()
+        .is_empty());
+    let (u, vh, values) =
+        svd_compact_factors_with_spectrum_dyn_checked_generic(&mut dense, &input).unwrap();
     assert!(!values.is_empty());
-    assert!(Arc::ptr_eq(u.space().provider_arc(), space.provider_arc()));
-    assert!(Arc::ptr_eq(vh.space().provider_arc(), space.provider_arc()));
-    qr_compact_dyn_generic(&mut dense, &input).unwrap();
-    lq_compact_dyn_generic(&mut dense, &input).unwrap();
+    assert!(Arc::ptr_eq(u.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(vh.space().provider_arc(), &provider));
+    qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    lq_compact_dyn_checked_generic(&mut dense, &input).unwrap();
 }
 
 #[test]
@@ -57,27 +61,31 @@ fn provider_neutral_generic_factorizations_keep_the_strided_fallback() {
     let (canonical_space, canonical_data) = generic_factorization_input();
     let (padded_space, padded_data) =
         padded_generic_factorization_input(&canonical_space, &canonical_data);
+    let (_, canonical_space) = bind_checked_layout(&canonical_space);
+    let (_, padded_space) = bind_checked_layout(&padded_space);
     let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
     let padded = BoundDynamicTensorRef::try_new(&padded_space, &padded_data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    let canonical_values = svd_vals_dyn_generic(&mut dense, &canonical).unwrap();
-    let padded_values = svd_vals_dyn_generic(&mut dense, &padded).unwrap();
+    let canonical_values = svd_vals_dyn_checked_generic(&mut dense, &canonical).unwrap();
+    let padded_values = svd_vals_dyn_checked_generic(&mut dense, &padded).unwrap();
     assert_real_spectra_close(&padded_values, &canonical_values);
 
-    let canonical_svd = svd_compact_factors_dyn_generic(&mut dense, &canonical).unwrap();
-    let padded_svd = svd_compact_factors_dyn_generic(&mut dense, &padded).unwrap();
+    let canonical_svd =
+        svd_compact_factors_with_spectrum_dyn_checked_generic(&mut dense, &canonical).unwrap();
+    let padded_svd =
+        svd_compact_factors_with_spectrum_dyn_checked_generic(&mut dense, &padded).unwrap();
     assert_generic_factor_close(&padded_svd.0, &canonical_svd.0);
     assert_generic_factor_close(&padded_svd.1, &canonical_svd.1);
     assert_real_spectra_close(&padded_svd.2, &canonical_svd.2);
 
-    let canonical_qr = qr_compact_dyn_generic(&mut dense, &canonical).unwrap();
-    let padded_qr = qr_compact_dyn_generic(&mut dense, &padded).unwrap();
+    let canonical_qr = qr_compact_dyn_checked_generic(&mut dense, &canonical).unwrap();
+    let padded_qr = qr_compact_dyn_checked_generic(&mut dense, &padded).unwrap();
     assert_generic_factor_close(&padded_qr.q, &canonical_qr.q);
     assert_generic_factor_close(&padded_qr.r, &canonical_qr.r);
 
-    let canonical_lq = lq_compact_dyn_generic(&mut dense, &canonical).unwrap();
-    let padded_lq = lq_compact_dyn_generic(&mut dense, &padded).unwrap();
+    let canonical_lq = lq_compact_dyn_checked_generic(&mut dense, &canonical).unwrap();
+    let padded_lq = lq_compact_dyn_checked_generic(&mut dense, &padded).unwrap();
     assert_generic_factor_close(&padded_lq.l, &canonical_lq.l);
     assert_generic_factor_close(&padded_lq.q, &canonical_lq.q);
 }
@@ -87,12 +95,12 @@ fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     let (canonical_space, canonical_data) = generic_factorization_input();
     let (reordered_space, reordered_data) =
         expert_generic_factorization_input(&canonical_space, &canonical_data, true);
+    let (_, reordered_space) = bind_checked_layout(&reordered_space);
     let reordered = BoundDynamicTensorRef::try_new(&reordered_space, &reordered_data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     crate::factorize::reset_generic_pair_publication_probe();
-    crate::factorize::reset_compact_qr_copy_probe();
-    let actual_qr = qr_compact_dyn_generic(&mut dense, &reordered).unwrap();
+    let actual_qr = qr_compact_dyn_checked_generic(&mut dense, &reordered).unwrap();
     assert!(!actual_qr.q.data().is_empty());
     assert!(!actual_qr.r.data().is_empty());
     let probe = crate::factorize::generic_pair_publication_probe();
@@ -102,19 +110,13 @@ fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     );
     assert!(probe.left_scattered_elements > 0);
     assert!(probe.right_scattered_elements > 0);
-    let qr_copy = crate::factorize::compact_qr_copy_probe();
     assert_eq!(
-        qr_copy.output_scatter_calls,
-        probe.left_scatter_calls + probe.right_scatter_calls
-    );
-    assert_eq!(
-        qr_copy.output_scatter_bytes,
-        (actual_qr.q.data().len() + actual_qr.r.data().len()) * std::mem::size_of::<f64>()
+        probe.left_scattered_elements + probe.right_scattered_elements,
+        actual_qr.q.data().len() + actual_qr.r.data().len()
     );
 
     crate::factorize::reset_generic_pair_publication_probe();
-    crate::factorize::reset_compact_lq_copy_probe();
-    let actual_lq = lq_compact_dyn_generic(&mut dense, &reordered).unwrap();
+    let actual_lq = lq_compact_dyn_checked_generic(&mut dense, &reordered).unwrap();
     assert!(!actual_lq.l.data().is_empty());
     assert!(!actual_lq.q.data().is_empty());
     let probe = crate::factorize::generic_pair_publication_probe();
@@ -124,14 +126,9 @@ fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     );
     assert!(probe.left_scattered_elements > 0);
     assert!(probe.right_scattered_elements > 0);
-    let lq_copy = crate::factorize::compact_lq_copy_probe();
     assert_eq!(
-        lq_copy.output_scatter_calls,
-        probe.left_scatter_calls + probe.right_scatter_calls
-    );
-    assert_eq!(
-        lq_copy.output_scatter_bytes,
-        (actual_lq.l.data().len() + actual_lq.q.data().len()) * std::mem::size_of::<f64>()
+        probe.left_scattered_elements + probe.right_scattered_elements,
+        actual_lq.l.data().len() + actual_lq.q.data().len()
     );
 }
 
@@ -166,7 +163,6 @@ fn checked_generic_pair_publication_reuses_one_sector_owners() {
     // block) and commits the structure it validated, so the admitted-key
     // equality of a two-source construction (formerly one visit and one more
     // event per block: `blocks` visits, `2 * blocks` events) no longer runs.
-    assert_eq!(probe.output_blocks_visited, 0);
     assert_eq!(probe.ordered_key_validation_events, blocks);
     assert_eq!(
         (probe.fallback_row_lookups, probe.fallback_col_lookups),
@@ -230,6 +226,7 @@ fn assert_pair_reconstructs_checked_literal<R, D>(
 fn staged_generic_pair_callers_publish_canonical_owned_payloads() {
     let (source, data) = one_sector_generic_factorization_input();
     let (padded_space, padded_data) = padded_generic_factorization_input(&source, &data);
+    let (_, padded_space) = bind_checked_layout(&padded_space);
     let padded = BoundDynamicTensorRef::try_new(&padded_space, &padded_data).unwrap();
     let provider = Arc::new(LateGenericSpy {
         rule: FactorGenericRule,
@@ -244,8 +241,8 @@ fn staged_generic_pair_callers_publish_canonical_owned_payloads() {
     crate::factorize::reset_generic_pair_publication_probe();
     crate::factorize::reset_one_sided_publication_probe();
 
-    qr_compact_dyn_generic(&mut dense, &padded).unwrap();
-    lq_compact_dyn_generic(&mut dense, &padded).unwrap();
+    qr_compact_dyn_checked_generic(&mut dense, &padded).unwrap();
+    lq_compact_dyn_checked_generic(&mut dense, &padded).unwrap();
     qr_compact_dyn_checked_generic(&mut dense, &checked_input).unwrap();
     svd_compact_dyn_checked_generic(&mut dense, &checked_input).unwrap();
     lq_compact_dyn_checked_generic(&mut dense, &checked_input).unwrap();
@@ -295,7 +292,6 @@ where
         + qr.r.space().space().structure().block_count();
     // Formerly `qr_blocks` visits and `2 * qr_blocks` events: the checked
     // route no longer cross-checks a separate key list against its structure.
-    assert_eq!(qr_probe.output_blocks_visited, 0);
     assert_eq!(qr_probe.ordered_key_validation_events, qr_blocks);
     assert_eq!(
         (qr_probe.fallback_row_lookups, qr_probe.fallback_col_lookups),

@@ -34,8 +34,8 @@ use tenet_core::{
 use tenet_dense::strided_batch_runs;
 use tenet_matrixalgebra::seam::{
     eig_full_dyn_checked_generic, lq_compact_dyn_checked_generic, lq_full_dyn_checked_generic,
-    qr_compact_dyn_checked_generic, qr_compact_dyn_generic, qr_full_dyn_checked_generic,
-    svd_compact_dyn_checked_generic, CheckedGenericFactorPlanError,
+    qr_compact_dyn_checked_generic, qr_full_dyn_checked_generic, svd_compact_dyn_checked_generic,
+    CheckedGenericFactorPlanError,
 };
 use tenet_matrixalgebra::BoundDynFactor;
 use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace};
@@ -1048,8 +1048,10 @@ fn run_layout_generic_qr(
     let ordered_input = BoundDynamicTensorRef::try_new(&ordered.space, &ordered.data)?;
     let reordered_input = BoundDynamicTensorRef::try_new(&reordered.space, &reordered.data)?;
     let mut preflight_dense = DefaultDenseExecutor::new();
-    let ordered_expected = qr_compact_dyn_generic(&mut preflight_dense, &ordered_input)?;
-    let reordered_expected = qr_compact_dyn_generic(&mut preflight_dense, &reordered_input)?;
+    let ordered_expected = qr_compact_dyn_checked_generic(&mut preflight_dense, &ordered_input)
+        .map_err(checked_compact_example_error)?;
+    let reordered_expected = qr_compact_dyn_checked_generic(&mut preflight_dense, &reordered_input)
+        .map_err(checked_compact_example_error)?;
     assert_layout_generic_factors_equal(&reordered_expected.q, &ordered_expected.q);
     assert_layout_generic_factors_equal(&reordered_expected.r, &ordered_expected.r);
     assert_layout_generic_qr_reconstructs(&ordered_expected.q, &ordered_expected.r);
@@ -1076,7 +1078,10 @@ fn run_layout_generic_qr(
             "first_after_setup",
             "warm_after_setup",
             min_time,
-            || qr_compact_dyn_generic(&mut dense, input),
+            || {
+                qr_compact_dyn_checked_generic(&mut dense, input)
+                    .map_err(checked_compact_example_error)
+            },
         )?;
         assert_layout_generic_qr_reconstructs(&left, &right);
     }

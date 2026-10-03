@@ -50,16 +50,6 @@ impl<E> From<OperationError> for CheckedGenericFactorPlanError<E> {
     }
 }
 
-pub(crate) struct PreparedGenericCompactFactorPlan {
-    pub(super) source_layout: ValidatedDynamicFusionLayout,
-    pub(super) source_regions: Arc<[CoupledSectorRegion]>,
-    pub(super) left: PreparedCheckedGenericDynamicSpace,
-    pub(super) right: PreparedCheckedGenericDynamicSpace,
-    pub(super) left_regions: Arc<[CoupledSectorRegion]>,
-    pub(super) right_regions: Arc<[CoupledSectorRegion]>,
-    pub(super) routes: Vec<CompactFactorRoute>,
-}
-
 pub(super) fn compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
 ) -> Result<Option<CompactFactorPlan>, OperationError>
@@ -67,70 +57,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     build_compact_factor_plan(input, input.validated_layout())
-}
-
-pub(super) fn compact_factor_plan_generic<R>(
-    input: &BoundDynamicFusionMapSpace<R>,
-) -> Result<Option<CompactFactorPlan>, OperationError>
-where
-    R: FusionRule,
-{
-    let checked = InfallibleGeneric::new(input.provider());
-    match prepare_compact_factor_plan_generic_checked(input, &checked) {
-        Ok(Some(prepared)) => finish_compact_factor_plan_generic(input, prepared),
-        Ok(None) => Ok(None),
-        Err(CheckedGenericFactorPlanError::Provider(never)) => match never {},
-        Err(CheckedGenericFactorPlanError::Operation(error)) => Err(error),
-    }
-}
-
-pub(super) fn prepare_compact_factor_plan_generic_checked<R, P>(
-    input: &BoundDynamicFusionMapSpace<R>,
-    provider: &P,
-) -> Result<Option<PreparedGenericCompactFactorPlan>, CheckedGenericFactorPlanError<P::Error>>
-where
-    R: FusionRule,
-    P: CheckedGenericFusion,
-{
-    let space = input.space();
-    let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
-        return Ok(None);
-    };
-    let new_leg = compact_bond_leg(&regions);
-    let left_hom = FusionTreeHomSpace::new(
-        space.homspace().codomain().clone(),
-        FusionProductSpace::new([new_leg.clone()]),
-    );
-    let right_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([new_leg]),
-        space.homspace().domain().clone(),
-    );
-    let left = input.prepare_final_homspace_generic_checked(provider, left_hom)?;
-    let right = input.prepare_final_homspace_generic_checked(provider, right_hom)?;
-    let left_regions =
-        checked_sector_regions(left.structure(), space.nout())?.ok_or_else(|| {
-            OperationError::UnsupportedTensorContractScope {
-                message: "compact left factor is not a coupled-sector matrix layout",
-            }
-        })?;
-    let right_regions = checked_sector_regions(right.structure(), 1)?.ok_or_else(|| {
-        OperationError::UnsupportedTensorContractScope {
-            message: "compact right factor is not a coupled-sector matrix layout",
-        }
-    })?;
-    if !source_factor_tree_extents_match(&regions, &left_regions, &right_regions) {
-        return Ok(None);
-    }
-    let routes = compile_compact_factor_routes(&regions, &left_regions, &right_regions)?;
-    Ok(Some(PreparedGenericCompactFactorPlan {
-        source_layout: input.validated_layout(),
-        source_regions: regions,
-        left,
-        right,
-        left_regions,
-        right_regions,
-        routes,
-    }))
 }
 
 pub(super) fn source_factor_tree_extents_match(
@@ -155,60 +81,6 @@ pub(super) fn source_factor_tree_extents_match(
         source_region.row_trees() == left[left_index].row_trees()
             && source_region.col_trees() == right[right_index].col_trees()
     })
-}
-
-pub(super) fn finish_compact_factor_plan_generic<R>(
-    input: &BoundDynamicFusionMapSpace<R>,
-    prepared: PreparedGenericCompactFactorPlan,
-) -> Result<Option<CompactFactorPlan>, OperationError>
-where
-    R: FusionRule,
-{
-    #[cfg(test)]
-    GENERIC_FACTOR_PLAN_FINISH_CALLS.with(|calls| calls.set(calls.get() + 1));
-    let PreparedGenericCompactFactorPlan {
-        source_layout,
-        source_regions,
-        left,
-        right,
-        left_regions,
-        right_regions,
-        routes,
-    } = prepared;
-    let left = input.commit_final_homspace_generic_checked(left)?;
-    let right = input.commit_final_homspace_generic_checked(right)?;
-    Ok(Some(CompactFactorPlan {
-        source_layout,
-        source_regions,
-        left_layout: left.validated_layout(),
-        right_layout: right.validated_layout(),
-        left_regions,
-        right_regions,
-        routes,
-    }))
-}
-
-#[cfg(test)]
-pub(crate) fn prepare_compact_factor_plan_generic_checked_for_test<R, P>(
-    input: &BoundDynamicFusionMapSpace<R>,
-    provider: &P,
-) -> Result<Option<PreparedGenericCompactFactorPlan>, CheckedGenericFactorPlanError<P::Error>>
-where
-    R: FusionRule,
-    P: CheckedGenericFusion,
-{
-    prepare_compact_factor_plan_generic_checked(input, provider)
-}
-
-#[cfg(test)]
-pub(crate) fn finish_compact_factor_plan_generic_for_test<R>(
-    input: &BoundDynamicFusionMapSpace<R>,
-    prepared: PreparedGenericCompactFactorPlan,
-) -> Result<bool, OperationError>
-where
-    R: FusionRule,
-{
-    finish_compact_factor_plan_generic(input, prepared).map(|plan| plan.is_some())
 }
 
 pub(super) fn build_compact_factor_plan<R>(

@@ -31,13 +31,11 @@ test_probes! {
     eigh_vectors: EIGH_OWNED_VECTOR_POINTERS: Vec<usize>,
     checked_eigh_pairs: CHECKED_EIGH_PAIR_POINTERS: Vec<usize>,
     checked_svd_stage: CHECKED_COMPACT_SVD_STAGE_POINTERS: Vec<(usize, usize)>,
-    generic_svd_fallback: GENERIC_COMPACT_SVD_FALLBACK_POINTERS: Vec<(usize, usize)>,
     mf_svd_fallback: MF_COMPACT_SVD_FALLBACK_POINTERS: Vec<(usize, usize)>,
     compact_lq: COMPACT_LQ_COPY_PROBE: CompactLqCopyProbe,
     diagonal_bond: DIAGONAL_BOND_BUILD_PROBE: DiagonalBondBuildProbe,
     values_fallbacks: VALUES_MATRICIZATION_FALLBACKS: usize,
     checked_inputs: CHECKED_COMPACT_INPUT_OBSERVATIONS: Vec<CheckedCompactInputObservation>,
-    plan_finish: GENERIC_FACTOR_PLAN_FINISH_CALLS: usize,
     pair_publication: GENERIC_PAIR_PUBLICATION_PROBE: GenericPairPublicationProbe,
     one_sided: ONE_SIDED_PUBLICATION_PROBE: OneSidedPublicationProbe,
     buffer_builds: FACTOR_BUFFER_BUILD_COUNTS: (usize, usize),
@@ -145,21 +143,6 @@ pub(super) fn record_input_pack_bytes<D>(matricizations: &[SectorMatricization<D
 
 #[cfg(test)]
 thread_local! {
-    pub(super) static GENERIC_FACTOR_PLAN_FINISH_CALLS: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_generic_factor_plan_finish_calls() {
-    GENERIC_FACTOR_PLAN_FINISH_CALLS.with(|calls| calls.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn generic_factor_plan_finish_calls() -> usize {
-    GENERIC_FACTOR_PLAN_FINISH_CALLS.with(Cell::get)
-}
-
-#[cfg(test)]
-thread_local! {
     pub(super) static FACTOR_BUFFER_BUILD_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }
 
@@ -246,7 +229,6 @@ pub(crate) struct GenericPairPublicationProbe {
     pub ordered_key_validation_events: usize,
     pub fallback_row_lookups: usize,
     pub fallback_col_lookups: usize,
-    pub output_blocks_visited: usize,
     pub left_owner_reused: usize,
     pub right_owner_reused: usize,
     pub left_appended_elements: usize,
@@ -342,18 +324,6 @@ pub(super) fn record_one_sided_fallback_publication() {
 pub(super) fn record_one_sided_fallback_publication() {}
 
 #[cfg(test)]
-pub(super) fn record_generic_pair_output_block_visit() {
-    GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-        let mut value = probe.get();
-        value.output_blocks_visited += 1;
-        probe.set(value);
-    });
-}
-
-#[cfg(not(test))]
-pub(super) fn record_generic_pair_output_block_visit() {}
-
-#[cfg(test)]
 pub(super) fn record_generic_pair_appended(left: usize, right: usize) {
     GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
         let mut value = probe.get();
@@ -399,8 +369,6 @@ thread_local! {
     pub(super) static CHECKED_EIGH_PAIR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     pub(super) static CHECKED_COMPACT_SVD_STAGE_POINTERS: RefCell<Vec<(usize, usize)>> =
         const { RefCell::new(Vec::new()) };
-    pub(super) static GENERIC_COMPACT_SVD_FALLBACK_POINTERS: RefCell<Vec<(usize, usize)>> =
-        const { RefCell::new(Vec::new()) };
     pub(super) static MF_COMPACT_SVD_FALLBACK_POINTERS: RefCell<Vec<(usize, usize)>> =
         const { RefCell::new(Vec::new()) };
     pub(super) static COMPACT_LQ_COPY_PROBE: Cell<CompactLqCopyProbe> = Cell::default();
@@ -423,25 +391,6 @@ pub(crate) fn checked_compact_svd_stage_pointers() -> Vec<(usize, usize)> {
 #[cfg(test)]
 pub(super) fn record_checked_compact_svd_stage_gauge<D>(u: &[D], vt: &[D]) {
     CHECKED_COMPACT_SVD_STAGE_POINTERS.with(|pointers| {
-        pointers
-            .borrow_mut()
-            .push((u.as_ptr() as usize, vt.as_ptr() as usize));
-    });
-}
-
-#[cfg(test)]
-pub(crate) fn reset_generic_compact_svd_fallback_pointers() {
-    GENERIC_COMPACT_SVD_FALLBACK_POINTERS.with(|pointers| pointers.borrow_mut().clear());
-}
-
-#[cfg(test)]
-pub(crate) fn generic_compact_svd_fallback_pointers() -> Vec<(usize, usize)> {
-    GENERIC_COMPACT_SVD_FALLBACK_POINTERS.with(|pointers| pointers.borrow().clone())
-}
-
-#[cfg(test)]
-pub(super) fn record_generic_compact_svd_fallback_gauge<D>(u: &[D], vt: &[D]) {
-    GENERIC_COMPACT_SVD_FALLBACK_POINTERS.with(|pointers| {
         pointers
             .borrow_mut()
             .push((u.as_ptr() as usize, vt.as_ptr() as usize));

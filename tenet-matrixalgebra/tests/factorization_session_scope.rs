@@ -27,7 +27,7 @@ use tenet_core::{
 };
 use tenet_dense::{cpu_session_stats, DefaultDenseExecutor};
 use tenet_matrixalgebra::seam::{
-    qr_compact_dyn, qr_compact_dyn_checked_generic, qr_compact_dyn_generic, BoundDynamicTensorRef,
+    qr_compact_dyn, qr_compact_dyn_checked_generic, BoundDynamicTensorRef,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 
@@ -148,6 +148,38 @@ impl FusionRule for ToyGenericRule {
 /// [`ToyGenericRule`] behind the fallible checked-Generic provider surface.
 struct CheckedToyRule;
 
+// The plain view too, so its spaces take the plain layout operations
+// (`adjoint_view`); every answer is `ToyGenericRule`'s.
+impl FusionRule for CheckedToyRule {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        ToyGenericRule.fusion_style()
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        ToyGenericRule.braiding_style()
+    }
+
+    fn vacuum(&self) -> SectorId {
+        ToyGenericRule.vacuum()
+    }
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        ToyGenericRule.dual(sector)
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        ToyGenericRule.fusion_channels(left, right)
+    }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        ToyGenericRule.nsymbol(left, right, coupled)
+    }
+}
+
 impl CheckedGenericFusion for CheckedToyRule {
     type Error = std::convert::Infallible;
 
@@ -230,9 +262,11 @@ fn assert_fallback_and_checked_generic_routes_open_one_session(mut dense: Defaul
         FusionProductSpace::new([leg(2, 2), leg(1, 2)]),
         FusionProductSpace::new([leg(2, 1)]),
     );
-    let space =
-        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::new(ToyGenericRule), homspace)
-            .unwrap();
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::new(CheckedToyRule),
+        homspace,
+    )
+    .unwrap();
     let data = (0..space.space().required_len().unwrap())
         .map(|i| 1.0 + ((i * 7 + 3) % 13) as f64 / 8.0)
         .collect::<Vec<f64>>();
@@ -240,7 +274,7 @@ fn assert_fallback_and_checked_generic_routes_open_one_session(mut dense: Defaul
     assert_not_matrix_layout(&adjoint);
     let input = BoundDynamicTensorRef::try_new(&adjoint, &data).unwrap();
     assert_eq!(
-        sessions_during(|| qr_compact_dyn_generic(&mut dense, &input).unwrap()),
+        sessions_during(|| qr_compact_dyn_checked_generic(&mut dense, &input).unwrap()),
         1,
         "Generic matricization qr_compact"
     );
@@ -340,9 +374,9 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     use tenet_matrixalgebra::seam::{
         eigh_full_dyn, eigh_full_dyn_checked_generic, left_null_dyn,
         left_null_dyn_checked_generic_with_dimensions, left_polar_dyn_checked_generic,
-        lq_compact_dyn, lq_compact_dyn_checked_generic, lq_compact_dyn_generic,
-        pinv_direct_into_dyn, right_null_dyn, right_null_dyn_checked_generic_with_dimensions,
-        svd_compact_dyn_checked_generic, svd_compact_factors_dyn, svd_compact_factors_dyn_generic,
+        lq_compact_dyn, lq_compact_dyn_checked_generic, pinv_direct_into_dyn, right_null_dyn,
+        right_null_dyn_checked_generic_with_dimensions, svd_compact_dyn_checked_generic,
+        svd_compact_factors_dyn,
     };
     let _guard = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let dense = &mut dense;
@@ -388,8 +422,8 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
         FusionProductSpace::new([toy_leg(2, 2), toy_leg(1, 2)]),
         FusionProductSpace::new([toy_leg(2, 1)]),
     );
-    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic(
-        Arc::new(ToyGenericRule),
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::new(CheckedToyRule),
         homspace.clone(),
     )
     .unwrap();
@@ -399,15 +433,15 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     let generic_matricized = BoundDynamicTensorRef::try_new(&generic_adjoint, &data).unwrap();
     assert_one_admission(
         "generic lq direct",
-        admissions_during(|| lq_compact_dyn_generic(dense, &generic).unwrap()),
+        admissions_during(|| lq_compact_dyn_checked_generic(dense, &generic).unwrap()),
     );
     assert_one_admission(
         "generic lq matricized",
-        admissions_during(|| lq_compact_dyn_generic(dense, &generic_matricized).unwrap()),
+        admissions_during(|| lq_compact_dyn_checked_generic(dense, &generic_matricized).unwrap()),
     );
     assert_one_admission(
         "generic svd matricized",
-        admissions_during(|| svd_compact_factors_dyn_generic(dense, &generic_matricized).unwrap()),
+        admissions_during(|| svd_compact_dyn_checked_generic(dense, &generic_matricized).unwrap()),
     );
 
     let provider = Arc::new(CheckedToyRule);

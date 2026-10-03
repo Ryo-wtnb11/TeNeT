@@ -17,14 +17,6 @@ pub(super) struct SectorRank {
     pub(super) kept: usize,
 }
 
-pub(super) struct GenericFactorPairSpaces<R> {
-    pub(super) left: BoundDynamicFusionMapSpace<R>,
-    pub(super) right: BoundDynamicFusionMapSpace<R>,
-    pub(super) left_keys: Vec<FusionTreePairKey>,
-    pub(super) right_keys: Vec<FusionTreePairKey>,
-    pub(super) ordered: bool,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum FactorSide {
     Left,

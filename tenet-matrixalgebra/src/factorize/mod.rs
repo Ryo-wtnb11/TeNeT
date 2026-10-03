@@ -13,10 +13,10 @@ use tenet_core::{
     BlockKey, BlockRef, BlockStructure, CheckedGenericFusion, CheckedGenericRigidSymbols,
     CheckedGenericStructureError, CoreError, CoupledSectorRegion, CoupledTreeExtent,
     FusionProductSpace, FusionRule, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
-    InfallibleGeneric, MultiplicityFreeRigidSymbols, SectorId, SectorLeg, SectorStructure,
+    MultiplicityFreeRigidSymbols, SectorId, SectorLeg, SectorStructure,
 };
 #[cfg(test)]
-use tenet_core::{FusionTensorMapSpace, TensorMap, TensorMapSpace};
+use tenet_core::{FusionTensorMapSpace, InfallibleGeneric, TensorMap, TensorMapSpace};
 use tenet_dense::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseFactorization, DenseOwned,
     DenseTensor, DenseView, DenseViewMut,
@@ -25,7 +25,7 @@ use tenet_dense::{
 pub use tenet_tensors::BoundDynamicTensorRef;
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DenseBlockScalar, DenseRecouplingScalar, DynamicFusionMapSpace,
-    PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
+    ValidatedDynamicFusionLayout,
 };
 
 use crate::results::{LeftPolar, Lq, Qr, RightPolar, Svd};
@@ -153,24 +153,21 @@ pub use polar::{
 use polar::{validate_polar_direction, PolarDirection};
 use qr_lq::diagonal_phase_magnitude;
 pub use qr_lq::{
-    lq_compact_dyn, lq_compact_dyn_checked_generic, lq_compact_dyn_generic,
-    lq_diagonal_dyn_checked_generic, lq_full_dyn, lq_full_dyn_checked_generic, qr_compact_dyn,
-    qr_compact_dyn_checked_generic, qr_compact_dyn_generic, qr_diagonal_dyn,
+    lq_compact_dyn, lq_compact_dyn_checked_generic, lq_diagonal_dyn_checked_generic, lq_full_dyn,
+    lq_full_dyn_checked_generic, qr_compact_dyn, qr_compact_dyn_checked_generic, qr_diagonal_dyn,
     qr_diagonal_dyn_checked_generic, qr_full_dyn, qr_full_dyn_checked_generic,
 };
 pub use scalar::{FactorScalar, SectorSpectrum, SpectrumMagnitude};
 pub use svd::{
     decide_bond_truncation, decide_bond_truncation_generic_checked,
-    diagonal_bond_bound_space_generic, diagonal_bond_bound_space_generic_checked,
-    diagonal_bond_bound_space_like, diagonal_bond_data, rectangular_diagonal_bond_tensor,
-    rectangular_diagonal_bond_tensor_generic_checked, scale_axis_by_spectrum,
-    scale_axis_by_spectrum_mapped, svd_compact_adjoint_factors_dyn,
+    diagonal_bond_bound_space_generic_checked, diagonal_bond_bound_space_like, diagonal_bond_data,
+    rectangular_diagonal_bond_tensor, rectangular_diagonal_bond_tensor_generic_checked,
+    scale_axis_by_spectrum, scale_axis_by_spectrum_mapped, svd_compact_adjoint_factors_dyn,
     svd_compact_diagonal_factors_dyn, svd_compact_diagonal_factors_dyn_checked_generic,
-    svd_compact_dyn_checked_generic, svd_compact_factors_dyn, svd_compact_factors_dyn_generic,
+    svd_compact_dyn_checked_generic, svd_compact_factors_dyn,
     svd_compact_factors_with_spectrum_dyn_checked_generic, svd_full_adjoint_factors_dyn,
     svd_full_diagonal_factors_dyn_checked_generic, svd_full_factors_dyn,
     svd_full_factors_dyn_checked_generic, svd_full_factors_dyn_checked_generic_with_dimensions,
     svd_vals_compact_diagonal_dyn, svd_vals_dyn, svd_vals_dyn_checked_generic,
-    svd_vals_dyn_generic, CheckedDiagonalFullSvdFactors, CheckedFullSvdDimensions, SvdFactorsDyn,
-    SvdFullFactorsDyn,
+    CheckedDiagonalFullSvdFactors, CheckedFullSvdDimensions, SvdFactorsDyn, SvdFullFactorsDyn,
 };

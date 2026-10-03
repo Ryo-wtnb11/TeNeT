@@ -278,11 +278,12 @@ pub(super) fn generic_diagonal_factor<R, D>(
     spectrum: &[SectorSpectrum],
 ) -> BoundDynFactor<R, D>
 where
-    R: FusionRule,
+    R: CheckedGenericFusion,
     D: FactorScalar,
 {
     let space =
-        diagonal_bond_bound_space_generic(Arc::clone(u.space().provider_arc()), spectrum).unwrap();
+        diagonal_bond_bound_space_generic_checked(Arc::clone(u.space().provider_arc()), spectrum)
+            .unwrap();
     let data = diagonal_bond_data(space.space(), spectrum, &D::from_real).unwrap();
     BoundDynFactor::from_bound(space, data, 1, 1).unwrap()
 }
@@ -487,9 +488,9 @@ where
     (bound, tensor.data().to_vec())
 }
 
-pub(super) fn assert_generic_complex_factor_close(
-    actual: &BoundDynFactor<FactorGenericRule, Complex64>,
-    expected: &BoundDynFactor<FactorGenericRule, Complex64>,
+pub(super) fn assert_generic_complex_factor_close<R: CheckedGenericFusion>(
+    actual: &BoundDynFactor<R, Complex64>,
+    expected: &BoundDynFactor<R, Complex64>,
 ) {
     assert_eq!(
         actual.space().space().homspace(),
@@ -610,6 +611,30 @@ where
         }
     }
     (provider, checked, data)
+}
+
+/// `space`'s exact layout rebound to a checked provider with
+/// [`FactorGenericRule`]'s symbols (a [`LateGenericSpy`] that never fails), the
+/// provider the checked Generic factorizations take.
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+pub(super) fn bind_checked_layout(
+    space: &BoundDynamicFusionMapSpace<FactorGenericRule>,
+) -> (
+    Arc<LateGenericSpy>,
+    BoundDynamicFusionMapSpace<LateGenericSpy>,
+) {
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(space.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    (provider, checked)
 }
 
 #[expect(
