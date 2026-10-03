@@ -1277,7 +1277,7 @@ pub fn decide_bond_truncation<R, V>(
     truncation: &Truncation,
 ) -> Result<crate::truncation::TruncationDecision, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     V: SpectrumMagnitude,
 {
     let magnitudes: Vec<Vec<f64>> = spectra
@@ -1410,7 +1410,7 @@ pub(crate) fn svd_full<E, R, D, const NOUT: usize, const NIN: usize>(
 ) -> Result<SvdFull<R, D, NOUT, NIN>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let out = svd_full_dyn(dense, &input.dynamic())?;
@@ -1429,7 +1429,7 @@ pub(crate) fn svd_full_dyn<E, R, D>(
 ) -> Result<SvdFullDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     svd_full_oriented_dyn(dense, input, FactorPlacement::Direct)
@@ -1443,7 +1443,7 @@ pub fn svd_full_factors_dyn<E, R, D>(
 ) -> Result<SvdFullFactorsDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     svd_full_oriented_factors_dyn(dense, input, FactorPlacement::Direct)
@@ -1456,7 +1456,7 @@ pub fn svd_full_adjoint_factors_dyn<E, R, D>(
 ) -> Result<SvdFullFactorsDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     svd_full_oriented_factors_dyn(dense, input, FactorPlacement::Adjoint)
@@ -1470,7 +1470,7 @@ pub(crate) fn svd_full_adjoint_dyn<E, R, D>(
 ) -> Result<SvdFullDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     svd_full_oriented_dyn(dense, input, FactorPlacement::Adjoint)
@@ -1525,7 +1525,7 @@ pub(super) fn svd_full_oriented_dyn<E, R, D>(
 ) -> Result<SvdFullDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let parts = svd_full_oriented_factors_dyn(dense, input, placement)?;
@@ -1551,7 +1551,7 @@ fn svd_full_oriented_factors_dyn<E, R, D>(
 ) -> Result<SvdFullFactorsDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let space = input.space().space();
