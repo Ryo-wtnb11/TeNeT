@@ -779,7 +779,7 @@ impl<C> FusionBlockContractPlan<C> {
             for layout in &self.inactive_dst_scale_blocks {
                 zero_strides.clear();
                 zero_strides.resize(layout.block.shape.len(), 0);
-                kernels.copy_scale_strided(
+                kernels.copy_scale_strided_baked(
                     data,
                     &zero,
                     &layout.block.shape,
@@ -789,6 +789,8 @@ impl<C> FusionBlockContractPlan<C> {
                     0,
                     false,
                     T::one(),
+                    None,
+                    None,
                 )?;
             }
             return Ok(());

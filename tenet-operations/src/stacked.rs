@@ -415,7 +415,7 @@ where
         if zero_inactive {
             let zero = [D::zero()];
             for (shape, strides, offset) in &self.inactive {
-                kernels.copy_scale_strided(
+                kernels.copy_scale_strided_baked(
                     dst_data,
                     &zero,
                     shape,
@@ -425,6 +425,8 @@ where
                     0,
                     false,
                     D::one(),
+                    None,
+                    None,
                 )?;
             }
         }

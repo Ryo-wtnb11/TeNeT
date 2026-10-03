@@ -1,4 +1,5 @@
 use super::*;
+use crate::kernel_adapter::observed::{KernelCall, ObservedKernels};
 
 #[test]
 fn zero_extent_profile_counts_match_serial_replay() {
@@ -170,132 +171,16 @@ fn profiled_overwrite_zeros_inactive_layout_without_touching_padding() {
     assert_eq!(profile.single_blocks, 1);
 }
 
-#[derive(Clone, Default)]
-struct SlowScaleAdapter(StridedHostKernelAdapter);
-
-impl HostKernelAdapter<f64> for SlowScaleAdapter {
-    fn add_strided(
-        &mut self,
-        zero_strides: &mut Vec<isize>,
-        dst_data: &mut [f64],
-        src_data: &[f64],
-        shape: &[usize],
-        dst_strides: &[isize],
-        src_strides: &[isize],
-        dst_offset: isize,
-        src_offset: isize,
-        source_conjugate: bool,
-        alpha: f64,
-        beta: f64,
-    ) -> Result<(), OperationError> {
-        self.0.add_strided(
-            zero_strides,
-            dst_data,
-            src_data,
-            shape,
-            dst_strides,
-            src_strides,
-            dst_offset,
-            src_offset,
-            source_conjugate,
-            alpha,
-            beta,
-        )
-    }
-
-    fn axpby_strided(
-        &mut self,
-        dst_data: &mut [f64],
-        src_data: &[f64],
-        shape: &[usize],
-        dst_strides: &[isize],
-        src_strides: &[isize],
-        dst_offset: isize,
-        src_offset: isize,
-        alpha: f64,
-        beta: f64,
-    ) -> Result<(), OperationError> {
-        self.0.axpby_strided(
-            dst_data,
-            src_data,
-            shape,
-            dst_strides,
-            src_strides,
-            dst_offset,
-            src_offset,
-            alpha,
-            beta,
-        )
-    }
-
-    fn copy_scale_strided(
-        &mut self,
-        dst_data: &mut [f64],
-        src_data: &[f64],
-        shape: &[usize],
-        dst_strides: &[isize],
-        src_strides: &[isize],
-        dst_offset: isize,
-        src_offset: isize,
-        source_conjugate: bool,
-        alpha: f64,
-    ) -> Result<(), OperationError> {
-        self.0.copy_scale_strided(
-            dst_data,
-            src_data,
-            shape,
-            dst_strides,
-            src_strides,
-            dst_offset,
-            src_offset,
-            source_conjugate,
-            alpha,
-        )
-    }
-
-    fn scale_strided(
-        &mut self,
-        dst_data: &mut [f64],
-        shape: &[usize],
-        dst_strides: &[isize],
-        dst_offset: isize,
-        beta: f64,
-    ) -> Result<(), OperationError> {
-        std::thread::sleep(Duration::from_millis(40));
-        self.0
-            .scale_strided(dst_data, shape, dst_strides, dst_offset, beta)
-    }
-
-    fn recoupling_src_times_u_transpose<C>(
-        &mut self,
-        destination: &mut [f64],
-        source: &[f64],
-        coefficients: &[C],
-        element_count: usize,
-        src_count: usize,
-        dst_count: usize,
-    ) -> Result<(), OperationError>
-    where
-        C: Copy,
-        f64: RecouplingCoefficientAction<C>,
-    {
-        self.0.recoupling_src_times_u_transpose(
-            destination,
-            source,
-            coefficients,
-            element_count,
-            src_count,
-            dst_count,
-        )
-    }
-}
-
 #[test]
 fn profiled_replay_attributes_inactive_destination_scaling() {
     let (mut dst, src, structure) = fixture();
     let mut profile = TreeTransformReplayProfile::default();
     tree_transform_structure_with_structural_recoupling_raw_profiled(
-        &mut SlowScaleAdapter::default(),
+        &mut ObservedKernels::new(|call| {
+            if matches!(call, KernelCall::Scale { .. }) {
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        }),
         &mut DefaultDenseExecutor::new(),
         &mut TreeTransformWorkspace::default(),
         &structure,

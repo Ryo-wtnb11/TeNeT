@@ -15,6 +15,8 @@ use crate::{
 
 mod adapter;
 mod fused_layout;
+#[cfg(test)]
+pub(crate) mod observed;
 
 pub use self::adapter::*;
 pub use self::fused_layout::*;
@@ -32,7 +34,7 @@ mod tests {
         let src = [2.0_f64, 3.0];
 
         adapter
-            .add_strided(
+            .add_strided_baked(
                 &mut zero_strides,
                 &mut dst,
                 &src,
@@ -44,6 +46,8 @@ mod tests {
                 false,
                 2.0,
                 3.0,
+                None,
+                None,
             )
             .unwrap();
 
@@ -302,7 +306,7 @@ mod tests {
         let mut adapter = StridedHostKernelAdapter::default();
 
         adapter
-            .copy_scale_strided(
+            .copy_scale_strided_baked(
                 &mut expected,
                 &src,
                 shape,
@@ -312,6 +316,8 @@ mod tests {
                 0,
                 false,
                 2.0,
+                None,
+                None,
             )
             .unwrap();
         let normalized = layout(shape, strides, strides);
@@ -333,6 +339,7 @@ mod tests {
                 false,
                 2.0,
                 Some(baked),
+                None,
             )
             .unwrap();
 
@@ -378,6 +385,7 @@ mod tests {
                     1.0,
                     2.0,
                     None,
+                    None
                 )
                 .unwrap_err(),
             dst_error
@@ -397,6 +405,7 @@ mod tests {
                     1.0,
                     2.0,
                     None,
+                    None
                 )
                 .unwrap_err(),
             dst_error
@@ -404,7 +413,7 @@ mod tests {
         assert_eq!(
             adapter
                 .axpby_strided_baked(
-                    &mut dst, &src, &shape, &missing, &strides, 0, 0, 1.0, 2.0, None,
+                    &mut dst, &src, &shape, &missing, &strides, 0, 0, 1.0, 2.0, None, None
                 )
                 .unwrap_err(),
             dst_error
@@ -412,7 +421,7 @@ mod tests {
         assert_eq!(
             adapter
                 .axpby_strided_baked(
-                    &mut dst, &src, &shape, &strides, &missing, 0, 0, 1.0, 2.0, None,
+                    &mut dst, &src, &shape, &strides, &missing, 0, 0, 1.0, 2.0, None, None
                 )
                 .unwrap_err(),
             dst_error
@@ -420,7 +429,7 @@ mod tests {
         assert_eq!(
             adapter
                 .copy_scale_strided_baked(
-                    &mut dst, &src, &shape, &missing, &strides, 0, 0, false, 1.0, None,
+                    &mut dst, &src, &shape, &missing, &strides, 0, 0, false, 1.0, None, None
                 )
                 .unwrap_err(),
             dst_error
@@ -428,7 +437,7 @@ mod tests {
         assert_eq!(
             adapter
                 .copy_scale_strided_baked(
-                    &mut dst, &src, &shape, &strides, &missing, 0, 0, false, 1.0, None,
+                    &mut dst, &src, &shape, &strides, &missing, 0, 0, false, 1.0, None, None
                 )
                 .unwrap_err(),
             dst_error
@@ -558,7 +567,7 @@ mod tests {
         // add_strided beta = 1: accumulate through the fused path.
         let mut dst = [10.0_f64, 20.0];
         adapter
-            .add_strided(
+            .add_strided_baked(
                 &mut zero_strides,
                 &mut dst,
                 &src,
@@ -570,13 +579,15 @@ mod tests {
                 false,
                 2.0,
                 1.0,
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(dst, [14.0, 26.0]);
 
         // add_strided beta = 0: assign through the fused path.
         adapter
-            .add_strided(
+            .add_strided_baked(
                 &mut zero_strides,
                 &mut dst,
                 &src,
@@ -588,6 +599,8 @@ mod tests {
                 false,
                 2.0,
                 0.0,
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(dst, [4.0, 6.0]);
@@ -595,18 +608,30 @@ mod tests {
         // axpby_strided beta = 1 then beta = 0.
         let mut dst = [1.0_f64, 2.0];
         adapter
-            .axpby_strided(&mut dst, &src, &[2], &[1], &[1], 0, 0, 3.0, 1.0)
+            .axpby_strided_baked(&mut dst, &src, &[2], &[1], &[1], 0, 0, 3.0, 1.0, None, None)
             .unwrap();
         assert_eq!(dst, [7.0, 11.0]);
         adapter
-            .axpby_strided(&mut dst, &src, &[2], &[1], &[1], 0, 0, 3.0, 0.0)
+            .axpby_strided_baked(&mut dst, &src, &[2], &[1], &[1], 0, 0, 3.0, 0.0, None, None)
             .unwrap();
         assert_eq!(dst, [6.0, 9.0]);
 
         // copy_scale_strided always assigns.
         let mut dst = [99.0_f64, 99.0];
         adapter
-            .copy_scale_strided(&mut dst, &src, &[2], &[1], &[1], 0, 0, false, -1.0)
+            .copy_scale_strided_baked(
+                &mut dst,
+                &src,
+                &[2],
+                &[1],
+                &[1],
+                0,
+                0,
+                false,
+                -1.0,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(dst, [-2.0, -3.0]);
 
@@ -850,14 +875,26 @@ mod tests {
         let alpha = Complex64::zero();
         let mut dst = initial;
         adapter
-            .copy_scale_strided(&mut dst, &src, &[2], &[1], &[1], 0, 0, false, alpha)
+            .copy_scale_strided_baked(
+                &mut dst,
+                &src,
+                &[2],
+                &[1],
+                &[1],
+                0,
+                0,
+                false,
+                alpha,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(pairs(&dst), pairs(&zero));
         for beta in [Complex64::zero(), Complex64::one()] {
             let want = if beta.is_zero() { zero } else { initial };
             let mut dst = initial;
             adapter
-                .add_strided(
+                .add_strided_baked(
                     &mut zero_strides,
                     &mut dst,
                     &src,
@@ -869,12 +906,26 @@ mod tests {
                     false,
                     alpha,
                     beta,
+                    None,
+                    None,
                 )
                 .unwrap();
             assert_eq!(pairs(&dst), pairs(&want), "add, beta {beta}");
             let mut dst = initial;
             adapter
-                .axpby_strided(&mut dst, &src, &[2], &[1], &[1], 0, 0, alpha, beta)
+                .axpby_strided_baked(
+                    &mut dst,
+                    &src,
+                    &[2],
+                    &[1],
+                    &[1],
+                    0,
+                    0,
+                    alpha,
+                    beta,
+                    None,
+                    None,
+                )
                 .unwrap();
             assert_eq!(pairs(&dst), pairs(&want), "axpby, beta {beta}");
         }

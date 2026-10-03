@@ -463,7 +463,7 @@ where
             let layout = layouts.entry(item.dst_layout);
             let baked = layouts.fused_baked(item.dst_layout);
             match mode {
-                DestinationMode::Axpby(beta) => kernels.axpby_strided_baked_with_index(
+                DestinationMode::Axpby(beta) => kernels.axpby_strided_baked(
                     dst_data,
                     packed_destination,
                     layouts.shape(layout),
@@ -474,9 +474,9 @@ where
                     alpha,
                     beta,
                     baked,
-                    &mut *fused_index,
+                    Some(&mut *fused_index),
                 )?,
-                DestinationMode::Overwrite => kernels.copy_scale_strided_baked_with_index(
+                DestinationMode::Overwrite => kernels.copy_scale_strided_baked(
                     dst_data,
                     packed_destination,
                     layouts.shape(layout),
@@ -487,7 +487,7 @@ where
                     false,
                     alpha,
                     baked,
-                    &mut *fused_index,
+                    Some(&mut *fused_index),
                 )?,
             }
         }

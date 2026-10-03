@@ -1,4 +1,5 @@
 use super::*;
+use crate::kernel_adapter::observed::ObservedKernels;
 use std::ops::{Add, Mul};
 
 use num_complex::Complex64;
@@ -1535,142 +1536,6 @@ fn scaled_storage_jobs_keep_canonical_coefficients_aligned_and_convert_payload()
     assert_eq!(rejected, vec![Complex64::ZERO; 2]);
 }
 
-/// Records the destination offset of every scale/copy kernel call so a
-/// test can prove which blocks the inactive-block pass touched.
-struct CountingKernels {
-    inner: crate::StridedHostKernelAdapter,
-    scale_offsets: Vec<isize>,
-    copy_offsets: Vec<isize>,
-}
-
-impl CountingKernels {
-    fn new() -> Self {
-        Self {
-            inner: crate::StridedHostKernelAdapter::default(),
-            scale_offsets: Vec::new(),
-            copy_offsets: Vec::new(),
-        }
-    }
-}
-
-impl HostKernelAdapter<f64> for CountingKernels {
-    fn add_strided(
-        &mut self,
-        zero_strides: &mut Vec<isize>,
-        dst_data: &mut [f64],
-        src_data: &[f64],
-        shape: &[usize],
-        dst_strides: &[isize],
-        src_strides: &[isize],
-        dst_offset: isize,
-        src_offset: isize,
-        source_conjugate: bool,
-        alpha: f64,
-        beta: f64,
-    ) -> Result<(), OperationError> {
-        self.inner.add_strided(
-            zero_strides,
-            dst_data,
-            src_data,
-            shape,
-            dst_strides,
-            src_strides,
-            dst_offset,
-            src_offset,
-            source_conjugate,
-            alpha,
-            beta,
-        )
-    }
-
-    fn axpby_strided(
-        &mut self,
-        dst_data: &mut [f64],
-        src_data: &[f64],
-        shape: &[usize],
-        dst_strides: &[isize],
-        src_strides: &[isize],
-        dst_offset: isize,
-        src_offset: isize,
-        alpha: f64,
-        beta: f64,
-    ) -> Result<(), OperationError> {
-        self.inner.axpby_strided(
-            dst_data,
-            src_data,
-            shape,
-            dst_strides,
-            src_strides,
-            dst_offset,
-            src_offset,
-            alpha,
-            beta,
-        )
-    }
-
-    fn copy_scale_strided(
-        &mut self,
-        dst_data: &mut [f64],
-        src_data: &[f64],
-        shape: &[usize],
-        dst_strides: &[isize],
-        src_strides: &[isize],
-        dst_offset: isize,
-        src_offset: isize,
-        source_conjugate: bool,
-        alpha: f64,
-    ) -> Result<(), OperationError> {
-        self.copy_offsets.push(dst_offset);
-        self.inner.copy_scale_strided(
-            dst_data,
-            src_data,
-            shape,
-            dst_strides,
-            src_strides,
-            dst_offset,
-            src_offset,
-            source_conjugate,
-            alpha,
-        )
-    }
-
-    fn scale_strided(
-        &mut self,
-        dst_data: &mut [f64],
-        shape: &[usize],
-        dst_strides: &[isize],
-        dst_offset: isize,
-        beta: f64,
-    ) -> Result<(), OperationError> {
-        self.scale_offsets.push(dst_offset);
-        self.inner
-            .scale_strided(dst_data, shape, dst_strides, dst_offset, beta)
-    }
-
-    fn recoupling_src_times_u_transpose<C>(
-        &mut self,
-        destination: &mut [f64],
-        source: &[f64],
-        recoupling_coefficients_dst_src: &[C],
-        element_count: usize,
-        src_count: usize,
-        dst_count: usize,
-    ) -> Result<(), OperationError>
-    where
-        C: Copy,
-        f64: RecouplingCoefficientAction<C>,
-    {
-        self.inner.recoupling_src_times_u_transpose(
-            destination,
-            source,
-            recoupling_coefficients_dst_src,
-            element_count,
-            src_count,
-            dst_count,
-        )
-    }
-}
-
 /// Fails on the `fail_at`-th (zero-based) GEMM job, after the earlier
 /// jobs have written their destination blocks.
 struct FailingAtJob {
@@ -1756,7 +1621,7 @@ fn zeroed_replay_never_touches_inactive_blocks() {
     // job with `beta = 0` and the inactive ones keep their zeros.
     for irregular_first in [false, true] {
         let (structure, plan) = four_block_plan(irregular_first);
-        let mut kernels = CountingKernels::new();
+        let mut kernels = ObservedKernels::recording();
         let mut dst = vec![0.0; 4];
         plan.execute_raw_zeroed(
             &mut kernels,
@@ -1772,11 +1637,11 @@ fn zeroed_replay_never_touches_inactive_blocks() {
         )
         .unwrap();
         assert_eq!(dst, [42.0, 110.0, 0.0, 0.0]);
-        assert!(kernels.scale_offsets.is_empty(), "{irregular_first}");
+        assert!(kernels.scale_offsets().is_empty(), "{irregular_first}");
         assert!(
-            touched_inactive(&kernels.copy_offsets).is_empty(),
+            touched_inactive(&kernels.copy_offsets()).is_empty(),
             "irregular_first={irregular_first}: {:?}",
-            kernels.copy_offsets
+            kernels.copy_offsets()
         );
         assert!(dst[2..].iter().all(|v| v.to_bits() == 0));
     }
@@ -1789,7 +1654,7 @@ fn axpby_zero_assigns_inactive_blocks_without_reading_them() {
     // multiply that would keep NaN.
     for irregular_first in [false, true] {
         let (structure, plan) = four_block_plan(irregular_first);
-        let mut kernels = CountingKernels::new();
+        let mut kernels = ObservedKernels::recording();
         let mut dst = vec![f64::NAN, f64::INFINITY, f64::NAN, -0.0];
         plan.execute_raw(
             &mut kernels,
@@ -1808,15 +1673,15 @@ fn axpby_zero_assigns_inactive_blocks_without_reading_them() {
         assert_eq!(dst[..2], [21.0, 55.0]);
         assert_eq!(dst[2].to_bits(), 0);
         assert_eq!(dst[3].to_bits(), 0);
-        assert!(kernels.scale_offsets.is_empty());
-        assert_eq!(touched_inactive(&kernels.copy_offsets), [2, 3]);
+        assert!(kernels.scale_offsets().is_empty());
+        assert_eq!(touched_inactive(&kernels.copy_offsets()), [2, 3]);
     }
 }
 
 #[test]
 fn axpby_one_leaves_inactive_blocks_untouched() {
     let (structure, plan) = four_block_plan(false);
-    let mut kernels = CountingKernels::new();
+    let mut kernels = ObservedKernels::recording();
     let mut dst = vec![1.0, 2.0, 3.0, f64::NAN];
     plan.execute_raw(
         &mut kernels,
@@ -1834,14 +1699,14 @@ fn axpby_one_leaves_inactive_blocks_untouched() {
     .unwrap();
     assert_eq!(dst[..3], [22.0, 57.0, 3.0]);
     assert!(dst[3].is_nan());
-    assert!(kernels.scale_offsets.is_empty());
-    assert!(kernels.copy_offsets.is_empty());
+    assert!(kernels.scale_offsets().is_empty());
+    assert!(kernels.copy_offsets().is_empty());
 }
 
 #[test]
 fn axpby_general_beta_scales_inactive_blocks_exactly_once() {
     let (structure, plan) = four_block_plan(false);
-    let mut kernels = CountingKernels::new();
+    let mut kernels = ObservedKernels::recording();
     let mut dst = vec![1.0, 2.0, 3.0, 4.0];
     plan.execute_raw(
         &mut kernels,
@@ -1858,8 +1723,8 @@ fn axpby_general_beta_scales_inactive_blocks_exactly_once() {
     )
     .unwrap();
     assert_eq!(dst, [21.5, 56.0, 1.5, 2.0]);
-    assert_eq!(kernels.scale_offsets, [2, 3]);
-    assert!(kernels.copy_offsets.is_empty());
+    assert_eq!(kernels.scale_offsets(), [2, 3]);
+    assert!(kernels.copy_offsets().is_empty());
 }
 
 #[test]
@@ -1868,7 +1733,7 @@ fn gemm_failure_after_the_first_job_surfaces_without_panicking() {
     // valid buffer throughout (born zero, first job written), so nothing
     // uninitialised can be observed and the owner drops it.
     let (structure, plan) = four_block_plan(false);
-    let mut kernels = CountingKernels::new();
+    let mut kernels = ObservedKernels::recording();
     let mut gemm = FailingAtJob {
         calls: 0,
         fail_at: 1,
@@ -1891,8 +1756,8 @@ fn gemm_failure_after_the_first_job_surfaces_without_panicking() {
     assert!(matches!(error, OperationError::StridedKernel { .. }));
     assert_eq!(gemm.calls, 2);
     assert_eq!(dst, [21.0, 0.0, 0.0, 0.0]);
-    assert!(kernels.scale_offsets.is_empty());
-    assert!(kernels.copy_offsets.is_empty());
+    assert!(kernels.scale_offsets().is_empty());
+    assert!(kernels.copy_offsets().is_empty());
 }
 
 #[test]
@@ -1954,7 +1819,7 @@ fn canonical_plan_zeroed_replay_skips_the_inactive_coupled_range() {
     let lhs_data = vec![1.0; lhs_structure.required_len().unwrap()];
     let rhs_data = vec![2.0; rhs_structure.required_len().unwrap()];
 
-    let mut kernels = CountingKernels::new();
+    let mut kernels = ObservedKernels::recording();
     let mut zeroed = vec![0.0; required];
     plan.execute_raw_zeroed(
         &mut kernels,
@@ -1969,10 +1834,10 @@ fn canonical_plan_zeroed_replay_skips_the_inactive_coupled_range() {
         1.0,
     )
     .unwrap();
-    assert!(kernels.scale_offsets.is_empty());
-    assert!(kernels.copy_offsets.is_empty());
+    assert!(kernels.scale_offsets().is_empty());
+    assert!(kernels.copy_offsets().is_empty());
 
-    let mut kernels = CountingKernels::new();
+    let mut kernels = ObservedKernels::recording();
     let mut assigned = vec![f64::NAN; required];
     plan.execute_raw(
         &mut kernels,
@@ -1988,8 +1853,8 @@ fn canonical_plan_zeroed_replay_skips_the_inactive_coupled_range() {
         0.0,
     )
     .unwrap();
-    assert_eq!(kernels.copy_offsets.len(), 1);
-    assert!(kernels.scale_offsets.is_empty());
+    assert_eq!(kernels.copy_offsets().len(), 1);
+    assert!(kernels.scale_offsets().is_empty());
     assert_eq!(zeroed, assigned);
     assert!(zeroed.iter().all(|v| v.to_bits() == 0 || *v == 4.0));
     assert_eq!(zeroed.iter().filter(|v| **v == 4.0).count(), 4);
