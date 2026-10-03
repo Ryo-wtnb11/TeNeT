@@ -1,3 +1,5 @@
+use super::*;
+
 /// Expert error returned by checked Generic-fusion structural construction.
 ///
 /// The provider source remains typed; core structural errors retain their
@@ -76,7 +78,7 @@ impl<E: std::error::Error + 'static> std::error::Error for CheckedGenericSymbolE
     }
 }
 
-fn map_infallible_generic_symbol_error(
+pub(super) fn map_infallible_generic_symbol_error(
     error: CheckedGenericSymbolError<std::convert::Infallible>,
 ) -> CoreError {
     match error {
@@ -92,7 +94,7 @@ fn map_infallible_generic_symbol_error(
     }
 }
 
-trait GenericFRAccess {
+pub(crate) trait GenericFRAccess {
     type Scalar: CategoricalScalar;
     type Error;
     fn fusion_style(&self) -> FusionStyleKind;
@@ -114,7 +116,7 @@ trait GenericFRAccess {
     fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error>;
 }
 
-trait GenericRigidAccess: GenericFRAccess {
+pub(crate) trait GenericRigidAccess: GenericFRAccess {
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
     fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
     fn try_frobenius_schur_phase_scalar(
@@ -136,7 +138,7 @@ trait GenericRigidAccess: GenericFRAccess {
     ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>>;
 }
 
-struct InfallibleGenericFR<'a, R>(&'a R);
+pub(crate) struct InfallibleGenericFR<'a, R>(pub(crate) &'a R);
 
 impl<R> GenericFRAccess for InfallibleGenericFR<'_, R>
 where
@@ -170,7 +172,7 @@ impl<P: CheckedGenericRigidSymbols> GenericFRAccess for P {
     fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { CheckedGenericRigidSymbols::try_r_symbol_generic(self,a,b,c) }
 }
 
-struct InfallibleGenericRigid<'a, R>(&'a R);
+pub(super) struct InfallibleGenericRigid<'a, R>(pub(super) &'a R);
 
 impl<R> GenericFRAccess for InfallibleGenericRigid<'_, R>
 where
@@ -300,7 +302,7 @@ where
     Ok(())
 }
 
-fn map_checked_generic_structure_error<E>(
+pub(super) fn map_checked_generic_structure_error<E>(
     error: CheckedGenericStructureError<E>,
 ) -> CheckedGenericSymbolError<E> {
     match error {
@@ -311,7 +313,7 @@ fn map_checked_generic_structure_error<E>(
     }
 }
 
-fn checked_generic_f_symbol<C>(
+pub(super) fn checked_generic_f_symbol<C>(
     rule: &C,
     a: SectorId,
     b: SectorId,
@@ -347,7 +349,7 @@ where
     Ok(symbol)
 }
 
-fn checked_generic_r_symbol<C>(
+pub(super) fn checked_generic_r_symbol<C>(
     rule: &C,
     a: SectorId,
     b: SectorId,

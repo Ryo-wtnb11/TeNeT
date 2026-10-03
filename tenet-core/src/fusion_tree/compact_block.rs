@@ -1,3 +1,5 @@
+use super::*;
+
 fn apply_first_compact_block_terms<R, K, F, I>(
     rule: &R,
     basis: &[K],
@@ -40,7 +42,7 @@ where
     Ok((locals, columns))
 }
 
-fn compact_artin_tree_block_first<R>(
+pub(super) fn compact_artin_tree_block_first<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreeBasis,
     index: usize,
@@ -70,7 +72,7 @@ where
     ))
 }
 
-fn compact_artin_tree_block_step<R>(
+pub(super) fn compact_artin_tree_block_step<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreeBasis,
     columns: &DenseColumns<R::Scalar>,
@@ -101,7 +103,7 @@ where
     ))
 }
 
-fn scatter_compact_tree_block<S>(
+pub(super) fn scatter_compact_tree_block<S>(
     basis: CompactMultiplicityFreeTreeBasis,
     columns: &DenseColumns<S>,
 ) -> Vec<Vec<(FusionTreeKey, S)>>
@@ -122,7 +124,7 @@ where
     rows_per_source
 }
 
-fn compact_bendright_block_first<R>(
+pub(crate) fn compact_bendright_block_first<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
 ) -> Result<
@@ -151,7 +153,7 @@ where
     ))
 }
 
-fn compact_bendleft_block_first<R>(
+pub(crate) fn compact_bendleft_block_first<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
 ) -> Result<
@@ -387,7 +389,7 @@ where
     compact_foldright_block(rule, swapped, None, true, true)
 }
 
-fn compact_codomain_artin_block_first<R>(
+pub(crate) fn compact_codomain_artin_block_first<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
     index: usize,
@@ -431,7 +433,7 @@ where
     ))
 }
 
-fn compact_bendright_block_step<R>(
+pub(super) fn compact_bendright_block_step<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
     columns: &DenseColumns<R::Scalar>,
@@ -461,7 +463,7 @@ where
     ))
 }
 
-fn compact_bendleft_block_step<R>(
+pub(super) fn compact_bendleft_block_step<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
     columns: &DenseColumns<R::Scalar>,
@@ -540,7 +542,7 @@ where
     compact_foldright_block(rule, swapped, Some(columns), true, true)
 }
 
-fn compact_codomain_artin_block_step<R>(
+pub(super) fn compact_codomain_artin_block_step<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
     columns: &DenseColumns<R::Scalar>,
@@ -585,7 +587,7 @@ where
     ))
 }
 
-fn compact_cycle_clockwise_block_first<R>(
+pub(super) fn compact_cycle_clockwise_block_first<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
 ) -> Result<
@@ -608,7 +610,7 @@ where
     }
 }
 
-fn compact_cycle_clockwise_block_step<R>(
+pub(super) fn compact_cycle_clockwise_block_step<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
     columns: &DenseColumns<R::Scalar>,
@@ -632,7 +634,7 @@ where
     }
 }
 
-fn compact_cycle_anticlockwise_block_first<R>(
+pub(super) fn compact_cycle_anticlockwise_block_first<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
 ) -> Result<
@@ -655,7 +657,7 @@ where
     }
 }
 
-fn compact_cycle_anticlockwise_block_step<R>(
+pub(super) fn compact_cycle_anticlockwise_block_step<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreePairBasis,
     columns: &DenseColumns<R::Scalar>,
@@ -679,7 +681,7 @@ where
     }
 }
 
-fn scatter_compact_block<S: Clone>(
+pub(crate) fn scatter_compact_block<S: Clone>(
     basis: CompactMultiplicityFreeTreePairBasis,
     columns: DenseColumns<S>,
 ) -> Vec<Vec<(FusionTreePairKey, S)>> {
@@ -707,7 +709,7 @@ fn scatter_compact_block<S: Clone>(
     rows_per_source
 }
 
-fn order_compact_block<S: Clone>(
+pub(crate) fn order_compact_block<S: Clone>(
     basis: CompactMultiplicityFreeTreePairBasis,
     mut columns: DenseColumns<S>,
 ) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
@@ -803,7 +805,7 @@ fn order_compact_block<S: Clone>(
     }
 }
 
-fn scatter_compact_tree_pair_block<S: Clone>(
+pub(super) fn scatter_compact_tree_pair_block<S: Clone>(
     block: CompactMultiplicityFreeTreePairBlock<S>,
 ) -> CompactMultiplicityFreeTreePairRows<S> {
     if block.records_dimensions {
@@ -827,7 +829,7 @@ fn scatter_compact_tree_pair_block<S: Clone>(
     }
 }
 
-fn order_compact_tree_pair_block<S: Clone>(
+pub(super) fn order_compact_tree_pair_block<S: Clone>(
     block: CompactMultiplicityFreeTreePairBlock<S>,
 ) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
     order_compact_block(block.basis, block.columns)
@@ -835,11 +837,11 @@ fn order_compact_tree_pair_block<S: Clone>(
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompactBlockDimensions {
-    destination_rows: usize,
-    source_columns: usize,
-    coefficient_slots: usize,
-    coefficient_bytes: usize,
+pub(crate) struct CompactBlockDimensions {
+    pub(crate) destination_rows: usize,
+    pub(crate) source_columns: usize,
+    pub(crate) coefficient_slots: usize,
+    pub(crate) coefficient_bytes: usize,
 }
 
 #[cfg(test)]
@@ -849,17 +851,17 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn reset_compact_block_dimensions() {
+pub(crate) fn reset_compact_block_dimensions() {
     COMPACT_BLOCK_DIMENSIONS.with(|dimensions| dimensions.set(None));
 }
 
 #[cfg(test)]
-fn compact_block_dimensions() -> Option<CompactBlockDimensions> {
+pub(crate) fn compact_block_dimensions() -> Option<CompactBlockDimensions> {
     COMPACT_BLOCK_DIMENSIONS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
-fn assert_compact_tree_pair_basis_matches_homspace<R>(
+pub(super) fn assert_compact_tree_pair_basis_matches_homspace<R>(
     rule: &R,
     basis: &CompactMultiplicityFreeTreePairBasis,
 ) where
@@ -985,7 +987,7 @@ where
     Ok(())
 }
 
-fn compact_repartition_tree_pair_block<R>(
+pub(super) fn compact_repartition_tree_pair_block<R>(
     group: ValidatedTreePairBlockGroup<'_, R>,
     target_codomain_rank: usize,
 ) -> Result<CompactMultiplicityFreeTreePairBlock<R::Scalar>, CoreError>

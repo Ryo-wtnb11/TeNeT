@@ -1,4 +1,6 @@
-fn inner_extended_sector<T>(tree: &T, index: usize) -> Result<SectorId, CoreError>
+use super::*;
+
+pub(super) fn inner_extended_sector<T>(tree: &T, index: usize) -> Result<SectorId, CoreError>
 where
     T: MultiplicityFreeTreeData + ?Sized,
 {
@@ -23,7 +25,7 @@ where
         })
 }
 
-fn only_fusion_channel<R>(rule: &R, left: SectorId, right: SectorId) -> Result<SectorId, CoreError>
+pub(super) fn only_fusion_channel<R>(rule: &R, left: SectorId, right: SectorId) -> Result<SectorId, CoreError>
 where
     R: FusionRule,
 {
@@ -184,7 +186,7 @@ where
     ))
 }
 
-fn unique_rigid_cycle_clockwise_tree_pair<R>(
+pub(crate) fn unique_rigid_cycle_clockwise_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
@@ -207,7 +209,7 @@ where
     Ok((destination, first_coefficient * second_coefficient))
 }
 
-fn unique_rigid_cycle_anticlockwise_tree_pair<R>(
+pub(crate) fn unique_rigid_cycle_anticlockwise_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
@@ -230,7 +232,7 @@ where
     Ok((destination, first_coefficient * second_coefficient))
 }
 
-fn unique_rigid_repartition_tree_pair_validated<R>(
+pub(super) fn unique_rigid_repartition_tree_pair_validated<R>(
     validated: ValidatedFusionTreePair<'_, R>,
     target_codomain_rank: usize,
 ) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
@@ -245,7 +247,7 @@ where
     )
 }
 
-fn unique_rigid_repartition_tree_pair_unchecked<R>(
+pub(crate) fn unique_rigid_repartition_tree_pair_unchecked<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,
@@ -288,7 +290,7 @@ where
     Ok((current.frame.materialize(current.local), coefficient))
 }
 
-fn unique_rigid_multi_fmove_tree<R>(
+pub(crate) fn unique_rigid_multi_fmove_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
 ) -> Result<(FusionTreeKey, R::Scalar), CoreError>
@@ -304,7 +306,7 @@ where
     Ok((destination, coefficient))
 }
 
-fn unique_rigid_multi_fmove_inv_tree<R>(
+pub(crate) fn unique_rigid_multi_fmove_inv_tree<R>(
     rule: &R,
     leading_sector: SectorId,
     coupled: SectorId,

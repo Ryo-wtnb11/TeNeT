@@ -1,4 +1,6 @@
-fn multiplicity_free_repartition_terms<R>(
+use super::*;
+
+pub(crate) fn multiplicity_free_repartition_terms<R>(
     rule: &R,
     terms: Vec<(FusionTreePairKey, R::Scalar)>,
     target_codomain_rank: usize,
@@ -35,7 +37,7 @@ where
     Ok(current)
 }
 
-struct PreparedMultiplicityFreeBendRight {
+pub(super) struct PreparedMultiplicityFreeBendRight {
     codomain_rank: usize,
     domain_rank: usize,
     codomain_first: SectorId,
@@ -48,15 +50,15 @@ struct PreparedMultiplicityFreeBendRight {
     output_domain_is_dual_prefix: DualVec,
 }
 
-struct ValidatedMultiplicityFreeBendRightLocal {
-    local: MultiplicityFreeTreePairLocal,
+pub(super) struct ValidatedMultiplicityFreeBendRightLocal {
+    pub(super) local: MultiplicityFreeTreePairLocal,
     coupled: SectorId,
     left_coupled: SectorId,
     bent_is_dual: bool,
 }
 
 impl PreparedMultiplicityFreeBendRight {
-    fn validate_output_frame(&self) -> Result<(), CoreError> {
+    pub(super) fn validate_output_frame(&self) -> Result<(), CoreError> {
         self.bent_is_dual
             .ok_or(CoreError::MalformedFusionTree {
                 message: "codomain tree is missing a duality flag",
@@ -64,7 +66,7 @@ impl PreparedMultiplicityFreeBendRight {
             .map(|_| ())
     }
 
-    fn output_frame<R>(&self, rule: &R) -> Result<MultiplicityFreeTreePairFrame, CoreError>
+    pub(super) fn output_frame<R>(&self, rule: &R) -> Result<MultiplicityFreeTreePairFrame, CoreError>
     where
         R: FusionRule,
     {
@@ -87,7 +89,7 @@ impl PreparedMultiplicityFreeBendRight {
         })
     }
 
-    fn validate_local<R, C, D>(
+    pub(super) fn validate_local<R, C, D>(
         &self,
         rule: &R,
         codomain: &C,
@@ -149,7 +151,7 @@ impl PreparedMultiplicityFreeBendRight {
         })
     }
 
-    fn coefficient<R>(
+    pub(super) fn coefficient<R>(
         &self,
         rule: &R,
         local: &ValidatedMultiplicityFreeBendRightLocal,
@@ -171,7 +173,7 @@ impl PreparedMultiplicityFreeBendRight {
     }
 }
 
-fn prepare_multiplicity_free_bendright<R>(
+pub(super) fn prepare_multiplicity_free_bendright<R>(
     _rule: &R,
     frame: &MultiplicityFreeTreePairFrame,
 ) -> Result<PreparedMultiplicityFreeBendRight, CoreError>
@@ -214,16 +216,16 @@ where
     })
 }
 
-struct PreparedMultiplicityFreeBendLeft {
+pub(super) struct PreparedMultiplicityFreeBendLeft {
     right: PreparedMultiplicityFreeBendRight,
 }
 
 impl PreparedMultiplicityFreeBendLeft {
-    fn validate_output_frame(&self) -> Result<(), CoreError> {
+    pub(super) fn validate_output_frame(&self) -> Result<(), CoreError> {
         self.right.validate_output_frame()
     }
 
-    fn output_frame<R>(&self, rule: &R) -> Result<MultiplicityFreeTreePairFrame, CoreError>
+    pub(super) fn output_frame<R>(&self, rule: &R) -> Result<MultiplicityFreeTreePairFrame, CoreError>
     where
         R: FusionRule,
     {
@@ -234,7 +236,7 @@ impl PreparedMultiplicityFreeBendLeft {
         })
     }
 
-    fn validate_local<R, C, D>(
+    pub(super) fn validate_local<R, C, D>(
         &self,
         rule: &R,
         codomain: &C,
@@ -248,7 +250,7 @@ impl PreparedMultiplicityFreeBendLeft {
         self.right.validate_local(rule, domain, codomain)
     }
 
-    fn finish_local<R>(
+    pub(super) fn finish_local<R>(
         &self,
         rule: &R,
         validated: ValidatedMultiplicityFreeBendRightLocal,
@@ -261,7 +263,7 @@ impl PreparedMultiplicityFreeBendLeft {
         (Self::finish_local_structure(validated), coefficient)
     }
 
-    fn finish_local_structure(
+    pub(super) fn finish_local_structure(
         validated: ValidatedMultiplicityFreeBendRightLocal,
     ) -> MultiplicityFreeTreePairLocal {
         MultiplicityFreeTreePairLocal {
@@ -271,7 +273,7 @@ impl PreparedMultiplicityFreeBendLeft {
     }
 }
 
-fn prepare_multiplicity_free_bendleft<R>(
+pub(super) fn prepare_multiplicity_free_bendleft<R>(
     rule: &R,
     frame: &MultiplicityFreeTreePairFrame,
 ) -> Result<PreparedMultiplicityFreeBendLeft, CoreError>
@@ -291,7 +293,7 @@ where
     clippy::type_complexity,
     reason = "the SmallVec inline capacity is part of this local bend allocation contract"
 )]
-fn multiplicity_free_bendright_tree_pair<R>(
+pub(crate) fn multiplicity_free_bendright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<SmallVec<[(FusionTreePairKey, R::Scalar); 1]>, CoreError>
@@ -315,7 +317,7 @@ where
     clippy::type_complexity,
     reason = "the SmallVec inline capacity is part of this local bend allocation contract"
 )]
-fn multiplicity_free_bendleft_tree_pair<R>(
+pub(crate) fn multiplicity_free_bendleft_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<SmallVec<[(FusionTreePairKey, R::Scalar); 1]>, CoreError>
@@ -350,7 +352,7 @@ where
 /// assignment (:110) keeps the *last* non-skipped `ν`; we reproduce that with a
 /// keep-last overwrite on key collision. When the domain is non-empty, `ν` is
 /// stored on the new domain tree, keys are distinct, and no overwrite occurs.
-fn generic_bendright_tree_pair<R>(
+pub(crate) fn generic_bendright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -364,7 +366,7 @@ where
 }
 
 #[cfg(test)]
-fn generic_bendright_tree_pair_checked<C>(
+pub(crate) fn generic_bendright_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
 ) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
@@ -376,7 +378,7 @@ where
     generic_bendright_tree_pair_result(rule, tree_pair)
 }
 
-fn generic_bendright_tree_pair_result<C>(
+pub(super) fn generic_bendright_tree_pair_result<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
 ) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
@@ -555,7 +557,7 @@ where
 /// swap codomain/domain, run `bendright`, swap back, and conjugate every
 /// coefficient. Structurally identical to the mult-free
 /// [`multiplicity_free_bendleft_tree_pair`] :2439-2460.
-fn generic_bendleft_tree_pair<R>(
+pub(crate) fn generic_bendleft_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -569,7 +571,7 @@ where
 }
 
 #[cfg(test)]
-fn generic_bendleft_tree_pair_checked<C>(
+pub(crate) fn generic_bendleft_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
 ) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
@@ -581,7 +583,7 @@ where
     generic_bendleft_tree_pair_result(rule, tree_pair)
 }
 
-fn generic_bendleft_tree_pair_result<C>(
+pub(super) fn generic_bendleft_tree_pair_result<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
 ) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
@@ -604,7 +606,7 @@ where
 }
 
 #[cfg(test)]
-fn compose_generic_tree_pair_terms<R, F, I>(
+pub(crate) fn compose_generic_tree_pair_terms<R, F, I>(
     rule: &R,
     terms: Vec<(FusionTreePairKey, R::Scalar)>,
     mut transform: F,
@@ -618,7 +620,7 @@ where
     compose_generic_tree_pair_terms_result(terms, |key| transform(rule, key))
 }
 
-fn compose_generic_tree_pair_terms_result<S, E, F, I>(
+pub(super) fn compose_generic_tree_pair_terms_result<S, E, F, I>(
     terms: Vec<(FusionTreePairKey, S)>,
     mut transform: F,
 ) -> Result<Vec<(FusionTreePairKey, S)>, E>
@@ -686,7 +688,7 @@ where
         .map_err(map_infallible_generic_symbol_error)
 }
 
-fn generic_repartition_tree_pair_unchecked<R>(
+pub(super) fn generic_repartition_tree_pair_unchecked<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,
@@ -730,7 +732,7 @@ where
     generic_repartition_tree_pair_result(rule, tree_pair, target_codomain_rank)
 }
 
-fn generic_repartition_tree_pair_result<C>(
+pub(super) fn generic_repartition_tree_pair_result<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,

@@ -1,3 +1,5 @@
+use super::*;
+
 /// Split a left-associated fusion tree using TensorKit's `split(f, m)`
 /// convention.
 ///

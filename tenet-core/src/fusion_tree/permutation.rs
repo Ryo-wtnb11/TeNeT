@@ -1,3 +1,5 @@
+use super::*;
+
 pub fn linearize_tree_pair_permutation(
     codomain_permutation: &[usize],
     domain_permutation: &[usize],
@@ -27,7 +29,7 @@ pub fn linearize_tree_pair_permutation(
     Ok(linearized)
 }
 
-fn validate_tree_pair_axis_map_inline(
+pub(super) fn validate_tree_pair_axis_map_inline(
     codomain_permutation: &[usize],
     domain_permutation: &[usize],
     codomain_rank: usize,
@@ -66,7 +68,7 @@ fn validate_tree_pair_axis_map_inline(
     Ok(())
 }
 
-fn validate_tree_pair_axis_map_without_scratch(
+pub(super) fn validate_tree_pair_axis_map_without_scratch(
     codomain_permutation: &[usize],
     domain_permutation: &[usize],
     codomain_rank: usize,
@@ -100,7 +102,7 @@ fn validate_tree_pair_axis_map_without_scratch(
     Ok(())
 }
 
-fn validate_cyclic_tree_pair_axis_map_inline(
+pub(super) fn validate_cyclic_tree_pair_axis_map_inline(
     codomain_permutation: &[usize],
     domain_permutation: &[usize],
     codomain_rank: usize,
@@ -147,7 +149,7 @@ fn validate_cyclic_tree_pair_axis_map_inline(
     Ok(())
 }
 
-fn raw_tree_pair_axis_at(
+pub(super) fn raw_tree_pair_axis_at(
     codomain_permutation: &[usize],
     domain_permutation: &[usize],
     position: usize,
@@ -159,7 +161,7 @@ fn raw_tree_pair_axis_at(
     }
 }
 
-fn linearized_tree_pair_axis_at(
+pub(super) fn linearized_tree_pair_axis_at(
     codomain_permutation: &[usize],
     domain_permutation: &[usize],
     codomain_rank: usize,
@@ -174,7 +176,7 @@ fn linearized_tree_pair_axis_at(
     linearize_tree_pair_axis(axis, codomain_rank, domain_rank)
 }
 
-fn materialize_linearized_tree_pair_permutation(
+pub(super) fn materialize_linearized_tree_pair_permutation(
     codomain_permutation: &[usize],
     domain_permutation: &[usize],
     codomain_rank: usize,
@@ -209,7 +211,7 @@ fn invalid_tree_pair_axis_map(
     }
 }
 
-fn tree_pair_axis_map_is_identity(
+pub(super) fn tree_pair_axis_map_is_identity(
     codomain_axes: &[usize],
     domain_axes: &[usize],
     codomain_rank: usize,
@@ -222,7 +224,7 @@ fn tree_pair_axis_map_is_identity(
             .eq(codomain_rank..codomain_rank + domain_rank)
 }
 
-fn permutation_to_adjacent_swaps(
+pub(crate) fn permutation_to_adjacent_swaps(
     permutation: &[usize],
     rank: usize,
 ) -> Result<Vec<usize>, CoreError> {
@@ -288,7 +290,7 @@ fn validate_permutation(permutation: &[usize], rank: usize) -> Result<(), CoreEr
     Ok(())
 }
 
-fn is_cyclic_permutation(permutation: &[usize]) -> bool {
+pub(super) fn is_cyclic_permutation(permutation: &[usize]) -> bool {
     let rank = permutation.len();
     for index in 0..rank {
         if permutation[(index + 1) % rank] != (permutation[index] + 1) % rank {

@@ -1,3 +1,5 @@
+use super::*;
+
 // ======================================================================
 // Stage B2b: Generic-fusion coefficient-vector layer (multi_Fmove /
 // multi_associator) plus foldright/foldleft/cycle. Outer-multiplicity
@@ -28,9 +30,9 @@
 /// topmost `a ⊗ b → c` vertex `λ`; see the convention block above). Aliased to
 /// keep the tree-function signatures readable and satisfy
 /// `clippy::type_complexity`.
-type GenericFmoveTerms<S> = Vec<(FusionTreeKey, Vec<S>)>;
-type GenericTreeTerms<S> = Vec<(FusionTreeKey, S)>;
-type GenericTreePairTerms<S> = Vec<(FusionTreePairKey, S)>;
+pub(super) type GenericFmoveTerms<S> = Vec<(FusionTreeKey, Vec<S>)>;
+pub(super) type GenericTreeTerms<S> = Vec<(FusionTreeKey, S)>;
+pub(super) type GenericTreePairTerms<S> = Vec<(FusionTreePairKey, S)>;
 
 /// Enumerate every standard-form fusion tree with the given `uncoupled` legs,
 /// `is_dual` flags and `coupled` sector, INCLUDING all outer-multiplicity
@@ -44,7 +46,7 @@ type GenericTreePairTerms<S> = Vec<(FusionTreePairKey, S)>;
 /// `basic_manipulations.jl:265`); factoring it out keeps `generic_multi_fmove_*`
 /// structurally identical to the multiplicity-free tree functions.
 #[cfg(test)]
-fn collect_generic_fusion_trees_for_coupled<R>(
+pub(crate) fn collect_generic_fusion_trees_for_coupled<R>(
     rule: &R,
     uncoupled: &[SectorId],
     is_dual: &[bool],
@@ -96,7 +98,7 @@ where
     }
 }
 
-fn collect_generic_fusion_trees_for_coupled_frozen_checked<R>(
+pub(super) fn collect_generic_fusion_trees_for_coupled_frozen_checked<R>(
     rule: &R,
     uncoupled: &Arc<[SectorId]>,
     is_dual: &Arc<[bool]>,
@@ -225,7 +227,7 @@ where
 }
 
 #[inline]
-fn multi_associator_new_cross_channel_is_admissible<R>(
+pub(super) fn multi_associator_new_cross_channel_is_admissible<R>(
     rule: &R,
     leading: SectorId,
     short_right: SectorId,
@@ -253,7 +255,7 @@ where
 /// Returns `None` iff the uncoupled/dual tails do not match (the `zero(...)`
 /// early return at TK `:141-142`), so callers filter exactly as the mult-free
 /// tree functions do.
-fn generic_multi_associator_result<C>(
+pub(crate) fn generic_multi_associator_result<C>(
     rule: &C,
     long: &FusionTreeKey,
     short: &FusionTreeKey,
@@ -342,7 +344,7 @@ where
     Ok(Some(coeff))
 }
 
-fn generic_multi_fmove_inv_tree_checked<C>(
+pub(super) fn generic_multi_fmove_inv_tree_checked<C>(
     rule: &C,
     leading: SectorId,
     coupled: SectorId,
@@ -405,7 +407,7 @@ where
     Ok(terms)
 }
 
-fn generic_multi_fmove_tree_checked<C>(
+pub(super) fn generic_multi_fmove_tree_checked<C>(
     rule: &C,
     tree: &FusionTreeKey,
 ) -> Result<GenericFmoveTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
@@ -514,7 +516,7 @@ where
 /// [`multiplicity_free_multi_fmove_tree`] — same Stage 1 tail enumeration, but
 /// coefficients are the `generic_multi_associator` vectors (see the convention
 /// block above for the vector index).
-fn generic_multi_fmove_tree<R>(
+pub(crate) fn generic_multi_fmove_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
 ) -> Result<GenericFmoveTerms<R::Scalar>, CoreError>
@@ -548,7 +550,7 @@ where
 /// forward associator computes `v = Tₙ⋯T₂·seed`, while the inverse computes
 /// `w = conj(Tₙ)⋯conj(T₃)·conj(T₂·seed) = conj(v)` (TK `:437-439, 460-462`,
 /// the `conj!`/`'` on each factor). No separate inverse F-chain is needed.
-fn generic_multi_fmove_inv_tree<R>(
+pub(crate) fn generic_multi_fmove_inv_tree<R>(
     rule: &R,
     leading_sector: SectorId,
     coupled: SectorId,

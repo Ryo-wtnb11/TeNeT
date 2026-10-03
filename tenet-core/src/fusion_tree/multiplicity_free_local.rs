@@ -1,10 +1,12 @@
+use super::*;
+
 /// Braid state that is mutated step by step without a cached hash.
 ///
 /// `FusionTreeKey` caches its hash, so in-place `Arc::make_mut` swaps on a key
 /// would leave that cache stale between steps; keeping the working state in a
 /// hash-free struct makes the stale state unrepresentable and costs one hash
 /// at `freeze` instead of one per Artin step.
-struct UnhashedFusionTree {
+pub(crate) struct UnhashedFusionTree {
     uncoupled: Arc<[SectorId]>,
     coupled: SectorId,
     is_dual: Arc<[bool]>,
@@ -33,7 +35,7 @@ impl From<FusionTreeKey> for UnhashedFusionTree {
 }
 
 impl UnhashedFusionTree {
-    fn freeze(self) -> FusionTreeKey {
+    pub(crate) fn freeze(self) -> FusionTreeKey {
         FusionTreeKey::from_frozen(
             self.uncoupled,
             self.coupled,
@@ -63,7 +65,7 @@ impl MultiplicityFreeTreeData for UnhashedFusionTree {
     }
 }
 
-fn apply_unique_artin_braid_at_with_inverse<R>(
+pub(crate) fn apply_unique_artin_braid_at_with_inverse<R>(
     rule: &R,
     tree: &mut UnhashedFusionTree,
     index: usize,
@@ -169,7 +171,7 @@ where
     Ok(coefficient)
 }
 
-trait MultiplicityFreeTreeLocalData {
+pub(super) trait MultiplicityFreeTreeLocalData {
     fn coupled(&self) -> SectorId;
     fn innerlines(&self) -> &[SectorId];
 }
@@ -187,7 +189,7 @@ impl MultiplicityFreeTreeLocalData for FusionTreeKey {
 
 }
 
-trait MultiplicityFreeTreeData: MultiplicityFreeTreeLocalData {
+pub(super) trait MultiplicityFreeTreeData: MultiplicityFreeTreeLocalData {
     fn uncoupled(&self) -> &[SectorId];
 }
 
@@ -199,42 +201,42 @@ impl MultiplicityFreeTreeData for FusionTreeKey {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct MultiplicityFreeTreeFrame {
-    uncoupled: Arc<[SectorId]>,
-    is_dual: Arc<[bool]>,
+pub(crate) struct MultiplicityFreeTreeFrame {
+    pub(super) uncoupled: Arc<[SectorId]>,
+    pub(super) is_dual: Arc<[bool]>,
     vertices: Arc<[MultiplicityIndex]>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct MultiplicityFreeTreeLocal {
-    coupled: SectorId,
-    innerlines: SectorVec,
+pub(crate) struct MultiplicityFreeTreeLocal {
+    pub(super) coupled: SectorId,
+    pub(super) innerlines: SectorVec,
 }
 
-type MultiplicityFreeTreeLocalTerms<S> = Vec<(MultiplicityFreeTreeLocal, S)>;
-type MultiplicityFreeFoldInverseCache<S> =
+pub(super) type MultiplicityFreeTreeLocalTerms<S> = Vec<(MultiplicityFreeTreeLocal, S)>;
+pub(super) type MultiplicityFreeFoldInverseCache<S> =
     FxHashMap<(SectorId, MultiplicityFreeTreeLocal), MultiplicityFreeTreeLocalTerms<S>>;
 
 mod multiplicity_free_projection {
     use super::*;
 
     #[derive(Clone, Copy)]
-    pub(super) struct Trees<'a> {
+    pub(crate) struct Trees<'a> {
         keys: &'a [FusionTreeKey],
     }
 
     #[derive(Clone, Copy)]
-    pub(super) struct Pairs<'a> {
+    pub(crate) struct Pairs<'a> {
         source: PairSource<'a>,
     }
 
     #[derive(Clone, Copy)]
-    pub(super) struct Tree<'a> {
+    pub(crate) struct Tree<'a> {
         key: &'a FusionTreeKey,
     }
 
     #[derive(Clone, Copy)]
-    pub(super) struct Pair<'a> {
+    pub(crate) struct Pair<'a> {
         codomain: &'a FusionTreeKey,
         domain: &'a FusionTreeKey,
     }
@@ -249,12 +251,12 @@ mod multiplicity_free_projection {
         },
     }
 
-    pub(super) struct TreeBatch<'rule, R> {
+    pub(crate) struct TreeBatch<'rule, R> {
         rule: &'rule R,
         keys: SmallVec<[FusionTreeKey; 8]>,
     }
 
-    pub(super) struct PairBatch<'rule, R> {
+    pub(crate) struct PairBatch<'rule, R> {
         rule: &'rule R,
         keys: SmallVec<[FusionTreePairKey; 8]>,
     }
@@ -263,7 +265,7 @@ mod multiplicity_free_projection {
     where
         R: FusionRule,
     {
-        pub(super) fn from_locally_validated<'structure, I>(
+        pub(crate) fn from_locally_validated<'structure, I>(
             proof: &LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R>,
             indices: I,
         ) -> Result<Self, CoreError>
@@ -284,7 +286,7 @@ mod multiplicity_free_projection {
             })
         }
 
-        pub(super) fn parts(&self) -> (&R, &[FusionTreeKey]) {
+        pub(crate) fn parts(&self) -> (&R, &[FusionTreeKey]) {
             (self.rule, &self.keys)
         }
     }
@@ -293,7 +295,7 @@ mod multiplicity_free_projection {
     where
         R: FusionRule,
     {
-        pub(super) fn from_locally_validated<'structure, I>(
+        pub(crate) fn from_locally_validated<'structure, I>(
             proof: &LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R>,
             indices: I,
         ) -> Result<Self, CoreError>
@@ -310,13 +312,13 @@ mod multiplicity_free_projection {
             })
         }
 
-        pub(super) fn parts(&self) -> (&R, &[FusionTreePairKey]) {
+        pub(crate) fn parts(&self) -> (&R, &[FusionTreePairKey]) {
             (self.rule, &self.keys)
         }
     }
 
     impl<'a> Trees<'a> {
-        pub(super) fn checked<R>(
+        pub(crate) fn checked<R>(
             rule: &R,
             trees: &'a [FusionTreeKey],
         ) -> Result<Self, CoreError>
@@ -330,7 +332,7 @@ mod multiplicity_free_projection {
             Ok(Self { keys: trees })
         }
 
-        pub(super) fn from_validated<R>(
+        pub(crate) fn from_validated<R>(
             rule: &R,
             trees: &'a [FusionTreeKey],
         ) -> Result<Self, CoreError>
@@ -344,7 +346,7 @@ mod multiplicity_free_projection {
             Ok(Self { keys: trees })
         }
 
-        pub(super) fn tree_at(&self, index: usize) -> Option<Tree<'a>> {
+        pub(crate) fn tree_at(&self, index: usize) -> Option<Tree<'a>> {
             self.keys.get(index).map(|key| Tree { key })
         }
 
@@ -354,7 +356,7 @@ mod multiplicity_free_projection {
     }
 
     impl<'a> Pairs<'a> {
-        pub(super) fn checked<R>(
+        pub(crate) fn checked<R>(
             rule: &R,
             pairs: &'a [FusionTreePairKey],
         ) -> Result<Self, CoreError>
@@ -371,7 +373,7 @@ mod multiplicity_free_projection {
             })
         }
 
-        pub(super) fn from_validated<R>(
+        pub(crate) fn from_validated<R>(
             rule: &R,
             pairs: &'a [FusionTreePairKey],
         ) -> Result<Self, CoreError>
@@ -386,7 +388,7 @@ mod multiplicity_free_projection {
             })
         }
 
-        pub(super) fn checked_structure<R>(
+        pub(crate) fn checked_structure<R>(
             rule: &R,
             structure: &'a BlockStructure,
             indices: &'a [usize],
@@ -426,14 +428,14 @@ mod multiplicity_free_projection {
             Ok(projection)
         }
 
-        pub(super) fn len(&self) -> usize {
+        pub(crate) fn len(&self) -> usize {
             match self.source {
                 PairSource::Slice(keys) => keys.len(),
                 PairSource::Structure { indices, .. } => indices.len(),
             }
         }
 
-        pub(super) fn pair_at(&self, index: usize) -> Option<Pair<'a>> {
+        pub(crate) fn pair_at(&self, index: usize) -> Option<Pair<'a>> {
             match self.source {
                 PairSource::Slice(keys) => keys.get(index).map(|key| Pair {
                     codomain: key.codomain_tree(),
@@ -476,27 +478,27 @@ mod multiplicity_free_projection {
     }
 
     impl<'a> Tree<'a> {
-        pub(super) fn key(self) -> &'a FusionTreeKey {
+        pub(crate) fn key(self) -> &'a FusionTreeKey {
             self.key
         }
     }
 
     impl<'a> Pair<'a> {
-        pub(super) fn materialize(self) -> FusionTreePairKey {
+        pub(crate) fn materialize(self) -> FusionTreePairKey {
             FusionTreePairKey::pair(self.codomain.clone(), self.domain.clone())
         }
 
-        pub(super) fn codomain(self) -> Tree<'a> {
+        pub(crate) fn codomain(self) -> Tree<'a> {
             Tree { key: self.codomain }
         }
 
-        pub(super) fn domain(self) -> Tree<'a> {
+        pub(crate) fn domain(self) -> Tree<'a> {
             Tree { key: self.domain }
         }
     }
 }
 
-use multiplicity_free_projection::{
+pub(crate) use multiplicity_free_projection::{
     Pair as ValidatedMultiplicityFreeTreePair, PairBatch as ValidatedMultiplicityFreePairBatch,
     Pairs as MultiplicityFreePairProjection, Tree as ValidatedMultiplicityFreeTree,
     TreeBatch as ValidatedMultiplicityFreeTreeBatch, Trees as MultiplicityFreeTreeProjection,
@@ -518,7 +520,7 @@ impl MultiplicityFreeTreeLocalData for MultiplicityFreeTreeLocal {
 type MultiplicityFreeArtinTerms<S> = SmallVec<[(MultiplicityFreeTreeLocal, S); 2]>;
 
 impl MultiplicityFreeTreeLocal {
-    fn from_proven(tree: ValidatedMultiplicityFreeTree<'_>) -> Self {
+    pub(super) fn from_proven(tree: ValidatedMultiplicityFreeTree<'_>) -> Self {
         let tree = tree.key();
         Self {
             coupled: tree.coupled(),
@@ -528,7 +530,7 @@ impl MultiplicityFreeTreeLocal {
 }
 
 impl MultiplicityFreeTreeFrame {
-    fn from_frozen_externals(
+    pub(super) fn from_frozen_externals(
         uncoupled: Arc<[SectorId]>,
         is_dual: Arc<[bool]>,
     ) -> Self {
@@ -553,7 +555,7 @@ impl MultiplicityFreeTreeFrame {
         }
     }
 
-    fn split(
+    pub(super) fn split(
         tree: ValidatedMultiplicityFreeTree<'_>,
     ) -> (Self, MultiplicityFreeTreeLocal) {
         let key = tree.key();
@@ -563,14 +565,14 @@ impl MultiplicityFreeTreeFrame {
         )
     }
 
-    fn matches_tree(&self, tree: &FusionTreeKey) -> bool {
+    pub(super) fn matches_tree(&self, tree: &FusionTreeKey) -> bool {
         // Why not split and compare frames: every source shares these slices,
         // while collecting rank > 8 frames would allocate once per source.
         self.uncoupled.as_ref() == tree.uncoupled()
             && self.is_dual.as_ref() == tree.is_dual()
     }
 
-    fn materialize(&self, local: MultiplicityFreeTreeLocal) -> FusionTreeKey {
+    pub(super) fn materialize(&self, local: MultiplicityFreeTreeLocal) -> FusionTreeKey {
         FusionTreeKey::from_frozen(
             Arc::clone(&self.uncoupled),
             local.coupled,
@@ -581,7 +583,7 @@ impl MultiplicityFreeTreeFrame {
     }
 }
 
-fn project_multiplicity_free_tree<R>(
+pub(crate) fn project_multiplicity_free_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
 ) -> Result<(MultiplicityFreeTreeFrame, MultiplicityFreeTreeLocal), CoreError>
@@ -598,19 +600,19 @@ where
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct MultiplicityFreeTreePairFrame {
-    codomain: MultiplicityFreeTreeFrame,
-    domain: MultiplicityFreeTreeFrame,
+pub(super) struct MultiplicityFreeTreePairFrame {
+    pub(super) codomain: MultiplicityFreeTreeFrame,
+    pub(super) domain: MultiplicityFreeTreeFrame,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct MultiplicityFreeTreePairLocal {
-    codomain: MultiplicityFreeTreeLocal,
-    domain: MultiplicityFreeTreeLocal,
+pub(super) struct MultiplicityFreeTreePairLocal {
+    pub(super) codomain: MultiplicityFreeTreeLocal,
+    pub(super) domain: MultiplicityFreeTreeLocal,
 }
 
 impl MultiplicityFreeTreePairLocal {
-    fn from_proven(tree_pair: ValidatedMultiplicityFreeTreePair<'_>) -> Self {
+    pub(super) fn from_proven(tree_pair: ValidatedMultiplicityFreeTreePair<'_>) -> Self {
         Self {
             codomain: MultiplicityFreeTreeLocal::from_proven(tree_pair.codomain()),
             domain: MultiplicityFreeTreeLocal::from_proven(tree_pair.domain()),
@@ -619,7 +621,7 @@ impl MultiplicityFreeTreePairLocal {
 }
 
 impl MultiplicityFreeTreePairFrame {
-    fn split(
+    pub(super) fn split(
         tree_pair: ValidatedMultiplicityFreeTreePair<'_>,
     ) -> (Self, MultiplicityFreeTreePairLocal) {
         let codomain = MultiplicityFreeTreeFrame::from_tree(tree_pair.codomain().key());
@@ -630,12 +632,12 @@ impl MultiplicityFreeTreePairFrame {
         )
     }
 
-    fn matches_tree_pair_ref(&self, tree_pair: ValidatedMultiplicityFreeTreePair<'_>) -> bool {
+    pub(super) fn matches_tree_pair_ref(&self, tree_pair: ValidatedMultiplicityFreeTreePair<'_>) -> bool {
         self.codomain.matches_tree(tree_pair.codomain().key())
             && self.domain.matches_tree(tree_pair.domain().key())
     }
 
-    fn materialize(&self, local: MultiplicityFreeTreePairLocal) -> FusionTreePairKey {
+    pub(super) fn materialize(&self, local: MultiplicityFreeTreePairLocal) -> FusionTreePairKey {
         FusionTreePairKey::pair(
             self.codomain.materialize(local.codomain),
             self.domain.materialize(local.domain),
@@ -643,7 +645,7 @@ impl MultiplicityFreeTreePairFrame {
     }
 }
 
-fn project_multiplicity_free_tree_pair<R>(
+pub(super) fn project_multiplicity_free_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<
@@ -665,8 +667,8 @@ where
     ))
 }
 
-struct PreparedMultiplicityFreeArtin {
-    output_frame: MultiplicityFreeTreeFrame,
+pub(super) struct PreparedMultiplicityFreeArtin {
+    pub(super) output_frame: MultiplicityFreeTreeFrame,
     rank: usize,
     first: SectorId,
     index: usize,
@@ -675,7 +677,7 @@ struct PreparedMultiplicityFreeArtin {
     right: SectorId,
 }
 
-fn prepare_multiplicity_free_artin<R>(
+pub(super) fn prepare_multiplicity_free_artin<R>(
     rule: &R,
     frame: &MultiplicityFreeTreeFrame,
     index: usize,
@@ -733,7 +735,7 @@ where
 impl PreparedMultiplicityFreeArtin {
     // External frame data stays out of this kernel: the block runner must enumerate
     // locals from this prepared frame rather than rebuilding full tree keys.
-    fn apply<R, T>(
+    pub(super) fn apply<R, T>(
         &self,
         rule: &R,
         tree: &T,
@@ -856,7 +858,7 @@ impl PreparedMultiplicityFreeArtin {
     clippy::type_complexity,
     reason = "the SmallVec inline capacity is part of this local braid allocation contract"
 )]
-fn multiplicity_free_artin_braid_at_with_inverse<R>(
+pub(crate) fn multiplicity_free_artin_braid_at_with_inverse<R>(
     rule: &R,
     tree: &FusionTreeKey,
     index: usize,

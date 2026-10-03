@@ -1,10 +1,12 @@
+use super::*;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct CoupledFusionTrees {
-    coupled: SectorId,
-    trees: Vec<FusionTreeKey>,
+pub(crate) struct CoupledFusionTrees {
+    pub(crate) coupled: SectorId,
+    pub(crate) trees: Vec<FusionTreeKey>,
 }
 
-fn validate_multiplicity_free_execution_style<R>(rule: &R) -> Result<(), CoreError>
+pub(crate) fn validate_multiplicity_free_execution_style<R>(rule: &R) -> Result<(), CoreError>
 where
     R: FusionRule,
 {
@@ -18,7 +20,7 @@ where
     }
 }
 
-fn try_visit_selected_leg_tuples<E, F>(
+pub(crate) fn try_visit_selected_leg_tuples<E, F>(
     legs: &[SectorLeg],
     remaining: usize,
     current: &mut [FusionTreeLeg],
@@ -39,7 +41,7 @@ where
     Ok(())
 }
 
-fn fusion_trees_by_coupled_for_space<R>(
+pub(crate) fn fusion_trees_by_coupled_for_space<R>(
     rule: &R,
     space: &FusionProductSpace,
 ) -> Vec<CoupledFusionTrees>
@@ -117,7 +119,7 @@ where
 /// structurally identical to the infallible enumerator, so its keys and order
 /// match byte-for-byte on any provider whose checked methods agree with their
 /// infallible counterparts.
-fn try_fusion_trees_by_coupled_for_space_checked<R>(
+pub(crate) fn try_fusion_trees_by_coupled_for_space_checked<R>(
     rule: &R,
     space: &FusionProductSpace,
 ) -> Result<Vec<CoupledFusionTrees>, FusionAlgebraError>
@@ -280,7 +282,7 @@ where
     Ok(())
 }
 
-fn fusion_trees_by_coupled_for_selected_space<R>(
+pub(crate) fn fusion_trees_by_coupled_for_selected_space<R>(
     rule: &R,
     space: &FusionProductSpace,
     selected: &[SectorId],
@@ -352,7 +354,7 @@ where
 /// block dimensions are either exactly right or an error, never silently
 /// truncated. A sector clean in one tuple but tainted in another is tainted
 /// overall (its block would mix complete and incomplete tree sets).
-fn fusion_trees_by_coupled_for_space_generic<R>(
+pub(crate) fn fusion_trees_by_coupled_for_space_generic<R>(
     rule: &R,
     space: &FusionProductSpace,
 ) -> (Vec<CoupledFusionTrees>, CoupledSectorFold)
@@ -372,7 +374,7 @@ where
     }
 }
 
-fn fusion_trees_by_coupled_for_space_generic_checked<R>(
+pub(crate) fn fusion_trees_by_coupled_for_space_generic_checked<R>(
     rule: &R,
     space: &FusionProductSpace,
 ) -> Result<(Vec<CoupledFusionTrees>, CoupledSectorFold), CheckedGenericStructureError<R::Error>>
@@ -432,7 +434,7 @@ where
 /// Shared codomain×domain merge on equal coupled sectors (the generic sibling
 /// of the loop in `fusion_tree_keys_uncached`).
 #[cfg(test)]
-fn merge_generic_tree_groups(
+pub(crate) fn merge_generic_tree_groups(
     codomain: &[CoupledFusionTrees],
     domain: &[CoupledFusionTrees],
 ) -> Vec<FusionTreePairKey> {
@@ -465,7 +467,7 @@ fn merge_generic_tree_groups(
 
 /// Human-readable summary of a non-clean coupled fold, for the construction
 /// `Err` (names the escaping sectors — never silently dropped).
-fn fusion_fold_error_message(side: &str, fold: &CoupledSectorFold) -> String {
+pub(crate) fn fusion_fold_error_message(side: &str, fold: &CoupledSectorFold) -> String {
     let mut parts = Vec::new();
     if !fold.out_of_table().is_empty() {
         parts.push(format!(
@@ -497,7 +499,7 @@ fn fusion_fold_error_message(side: &str, fold: &CoupledSectorFold) -> String {
 /// Computed once per leg tuple (not per enumeration node): the forward fold
 /// `⊗` over the legs with dedup. Used only to drive the per-coupled grouping;
 /// the tree enumeration itself does not consult it (see below).
-fn reachable_coupled_sectors<R>(rule: &R, effective: &[SectorId]) -> Vec<SectorId>
+pub(crate) fn reachable_coupled_sectors<R>(rule: &R, effective: &[SectorId]) -> Vec<SectorId>
 where
     R: MultiplicityFreeFusionRule,
 {
@@ -528,7 +530,7 @@ where
 /// intermediate tree list per recursion level: a single `visit` walk pushes
 /// each completed key straight into `out`, threading one reused inner-line
 /// stack. Multiplicity-free, so every vertex is the trivial label.
-fn collect_fusion_trees_for_coupled<R>(
+pub(crate) fn collect_fusion_trees_for_coupled<R>(
     rule: &R,
     uncoupled: &[SectorId],
     is_dual: &[bool],
@@ -603,7 +605,7 @@ fn visit_fusion_trees<R, F>(
     );
 }
 
-fn visit_fusion_trees_where<R, P, F>(
+pub(super) fn visit_fusion_trees_where<R, P, F>(
     rule: &R,
     effective: &[SectorId],
     coupled: SectorId,

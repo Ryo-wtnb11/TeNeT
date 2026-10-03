@@ -1,4 +1,6 @@
-enum FusionTermAccumulator<K, S> {
+use super::*;
+
+pub(crate) enum FusionTermAccumulator<K, S> {
     Empty,
     Singleton(K, S),
     Map {
@@ -12,11 +14,11 @@ where
     K: Clone + Eq + Hash,
     S: Clone + Add<Output = S>,
 {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::Empty
     }
 
-    fn push(&mut self, key: K, coefficient: S) {
+    pub(crate) fn push(&mut self, key: K, coefficient: S) {
         match self {
             Self::Empty => {
                 *self = Self::Singleton(key, coefficient);
@@ -70,7 +72,7 @@ where
         }
     }
 
-    fn into_vec(self) -> Vec<(K, S)> {
+    pub(crate) fn into_vec(self) -> Vec<(K, S)> {
         match self {
             Self::Empty => Vec::new(),
             Self::Singleton(key, coefficient) => vec![(key, coefficient)],
@@ -91,7 +93,7 @@ where
     }
 }
 
-fn compose_tree_pair_terms<R, F, I>(
+pub(crate) fn compose_tree_pair_terms<R, F, I>(
     rule: &R,
     terms: Vec<(FusionTreePairKey, R::Scalar)>,
     mut transform: F,
@@ -129,10 +131,10 @@ where
 /// batched braid over a whole block adds hundreds of thousands of rows across
 /// its bend/braid steps, so the per-row allocation dominated the cold
 /// recoupling build).
-struct DenseColumns<S> {
-    data: Vec<Option<S>>,
-    num_src: usize,
-    num_rows: usize,
+pub(crate) struct DenseColumns<S> {
+    pub(super) data: Vec<Option<S>>,
+    pub(crate) num_src: usize,
+    pub(crate) num_rows: usize,
 }
 
 /// Ordered block-linear result produced by one categorical block transform.
@@ -145,9 +147,9 @@ struct DenseColumns<S> {
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct OrderedBlockLinearMap<K, S> {
-    destinations: Vec<K>,
-    source_count: usize,
-    storage: OrderedBlockLinearStorage<S>,
+    pub(super) destinations: Vec<K>,
+    pub(super) source_count: usize,
+    pub(super) storage: OrderedBlockLinearStorage<S>,
 }
 
 /// Structural storage for an [`OrderedBlockLinearMap`].
@@ -187,7 +189,7 @@ impl<K, S> OrderedBlockLinearMap<K, S> {
 }
 
 impl<S: Clone> DenseColumns<S> {
-    fn with_capacity(num_src: usize, rows_hint: usize) -> Self {
+    pub(crate) fn with_capacity(num_src: usize, rows_hint: usize) -> Self {
         Self {
             data: Vec::with_capacity(rows_hint.saturating_mul(num_src)),
             num_src,
@@ -196,7 +198,7 @@ impl<S: Clone> DenseColumns<S> {
     }
 
     /// Append a new all-empty row, returning its index.
-    fn push_empty_row(&mut self) -> usize {
+    pub(crate) fn push_empty_row(&mut self) -> usize {
         let row = self.num_rows;
         self.data.resize_with(self.data.len() + self.num_src, || None);
         self.num_rows += 1;
@@ -204,20 +206,20 @@ impl<S: Clone> DenseColumns<S> {
     }
 
     #[inline]
-    fn row(&self, row: usize) -> &[Option<S>] {
+    pub(crate) fn row(&self, row: usize) -> &[Option<S>] {
         let start = row * self.num_src;
         &self.data[start..start + self.num_src]
     }
 
     #[inline]
-    fn row_mut(&mut self, row: usize) -> &mut [Option<S>] {
+    pub(crate) fn row_mut(&mut self, row: usize) -> &mut [Option<S>] {
         let start = row * self.num_src;
         &mut self.data[start..start + self.num_src]
     }
 }
 
 #[cfg(test)]
-fn compose_block_terms<R, F, I>(
+pub(super) fn compose_block_terms<R, F, I>(
     rule: &R,
     basis: &[FusionTreePairKey],
     columns: &DenseColumns<R::Scalar>,
@@ -278,13 +280,13 @@ where
     Ok((next_basis, next_columns))
 }
 
-struct CompactMultiplicityFreeTreeBasis {
-    frame: MultiplicityFreeTreeFrame,
-    locals: Vec<MultiplicityFreeTreeLocal>,
+pub(super) struct CompactMultiplicityFreeTreeBasis {
+    pub(super) frame: MultiplicityFreeTreeFrame,
+    pub(super) locals: Vec<MultiplicityFreeTreeLocal>,
 }
 
 impl CompactMultiplicityFreeTreeBasis {
-    fn from_group<R>(
+    pub(super) fn from_group<R>(
         group: ValidatedFusionTreeBlockGroup<'_, R>,
     ) -> Result<Self, CoreError> {
         let src_keys = group.src_keys;
@@ -315,21 +317,21 @@ impl CompactMultiplicityFreeTreeBasis {
     }
 }
 
-struct CompactMultiplicityFreeTreePairBasis {
-    frame: MultiplicityFreeTreePairFrame,
-    locals: Vec<MultiplicityFreeTreePairLocal>,
+pub(crate) struct CompactMultiplicityFreeTreePairBasis {
+    pub(super) frame: MultiplicityFreeTreePairFrame,
+    pub(super) locals: Vec<MultiplicityFreeTreePairLocal>,
 }
 
-struct CompactMultiplicityFreeTreePairBlock<S> {
-    basis: CompactMultiplicityFreeTreePairBasis,
-    columns: DenseColumns<S>,
-    records_dimensions: bool,
+pub(super) struct CompactMultiplicityFreeTreePairBlock<S> {
+    pub(super) basis: CompactMultiplicityFreeTreePairBasis,
+    pub(super) columns: DenseColumns<S>,
+    pub(super) records_dimensions: bool,
 }
 
-type CompactMultiplicityFreeTreePairRows<S> = Vec<Vec<(FusionTreePairKey, S)>>;
+pub(super) type CompactMultiplicityFreeTreePairRows<S> = Vec<Vec<(FusionTreePairKey, S)>>;
 
 impl CompactMultiplicityFreeTreePairBasis {
-    fn from_group<R>(
+    pub(crate) fn from_group<R>(
         group: ValidatedTreePairBlockGroup<'_, R>,
     ) -> Result<Self, CoreError> {
         let (frame, first_local) = MultiplicityFreeTreePairFrame::split(
@@ -360,7 +362,7 @@ impl CompactMultiplicityFreeTreePairBasis {
     }
 }
 
-fn compose_compact_block_terms<R, K, F, I>(
+pub(super) fn compose_compact_block_terms<R, K, F, I>(
     rule: &R,
     basis: &[K],
     columns: &DenseColumns<R::Scalar>,
@@ -411,7 +413,7 @@ where
     Ok((locals, next_columns))
 }
 
-fn compose_generic_block_terms<R, F, I>(
+pub(crate) fn compose_generic_block_terms<R, F, I>(
     rule: &R,
     basis: &[FusionTreePairKey],
     columns: &DenseColumns<R::Scalar>,

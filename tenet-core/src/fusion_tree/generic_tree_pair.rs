@@ -1,3 +1,5 @@
+use super::*;
+
 /// Generic-fusion `foldright`: bend the first codomain vertex `a ⊗ b ← c` to a
 /// domain vertex `b ← dual(a) ⊗ c`. Verbatim mirror of TensorKit `foldright`
 /// GenericFusion branch (`duality_manipulations.jl:238-289`), especially the
@@ -152,7 +154,7 @@ where
     generic_cycle_clockwise_tree_pair_unchecked(rule, tree_pair.key)
 }
 
-fn generic_cycle_clockwise_tree_pair_unchecked<R>(
+pub(super) fn generic_cycle_clockwise_tree_pair_unchecked<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -202,7 +204,7 @@ where
     generic_cycle_anticlockwise_tree_pair_unchecked(rule, tree_pair.key)
 }
 
-fn generic_cycle_anticlockwise_tree_pair_unchecked<R>(
+pub(super) fn generic_cycle_anticlockwise_tree_pair_unchecked<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
