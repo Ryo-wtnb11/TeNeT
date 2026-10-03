@@ -65,4 +65,7 @@ mod error;
 pub use error::*;
 
 #[cfg(test)]
-include!("tests.rs");
+#[rustfmt::skip] // #1817 formats the former include! fragments in a separate formatting-only PR.
+mod tests;
+#[cfg(test)]
+pub(crate) use tests::test_support;

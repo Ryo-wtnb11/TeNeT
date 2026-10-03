@@ -1,3 +1,5 @@
+use super::*;
+
 /// Test-only synchronization for tenet-core's process-global intern tables
 /// (block-structure content/arc tables, the hom-space intern table).
 ///
@@ -50,21 +52,19 @@ pub(crate) mod test_support {
     }
 }
 
-mod tests {
-    use super::*;
+// Shared fixtures and helper fusion rules used across more than one of
+// the per-responsibility test files below (#1590). They live in `support`
+// and are glob-imported here, so every sibling test module sees them through
+// its own `use super::*;`.
+mod support;
+use support::*;
 
-    // Shared fixtures and helper fusion rules used across more than one of
-    // the per-responsibility test files below (#1590). Kept flat here
-    // (rather than in a `mod support`) so every child module can see them
-    // through the ordinary private-item-visible-to-descendants rule, the
-    // same way they saw each other before this split.
-    include!("tests/support.rs");
-
-    include!("tests/storage.rs");
-    include!("tests/sector.rs");
-    include!("tests/fusion_space.rs");
-    include!("tests/fusion_tree.rs");
-    include!("tests/block_structure.rs");
-    include!("tests/tensor_map.rs");
-    include!("tests/error.rs");
-}
+mod storage;
+mod sector;
+mod fusion_space;
+mod fusion_tree;
+mod generic_symbol_shape_mismatch;
+mod checked_rank1_tree_admission;
+mod block_structure;
+mod tensor_map;
+mod error;

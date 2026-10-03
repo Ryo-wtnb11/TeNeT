@@ -1,11 +1,13 @@
-use smallvec::smallvec;
+use super::*;
 
-    use std::hash::{Hash, Hasher};
+pub(super) use smallvec::smallvec;
+
+    pub(super) use std::hash::{Hash, Hasher};
 
     /// Fixture layout: subblocks packed contiguously in key order. Not a product
     /// layout (the only one is the coupled sector matrix); fixtures use it to
     /// exercise the arbitrary-strided-view contract of [`BlockStructure`].
-    fn packed_fixture_structure<I, K>(rank: usize, blocks: I) -> Result<BlockStructure, CoreError>
+    pub(super) fn packed_fixture_structure<I, K>(rank: usize, blocks: I) -> Result<BlockStructure, CoreError>
     where
         I: IntoIterator<Item = (K, Vec<usize>)>,
         K: Into<BlockKey>,
@@ -22,28 +24,28 @@ use smallvec::smallvec;
         )
     }
 
-    fn u1(charge: i32) -> SectorId {
+    pub(super) fn u1(charge: i32) -> SectorId {
         U1Irrep::new(charge).sector_id()
     }
 
-    fn excluded_u1_id() -> SectorId {
+    pub(super) fn excluded_u1_id() -> SectorId {
         SectorId::new(u32::MAX as usize)
     }
 
-    fn z2_even() -> SectorId {
+    pub(super) fn z2_even() -> SectorId {
         Z2Irrep::EVEN.sector_id()
     }
 
-    fn z2_odd() -> SectorId {
+    pub(super) fn z2_odd() -> SectorId {
         Z2Irrep::ODD.sector_id()
     }
 
-    fn su2(twice_spin: usize) -> SectorId {
+    pub(super) fn su2(twice_spin: usize) -> SectorId {
         SU2Irrep::from_twice_spin(twice_spin).sector_id()
     }
 
     #[derive(Clone, Copy, Debug)]
-    struct IsomorphismMultiplicityRule;
+    pub(super) struct IsomorphismMultiplicityRule;
 
     impl FusionRule for IsomorphismMultiplicityRule {
         fn rule_identity(&self) -> RuleIdentity {
@@ -80,7 +82,7 @@ use smallvec::smallvec;
     }
 
     #[derive(Clone, Copy, Debug)]
-    struct Z4PointedRule;
+    pub(super) struct Z4PointedRule;
 
     impl FusionRule for Z4PointedRule {
         fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
@@ -108,7 +110,7 @@ use smallvec::smallvec;
     impl MultiplicityFreeFusionRule for Z4PointedRule {}
 
     #[derive(Clone, Copy, Debug)]
-    struct PlanarZ2Rule;
+    pub(super) struct PlanarZ2Rule;
 
     impl FusionRule for PlanarZ2Rule {
         fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
@@ -183,7 +185,7 @@ use smallvec::smallvec;
     }
 
     #[derive(Clone, Copy, Debug)]
-    struct IdentitySymbolPanicRule;
+    pub(super) struct IdentitySymbolPanicRule;
 
     impl FusionRule for IdentitySymbolPanicRule {
         fn rule_identity(&self) -> RuleIdentity {
@@ -261,10 +263,10 @@ use smallvec::smallvec;
     }
 
     #[derive(Debug, Default)]
-    struct SplitOnlyCountingRule {
-        n_calls: std::sync::atomic::AtomicUsize,
-        f_calls: std::sync::atomic::AtomicUsize,
-        r_calls: std::sync::atomic::AtomicUsize,
+    pub(super) struct SplitOnlyCountingRule {
+        pub(super) n_calls: std::sync::atomic::AtomicUsize,
+        pub(super) f_calls: std::sync::atomic::AtomicUsize,
+        pub(super) r_calls: std::sync::atomic::AtomicUsize,
     }
 
     impl FusionRule for SplitOnlyCountingRule {
@@ -352,7 +354,7 @@ use smallvec::smallvec;
         }
     }
 
-    fn legacy_split_only_tree_pair_route<R>(
+    pub(super) fn legacy_split_only_tree_pair_route<R>(
         rule: &R,
         source: &FusionTreePairKey,
         target_codomain_rank: usize,
@@ -393,7 +395,7 @@ use smallvec::smallvec;
     }
 
     #[derive(Clone, Copy, Debug)]
-    struct AsymmetricAnyonicRule;
+    pub(super) struct AsymmetricAnyonicRule;
 
     impl FusionRule for AsymmetricAnyonicRule {
         fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
@@ -481,15 +483,15 @@ use smallvec::smallvec;
         }
     }
 
-    fn sector_ids(sectors: &[SectorId]) -> Vec<usize> {
+    pub(super) fn sector_ids(sectors: &[SectorId]) -> Vec<usize> {
         sectors.iter().map(|sector| sector.id()).collect()
     }
 
     #[derive(Debug, Default)]
-    struct CheckedTreeProbe {
-        channel_calls: AtomicUsize,
-        nsymbol_calls: AtomicUsize,
-        legacy_nsymbol_calls: AtomicUsize,
+    pub(super) struct CheckedTreeProbe {
+        pub(super) channel_calls: AtomicUsize,
+        pub(super) nsymbol_calls: AtomicUsize,
+        pub(super) legacy_nsymbol_calls: AtomicUsize,
     }
 
     impl FusionRule for CheckedTreeProbe {
@@ -548,29 +550,29 @@ use smallvec::smallvec;
         }
     }
 
-    struct FibonacciFAdmissibilityProbe {
+    pub(super) struct FibonacciFAdmissibilityProbe {
         calls: std::sync::Mutex<Vec<[SectorId; 6]>>,
         complex_f_phase: bool,
     }
 
     impl FibonacciFAdmissibilityProbe {
-        const SENTINEL: Complex64 = Complex64::new(97.0, -31.0);
+        pub(super) const SENTINEL: Complex64 = Complex64::new(97.0, -31.0);
 
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 calls: std::sync::Mutex::new(Vec::new()),
                 complex_f_phase: false,
             }
         }
 
-        fn with_complex_f_phase() -> Self {
+        pub(super) fn with_complex_f_phase() -> Self {
             Self {
                 calls: std::sync::Mutex::new(Vec::new()),
                 complex_f_phase: true,
             }
         }
 
-        fn take_calls(&self) -> Vec<[SectorId; 6]> {
+        pub(super) fn take_calls(&self) -> Vec<[SectorId; 6]> {
             std::mem::take(
                 &mut *self
                     .calls
@@ -699,7 +701,7 @@ use smallvec::smallvec;
         }
     }
 
-    fn assert_fibonacci_f_calls_are_admissible(calls: &[[SectorId; 6]]) {
+    pub(super) fn assert_fibonacci_f_calls_are_admissible(calls: &[[SectorId; 6]]) {
         for &[left, middle, right, coupled, left_coupled, right_coupled] in calls {
             assert_ne!(
                 FibonacciFusionRule.nsymbol(left, middle, left_coupled),
@@ -720,7 +722,7 @@ use smallvec::smallvec;
         }
     }
 
-    fn tree_pair_group_fixture(
+    pub(super) fn tree_pair_group_fixture(
         codomain: &[usize],
         domain: &[usize],
         coupled: usize,
@@ -741,7 +743,7 @@ use smallvec::smallvec;
         ).unwrap()
     }
 
-    fn assert_mixed_tree_pair_block_group_is_rejected<R>(
+    pub(super) fn assert_mixed_tree_pair_block_group_is_rejected<R>(
         rule: &R,
         keys: &[FusionTreePairKey],
         expected: CoreError,
@@ -800,7 +802,7 @@ use smallvec::smallvec;
         );
     }
 
-    fn materialized_leg_tuple_oracle(space: &FusionProductSpace) -> Vec<Vec<FusionTreeLeg>> {
+    pub(super) fn materialized_leg_tuple_oracle(space: &FusionProductSpace) -> Vec<Vec<FusionTreeLeg>> {
         fn visit(
             legs: &[SectorLeg],
             remaining: usize,
@@ -824,7 +826,7 @@ use smallvec::smallvec;
         out
     }
 
-    fn legacy_select<R: FusionRule>(
+    pub(super) fn legacy_select<R: FusionRule>(
         rule: &R,
         homspace: &FusionTreeHomSpace,
         codomain_axes: &[usize],
@@ -868,7 +870,7 @@ use smallvec::smallvec;
         )
     }
 
-    fn assert_direct_contract_matches_legacy<R: CheckedFusionAlgebra>(
+    pub(super) fn assert_direct_contract_matches_legacy<R: CheckedFusionAlgebra>(
         rule: &R,
         lhs: &FusionTreeHomSpace,
         rhs: &FusionTreeHomSpace,
@@ -958,7 +960,7 @@ use smallvec::smallvec;
         }
     }
 
-    fn legacy_leg_degeneracy_structure<R>(
+    pub(super) fn legacy_leg_degeneracy_structure<R>(
         rule: &R,
         homspace: &FusionTreeHomSpace,
     ) -> Arc<BlockStructure>
@@ -985,7 +987,7 @@ use smallvec::smallvec;
         .into_shared()
     }
 
-    fn singleton_rank_hom(sector: SectorId, rank: usize) -> FusionTreeHomSpace {
+    pub(super) fn singleton_rank_hom(sector: SectorId, rank: usize) -> FusionTreeHomSpace {
         let side = |invert_dual| {
             FusionProductSpace::new((0..rank).map(|axis| {
                 SectorLeg::new([(sector, axis % 3 + 1)], (axis % 2 == 0) ^ invert_dual)
@@ -994,7 +996,7 @@ use smallvec::smallvec;
         FusionTreeHomSpace::new(side(false), side(true))
     }
 
-    fn compact_operator_cohort_fixture<R>(
+    pub(super) fn compact_operator_cohort_fixture<R>(
         rule: &R,
         external: SectorId,
         coupled: SectorId,
@@ -1016,7 +1018,7 @@ use smallvec::smallvec;
         keys
     }
 
-    trait TransposeOracleScalar {
+    pub(super) trait TransposeOracleScalar {
         fn oracle_distance(&self, other: &Self) -> f64;
         fn oracle_magnitude(&self) -> f64;
     }
@@ -1041,7 +1043,7 @@ use smallvec::smallvec;
         }
     }
 
-    fn assert_compact_transpose_matches_full_key_oracle<R>(
+    pub(super) fn assert_compact_transpose_matches_full_key_oracle<R>(
         rule: &R,
         sources: &[FusionTreePairKey],
         codomain_permutation: &[usize],
@@ -1188,9 +1190,9 @@ use smallvec::smallvec;
     }
 
     #[derive(Debug)]
-    struct AdversarialHostStorage<T> {
+    pub(super) struct AdversarialHostStorage<T> {
         data: Vec<T>,
-        reported_len: std::cell::Cell<usize>,
+        pub(super) reported_len: std::cell::Cell<usize>,
     }
 
     impl<T> TensorStorage<T> for AdversarialHostStorage<T> {
@@ -1218,7 +1220,7 @@ use smallvec::smallvec;
     type AdversarialHostTensor =
         TensorMap<i32, 1, 0, Trivial, AdversarialHostStorage<i32>>;
 
-    fn adversarial_host_tensor(actual_len: usize) -> AdversarialHostTensor {
+    pub(super) fn adversarial_host_tensor(actual_len: usize) -> AdversarialHostTensor {
         let space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
         let storage = AdversarialHostStorage {
             data: (0..actual_len).map(|value| value as i32 + 10).collect(),
@@ -1232,7 +1234,7 @@ use smallvec::smallvec;
         .unwrap()
     }
 
-    fn assert_host_execution_rejects_extent(
+    pub(super) fn assert_host_execution_rejects_extent(
         mut tensor: AdversarialHostTensor,
         error: CoreError,
     ) {
@@ -1272,7 +1274,7 @@ use smallvec::smallvec;
         assert_eq!(tensor.data(), before);
     }
 
-    fn adversarial_fusion_host_tensor(
+    pub(super) fn adversarial_fusion_host_tensor(
         actual_len: usize,
     ) -> (
         TensorMap<i32, 1, 1, Trivial, AdversarialHostStorage<i32>>,
@@ -1314,12 +1316,12 @@ use smallvec::smallvec;
     // `UnsupportedFusionStyle` guards) does not consume this rule; that is
     // explicitly Stage B.
     #[derive(Clone, Copy, Debug)]
-    struct ToyOmRule;
+    pub(super) struct ToyOmRule;
 
     impl ToyOmRule {
-        const VACUUM: usize = 0;
-        const A: usize = 1;
-        const C: usize = 3;
+        pub(super) const VACUUM: usize = 0;
+        pub(super) const A: usize = 1;
+        pub(super) const C: usize = 3;
     }
 
     impl FusionRule for ToyOmRule {
@@ -1436,12 +1438,12 @@ use smallvec::smallvec;
     //     assertion test has a non-identity unitary F block to check. It is not
     //     on any braid path here.
     #[derive(Clone, Copy, Debug)]
-    struct UnitaryToyOmRule;
+    pub(super) struct UnitaryToyOmRule;
 
     impl UnitaryToyOmRule {
-        const VACUUM: usize = 0;
-        const A: usize = 1;
-        const C: usize = 3;
+        pub(super) const VACUUM: usize = 0;
+        pub(super) const A: usize = 1;
+        pub(super) const C: usize = 3;
         // R(a,a,c) rotation angle. Any nonzero angle whose sin/cos are both
         // nonzero makes the braid genuinely spread over both OM channels.
         const R_THETA: f64 = std::f64::consts::PI / 5.0;
@@ -1570,25 +1572,25 @@ use smallvec::smallvec;
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum ArtinSpyError { F, R }
+    pub(super) enum ArtinSpyError { F, R }
 
     impl std::fmt::Display for ArtinSpyError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{self:?}") } }
 
     impl std::error::Error for ArtinSpyError {}
 
-    struct ArtinSpy {
-        inner: UnitaryToyOmRule,
-        f_calls: std::cell::Cell<usize>,
-        r_calls: std::cell::Cell<usize>,
-        rigid_calls: std::cell::Cell<usize>,
-        fail_f: Option<usize>,
-        fail_r: Option<usize>,
-        bad_f: bool,
-        bad_r: bool,
+    pub(super) struct ArtinSpy {
+        pub(super) inner: UnitaryToyOmRule,
+        pub(super) f_calls: std::cell::Cell<usize>,
+        pub(super) r_calls: std::cell::Cell<usize>,
+        pub(super) rigid_calls: std::cell::Cell<usize>,
+        pub(super) fail_f: Option<usize>,
+        pub(super) fail_r: Option<usize>,
+        pub(super) bad_f: bool,
+        pub(super) bad_r: bool,
     }
 
     impl ArtinSpy {
-        fn new() -> Self { Self { inner: UnitaryToyOmRule, f_calls: std::cell::Cell::new(0), r_calls: std::cell::Cell::new(0), rigid_calls: std::cell::Cell::new(0), fail_f: None, fail_r: None, bad_f: false, bad_r: false } }
+        pub(super) fn new() -> Self { Self { inner: UnitaryToyOmRule, f_calls: std::cell::Cell::new(0), r_calls: std::cell::Cell::new(0), rigid_calls: std::cell::Cell::new(0), fail_f: None, fail_r: None, bad_f: false, bad_r: false } }
         fn trip(counter: &std::cell::Cell<usize>, fail: Option<usize>, error: ArtinSpyError) -> Result<(), ArtinSpyError> { let n = counter.get()+1; counter.set(n); if fail == Some(n) { Err(error) } else { Ok(()) } }
     }
 
@@ -1614,7 +1616,7 @@ use smallvec::smallvec;
     }
 
     // Rank-2 tree [a, a] -> c with a single OM vertex label `vertex`.
-    fn unitary_rank2_tree(vertex: usize) -> FusionTreeKey {
+    pub(super) fn unitary_rank2_tree(vertex: usize) -> FusionTreeKey {
         let a = SectorId::new(UnitaryToyOmRule::A);
         let c = SectorId::new(UnitaryToyOmRule::C);
         FusionTreeKey::new([a, a], c, [false, false], [], [MultiplicityIndex::new(vertex).expect("test multiplicity label is one-based")])
@@ -1623,7 +1625,7 @@ use smallvec::smallvec;
     // Rank-3 tree [a, a, a] -> a: fuse a⊗a->c (OM vertex `vertex1`, N=2), then
     // c⊗a->a (vertex2, forced label 1). Innerline [c]. Mixes an OM vertex with
     // a multiplicity-1 vertex.
-    fn unitary_rank3_tree(vertex1: usize) -> FusionTreeKey {
+    pub(super) fn unitary_rank3_tree(vertex1: usize) -> FusionTreeKey {
         let a = SectorId::new(UnitaryToyOmRule::A);
         let c = SectorId::new(UnitaryToyOmRule::C);
         FusionTreeKey::new(
@@ -1659,7 +1661,7 @@ use smallvec::smallvec;
     // μ↔ν-discriminating BEND oracle needs a non-diagonal Bsymbol (e.g. SU(3));
     // none is available here as verified constants — flagged for B2b.
     #[derive(Clone, Copy, Debug)]
-    struct A4BendRule;
+    pub(super) struct A4BendRule;
 
     impl FusionRule for A4BendRule {
         fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
@@ -1871,7 +1873,7 @@ use smallvec::smallvec;
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum RigidSpyError {
+    pub(super) enum RigidSpyError {
         Dual,
         N,
         F,
@@ -1888,26 +1890,26 @@ use smallvec::smallvec;
 
     impl std::error::Error for RigidSpyError {}
 
-    struct CheckedA4Spy {
-        dual_calls: std::cell::Cell<usize>,
-        n_calls: std::cell::Cell<usize>,
-        f_calls: std::cell::Cell<usize>,
-        sqrt_calls: std::cell::Cell<usize>,
-        inv_sqrt_calls: std::cell::Cell<usize>,
-        fs_calls: std::cell::Cell<usize>,
-        fail_dual: Option<usize>,
-        fail_n: Option<usize>,
-        fail_f: Option<usize>,
-        fail_sqrt: Option<usize>,
-        fail_inv_sqrt: Option<usize>,
-        fail_fs: Option<usize>,
-        bad_b_f: bool,
-        bad_a_f: bool,
-        non_diagonal_b: bool,
+    pub(super) struct CheckedA4Spy {
+        pub(super) dual_calls: std::cell::Cell<usize>,
+        pub(super) n_calls: std::cell::Cell<usize>,
+        pub(super) f_calls: std::cell::Cell<usize>,
+        pub(super) sqrt_calls: std::cell::Cell<usize>,
+        pub(super) inv_sqrt_calls: std::cell::Cell<usize>,
+        pub(super) fs_calls: std::cell::Cell<usize>,
+        pub(super) fail_dual: Option<usize>,
+        pub(super) fail_n: Option<usize>,
+        pub(super) fail_f: Option<usize>,
+        pub(super) fail_sqrt: Option<usize>,
+        pub(super) fail_inv_sqrt: Option<usize>,
+        pub(super) fail_fs: Option<usize>,
+        pub(super) bad_b_f: bool,
+        pub(super) bad_a_f: bool,
+        pub(super) non_diagonal_b: bool,
     }
 
     impl CheckedA4Spy {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 dual_calls: std::cell::Cell::new(0),
                 n_calls: std::cell::Cell::new(0),
@@ -2082,19 +2084,19 @@ use smallvec::smallvec;
         }
     }
 
-    fn a4_three() -> SectorId {
+    pub(super) fn a4_three() -> SectorId {
         SectorId::new(3)
     }
 
     // cod [3,3]->3 (vertex μ), dom [3]->3.
-    fn a4_pair_rank2(mu: usize) -> FusionTreePairKey {
+    pub(super) fn a4_pair_rank2(mu: usize) -> FusionTreePairKey {
         let t = a4_three();
         let cod = FusionTreeKey::new([t, t], t, [false, false], [], [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")]);
         let dom = FusionTreeKey::new([t], t, [false], [], []);
         FusionTreePairKey::pair(cod, dom)
     }
 
-    fn a4_dual_pair_rank2(mu: usize) -> FusionTreePairKey {
+    pub(super) fn a4_dual_pair_rank2(mu: usize) -> FusionTreePairKey {
         let t = a4_three();
         let cod = FusionTreeKey::new(
             [t, t],
@@ -2108,7 +2110,7 @@ use smallvec::smallvec;
         FusionTreePairKey::pair(cod, dom)
     }
 
-    fn assert_rigid_provider_error(
+    pub(super) fn assert_rigid_provider_error(
         error: CheckedGenericSymbolError<RigidSpyError>,
         expected: RigidSpyError,
     ) {
@@ -2134,7 +2136,7 @@ use smallvec::smallvec;
     // A μ↔ν (or κ↔λ) swap in the impl would read F[ν,μ,0,0] / F[0,0,λ,κ] and
     // produce the TRANSPOSE — which THIS test detects and the A4 oracle does not.
     #[derive(Clone, Copy, Debug)]
-    struct TransposeProbeRule;
+    pub(super) struct TransposeProbeRule;
 
     // Sector 1 is self-dual with dim 4 (so √dim=2, exercising the coeff factor);
     // 1⊗1 = {0 (rigidity), 1 (with N=2)}. Only the (1,1,1) block is non-trivial.
@@ -2173,7 +2175,7 @@ use smallvec::smallvec;
     const TP_FB: [f64; 4] = [0.3, 0.7, 0.9, 0.1];
 
  // F(1,1,1,1,1,0)[μ,ν] block, non-symmetric
-    const TP_FA: [f64; 4] = [0.2, 0.5, 0.6, 0.4];
+    pub(super) const TP_FA: [f64; 4] = [0.2, 0.5, 0.6, 0.4];
 
  // F(1,1,1,1,0,1)[κ,λ] block, non-symmetric
     impl GenericFusionSymbols for TransposeProbeRule {
@@ -2219,7 +2221,7 @@ use smallvec::smallvec;
 
     // Independent from-scratch TK evaluation of the reshape formula — explicit
     // index loops, NO call into b_symbol_generic / a_symbol_generic.
-    fn tp_expected_b() -> [[f64; 2]; 2] {
+    pub(super) fn tp_expected_b() -> [[f64; 2]; 2] {
         let factor = 2.0 * 2.0 * 0.5; // √dim(1)·√dim(1)·invsqrtdim(1) = 2
         let mut b = [[0.0; 2]; 2];
         for mu in 0..2 {
@@ -2249,7 +2251,7 @@ use smallvec::smallvec;
     // B2a A4BendRule only modelled the handful of bend/A-symbol tuples, which is
     // insufficient for multi_Fmove/associator (they consult every (e,f)).
     #[derive(Clone, Copy, Debug)]
-    struct A4FoldRule;
+    pub(super) struct A4FoldRule;
 
     impl FusionRule for A4FoldRule {
         fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
@@ -2404,7 +2406,7 @@ use smallvec::smallvec;
         }
     }
 
-    fn a4f_rank3(inner: usize, v1: usize, v2: usize) -> FusionTreeKey {
+    pub(super) fn a4f_rank3(inner: usize, v1: usize, v2: usize) -> FusionTreeKey {
         let t = SectorId::new(3);
         FusionTreeKey::new(
             [t, t, t], t,
@@ -2429,7 +2431,7 @@ use smallvec::smallvec;
     // flips the sign of the imaginary parts and fails both the direct check and
     // the round-trip (which needs U U† = I).
     #[derive(Clone, Copy, Debug)]
-    struct ComplexUnitaryRule;
+    pub(super) struct ComplexUnitaryRule;
 
     impl FusionRule for ComplexUnitaryRule {
         fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
@@ -2461,12 +2463,12 @@ use smallvec::smallvec;
         }
     }
 
-    fn cx(re: f64, im: f64) -> Complex64 {
+    pub(super) fn cx(re: f64, im: f64) -> Complex64 {
         Complex64::new(re, im)
     }
 
     // U = (1/√2)[[1, i],[i, 1]], row-major.
-    fn cx_u() -> [Complex64; 4] {
+    pub(super) fn cx_u() -> [Complex64; 4] {
         let r = 1.0 / 2.0_f64.sqrt();
         [cx(r, 0.0), cx(0.0, r), cx(0.0, r), cx(r, 0.0)]
     }
@@ -2539,7 +2541,7 @@ use smallvec::smallvec;
     // transcribed), so the bend surgery, coeff₀ = √dim(c)/√dim(a), μ→ν row
     // distribution and round-trip are all exercised against real categorical B.
     #[derive(Clone, Copy, Debug)]
-    struct Su3BendRule;
+    pub(super) struct Su3BendRule;
 
     // ids: 1 = (4,2,0) self-dual, 2 = (3,1,0), 3 = (3,2,0) = dual((3,1,0)).
     impl FusionRule for Su3BendRule {
@@ -2640,9 +2642,9 @@ use smallvec::smallvec;
     // equals the hand-chained primitives it is built from.
     // ==================================================================
 
-    use std::collections::HashMap;
+    pub(super) use std::collections::HashMap;
 
-    fn map_terms(terms: Vec<(FusionTreePairKey, f64)>) -> HashMap<FusionTreePairKey, f64> {
+    pub(super) fn map_terms(terms: Vec<(FusionTreePairKey, f64)>) -> HashMap<FusionTreePairKey, f64> {
         let mut map = HashMap::new();
         for (key, coeff) in terms {
             *map.entry(key).or_insert(0.0) += coeff;
@@ -2650,7 +2652,7 @@ use smallvec::smallvec;
         map
     }
 
-    fn assert_term_maps_eq(
+    pub(super) fn assert_term_maps_eq(
         got: &HashMap<FusionTreePairKey, f64>,
         want: &HashMap<FusionTreePairKey, f64>,
         label: &str,
@@ -2664,7 +2666,7 @@ use smallvec::smallvec;
         }
     }
 
-    fn u1_leg(charge: i32, deg: usize, dual: bool) -> SectorLeg {
+    pub(super) fn u1_leg(charge: i32, deg: usize, dual: bool) -> SectorLeg {
         SectorLeg::new([(u1(charge), deg)], dual)
     }
 
@@ -2672,7 +2674,7 @@ use smallvec::smallvec;
     // base tree in exactly one identity field each (uncoupled, coupled, dual
     // flag, inner line, vertex), plus equal copies built with shared and with
     // fresh backings.
-    fn key_hash_fixture() -> (Vec<FusionTreeKey>, FusionTreeKey, FusionTreeKey) {
+    pub(super) fn key_hash_fixture() -> (Vec<FusionTreeKey>, FusionTreeKey, FusionTreeKey) {
         let base =
             FusionTreeKey::try_from_sector_ids([3, 3, 3], 3, [false, true, false], [1], [1, 2]).unwrap();
         let distinct = vec![
@@ -2700,7 +2702,7 @@ use smallvec::smallvec;
         (distinct, shared, fresh)
     }
 
-    fn fx_hash_of<T: Hash>(value: &T) -> u64 {
+    pub(super) fn fx_hash_of<T: Hash>(value: &T) -> u64 {
         let mut hasher = rustc_hash::FxHasher::default();
         value.hash(&mut hasher);
         hasher.finish()
@@ -2710,7 +2712,7 @@ use smallvec::smallvec;
     /// visit, then checks the same geometry without the witness through the
     /// exact per-element enumeration, which must agree and must actually
     /// enumerate (interleaved subblocks of one coupled-sector matrix).
-    fn assert_canonical_storage_admitted_without_enumeration(canonical: &BlockStructure) {
+    pub(super) fn assert_canonical_storage_admitted_without_enumeration(canonical: &BlockStructure) {
         assert!(canonical.storage_tiling_proven());
         // Independent of `record_storage_tiling`: every offset of the payload
         // is reached by exactly one (block, element), the fact the
