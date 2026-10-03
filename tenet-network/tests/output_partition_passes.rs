@@ -5,46 +5,25 @@
 //! second output-sized buffer follow the contraction. Spelling the same result
 //! as contract-then-permute still costs two.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 use tenet_network::tensor;
 
-struct CountingAllocator;
-
-static ENABLED: AtomicBool = AtomicBool::new(false);
-static PAYLOAD_BYTES: AtomicUsize = AtomicUsize::new(0);
-static PAYLOAD_ALLOCS: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ENABLED.load(Ordering::Relaxed) && layout.size() == PAYLOAD_BYTES.load(Ordering::Relaxed)
-        {
-            PAYLOAD_ALLOCS.fetch_add(1, Ordering::Relaxed);
-        }
-        // SAFETY: forwards the caller's layout unchanged to the system allocator.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        // SAFETY: `pointer` was returned by `System.alloc` with this layout.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
+
+/// The output payload of `operands()`'s contraction, in bytes; the distinct
+/// prime degeneracies keep it unique in the run.
+const PAYLOAD_BYTES: usize = 13 * 17 * 23 * size_of::<f64>();
 
 /// Output-payload-sized allocations made while `f` runs (result dropped after).
 fn output_sized_allocs<T>(f: impl FnOnce() -> T) -> usize {
-    PAYLOAD_ALLOCS.store(0, Ordering::SeqCst);
-    ENABLED.store(true, Ordering::SeqCst);
-    let result = f();
-    ENABLED.store(false, Ordering::SeqCst);
+    let (result, allocs) = counting_alloc::measure_matching(PAYLOAD_BYTES..=PAYLOAD_BYTES, f);
     drop(result);
-    PAYLOAD_ALLOCS.load(Ordering::SeqCst)
+    allocs.matched_calls as usize
 }
 
 type Map = TensorMap<U1FusionRule, f64>;
@@ -65,8 +44,6 @@ fn operands() -> (Map, Map) {
 
 #[test]
 fn mixed_output_partition_costs_one_output_sized_allocation() {
-    PAYLOAD_BYTES.store(13 * 17 * 23 * size_of::<f64>(), Ordering::SeqCst);
-
     let (a, b) = operands();
     assert_eq!(
         output_sized_allocs(|| a

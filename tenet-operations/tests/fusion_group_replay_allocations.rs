@@ -1,5 +1,3 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::Arc;
 
 use tenet_core::{BlockStructure, SectorId};
@@ -9,28 +7,11 @@ use tenet_operations::{
     Rank2Gemm, StridedHostKernelAdapter,
 };
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.with(Cell::get) {
-            ALLOCATIONS.with(|count| count.set(count.get() + 1));
-        }
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 struct ScalarGemm;
 
@@ -109,9 +90,7 @@ fn warmed_irregular_group_replay_allocates_nothing() {
         )
         .unwrap();
     }
-
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     plan.execute_raw(
         &mut kernels,
         &mut gemm,
@@ -126,9 +105,9 @@ fn warmed_irregular_group_replay_allocates_nothing() {
         0.0,
     )
     .unwrap();
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
 
-    assert_eq!(ALLOCATIONS.get(), 0);
+    assert_eq!(allocs.calls, 0);
     assert_eq!(dst, [6.0]);
 }
 
@@ -151,8 +130,7 @@ fn a_fresh_adapter_checked_block_copy_allocates_nothing_up_to_rank_eight() {
     let src: Vec<f64> = (0..3usize.pow(8)).map(|value| value as f64).collect();
     let mut dst = vec![0.0; 1 << 8];
 
-    COUNTING.with(|counting| counting.set(true));
-    ALLOCATIONS.with(|count| count.set(0));
+    counting_alloc::start();
     for (alpha, beta) in [(1.0, 0.0), (1.0, 1.0), (2.0, 0.5)] {
         StridedHostKernelAdapter::default()
             .tensoradd_strided_checked(
@@ -169,7 +147,7 @@ fn a_fresh_adapter_checked_block_copy_allocates_nothing_up_to_rank_eight() {
             )
             .unwrap();
     }
-    COUNTING.with(|counting| counting.set(false));
+    let allocs = counting_alloc::stop();
 
-    assert_eq!(ALLOCATIONS.with(Cell::get), 0);
+    assert_eq!(allocs.calls, 0);
 }

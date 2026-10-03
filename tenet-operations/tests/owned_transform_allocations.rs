@@ -1,5 +1,3 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::Arc;
 
 use tenet_core::{BlockKey, BlockSpec, BlockStructure, FusionTreePairKey};
@@ -9,37 +7,11 @@ use tenet_operations::{
     TreeTransformStructure, TreeTransformWorkspace,
 };
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(ptr, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 fn canonical_structure() -> Arc<BlockStructure> {
     let key = BlockKey::from(
@@ -83,9 +55,7 @@ fn warm_owned_transform_allocates_only_the_output_payload() {
     .unwrap()
     .unwrap();
     drop(warm);
-
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let output = try_tree_transform_structure_overwrite_owned_raw(
         &mut dense,
         &mut workspace,
@@ -99,8 +69,8 @@ fn warm_owned_transform_allocates_only_the_output_payload() {
     )
     .unwrap()
     .unwrap();
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
 
-    assert_eq!(ALLOCATIONS.get(), 1);
+    assert_eq!(allocs.calls, 1);
     assert_eq!(output, source);
 }

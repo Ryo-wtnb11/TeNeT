@@ -1,5 +1,3 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::Arc;
 
 use tenet_core::BlockStructure;
@@ -8,37 +6,11 @@ use tenet_operations::{
     TreeTransformStructure, TreeTransformWorkspace,
 };
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 #[test]
 fn warmed_public_host_admission_without_tasks_is_allocation_free() {
@@ -68,16 +40,14 @@ fn warmed_public_host_admission_without_tasks_is_allocation_free() {
             .unwrap();
     };
     replay(&mut TreeTransformReplayProfile::default());
-
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let mut profile = TreeTransformReplayProfile::default();
     for _ in 0..100 {
         replay(&mut profile);
     }
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
 
-    assert_eq!(ALLOCATIONS.get(), 0);
+    assert_eq!(allocs.calls, 0);
     assert_eq!(profile.single_blocks, 0);
     assert_eq!(profile.multi_blocks, 0);
     assert_eq!(profile.multi_coefficient_prepare, std::time::Duration::ZERO);

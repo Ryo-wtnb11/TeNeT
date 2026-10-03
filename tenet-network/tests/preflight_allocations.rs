@@ -3,8 +3,6 @@
 //! The counter is per thread, so the tests do not disturb each other; each
 //! call under test runs on the test's own thread.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::Arc;
 use tenet::typed::ContractSpec;
 
@@ -20,54 +18,16 @@ use tenet_network::{
 mod braiding_probe;
 use braiding_probe::{ProbeSector, RealBraidingProbe};
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-}
-
-fn record() {
-    let _ = COUNTING.try_with(|counting| {
-        if counting.get() {
-            let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
-        }
-    });
-}
-
-// SAFETY: every call forwards to `System` with the caller's arguments; the
-// counter touches only const-initialised thread-locals, which never allocate.
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record();
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        record();
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        record();
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 /// Allocation calls (alloc and realloc) made by `run` on this thread.
 fn allocations<T>(run: impl FnOnce() -> T) -> (u64, T) {
-    ALLOCATIONS.with(|count| count.set(0));
-    COUNTING.with(|counting| counting.set(true));
-    let value = run();
-    COUNTING.with(|counting| counting.set(false));
-    (ALLOCATIONS.with(Cell::get), value)
+    let (value, allocs) = counting_alloc::measure(run);
+    (allocs.calls, value)
 }
 
 /// `a: [v, v; w]`, `b: [w; v, v]` and `c: [w*; v, v]`, 8 U(1) sectors of
