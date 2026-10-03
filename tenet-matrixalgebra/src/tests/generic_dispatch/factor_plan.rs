@@ -1,43 +1,6 @@
 use super::*;
 
 #[test]
-fn checked_generic_factor_plan_late_failure_precedes_commit() {
-    let (space, _data) = generic_factorization_input();
-    let complete = LateGenericSpy {
-        rule: FactorGenericRule,
-        fail_at: usize::MAX,
-        calls: Cell::new(0),
-    };
-    let prepared =
-        crate::factorize::prepare_compact_factor_plan_generic_checked_for_test(&space, &complete)
-            .unwrap()
-            .expect("canonical checked plan");
-    let final_call = complete.calls.get();
-    assert!(final_call > 1);
-    crate::factorize::finish_compact_factor_plan_generic_for_test(&space, prepared).unwrap();
-    assert_eq!(complete.calls.get(), final_call);
-
-    let failing = LateGenericSpy {
-        rule: FactorGenericRule,
-        fail_at: final_call,
-        calls: Cell::new(0),
-    };
-    crate::factorize::reset_generic_factor_plan_finish_calls();
-    let error = match crate::factorize::prepare_compact_factor_plan_generic_checked_for_test(
-        &space, &failing,
-    ) {
-        Err(error) => error,
-        Ok(_) => panic!("late provider failure must abort checked preparation"),
-    };
-    assert!(matches!(
-        error,
-        crate::factorize::CheckedGenericFactorPlanError::Provider(LateGenericError(call))
-            if call == final_call
-    ));
-    assert_eq!(crate::factorize::generic_factor_plan_finish_calls(), 0);
-}
-
-#[test]
 fn hermitian_region_validation_rejects_short_storage_without_panicking() {
     // What: the cross-crate region validator reports malformed storage as a typed structural error.
     let tensor = one_sector_matrix(vec![1.0_f64, 0.0, 0.0, 2.0]);

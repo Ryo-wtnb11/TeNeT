@@ -54,9 +54,10 @@ fn direct_compact_svd_uses_owned_executor_outputs_only() {
     assert_eq!(direct.counts().svd_into, 0);
 
     let (space, data) = generic_factorization_input();
-    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let (_, layout_space) = bind_checked_layout(&space);
+    let input = BoundDynamicTensorRef::try_new(&layout_space, &data).unwrap();
     let mut generic = ScriptedExecutor::<RejectSvdInto>::default();
-    svd_compact_factors_dyn_generic(&mut generic, &input).unwrap();
+    svd_compact_factors_with_spectrum_dyn_checked_generic(&mut generic, &input).unwrap();
     assert!(generic.counts().svd > 0);
     assert_eq!(generic.counts().svd_into, 0);
 
@@ -146,17 +147,35 @@ fn generic_compact_svd_padded_fallback_uses_owned_outputs_and_scatter() {
     let (canonical_space, canonical_data) = generic_factorization_input();
     let (padded_space, padded_data) =
         padded_generic_factorization_input(&canonical_space, &canonical_data);
+    let (_, padded_space) = bind_checked_layout(&padded_space);
     let padded = BoundDynamicTensorRef::try_new(&padded_space, &padded_data).unwrap();
     let mut dense = ScriptedExecutor::<RejectSvdInto>::default();
 
     crate::factorize::reset_compact_svd_copy_probe();
-    svd_compact_factors_dyn_generic(&mut dense, &padded).unwrap();
+    crate::factorize::reset_generic_pair_publication_probe();
+    svd_compact_factors_with_spectrum_dyn_checked_generic(&mut dense, &padded).unwrap();
 
     assert!(dense.counts().svd > 0);
     assert_eq!(dense.counts().svd_into, 0);
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
-    assert!(probe.output_scatter_calls > 0);
+    // Padding lives only in the source: the checked tier packs it away
+    // and publishes the fresh factors canonically, without an output scatter.
+    let publication = crate::factorize::generic_pair_publication_probe();
+    assert_eq!(
+        (
+            publication.canonical_publications,
+            publication.fallback_publications
+        ),
+        (1, 0)
+    );
+    assert_eq!(
+        (
+            publication.left_scatter_calls,
+            publication.right_scatter_calls
+        ),
+        (0, 0)
+    );
 }
 
 fn assert_generic_compact_svd_fallback_live_owners<D: crate::factorize::FactorScalar>() {
@@ -167,13 +186,15 @@ fn assert_generic_compact_svd_fallback_live_owners<D: crate::factorize::FactorSc
         .into_iter()
         .map(D::from_real)
         .collect::<Vec<_>>();
+    let (_, padded_space) = bind_checked_layout(&padded_space);
     let padded = BoundDynamicTensorRef::try_new(&padded_space, &data).unwrap();
     let mut dense = ScriptedExecutor::<RejectSvdInto>::default();
 
     crate::factorize::reset_compact_svd_copy_probe();
-    crate::factorize::reset_generic_compact_svd_fallback_pointers();
-    svd_compact_factors_dyn_generic(&mut dense, &padded).unwrap();
-    let stage = crate::factorize::generic_compact_svd_fallback_pointers();
+    crate::factorize::reset_generic_pair_publication_probe();
+    crate::factorize::reset_checked_compact_svd_stage_pointers();
+    svd_compact_factors_with_spectrum_dyn_checked_generic(&mut dense, &padded).unwrap();
+    let stage = crate::factorize::checked_compact_svd_stage_pointers();
 
     assert_eq!(dense.counts().svd_into, 0);
     assert_eq!(dense.output_ptrs, stage);
@@ -181,7 +202,23 @@ fn assert_generic_compact_svd_fallback_live_owners<D: crate::factorize::FactorSc
     assert!(stage.iter().all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
-    assert!(probe.output_scatter_calls > 0);
+    // Padding lives only in the source: the checked tier packs it away
+    // and publishes the fresh factors canonically, without an output scatter.
+    let publication = crate::factorize::generic_pair_publication_probe();
+    assert_eq!(
+        (
+            publication.canonical_publications,
+            publication.fallback_publications
+        ),
+        (1, 0)
+    );
+    assert_eq!(
+        (
+            publication.left_scatter_calls,
+            publication.right_scatter_calls
+        ),
+        (0, 0)
+    );
 }
 
 #[test]
@@ -197,14 +234,19 @@ fn generic_compact_svd_interleaved_complex_fallback_preserves_source_order() {
     let (canonical_space, canonical_data, _) = generic_values_endomorphism_input();
     let (interleaved_space, interleaved_data) =
         interleaved_generic_endomorphism_input(&canonical_space, &canonical_data);
+    let (_, canonical_space) = bind_checked_layout(&canonical_space);
+    let (_, interleaved_space) = bind_checked_layout(&interleaved_space);
     let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
     let interleaved =
         BoundDynamicTensorRef::try_new(&interleaved_space, &interleaved_data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    let canonical_svd = svd_compact_factors_dyn_generic(&mut dense, &canonical).unwrap();
+    let canonical_svd =
+        svd_compact_factors_with_spectrum_dyn_checked_generic(&mut dense, &canonical).unwrap();
     crate::factorize::reset_compact_svd_copy_probe();
-    let fallback_svd = svd_compact_factors_dyn_generic(&mut dense, &interleaved).unwrap();
+    crate::factorize::reset_generic_pair_publication_probe();
+    let fallback_svd =
+        svd_compact_factors_with_spectrum_dyn_checked_generic(&mut dense, &interleaved).unwrap();
 
     let fallback_s = generic_diagonal_factor(&fallback_svd.0, &fallback_svd.2);
     assert_compact_factors_reconstruct_input(
@@ -234,7 +276,15 @@ fn generic_compact_svd_interleaved_complex_fallback_preserves_source_order() {
     }
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
-    assert!(probe.output_scatter_calls > 0);
+    let publication = crate::factorize::generic_pair_publication_probe();
+    assert_eq!(
+        (
+            publication.canonical_publications,
+            publication.fallback_publications
+        ),
+        (0, 1)
+    );
+    assert!(publication.left_scatter_calls > 0 && publication.right_scatter_calls > 0);
 }
 
 #[test]
@@ -242,14 +292,19 @@ fn generic_compact_svd_padded_complex_rectangular_fallback_matches_canonical_gau
     let (canonical_space, canonical_data) = generic_svd_truncation_input::<Complex64>(true);
     let (padded_space, padded_data) =
         padded_generic_svd_truncation_input(&canonical_space, &canonical_data);
+    let (_, canonical_space) = bind_checked_layout(&canonical_space);
+    let (_, padded_space) = bind_checked_layout(&padded_space);
     let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
     let padded = BoundDynamicTensorRef::try_new(&padded_space, &padded_data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    let canonical_svd = svd_compact_factors_dyn_generic(&mut dense, &canonical).unwrap();
+    let canonical_svd =
+        svd_compact_factors_with_spectrum_dyn_checked_generic(&mut dense, &canonical).unwrap();
     crate::factorize::reset_compact_svd_copy_probe();
+    crate::factorize::reset_generic_pair_publication_probe();
     let mut reject = ScriptedExecutor::<RejectSvdInto>::default();
-    let padded_svd = svd_compact_factors_dyn_generic(&mut reject, &padded).unwrap();
+    let padded_svd =
+        svd_compact_factors_with_spectrum_dyn_checked_generic(&mut reject, &padded).unwrap();
 
     assert_eq!(reject.counts().svd_into, 0);
     let padded_s = generic_diagonal_factor(&padded_svd.0, &padded_svd.2);
@@ -264,28 +319,53 @@ fn generic_compact_svd_padded_complex_rectangular_fallback_matches_canonical_gau
     assert_real_spectra_close(&padded_svd.2, &canonical_svd.2);
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
-    assert!(probe.output_scatter_calls > 0);
+    // Padding lives only in the source: the checked tier packs it away
+    // and publishes the fresh factors canonically, without an output scatter.
+    let publication = crate::factorize::generic_pair_publication_probe();
+    assert_eq!(
+        (
+            publication.canonical_publications,
+            publication.fallback_publications
+        ),
+        (1, 0)
+    );
+    assert_eq!(
+        (
+            publication.left_scatter_calls,
+            publication.right_scatter_calls
+        ),
+        (0, 0)
+    );
 }
 
 #[test]
 fn generic_compact_svd_second_dense_failure_preserves_source() {
     let (source_space, source_data) = generic_svd_truncation_input::<f64>(false);
     let (space, data) = padded_generic_svd_truncation_input(&source_space, &source_data);
+    let (_, space) = bind_checked_layout(&space);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let before = input.data().to_vec();
     let mut dense = ScriptedExecutor::<FailSecondSvd>::default();
 
     crate::factorize::reset_compact_svd_copy_probe();
-    match svd_compact_factors_dyn_generic(&mut dense, &input) {
-        Err(OperationError::Dense(DenseError::Backend { op: "svd_into", .. })) => {}
-        Err(error) => panic!("unexpected Generic SVD failure: {error}"),
+    crate::factorize::reset_generic_pair_publication_probe();
+    match svd_compact_factors_with_spectrum_dyn_checked_generic(&mut dense, &input) {
+        Err(CheckedGenericFactorPlanError::Operation(OperationError::Dense(
+            DenseError::Backend { op: "svd_into", .. },
+        ))) => {}
+        Err(error) => panic!("unexpected Generic SVD failure: {error:?}"),
         Ok(_) => panic!("second compact SVD must fail"),
     }
     assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 2);
     assert_eq!(input.data(), before);
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
-    assert!(probe.output_scatter_calls > 0);
+    // The checked tier stages every sector before publishing, so a dense
+    // failure publishes no factor block at all.
+    assert_eq!(
+        crate::factorize::generic_pair_publication_probe(),
+        crate::factorize::GenericPairPublicationProbe::default()
+    );
 }
 
 #[test]
@@ -300,11 +380,13 @@ fn generic_compact_svd_empty_input_skips_dense_execution() {
         ),
     )
     .unwrap();
+    let (_, space) = bind_checked_layout(&space);
     let data: [f64; 0] = [];
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let mut reject = ScriptedExecutor::new(RejectExecutorCalls);
 
-    let (u, vh, singular_values) = svd_compact_factors_dyn_generic(&mut reject, &input).unwrap();
+    let (u, vh, singular_values) =
+        svd_compact_factors_with_spectrum_dyn_checked_generic(&mut reject, &input).unwrap();
 
     assert!(u.data().is_empty());
     assert!(vh.data().is_empty());

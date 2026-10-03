@@ -1,5 +1,28 @@
 use super::*;
 
+/// The checked pair publisher over `provider`'s infallible checked view, with
+/// its operation errors unwrapped: the view never fails, so this is the paired
+/// publication every checked Generic factorization uses.
+fn publish_pair<'r, R, D, M>(
+    provider: &'r Arc<R>,
+    homspace: &FusionTreeHomSpace,
+    matricizations: &[M],
+    pairs: Vec<FactorPair<D>>,
+) -> Result<DynamicFactorPair<InfallibleGeneric<'r, R>, D>, OperationError>
+where
+    R: FusionRule,
+    D: FactorScalar,
+    M: SectorGeometry,
+{
+    let checked = Arc::new(InfallibleGeneric::new(provider.as_ref()));
+    build_left_right_bound_pair_generic_checked(&checked, homspace, matricizations, pairs).map_err(
+        |error| match error {
+            CheckedGenericFactorPlanError::Provider(never) => match never {},
+            CheckedGenericFactorPlanError::Operation(error) => error,
+        },
+    )
+}
+
 #[test]
 fn generic_pair_publication_falls_back_for_padded_staged_geometry() {
     let (homspace, matrix) = z2_single_sector_matrix(2, 1);
@@ -7,7 +30,7 @@ fn generic_pair_publication_falls_back_for_padded_staged_geometry() {
     reset_generic_pair_publication_probe();
     reset_scatter_visit_probe();
 
-    let (left, right) = build_left_right_bound_pair_generic(
+    let (left, right) = publish_pair(
         &provider,
         &homspace,
         &[matrix],
@@ -128,8 +151,7 @@ fn generic_pair_publication_preserves_vertex_tree_payload_placement() {
     let expected_left = pair.left.clone();
     let expected_right = pair.right.clone();
     reset_generic_pair_publication_probe();
-    let (left, right) =
-        build_left_right_bound_pair_generic(&provider, &homspace, &[matrix], vec![pair]).unwrap();
+    let (left, right) = publish_pair(&provider, &homspace, &[matrix], vec![pair]).unwrap();
     assert_eq!(left.data(), expected_left);
     assert_eq!(right.data(), expected_right);
     let probe = generic_pair_publication_probe();
@@ -145,10 +167,11 @@ fn generic_pair_publication_preserves_vertex_tree_payload_placement() {
         (probe.left_scatter_calls, probe.right_scatter_calls),
         (0, 0)
     );
-    assert_eq!(probe.output_blocks_visited, 4);
+    // The checked publisher validates each published key once, in order.
     assert_eq!(
         probe.ordered_key_validation_events,
-        2 * probe.output_blocks_visited
+        left.space().space().structure().block_count()
+            + right.space().space().structure().block_count()
     );
 
     let (homspace, matrix, pair) = vertex_tree_factor_fixture(true);
@@ -156,8 +179,7 @@ fn generic_pair_publication_preserves_vertex_tree_payload_placement() {
     let right_source = pair.right.clone();
     reset_generic_pair_publication_probe();
     reset_placement_index_probe();
-    let (left, right) =
-        build_left_right_bound_pair_generic(&provider, &homspace, &[matrix], vec![pair]).unwrap();
+    let (left, right) = publish_pair(&provider, &homspace, &[matrix], vec![pair]).unwrap();
     assert_eq!(
         left.data(),
         [
@@ -333,7 +355,6 @@ fn generic_pair_canonical_validation_scales_linearly_in_sectors_and_trees() {
         .unwrap());
         assert!(factor_output_is_canonical(
             &left_structure,
-            Some(&left_keys),
             &matrices,
             &pairs,
             expected_left.len(),
@@ -341,7 +362,6 @@ fn generic_pair_canonical_validation_scales_linearly_in_sectors_and_trees() {
         ));
         assert!(factor_output_is_canonical(
             &right_structure,
-            Some(&right_keys),
             &matrices,
             &pairs,
             expected_right.len(),
@@ -349,8 +369,7 @@ fn generic_pair_canonical_validation_scales_linearly_in_sectors_and_trees() {
         ));
         let output_blocks = left_keys.len() + right_keys.len();
         let probe = generic_pair_publication_probe();
-        assert_eq!(probe.output_blocks_visited, output_blocks);
-        assert_eq!(probe.ordered_key_validation_events, 2 * output_blocks);
+        assert_eq!(probe.ordered_key_validation_events, output_blocks);
         assert_eq!(
             (probe.fallback_row_lookups, probe.fallback_col_lookups),
             (0, 0)
@@ -375,7 +394,7 @@ fn generic_pair_validation_preserves_missing_sector_and_tree_errors() {
         right_leading: 1,
     };
 
-    let missing_sector = build_left_right_bound_pair_generic(
+    let missing_sector = publish_pair(
         &provider,
         &homspace,
         &[] as &[SectorMatricization<f64>],
@@ -397,9 +416,7 @@ fn generic_pair_validation_preserves_missing_sector_and_tree_errors() {
     let mut wrong_row = matrix;
     wrong_row.row_trees[0].0 = wrong.clone();
     wrong_row.col_trees[0].0 = wrong.clone();
-    let missing_row =
-        build_left_right_bound_pair_generic(&provider, &homspace, &[wrong_row], vec![pair()])
-            .unwrap_err();
+    let missing_row = publish_pair(&provider, &homspace, &[wrong_row], vec![pair()]).unwrap_err();
     assert!(matches!(
         missing_row,
         OperationError::UnsupportedTensorContractScope {
@@ -409,9 +426,7 @@ fn generic_pair_validation_preserves_missing_sector_and_tree_errors() {
 
     let (_, mut wrong_col) = z2_single_sector_matrix(1, 1);
     wrong_col.col_trees[0].0 = wrong;
-    let missing_col =
-        build_left_right_bound_pair_generic(&provider, &homspace, &[wrong_col], vec![pair()])
-            .unwrap_err();
+    let missing_col = publish_pair(&provider, &homspace, &[wrong_col], vec![pair()]).unwrap_err();
     assert!(matches!(
         missing_col,
         OperationError::UnsupportedTensorContractScope {
@@ -422,10 +437,11 @@ fn generic_pair_validation_preserves_missing_sector_and_tree_errors() {
 
 #[test]
 fn generic_pair_publication_handles_zero_kept_sector() {
+    let provider = Arc::new(TestGenericRule);
     let (homspace, matrix) = z2_single_sector_matrix(2, 1);
     reset_generic_pair_publication_probe();
-    let (left, right) = build_left_right_bound_pair_generic(
-        &Arc::new(TestGenericRule),
+    let (left, right) = publish_pair(
+        &provider,
         &homspace,
         &[matrix],
         vec![FactorPair {
@@ -450,25 +466,22 @@ fn generic_pair_publication_handles_zero_kept_sector() {
 
     let empty = FusionProductSpace::new(std::iter::empty::<SectorLeg>());
     let empty_hom = FusionTreeHomSpace::new(empty.clone(), empty);
-    let (left, right) = build_left_right_bound_pair_generic::<_, f64, SectorMatricization<f64>>(
-        &Arc::new(TestGenericRule),
-        &empty_hom,
-        &[],
-        Vec::new(),
-    )
-    .unwrap();
+    let (left, right) =
+        publish_pair::<_, f64, SectorMatricization<f64>>(&provider, &empty_hom, &[], Vec::new())
+            .unwrap();
     assert!(left.data().is_empty());
     assert!(right.data().is_empty());
 }
 
 #[test]
 fn generic_pair_publication_handles_scalar_matrix() {
+    let provider = Arc::new(TestGenericRule);
     let empty = FusionProductSpace::new(std::iter::empty::<SectorLeg>());
     let homspace = FusionTreeHomSpace::new(empty.clone(), empty);
     let key = homspace.fusion_tree_keys_generic(&TestGenericRule).unwrap()[0].clone();
     reset_generic_pair_publication_probe();
-    let (left, right) = build_left_right_bound_pair_generic(
-        &Arc::new(TestGenericRule),
+    let (left, right) = publish_pair(
+        &provider,
         &homspace,
         &[SectorMatricization {
             sector: SectorId::new(0),
@@ -507,7 +520,7 @@ fn generic_pair_fallback_scatters_rank1_right_block_with_right_layout() {
         .collect::<Vec<_>>();
     reset_generic_pair_publication_probe();
 
-    let (left_factor, right_factor) = build_left_right_bound_pair_generic(
+    let (left_factor, right_factor) = publish_pair(
         &provider,
         &homspace,
         std::slice::from_ref(&matrix),
@@ -643,25 +656,9 @@ fn generic_pair_fallback_scatters_each_output_block_once() {
         assert!(matrices
             .iter()
             .all(|m| m.row_trees.len() == 4 && m.col_trees.len() == 4));
-        let plain_provider = Arc::new(Z4GenericRule);
         let checked_provider = Arc::new(InfallibleGeneric::new(&Z4_GENERIC));
 
         let build = |matrices: &[SectorMatricization<D>]| {
-            reset_generic_pair_publication_probe();
-            reset_scatter_visit_probe();
-            let (left, right) = build_left_right_bound_pair_generic(
-                &plain_provider,
-                &homspace,
-                matrices,
-                staged_pairs(matrices, &values),
-            )
-            .unwrap();
-            let plain = (
-                left.data().to_vec(),
-                right.data().to_vec(),
-                generic_pair_publication_probe(),
-                scatter_visit_probe(),
-            );
             reset_generic_pair_publication_probe();
             reset_scatter_visit_probe();
             let (left, right) = build_left_right_bound_pair_generic_checked(
@@ -678,27 +675,26 @@ fn generic_pair_fallback_scatters_each_output_block_once() {
                 ),
                 (16, 16)
             );
-            let checked = (
+            (
                 left.data().to_vec(),
                 right.data().to_vec(),
                 generic_pair_publication_probe(),
                 scatter_visit_probe(),
-            );
-            (plain, checked)
+            )
         };
 
-        let (reference, checked_reference) = build(&matrices);
-        for (_, _, probe, visits) in [&reference, &checked_reference] {
+        let reference = build(&matrices);
+        {
+            let (_, _, probe, visits) = &reference;
             assert_eq!(probe.canonical_publications, 1);
             assert_eq!(*visits, ScatterVisitProbe::default());
         }
 
         let (_, mut reversed) = fresh();
         reversed.reverse();
-        let (plain, checked) = build(&reversed);
-        for ((left, right, probe, visits), (left_ref, right_ref, ..)) in
-            [(&plain, &reference), (&checked, &checked_reference)]
+        let checked = build(&reversed);
         {
+            let ((left, right, probe, visits), (left_ref, right_ref, ..)) = (&checked, &reference);
             assert_eq!(probe.fallback_publications, 1);
             assert_eq!((left, right), (left_ref, right_ref));
             assert_eq!(
@@ -744,7 +740,6 @@ fn generic_pair_validation_reports_left_defect_before_right_across_sectors() {
         matrices.iter().map(|m| m.sector.id()).collect::<Vec<_>>(),
         [0, 1, 2]
     );
-    let plain_provider = Arc::new(Z4GenericRule);
     let checked_provider = Arc::new(InfallibleGeneric::new(&Z4_GENERIC));
     let foreign_row = matrices[0].row_trees[0].0.clone();
     let foreign_col = matrices[1].col_trees[0].0.clone();
@@ -766,17 +761,6 @@ fn generic_pair_validation_reports_left_defect_before_right_across_sectors() {
         (false, true, codomain),
     ] {
         let matrices = corrupt(bad_first_col, bad_later_row);
-        let error = build_left_right_bound_pair_generic(
-            &plain_provider,
-            &homspace,
-            &matrices,
-            staged_pairs(&matrices, &|k| k as f64),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            OperationError::UnsupportedTensorContractScope { message } if message == expected
-        ));
         let error = build_left_right_bound_pair_generic_checked(
             &checked_provider,
             &homspace,
@@ -848,8 +832,8 @@ fn assert_factor_matches_space<R: CheckedGenericFusion, D: FactorScalar + fmt::D
 }
 
 /// Checked paired publication equals the two-enumeration construction in
-/// structure, key order, length, homspace and provider binding, and the
-/// unchecked paired builder in data.
+/// structure, key order, length, homspace and provider binding, and in data
+/// the same publication over the plain rule's infallible view.
 fn assert_checked_pair_matches_two_enumeration_construction<
     P: FusionRule,
     R: CheckedGenericFusion,
@@ -866,8 +850,7 @@ fn assert_checked_pair_matches_two_enumeration_construction<
     let (left_hom, right_hom) = paired_output_homs(homspace, &pairs());
     let (left_keys, left_expected) = two_enumeration_space(checked, left_hom);
     let (right_keys, right_expected) = two_enumeration_space(checked, right_hom);
-    let (plain_left, plain_right) =
-        build_left_right_bound_pair_generic(plain, homspace, matrices, pairs()).unwrap();
+    let (plain_left, plain_right) = publish_pair(plain, homspace, matrices, pairs()).unwrap();
     reset_generic_pair_publication_probe();
     let (left, right) =
         build_left_right_bound_pair_generic_checked(checked, homspace, matrices, pairs()).unwrap();
@@ -876,7 +859,6 @@ fn assert_checked_pair_matches_two_enumeration_construction<
         (probe.canonical_publications, probe.fallback_publications),
         expected_publications
     );
-    assert_eq!(probe.output_blocks_visited, 0);
     assert_eq!(
         probe.ordered_key_validation_events,
         left_keys.len() + right_keys.len()
@@ -946,7 +928,7 @@ fn checked_paired_structure_matches_two_enumeration_construction() {
     // What: over G_s = 4 Z_4 matricizations with F = 16 blocks per side,
     // canonical and reversed (fallback) geometries, `f64` and
     // `Complex64`, the checked pair equals the two-enumeration
-    // construction and the unchecked builder's data.
+    // construction and, in data, the same publication over the plain rule.
     fn run<D: FactorScalar + fmt::Debug>(values: impl Fn(usize) -> D) {
         let fresh = || z4_generic_geometry::<D>(z4_all_charge_legs());
         let (homspace, matrices) = fresh();

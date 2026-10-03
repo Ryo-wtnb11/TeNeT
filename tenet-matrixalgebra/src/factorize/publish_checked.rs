@@ -116,20 +116,14 @@ pub(super) fn checked_extent(shape: &[usize]) -> Option<usize> {
     tenet_core::checked_product(shape).ok()
 }
 
-/// `keys` carries the separately enumerated key list of the unchecked paired
-/// route for the admitted-key equality against `structure`; the checked route
-/// commits the very structure it validated and passes `None`.
 pub(super) fn factor_output_is_canonical<D, M: SectorGeometry>(
     structure: &BlockStructure,
-    keys: Option<&[FusionTreePairKey]>,
     matricizations: &[M],
     pairs: &[FactorPair<D>],
     required_len: usize,
     side: FactorSide,
 ) -> bool {
-    if matricizations.len() != pairs.len()
-        || keys.is_some_and(|keys| keys.len() != structure.block_count())
-    {
+    if matricizations.len() != pairs.len() {
         return false;
     }
     let mut block_index = 0usize;
@@ -152,7 +146,6 @@ pub(super) fn factor_output_is_canonical<D, M: SectorGeometry>(
             factor_leading,
             pair.kept,
             side,
-            keys,
         ) else {
             return false;
         };
@@ -167,8 +160,6 @@ pub(super) fn factor_output_is_canonical<D, M: SectorGeometry>(
 /// in the exact layout `from_bound` expects, and returns the next output
 /// offset. Left output reads the source as `F[o + q + a*j]`, right output as
 /// `F[j + b*(o + q)]`; `a` is the source-side extent on `source_trees`.
-/// `expected_keys` keeps the paired callers' additional admitted-key equality
-/// and their probe events; one-sided callers pass `None`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sector_factor_output_is_canonical<M: SectorGeometry>(
     structure: &BlockStructure,
@@ -180,7 +171,6 @@ pub(super) fn sector_factor_output_is_canonical<M: SectorGeometry>(
     factor_leading: usize,
     bond: usize,
     side: FactorSide,
-    expected_keys: Option<&[FusionTreePairKey]>,
 ) -> Option<usize> {
     let source_extent = match source_trees {
         FactorSide::Left => matrix.rows(),
@@ -208,13 +198,6 @@ pub(super) fn sector_factor_output_is_canonical<M: SectorGeometry>(
         let BlockKey::FusionTree(actual_key) = block.key() else {
             return None;
         };
-        if let Some(keys) = expected_keys {
-            record_generic_pair_output_block_visit();
-            record_generic_pair_ordered_key_validation();
-            if actual_key != keys.get(*block_index)? {
-                return None;
-            }
-        }
         let actual_tree = match side {
             FactorSide::Left => actual_key.codomain_tree(),
             FactorSide::Right => actual_key.domain_tree(),
@@ -434,7 +417,6 @@ pub(super) fn one_sided_factor_output_plan<D, M: SectorGeometry>(
             factor_leading,
             bond?,
             side,
-            None,
         )?;
     }
     if pair_records.next().is_some()
@@ -568,230 +550,6 @@ pub(super) fn publish_generic_factor_pairs<D>(
     (left_data, right_data)
 }
 
-/// Builds provider-bound left and right factor spaces for a generic rule.
-pub(super) fn build_left_right_bound_spaces_generic<R, M>(
-    provider: &Arc<R>,
-    homspace: &FusionTreeHomSpace,
-    matricizations: &[M],
-    ranks: &[SectorRank],
-) -> Result<(BoundDynamicFusionMapSpace<R>, BoundDynamicFusionMapSpace<R>), OperationError>
-where
-    R: FusionRule,
-    M: SectorGeometry,
-{
-    let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
-    let mut matrix_by_sector = None;
-    let (left, _, _) = build_left_bound_space_generic(
-        provider,
-        homspace,
-        matricizations,
-        new_leg.clone(),
-        None,
-        &mut matrix_by_sector,
-    )?;
-    let (right, _, _) = build_right_bound_space_generic(
-        provider,
-        homspace,
-        matricizations,
-        new_leg,
-        None,
-        &mut matrix_by_sector,
-    )?;
-    Ok((left, right))
-}
-
-pub(super) fn build_left_right_bound_spaces_and_keys_generic<R, M>(
-    provider: &Arc<R>,
-    homspace: &FusionTreeHomSpace,
-    matricizations: &[M],
-    ranks: &[SectorRank],
-) -> Result<GenericFactorPairSpaces<R>, OperationError>
-where
-    R: FusionRule,
-    M: SectorGeometry,
-{
-    let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
-    let mut matrix_by_sector = None;
-    let mut left_cursor = FactorTreeCursor::new(matricizations, ranks);
-    let (left, left_keys, left_ordered) = build_left_bound_space_generic(
-        provider,
-        homspace,
-        matricizations,
-        new_leg.clone(),
-        Some(&mut left_cursor),
-        &mut matrix_by_sector,
-    )?;
-    let mut right_cursor = FactorTreeCursor::new(matricizations, ranks);
-    let (right, right_keys, right_ordered) = build_right_bound_space_generic(
-        provider,
-        homspace,
-        matricizations,
-        new_leg,
-        Some(&mut right_cursor),
-        &mut matrix_by_sector,
-    )?;
-    Ok(GenericFactorPairSpaces {
-        left,
-        right,
-        left_keys,
-        right_keys,
-        ordered: left_ordered && right_ordered,
-    })
-}
-
-pub(super) fn build_left_bound_space_generic<'a, R, M>(
-    provider: &Arc<R>,
-    homspace: &FusionTreeHomSpace,
-    matricizations: &'a [M],
-    new_leg: SectorLeg,
-    cursor: Option<&mut FactorTreeCursor<'_, M>>,
-    matrix_by_sector: &mut Option<FxHashMap<SectorId, &'a M>>,
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<FusionTreePairKey>, bool), OperationError>
-where
-    R: FusionRule,
-    M: SectorGeometry,
-{
-    let left_hom = FusionTreeHomSpace::new(
-        homspace.codomain().clone(),
-        FusionProductSpace::new([new_leg]),
-    );
-    let left_keys = left_hom
-        .fusion_tree_keys_generic(provider.as_ref())
-        .map_err(OperationError::from_core_preserving_context)?;
-    let ordered = validate_generic_factor_keys(
-        &left_keys,
-        FactorSide::Left,
-        cursor,
-        matricizations,
-        matrix_by_sector,
-    )?;
-    let left =
-        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::clone(provider), left_hom)?;
-    Ok((left, left_keys, ordered))
-}
-
-pub(super) fn build_right_bound_space_generic<'a, R, M>(
-    provider: &Arc<R>,
-    homspace: &FusionTreeHomSpace,
-    matricizations: &'a [M],
-    new_leg: SectorLeg,
-    cursor: Option<&mut FactorTreeCursor<'_, M>>,
-    matrix_by_sector: &mut Option<FxHashMap<SectorId, &'a M>>,
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<FusionTreePairKey>, bool), OperationError>
-where
-    R: FusionRule,
-    M: SectorGeometry,
-{
-    let right_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([new_leg]),
-        homspace.domain().clone(),
-    );
-    let right_keys = right_hom
-        .fusion_tree_keys_generic(provider.as_ref())
-        .map_err(OperationError::from_core_preserving_context)?;
-    let ordered = validate_generic_factor_keys(
-        &right_keys,
-        FactorSide::Right,
-        cursor,
-        matricizations,
-        matrix_by_sector,
-    )?;
-    let right =
-        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::clone(provider), right_hom)?;
-    Ok((right, right_keys, ordered))
-}
-
-pub(super) fn build_left_right_bound_pair_generic<R, D, M>(
-    provider: &Arc<R>,
-    homspace: &FusionTreeHomSpace,
-    matricizations: &[M],
-    pairs: Vec<FactorPair<D>>,
-) -> Result<DynamicFactorPair<R, D>, OperationError>
-where
-    R: FusionRule,
-    D: FactorScalar,
-    M: SectorGeometry,
-{
-    let ranks = pairs
-        .iter()
-        .map(|pair| SectorRank {
-            sector: pair.sector,
-            kept: pair.kept,
-        })
-        .collect::<Vec<_>>();
-    let spaces =
-        build_left_right_bound_spaces_and_keys_generic(provider, homspace, matricizations, &ranks)?;
-    let left_len = spaces.left.space().required_len()?;
-    let right_len = spaces.right.space().required_len()?;
-    let canonical = spaces.ordered
-        && factor_output_is_canonical(
-            spaces.left.space().structure(),
-            Some(&spaces.left_keys),
-            matricizations,
-            &pairs,
-            left_len,
-            FactorSide::Left,
-        )
-        && factor_output_is_canonical(
-            spaces.right.space().structure(),
-            Some(&spaces.right_keys),
-            matricizations,
-            &pairs,
-            right_len,
-            FactorSide::Right,
-        );
-    let (left_data, right_data) = if canonical {
-        #[cfg(test)]
-        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-            let mut value = probe.get();
-            value.canonical_publications += 1;
-            probe.set(value);
-        });
-        publish_generic_factor_pairs(pairs, left_len, right_len)
-    } else {
-        #[cfg(test)]
-        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-            let mut value = probe.get();
-            value.fallback_publications += 1;
-            probe.set(value);
-        });
-        let mut left_data = vec![D::zero(); left_len];
-        let mut right_data = vec![D::zero(); right_len];
-        let index = PlacementIndex::new(matricizations, &[FactorSide::Left, FactorSide::Right]);
-        let left_groups =
-            SectorBlockGroups::new(spaces.left.space().structure(), FactorSide::Left)?;
-        let right_groups =
-            SectorBlockGroups::new(spaces.right.space().structure(), FactorSide::Right)?;
-        for (matrix, pair) in matricizations.iter().zip(&pairs) {
-            scatter_left_sector_blocks_generic(
-                spaces.left.space(),
-                &mut left_data,
-                matrix,
-                &index,
-                &left_groups,
-                &pair.left,
-                pair.left_rows,
-            )?;
-            scatter_right_sector_blocks_generic(
-                spaces.right.space(),
-                &mut right_data,
-                matrix,
-                &index,
-                &right_groups,
-                &pair.right,
-                pair.right_leading,
-            )?;
-        }
-        (left_data, right_data)
-    };
-    let left_nout = spaces.left.space().nout();
-    let right_nin = spaces.right.space().nin();
-    Ok((
-        BoundDynFactor::from_bound(spaces.left, left_data, left_nout, 1)?,
-        BoundDynFactor::from_bound(spaces.right, right_data, 1, right_nin)?,
-    ))
-}
-
 pub(super) fn build_left_right_bound_pair_generic_checked<R, D, M>(
     provider: &Arc<R>,
     homspace: &FusionTreeHomSpace,
@@ -869,7 +627,6 @@ where
         && right_ordered
         && factor_output_is_canonical(
             left.space().structure(),
-            None,
             matricizations,
             &pairs,
             left_len,
@@ -877,7 +634,6 @@ where
         )
         && factor_output_is_canonical(
             right.space().structure(),
-            None,
             matricizations,
             &pairs,
             right_len,

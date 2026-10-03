@@ -151,25 +151,27 @@ fn compact_lq_append_proof_rejects_unordered_routes_and_fallback_matches_append(
 #[test]
 fn generic_compact_qr_lq_paths_do_not_call_qr_into() {
     let (canonical_space, canonical_data) = generic_factorization_input();
-    let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
     let (fallback_space, fallback_data) =
         expert_generic_factorization_input(&canonical_space, &canonical_data, true);
+    let (_, canonical_space) = bind_checked_layout(&canonical_space);
+    let (_, fallback_space) = bind_checked_layout(&fallback_space);
+    let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
     let fallback = BoundDynamicTensorRef::try_new(&fallback_space, &fallback_data).unwrap();
 
     let mut direct_dense = ScriptedExecutor::new(FailAfterObservingQrInput {
         qr_succeeds: true,
         ..Default::default()
     });
-    qr_compact_dyn_generic(&mut direct_dense, &canonical).unwrap();
-    lq_compact_dyn_generic(&mut direct_dense, &canonical).unwrap();
+    qr_compact_dyn_checked_generic(&mut direct_dense, &canonical).unwrap();
+    lq_compact_dyn_checked_generic(&mut direct_dense, &canonical).unwrap();
     assert!(!direct_dense.observed.is_empty());
 
     let mut fallback_dense = ScriptedExecutor::new(FailAfterObservingQrInput {
         qr_succeeds: true,
         ..Default::default()
     });
-    qr_compact_dyn_generic(&mut fallback_dense, &fallback).unwrap();
-    lq_compact_dyn_generic(&mut fallback_dense, &fallback).unwrap();
+    qr_compact_dyn_checked_generic(&mut fallback_dense, &fallback).unwrap();
+    lq_compact_dyn_checked_generic(&mut fallback_dense, &fallback).unwrap();
     assert!(!fallback_dense.observed.is_empty());
 }
 
