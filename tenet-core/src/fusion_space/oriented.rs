@@ -1,34 +1,36 @@
+use super::*;
+
 #[cfg(test)]
 thread_local! {
-    static DESCRIPTOR_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static DESCRIPTOR_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Clone, Copy)]
-struct OrientedLegView<'a> {
-    source: &'a SectorLeg,
-    dualize: bool,
+pub(crate) struct OrientedLegView<'a> {
+    pub(super) source: &'a SectorLeg,
+    pub(super) dualize: bool,
 }
 
 impl<'a> OrientedLegView<'a> {
-    fn borrowed(source: &'a SectorLeg) -> Self {
+    pub(crate) fn borrowed(source: &'a SectorLeg) -> Self {
         Self {
             source,
             dualize: false,
         }
     }
 
-    fn toggled(self) -> Self {
+    pub(crate) fn toggled(self) -> Self {
         Self {
             source: self.source,
             dualize: !self.dualize,
         }
     }
 
-    fn is_dual(self) -> bool {
+    pub(super) fn is_dual(self) -> bool {
         self.source.is_dual() ^ self.dualize
     }
 
-    fn mapped_sector<R>(self, rule: &R, sector: SectorId) -> SectorId
+    pub(super) fn mapped_sector<R>(self, rule: &R, sector: SectorId) -> SectorId
     where
         R: FusionRule,
     {
@@ -39,7 +41,7 @@ impl<'a> OrientedLegView<'a> {
         }
     }
 
-    fn try_mapped_sector<R>(
+    pub(super) fn try_mapped_sector<R>(
         self,
         rule: &R,
         sector: SectorId,
@@ -54,7 +56,7 @@ impl<'a> OrientedLegView<'a> {
         }
     }
 
-    fn materialize<R>(self, rule: &R) -> SectorLeg
+    pub(crate) fn materialize<R>(self, rule: &R) -> SectorLeg
     where
         R: FusionRule,
     {
@@ -65,7 +67,7 @@ impl<'a> OrientedLegView<'a> {
         }
     }
 
-    fn try_materialize<R>(self, rule: &R) -> Result<SectorLeg, FusionAlgebraError>
+    pub(super) fn try_materialize<R>(self, rule: &R) -> Result<SectorLeg, FusionAlgebraError>
     where
         R: CheckedFusionAlgebra,
     {
@@ -76,7 +78,7 @@ impl<'a> OrientedLegView<'a> {
         }
     }
 
-    fn try_materialize_generic<R>(
+    pub(super) fn try_materialize_generic<R>(
         self,
         rule: &R,
     ) -> Result<SectorLeg, CheckedGenericStructureError<R::Error>>
@@ -128,7 +130,7 @@ impl OrientedLegView<'_> {
     }
 }
 
-struct HomSpaceDescriptor<'a> {
+pub(super) struct HomSpaceDescriptor<'a> {
     // Why one vector instead of one per side: rank, not side rank, is the
     // natural inline bound. PEPS/MPS metadata up to rank 8 stays entirely on
     // the stack and `nout` splits the stored-orientation views.
@@ -137,7 +139,7 @@ struct HomSpaceDescriptor<'a> {
 }
 
 impl<'a> HomSpaceDescriptor<'a> {
-    fn new(
+    pub(super) fn new(
         codomain: impl IntoIterator<Item = OrientedLegView<'a>>,
         domain: impl IntoIterator<Item = OrientedLegView<'a>>,
     ) -> Self {
@@ -181,7 +183,7 @@ impl<'a> HomSpaceDescriptor<'a> {
         Ok(true)
     }
 
-    fn materialize<R>(&self, rule: &R) -> FusionTreeHomSpace
+    pub(super) fn materialize<R>(&self, rule: &R) -> FusionTreeHomSpace
     where
         R: FusionRule,
     {
@@ -203,7 +205,7 @@ impl<'a> HomSpaceDescriptor<'a> {
         )
     }
 
-    fn try_materialize<R>(
+    pub(super) fn try_materialize<R>(
         &self,
         rule: &R,
     ) -> Result<FusionTreeHomSpace, FusionAlgebraError>
@@ -230,7 +232,7 @@ impl<'a> HomSpaceDescriptor<'a> {
         ))
     }
 
-    fn try_materialize_generic<R>(
+    pub(super) fn try_materialize_generic<R>(
         &self,
         rule: &R,
     ) -> Result<FusionTreeHomSpace, CheckedGenericStructureError<R::Error>>
@@ -622,7 +624,7 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
         ))
     }
 
-    fn external_axis_leg_view(self, axis: usize) -> Option<OrientedLegView<'a>> {
+    pub(super) fn external_axis_leg_view(self, axis: usize) -> Option<OrientedLegView<'a>> {
         match self.orientation {
             FusionTreePairOrientation::Direct => {
                 if axis < self.source.codomain().len() {

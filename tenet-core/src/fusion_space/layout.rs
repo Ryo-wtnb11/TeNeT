@@ -1,24 +1,26 @@
+use super::*;
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FusionTreeBlockLayoutEntry {
-    row: usize,
-    col: usize,
+pub(crate) struct FusionTreeBlockLayoutEntry {
+    pub(crate) row: usize,
+    pub(crate) col: usize,
 }
 
 #[derive(Clone, Debug)]
-struct FusionTreeCoupledSectorLayout {
-    start: usize,
-    row_count: usize,
-    col_count: usize,
+pub(crate) struct FusionTreeCoupledSectorLayout {
+    pub(crate) start: usize,
+    pub(crate) row_count: usize,
+    pub(crate) col_count: usize,
 }
 
 #[derive(Clone, Debug)]
-struct FusionTreeHomSpaceLayoutData {
-    keys: Arc<[FusionTreePairKey]>,
-    sectors: Vec<FusionTreeCoupledSectorLayout>,
+pub(crate) struct FusionTreeHomSpaceLayoutData {
+    pub(crate) keys: Arc<[FusionTreePairKey]>,
+    pub(crate) sectors: Vec<FusionTreeCoupledSectorLayout>,
 }
 
-fn generic_keys_for_coupled_from_groups(
+pub(super) fn generic_keys_for_coupled_from_groups(
     codomain: &[CoupledFusionTrees], codomain_fold: &CoupledSectorFold,
     domain: &[CoupledFusionTrees], domain_fold: &CoupledSectorFold, coupled: SectorId,
     outside_table_error: impl Fn(&str, &CoupledSectorFold, SectorId) -> CoreError,
@@ -36,13 +38,13 @@ fn generic_keys_for_coupled_from_groups(
 }
 
 #[derive(Clone, Debug)]
-struct FusionTreeHomSpaceLayout {
-    id: FusionTreeLayoutId,
+pub(crate) struct FusionTreeHomSpaceLayout {
+    pub(crate) id: FusionTreeLayoutId,
     data: FusionTreeHomSpaceLayoutData,
 }
 
 #[derive(Debug)]
-enum PreparedFusionTreeLayoutState {
+pub(super) enum PreparedFusionTreeLayoutState {
     Cached {
         key: FusionTreeHomSpaceCacheKey,
         layout: Arc<FusionTreeHomSpaceLayout>,
@@ -61,7 +63,7 @@ enum PreparedFusionTreeLayoutState {
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct PreparedFusionTreeLayout {
-    state: PreparedFusionTreeLayoutState,
+    pub(super) state: PreparedFusionTreeLayoutState,
 }
 
 impl PreparedFusionTreeLayout {
@@ -159,7 +161,7 @@ impl PreparedFusionTreeLayout {
         Arc::clone(&self.commit_layout().keys)
     }
 
-    fn commit_layout(self) -> Arc<FusionTreeHomSpaceLayout> {
+    pub(crate) fn commit_layout(self) -> Arc<FusionTreeHomSpaceLayout> {
         let cache = fusion_tree_layout_cache();
         // Why a read lock first: a warm commit only re-finds an entry that is
         // already published, and taking the process-global write lock for that
@@ -207,7 +209,7 @@ impl std::ops::Deref for FusionTreeHomSpaceLayout {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
-struct FusionTreeLayoutId(usize);
+pub(crate) struct FusionTreeLayoutId(usize);
 
 static FUSION_TREE_LAYOUT_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -216,10 +218,10 @@ std::thread_local! {
     static FUSION_TREE_LAYOUT_ID_CALLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
-    static FUSION_TREE_LAYOUT_ADMISSIONS: std::cell::Cell<usize> = const {
+    pub(super) static FUSION_TREE_LAYOUT_ADMISSIONS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
-    static FUSION_TREE_LAYOUT_WRITE_LOCKS: std::cell::Cell<usize> = const {
+    pub(super) static FUSION_TREE_LAYOUT_WRITE_LOCKS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     static COUPLED_GRID_BUILD_OBSERVATIONS: std::cell::Cell<(usize, usize)> =
@@ -241,12 +243,12 @@ pub(crate) fn fusion_tree_layout_probe_side_effect_calls() -> (usize, usize) {
 }
 
 #[cfg(test)]
-fn reset_coupled_grid_build_observations() {
+pub(crate) fn reset_coupled_grid_build_observations() {
     COUPLED_GRID_BUILD_OBSERVATIONS.set((0, 0));
 }
 
 #[cfg(test)]
-fn coupled_grid_build_observations() -> (usize, usize) {
+pub(crate) fn coupled_grid_build_observations() -> (usize, usize) {
     COUPLED_GRID_BUILD_OBSERVATIONS.get()
 }
 
@@ -260,7 +262,7 @@ fn observe_coupled_grid_reconstruction_insert() {
 }
 
 #[cfg(test)]
-fn observe_coupled_grid_side_derivation() {
+pub(super) fn observe_coupled_grid_side_derivation() {
     COUPLED_GRID_BUILD_OBSERVATIONS.set({
         let (reconstruction_inserts, side_derivations) =
             COUPLED_GRID_BUILD_OBSERVATIONS.get();
@@ -268,7 +270,7 @@ fn observe_coupled_grid_side_derivation() {
     });
 }
 
-fn next_fusion_tree_layout_id() -> FusionTreeLayoutId {
+pub(crate) fn next_fusion_tree_layout_id() -> FusionTreeLayoutId {
     #[cfg(test)]
     FUSION_TREE_LAYOUT_ID_CALLS.set(FUSION_TREE_LAYOUT_ID_CALLS.get() + 1);
     let id = FUSION_TREE_LAYOUT_ID
@@ -280,7 +282,7 @@ fn next_fusion_tree_layout_id() -> FusionTreeLayoutId {
 }
 
 #[cfg(test)]
-fn fusion_tree_layout_from_data(
+pub(crate) fn fusion_tree_layout_from_data(
     id: FusionTreeLayoutId,
     data: FusionTreeHomSpaceLayoutData,
 ) -> FusionTreeHomSpaceLayout {
@@ -288,23 +290,23 @@ fn fusion_tree_layout_from_data(
 }
 
 #[cfg(test)]
-struct ReconstructedFusionTreeCoupledSectorLayout {
-    start: usize,
-    row_count: usize,
-    col_count: usize,
-    row_key_offsets: Vec<usize>,
-    col_key_offsets: Vec<usize>,
-    entries: Vec<FusionTreeBlockLayoutEntry>,
+pub(crate) struct ReconstructedFusionTreeCoupledSectorLayout {
+    pub(crate) start: usize,
+    pub(crate) row_count: usize,
+    pub(crate) col_count: usize,
+    pub(crate) row_key_offsets: Vec<usize>,
+    pub(crate) col_key_offsets: Vec<usize>,
+    pub(crate) entries: Vec<FusionTreeBlockLayoutEntry>,
 }
 
 #[cfg(test)]
-struct ReconstructedFusionTreeHomSpaceLayoutData {
-    keys: Arc<[FusionTreePairKey]>,
-    sectors: Vec<ReconstructedFusionTreeCoupledSectorLayout>,
+pub(crate) struct ReconstructedFusionTreeHomSpaceLayoutData {
+    pub(crate) keys: Arc<[FusionTreePairKey]>,
+    pub(crate) sectors: Vec<ReconstructedFusionTreeCoupledSectorLayout>,
 }
 
 #[cfg(test)]
-fn reconstructed_fusion_tree_layout_data_from_keys(
+pub(crate) fn reconstructed_fusion_tree_layout_data_from_keys(
     keys: Vec<FusionTreePairKey>,
 ) -> ReconstructedFusionTreeHomSpaceLayoutData {
     let keys = Arc::<[FusionTreePairKey]>::from(keys);
@@ -387,7 +389,7 @@ fn fusion_tree_layout_capacities(
     Some((key_count, sector_count))
 }
 
-fn fusion_tree_layout_data_from_groups(
+pub(super) fn fusion_tree_layout_data_from_groups(
     codomain: &[CoupledFusionTrees],
     domain: &[CoupledFusionTrees],
 ) -> FusionTreeHomSpaceLayoutData {

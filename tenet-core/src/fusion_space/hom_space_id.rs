@@ -1,3 +1,5 @@
+use super::*;
+
 /// Process-global intern id for a fusion hom space. [`FusionTreeHomSpace::id`]
 /// deep-hashes the space on first demand (the full generic key: every codomain
 /// and domain leg's sectors and dual flag — never a multiplicity-free subset)
@@ -17,7 +19,7 @@
 #[derive(Clone, Debug)]
 pub struct HomSpaceId {
     prehash: u64,
-    key: Arc<HomSpaceInternKey>,
+    pub(crate) key: Arc<HomSpaceInternKey>,
 }
 
 /// Non-owning process-local identity for one live [`HomSpaceId`].
@@ -57,16 +59,16 @@ impl std::hash::Hash for HomSpaceId {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct HomSpaceInternKey {
+pub(crate) struct HomSpaceInternKey {
     codomain: FusionProductSpace,
     domain: FusionProductSpace,
 }
 
-struct HomSpaceInternTable {
-    entries: lru::LruCache<HomSpaceInternKey, Arc<HomSpaceInternKey>>,
+pub(crate) struct HomSpaceInternTable {
+    pub(crate) entries: lru::LruCache<HomSpaceInternKey, Arc<HomSpaceInternKey>>,
 }
 
-const HOM_SPACE_INTERN_CAP: usize = 8192;
+pub(crate) const HOM_SPACE_INTERN_CAP: usize = 8192;
 
 #[cfg(test)]
 std::thread_local! {
@@ -83,7 +85,7 @@ pub(crate) fn hom_space_intern_calls() -> usize {
     HOM_SPACE_INTERN_CALLS.get()
 }
 
-fn hom_space_intern_table() -> &'static RwLock<HomSpaceInternTable> {
+pub(crate) fn hom_space_intern_table() -> &'static RwLock<HomSpaceInternTable> {
     static TABLE: OnceLock<RwLock<HomSpaceInternTable>> = OnceLock::new();
     TABLE.get_or_init(|| {
         RwLock::new(HomSpaceInternTable {
@@ -94,7 +96,7 @@ fn hom_space_intern_table() -> &'static RwLock<HomSpaceInternTable> {
     })
 }
 
-fn intern_hom_space(codomain: &FusionProductSpace, domain: &FusionProductSpace) -> HomSpaceId {
+pub(super) fn intern_hom_space(codomain: &FusionProductSpace, domain: &FusionProductSpace) -> HomSpaceId {
     #[cfg(test)]
     HOM_SPACE_INTERN_CALLS.set(HOM_SPACE_INTERN_CALLS.get() + 1);
     let key = HomSpaceInternKey {
@@ -121,7 +123,7 @@ fn intern_hom_space(codomain: &FusionProductSpace, domain: &FusionProductSpace) 
     }
 }
 
-fn reset_hom_space_intern_table() {
+pub(crate) fn reset_hom_space_intern_table() {
     if let Ok(mut table) = hom_space_intern_table().write() {
         table.entries.clear();
     }

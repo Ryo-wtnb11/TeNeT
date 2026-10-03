@@ -1,6 +1,8 @@
+use super::*;
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct FusionProductSpace {
-    legs: SmallVec<[SectorLeg; 8]>,
+    pub(super) legs: SmallVec<[SectorLeg; 8]>,
 }
 
 impl FusionProductSpace {
@@ -106,7 +108,7 @@ impl FusionProductSpace {
         Ok(dimensions)
     }
 
-    fn try_visit_selected_leg_tuples<E, F>(&self, emit: &mut F) -> Result<(), E>
+    pub(crate) fn try_visit_selected_leg_tuples<E, F>(&self, emit: &mut F) -> Result<(), E>
     where
         F: FnMut(&[FusionTreeLeg]) -> Result<(), E>,
     {

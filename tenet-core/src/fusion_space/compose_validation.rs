@@ -1,4 +1,6 @@
-fn dual_sector_leg<R>(rule: &R, leg: &SectorLeg) -> SectorLeg
+use super::*;
+
+pub(super) fn dual_sector_leg<R>(rule: &R, leg: &SectorLeg) -> SectorLeg
 where
     R: FusionRule,
 {
@@ -6,7 +8,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tensorcontract_descriptor<'a>(
+pub(super) fn tensorcontract_descriptor<'a>(
     lhs: OrientedFusionTreeHomSpace<'a>,
     rhs: OrientedFusionTreeHomSpace<'a>,
     lhs_contracting_axes: &[usize],
@@ -87,7 +89,7 @@ fn validate_axis_subset_inline(
     Ok(seen)
 }
 
-fn validate_permutation_inline(permutation: &[usize], rank: usize) -> Result<(), CoreError> {
+pub(crate) fn validate_permutation_inline(permutation: &[usize], rank: usize) -> Result<(), CoreError> {
     if permutation.len() != rank {
         return Err(CoreError::InvalidPermutation {
             permutation: permutation.to_vec(),
@@ -97,7 +99,7 @@ fn validate_permutation_inline(permutation: &[usize], rank: usize) -> Result<(),
     validate_axis_subset_inline(permutation, rank).map(|_| ())
 }
 
-fn validate_axis_selection(
+pub(super) fn validate_axis_selection(
     codomain_axes: &[usize],
     domain_axes: &[usize],
     rank: usize,
@@ -131,7 +133,7 @@ fn contracted_leg_duality_mismatch(
     }
 }
 
-fn validate_composed_leg(
+pub(crate) fn validate_composed_leg(
     lhs_domain: &SectorLeg,
     rhs_codomain: &SectorLeg,
     axes: (usize, usize),
@@ -172,7 +174,7 @@ fn validate_composed_leg(
     Ok(())
 }
 
-fn validate_oriented_composed_leg<R>(
+pub(crate) fn validate_oriented_composed_leg<R>(
     rule: &R,
     lhs_domain: OrientedLegView<'_>,
     rhs_codomain: OrientedLegView<'_>,
@@ -204,7 +206,7 @@ where
     )
 }
 
-fn validate_oriented_composed_leg_checked<R>(
+pub(super) fn validate_oriented_composed_leg_checked<R>(
     rule: &R,
     lhs_domain: OrientedLegView<'_>,
     rhs_codomain: OrientedLegView<'_>,
@@ -252,7 +254,7 @@ where
     .map_err(Into::into)
 }
 
-fn validate_oriented_composed_leg_generic_checked<R>(
+pub(super) fn validate_oriented_composed_leg_generic_checked<R>(
     rule: &R,
     lhs_domain: OrientedLegView<'_>,
     rhs_codomain: OrientedLegView<'_>,
