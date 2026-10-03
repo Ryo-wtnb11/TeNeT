@@ -55,7 +55,6 @@ pub(super) fn generic_keys_for_coupled_from_groups(
 
 #[derive(Clone, Debug)]
 pub(crate) struct FusionTreeHomSpaceLayout {
-    pub(crate) id: FusionTreeLayoutId,
     data: FusionTreeHomSpaceLayoutData,
 }
 
@@ -205,10 +204,9 @@ impl PreparedFusionTreeLayout {
                 if let Some(existing) = write.lookup(&key) {
                     return existing;
                 }
-                let computed = Arc::new(FusionTreeHomSpaceLayout {
-                    id: next_fusion_tree_layout_id(),
-                    data,
-                });
+                #[cfg(test)]
+                FUSION_TREE_LAYOUT_BUILDS.set(FUSION_TREE_LAYOUT_BUILDS.get() + 1);
+                let computed = Arc::new(FusionTreeHomSpaceLayout { data });
                 let charged_bytes = charged_fusion_tree_layout_bytes(&key, &computed);
                 write.admit(Arc::new(key), computed, charged_bytes)
             }
@@ -224,14 +222,9 @@ impl std::ops::Deref for FusionTreeHomSpaceLayout {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub(crate) struct FusionTreeLayoutId(usize);
-
-static FUSION_TREE_LAYOUT_ID: AtomicUsize = AtomicUsize::new(1);
-
 #[cfg(test)]
 std::thread_local! {
-    static FUSION_TREE_LAYOUT_ID_CALLS: std::cell::Cell<usize> = const {
+    static FUSION_TREE_LAYOUT_BUILDS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     pub(super) static FUSION_TREE_LAYOUT_ADMISSIONS: std::cell::Cell<usize> = const {
@@ -246,14 +239,14 @@ std::thread_local! {
 
 #[cfg(test)]
 pub(crate) fn reset_fusion_tree_layout_probe_side_effect_calls() {
-    FUSION_TREE_LAYOUT_ID_CALLS.set(0);
+    FUSION_TREE_LAYOUT_BUILDS.set(0);
     FUSION_TREE_LAYOUT_ADMISSIONS.set(0);
 }
 
 #[cfg(test)]
 pub(crate) fn fusion_tree_layout_probe_side_effect_calls() -> (usize, usize) {
     (
-        FUSION_TREE_LAYOUT_ID_CALLS.get(),
+        FUSION_TREE_LAYOUT_BUILDS.get(),
         FUSION_TREE_LAYOUT_ADMISSIONS.get(),
     )
 }
@@ -284,23 +277,11 @@ pub(super) fn observe_coupled_grid_side_derivation() {
     });
 }
 
-pub(crate) fn next_fusion_tree_layout_id() -> FusionTreeLayoutId {
-    #[cfg(test)]
-    FUSION_TREE_LAYOUT_ID_CALLS.set(FUSION_TREE_LAYOUT_ID_CALLS.get() + 1);
-    let id = FUSION_TREE_LAYOUT_ID
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            current.checked_add(1)
-        })
-        .expect("fusion-tree layout identity space exhausted");
-    FusionTreeLayoutId(id)
-}
-
 #[cfg(test)]
 pub(crate) fn fusion_tree_layout_from_data(
-    id: FusionTreeLayoutId,
     data: FusionTreeHomSpaceLayoutData,
 ) -> FusionTreeHomSpaceLayout {
-    FusionTreeHomSpaceLayout { id, data }
+    FusionTreeHomSpaceLayout { data }
 }
 
 #[cfg(test)]

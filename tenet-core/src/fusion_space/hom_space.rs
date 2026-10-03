@@ -792,39 +792,15 @@ impl FusionTreeHomSpace {
             });
         }
         self.validate_degeneracy_shapes(layout.keys.as_ref(), &shapes)?;
-
-        let cache_key = CoupledBlockStructureCacheKey {
-            layout: layout.id,
-            nout,
-            rank,
-            shapes: Arc::<[DimVec]>::from(shapes),
-        };
-        let cache = coupled_block_structure_cache();
-        // Read-lock fast path uses `peek` (does not bump recency; `get` needs `&mut`).
-        let read = cache
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(structure) = read.peek(&cache_key).and_then(Weak::upgrade) {
-            return Ok(structure);
+        if nout == self.codomain().len() {
+            // The shapes equal the leg degeneracies, so the canonical
+            // leg-derived structure (and its bounded cache) is the answer.
+            return self.coupled_subblock_structure_from_leg_degeneracies(rule);
         }
-        drop(read);
-
-        let specs = coupled_sector_matrix_block_specs_from_layout(
-            nout,
-            rank,
-            &layout,
-            cache_key.shapes.as_ref(),
-        )?;
-        let structure = BlockStructure::from_blocks_with_rank(rank, specs)?.into_shared();
-
-        let mut write = cache
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(existing) = write.get(&cache_key).and_then(Weak::upgrade) {
-            return Ok(existing);
-        }
-        write.put(cache_key, Arc::downgrade(&structure));
-        Ok(structure)
+        // Why not reject a row/column split other than the codomain rank: it
+        // is an accepted (uncached) layout of this public constructor.
+        let specs = coupled_sector_matrix_block_specs(nout, rank, layout.keys.as_ref(), &shapes)?;
+        Ok(BlockStructure::from_blocks_with_rank(rank, specs)?.into_shared())
     }
 
     /// Builds the canonical coupled-sector layout directly from this hom

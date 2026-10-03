@@ -26,7 +26,7 @@ pub(crate) struct BlockStructureInternTable {
 }
 
 /// Entry cap for the block-structure content intern table (and, reusing the
-/// same bound, the arc dedup and coupled-subblock caches). Mirrors
+/// same bound, the arc dedup table, whose entries have a fixed size). Mirrors
 /// `HOM_SPACE_INTERN_CAP`: a long-lived / multi-tenant process can otherwise
 /// grow these tables without bound over a χ sweep. See
 /// `BLOCK_STRUCTURE_CONTENT_ID` for why capping this particular table is

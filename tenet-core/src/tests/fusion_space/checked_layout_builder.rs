@@ -11,7 +11,6 @@ pub(super) fn local_u1_layout(
         FusionTreeHomSpace::from_sectors([(U1Irrep::new(charge), 1)], [(U1Irrep::new(charge), 1)]);
     let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
     let layout = Arc::new(fusion_tree_layout_from_data(
-        next_fusion_tree_layout_id(),
         hom.fusion_tree_layout_data_uncached(&rule),
     ));
     (key, layout)

@@ -103,17 +103,6 @@ impl FusionTreeHomSpaceCacheKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub(super) struct CoupledBlockStructureCacheKey {
-    // Why-not `Arc::as_ptr`: eviction/reset may recycle an address while a
-    // coupled structure keyed by that address is still alive. This monotonic
-    // process-local id is never recycled, including across cache reset.
-    pub(super) layout: FusionTreeLayoutId,
-    pub(super) nout: usize,
-    pub(super) rank: usize,
-    pub(super) shapes: Arc<[DimVec]>,
-}
-
 #[derive(Clone)]
 struct FusionTreeLayoutCacheEntry {
     layout: Arc<FusionTreeHomSpaceLayout>,
@@ -396,10 +385,6 @@ pub(crate) enum CompleteHomSpaceStructureLookup {
 /// admission. Why not true LRU: promotion needs `&mut self`, so every hit
 /// would take the write lock; at these bounds FIFO and LRU give the same
 /// (compulsory-only) warm misses on the census traces.
-///
-/// Why not reuse `coupled_block_structure_cache`: that weak table accepts
-/// arbitrary `nout` and caller shapes, so it cannot avoid the final-HomSpace
-/// construction work and would retain a live wrapper if made strong.
 pub(crate) struct CompleteHomSpaceStructureCache {
     /// Insertion-ordered (FIFO) map; never promoted, see the type docs.
     pub(crate) entries: lru::LruCache<
@@ -700,27 +685,9 @@ pub(crate) fn charged_complete_hom_space_structure_bytes(
         .saturating_add(std::mem::size_of::<BlockStructure>())
 }
 
-type CoupledBlockStructureCache =
-    lru::LruCache<CoupledBlockStructureCacheKey, Weak<BlockStructure>, rustc_hash::FxBuildHasher>;
-
-pub(super) fn coupled_block_structure_cache() -> &'static RwLock<CoupledBlockStructureCache> {
-    static CACHE: OnceLock<RwLock<CoupledBlockStructureCache>> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        RwLock::new(lru::LruCache::with_hasher(
-            std::num::NonZeroUsize::new(BLOCK_STRUCTURE_INTERN_CAP).unwrap(),
-            rustc_hash::FxBuildHasher,
-        ))
-    })
-}
-
 pub(crate) fn reset_fusion_tree_layout_caches() {
     let mut layouts = fusion_tree_layout_cache()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     layouts.clear();
-    drop(layouts);
-    coupled_block_structure_cache()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
 }
