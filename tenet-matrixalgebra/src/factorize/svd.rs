@@ -1277,22 +1277,24 @@ pub fn decide_bond_truncation<R, V>(
     truncation: &Truncation,
 ) -> Result<crate::truncation::TruncationDecision, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     V: SpectrumMagnitude,
 {
     let magnitudes: Vec<Vec<f64>> = spectra
         .iter()
         .map(|entry| entry.values.iter().map(|value| value.magnitude()).collect())
         .collect();
-    let weighted: Vec<WeightedSpectrum<'_>> = spectra
-        .iter()
-        .zip(&magnitudes)
-        .map(|(entry, values)| WeightedSpectrum {
+    let mut weighted = Vec::with_capacity(spectra.len());
+    for (entry, values) in spectra.iter().zip(&magnitudes) {
+        weighted.push(WeightedSpectrum {
             sector: entry.sector,
-            weight: rule.dim_scalar(entry.sector),
+            weight: <MultiplicityFreeAdmissionMode as RigidCoefficientAlgebra<R>>::dim(
+                rule,
+                entry.sector,
+            )?,
             values,
-        })
-        .collect();
+        });
+    }
     select_truncation(&weighted, truncation, &rule.rule_identity(), |sector| {
         rule.sector_order_key(sector)
     })
@@ -1408,7 +1410,7 @@ pub(crate) fn svd_full<E, R, D, const NOUT: usize, const NIN: usize>(
 ) -> Result<SvdFull<R, D, NOUT, NIN>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     D: FactorScalar,
 {
     let out = svd_full_dyn(dense, &input.dynamic())?;
@@ -1427,7 +1429,7 @@ pub(crate) fn svd_full_dyn<E, R, D>(
 ) -> Result<SvdFullDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     D: FactorScalar,
 {
     svd_full_oriented_dyn(dense, input, FactorPlacement::Direct)
@@ -1441,7 +1443,7 @@ pub fn svd_full_factors_dyn<E, R, D>(
 ) -> Result<SvdFullFactorsDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     D: FactorScalar,
 {
     svd_full_oriented_factors_dyn(dense, input, FactorPlacement::Direct)
@@ -1454,7 +1456,7 @@ pub fn svd_full_adjoint_factors_dyn<E, R, D>(
 ) -> Result<SvdFullFactorsDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     D: FactorScalar,
 {
     svd_full_oriented_factors_dyn(dense, input, FactorPlacement::Adjoint)
@@ -1468,7 +1470,7 @@ pub(crate) fn svd_full_adjoint_dyn<E, R, D>(
 ) -> Result<SvdFullDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     D: FactorScalar,
 {
     svd_full_oriented_dyn(dense, input, FactorPlacement::Adjoint)
@@ -1523,7 +1525,7 @@ pub(super) fn svd_full_oriented_dyn<E, R, D>(
 ) -> Result<SvdFullDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     D: FactorScalar,
 {
     let parts = svd_full_oriented_factors_dyn(dense, input, placement)?;
@@ -1549,7 +1551,7 @@ fn svd_full_oriented_factors_dyn<E, R, D>(
 ) -> Result<SvdFullFactorsDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     D: FactorScalar,
 {
     let space = input.space().space();
@@ -1696,7 +1698,9 @@ where
 
     let adjoint_space = match placement {
         FactorPlacement::Direct => None,
-        FactorPlacement::Adjoint => Some(tenet_tensors::adjoint_bound_space_dyn(input.space())?),
+        FactorPlacement::Adjoint => Some(<MultiplicityFreeAdmissionMode as CoefficientAlgebra<
+            R,
+        >>::adjoint_space(input.space())?),
     };
     let authority = adjoint_space.as_ref().unwrap_or(input.space());
     let homspace = authority.space().homspace();
@@ -2251,7 +2255,7 @@ pub fn decide_bond_truncation_generic_checked<R, V>(
     rule: &R,
     spectra: &[SectorSpectrum<V>],
     truncation: &Truncation,
-) -> Result<crate::truncation::TruncationDecision, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<crate::truncation::TruncationDecision, CheckedGenericPlanError<R::Error>>
 where
     R: CheckedGenericRigidSymbols<Scalar = f64>,
     V: SpectrumMagnitude,
@@ -2262,19 +2266,19 @@ where
         .collect();
     let mut weighted = Vec::with_capacity(spectra.len());
     for (entry, values) in spectra.iter().zip(&magnitudes) {
-        let sqrt_dim = rule
-            .try_sqrt_dim_scalar(entry.sector)
-            .map_err(CheckedGenericFactorPlanError::Provider)?;
         weighted.push(WeightedSpectrum {
             sector: entry.sector,
-            weight: sqrt_dim * sqrt_dim,
+            weight: <CheckedGenericAdmissionMode as RigidCoefficientAlgebra<R>>::dim(
+                rule,
+                entry.sector,
+            )?,
             values,
         });
     }
     select_truncation(&weighted, truncation, &rule.rule_identity(), |sector| {
         rule.sector_order_key(sector)
     })
-    .map_err(|error| CheckedGenericFactorPlanError::Operation(error.into()))
+    .map_err(|error| CheckedGenericPlanError::Operation(error.into()))
 }
 
 /// Checked-Generic compact SVD. Dense SVD is unchanged; all provider-bound

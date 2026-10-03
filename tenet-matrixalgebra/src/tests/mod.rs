@@ -3,10 +3,10 @@
 
 use tenet_core::{
     product_fusion_rule, BlockKey, BlockSpec, BlockStructure, BraidingStyleKind,
-    CheckedGenericFusion, CheckedGenericRigidSymbols, CoreError, CoupledSectorFold,
-    FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
-    FusionTreeHomSpace, FusionTreeKey, GenericFArray, GenericFusionSymbols, GenericRMatrix,
-    GenericRigidSymbols, InfallibleGeneric, MultiplicityFreeFusionRule,
+    CheckedFusionAlgebra, CheckedGenericFusion, CheckedGenericRigidSymbols, CoreError,
+    CoupledSectorFold, FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind,
+    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, GenericFArray, GenericFusionSymbols,
+    GenericRMatrix, GenericRigidSymbols, InfallibleGeneric, MultiplicityFreeFusionRule,
     MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule,
     SU2Irrep, SectorId, SectorLeg, SectorVec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
     Z2FusionRule,

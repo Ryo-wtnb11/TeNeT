@@ -524,7 +524,7 @@ where
 /// facade's gauge-fixed ones.
 fn assert_reordered_compact_factor_publication<R, D>(provider: Arc<R>, facade: &TensorMap<D, 2, 2>)
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     D: FactorScalar,
 {
     let reordered = reversed_coupled_tree_basis_copy(provider.as_ref(), facade);
@@ -573,6 +573,7 @@ where
 fn assert_reordered_eigen_factor_publication<R>(rule: R, sectors: &[SectorId])
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
         + TreeTransformRuleCacheKey<Key = RuleIdentity>
         + Clone,
 {
