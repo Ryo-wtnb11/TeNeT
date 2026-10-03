@@ -358,7 +358,11 @@ fn checked_generic_compact_pair_builder_failure_preserves_provider_context() {
     // right enumeration propagate their exact provider error without
     // publishing either factor or touching the input.
     let (source, data) = generic_factorization_input();
-    for fail_at in [COMPACT_PAIR_LEFT_LAST_CALL, COMPACT_PAIR_RIGHT_FIRST_CALL] {
+    for fail_at in [
+        COMPACT_PAIR_LEFT_LAST_CALL,
+        COMPACT_PAIR_RIGHT_FIRST_CALL,
+        COMPACT_PAIR_RIGHT_LAST_CALL,
+    ] {
         let provider = Arc::new(LateGenericSpy {
             rule: FactorGenericRule,
             fail_at,

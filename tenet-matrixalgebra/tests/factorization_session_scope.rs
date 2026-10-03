@@ -1,5 +1,5 @@
-//! #1361: the compact-QR matricization fallbacks (multiplicity-free and
-//! Generic) and the checked-Generic compact QR enter one CPU linear-algebra
+//! #1361: the multiplicity-free compact-QR matricization fallback and the
+//! checked-Generic compact QR enter one CPU linear-algebra
 //! session per call, however many coupled sectors they factorize. The
 //! direct-region routes are gated through the facade in
 //! `tenet/tests/factorization_session_scope.rs`.
@@ -9,12 +9,11 @@
 //!
 //! Route: an adjoint view keeps the source blocks' offsets and strides but
 //! swaps their codomain and domain axes, so its structure has no coupled-sector
-//! matrix regions (asserted below). Both compact-QR entries take the direct
-//! route only when `coupled_sector_regions(nout)` is `Some`
-//! (`build_compact_factor_plan`, `prepare_compact_factor_plan_generic_checked`),
-//! so these fixtures take the per-sector matricization fallback. The
-//! checked-Generic entry has no direct route: it always factorizes the
-//! per-sector matrices of `generic_input_matricizations`.
+//! matrix regions (asserted below). Only the multiplicity-free compact QR has
+//! a direct route, taken when `coupled_sector_regions(nout)` is `Some`
+//! (`build_compact_factor_plan`), so its fixture takes the per-sector
+//! matricization fallback. The checked-Generic entry has no direct route: it
+//! always factorizes the per-sector matrices of `generic_input_matricizations`.
 
 #![cfg(feature = "cpu-faer")]
 
