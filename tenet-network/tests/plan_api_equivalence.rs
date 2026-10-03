@@ -1,9 +1,7 @@
 use tenet_network::{
-    active_pair_path_from_tree, block_sparse_order_from_labels, dense_steps_from_active_pair_path,
-    greedy_slice, ActivePair, BlockInfo, BlockSparseContractionOptimizer, BlockSparseCostModel,
-    BlockSparseTensorInfo, ContractionPlan, DenseContractionOptimizer, DenseCostModel,
-    DenseTensorInfo, GreedyBlockSparseOptimizer, GreedyDenseOptimizer, LabelOrderDenseOptimizer,
-    NetworkIR, SliceLabels, TemporaryLabel,
+    active_pair_path_from_tree, dense_steps_from_active_pair_path, greedy_slice, ActivePair,
+    ContractionPlan, DenseContractionOptimizer, DenseCostModel, DenseTensorInfo,
+    GreedyDenseOptimizer, LabelOrderDenseOptimizer, NetworkIR, SliceLabels, TemporaryLabel,
 };
 
 // Captured with the corresponding old public constructors and both old slice
@@ -12,8 +10,6 @@ const DENSE_PATH: &str =
     "tenet-contract-plan-v1\ntensor_count 3\noutput a d\nstep 0 1 3 32 a c\nstep 2 3 4 50 a d\n";
 const DENSE_GREEDY: &str =
     "tenet-contract-plan-v1\ntensor_count 3\noutput a d\nstep 0 1 3 24 a c\nstep 3 2 4 40 a d\n";
-const SPARSE: &str =
-    "tenet-contract-plan-v1\ntensor_count 3\noutput a d\nstep 0 1 3 8 a c\nstep 2 3 4 8 a d\n";
 const SLICE_INTERNAL: &str = "tenet-slice-plan-v1\nnslices 8\nsliced_width 4\nunsliced_width 16\nper_slice_flops 8\nslice internal c\n";
 const SLICE_OUTPUT: &str = "tenet-slice-plan-v1\nnslices 6\nsliced_width 6\nunsliced_width 36\nper_slice_flops 7\nslice output a\n";
 
@@ -79,33 +75,6 @@ fn migrated_plan_entries_match_old_text() {
             .unwrap()
             .to_text(),
         DENSE_PATH
-    );
-
-    let blocks = [["a", "b"], ["b", "c"], ["c", "d"]]
-        .into_iter()
-        .map(|axes| {
-            BlockSparseTensorInfo::new(vec![BlockInfo::new(
-                axes.into_iter()
-                    .map(|name| (TemporaryLabel::new(name), 0i32, 2))
-                    .collect(),
-            )
-            .unwrap()])
-        })
-        .collect::<Vec<_>>();
-    let sparse = BlockSparseCostModel::from_network(&ir, &blocks).unwrap();
-    let sparse_label = block_sparse_order_from_labels(&ir, &sparse, &order).unwrap();
-    assert_eq!(
-        ContractionPlan::from_steps(&ir, sparse_label)
-            .unwrap()
-            .to_text(),
-        SPARSE
-    );
-    let sparse_greedy = GreedyBlockSparseOptimizer.optimize(&ir, &sparse).unwrap();
-    assert_eq!(
-        ContractionPlan::from_steps(&ir, sparse_greedy)
-            .unwrap()
-            .to_text(),
-        SPARSE
     );
 
     let internal_cost = dense(&ir, [[2, 2], [2, 8], [8, 2]]);

@@ -58,10 +58,7 @@ mod plancache;
 mod slice;
 mod tree;
 
-pub use cost::{
-    BlockInfo, BlockLabelInfo, BlockSparseCostModel, BlockSparseTensorInfo, DenseCostModel,
-    DenseTensorInfo,
-};
+pub use cost::{DenseCostModel, DenseTensorInfo};
 #[cfg(feature = "cotengra-python")]
 pub use cotengra_python::CotengraPythonOptimizer;
 pub use error::{
@@ -76,9 +73,8 @@ pub use network::{
     StaticNetworkOperand, StaticTopologySpec, StaticTraceNetworkOperand, SymmetricSliceStats,
 };
 pub use optimizer::{
-    block_sparse_order_from_labels, BlockSparseContractionOptimizer, ContractionStep,
-    DenseContractionOptimizer, DensePlanCostReport, GreedyBlockSparseOptimizer,
-    GreedyDenseOptimizer, LabelOrderDenseOptimizer,
+    ContractionStep, DenseContractionOptimizer, DensePlanCostReport, GreedyDenseOptimizer,
+    LabelOrderDenseOptimizer,
 };
 #[cfg(feature = "opt-path")]
 pub use pathopt::{

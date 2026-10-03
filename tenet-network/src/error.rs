@@ -110,7 +110,6 @@ pub enum ContractError {
         tensor: usize,
         tensor_count: usize,
     },
-    InvalidBlockStructure(String),
     InvalidContractionPlan(String),
     UnsupportedExecution(String),
     TensorExecution(String),
@@ -194,9 +193,6 @@ impl Display for ContractError {
                 f,
                 "invalid tensor id {tensor}; network has {tensor_count} tensors"
             ),
-            ContractError::InvalidBlockStructure(message) => {
-                write!(f, "invalid block-sparse tensor info: {message}")
-            }
             ContractError::InvalidContractionPlan(message) => {
                 write!(f, "invalid contraction plan: {message}")
             }
