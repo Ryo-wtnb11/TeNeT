@@ -46,264 +46,156 @@ where
     })
 }
 
-pub(super) struct PreparedMultiplicityFreeBendRight {
-    codomain_rank: usize,
-    domain_rank: usize,
-    codomain_first: SectorId,
-    domain_nonempty: bool,
-    bent_sector: SectorId,
-    bent_is_dual: Option<bool>,
-    output_codomain_uncoupled: SectorVec,
-    output_codomain_is_dual: DualVec,
-    output_domain_uncoupled_prefix: SectorVec,
-    output_domain_is_dual_prefix: DualVec,
+/// One multiplicity-free bend at a fixed frame. `bendleft` is `bendright`
+/// through the swapped pair with a conjugated coefficient
+/// (`duality_manipulations.jl:140-148`).
+pub(super) struct MultiplicityFreeBend {
+    site: BendSite,
+    left: bool,
 }
 
-pub(super) struct ValidatedMultiplicityFreeBendRightLocal {
-    pub(super) local: MultiplicityFreeTreePairLocal,
-    coupled: SectorId,
-    left_coupled: SectorId,
-    bent_is_dual: bool,
-}
-
-impl PreparedMultiplicityFreeBendRight {
-    pub(super) fn validate_output_frame(&self) -> Result<(), CoreError> {
-        self.bent_is_dual
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "codomain tree is missing a duality flag",
-            })
-            .map(|_| ())
-    }
-
-    pub(super) fn output_frame<R>(
-        &self,
-        rule: &R,
-    ) -> Result<MultiplicityFreeTreePairFrame, CoreError>
-    where
-        R: FusionRule,
-    {
-        let bent_is_dual = self.bent_is_dual.ok_or(CoreError::MalformedFusionTree {
-            message: "codomain tree is missing a duality flag",
-        })?;
-        let mut domain_uncoupled = self.output_domain_uncoupled_prefix.clone();
-        domain_uncoupled.push(rule.dual(self.bent_sector));
-        let mut domain_is_dual = self.output_domain_is_dual_prefix.clone();
-        domain_is_dual.push(!bent_is_dual);
-        Ok(MultiplicityFreeTreePairFrame {
-            codomain: MultiplicityFreeTreeFrame::from_frozen_externals(
-                self.output_codomain_uncoupled.clone().into_vec().into(),
-                self.output_codomain_is_dual.clone().into_vec().into(),
-            ),
-            domain: MultiplicityFreeTreeFrame::from_frozen_externals(
-                domain_uncoupled.into_vec().into(),
-                domain_is_dual.into_vec().into(),
-            ),
+impl MultiplicityFreeBend {
+    pub(super) fn prepare(
+        frame: &MultiplicityFreeTreePairFrame,
+        bend: Bend,
+    ) -> Result<Self, CoreError> {
+        let left = matches!(bend, Bend::Left);
+        let (codomain, domain) = orient(left, &frame.codomain, &frame.domain);
+        Ok(Self {
+            site: BendSite::new(
+                &codomain.uncoupled,
+                &codomain.is_dual,
+                domain.uncoupled.len(),
+            )?,
+            left,
         })
     }
 
-    pub(super) fn validate_local<R, C, D>(
+    pub(super) fn validate_output_frame(&self) -> Result<(), CoreError> {
+        self.site.bent_is_dual().map(drop)
+    }
+
+    /// The externals after the bend (`duality_manipulations.jl:40-51`).
+    pub(super) fn output_frame<R: FusionRule>(
         &self,
         rule: &R,
-        codomain: &C,
-        domain: &D,
-    ) -> Result<ValidatedMultiplicityFreeBendRightLocal, CoreError>
-    where
-        R: FusionRule,
-        C: MultiplicityFreeTreeLocalData + ?Sized,
-        D: MultiplicityFreeTreeLocalData + ?Sized,
-    {
-        let coupled = codomain.coupled();
-        if self.domain_nonempty {
-            let domain_coupled = domain.coupled();
-            if domain_coupled != coupled {
-                return Err(CoreError::MalformedFusionTree {
-                    message: "fusion tree pair requires matching coupled sectors",
-                });
-            }
-        }
-
-        let left_coupled = match self.codomain_rank {
-            1 => rule.vacuum(),
-            2 => self.codomain_first,
-            _ => codomain
-                .innerlines()
-                .last()
+        frame: &MultiplicityFreeTreePairFrame,
+    ) -> Result<MultiplicityFreeTreePairFrame, CoreError> {
+        let bent_is_dual = self.site.bent_is_dual()?;
+        let (codomain, domain) = orient(self.left, &frame.codomain, &frame.domain);
+        let kept = self.site.codomain_rank - 1;
+        let shrunk = MultiplicityFreeTreeFrame::from_frozen_externals(
+            codomain.uncoupled[..kept].into(),
+            codomain.is_dual[..kept].into(),
+        );
+        let grown = MultiplicityFreeTreeFrame::from_frozen_externals(
+            domain
+                .uncoupled
+                .iter()
                 .copied()
-                .ok_or(CoreError::MalformedFusionTree {
-                    message: "bendright requires the last codomain innerline",
-                })?,
-        };
-        let bent_is_dual = self.bent_is_dual.ok_or(CoreError::MalformedFusionTree {
-            message: "codomain tree is missing a duality flag",
-        })?;
+                .chain(std::iter::once(rule.dual(self.site.bent_sector)))
+                .collect(),
+            domain
+                .is_dual
+                .iter()
+                .copied()
+                .chain(std::iter::once(!bent_is_dual))
+                .collect(),
+        );
+        let (codomain, domain) = orient(self.left, shrunk, grown);
+        Ok(MultiplicityFreeTreePairFrame { codomain, domain })
+    }
 
-        let cod_inner = codomain.innerlines();
-        let new_codomain_innerlines: &[SectorId] = if self.codomain_rank > 2 {
-            &cod_inner[..cod_inner.len() - 1]
+    #[inline(always)]
+    pub(super) fn apply<K>(
+        &self,
+        kernel: &K,
+        local: &MultiplicityFreeTreePairLocal,
+    ) -> Result<(MultiplicityFreeTreePairLocal, K::S), CoreError>
+    where
+        K: BendKernel<E = CoreError, Row = <K as StyleKernel>::S>,
+    {
+        let (codomain, domain) = orient(self.left, &local.codomain, &local.domain);
+        let (lines, coefficient) = bend_surgery(kernel, &self.site, codomain, domain)?;
+        let local = self.local(&lines, codomain, domain);
+        Ok(if self.left {
+            (local, coefficient.conj())
+        } else {
+            (local, coefficient)
+        })
+    }
+
+    /// The bend's structure alone, for the source-major preflight.
+    pub(super) fn next_local(
+        &self,
+        vacuum: SectorId,
+        local: &MultiplicityFreeTreePairLocal,
+    ) -> Result<MultiplicityFreeTreePairLocal, CoreError> {
+        let (codomain, domain) = orient(self.left, &local.codomain, &local.domain);
+        let lines = self.site.lines(vacuum, codomain, domain)?;
+        Ok(self.local(&lines, codomain, domain))
+    }
+
+    /// Drop the last codomain innerline; the domain gains `c` as an innerline
+    /// and both trees couple to `a` (`duality_manipulations.jl:40-51`).
+    #[inline(always)]
+    fn local(
+        &self,
+        lines: &BendLines,
+        codomain: &MultiplicityFreeTreeLocal,
+        domain: &MultiplicityFreeTreeLocal,
+    ) -> MultiplicityFreeTreePairLocal {
+        let kept: &[SectorId] = if self.site.codomain_rank > 2 {
+            &codomain.innerlines[..codomain.innerlines.len() - 1]
         } else {
             &[]
         };
-        Ok(ValidatedMultiplicityFreeBendRightLocal {
-            local: MultiplicityFreeTreePairLocal {
-                codomain: MultiplicityFreeTreeLocal {
-                    coupled: left_coupled,
-                    innerlines: new_codomain_innerlines.iter().copied().collect(),
-                },
-                domain: MultiplicityFreeTreeLocal {
-                    coupled: left_coupled,
-                    innerlines: domain
-                        .innerlines()
-                        .iter()
-                        .copied()
-                        .chain((self.domain_rank > 1).then_some(coupled))
-                        .collect(),
-                },
-            },
-            coupled,
-            left_coupled,
-            bent_is_dual,
-        })
-    }
-
-    pub(super) fn coefficient<R>(
-        &self,
-        rule: &R,
-        local: &ValidatedMultiplicityFreeBendRightLocal,
-    ) -> R::Scalar
-    where
-        R: MultiplicityFreeRigidSymbols,
-        R::Scalar: Clone + Mul<Output = R::Scalar>,
-    {
-        let mut coefficient = rule.sqrt_dim_scalar(local.coupled)
-            * rule.inv_sqrt_dim_scalar(local.left_coupled)
-            * rule.b_symbol_scalar(local.left_coupled, self.bent_sector, local.coupled);
-        if local.bent_is_dual {
-            coefficient = coefficient
-                * rule
-                    .frobenius_schur_phase_scalar(rule.dual(self.bent_sector))
-                    .conj();
-        }
-        coefficient
+        let shrunk = MultiplicityFreeTreeLocal {
+            coupled: lines.left_coupled,
+            innerlines: kept.iter().copied().collect(),
+        };
+        let grown = MultiplicityFreeTreeLocal {
+            coupled: lines.left_coupled,
+            innerlines: domain
+                .innerlines
+                .iter()
+                .copied()
+                .chain((self.site.domain_rank > 1).then_some(lines.coupled))
+                .collect(),
+        };
+        let (codomain, domain) = orient(self.left, shrunk, grown);
+        MultiplicityFreeTreePairLocal { codomain, domain }
     }
 }
 
-pub(super) fn prepare_multiplicity_free_bendright<R>(
-    _rule: &R,
-    frame: &MultiplicityFreeTreePairFrame,
-) -> Result<PreparedMultiplicityFreeBendRight, CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-{
-    let codomain = &frame.codomain;
-    let domain = &frame.domain;
-    let codomain_rank = codomain.uncoupled.len();
-    if codomain_rank == 0 {
-        return Err(CoreError::MalformedFusionTree {
-            message: "bendright requires at least one codomain leg",
-        });
-    }
-
-    let bent_sector = codomain.uncoupled[codomain_rank - 1];
-    let bent_is_dual = codomain.is_dual.get(codomain_rank - 1).copied();
-    let output_codomain_uncoupled = codomain.uncoupled[..codomain_rank - 1]
-        .iter()
-        .copied()
-        .collect();
-    let output_codomain_is_dual = codomain
-        .is_dual
-        .iter()
-        .copied()
-        .take(codomain_rank - 1)
-        .collect();
-    let domain_rank = domain.uncoupled.len();
-    Ok(PreparedMultiplicityFreeBendRight {
-        codomain_rank,
-        domain_rank,
-        codomain_first: codomain.uncoupled[0],
-        domain_nonempty: domain_rank != 0,
-        bent_sector,
-        bent_is_dual,
-        output_codomain_uncoupled,
-        output_codomain_is_dual,
-        output_domain_uncoupled_prefix: domain.uncoupled.iter().copied().collect(),
-        output_domain_is_dual_prefix: domain.is_dual.iter().copied().collect(),
-    })
-}
-
-pub(super) struct PreparedMultiplicityFreeBendLeft {
-    right: PreparedMultiplicityFreeBendRight,
-}
-
-impl PreparedMultiplicityFreeBendLeft {
-    pub(super) fn validate_output_frame(&self) -> Result<(), CoreError> {
-        self.right.validate_output_frame()
-    }
-
-    pub(super) fn output_frame<R>(
-        &self,
-        rule: &R,
-    ) -> Result<MultiplicityFreeTreePairFrame, CoreError>
-    where
-        R: FusionRule,
-    {
-        let frame = self.right.output_frame(rule)?;
-        Ok(MultiplicityFreeTreePairFrame {
-            codomain: frame.domain,
-            domain: frame.codomain,
-        })
-    }
-
-    pub(super) fn validate_local<R, C, D>(
-        &self,
-        rule: &R,
-        codomain: &C,
-        domain: &D,
-    ) -> Result<ValidatedMultiplicityFreeBendRightLocal, CoreError>
-    where
-        R: FusionRule,
-        C: MultiplicityFreeTreeLocalData + ?Sized,
-        D: MultiplicityFreeTreeLocalData + ?Sized,
-    {
-        self.right.validate_local(rule, domain, codomain)
-    }
-
-    pub(super) fn finish_local<R>(
-        &self,
-        rule: &R,
-        validated: ValidatedMultiplicityFreeBendRightLocal,
-    ) -> (MultiplicityFreeTreePairLocal, R::Scalar)
-    where
-        R: MultiplicityFreeRigidSymbols,
-        R::Scalar: Clone + Mul<Output = R::Scalar>,
-    {
-        let coefficient = (self.right.coefficient(rule, &validated)).conj();
-        (Self::finish_local_structure(validated), coefficient)
-    }
-
-    pub(super) fn finish_local_structure(
-        validated: ValidatedMultiplicityFreeBendRightLocal,
-    ) -> MultiplicityFreeTreePairLocal {
-        MultiplicityFreeTreePairLocal {
-            codomain: validated.local.domain,
-            domain: validated.local.codomain,
-        }
+#[inline(always)]
+fn orient<T>(swap: bool, codomain: T, domain: T) -> (T, T) {
+    if swap {
+        (domain, codomain)
+    } else {
+        (codomain, domain)
     }
 }
 
-pub(super) fn prepare_multiplicity_free_bendleft<R>(
+#[expect(
+    clippy::type_complexity,
+    reason = "the SmallVec inline capacity is part of this local bend allocation contract"
+)]
+fn multiplicity_free_bend_tree_pair<R>(
     rule: &R,
-    frame: &MultiplicityFreeTreePairFrame,
-) -> Result<PreparedMultiplicityFreeBendLeft, CoreError>
+    tree_pair: &FusionTreePairKey,
+    bend: Bend,
+) -> Result<SmallVec<[(FusionTreePairKey, R::Scalar); 1]>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
 {
-    let swapped = MultiplicityFreeTreePairFrame {
-        codomain: frame.domain.clone(),
-        domain: frame.codomain.clone(),
-    };
-    Ok(PreparedMultiplicityFreeBendLeft {
-        right: prepare_multiplicity_free_bendright(rule, &swapped)?,
-    })
+    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
+    let prepared = MultiplicityFreeBend::prepare(&frame, bend)?;
+    let (local, coefficient) = prepared.apply(&SimpleK(rule), &local)?;
+    let frame = prepared.output_frame(rule, &frame)?;
+    let mut terms = SmallVec::new();
+    terms.push((frame.materialize(local), coefficient));
+    Ok(terms)
 }
 
 #[expect(
@@ -316,18 +208,8 @@ pub(crate) fn multiplicity_free_bendright_tree_pair<R>(
 ) -> Result<SmallVec<[(FusionTreePairKey, R::Scalar); 1]>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    // Why not duplicate bend surgery in the future block runner: duality and
-    // Frobenius-Schur phases must stay identical to the per-source operation.
-    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
-    let prepared = prepare_multiplicity_free_bendright(rule, &frame)?;
-    let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-    let frame = prepared.output_frame(rule)?;
-    let coefficient = prepared.coefficient(rule, &validated);
-    let mut terms = SmallVec::new();
-    terms.push((frame.materialize(validated.local), coefficient));
-    Ok(terms)
+    multiplicity_free_bend_tree_pair(rule, tree_pair, Bend::Right)
 }
 
 #[expect(
@@ -340,16 +222,8 @@ pub(crate) fn multiplicity_free_bendleft_tree_pair<R>(
 ) -> Result<SmallVec<[(FusionTreePairKey, R::Scalar); 1]>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
-    let prepared = prepare_multiplicity_free_bendleft(rule, &frame)?;
-    let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
-    let frame = prepared.output_frame(rule)?;
-    let (local, coefficient) = prepared.finish_local(rule, validated);
-    let mut terms = SmallVec::new();
-    terms.push((frame.materialize(local), coefficient));
-    Ok(terms)
+    multiplicity_free_bend_tree_pair(rule, tree_pair, Bend::Left)
 }
 
 /// Generic-fusion (outer multiplicity) `bendright`: map the final splitting
@@ -404,47 +278,14 @@ where
 {
     let codomain = tree_pair.codomain_tree();
     let domain = tree_pair.domain_tree();
-    let codomain_rank = codomain.uncoupled().len();
-    if codomain_rank == 0 {
-        return Err(CoreError::MalformedFusionTree {
-            message: "bendright requires at least one codomain leg",
-        }
-        .into());
-    }
-
-    let coupled = codomain.coupled();
-    if !domain.uncoupled().is_empty() {
-        let domain_coupled = domain.coupled();
-        if domain_coupled != coupled {
-            return Err(CoreError::MalformedFusionTree {
-                message: "fusion tree pair requires matching coupled sectors",
-            }
-            .into());
-        }
-    }
-
-    // a = N₁==1 ? unit : N₁==2 ? uncoupled[1] : innerlines[end]  (TK :37).
-    let left_coupled = match codomain_rank {
-        1 => rule.vacuum(),
-        2 => codomain.uncoupled()[0],
-        _ => codomain
-            .innerlines()
-            .last()
-            .copied()
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "bendright requires the last codomain innerline",
-            })?,
-    };
-    // b = uncoupled[N₁]  (TK :38).
-    let bent_sector = codomain.uncoupled()[codomain_rank - 1];
-    let bent_is_dual = codomain.is_dual().get(codomain_rank - 1).copied().ok_or(
-        CoreError::MalformedFusionTree {
-            message: "codomain tree is missing a duality flag",
-        },
+    let site = BendSite::new(
+        codomain.uncoupled(),
+        codomain.is_dual(),
+        domain.uncoupled().len(),
     )?;
-    let domain_bent_sector = rule
-        .try_dual(bent_sector)
-        .map_err(CheckedGenericSymbolError::Provider)?;
+    let (lines, row) = bend_surgery(&GenericK(rule), &site, codomain, domain)?;
+    let codomain_rank = site.codomain_rank;
+    let domain_rank = site.domain_rank;
 
     // New codomain tree: drop the last leg (TK `_bendright_treepair` :41-45).
     let cod_inner = codomain.innerlines();
@@ -461,84 +302,43 @@ where
     };
     let new_codomain = FusionTreeKey::new(
         codomain.uncoupled()[..codomain_rank - 1].iter().copied(),
-        left_coupled,
+        lines.left_coupled,
         codomain.is_dual()[..codomain_rank - 1].iter().copied(),
         new_codomain_innerlines.iter().copied(),
         new_codomain_vertices.iter().copied(),
     );
 
-    let domain_rank = domain.uncoupled().len();
     // Base domain data shared by every ν; only the appended vertex label varies
     // (TK :100-103, `uncoupled₂/coupled₂/isdual₂/inner₂` hoisted out of the loop).
     let domain_uncoupled: Arc<[SectorId]> = domain
         .uncoupled()
         .iter()
         .copied()
-        .chain(std::iter::once(domain_bent_sector))
+        .chain(std::iter::once(row.bent_dual))
         .collect::<Vec<_>>()
         .into();
     let domain_is_dual: Arc<[bool]> = domain
         .is_dual()
         .iter()
         .copied()
-        .chain(std::iter::once(!bent_is_dual))
+        .chain(std::iter::once(!lines.bent_is_dual))
         .collect::<Vec<_>>()
         .into();
     let domain_innerlines: Arc<[SectorId]> = domain
         .innerlines()
         .iter()
         .copied()
-        .chain((domain_rank > 1).then_some(coupled))
+        .chain((domain_rank > 1).then_some(lines.coupled))
         .collect::<Vec<_>>()
         .into();
 
-    // coeff₀ = √dim(c)·(1/√dim(a)); ·conj(κ_{dual(b)}) if the bent leg is dual
-    // (TK :89-92, same placement as the mult-free bend :2424-2429).
-    let mut coeff0 = rule
-        .try_sqrt_dim_scalar(coupled)
-        .map_err(CheckedGenericSymbolError::Provider)?
-        * rule
-            .try_inv_sqrt_dim_scalar(left_coupled)
-            .map_err(CheckedGenericSymbolError::Provider)?;
-    if bent_is_dual {
-        let dual_bent_sector = rule
-            .try_dual(bent_sector)
-            .map_err(CheckedGenericSymbolError::Provider)?;
-        coeff0 = coeff0
-            * rule
-                .try_frobenius_schur_phase_scalar(dual_bent_sector)
-                .map_err(CheckedGenericSymbolError::Provider)?
-                .conj();
-    }
-
-    // Bmat = Bsymbol(a, b, c)  (TK :98); μ = N₁>1 ? vertices[end] : 1  (TK :99).
-    let bmat = rule.try_b_symbol_generic(left_coupled, bent_sector, coupled)?;
-    let mu0 = if codomain_rank > 1 {
-        mu_index(codomain, codomain_rank - 2)?
-    } else {
-        0
-    };
-
-    let (_, cols) = bmat.shape();
-    if mu0 >= bmat.shape().0 {
-        return Err(CheckedGenericSymbolError::Shape {
-            symbol: "B",
-            expected: vec![mu0 + 1, cols],
-            actual: vec![bmat.shape().0, cols],
-        });
-    }
     let mut out: Vec<(FusionTreePairKey, C::Scalar)> = Vec::new();
-    for nu0 in 0..cols {
-        // coeff = coeff₀ · Bmat[μ, ν]  (TK :105); iszero → skip  (TK :106).
-        let coeff = coeff0.clone() * bmat.get(mu0, nu0).clone();
-        if coeff.is_zero() {
-            continue;
-        }
+    for (nu0, coeff) in row.terms() {
         // vertices₂ = N₂>0 ? (f₂.vertices..., ν) : ()  (TK :107). ν is the
         // 1-based output vertex label (mu_index inverts this on the way back).
         let new_domain = FusionTreeKey::from_frozen(
             Arc::clone(&domain_uncoupled),
-            left_coupled,
+            lines.left_coupled,
             Arc::clone(&domain_is_dual),
             Arc::clone(&domain_innerlines),
             domain
@@ -720,21 +520,11 @@ where
         vec![(tree_pair.clone(), C::Scalar::one())],
         tree_pair.codomain_tree().uncoupled().len(),
         target_codomain_rank,
-        |terms, bend| generic_bend_terms(rule, terms, bend),
+        |terms, bend| {
+            compose_terms(terms, |key| match bend {
+                Bend::Left => generic_bendleft_tree_pair_result(rule, key),
+                Bend::Right => generic_bendright_tree_pair_result(rule, key),
+            })
+        },
     )
-}
-
-/// One repartition bend over a Generic term list.
-pub(super) fn generic_bend_terms<C>(
-    rule: &C,
-    terms: GenericTreePairTerms<C::Scalar>,
-    bend: Bend,
-) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
-where
-    C: GenericRigidAccess,
-{
-    compose_terms(terms, |key| match bend {
-        Bend::Left => generic_bendleft_tree_pair_result(rule, key),
-        Bend::Right => generic_bendright_tree_pair_result(rule, key),
-    })
 }

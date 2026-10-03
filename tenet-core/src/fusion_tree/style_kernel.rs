@@ -3,8 +3,9 @@
 //! Every move has one surgery (which sectors a swap reads, which innerline it
 //! rewrites, which external legs it exchanges). A [`StyleKernel`] supplies
 //! only what TensorKit branches on `FusionStyle` inside the coefficient
-//! (`braiding_manipulations.jl:132, 157`): admission, the coefficient, and,
-//! for Generic fusion, the vertex labels each output carries.
+//! (`braiding_manipulations.jl:132, 157`; `duality_manipulations.jl:89-112`
+//! for bends): admission, the coefficient, and, for Generic fusion, the
+//! vertex labels each output carries.
 //!
 //! The kernels are sealed and statically dispatched: [`UniqueK`] (one channel
 //! per fusion, in-place trees), [`SimpleK`] (multiplicity-free channel
@@ -36,7 +37,7 @@ pub(crate) trait StyleKernel: sealed::Sealed {
 
     /// The first-pair swap `a ⊗ b ← c` (TensorKit `artin_braid`, `i == 1`):
     /// one term per output vertex label.
-    fn artin_first<T: ArtinTree, W: ArtinWriter<Self::S, Self::E>>(
+    fn artin_first<T: TreeView, W: ArtinWriter<Self::S, Self::E>>(
         &self,
         left: SectorId,
         right: SectorId,
@@ -48,7 +49,7 @@ pub(crate) trait StyleKernel: sealed::Sealed {
 
     /// A swap past the first pair over the inner-extended lines
     /// `[a, b, c, d, e]`: one term per new innerline `c′` and vertex labels.
-    fn artin_general<T: ArtinTree, W: ArtinWriter<Self::S, Self::E>>(
+    fn artin_general<T: TreeView, W: ArtinWriter<Self::S, Self::E>>(
         &self,
         sectors: [SectorId; 5],
         inverse: bool,
@@ -58,15 +59,15 @@ pub(crate) trait StyleKernel: sealed::Sealed {
     ) -> Result<(), Self::E>;
 }
 
-/// Read access to the tree an Artin swap acts on.
-pub(crate) trait ArtinTree {
+/// Read access to the tree a fusion-tree move acts on.
+pub(crate) trait TreeView {
     fn coupled(&self) -> SectorId;
     fn innerlines(&self) -> &[SectorId];
     /// The vertex label at `position`; only Generic kernels read it.
     fn vertex(&self, position: usize) -> Option<MultiplicityIndex>;
 }
 
-impl ArtinTree for UnhashedFusionTree {
+impl TreeView for UnhashedFusionTree {
     fn coupled(&self) -> SectorId {
         MultiplicityFreeTreeLocalData::coupled(self)
     }
@@ -78,7 +79,7 @@ impl ArtinTree for UnhashedFusionTree {
     }
 }
 
-impl ArtinTree for MultiplicityFreeTreeLocal {
+impl TreeView for MultiplicityFreeTreeLocal {
     #[inline(always)]
     fn coupled(&self) -> SectorId {
         self.coupled
@@ -93,7 +94,7 @@ impl ArtinTree for MultiplicityFreeTreeLocal {
     }
 }
 
-impl ArtinTree for FusionTreeKey {
+impl TreeView for FusionTreeKey {
     fn coupled(&self) -> SectorId {
         FusionTreeKey::coupled(self)
     }
@@ -184,7 +185,7 @@ impl ArtinSite {
     }
 
     #[inline(always)]
-    fn inner_extended<T: ArtinTree>(&self, tree: &T, index: usize) -> Result<SectorId, CoreError> {
+    fn inner_extended<T: TreeView>(&self, tree: &T, index: usize) -> Result<SectorId, CoreError> {
         if index == 0 {
             return Ok(self.first);
         }
@@ -214,7 +215,7 @@ pub(crate) fn artin_surgery<K, T, W>(
 ) -> Result<(), K::E>
 where
     K: StyleKernel,
-    T: ArtinTree,
+    T: TreeView,
     W: ArtinWriter<K::S, K::E>,
 {
     let index = site.index;
@@ -263,6 +264,257 @@ pub(crate) fn artin_innerline_message(vertices: ArtinVertices) -> &'static str {
     }
 }
 
+/// The position-dependent part of one `bendright`, fixed by the external
+/// legs: TensorKit `_bendright_treepair` (`duality_manipulations.jl:33-54`).
+pub(crate) struct BendSite {
+    pub(crate) codomain_rank: usize,
+    pub(crate) domain_rank: usize,
+    codomain_first: SectorId,
+    pub(crate) bent_sector: SectorId,
+    bent_is_dual: Option<bool>,
+}
+
+/// The lines one `bendright` reads from a tree pair: `c` (coupled), `a`
+/// (the left part's coupled line) and the bent leg's duality.
+#[derive(Clone, Copy)]
+pub(crate) struct BendLines {
+    pub(crate) coupled: SectorId,
+    pub(crate) left_coupled: SectorId,
+    pub(crate) bent_is_dual: bool,
+}
+
+impl BendSite {
+    pub(crate) fn new(
+        codomain_uncoupled: &[SectorId],
+        codomain_is_dual: &[bool],
+        domain_rank: usize,
+    ) -> Result<Self, CoreError> {
+        let codomain_rank = codomain_uncoupled.len();
+        if codomain_rank == 0 {
+            return Err(CoreError::MalformedFusionTree {
+                message: "bendright requires at least one codomain leg",
+            });
+        }
+        Ok(Self {
+            codomain_rank,
+            domain_rank,
+            codomain_first: codomain_uncoupled[0],
+            bent_sector: codomain_uncoupled[codomain_rank - 1],
+            bent_is_dual: codomain_is_dual.get(codomain_rank - 1).copied(),
+        })
+    }
+
+    pub(crate) fn bent_is_dual(&self) -> Result<bool, CoreError> {
+        self.bent_is_dual.ok_or(CoreError::MalformedFusionTree {
+            message: "codomain tree is missing a duality flag",
+        })
+    }
+
+    /// `a = N₁ == 1 ? unit : N₁ == 2 ? uncoupled[1] : innerlines[end]`
+    /// (`duality_manipulations.jl:37`), after the coupled-sector check.
+    #[inline(always)]
+    pub(crate) fn lines<C, D>(
+        &self,
+        vacuum: SectorId,
+        codomain: &C,
+        domain: &D,
+    ) -> Result<BendLines, CoreError>
+    where
+        C: TreeView + ?Sized,
+        D: TreeView + ?Sized,
+    {
+        let coupled = codomain.coupled();
+        if self.domain_rank != 0 && domain.coupled() != coupled {
+            return Err(CoreError::MalformedFusionTree {
+                message: "fusion tree pair requires matching coupled sectors",
+            });
+        }
+        let left_coupled = match self.codomain_rank {
+            1 => vacuum,
+            2 => self.codomain_first,
+            _ => codomain
+                .innerlines()
+                .last()
+                .copied()
+                .ok_or(CoreError::MalformedFusionTree {
+                    message: "bendright requires the last codomain innerline",
+                })?,
+        };
+        Ok(BendLines {
+            coupled,
+            left_coupled,
+            bent_is_dual: self.bent_is_dual()?,
+        })
+    }
+}
+
+/// The `bendright` coefficient of a kernel whose provider carries rigidity
+/// data: `coeff₀ = √d_c/√d_a · conj(κ_{b̄})^{[b dual]}` times the `B` symbol
+/// (`duality_manipulations.jl:62-65, 88-110`).
+pub(crate) trait BendKernel: StyleKernel {
+    /// The emitted `B` data: a scalar without multiplicity, a row `B[μ, :]`
+    /// with it.
+    type Row;
+
+    fn bend_row<T: TreeView + ?Sized>(
+        &self,
+        site: &BendSite,
+        lines: &BendLines,
+        codomain: &T,
+    ) -> Result<Self::Row, Self::E>;
+}
+
+/// One `bendright`: the lines it reads and the kernel's `B` emission. Every
+/// mode reads the same lines; only the coefficient and, for Generic fusion,
+/// the output vertex labels differ.
+#[inline(always)]
+pub(crate) fn bend_surgery<K, C, D>(
+    kernel: &K,
+    site: &BendSite,
+    codomain: &C,
+    domain: &D,
+) -> Result<(BendLines, K::Row), K::E>
+where
+    K: BendKernel,
+    C: TreeView + ?Sized,
+    D: TreeView + ?Sized,
+{
+    let lines = site.lines(kernel.vacuum(), codomain, domain)?;
+    let row = kernel.bend_row(site, &lines, codomain)?;
+    Ok((lines, row))
+}
+
+/// The multiplicity-free bend coefficient, shared by `UniqueK` and `SimpleK`.
+#[inline(always)]
+fn mf_bend_coefficient<R>(rule: &R, bent: SectorId, lines: &BendLines) -> R::Scalar
+where
+    R: MultiplicityFreeRigidSymbols,
+{
+    let coefficient = rule.sqrt_dim_scalar(lines.coupled)
+        * rule.inv_sqrt_dim_scalar(lines.left_coupled)
+        * rule.b_symbol_scalar(lines.left_coupled, bent, lines.coupled);
+    if lines.bent_is_dual {
+        coefficient * rule.frobenius_schur_phase_scalar(rule.dual(bent)).conj()
+    } else {
+        coefficient
+    }
+}
+
+impl<R: MultiplicityFreeRigidSymbols> BendKernel for UniqueK<'_, R> {
+    type Row = R::Scalar;
+
+    #[inline(always)]
+    fn bend_row<T: TreeView + ?Sized>(
+        &self,
+        site: &BendSite,
+        lines: &BendLines,
+        _: &T,
+    ) -> Result<R::Scalar, CoreError> {
+        Ok(mf_bend_coefficient(self.0, site.bent_sector, lines))
+    }
+}
+
+impl<R: MultiplicityFreeRigidSymbols> BendKernel for SimpleK<'_, R> {
+    type Row = R::Scalar;
+
+    #[inline(always)]
+    fn bend_row<T: TreeView + ?Sized>(
+        &self,
+        site: &BendSite,
+        lines: &BendLines,
+        _: &T,
+    ) -> Result<R::Scalar, CoreError> {
+        Ok(mf_bend_coefficient(self.0, site.bent_sector, lines))
+    }
+}
+
+/// `coeff₀ · B[μ, :]` and the dual of the bent leg, which joins the domain.
+pub(crate) struct GenericBendRow<S> {
+    pub(crate) bent_dual: SectorId,
+    coeff0: S,
+    bmat: GenericRMatrix<S>,
+    mu: usize,
+}
+
+impl<S: CategoricalScalar> GenericBendRow<S> {
+    /// Every nonzero `coeff₀ · B[μ, ν]` with its zero-based `ν`
+    /// (`duality_manipulations.jl:104-106`).
+    pub(crate) fn terms(&self) -> impl Iterator<Item = (usize, S)> + '_ {
+        (0..self.bmat.shape().1)
+            .map(|nu| (nu, self.coeff0.clone() * self.bmat.get(self.mu, nu).clone()))
+            .filter(|(_, coefficient)| !coefficient.is_zero())
+    }
+}
+
+impl<C: GenericRigidAccess> BendKernel for GenericK<'_, C> {
+    type Row = GenericBendRow<C::Scalar>;
+
+    // GenericFusion branch (duality_manipulations.jl:97-112): Bmat =
+    // Bsymbol(a, b, c) and μ = N₁ > 1 ? vertices[end] : 1.
+    fn bend_row<T: TreeView + ?Sized>(
+        &self,
+        site: &BendSite,
+        lines: &BendLines,
+        codomain: &T,
+    ) -> Result<Self::Row, Self::E> {
+        let rule = self.0;
+        let provider = CheckedGenericSymbolError::Provider;
+        let bent = site.bent_sector;
+        let bent_dual = rule.try_dual(bent).map_err(provider)?;
+        let mut coeff0 = rule.try_sqrt_dim_scalar(lines.coupled).map_err(provider)?
+            * rule
+                .try_inv_sqrt_dim_scalar(lines.left_coupled)
+                .map_err(provider)?;
+        if lines.bent_is_dual {
+            let dual_bent = rule.try_dual(bent).map_err(provider)?;
+            coeff0 = coeff0
+                * rule
+                    .try_frobenius_schur_phase_scalar(dual_bent)
+                    .map_err(provider)?
+                    .conj();
+        }
+        let bmat = rule.try_b_symbol_generic(lines.left_coupled, bent, lines.coupled)?;
+        let mu = if site.codomain_rank > 1 {
+            mu_index(codomain, site.codomain_rank - 2)?
+        } else {
+            0
+        };
+        let (rows, cols) = bmat.shape();
+        if mu >= rows {
+            return Err(CheckedGenericSymbolError::Shape {
+                symbol: "B",
+                expected: vec![mu + 1, cols],
+                actual: vec![rows, cols],
+            });
+        }
+        Ok(GenericBendRow {
+            bent_dual,
+            coeff0,
+            bmat,
+            mu,
+        })
+    }
+}
+
+/// The multiplicity-free first-pair output, shared by `UniqueK` and `SimpleK`.
+#[inline(always)]
+fn emit_mf_artin_first<R, W>(
+    rule: &R,
+    left: SectorId,
+    right: SectorId,
+    coupled: SectorId,
+    inverse: bool,
+    out: &mut W,
+) -> Result<(), CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    W: ArtinWriter<R::Scalar, CoreError>,
+{
+    let coefficient = mf_artin_first_coefficient(rule, left, right, coupled, inverse);
+    let slot = out.begin(None, ArtinVertices::Keep)?;
+    out.finish(slot, coefficient)
+}
+
 /// Unique fusion: one channel per fusion, in-place trees, infallible symbols.
 pub(crate) struct UniqueK<'r, R>(pub(crate) &'r R);
 /// Multiplicity-free (Unique or Simple) channel enumeration on compact locals.
@@ -296,7 +548,7 @@ where
         }
         Ok(())
     }
-    fn artin_first<T: ArtinTree, W: ArtinWriter<R::Scalar, CoreError>>(
+    fn artin_first<T: TreeView, W: ArtinWriter<R::Scalar, CoreError>>(
         &self,
         left: SectorId,
         right: SectorId,
@@ -305,11 +557,9 @@ where
         _: &T,
         out: &mut W,
     ) -> Result<(), CoreError> {
-        let coefficient = mf_artin_first_coefficient(self.0, left, right, coupled, inverse);
-        let slot = out.begin(None, ArtinVertices::Keep)?;
-        out.finish(slot, coefficient)
+        emit_mf_artin_first(self.0, left, right, coupled, inverse, out)
     }
-    fn artin_general<T: ArtinTree, W: ArtinWriter<R::Scalar, CoreError>>(
+    fn artin_general<T: TreeView, W: ArtinWriter<R::Scalar, CoreError>>(
         &self,
         [a, b, c, d, e]: [SectorId; 5],
         inverse: bool,
@@ -349,7 +599,7 @@ where
         Ok(())
     }
     #[inline(always)]
-    fn artin_first<T: ArtinTree, W: ArtinWriter<R::Scalar, CoreError>>(
+    fn artin_first<T: TreeView, W: ArtinWriter<R::Scalar, CoreError>>(
         &self,
         left: SectorId,
         right: SectorId,
@@ -358,12 +608,10 @@ where
         _: &T,
         out: &mut W,
     ) -> Result<(), CoreError> {
-        let coefficient = mf_artin_first_coefficient(self.0, left, right, coupled, inverse);
-        let slot = out.begin(None, ArtinVertices::Keep)?;
-        out.finish(slot, coefficient)
+        emit_mf_artin_first(self.0, left, right, coupled, inverse, out)
     }
     #[inline(always)]
-    fn artin_general<T: ArtinTree, W: ArtinWriter<R::Scalar, CoreError>>(
+    fn artin_general<T: TreeView, W: ArtinWriter<R::Scalar, CoreError>>(
         &self,
         [a, b, c, d, e]: [SectorId; 5],
         inverse: bool,
@@ -388,11 +636,14 @@ where
 /// The zero-based outer-multiplicity label of the vertex at `position`.
 /// [`MultiplicityIndex`] stores the one-based categorical label, and
 /// TensorKit's `Rmat[μ, ν]` / `Fmat[κ, λ, μ, ρ]` are one-based Julia indices.
-fn generic_mu_index<T: ArtinTree>(tree: &T, position: usize) -> Result<usize, CoreError> {
+pub(crate) fn mu_index<T: TreeView + ?Sized>(
+    tree: &T,
+    position: usize,
+) -> Result<usize, CoreError> {
     Ok(tree
         .vertex(position)
         .ok_or(CoreError::MalformedFusionTree {
-            message: "Generic braid requires a vertex label at the braided position",
+            message: "Generic fusion tree requires a vertex label at the read position",
         })?
         .get()
         - 1)
@@ -427,7 +678,7 @@ where
     // GenericFusion i == 1 branch (braiding_manipulations.jl:137-148):
     // R = Rmat[μ, ν] with Rmat = inv ? Rsymbol(b,a,c)' : Rsymbol(a,b,c); the
     // adjoint is taken at the element read.
-    fn artin_first<T: ArtinTree, W: ArtinWriter<Self::S, Self::E>>(
+    fn artin_first<T: TreeView, W: ArtinWriter<Self::S, Self::E>>(
         &self,
         left: SectorId,
         right: SectorId,
@@ -436,7 +687,7 @@ where
         tree: &T,
         out: &mut W,
     ) -> Result<(), Self::E> {
-        let mu0 = generic_mu_index(tree, 0)?;
+        let mu0 = mu_index(tree, 0)?;
         let rmat = if inverse {
             checked_generic_r_symbol(self.0, right, left, coupled)?
         } else {
@@ -466,7 +717,7 @@ where
     // intersect(a ⊗ d, e ⊗ conj(b)), coeff[σ, λ] = Σ_{ρ,κ} Rmat1[ν,ρ] ·
     // conj(Fmat[κ,λ,μ,ρ]) · conj(Rmat2[σ,κ]). `fusion_channels_in_table`:
     // frontier c′ of a bounded table are provably dead on admitted structures.
-    fn artin_general<T: ArtinTree, W: ArtinWriter<Self::S, Self::E>>(
+    fn artin_general<T: TreeView, W: ArtinWriter<Self::S, Self::E>>(
         &self,
         [a, b, c, d, e]: [SectorId; 5],
         inverse: bool,
@@ -476,8 +727,8 @@ where
     ) -> Result<(), Self::E> {
         let rule = self.0;
         let provider = CheckedGenericSymbolError::Provider;
-        let mu0 = generic_mu_index(tree, index - 1)?;
-        let nu0 = generic_mu_index(tree, index)?;
+        let mu0 = mu_index(tree, index - 1)?;
+        let nu0 = mu_index(tree, index)?;
         for c_prime in rule.try_fusion_channels_in_table(a, d).map_err(provider)? {
             if rule.try_nsymbol(c_prime, b, e).map_err(provider)? == 0 {
                 continue;
