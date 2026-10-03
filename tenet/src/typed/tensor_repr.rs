@@ -945,9 +945,10 @@ where
     /// Contraction planners use it as a size/FLOP proxy.
     ///
     /// The rounding formula is
-    /// `Σ_sector round(degeneracy * dim(sector))` per leg. The provider
-    /// abstraction carries `dim_scalar` uniformly, so there is deliberately
-    /// no group-specific branch.
+    /// `Σ_sector round(degeneracy * dim(sector))` per leg, with `dim` read
+    /// through the mode's `RigidCoefficientAlgebra::dim` (crate helper
+    /// `multiplicity_free_dim`), so there is deliberately no group-specific
+    /// branch.
     ///
     /// # Complexity
     ///
