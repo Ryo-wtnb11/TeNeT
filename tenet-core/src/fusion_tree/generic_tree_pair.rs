@@ -548,7 +548,7 @@ where
     R::Scalar: CategoricalScalar,
 {
     let checked = InfallibleGenericRigid(tree_pair.rule);
-    match generic_braid_tree_pair_result(
+    generic_braid_tree_pair_result(
         &checked,
         tree_pair.key,
         target_codomain_rank,
@@ -556,14 +556,8 @@ where
         levels,
         swaps,
         identity,
-    ) {
-        Ok(rows) => Ok(rows),
-        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
-        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
-        Err(CheckedGenericSymbolError::Shape { .. }) => {
-            unreachable!("infallible Generic symbols must be categorical")
-        }
-    }
+    )
+    .map_err(map_infallible_generic_symbol_error)
 }
 
 fn generic_braid_tree_pair_result<C>(

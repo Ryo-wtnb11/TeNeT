@@ -8847,6 +8847,97 @@ fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
     );
 }
 
+// `DenseGenericRule` whose R(1,1,1) is 1x1 although N(1,1,1) = 2: an
+// inconsistent user provider of the open `GenericFusionSymbols` trait.
+#[derive(Clone, Copy)]
+struct TruncatedRGenericRule;
+
+impl FusionRule for TruncatedRGenericRule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        DenseGenericRule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        DenseGenericRule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        DenseGenericRule.vacuum()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        DenseGenericRule.dual(sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        DenseGenericRule.fusion_channels(left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        DenseGenericRule.nsymbol(left, right, coupled)
+    }
+}
+
+impl GenericFusionSymbols for TruncatedRGenericRule {
+    type Scalar = f64;
+    fn f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> GenericFArray<Self::Scalar> {
+        DenseGenericRule.f_symbol_generic(a, b, c, d, e, f)
+    }
+    fn r_symbol_generic(
+        &self,
+        _a: SectorId,
+        _b: SectorId,
+        _c: SectorId,
+    ) -> GenericRMatrix<Self::Scalar> {
+        GenericRMatrix::new(vec![1.0], 1, 1)
+    }
+}
+
+impl GenericRigidSymbols for TruncatedRGenericRule {
+    fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        DenseGenericRule.sqrt_dim_scalar(sector)
+    }
+    fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        DenseGenericRule.inv_sqrt_dim_scalar(sector)
+    }
+    fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+        DenseGenericRule.frobenius_schur_phase_scalar(sector)
+    }
+}
+
+#[test]
+fn generic_braid_plan_rejects_r_symbol_shape_mismatch() {
+    let pairs = dense_generic_source_pairs(&DenseGenericRule);
+    let structure = packed_fixture_structure(
+        3,
+        pairs
+            .iter()
+            .cloned()
+            .map(BlockKey::from)
+            .map(|key| (key, vec![1usize; 3])),
+    )
+    .unwrap();
+    let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
+
+    // What: the tensor-level Generic braid plan reports a malformed provider
+    // symbol as a typed error instead of panicking.
+    let error =
+        build_generic_tree_pair_transform_group_plan(&TruncatedRGenericRule, operation, &structure)
+            .unwrap_err();
+    assert_eq!(
+        error,
+        OperationError::Core(CoreError::MalformedFusionTree {
+            message: "Generic symbol shape mismatch",
+        })
+    );
+}
+
 #[test]
 fn generic_dense_block_plan_matches_per_source_oracle_matrix() {
     let rule = DenseGenericRule;

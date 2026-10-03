@@ -388,14 +388,8 @@ where
     R::Scalar: CategoricalScalar + Send + Sync,
 {
     let checked = InfallibleGeneric::new(rule);
-    match merge_fusion_trees_generic_checked(&checked, lhs, rhs, coupled, root_vertex) {
-        Ok(terms) => Ok(terms),
-        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
-        Err(CheckedGenericSymbolError::Shape { symbol, expected, actual }) => {
-            Err(CoreError::MalformedFusionTree { message: if symbol == "F" && expected != actual { "Generic F-symbol shape mismatch" } else { "Generic symbol shape mismatch" } })
-        }
-        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
-    }
+    merge_fusion_trees_generic_checked(&checked, lhs, rhs, coupled, root_vertex)
+        .map_err(map_infallible_generic_symbol_error)
 }
 
 fn join_fusion_tree_front_generic_checked<C>(
