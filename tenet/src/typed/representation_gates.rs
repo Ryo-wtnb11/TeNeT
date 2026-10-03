@@ -494,9 +494,11 @@ where
     }
 }
 
-fn assert_close<D: TensorScalar>(actual: D, expected: D) {
-    assert!((actual.widen_complex() - expected.widen_complex()).norm() < 1e-12);
-}
+use crate::test_numerics::numerics;
+
+/// Floating terms per compared scalar of these gates: an inner product or
+/// trace over the fixtures' stored entries, at most this many.
+const GATE_TERMS: usize = 16;
 
 /// A rank-(1, 1) domain leg against a rank-(1, 1) codomain leg, default split.
 const RANK_TWO_COMPOSE: ContractSpec<'static> = ContractSpec {

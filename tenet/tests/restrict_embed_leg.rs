@@ -140,25 +140,15 @@ fn scattered<D: Copy>(shape: &[usize], source: &[D], maps: &[Vec<usize>], zero: 
     out
 }
 
-fn assert_close(actual: &[f64], expected: &[f64]) {
-    assert_eq!(actual.len(), expected.len(), "length");
-    for (index, (left, right)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (left - right).abs() <= 1e-12 * right.abs().max(1.0),
-            "entry {index}: {left} != {right}"
-        );
-    }
-}
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
-fn assert_close_complex(actual: &[Complex64], expected: &[Complex64]) {
-    assert_eq!(actual.len(), expected.len(), "length");
-    for (index, (left, right)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (left - right).norm() <= 1e-12 * right.norm().max(1.0),
-            "entry {index}: {left} != {right}"
-        );
-    }
-}
+use num_complex::Complex32;
+
+/// Floating terms reaching one compared entry: a fusion-tree expansion to
+/// the physical basis, or a composition with an inclusion isometry over a
+/// leg of at most this many states.
+const TERMS: usize = 8;
 
 fn u1(provider: &Arc<U1FusionRule>, pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
@@ -292,7 +282,7 @@ fn restrict_matches_the_dense_gather_on_a_dual_u1_codomain_leg() {
     let (shape, expected) = gather(&dense.shape, &dense.data, &maps);
     let actual = restricted.to_physical_dense().unwrap();
     assert_eq!(actual.shape, shape);
-    assert_close(&actual.data, &expected);
+    numerics::assert_slices_close("physical entries", &actual.data, &expected, TERMS);
 }
 
 #[test]
@@ -337,7 +327,7 @@ fn restrict_keeps_su2_multiplets_intact_for_a_middle_sector_with_offset() {
     let (shape, expected) = gather(&dense.shape, &dense.data, &maps);
     let actual = restricted.to_physical_dense().unwrap();
     assert_eq!(actual.shape, shape);
-    assert_close(&actual.data, &expected);
+    numerics::assert_slices_close("physical entries", &actual.data, &expected, TERMS);
 }
 
 #[test]
@@ -394,9 +384,11 @@ fn restrict_equals_composition_with_the_inclusion_isometry_on_both_sides() {
     let restricted = source.restrict_leg(&[(1, &selection)]).unwrap();
     assert_eq!(restricted.codomain(), expected.codomain());
     assert_eq!(restricted.domain(), expected.domain());
-    assert_close(
+    numerics::assert_slices_close(
+        "entries",
         restricted.dense_data().unwrap(),
         expected.dense_data().unwrap(),
+        TERMS,
     );
 
     // Domain leg 2: t ∘ (ι ⊗ id).
@@ -405,9 +397,11 @@ fn restrict_equals_composition_with_the_inclusion_isometry_on_both_sides() {
     let restricted = source.restrict_leg(&[(2, &selection)]).unwrap();
     assert_eq!(restricted.codomain(), expected.codomain());
     assert_eq!(restricted.domain(), expected.domain());
-    assert_close(
+    numerics::assert_slices_close(
+        "entries",
         restricted.dense_data().unwrap(),
         expected.dense_data().unwrap(),
+        TERMS,
     );
 }
 
@@ -445,9 +439,11 @@ fn restrict_of_a_fermionic_odd_dual_leg_equals_the_isometry_composition() {
         .unwrap();
     let restricted = source.restrict_leg(&[(0, &selection)]).unwrap();
     assert_eq!(restricted.codomain(), expected.codomain());
-    assert_close(
+    numerics::assert_slices_close(
+        "entries",
         restricted.dense_data().unwrap(),
         expected.dense_data().unwrap(),
+        TERMS,
     );
 }
 
@@ -489,7 +485,7 @@ fn restrict_reads_a_complex_lazy_adjoint_domain_leg_with_a_multi_sector_selectio
     let (shape, gathered) = gather(&dense.shape, &dense.data, &maps);
     let actual = restricted.to_physical_dense().unwrap();
     assert_eq!(actual.shape, shape);
-    assert_close_complex(&actual.data, &gathered);
+    numerics::assert_slices_close("physical entries", &actual.data, &gathered, TERMS);
 }
 
 #[test]
@@ -515,9 +511,11 @@ fn restrict_commutes_with_adjoint_under_the_codomain_domain_axis_map() {
         .unwrap();
     assert_eq!(left.codomain(), right.codomain());
     assert_eq!(left.domain(), right.domain());
-    assert_close_complex(
+    numerics::assert_slices_close(
+        "entries",
         left.materialize().unwrap().dense_data().unwrap(),
         right.dense_data().unwrap(),
+        TERMS,
     );
 }
 
@@ -603,7 +601,7 @@ fn embed_after_restrict_is_the_orthogonal_projector() {
     let expected = masked(&dense.shape, &dense.data, &maps);
     let actual = projected.to_physical_dense().unwrap();
     assert_eq!(actual.shape, dense.shape);
-    assert_close(&actual.data, &expected);
+    numerics::assert_slices_close("physical entries", &actual.data, &expected, TERMS);
 
     // Idempotent: projecting twice changes nothing.
     let twice = projected
@@ -773,7 +771,7 @@ fn embed_scatters_a_complex_lazy_adjoint_dual_domain_leg_per_sector() {
     let source = lazy.to_physical_dense().unwrap();
     let actual = embedded.to_physical_dense().unwrap();
     let expected = scattered(&actual.shape, &source.data, &maps, Complex64::new(0.0, 0.0));
-    assert_close_complex(&actual.data, &expected);
+    numerics::assert_slices_close("physical entries", &actual.data, &expected, TERMS);
 
     // And the restriction of that embedding is the original, bitwise.
     assert_eq!(
@@ -860,9 +858,11 @@ fn restrict_and_embed_on_a_product_fz2_u1_leg_match_the_isometry_composition() {
         .compose(&source)
         .unwrap();
     assert_eq!(restricted.codomain(), expected.codomain());
-    assert_close_complex(
+    numerics::assert_slices_close(
+        "entries",
         restricted.dense_data().unwrap(),
         expected.dense_data().unwrap(),
+        TERMS,
     );
 
     let embedded = restricted.embed_leg(0, &selection).unwrap();
@@ -872,9 +872,11 @@ fn restrict_and_embed_on_a_product_fz2_u1_leg_match_the_isometry_composition() {
         .compose(&restricted)
         .unwrap();
     assert_eq!(embedded.codomain(), expected.codomain());
-    assert_close_complex(
+    numerics::assert_slices_close(
+        "entries",
         embedded.dense_data().unwrap(),
         expected.dense_data().unwrap(),
+        TERMS,
     );
 }
 
@@ -917,7 +919,7 @@ fn a_rank_five_restriction_still_gathers_one_axis_only() {
     let (shape, expected) = gather(&dense.shape, &dense.data, &maps);
     let actual = restricted.to_physical_dense().unwrap();
     assert_eq!(actual.shape, shape);
-    assert_close(&actual.data, &expected);
+    numerics::assert_slices_close("physical entries", &actual.data, &expected, TERMS);
 }
 
 #[test]
@@ -970,9 +972,11 @@ fn restriction_commutes_with_permute_and_with_a_contraction_over_an_untouched_le
         restrict_then_permute.codomain(),
         permute_then_restrict.codomain()
     );
-    assert_close(
+    numerics::assert_slices_close(
+        "entries",
         restrict_then_permute.dense_data().unwrap(),
         permute_then_restrict.dense_data().unwrap(),
+        TERMS,
     );
 
     // Contracting the untouched bond commutes with the restriction. Both
@@ -1008,9 +1012,11 @@ fn restriction_commutes_with_permute_and_with_a_contraction_over_an_untouched_le
         restrict_then_contract.codomain(),
         contract_then_restrict.codomain()
     );
-    assert_close(
+    numerics::assert_slices_close(
+        "entries",
         restrict_then_contract.dense_data().unwrap(),
         contract_then_restrict.dense_data().unwrap(),
+        TERMS,
     );
 }
 

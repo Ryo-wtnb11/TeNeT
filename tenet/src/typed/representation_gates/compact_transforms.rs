@@ -144,13 +144,17 @@ fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
     }
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
-    assert_close(
+    numerics::assert_close(
+        "diagonal.inner(&lazy)",
         diagonal.inner(&lazy).unwrap(),
         diagonal.inner(&eager).unwrap(),
+        GATE_TERMS,
     );
-    assert_close(
+    numerics::assert_close(
+        "lazy.inner(&diagonal)",
         lazy.inner(&diagonal).unwrap(),
         eager.inner(&diagonal).unwrap(),
+        GATE_TERMS,
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
@@ -180,10 +184,30 @@ fn mixed_compact_dense_inner_does_not_materialize_the_diagonal() {
     .unwrap();
 
     DIAGONAL_MATERIALIZATIONS.set(0);
-    assert_close(diagonal.inner(&dense).unwrap(), Complex64::new(3.5, 0.0));
-    assert_close(dense.inner(&diagonal).unwrap(), Complex64::new(3.5, 0.0));
-    assert_close(diagonal.inner(&lazy).unwrap(), Complex64::new(-7.5, -10.0));
-    assert_close(lazy.inner(&diagonal).unwrap(), Complex64::new(-7.5, 10.0));
+    numerics::assert_close(
+        "diagonal.inner(&dense)",
+        diagonal.inner(&dense).unwrap(),
+        Complex64::new(3.5, 0.0),
+        GATE_TERMS,
+    );
+    numerics::assert_close(
+        "dense.inner(&diagonal)",
+        dense.inner(&diagonal).unwrap(),
+        Complex64::new(3.5, 0.0),
+        GATE_TERMS,
+    );
+    numerics::assert_close(
+        "diagonal.inner(&lazy)",
+        diagonal.inner(&lazy).unwrap(),
+        Complex64::new(-7.5, -10.0),
+        GATE_TERMS,
+    );
+    numerics::assert_close(
+        "lazy.inner(&diagonal)",
+        lazy.inner(&diagonal).unwrap(),
+        Complex64::new(-7.5, 10.0),
+        GATE_TERMS,
+    );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
