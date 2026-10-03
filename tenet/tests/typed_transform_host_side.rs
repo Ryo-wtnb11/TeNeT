@@ -31,6 +31,17 @@ use tenet::typed::{Complex32, Complex64};
 /// SU(2) tensor with spins up to 1 sums over at most four intermediate spins.
 const TERMS: usize = 4;
 
+/// The slice-wide `numerics` bound also covers the zero entries, which this
+/// oracle once held to `1e-12`; the shared fill must stay small enough that
+/// the bound does not exceed it (`max|entry| <= 70` at `TERMS`).
+fn assert_bound_within_entry_floor(data: &[f64]) {
+    let scale = data.iter().fold(0.0_f64, |max, value| max.max(value.abs()));
+    assert!(
+        numerics::tolerance::<f64>(TERMS, scale) <= 1e-12,
+        "fill scale {scale}"
+    );
+}
+
 /// The fill `typed_cuda_transform.rs` uses, so the pin and the device gate
 /// exercise the same values.
 fn real_fill<S: std::fmt::Debug>(_trees: &tenet::typed::BlockFusionTrees<S>, idx: &[usize]) -> f64 {
@@ -77,6 +88,7 @@ fn the_dense_permute_oracle_agrees_with_the_host_for_u1_and_su2() {
     let (shape, data) = permute_dense(&source.shape, &source.data, &[1, 0, 3, 2]);
     let actual = permuted.to_physical_dense().unwrap();
     assert_eq!(actual.shape, shape, "U(1) oracle shape");
+    assert_bound_within_entry_floor(&data);
     numerics::assert_slices_close("U(1) oracle", &actual.data, &data, TERMS);
 
     // SU(2) is the case that matters: the reduced-block replay must recouple
@@ -89,6 +101,7 @@ fn the_dense_permute_oracle_agrees_with_the_host_for_u1_and_su2() {
     let (shape, data) = permute_dense(&source.shape, &source.data, &[1, 0, 3, 2]);
     let actual = permuted.to_physical_dense().unwrap();
     assert_eq!(actual.shape, shape, "SU(2) oracle shape");
+    assert_bound_within_entry_floor(&data);
     numerics::assert_slices_close("SU(2) oracle", &actual.data, &data, TERMS);
 
     // Non-vacuity: the reduced payload is not a reordering of the source, so
