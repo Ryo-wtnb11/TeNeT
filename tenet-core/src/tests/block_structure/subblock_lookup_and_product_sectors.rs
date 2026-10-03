@@ -838,3 +838,173 @@ fn fusion_tree_pair_key_external_sectors_restore_visible_domain_sector() {
     );
     assert_eq!(key.external_is_dual(), vec![true, false]);
 }
+
+// A unique, non-self-dual rule with complex symbols, so every factor of the
+// bend coefficient (√d_c/√d_a, B, conj κ, and bendleft's conj) is visible.
+#[derive(Clone, Copy, Debug)]
+struct ComplexZ4BendRule;
+
+impl FusionRule for ComplexZ4BendRule {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Anyonic
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+    fn dual(&self, s: SectorId) -> SectorId {
+        SectorId::new((4 - s.id() % 4) % 4)
+    }
+    fn fusion_channels(&self, l: SectorId, r: SectorId) -> SectorVec {
+        smallvec::smallvec![SectorId::new((l.id() + r.id()) % 4)]
+    }
+}
+
+impl MultiplicityFreeFusionRule for ComplexZ4BendRule {}
+
+impl MultiplicityFreeFusionSymbols for ComplexZ4BendRule {
+    type Scalar = Complex64;
+    fn f_symbol_scalar(
+        &self,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+    ) -> Complex64 {
+        Complex64::new(1.0, 0.0)
+    }
+    fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> Complex64 {
+        Complex64::new(1.0, 0.0)
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for ComplexZ4BendRule {
+    fn dim_scalar(&self, _: SectorId) -> Complex64 {
+        Complex64::new(1.0, 0.0)
+    }
+    fn inv_dim_scalar(&self, _: SectorId) -> Complex64 {
+        Complex64::new(1.0, 0.0)
+    }
+    fn sqrt_dim_scalar(&self, s: SectorId) -> Complex64 {
+        Complex64::new(1.0 + s.id() as f64, 0.0)
+    }
+    fn inv_sqrt_dim_scalar(&self, s: SectorId) -> Complex64 {
+        Complex64::new(1.0 / (1.0 + s.id() as f64), 0.0)
+    }
+    fn twist_scalar(&self, _: SectorId) -> Complex64 {
+        Complex64::new(1.0, 0.0)
+    }
+    fn frobenius_schur_phase_scalar(&self, s: SectorId) -> Complex64 {
+        Complex64::from_polar(1.0, 0.7 * s.id() as f64)
+    }
+    fn b_symbol_scalar(&self, a: SectorId, b: SectorId, c: SectorId) -> Complex64 {
+        Complex64::from_polar(2.0, 0.2 * (a.id() + 4 * b.id() + 9 * c.id()) as f64)
+    }
+}
+
+fn z4(id: usize) -> SectorId {
+    SectorId::new(id)
+}
+
+#[test]
+fn complex_non_self_dual_bends_match_hand_computed_tensorkit_coefficients() {
+    let rule = ComplexZ4BendRule;
+    let assert_close = |got: Complex64, want: Complex64| {
+        assert!((got - want).norm() < 1e-12, "{got} != {want}");
+    };
+
+    // What: bendright of the dual leg b = 1 off (2 ⊗ 1̄ ← 3) gives
+    // √d₃/√d₂ · B(2, 1, 3) · conj(κ_{1̄ = 3}) and appends dual(b) = 3,
+    // undualized, to the domain (duality_manipulations.jl:33-65).
+    let source = FusionTreePairKey::pair(
+        FusionTreeKey::new(
+            [z4(2), z4(1)],
+            z4(3),
+            [false, true],
+            Vec::<SectorId>::new(),
+            [MultiplicityIndex::ONE],
+        ),
+        FusionTreeKey::new(
+            [z4(3)],
+            z4(3),
+            [false],
+            Vec::<SectorId>::new(),
+            Vec::<MultiplicityIndex>::new(),
+        ),
+    );
+    let out = multiplicity_free_bendright_tree_pair(&rule, &source).unwrap();
+    assert_eq!(out.len(), 1);
+    let want = Complex64::new(4.0 / 3.0, 0.0)
+        * Complex64::from_polar(2.0, 0.2 * 33.0)
+        * Complex64::from_polar(1.0, 0.7 * 3.0).conj();
+    assert_close(out[0].1, want);
+    let expected = FusionTreePairKey::pair(
+        FusionTreeKey::new(
+            [z4(2)],
+            z4(2),
+            [false],
+            Vec::<SectorId>::new(),
+            Vec::<MultiplicityIndex>::new(),
+        ),
+        FusionTreeKey::new(
+            [z4(3), z4(3)],
+            z4(2),
+            [false, false],
+            Vec::<SectorId>::new(),
+            [MultiplicityIndex::ONE],
+        ),
+    );
+    assert_eq!(out[0].0, expected);
+
+    // What: bendleft is conj(bendright) through the swapped pair
+    // (duality_manipulations.jl:140-148): the domain leg 1̄ off (1 ⊗ 1̄ ← 2)
+    // moves to the codomain as dual(1) = 3 with
+    // conj(√d₂/√d₁ · B(1, 1, 2) · conj(κ_{1̄ = 3})).
+    let source = FusionTreePairKey::pair(
+        FusionTreeKey::new(
+            [z4(2)],
+            z4(2),
+            [false],
+            Vec::<SectorId>::new(),
+            Vec::<MultiplicityIndex>::new(),
+        ),
+        FusionTreeKey::new(
+            [z4(1), z4(1)],
+            z4(2),
+            [false, true],
+            Vec::<SectorId>::new(),
+            [MultiplicityIndex::ONE],
+        ),
+    );
+    let out = multiplicity_free_bendleft_tree_pair(&rule, &source).unwrap();
+    assert_eq!(out.len(), 1);
+    let want = (Complex64::new(3.0 / 2.0, 0.0)
+        * Complex64::from_polar(2.0, 0.2 * 23.0)
+        * Complex64::from_polar(1.0, 0.7 * 3.0).conj())
+    .conj();
+    assert_close(out[0].1, want);
+    let expected = FusionTreePairKey::pair(
+        FusionTreeKey::new(
+            [z4(2), z4(3)],
+            z4(1),
+            [false, false],
+            Vec::<SectorId>::new(),
+            [MultiplicityIndex::ONE],
+        ),
+        FusionTreeKey::new(
+            [z4(1)],
+            z4(1),
+            [false],
+            Vec::<SectorId>::new(),
+            Vec::<MultiplicityIndex>::new(),
+        ),
+    );
+    assert_eq!(out[0].0, expected);
+}

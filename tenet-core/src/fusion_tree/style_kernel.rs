@@ -643,7 +643,7 @@ pub(crate) fn mu_index<T: TreeView + ?Sized>(
     Ok(tree
         .vertex(position)
         .ok_or(CoreError::MalformedFusionTree {
-            message: "Generic braid requires a vertex label at the braided position",
+            message: "Generic fusion tree requires a vertex label at the read position",
         })?
         .get()
         - 1)
