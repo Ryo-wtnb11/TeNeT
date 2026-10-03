@@ -189,14 +189,21 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let prepared = prepare_multiplicity_free_foldright(rule, &basis.frame)?;
+    let site = FoldSite::new(
+        &basis.frame.codomain.uncoupled,
+        &basis.frame.codomain.is_dual,
+    )?;
+    let kernel = SimpleK(rule);
+    let (fold, dual_first) = kernel.fold_begin(&site)?;
+    let fold_frame =
+        multiplicity_free_fold_output_frame(&basis.frame, dual_first, site.first_is_dual);
     let output_frame = if swap_output {
         MultiplicityFreeTreePairFrame {
-            codomain: prepared.output_frame.domain.clone(),
-            domain: prepared.output_frame.codomain.clone(),
+            codomain: fold_frame.domain.clone(),
+            domain: fold_frame.codomain.clone(),
         }
     } else {
-        prepared.output_frame.clone()
+        fold_frame.clone()
     };
     let output_locals = collect_multiplicity_free_tree_pair_locals_for_frame(rule, &output_frame);
     let output_index = output_locals
@@ -243,7 +250,7 @@ where
                     tail_coupled,
                     &basis.frame.domain,
                     &source.domain,
-                    &prepared.output_frame.domain,
+                    &fold_frame.domain,
                 )?;
                 inverse_cache.insert(inverse_key.clone(), terms);
             }
@@ -252,11 +259,7 @@ where
                 .expect("inverse fold table inserted above");
             let cache_key = (tail_coupled, coupled);
             if let Entry::Vacant(entry) = coefficient_cache.entry(cache_key) {
-                entry.insert(
-                    prepared
-                        .coefficient
-                        .sector_factors(rule, tail_coupled, coupled),
-                );
+                entry.insert(kernel.fold_factors(&fold, tail_coupled, coupled)?);
             }
             let factors = coefficient_cache
                 .get(&cache_key)
@@ -279,11 +282,12 @@ where
                             message:
                                 "compact fold destination is outside the canonical output basis",
                         })?;
-                let mut coefficient = prepared.coefficient.coefficient(
+                let mut coefficient = kernel.fold_coefficient(
+                    &fold,
                     factors,
                     codomain_coefficient,
                     domain_coefficient,
-                );
+                )?;
                 if conjugate_step {
                     coefficient = (coefficient).conj();
                 }

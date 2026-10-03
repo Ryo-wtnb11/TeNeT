@@ -166,7 +166,7 @@ where
     if rhs.uncoupled().is_empty() {
         return Ok(vec![(lhs.clone(), C::Scalar::one())]);
     }
-    let terms = generic_multi_fmove_inv_tree_checked(rule, lhs.coupled(), coupled, rhs, false)?;
+    let terms = generic_multi_fmove_inv_tree_result(rule, lhs.coupled(), coupled, rhs, false)?;
     terms
         .into_iter()
         .map(|(tail, coefficients)| {

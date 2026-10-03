@@ -56,22 +56,12 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let access = InfallibleGeneric::new(rule);
-    generic_foldright_tree_pair_with(
-        &access,
-        tree_pair,
-        |tree| generic_multi_fmove_tree(rule, tree).map_err(CheckedGenericSymbolError::Core),
-        |leading, coupled, tree, leading_is_dual| {
-            generic_multi_fmove_inv_tree(rule, leading, coupled, tree, leading_is_dual)
-                .map_err(CheckedGenericSymbolError::Core)
-        },
-    )
-    .map_err(map_infallible_generic_symbol_error)
+    generic_foldright_tree_pair_result(&InfallibleGenericFR(rule), tree_pair)
+        .map_err(map_infallible_generic_symbol_error)
 }
 
 /// Generic-fusion `foldleft` = swap + conjugate of `foldright`, verbatim mirror
 /// of TensorKit `foldleft((f₁,f₂))` (`duality_manipulations.jl:315-319`).
-/// Structural twin of `multiplicity_free_foldleft_tree_pair`.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
 #[cfg(test)]
@@ -232,107 +222,13 @@ fn generic_foldright_tree_pair_result<C>(
     tree_pair: &FusionTreePairKey,
 ) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
-    C: CheckedGenericRigidSymbols,
-{
-    generic_foldright_tree_pair_with(
-        rule,
-        tree_pair,
-        |tree| generic_multi_fmove_tree_checked(rule, tree),
-        |leading, coupled, tree, leading_is_dual| {
-            generic_multi_fmove_inv_tree_checked(rule, leading, coupled, tree, leading_is_dual)
-        },
-    )
-}
-
-fn generic_foldright_tree_pair_with<C, F, I>(
-    rule: &C,
-    tree_pair: &FusionTreePairKey,
-    mut forward: F,
-    mut inverse: I,
-) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
-where
     C: GenericRigidAccess,
-    F: FnMut(
-        &FusionTreeKey,
-    ) -> Result<GenericFmoveTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>,
-    I: FnMut(
-        SectorId,
-        SectorId,
-        &FusionTreeKey,
-        bool,
-    ) -> Result<GenericFmoveTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>,
 {
-    let codomain = tree_pair.codomain_tree();
-    let Some(&a) = codomain.uncoupled().first() else {
-        return Err(CoreError::MalformedFusionTree {
-            message: "foldright requires at least one codomain leg",
-        }
-        .into());
-    };
-    let is_dual_a = codomain
-        .is_dual()
-        .first()
-        .copied()
-        .ok_or(CoreError::MalformedFusionTree {
-            message: "codomain tree is missing the first duality flag",
-        })?;
-    let kappa = rule
-        .try_frobenius_schur_phase_scalar(a)
-        .map_err(CheckedGenericSymbolError::Provider)?;
-    let coupled = codomain.coupled();
-    let dual_a = rule
-        .try_dual(a)
-        .map_err(CheckedGenericSymbolError::Provider)?;
-
     let mut terms = FusionTermAccumulator::new();
-    for (codomain_prime, coeff1) in forward(codomain)? {
-        let b = codomain_prime.coupled();
-        let a_matrix = <C as GenericRigidAccess>::try_a_symbol_generic(rule, a, b, coupled)?;
-        let (rows, cols) = a_matrix.shape();
-        let coeff0 = rule
-            .try_sqrt_dim_scalar(coupled)
-            .map_err(CheckedGenericSymbolError::Provider)?
-            * rule
-                .try_inv_sqrt_dim_scalar(b)
-                .map_err(CheckedGenericSymbolError::Provider)?;
-        for (domain_prime, coeff2) in inverse(dual_a, b, tree_pair.domain_tree(), !is_dual_a)? {
-            if coeff1.len() != rows || coeff2.len() != cols {
-                return Err(CoreError::MalformedFusionTree {
-                    message: "foldright: coefficient-vector length disagrees with A-matrix shape",
-                }
-                .into());
-            }
-            let mut inner = C::Scalar::zero();
-            for (j, coeff2_j) in coeff2.iter().enumerate() {
-                let mut column = C::Scalar::zero();
-                for (i, coeff1_i) in coeff1.iter().enumerate() {
-                    column = column + a_matrix.get(i, j).clone() * coeff1_i.clone();
-                }
-                inner = inner + coeff2_j.conj() * column;
-            }
-            let mut coefficient = coeff0.clone() * inner;
-            if is_dual_a {
-                coefficient = coefficient * kappa.clone();
-            }
-            terms.push(
-                FusionTreePairKey::pair(codomain_prime.clone(), domain_prime),
-                coefficient,
-            );
-        }
-    }
+    fold_surgery(&GenericK(rule), tree_pair, |key, coefficient| {
+        terms.push(key, coefficient)
+    })?;
     Ok(terms.into_vec())
-}
-
-fn generic_foldleft_tree_pair_result<C>(
-    rule: &C,
-    tree_pair: &FusionTreePairKey,
-) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
-where
-    C: CheckedGenericRigidSymbols,
-{
-    left_move_by_swap(tree_pair, |key| {
-        generic_foldright_tree_pair_result(rule, key)
-    })
 }
 
 fn generic_cycle_clockwise_tree_pair_result<C>(
@@ -359,7 +255,11 @@ where
     cycle_anticlockwise(
         tree_pair,
         |key| generic_bendright_tree_pair_result(rule, key),
-        |key| generic_foldleft_tree_pair_result(rule, key),
+        |key| {
+            left_move_by_swap(key, |swapped| {
+                generic_foldright_tree_pair_result(rule, swapped)
+            })
+        },
     )
 }
 

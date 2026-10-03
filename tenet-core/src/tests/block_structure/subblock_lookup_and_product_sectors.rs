@@ -840,7 +840,8 @@ fn fusion_tree_pair_key_external_sectors_restore_visible_domain_sector() {
 }
 
 // A unique, non-self-dual rule with complex symbols, so every factor of the
-// bend coefficient (√d_c/√d_a, B, conj κ, and bendleft's conj) is visible.
+// bend and fold coefficients (dims, B, F-derived A and multi-F-moves, κ, and
+// the left moves' conj) is visible.
 #[derive(Clone, Copy, Debug)]
 struct ComplexZ4BendRule;
 
@@ -871,14 +872,15 @@ impl MultiplicityFreeFusionSymbols for ComplexZ4BendRule {
     type Scalar = Complex64;
     fn f_symbol_scalar(
         &self,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
     ) -> Complex64 {
-        Complex64::new(1.0, 0.0)
+        let phase = a.id() + 2 * b.id() + 3 * c.id() + 5 * d.id() + 7 * e.id() + 11 * f.id();
+        Complex64::from_polar(1.0, 0.1 * phase as f64)
     }
     fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> Complex64 {
         Complex64::new(1.0, 0.0)
@@ -1007,4 +1009,56 @@ fn complex_non_self_dual_bends_match_hand_computed_tensorkit_coefficients() {
         ),
     );
     assert_eq!(out[0].0, expected);
+}
+
+#[test]
+fn unique_cycles_match_keyed_multiplicity_free_cycles_on_complex_non_self_dual_z4() {
+    // What: the unique fold's unrolled step sequence equals the keyed
+    // multiplicity-free fold surgery on a rule whose dims, κ and B are all
+    // nontrivial and complex, including dual first codomain legs (κ_a).
+    let rule = ComplexZ4BendRule;
+    let leg =
+        |is_dual: bool| SectorLeg::new((0..4).map(|s| (z4(s), 1)).collect::<Vec<_>>(), is_dual);
+    let mut checked = 0;
+    for codomain_rank in 0..=3usize {
+        for domain_rank in 0..=(4 - codomain_rank).min(2) {
+            if codomain_rank + domain_rank == 0 {
+                continue;
+            }
+            for dual_mask in 0..(1u32 << (codomain_rank + domain_rank)) {
+                let is_dual = |i: usize| dual_mask & (1 << i) != 0;
+                let hom = FusionTreeHomSpace::new(
+                    FusionProductSpace::new(
+                        (0..codomain_rank)
+                            .map(|i| leg(is_dual(i)))
+                            .collect::<Vec<_>>(),
+                    ),
+                    FusionProductSpace::new(
+                        (0..domain_rank)
+                            .map(|i| leg(is_dual(codomain_rank + i)))
+                            .collect::<Vec<_>>(),
+                    ),
+                );
+                for source in hom.fusion_tree_keys_uncached(&rule) {
+                    for (unique, keyed) in [
+                        (
+                            unique_rigid_cycle_clockwise_tree_pair(&rule, &source).unwrap(),
+                            multiplicity_free_cycle_clockwise_tree_pair(&rule, &source).unwrap(),
+                        ),
+                        (
+                            unique_rigid_cycle_anticlockwise_tree_pair(&rule, &source).unwrap(),
+                            multiplicity_free_cycle_anticlockwise_tree_pair(&rule, &source)
+                                .unwrap(),
+                        ),
+                    ] {
+                        assert_eq!(keyed.len(), 1, "{source:?}");
+                        assert_eq!(unique.0, keyed[0].0, "{source:?}");
+                        assert!((unique.1 - keyed[0].1).norm() < 1e-12, "{source:?}");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 1000, "{checked}");
 }

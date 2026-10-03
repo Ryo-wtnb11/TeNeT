@@ -784,3 +784,272 @@ where
         Ok(())
     }
 }
+
+/// The first codomain leg a `foldright` moves: TensorKit `foldright`
+/// (`duality_manipulations.jl:220-293`) reads `a = f₁.uncoupled[1]` and its
+/// duality.
+pub(crate) struct FoldSite {
+    pub(crate) first: SectorId,
+    pub(crate) first_is_dual: bool,
+}
+
+impl FoldSite {
+    pub(crate) fn new(
+        codomain_uncoupled: &[SectorId],
+        codomain_is_dual: &[bool],
+    ) -> Result<Self, CoreError> {
+        let Some(&first) = codomain_uncoupled.first() else {
+            return Err(CoreError::MalformedFusionTree {
+                message: "foldright requires at least one codomain leg",
+            });
+        };
+        let Some(&first_is_dual) = codomain_is_dual.first() else {
+            return Err(CoreError::MalformedFusionTree {
+                message: "codomain tree is missing the first duality flag",
+            });
+        };
+        Ok(Self {
+            first,
+            first_is_dual,
+        })
+    }
+}
+
+/// The `foldright` coefficient of a kernel, and the multi-F-moves it composes:
+/// `(f₁′, coeff₁) ∈ multi_Fmove(f₁)`, `(f₂′, coeff₂) ∈
+/// multi_Fmove_inv(ā, b, f₂, !isdual(a))`, coefficient
+/// `√d_c/√d_b · coeff₂' · A(a, b, c) · coeff₁ · κ_a^{[a dual]}`.
+pub(crate) trait FoldKernel: StyleKernel {
+    /// The site-fixed part (`κ_a`, `a`, its duality).
+    type Fold;
+    /// The part fixed by `(b, c)`: `√d_c/√d_b` and `A(a, b, c)`.
+    type Factors;
+    /// A multi-F-move coefficient: a scalar, or a vector over the top vertex.
+    type FCoeff;
+
+    /// The fold data and `ā`.
+    fn fold_begin(&self, site: &FoldSite) -> Result<(Self::Fold, SectorId), Self::E>;
+    fn fold_factors(
+        &self,
+        fold: &Self::Fold,
+        tail_coupled: SectorId,
+        coupled: SectorId,
+    ) -> Result<Self::Factors, Self::E>;
+    fn fold_coefficient(
+        &self,
+        fold: &Self::Fold,
+        factors: &Self::Factors,
+        codomain: &Self::FCoeff,
+        domain: &Self::FCoeff,
+    ) -> Result<Self::S, Self::E>;
+}
+
+/// The keyed multi-F-moves a fold composes (TensorKit `multi_Fmove` /
+/// `multi_Fmove_inv`, `basic_manipulations.jl:218-327, 343-462`).
+pub(crate) trait MultiFmoveKernel: FoldKernel {
+    type Moves: IntoIterator<Item = (FusionTreeKey, Self::FCoeff)>;
+    fn multi_fmove(&self, tree: &FusionTreeKey) -> Result<Self::Moves, Self::E>;
+    fn multi_fmove_inv(
+        &self,
+        leading: SectorId,
+        coupled: SectorId,
+        tree: &FusionTreeKey,
+        leading_is_dual: bool,
+    ) -> Result<Self::Moves, Self::E>;
+}
+
+/// One `foldright` of a keyed tree pair; every output goes to `emit`.
+#[inline(always)]
+pub(crate) fn fold_surgery<K, F>(
+    kernel: &K,
+    tree_pair: &FusionTreePairKey,
+    mut emit: F,
+) -> Result<(), K::E>
+where
+    K: MultiFmoveKernel,
+    F: FnMut(FusionTreePairKey, K::S),
+{
+    let codomain = tree_pair.codomain_tree();
+    let site = FoldSite::new(codomain.uncoupled(), codomain.is_dual())?;
+    let (fold, dual_first) = kernel.fold_begin(&site)?;
+    let coupled = codomain.coupled();
+    for (codomain_prime, coeff1) in kernel.multi_fmove(codomain)? {
+        let tail_coupled = codomain_prime.coupled();
+        let factors = kernel.fold_factors(&fold, tail_coupled, coupled)?;
+        // The last output takes `codomain_prime` by move instead of a clone.
+        let mut inverse = kernel
+            .multi_fmove_inv(
+                dual_first,
+                tail_coupled,
+                tree_pair.domain_tree(),
+                !site.first_is_dual,
+            )?
+            .into_iter();
+        let mut next = inverse.next();
+        while let Some((domain_prime, coeff2)) = next {
+            let coefficient = kernel.fold_coefficient(&fold, &factors, &coeff1, &coeff2)?;
+            next = inverse.next();
+            if next.is_none() {
+                emit(
+                    FusionTreePairKey::pair(codomain_prime, domain_prime),
+                    coefficient,
+                );
+                break;
+            }
+            emit(
+                FusionTreePairKey::pair(codomain_prime.clone(), domain_prime),
+                coefficient,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Every multiplicity-free fold, unique ones included, reads its
+/// coefficient through the one authority, [`MultiplicityFreeFoldCoefficient`].
+impl<R: MultiplicityFreeRigidSymbols> FoldKernel for SimpleK<'_, R> {
+    type Fold = MultiplicityFreeFoldCoefficient<R::Scalar>;
+    type Factors = (R::Scalar, R::Scalar);
+    type FCoeff = R::Scalar;
+
+    #[inline(always)]
+    fn fold_begin(&self, site: &FoldSite) -> Result<(Self::Fold, SectorId), CoreError> {
+        Ok((
+            MultiplicityFreeFoldCoefficient::new(self.0, site.first, site.first_is_dual),
+            self.0.dual(site.first),
+        ))
+    }
+    #[inline(always)]
+    fn fold_factors(
+        &self,
+        fold: &Self::Fold,
+        tail_coupled: SectorId,
+        coupled: SectorId,
+    ) -> Result<Self::Factors, CoreError> {
+        Ok(fold.sector_factors(self.0, tail_coupled, coupled))
+    }
+    #[inline(always)]
+    fn fold_coefficient(
+        &self,
+        fold: &Self::Fold,
+        factors: &Self::Factors,
+        codomain: &R::Scalar,
+        domain: &R::Scalar,
+    ) -> Result<R::Scalar, CoreError> {
+        Ok(fold.coefficient(factors, codomain, domain))
+    }
+}
+
+impl<R: MultiplicityFreeRigidSymbols> MultiFmoveKernel for SimpleK<'_, R> {
+    type Moves = Vec<(FusionTreeKey, R::Scalar)>;
+
+    #[inline(always)]
+    fn multi_fmove(&self, tree: &FusionTreeKey) -> Result<Self::Moves, CoreError> {
+        multiplicity_free_multi_fmove_tree(self.0, tree)
+    }
+    #[inline(always)]
+    fn multi_fmove_inv(
+        &self,
+        leading: SectorId,
+        coupled: SectorId,
+        tree: &FusionTreeKey,
+        leading_is_dual: bool,
+    ) -> Result<Self::Moves, CoreError> {
+        multiplicity_free_multi_fmove_inv_tree(self.0, leading, coupled, tree, leading_is_dual)
+    }
+}
+
+pub(crate) struct GenericFold<S> {
+    first: SectorId,
+    first_is_dual: bool,
+    kappa: S,
+}
+
+impl<C: GenericRigidAccess> FoldKernel for GenericK<'_, C> {
+    type Fold = GenericFold<C::Scalar>;
+    type Factors = (C::Scalar, GenericRMatrix<C::Scalar>);
+    type FCoeff = Vec<C::Scalar>;
+
+    fn fold_begin(&self, site: &FoldSite) -> Result<(Self::Fold, SectorId), Self::E> {
+        let provider = CheckedGenericSymbolError::Provider;
+        let kappa = self
+            .0
+            .try_frobenius_schur_phase_scalar(site.first)
+            .map_err(provider)?;
+        let dual_first = self.0.try_dual(site.first).map_err(provider)?;
+        Ok((
+            GenericFold {
+                first: site.first,
+                first_is_dual: site.first_is_dual,
+                kappa,
+            },
+            dual_first,
+        ))
+    }
+    // GenericFusion branch (duality_manipulations.jl:268-284): A(a, b, c),
+    // then coeff₀ = √d_c/√d_b.
+    fn fold_factors(
+        &self,
+        fold: &Self::Fold,
+        tail_coupled: SectorId,
+        coupled: SectorId,
+    ) -> Result<Self::Factors, Self::E> {
+        let provider = CheckedGenericSymbolError::Provider;
+        let a_matrix = self
+            .0
+            .try_a_symbol_generic(fold.first, tail_coupled, coupled)?;
+        let coeff0 = self.0.try_sqrt_dim_scalar(coupled).map_err(provider)?
+            * self
+                .0
+                .try_inv_sqrt_dim_scalar(tail_coupled)
+                .map_err(provider)?;
+        Ok((coeff0, a_matrix))
+    }
+    // coeff₀ · (coeff₂' · (Aᵀ · coeff₁)) · κ_a^{[a dual]}.
+    fn fold_coefficient(
+        &self,
+        fold: &Self::Fold,
+        (coeff0, a_matrix): &Self::Factors,
+        coeff1: &Vec<C::Scalar>,
+        coeff2: &Vec<C::Scalar>,
+    ) -> Result<C::Scalar, Self::E> {
+        let (rows, cols) = a_matrix.shape();
+        if coeff1.len() != rows || coeff2.len() != cols {
+            return Err(CoreError::MalformedFusionTree {
+                message: "foldright: coefficient-vector length disagrees with A-matrix shape",
+            }
+            .into());
+        }
+        let mut inner = C::Scalar::zero();
+        for (j, coeff2_j) in coeff2.iter().enumerate() {
+            let mut column = C::Scalar::zero();
+            for (i, coeff1_i) in coeff1.iter().enumerate() {
+                column = column + a_matrix.get(i, j).clone() * coeff1_i.clone();
+            }
+            inner = inner + coeff2_j.conj() * column;
+        }
+        let coefficient = coeff0.clone() * inner;
+        Ok(if fold.first_is_dual {
+            coefficient * fold.kappa.clone()
+        } else {
+            coefficient
+        })
+    }
+}
+
+impl<C: GenericRigidAccess> MultiFmoveKernel for GenericK<'_, C> {
+    type Moves = GenericFmoveTerms<C::Scalar>;
+
+    fn multi_fmove(&self, tree: &FusionTreeKey) -> Result<Self::Moves, Self::E> {
+        generic_multi_fmove_tree_result(self.0, tree)
+    }
+    fn multi_fmove_inv(
+        &self,
+        leading: SectorId,
+        coupled: SectorId,
+        tree: &FusionTreeKey,
+        leading_is_dual: bool,
+    ) -> Result<Self::Moves, Self::E> {
+        generic_multi_fmove_inv_tree_result(self.0, leading, coupled, tree, leading_is_dual)
+    }
+}

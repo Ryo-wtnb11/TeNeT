@@ -1,10 +1,5 @@
 use super::*;
 
-pub(super) struct PreparedMultiplicityFreeFoldRight<S> {
-    pub(super) coefficient: MultiplicityFreeFoldCoefficient<S>,
-    pub(super) output_frame: MultiplicityFreeTreePairFrame,
-}
-
 /// The one multiplicity-free `foldright` coefficient authority, shared by the
 /// keyed, unique-rigid and compact-block folds.
 ///
@@ -19,7 +14,7 @@ pub(super) struct PreparedMultiplicityFreeFoldRight<S> {
 /// unique-rigid and compact paths. TensorKit writes the same product as
 /// `sqrtdim(c)·invsqrtdim(b)·coeff₁·A·conj(coeff₂)` (pair) and
 /// `coeff₀·(coeff₂'·(Aᵀ·coeff₁))` (block).
-pub(super) struct MultiplicityFreeFoldCoefficient<S> {
+pub(crate) struct MultiplicityFreeFoldCoefficient<S> {
     pub(super) first: SectorId,
     first_is_dual: bool,
     frobenius_schur_phase: S,
@@ -71,49 +66,27 @@ impl<S: CategoricalScalar> MultiplicityFreeFoldCoefficient<S> {
     }
 }
 
-pub(super) fn prepare_multiplicity_free_foldright<R>(
-    rule: &R,
+/// The externals after a `foldright` (`duality_manipulations.jl:220-236`):
+/// the first codomain leg moves to the front of the domain as `ā`.
+pub(super) fn multiplicity_free_fold_output_frame(
     frame: &MultiplicityFreeTreePairFrame,
-) -> Result<PreparedMultiplicityFreeFoldRight<R::Scalar>, CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-{
-    let first =
-        frame
-            .codomain
-            .uncoupled
-            .first()
-            .copied()
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "foldright requires at least one codomain leg",
-            })?;
-    let first_is_dual =
-        frame
-            .codomain
-            .is_dual
-            .first()
-            .copied()
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "codomain tree is missing the first duality flag",
-            })?;
-    let output_frame = MultiplicityFreeTreePairFrame {
+    dual_first: SectorId,
+    first_is_dual: bool,
+) -> MultiplicityFreeTreePairFrame {
+    MultiplicityFreeTreePairFrame {
         codomain: MultiplicityFreeTreeFrame::from_frozen_externals(
             frame.codomain.uncoupled[1..].iter().copied().collect(),
             frame.codomain.is_dual[1..].iter().copied().collect(),
         ),
         domain: MultiplicityFreeTreeFrame::from_frozen_externals(
-            std::iter::once(rule.dual(first))
+            std::iter::once(dual_first)
                 .chain(frame.domain.uncoupled.iter().copied())
                 .collect(),
             std::iter::once(!first_is_dual)
                 .chain(frame.domain.is_dual.iter().copied())
                 .collect(),
         ),
-    };
-    Ok(PreparedMultiplicityFreeFoldRight {
-        coefficient: MultiplicityFreeFoldCoefficient::new(rule, first, first_is_dual),
-        output_frame,
-    })
+    }
 }
 
 pub(crate) fn multiplicity_free_foldright_tree_pair<R>(
@@ -122,60 +95,15 @@ pub(crate) fn multiplicity_free_foldright_tree_pair<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let codomain = tree_pair.codomain_tree();
-    let codomain_rank = codomain.uncoupled().len();
-    if codomain_rank == 0 {
-        return Err(CoreError::MalformedFusionTree {
-            message: "foldright requires at least one codomain leg",
-        });
-    }
-    let a = codomain.uncoupled()[0];
-    let is_dual_a = codomain
-        .is_dual()
-        .first()
-        .copied()
-        .ok_or(CoreError::MalformedFusionTree {
-            message: "codomain tree is missing the first duality flag",
-        })?;
-    let fold = MultiplicityFreeFoldCoefficient::new(rule, a, is_dual_a);
-    let c = codomain.coupled();
-
     let mut terms = FusionTermAccumulator::new();
-    for (codomain_prime, coeff1) in multiplicity_free_multi_fmove_tree(rule, codomain)? {
-        let b = codomain_prime.coupled();
-        let factors = fold.sector_factors(rule, b, c);
-        for (domain_prime, coeff2) in multiplicity_free_multi_fmove_inv_tree(
-            rule,
-            rule.dual(a),
-            b,
-            tree_pair.domain_tree(),
-            !is_dual_a,
-        )? {
-            terms.push(
-                FusionTreePairKey::pair(codomain_prime.clone(), domain_prime),
-                fold.coefficient(&factors, &coeff1, &coeff2),
-            );
-        }
-    }
+    fold_surgery(&SimpleK(rule), tree_pair, |key, coefficient| {
+        terms.push(key, coefficient)
+    })?;
     Ok(terms.into_vec())
 }
 
-fn multiplicity_free_foldleft_tree_pair<R>(
-    rule: &R,
-    tree_pair: &FusionTreePairKey,
-) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-{
-    left_move_by_swap(tree_pair, |swapped| {
-        multiplicity_free_foldright_tree_pair(rule, swapped)
-    })
-}
-
-pub(super) fn multiplicity_free_cycle_clockwise_tree_pair<R>(
+pub(crate) fn multiplicity_free_cycle_clockwise_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -190,7 +118,7 @@ where
     )
 }
 
-pub(super) fn multiplicity_free_cycle_anticlockwise_tree_pair<R>(
+pub(crate) fn multiplicity_free_cycle_anticlockwise_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -201,7 +129,11 @@ where
     cycle_anticlockwise(
         tree_pair,
         |key| multiplicity_free_bendright_tree_pair(rule, key),
-        |key| multiplicity_free_foldleft_tree_pair(rule, key),
+        |key| {
+            left_move_by_swap(key, |swapped| {
+                multiplicity_free_foldright_tree_pair(rule, swapped)
+            })
+        },
     )
 }
 
