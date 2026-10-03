@@ -1,67 +1,5 @@
 use super::*;
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct GenericPairPublicationProbe {
-    pub ordered_key_validation_events: usize,
-    pub fallback_row_lookups: usize,
-    pub fallback_col_lookups: usize,
-    pub output_blocks_visited: usize,
-    pub left_owner_reused: usize,
-    pub right_owner_reused: usize,
-    pub left_appended_elements: usize,
-    pub right_appended_elements: usize,
-    pub left_scattered_elements: usize,
-    pub right_scattered_elements: usize,
-    pub left_scatter_calls: usize,
-    pub right_scatter_calls: usize,
-    pub canonical_publications: usize,
-    pub fallback_publications: usize,
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(super) static GENERIC_PAIR_PUBLICATION_PROBE: Cell<GenericPairPublicationProbe> = Cell::default();
-}
-
-#[cfg(test)]
-pub(crate) fn reset_generic_pair_publication_probe() {
-    GENERIC_PAIR_PUBLICATION_PROBE.set(GenericPairPublicationProbe::default());
-}
-
-#[cfg(test)]
-pub(crate) fn generic_pair_publication_probe() -> GenericPairPublicationProbe {
-    GENERIC_PAIR_PUBLICATION_PROBE.get()
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct OneSidedPublicationProbe {
-    pub canonical_publications: usize,
-    pub fallback_publications: usize,
-    pub owner_reused: usize,
-    /// Elements written by canonical publication beyond the moved first
-    /// owner: appended factors plus in-place identity blocks.
-    pub appended_elements: usize,
-    /// Heap bytes held by publication plans (identity segment lists).
-    pub plan_bytes: usize,
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(super) static ONE_SIDED_PUBLICATION_PROBE: Cell<OneSidedPublicationProbe> = Cell::default();
-}
-
-#[cfg(test)]
-pub(crate) fn reset_one_sided_publication_probe() {
-    ONE_SIDED_PUBLICATION_PROBE.set(OneSidedPublicationProbe::default());
-}
-
-#[cfg(test)]
-pub(crate) fn one_sided_publication_probe() -> OneSidedPublicationProbe {
-    ONE_SIDED_PUBLICATION_PROBE.get()
-}
-
 #[doc(hidden)]
 pub fn build_bound_factor_space_generic_checked<R>(
     authority: Arc<R>,
@@ -82,18 +20,6 @@ where
     BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(authority, hom)
         .map_err(CheckedGenericFactorPlanError::from)
 }
-
-#[cfg(test)]
-pub(super) fn record_generic_pair_ordered_key_validation() {
-    GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-        let mut value = probe.get();
-        value.ordered_key_validation_events += 1;
-        probe.set(value);
-    });
-}
-
-#[cfg(not(test))]
-pub(super) fn record_generic_pair_ordered_key_validation() {}
 
 pub(super) struct FactorTreeCursor<'a, M> {
     pub(super) matricizations: &'a [M],
@@ -148,21 +74,6 @@ impl<'a, M: SectorGeometry> FactorTreeCursor<'a, M> {
         self.next(side).is_none() && self.valid
     }
 }
-
-#[cfg(test)]
-pub(super) fn record_generic_pair_fallback_lookup(side: FactorSide) {
-    GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-        let mut value = probe.get();
-        match side {
-            FactorSide::Left => value.fallback_row_lookups += 1,
-            FactorSide::Right => value.fallback_col_lookups += 1,
-        }
-        probe.set(value);
-    });
-}
-
-#[cfg(not(test))]
-pub(super) fn record_generic_pair_fallback_lookup(_side: FactorSide) {}
 
 /// Staged keys of a prepared checked layout in enumeration order. The
 /// prepared structure lists its blocks exactly as the enumeration produced
@@ -618,43 +529,6 @@ pub(super) fn take_one_sided_factors<D: FactorScalar>(
     });
     data
 }
-
-#[cfg(test)]
-pub(super) fn record_one_sided_fallback_publication() {
-    ONE_SIDED_PUBLICATION_PROBE.with(|probe| {
-        let mut value = probe.get();
-        value.fallback_publications += 1;
-        probe.set(value);
-    });
-}
-
-#[cfg(not(test))]
-pub(super) fn record_one_sided_fallback_publication() {}
-
-#[cfg(test)]
-pub(super) fn record_generic_pair_output_block_visit() {
-    GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-        let mut value = probe.get();
-        value.output_blocks_visited += 1;
-        probe.set(value);
-    });
-}
-
-#[cfg(not(test))]
-pub(super) fn record_generic_pair_output_block_visit() {}
-
-#[cfg(test)]
-pub(super) fn record_generic_pair_appended(left: usize, right: usize) {
-    GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-        let mut value = probe.get();
-        value.left_appended_elements += left;
-        value.right_appended_elements += right;
-        probe.set(value);
-    });
-}
-
-#[cfg(not(test))]
-pub(super) fn record_generic_pair_appended(_left: usize, _right: usize) {}
 
 /// Appends `factor` to `output`, letting the first nonempty factor keep its
 /// allocation (grown once to `required_len`). Returns the element count that
