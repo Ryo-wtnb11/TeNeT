@@ -200,9 +200,7 @@ impl<T: Copy> TreeTransformStructure<T> {
     pub(crate) fn block_matrix(&self, block_index: usize) -> Option<&[T]> {
         match *self.blocks.get(block_index)? {
             TreeTransformBlock::Single { .. } => None,
-            TreeTransformBlock::Multi {
-                dst_layout_start, ..
-            } => self.coefficients.matrix(dst_layout_start),
+            TreeTransformBlock::Multi { matrix, .. } => self.coefficients.matrix(matrix),
         }
     }
 
@@ -388,6 +386,9 @@ pub enum TreeTransformBlock {
         src_count: usize,
         coefficient_start: usize,
         element_count: usize,
+        /// Ordinal of this block's matrix among the plan's Multi matrices
+        /// (the number of Multi blocks before it).
+        matrix: u32,
     },
 }
 

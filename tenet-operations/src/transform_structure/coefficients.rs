@@ -2,19 +2,15 @@ use super::*;
 
 /// One plan's coefficients, shared by every binding of that plan.
 ///
-/// Holds the Single scalars, the Multi matrices as the specs' own `Arc`s
-/// (spec order, which is also `coefficient_start` order), and an O(1) index
-/// from a Multi block's `dst_layout_start` to its matrix. Every part is
-/// layout-independent: compilation pushes `dst_count + src_count` layouts per
-/// spec in spec order, so a spec's `dst_layout_start` is the same in every
-/// binding, and binding an existing plan is one `Arc` bump.
+/// Holds the Single scalars and the Multi matrices as the specs' own `Arc`s
+/// (spec order, which is also `coefficient_start` order). A Multi block
+/// names its matrix by ordinal, the number of Multi specs before it, which
+/// is the same in every binding, so binding an existing plan is one `Arc`
+/// bump.
 #[derive(Debug, PartialEq)]
 pub(crate) struct TreeTransformCoefficients<T> {
     pub(super) singles: Vec<T>,
     pub(super) matrices: Vec<Arc<[T]>>,
-    /// Indexed by `dst_layout_start / 2`. Why halved: every spec owns at least
-    /// one destination and one source layout, so two specs never share a slot.
-    matrix_slots: Vec<u32>,
     pub(super) len: usize,
 }
 
@@ -27,39 +23,27 @@ impl<T: Copy> TreeTransformCoefficients<T> {
         I: Iterator<Item = (usize, usize, &'a [T], Option<&'a Arc<[T]>>)> + Clone,
         T: 'a,
     {
-        let (mut single_count, mut matrix_count, mut layout_count) = (0usize, 0usize, 0usize);
+        let (mut single_count, mut matrix_count) = (0usize, 0usize);
         for (dst_count, src_count, _, _) in specs.clone() {
             if dst_count == 1 && src_count == 1 {
                 single_count += 1;
             } else {
                 matrix_count += 1;
             }
-            layout_count = layout_count
-                .checked_add(dst_count)
-                .and_then(|count| count.checked_add(src_count))
-                .ok_or(OperationError::ElementCountOverflow)?;
         }
+        // The ordinal a Multi block stores is a `u32`.
+        u32::try_from(matrix_count).map_err(|_| OperationError::ElementCountOverflow)?;
         let mut coefficients = Self {
             singles: Vec::with_capacity(single_count),
             matrices: Vec::with_capacity(matrix_count),
-            matrix_slots: Vec::new(),
             len: single_count,
         };
-        if matrix_count != 0 {
-            coefficients.matrix_slots = vec![u32::MAX; layout_count.div_ceil(2)];
-        }
-        let mut layout_start = 0usize;
         for (dst_count, src_count, values, shared) in specs {
             if dst_count == 1 && src_count == 1 {
                 if let Some(&value) = values.first() {
                     coefficients.singles.push(value);
                 }
             } else {
-                let slot = u32::try_from(coefficients.matrices.len())
-                    .map_err(|_| OperationError::ElementCountOverflow)?;
-                if let Some(entry) = coefficients.matrix_slots.get_mut(layout_start / 2) {
-                    *entry = slot;
-                }
                 coefficients.len = coefficients
                     .len
                     .checked_add(values.len())
@@ -68,7 +52,6 @@ impl<T: Copy> TreeTransformCoefficients<T> {
                     .matrices
                     .push(shared.cloned().unwrap_or_else(|| Arc::from(values)));
             }
-            layout_start += dst_count + src_count;
         }
         Ok(coefficients)
     }
@@ -76,9 +59,8 @@ impl<T: Copy> TreeTransformCoefficients<T> {
 
 impl<T> TreeTransformCoefficients<T> {
     #[inline]
-    pub(super) fn matrix(&self, dst_layout_start: usize) -> Option<&[T]> {
-        let slot = *self.matrix_slots.get(dst_layout_start / 2)?;
-        self.matrices.get(slot as usize).map(|matrix| &**matrix)
+    pub(super) fn matrix(&self, ordinal: u32) -> Option<&[T]> {
+        self.matrices.get(ordinal as usize).map(|matrix| &**matrix)
     }
 
     /// Conservative charge: the shared matrices are charged in full for every
@@ -94,11 +76,6 @@ impl<T> TreeTransformCoefficients<T> {
                     self.matrices
                         .capacity()
                         .saturating_mul(core::mem::size_of::<Arc<[T]>>()),
-                )
-                .saturating_add(
-                    self.matrix_slots
-                        .capacity()
-                        .saturating_mul(core::mem::size_of::<u32>()),
                 ),
             |bytes, matrix| {
                 bytes
@@ -131,16 +108,44 @@ pub(crate) fn charged_shared_coefficient_bytes<T>(
     const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
     spec_shapes.fold(
         ARC_CONTROL_BYTES.saturating_add(core::mem::size_of::<TreeTransformCoefficients<T>>()),
-        |bytes, (dst_count, src_count)| {
-            bytes
-                .saturating_add(core::mem::size_of::<T>().max(core::mem::size_of::<Arc<[T]>>()))
-                .saturating_add(
-                    dst_count
-                        .saturating_add(src_count)
-                        .div_ceil(2)
-                        .saturating_add(1)
-                        .saturating_mul(core::mem::size_of::<u32>()),
-                )
+        |bytes, _| {
+            bytes.saturating_add(core::mem::size_of::<T>().max(core::mem::size_of::<Arc<[T]>>()))
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multi_matrices_are_addressed_by_ordinal_with_no_per_layout_table() {
+        // Two Multi specs around a Single, with wide layouts that a
+        // per-layout slot table would have charged for.
+        let wide = vec![1.0_f64; 64 * 32];
+        let small = [2.0_f64; 4];
+        let specs = [
+            (64usize, 32usize, wide.as_slice(), None),
+            (1, 1, &[3.0][..], None),
+            (2, 2, &small[..], None),
+        ];
+        let coefficients = TreeTransformCoefficients::from_specs(specs.iter().copied()).unwrap();
+
+        // What: ordinal `k` is the k-th Multi spec's matrix; the charge is the
+        // scalars, the matrix handles and the matrices, nothing per layout.
+        assert_eq!(coefficients.matrix(0), Some(wide.as_slice()));
+        assert_eq!(coefficients.matrix(1), Some(&small[..]));
+        assert_eq!(coefficients.matrix(2), None);
+        let arc_control = 2 * core::mem::size_of::<usize>();
+        let element = core::mem::size_of::<f64>();
+        assert_eq!(
+            coefficients.charged_bytes(),
+            arc_control
+                + core::mem::size_of::<TreeTransformCoefficients<f64>>()
+                + coefficients.singles.capacity() * element
+                + coefficients.matrices.capacity() * core::mem::size_of::<Arc<[f64]>>()
+                + (arc_control + wide.len() * element)
+                + (arc_control + small.len() * element)
+        );
+    }
 }

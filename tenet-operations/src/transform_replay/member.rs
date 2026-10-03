@@ -157,6 +157,7 @@ where
             src_count,
             element_count,
             coefficient_start,
+            ..
         } = recoupling_multi_block(task, block_index)?
         else {
             unreachable!()

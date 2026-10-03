@@ -60,7 +60,7 @@ mod tests {
         let coefficients = [1.0_f64, 0.5, -1.0, 2.0];
 
         adapter
-            .recoupling_src_times_u_transpose(&mut destination, &source, &coefficients, 0, 2, 2, 2)
+            .recoupling_src_times_u_transpose(&mut destination, &source, &coefficients, 2, 2, 2)
             .unwrap();
 
         assert_eq!(destination, [6.0, 12.0, 19.0, 38.0]);
@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn recoupling_len_validation_rejects_mismatched_columns() {
-        let err = validate_recoupling_lens(4, 3, 4, 0, 2, 2, 2).unwrap_err();
+        let err = validate_recoupling_lens(4, 3, 4, 2, 2, 2).unwrap_err();
         assert_eq!(
             err,
             OperationError::ElementCountMismatch {

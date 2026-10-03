@@ -635,6 +635,7 @@ mod tests {
                     src_count,
                     coefficient_start: _,
                     element_count,
+                    matrix: _,
                 } => {
                     let mut prepared_start = 0;
                     for (prepared_block, _) in task.recoupling_plan().entries() {
