@@ -2742,7 +2742,7 @@ fn typed_cuda_c64_lazy_adjoint_contract_matches_a_hand_expansion() {
 
     fn reduced_block(
         tensor: &TensorMap<U1FusionRule, Complex64>,
-    ) -> impl Fn(usize, usize) -> Complex64 {
+    ) -> impl Fn(usize, usize) -> Complex64 + use<> {
         let block = tensor.subblock(0).unwrap();
         assert_eq!(block.shape(), [2, 2]);
         let offset = block.offset();

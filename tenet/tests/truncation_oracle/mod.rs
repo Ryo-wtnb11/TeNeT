@@ -492,7 +492,7 @@ pub fn kept_pairs<S: Ord + Clone>(offers: &[Offer<S>], kept: &[usize]) -> Vec<(S
     let mut pairs: Vec<(S, usize)> = offers
         .iter()
         .zip(kept)
-        .filter(|(_, &k)| k > 0)
+        .filter(|&(_, &k)| k > 0)
         .map(|(o, &k)| (o.sector.clone(), k))
         .collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
