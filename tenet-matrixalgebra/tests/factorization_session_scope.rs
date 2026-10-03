@@ -26,11 +26,40 @@ use tenet_core::{
     TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet_dense::{cpu_session_stats, DefaultDenseExecutor};
-use tenet_matrixalgebra::{
+use tenet_matrixalgebra::seam::{
     qr_compact_dyn, qr_compact_dyn_checked_generic, qr_compact_dyn_generic, BoundDynamicTensorRef,
-    BoundTensorMap,
 };
-use tenet_tensors::BoundDynamicFusionMapSpace;
+use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
+
+/// A typed U(1) tensor bound to its provider, built the way the facade binds
+/// one (`bind_multiplicity_free` over the tensor's own fusion space).
+struct BoundTensorMap {
+    space: BoundDynamicFusionMapSpace<U1FusionRule>,
+    tensor: TensorMap<f64, 2, 2>,
+}
+
+impl BoundTensorMap {
+    fn try_new(provider: Arc<U1FusionRule>, tensor: TensorMap<f64, 2, 2>) -> Option<Self> {
+        let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            DynamicFusionMapSpace::from_typed(tensor.fusion_space()?),
+            provider,
+        )
+        .ok()?;
+        Some(Self { space, tensor })
+    }
+
+    fn space(&self) -> &BoundDynamicFusionMapSpace<U1FusionRule> {
+        &self.space
+    }
+
+    fn tensor(&self) -> &TensorMap<f64, 2, 2> {
+        &self.tensor
+    }
+
+    fn data(&self) -> &[f64] {
+        self.tensor.data()
+    }
+}
 
 static COUNTER_LOCK: Mutex<()> = Mutex::new(());
 
@@ -41,7 +70,7 @@ fn sessions_during<T>(call: impl FnOnce() -> T) -> u64 {
 }
 
 /// A U(1) 2 <- 2 tensor with legs over `charges`, degeneracy 2 each.
-fn u1_tensor(charges: &[i32]) -> BoundTensorMap<U1FusionRule, f64, 2, 2> {
+fn u1_tensor(charges: &[i32]) -> BoundTensorMap {
     let rule = U1FusionRule;
     let degeneracy = 2usize;
     let leg = || {
@@ -259,7 +288,7 @@ fn admissions_during<T>(call: impl FnOnce() -> T) -> (u64, u64) {
     )
 }
 
-fn hermitian_u1_tensor(charges: &[i32]) -> BoundTensorMap<U1FusionRule, f64, 2, 2> {
+fn hermitian_u1_tensor(charges: &[i32]) -> BoundTensorMap {
     let tensor = u1_tensor(charges);
     let mut data = tensor.data().to_vec();
     symmetrize(tensor.space().space().structure(), 2, &mut data);
@@ -308,12 +337,12 @@ fn assert_one_admission(label: &str, (sessions, admissions): (u64, u64)) {
 }
 
 fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
-    use tenet_matrixalgebra::{
-        eigh_full_dyn, eigh_full_dyn_checked_generic, left_null_dyn, left_null_dyn_checked_generic,
-        left_polar_dyn_checked_generic, lq_compact_dyn, lq_compact_dyn_checked_generic,
-        lq_compact_dyn_generic, pinv_direct_into_dyn, right_null_dyn,
-        right_null_dyn_checked_generic, svd_compact_dyn_checked_generic, svd_compact_factors_dyn,
-        svd_compact_factors_dyn_generic,
+    use tenet_matrixalgebra::seam::{
+        eigh_full_dyn, eigh_full_dyn_checked_generic, left_null_dyn,
+        left_null_dyn_checked_generic_with_dimensions, left_polar_dyn_checked_generic,
+        lq_compact_dyn, lq_compact_dyn_checked_generic, lq_compact_dyn_generic,
+        pinv_direct_into_dyn, right_null_dyn, right_null_dyn_checked_generic_with_dimensions,
+        svd_compact_dyn_checked_generic, svd_compact_factors_dyn, svd_compact_factors_dyn_generic,
     };
     let _guard = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let dense = &mut dense;
@@ -399,11 +428,15 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     );
     assert_one_admission(
         "checked left_null",
-        admissions_during(|| left_null_dyn_checked_generic(dense, &input).unwrap()),
+        admissions_during(|| {
+            left_null_dyn_checked_generic_with_dimensions(dense, &input, None).unwrap()
+        }),
     );
     assert_one_admission(
         "checked right_null",
-        admissions_during(|| right_null_dyn_checked_generic(dense, &input).unwrap()),
+        admissions_during(|| {
+            right_null_dyn_checked_generic_with_dimensions(dense, &input, None).unwrap()
+        }),
     );
 
     // Polar and pinv read canonical coupled-sector storage: a 1 <- 1 map.
@@ -507,8 +540,9 @@ fn streaming_site_without_the_executor_scope_admits_per_session() {
         DefaultDenseExecutor::with_threads(1).unwrap(),
     ] {
         let mut dense = UnscopedExecutor(inner);
-        let (sessions, admissions) =
-            admissions_during(|| tenet_matrixalgebra::lq_compact_dyn(&mut dense, &direct).unwrap());
+        let (sessions, admissions) = admissions_during(|| {
+            tenet_matrixalgebra::seam::lq_compact_dyn(&mut dense, &direct).unwrap()
+        });
         assert!(sessions > 1);
         assert_eq!(admissions, sessions);
     }

@@ -14,7 +14,8 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, SU2Irrep, SectorId, SectorLeg, TensorMap, TensorMapSpace,
     U1FusionRule, U1Irrep,
 };
-use tenet_matrixalgebra::svd_vals;
+use tenet_matrixalgebra::seam::{svd_vals_dyn, BoundDynamicTensorRef};
+use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 
 const DEGENERACY: usize = 2;
 
@@ -125,9 +126,13 @@ where
     }
 
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let input =
-        tenet_matrixalgebra::BoundTensorMap::try_new(Arc::new(rule.clone()), tensor).unwrap();
-    let spectra = svd_vals(&mut dense, &input.as_ref()).unwrap();
+    let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap()),
+        Arc::new(rule.clone()),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&space, tensor.data()).unwrap();
+    let spectra = svd_vals_dyn(&mut dense, &input).unwrap();
     let mut entries: Vec<(i64, Vec<f64>)> = spectra
         .iter()
         .map(|entry| (label_of(entry.sector), entry.values.clone()))

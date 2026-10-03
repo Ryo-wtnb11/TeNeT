@@ -8,8 +8,8 @@ use tenet_core::{
     FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, SU2Irrep,
     SectorId, SectorLeg, TensorMap, TensorMapSpace,
 };
-use tenet_matrixalgebra::{
-    eigh_full_dyn, qr_compact_dyn, sector_matricization_diagnostic, svd_compact_dyn,
+use tenet_matrixalgebra::seam::{
+    eigh_full_dyn, qr_compact_dyn, sector_matricization_diagnostic, svd_compact_factors_dyn,
     validate_hermitian_regions, BoundDynamicTensorRef,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
@@ -111,16 +111,16 @@ fn main() {
     );
 
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    black_box(svd_compact_dyn(&mut dense, &general_input).unwrap());
+    black_box(svd_compact_factors_dyn(&mut dense, &general_input).unwrap());
     ALLOCATIONS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..svd_iters {
-        black_box(svd_compact_dyn(&mut dense, &general_input).unwrap());
+        black_box(svd_compact_factors_dyn(&mut dense, &general_input).unwrap());
     }
     let elapsed = start.elapsed();
     let allocation_calls = ALLOCATIONS.load(Ordering::Relaxed);
     println!(
-        "svd_compact_dyn fixture=general iters={} total_ms={:.3} avg_us={:.3} allocation_calls={} allocation_calls_per_iter={:.2}",
+        "svd_compact_factors_dyn fixture=general iters={} total_ms={:.3} avg_us={:.3} allocation_calls={} allocation_calls_per_iter={:.2}",
         svd_iters,
         elapsed.as_secs_f64() * 1.0e3,
         elapsed.as_secs_f64() * 1.0e6 / svd_iters as f64,

@@ -4,18 +4,21 @@ use super::*;
 // Dynamic-rank representation.
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 /// Dynamic-rank factor tensor: an expert-layer space handle plus flat data in
 /// the coupled-sector matrix layout (the same pair `tenet_tensors::adjoint_dyn`
 /// returns).
 pub(crate) type DynFactor<D> = (DynamicFusionMapSpace, Vec<D>);
 
+#[cfg(test)]
 /// Typed tensor plus the sole provider authority accepted by provider-sensitive
 /// factorization and matrix-function APIs.
-pub struct BoundTensorMapRef<'a, R, D, const NOUT: usize, const NIN: usize> {
+pub(crate) struct BoundTensorMapRef<'a, R, D, const NOUT: usize, const NIN: usize> {
     pub(super) space: &'a BoundDynamicFusionMapSpace<R>,
     pub(super) tensor: &'a TensorMap<D, NOUT, NIN>,
 }
 
+#[cfg(test)]
 /// Owned typed tensor that retains the provider authority for its fusion
 /// space. Provider-sensitive operations consume this type or its borrowed
 /// view instead of accepting an independently supplied rule.
@@ -36,11 +39,12 @@ pub struct BoundTensorMapRef<'a, R, D, const NOUT: usize, const NIN: usize> {
 /// }
 /// ```
 #[derive(Clone, Debug)]
-pub struct BoundTensorMap<R, D, const NOUT: usize, const NIN: usize> {
+pub(crate) struct BoundTensorMap<R, D, const NOUT: usize, const NIN: usize> {
     pub(super) space: BoundDynamicFusionMapSpace<R>,
     pub(super) tensor: TensorMap<D, NOUT, NIN>,
 }
 
+#[cfg(test)]
 impl<R, D, const NOUT: usize, const NIN: usize> BoundTensorMap<R, D, NOUT, NIN>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -57,10 +61,6 @@ where
 
     pub fn space(&self) -> &BoundDynamicFusionMapSpace<R> {
         &self.space
-    }
-
-    pub fn provider(&self) -> &R {
-        self.space.provider()
     }
 
     pub fn tensor(&self) -> &TensorMap<D, NOUT, NIN> {
@@ -83,6 +83,7 @@ where
     }
 }
 
+#[cfg(test)]
 impl<R, D, const NOUT: usize, const NIN: usize> std::ops::Deref
     for BoundTensorMap<R, D, NOUT, NIN>
 {
@@ -93,6 +94,7 @@ impl<R, D, const NOUT: usize, const NIN: usize> std::ops::Deref
     }
 }
 
+#[cfg(test)]
 impl<'a, R, D, const NOUT: usize, const NIN: usize> BoundTensorMapRef<'a, R, D, NOUT, NIN>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -103,10 +105,6 @@ where
 
     pub fn tensor(&self) -> &'a TensorMap<D, NOUT, NIN> {
         self.tensor
-    }
-
-    pub fn data(&self) -> &'a [D] {
-        self.tensor.data()
     }
 
     pub(crate) fn dynamic(&self) -> BoundDynamicTensorRef<'_, R, D> {
@@ -210,6 +208,7 @@ where
     BoundDynFactor::from_bound(space, data, nout, nin)
 }
 
+#[cfg(test)]
 /// Rank-erases the fusion space of a typed tensor (shared handles, no copy).
 pub(crate) fn dyn_space_of<D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
@@ -221,6 +220,7 @@ pub(crate) fn dyn_space_of<D, const NOUT: usize, const NIN: usize>(
     ))
 }
 
+#[cfg(test)]
 /// Rebuilds a typed tensor from a dynamic factor: the subblock structure and
 /// hom space are shared as-is (identical layout by construction), only the
 /// dense bookkeeping dims are recomputed as per-axis degeneracy totals.
@@ -272,6 +272,7 @@ where
         .map_err(OperationError::from_core_preserving_context)
 }
 
+#[cfg(test)]
 pub(crate) fn typed_from_bound_factor<R, D, const NOUT: usize, const NIN: usize>(
     factor: BoundDynFactor<R, D>,
 ) -> Result<BoundTensorMap<R, D, NOUT, NIN>, OperationError>

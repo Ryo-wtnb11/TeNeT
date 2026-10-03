@@ -1860,7 +1860,7 @@ where
                 .as_ref()
                 .to_vec()
         };
-        tenet_matrixalgebra::scale_axis_by_spectrum_mapped(
+        tenet_matrixalgebra::seam::scale_axis_by_spectrum_mapped(
             self.logical_space().space(),
             &mut data,
             axis,
@@ -1996,7 +1996,10 @@ where
         let compact = match &self.repr {
             TypedTensorRepr::Owned(body) => match body.data.as_ref() {
                 TypedData::Diagonal(spectrum) => {
-                    tenet_matrixalgebra::svd_compact_diagonal_factors_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::seam::svd_compact_diagonal_factors_dyn(
+                        &body.space,
+                        spectrum,
+                    )?
                 }
                 TypedData::Dense(_) => None,
             },
@@ -2010,14 +2013,14 @@ where
             let mut dense = self.runtime.lease_dense();
             match &self.repr {
                 TypedTensorRepr::Adjoint(view) => {
-                    tenet_matrixalgebra::svd_compact_adjoint_factors_dyn(
+                    tenet_matrixalgebra::seam::svd_compact_adjoint_factors_dyn(
                         dense.dense(),
                         &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
                     )?
                 }
                 TypedTensorRepr::Owned(_) => {
                     let (bound_space, bound_payload) = self.bound_payload()?;
-                    tenet_matrixalgebra::svd_compact_factors_dyn(
+                    tenet_matrixalgebra::seam::svd_compact_factors_dyn(
                         dense.dense(),
                         &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
                     )?
@@ -2056,7 +2059,10 @@ where
                 // A diagonal input has square sectors, so compact and full
                 // factor spaces coincide, including their nondual bond W.
                 if let Some((u, vh, mut spectrum)) =
-                    tenet_matrixalgebra::svd_compact_diagonal_factors_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::seam::svd_compact_diagonal_factors_dyn(
+                        &body.space,
+                        spectrum,
+                    )?
                 {
                     return Ok(Svd {
                         u: self.wrap_bound_factor(u),
@@ -2068,13 +2074,15 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let factors = match &self.repr {
-            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_full_adjoint_factors_dyn(
-                dense.dense(),
-                &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
-            )?,
+            TypedTensorRepr::Adjoint(view) => {
+                tenet_matrixalgebra::seam::svd_full_adjoint_factors_dyn(
+                    dense.dense(),
+                    &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
+                )?
+            }
             TypedTensorRepr::Owned(_) => {
                 let (bound_space, bound_payload) = self.bound_payload()?;
-                tenet_matrixalgebra::svd_full_factors_dyn(
+                tenet_matrixalgebra::seam::svd_full_factors_dyn(
                     dense.dense(),
                     &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
                 )?
@@ -2082,7 +2090,7 @@ where
         };
         let (u, vh, mut spectrum, row_dimensions, col_dimensions) = factors.into_parts();
         if full_svd_compact_bond(&u, &vh, &spectrum) {
-            let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(
+            let space = tenet_matrixalgebra::seam::diagonal_bond_bound_space_like(
                 self.logical_space(),
                 &spectrum,
             )?;
@@ -2094,7 +2102,7 @@ where
                 });
             }
         }
-        let s = tenet_matrixalgebra::rectangular_diagonal_bond_tensor(
+        let s = tenet_matrixalgebra::seam::rectangular_diagonal_bond_tensor(
             self.logical_space(),
             &spectrum,
             &row_dimensions,
@@ -2129,7 +2137,7 @@ where
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                 if let Some(raw) =
-                    tenet_matrixalgebra::svd_vals_compact_diagonal_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(&body.space, spectrum)?
                 {
                     return self.decode_spectrum(raw);
                 }
@@ -2139,13 +2147,13 @@ where
         // Singular values and coupled-sector ids are invariant under adjoint,
         // so an oriented input or logical-payload copy cannot change this output.
         let raw = match &self.repr {
-            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_vals_dyn(
+            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::seam::svd_vals_dyn(
                 dense.dense(),
                 &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
             )?,
             TypedTensorRepr::Owned(_) => {
                 let (bound_space, bound_payload) = self.bound_payload()?;
-                tenet_matrixalgebra::svd_vals_dyn(
+                tenet_matrixalgebra::seam::svd_vals_dyn(
                     dense.dense(),
                     &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
                 )?
@@ -2164,7 +2172,7 @@ where
         let TypedData::Diagonal(spectrum) = body.data.as_ref() else {
             return None;
         };
-        let Qr { q, r } = tenet_matrixalgebra::qr_diagonal_dyn(&body.space, spectrum)?;
+        let Qr { q, r } = tenet_matrixalgebra::seam::qr_diagonal_dyn(&body.space, spectrum)?;
         let wrap = |values| Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::diagonal(body.space.clone(), values)),
@@ -2204,7 +2212,7 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let Qr { q, r } = tenet_matrixalgebra::qr_compact_dyn(
+        let Qr { q, r } = tenet_matrixalgebra::seam::qr_compact_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
@@ -2242,7 +2250,7 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let Qr { q, r } = tenet_matrixalgebra::qr_full_dyn(
+        let Qr { q, r } = tenet_matrixalgebra::seam::qr_full_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
@@ -2282,7 +2290,7 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let Lq { l, q } = tenet_matrixalgebra::lq_compact_dyn(
+        let Lq { l, q } = tenet_matrixalgebra::seam::lq_compact_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
@@ -2323,7 +2331,7 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let Lq { l, q } = tenet_matrixalgebra::lq_full_dyn(
+        let Lq { l, q } = tenet_matrixalgebra::seam::lq_full_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
@@ -2382,7 +2390,7 @@ where
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                 if let Some(out) =
-                    tenet_matrixalgebra::left_null_diagonal_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::seam::left_null_diagonal_dyn(&body.space, spectrum)?
                 {
                     return Ok(self.wrap_bound_factor(out));
                 }
@@ -2390,7 +2398,7 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let out = tenet_matrixalgebra::left_null_dyn(
+        let out = tenet_matrixalgebra::seam::left_null_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
@@ -2431,7 +2439,7 @@ where
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                 if let Some(out) =
-                    tenet_matrixalgebra::right_null_diagonal_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::seam::right_null_diagonal_dyn(&body.space, spectrum)?
                 {
                     return Ok(self.wrap_bound_factor(out));
                 }
@@ -2439,7 +2447,7 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let out = tenet_matrixalgebra::right_null_dyn(
+        let out = tenet_matrixalgebra::seam::right_null_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
@@ -2476,7 +2484,10 @@ where
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                 if let Some(LeftPolar { w, p }) =
-                    tenet_matrixalgebra::left_polar_diagonal_spectra_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::seam::left_polar_diagonal_spectra_dyn(
+                        &body.space,
+                        spectrum,
+                    )?
                 {
                     return Ok(LeftPolar {
                         w: self.with_spectrum(w),
@@ -2488,7 +2499,7 @@ where
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let mut dense = self.runtime.lease_dense();
             let mut lease = self.runtime.lease_context()?;
-            let LeftPolar { w, p } = tenet_matrixalgebra::left_polar_adjoint_parent_dyn(
+            let LeftPolar { w, p } = tenet_matrixalgebra::seam::left_polar_adjoint_parent_dyn(
                 dense.dense(),
                 lease.context().multiplicity_free_lane::<D>()?,
                 &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
@@ -2504,7 +2515,7 @@ where
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let LeftPolar { w, p } = tenet_matrixalgebra::left_polar_dyn(
+        let LeftPolar { w, p } = tenet_matrixalgebra::seam::left_polar_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>()?,
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
@@ -2542,7 +2553,10 @@ where
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                 if let Some(RightPolar { p, wh }) =
-                    tenet_matrixalgebra::right_polar_diagonal_spectra_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::seam::right_polar_diagonal_spectra_dyn(
+                        &body.space,
+                        spectrum,
+                    )?
                 {
                     return Ok(RightPolar {
                         p: self.with_spectrum(p),
@@ -2554,11 +2568,12 @@ where
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let mut dense = self.runtime.lease_dense();
             let mut lease = self.runtime.lease_context()?;
-            let RightPolar { p, wh: w } = tenet_matrixalgebra::right_polar_adjoint_parent_dyn(
-                dense.dense(),
-                lease.context().multiplicity_free_lane::<D>()?,
-                &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
-            )?;
+            let RightPolar { p, wh: w } =
+                tenet_matrixalgebra::seam::right_polar_adjoint_parent_dyn(
+                    dense.dense(),
+                    lease.context().multiplicity_free_lane::<D>()?,
+                    &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
+                )?;
             return Ok(RightPolar {
                 p: self.wrap_bound_factor(p),
                 wh: self.wrap_bound_factor(w),
@@ -2568,7 +2583,7 @@ where
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let RightPolar { p, wh: w } = tenet_matrixalgebra::right_polar_dyn(
+        let RightPolar { p, wh: w } = tenet_matrixalgebra::seam::right_polar_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>()?,
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
@@ -2605,7 +2620,7 @@ where
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                 if let Some(out) =
-                    tenet_matrixalgebra::eigh_full_diagonal_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::seam::eigh_full_diagonal_dyn(&body.space, spectrum)?
                 {
                     let (v, mut eigenvalues) = out.into_parts();
                     return Ok(Eigh {
@@ -2622,7 +2637,7 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let out = tenet_matrixalgebra::eigh_full_dyn(
+        let out = tenet_matrixalgebra::seam::eigh_full_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
@@ -2655,7 +2670,7 @@ where
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                 if let Some(raw) =
-                    tenet_matrixalgebra::eigh_vals_diagonal_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::seam::eigh_vals_diagonal_dyn(&body.space, spectrum)?
                 {
                     return self.decode_spectrum(raw);
                 }
@@ -2668,7 +2683,7 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let raw = tenet_matrixalgebra::eigh_vals_dyn(
+        let raw = tenet_matrixalgebra::seam::eigh_vals_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
@@ -2712,7 +2727,7 @@ where
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                 if let Some(out) =
-                    tenet_matrixalgebra::eig_full_diagonal_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::seam::eig_full_diagonal_dyn(&body.space, spectrum)?
                 {
                     let (v, mut eigenvalues) = out.into_parts();
                     return Ok(Eig {
@@ -2734,7 +2749,7 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let out = tenet_matrixalgebra::eig_full_dyn(
+        let out = tenet_matrixalgebra::seam::eig_full_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
@@ -2771,7 +2786,7 @@ where
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                 if let Some(raw) =
-                    tenet_matrixalgebra::eig_vals_diagonal_dyn(&body.space, spectrum)?
+                    tenet_matrixalgebra::seam::eig_vals_diagonal_dyn(&body.space, spectrum)?
                 {
                     return self.decode_spectrum(raw);
                 }
@@ -2784,7 +2799,7 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let raw = tenet_matrixalgebra::eig_vals_dyn(
+        let raw = tenet_matrixalgebra::seam::eig_vals_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
@@ -2813,7 +2828,7 @@ where
             .as_ref()
             .and_then(Self::owned_body)
             .unwrap_or_else(|| self.owned_body().expect("owned representation"));
-        let out = tenet_matrixalgebra::exp_dyn(
+        let out = tenet_matrixalgebra::seam::exp_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>()?,
             &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())?,
@@ -2841,7 +2856,7 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let (bound_space, bound_payload) = self.bound_payload()?;
-        let out = tenet_matrixalgebra::inv_direct_dyn(
+        let out = tenet_matrixalgebra::seam::inv_direct_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
         )?;
@@ -2916,7 +2931,7 @@ where
         let (lhs_space, lhs_payload) = lhs.bound_payload()?;
         let (rhs_space, rhs_payload) = rhs.bound_payload()?;
         let mut dense = self.runtime.lease_dense();
-        let out = tenet_matrixalgebra::solve_left_direct_dyn(
+        let out = tenet_matrixalgebra::seam::solve_left_direct_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(lhs_space, &lhs_payload)?,
             &BoundDynamicTensorRef::try_new(rhs_space, &rhs_payload)?,
@@ -2966,7 +2981,7 @@ where
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
         let out = match &self.repr {
-            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::pinv_adjoint_parent_dyn(
+            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::seam::pinv_adjoint_parent_dyn(
                 dense.dense(),
                 lease.context().multiplicity_free_lane::<D>()?,
                 &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
@@ -2975,7 +2990,7 @@ where
             .map_err(pinv_seam_error)?,
             TypedTensorRepr::Owned(_) => {
                 let (bound_space, bound_payload) = self.bound_payload()?;
-                tenet_matrixalgebra::pinv_dyn(
+                tenet_matrixalgebra::seam::pinv_dyn(
                     dense.dense(),
                     lease.context().multiplicity_free_lane::<D>()?,
                     &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,

@@ -300,7 +300,7 @@ where
 
 /// The bond-truncation decision, selected by a provider-owned mode.
 ///
-/// Both arms call `tenet_matrixalgebra::decide_bond_truncation*`, the one
+/// Both arms call `tenet_matrixalgebra::seam::decide_bond_truncation*`, the one
 /// adapter over `select_truncation` that supplies the quantum-dimension weight
 /// and TensorKit's sector order.
 #[doc(hidden)]

@@ -293,7 +293,8 @@ pub use tenet_matrixalgebra::{Truncation, TruncationError, TruncationSpace};
 /// expansion and projection name it as a bound.
 pub use tenet_tensors::RecouplingCoefficientAction;
 
-use tenet_matrixalgebra::{rescaled_power_norm, BoundDynFactor, CheckedGenericFactorPlanError};
+use tenet_matrixalgebra::seam::{rescaled_power_norm, CheckedGenericFactorPlanError};
+use tenet_matrixalgebra::BoundDynFactor;
 
 use crate::runtime::{Ctx, Ctxs};
 pub use crate::tensor_core::CheckedGenericTensorProductError;

@@ -95,7 +95,7 @@ where
         V: SpectrumMagnitude,
     {
         // Magnitude-based, as MatrixAlgebraKit `findtruncated` is.
-        tenet_matrixalgebra::decide_bond_truncation(provider, spectra, truncation)
+        tenet_matrixalgebra::seam::decide_bond_truncation(provider, spectra, truncation)
             .map_err(Error::from)
     }
 }
@@ -115,8 +115,10 @@ where
     where
         V: SpectrumMagnitude,
     {
-        tenet_matrixalgebra::decide_bond_truncation_generic_checked(provider, spectra, truncation)
-            .map_err(Into::into)
+        tenet_matrixalgebra::seam::decide_bond_truncation_generic_checked(
+            provider, spectra, truncation,
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -502,11 +504,11 @@ where
             }
         }
         let source = tensor.logical_space();
-        let codomain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+        let codomain = tenet_matrixalgebra::seam::coupled_sector_block_dimensions_generic_checked(
             source.space().homspace().codomain(),
             source.provider(),
         )?;
-        let domain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+        let domain = tenet_matrixalgebra::seam::coupled_sector_block_dimensions_generic_checked(
             source.space().homspace().domain(),
             source.provider(),
         )?;
@@ -530,7 +532,7 @@ where
             .owned_body()
             .expect("checked Generic inverse input is owned after lazy dispatch");
         let mut dense = tensor.runtime.lease_dense();
-        let factor = tenet_matrixalgebra::inv_direct_into_dyn(
+        let factor = tenet_matrixalgebra::seam::inv_direct_into_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())
                 .map_err(Error::from)?,
@@ -574,11 +576,11 @@ where
         }
 
         let lhs_space = tensor.logical_space();
-        let codomain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+        let codomain = tenet_matrixalgebra::seam::coupled_sector_block_dimensions_generic_checked(
             lhs_space.space().homspace().codomain(),
             lhs_space.provider(),
         )?;
-        let domain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+        let domain = tenet_matrixalgebra::seam::coupled_sector_block_dimensions_generic_checked(
             lhs_space.space().homspace().domain(),
             lhs_space.provider(),
         )?;
@@ -668,7 +670,7 @@ where
         }
         TypedData::Dense(values) => {
             let mut data = values.clone();
-            tenet_matrixalgebra::scale_axis_by_spectrum_mapped(
+            tenet_matrixalgebra::seam::scale_axis_by_spectrum_mapped(
                 output.space(),
                 &mut data,
                 Some(0),
@@ -705,7 +707,7 @@ where
     let lhs_body = lhs.owned_body().expect("uncached solve lhs is owned");
     let rhs_body = rhs.owned_body().expect("uncached solve rhs is owned");
     let mut dense = tensor.runtime.lease_dense();
-    tenet_matrixalgebra::solve_left_direct_into_dyn(
+    tenet_matrixalgebra::seam::solve_left_direct_into_dyn(
         dense.dense(),
         &BoundDynamicTensorRef::try_new(
             &divisor_authority,
@@ -851,7 +853,7 @@ where
             }
         }
         let mut dense = tensor.runtime.lease_dense();
-        let factor = tenet_matrixalgebra::pinv_direct_into_dyn(
+        let factor = tenet_matrixalgebra::seam::pinv_direct_into_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())
                 .map_err(Error::from)?,
@@ -885,14 +887,14 @@ where
             .expect("checked Generic left-null input is owned after lazy dispatch");
         let dimensions = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
             if is_diagonal_bond_space(body.space.space()) {
-                match tenet_matrixalgebra::left_null_diagonal_dyn_checked_generic(
+                match tenet_matrixalgebra::seam::left_null_diagonal_dyn_checked_generic(
                     &body.space,
                     spectrum,
                 )? {
-                    tenet_matrixalgebra::CheckedDiagonalNullFactor::Direct(factor) => {
+                    tenet_matrixalgebra::seam::CheckedDiagonalNullFactor::Direct(factor) => {
                         return Ok(wrap_factor_on(&tensor.runtime, factor));
                     }
-                    tenet_matrixalgebra::CheckedDiagonalNullFactor::Fallback(dimensions) => {
+                    tenet_matrixalgebra::seam::CheckedDiagonalNullFactor::Fallback(dimensions) => {
                         dimensions
                     }
                 }
@@ -905,7 +907,7 @@ where
         let payload = body.materialized_dense_data();
         let input = BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
         let mut dense = tensor.runtime.lease_dense();
-        let factor = tenet_matrixalgebra::left_null_dyn_checked_generic_with_dimensions(
+        let factor = tenet_matrixalgebra::seam::left_null_dyn_checked_generic_with_dimensions(
             dense.dense(),
             &input,
             dimensions,
@@ -927,14 +929,14 @@ where
             .expect("checked Generic right-null input is owned after lazy dispatch");
         let dimensions = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
             if is_diagonal_bond_space(body.space.space()) {
-                match tenet_matrixalgebra::right_null_diagonal_dyn_checked_generic(
+                match tenet_matrixalgebra::seam::right_null_diagonal_dyn_checked_generic(
                     &body.space,
                     spectrum,
                 )? {
-                    tenet_matrixalgebra::CheckedDiagonalNullFactor::Direct(factor) => {
+                    tenet_matrixalgebra::seam::CheckedDiagonalNullFactor::Direct(factor) => {
                         return Ok(wrap_factor_on(&tensor.runtime, factor));
                     }
-                    tenet_matrixalgebra::CheckedDiagonalNullFactor::Fallback(dimensions) => {
+                    tenet_matrixalgebra::seam::CheckedDiagonalNullFactor::Fallback(dimensions) => {
                         dimensions
                     }
                 }
@@ -947,7 +949,7 @@ where
         let payload = body.materialized_dense_data();
         let input = BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
         let mut dense = tensor.runtime.lease_dense();
-        let factor = tenet_matrixalgebra::right_null_dyn_checked_generic_with_dimensions(
+        let factor = tenet_matrixalgebra::seam::right_null_dyn_checked_generic_with_dimensions(
             dense.dense(),
             &input,
             dimensions,
@@ -972,13 +974,13 @@ where
             TypedTensorRepr::Owned(body) => {
                 if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                     if is_diagonal_bond_space(body.space.space()) {
-                        if let Some(tenet_matrixalgebra::CheckedCompactPolarFactors {
+                        if let Some(tenet_matrixalgebra::seam::CheckedCompactPolarFactors {
                             w_space,
                             p_space,
                             phase,
                             magnitude,
                         }) =
-                            tenet_matrixalgebra::left_polar_diagonal_spectra_dyn_checked_generic(
+                            tenet_matrixalgebra::seam::left_polar_diagonal_spectra_dyn_checked_generic(
                                 &body.space,
                                 spectrum,
                             )?
@@ -994,8 +996,10 @@ where
                 let input =
                     BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
                 let mut dense = tensor.runtime.lease_dense();
-                let LeftPolar { w, p } =
-                    tenet_matrixalgebra::left_polar_dyn_checked_generic(dense.dense(), &input)?;
+                let LeftPolar { w, p } = tenet_matrixalgebra::seam::left_polar_dyn_checked_generic(
+                    dense.dense(),
+                    &input,
+                )?;
                 Ok(LeftPolar {
                     w: wrap_factor_on(&tensor.runtime, w),
                     p: wrap_factor_on(&tensor.runtime, p),
@@ -1006,7 +1010,7 @@ where
                 let input = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
                     .map_err(Error::from)?;
                 let RightPolar { p, wh: w } =
-                    tenet_matrixalgebra::left_polar_adjoint_parent_dyn_checked_generic(
+                    tenet_matrixalgebra::seam::left_polar_adjoint_parent_dyn_checked_generic(
                         dense.dense(),
                         &input,
                     )?;
@@ -1030,13 +1034,13 @@ where
             TypedTensorRepr::Owned(body) => {
                 if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                     if is_diagonal_bond_space(body.space.space()) {
-                        if let Some(tenet_matrixalgebra::CheckedCompactPolarFactors {
+                        if let Some(tenet_matrixalgebra::seam::CheckedCompactPolarFactors {
                             w_space,
                             p_space,
                             phase,
                             magnitude,
                         }) =
-                            tenet_matrixalgebra::right_polar_diagonal_spectra_dyn_checked_generic(
+                            tenet_matrixalgebra::seam::right_polar_diagonal_spectra_dyn_checked_generic(
                                 &body.space,
                                 spectrum,
                             )?
@@ -1053,7 +1057,10 @@ where
                     BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
                 let mut dense = tensor.runtime.lease_dense();
                 let RightPolar { p, wh: w } =
-                    tenet_matrixalgebra::right_polar_dyn_checked_generic(dense.dense(), &input)?;
+                    tenet_matrixalgebra::seam::right_polar_dyn_checked_generic(
+                        dense.dense(),
+                        &input,
+                    )?;
                 Ok(RightPolar {
                     p: wrap_factor_on(&tensor.runtime, p),
                     wh: wrap_factor_on(&tensor.runtime, w),
@@ -1064,7 +1071,7 @@ where
                 let input = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
                     .map_err(Error::from)?;
                 let LeftPolar { w, p } =
-                    tenet_matrixalgebra::right_polar_adjoint_parent_dyn_checked_generic(
+                    tenet_matrixalgebra::seam::right_polar_adjoint_parent_dyn_checked_generic(
                         dense.dense(),
                         &input,
                     )?;
@@ -1118,7 +1125,7 @@ where
             }
         }
         let mut dense = tensor.runtime.lease_dense();
-        let factor = tenet_matrixalgebra::exp_pade13_direct_into_dyn(
+        let factor = tenet_matrixalgebra::seam::exp_pade13_direct_into_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data().as_ref())
                 .map_err(Error::from)?,
@@ -1212,7 +1219,11 @@ where
         };
         if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
             if let Some((l_space, q_space, phases, magnitudes)) =
-                tenet_matrixalgebra::lq_diagonal_dyn_checked_generic(&body.space, spectrum, true)?
+                tenet_matrixalgebra::seam::lq_diagonal_dyn_checked_generic(
+                    &body.space,
+                    spectrum,
+                    true,
+                )?
             {
                 return Ok(Lq {
                     l: tensor.with_spectrum_on(l_space, magnitudes),
@@ -1224,7 +1235,8 @@ where
         let payload = body.materialized_dense_data();
         let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let Lq { l, q } = tenet_matrixalgebra::lq_full_dyn_checked_generic(dense.dense(), &input)?;
+        let Lq { l, q } =
+            tenet_matrixalgebra::seam::lq_full_dyn_checked_generic(dense.dense(), &input)?;
         Ok(Lq {
             l: wrap_factor_on(&tensor.runtime, l),
             q: wrap_factor_on(&tensor.runtime, q),
@@ -1601,7 +1613,7 @@ where
         coupled: SectorId,
     ) -> Result<usize, Self::FacadeError> {
         Ok(
-            tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+            tenet_matrixalgebra::seam::coupled_sector_block_dimensions_generic_checked(
                 product, provider,
             )?
             .get(&coupled)

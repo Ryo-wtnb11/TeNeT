@@ -651,7 +651,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     V: Copy,
 {
-    let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(authority, spectrum)?;
+    let space = tenet_matrixalgebra::seam::diagonal_bond_bound_space_like(authority, spectrum)?;
     Ok(diagonal_factor_on_bound(
         runtime, space, spectrum, to_scalar,
     ))
@@ -673,7 +673,8 @@ where
     E: TensorScalar,
     V: Copy,
 {
-    let space = tenet_matrixalgebra::diagonal_bond_bound_space_generic_checked(provider, spectrum)?;
+    let space =
+        tenet_matrixalgebra::seam::diagonal_bond_bound_space_generic_checked(provider, spectrum)?;
     Ok(diagonal_factor_on_bound(
         runtime, space, spectrum, to_scalar,
     ))
@@ -794,7 +795,7 @@ pub(super) fn wrap_factor_on<R, E>(
 /// The dense operand is scaled into a fresh owned buffer and the spectrum is
 /// added onto that buffer's per-block diagonal, which is the only place a bond
 /// space is non-zero. Same block addressing as
-/// [`tenet_matrixalgebra::diagonal_bond_data`], which is what put the values
+/// [`tenet_matrixalgebra::seam::diagonal_bond_data`], which is what put the values
 /// there in the first place.
 pub(super) fn scatter_spectrum<D>(
     space: &DynamicFusionMapSpace,
@@ -878,7 +879,7 @@ where
 /// compact-*destination* call sites it cannot fail — every
 /// [`TypedData::Diagonal`] payload this module can produce sits on a space
 /// admitted by [`TensorMap::diagonal`] or built by [`diagonal_factor_on`]
-/// through [`tenet_matrixalgebra::diagonal_bond_bound_space_like`], which is a
+/// through [`tenet_matrixalgebra::seam::diagonal_bond_bound_space_like`], which is a
 /// bond space by construction. Diagonal QR/LQ preserve that exact input space,
 /// and the operations that preserve the payload
 /// ([`TensorMap::scale`], [`TensorMap::axpby`], [`TensorMap::adjoint`],

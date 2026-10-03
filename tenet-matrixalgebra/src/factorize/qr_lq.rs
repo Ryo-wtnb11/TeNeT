@@ -329,6 +329,7 @@ pub(super) fn scale_row<D: FactorScalar>(
     }
 }
 
+#[cfg(test)]
 /// Full QR `t = Q * R` (MatrixAlgebraKit `qr_full`): per sector `Q` is the
 /// square `m x m` unitary and `R` the upper-trapezoidal `m x n`, obtained
 /// from one economy QR, augmenting with identity columns only when `m > n`.
@@ -337,7 +338,7 @@ pub(super) fn scale_row<D: FactorScalar>(
     clippy::type_complexity,
     reason = "static-rank factors differ in rank, so the named result spells both factor types"
 )]
-pub fn qr_full<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn qr_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<Qr<BoundTensorMap<R, D, NOUT, 1>, BoundTensorMap<R, D, 1, NIN>>, OperationError>
@@ -405,6 +406,7 @@ where
     }))
 }
 
+#[cfg(test)]
 /// Full LQ `t = L * Q` (MatrixAlgebraKit `lq_full`): per sector `L` is the
 /// lower-trapezoidal `m x n` and `Q` the square `n x n` unitary, via the full
 /// QR of the adjoint sector matrices.
@@ -413,7 +415,7 @@ where
     clippy::type_complexity,
     reason = "static-rank factors differ in rank, so the named result spells both factor types"
 )]
-pub fn lq_full<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn lq_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<Lq<BoundTensorMap<R, D, NOUT, 1>, BoundTensorMap<R, D, 1, NIN>>, OperationError>
@@ -482,6 +484,7 @@ where
     }))
 }
 
+#[cfg(test)]
 /// Compact QR `t = Q * R` (MatrixAlgebraKit `qr_compact`):
 /// `Q : codomain <- W` has orthonormal columns per coupled sector and
 /// `R : W <- domain` with per-sector bond `min(rows, cols)`. The
@@ -491,7 +494,7 @@ where
     clippy::type_complexity,
     reason = "static-rank factors differ in rank, so the named result spells both factor types"
 )]
-pub fn qr_compact<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn qr_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<Qr<BoundTensorMap<R, D, NOUT, 1>, BoundTensorMap<R, D, 1, NIN>>, OperationError>
@@ -619,6 +622,7 @@ where
     Ok((left, right))
 }
 
+#[cfg(test)]
 /// Compact LQ `t = L * Q` (MatrixAlgebraKit `lq_compact`, via the QR of the
 /// transposed sector matrices): `Q : W <- domain` has orthonormal rows per
 /// coupled sector and `L : codomain <- W`. The positive-diagonal gauge is
@@ -628,7 +632,7 @@ where
     clippy::type_complexity,
     reason = "static-rank factors differ in rank, so the named result spells both factor types"
 )]
-pub fn lq_compact<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn lq_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<Lq<BoundTensorMap<R, D, NOUT, 1>, BoundTensorMap<R, D, 1, NIN>>, OperationError>

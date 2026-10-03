@@ -25,6 +25,7 @@ impl HermitianReal for f64 {
     }
 }
 
+#[cfg(test)]
 /// Full (untruncated) Hermitian eigendecomposition `t = V * D * Vh`.
 ///
 /// Requires an endomorphism (`codomain == domain`) with Hermitian coupled
@@ -33,7 +34,7 @@ impl HermitianReal for f64 {
 /// `eigenvalues` keeps the signed values in that order and `D : W <- W` is
 /// their diagonal tensor.
 #[derive(Clone, Debug)]
-pub struct EighFull<R, D, const NOUT: usize, const NIN: usize> {
+pub(crate) struct EighFull<R, D, const NOUT: usize, const NIN: usize> {
     pub d: BoundTensorMap<R, D, 1, 1>,
     pub v: BoundTensorMap<R, D, NOUT, 1>,
     pub eigenvalues: Vec<SectorSpectrum>,
@@ -64,13 +65,14 @@ impl<R, D> EighFullDyn<R, D> {
     }
 }
 
+#[cfg(test)]
 /// Full Hermitian eigendecomposition through the device boundary.
 ///
 /// Before any dense call, every coupled-sector block `A` must satisfy
 /// `||(A - A†)/2||_F <= 64 * eps(real(D)) * ||A||_F`, where `real(D)` is
 /// the real component type of `D`. This fixed machine-precision multiple is
 /// not currently user-configurable in this API.
-pub fn eigh_full<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn eigh_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<EighFull<R, D, NOUT, NIN>, OperationError>
@@ -431,11 +433,12 @@ pub(crate) fn eigenvector_gauge<D: FactorScalar>(
     }
 }
 
+#[cfg(test)]
 /// Full general eigendecomposition `t = V * D * V^-1` (MatrixAlgebraKit
 /// `eig_full`): always complex, requires an endomorphism. Bond states are
 /// stored descending by `|eigenvalue|` per sector.
 #[derive(Clone, Debug)]
-pub struct EigFull<R, D: FactorScalar, const NOUT: usize, const NIN: usize> {
+pub(crate) struct EigFull<R, D: FactorScalar, const NOUT: usize, const NIN: usize> {
     pub d: BoundTensorMap<R, D::Eig, 1, 1>,
     pub v: BoundTensorMap<R, D::Eig, NOUT, 1>,
     pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
@@ -463,8 +466,9 @@ impl<R, D: FactorScalar> EigFullDyn<R, D> {
     }
 }
 
+#[cfg(test)]
 /// Full general eigendecomposition through the device boundary.
-pub fn eig_full<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn eig_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<EigFull<R, D, NOUT, NIN>, OperationError>
@@ -843,12 +847,13 @@ where
     Ok(Some(result))
 }
 
+#[cfg(test)]
 /// All Hermitian eigenvalues per coupled sector, descending by magnitude
 /// (MatrixAlgebraKit `eigh_vals`).
 ///
 /// Uses the same fixed relative-Frobenius Hermiticity criterion as
 /// [`eigh_full`]; this API does not expose `atol` or `rtol`.
-pub fn eigh_vals<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn eigh_vals<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<Vec<SectorSpectrum>, OperationError>
@@ -910,9 +915,10 @@ where
     Ok(eigenvalues)
 }
 
+#[cfg(test)]
 /// All general eigenvalues per coupled sector, descending by magnitude
 /// (MatrixAlgebraKit `eig_vals`).
-pub fn eig_vals<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn eig_vals<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<Vec<SectorSpectrum<Complex64>>, OperationError>

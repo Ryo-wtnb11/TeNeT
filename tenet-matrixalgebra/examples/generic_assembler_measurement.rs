@@ -23,7 +23,7 @@ use tenet_core::{
     RuleIdentity, SectorId, SectorLeg, SectorVec, TensorMapSpace,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite};
-use tenet_matrixalgebra::{
+use tenet_matrixalgebra::seam::{
     svd_vals_dyn_checked_generic, BoundDynamicTensorRef, CheckedGenericFactorPlanError,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
