@@ -280,6 +280,7 @@ fn tenet_core_exports_exactly_the_pinned_names() {
         "Z2Irrep",
         "ZNFusionRule",
         "ZNIrrep",
+        "axes",
         "block_structure_intern_cache_info",
         "complete_hom_space_structure_cache_info",
         "fusion_tree_layout_cache_info",

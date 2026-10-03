@@ -11,7 +11,7 @@ pub(crate) fn linearize_tree_pair_permutation(
         Vec::with_capacity(codomain_permutation.len() + domain_permutation.len());
     original_permutation.extend_from_slice(codomain_permutation);
     original_permutation.extend_from_slice(domain_permutation);
-    validate_permutation(&original_permutation, total_rank)?;
+    validate_permutation_inline(&original_permutation, total_rank)?;
 
     let mut linearized = Vec::with_capacity(total_rank);
     linearized.extend(
@@ -25,7 +25,7 @@ pub(crate) fn linearize_tree_pair_permutation(
             .rev()
             .map(|&axis| linearize_tree_pair_axis(axis, codomain_rank, domain_rank)),
     );
-    validate_permutation(&linearized, total_rank)?;
+    validate_permutation_inline(&linearized, total_rank)?;
     Ok(linearized)
 }
 
@@ -43,27 +43,16 @@ pub(super) fn validate_tree_pair_axis_map_inline(
             total_rank,
         ));
     }
-    let mut seen = SmallVec::<[u64; 2]>::new();
-    seen.resize(total_rank.div_ceil(u64::BITS as usize), 0);
+    let mut seen = crate::axes::AxisMask::new(total_rank);
     for position in 0..total_rank {
         let axis = raw_tree_pair_axis_at(codomain_permutation, domain_permutation, position);
-        if axis >= total_rank {
+        if seen.insert(axis).is_err() {
             return Err(invalid_tree_pair_axis_map(
                 codomain_permutation,
                 domain_permutation,
                 total_rank,
             ));
         }
-        let word = axis / u64::BITS as usize;
-        let bit = 1u64 << (axis % u64::BITS as usize);
-        if seen[word] & bit != 0 {
-            return Err(invalid_tree_pair_axis_map(
-                codomain_permutation,
-                domain_permutation,
-                total_rank,
-            ));
-        }
-        seen[word] |= bit;
     }
     Ok(())
 }
@@ -228,22 +217,7 @@ pub(crate) fn permutation_to_adjacent_swaps(
     permutation: &[usize],
     rank: usize,
 ) -> Result<Vec<usize>, CoreError> {
-    if permutation.len() != rank {
-        return Err(CoreError::InvalidPermutation {
-            permutation: permutation.to_vec(),
-            rank,
-        });
-    }
-    let mut seen = vec![false; rank];
-    for &axis in permutation {
-        if axis >= rank || seen[axis] {
-            return Err(CoreError::InvalidPermutation {
-                permutation: permutation.to_vec(),
-                rank,
-            });
-        }
-        seen[axis] = true;
-    }
+    validate_permutation_inline(permutation, rank)?;
 
     let mut work = permutation.to_vec();
     let mut swaps = Vec::new();
@@ -268,26 +242,6 @@ fn linearize_tree_pair_axis(axis: usize, codomain_rank: usize, domain_rank: usiz
     } else {
         domain_rank + 2 * codomain_rank - 1 - axis
     }
-}
-
-fn validate_permutation(permutation: &[usize], rank: usize) -> Result<(), CoreError> {
-    if permutation.len() != rank {
-        return Err(CoreError::InvalidPermutation {
-            permutation: permutation.to_vec(),
-            rank,
-        });
-    }
-    let mut seen = vec![false; rank];
-    for &axis in permutation {
-        if axis >= rank || seen[axis] {
-            return Err(CoreError::InvalidPermutation {
-                permutation: permutation.to_vec(),
-                rank,
-            });
-        }
-        seen[axis] = true;
-    }
-    Ok(())
 }
 
 pub(super) fn is_cyclic_permutation(permutation: &[usize]) -> bool {

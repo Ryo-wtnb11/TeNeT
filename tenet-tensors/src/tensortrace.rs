@@ -1157,11 +1157,11 @@ impl TensorTraceAxisPlan {
             });
         }
 
-        let mut seen = vec![false; src_rank];
+        let mut seen = tenet_core::axes::AxisMask::new(src_rank);
         mark_axes("trace output", axes.output_axes(), src_rank, &mut seen)?;
         mark_axes("trace lhs", axes.trace_lhs_axes(), src_rank, &mut seen)?;
         mark_axes("trace rhs", axes.trace_rhs_axes(), src_rank, &mut seen)?;
-        if seen.iter().any(|&axis_seen| !axis_seen) {
+        if !seen.is_full() {
             let mut all_axes = Vec::with_capacity(
                 axes.output_axes().len()
                     + axes.trace_lhs_axes().len()
@@ -2502,19 +2502,14 @@ fn mark_axes(
     tensor: &'static str,
     axes: &[usize],
     rank: usize,
-    seen: &mut [bool],
+    seen: &mut tenet_core::axes::AxisMask,
 ) -> Result<(), OperationError> {
-    for &axis in axes {
-        if axis >= rank || seen[axis] {
-            return Err(OperationError::InvalidAxisSet {
-                tensor,
-                axes: axes.to_vec(),
-                rank,
-            });
-        }
-        seen[axis] = true;
-    }
-    Ok(())
+    seen.insert_all(axes)
+        .map_err(|_| OperationError::InvalidAxisSet {
+            tensor,
+            axes: axes.to_vec(),
+            rank,
+        })
 }
 
 fn stride_to_isize(stride: usize) -> Result<isize, OperationError> {

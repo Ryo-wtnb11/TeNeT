@@ -25,12 +25,8 @@ pub(super) fn tensorcontract_descriptor<'a>(
 
     let lhs_seen = validate_axis_subset_inline(lhs_contracting_axes, lhs.rank())?;
     let rhs_seen = validate_axis_subset_inline(rhs_contracting_axes, rhs.rank())?;
-    let lhs_open_axes = (0..lhs.rank())
-        .filter(|&axis| !lhs_seen[axis])
-        .collect::<SmallVec<[usize; 8]>>();
-    let rhs_open_axes = (0..rhs.rank())
-        .filter(|&axis| !rhs_seen[axis])
-        .collect::<SmallVec<[usize; 8]>>();
+    let lhs_open_axes = lhs_seen.complement().collect::<SmallVec<[usize; 8]>>();
+    let rhs_open_axes = rhs_seen.complement().collect::<SmallVec<[usize; 8]>>();
     let output_rank = lhs_open_axes.len() + rhs_open_axes.len();
     validate_permutation_inline(output_axes, output_rank)?;
     if dst_codomain_rank > output_rank {
@@ -66,32 +62,23 @@ pub(super) fn tensorcontract_descriptor<'a>(
 fn validate_axis_subset_inline(
     axes: &[usize],
     rank: usize,
-) -> Result<SmallVec<[bool; 8]>, CoreError> {
-    let mut seen = SmallVec::<[bool; 8]>::new();
-    seen.resize(rank, false);
-    for &axis in axes {
-        if axis >= rank || seen[axis] {
-            return Err(CoreError::InvalidPermutation {
-                permutation: axes.to_vec(),
-                rank,
-            });
-        }
-        seen[axis] = true;
-    }
-    Ok(seen)
+) -> Result<crate::axes::AxisMask, CoreError> {
+    crate::axes::validate_axis_subset(axes, rank).map_err(|_| CoreError::InvalidPermutation {
+        permutation: axes.to_vec(),
+        rank,
+    })
 }
 
 pub(crate) fn validate_permutation_inline(
     permutation: &[usize],
     rank: usize,
 ) -> Result<(), CoreError> {
-    if permutation.len() != rank {
-        return Err(CoreError::InvalidPermutation {
+    crate::axes::validate_permutation(permutation, rank).map_err(|_| {
+        CoreError::InvalidPermutation {
             permutation: permutation.to_vec(),
             rank,
-        });
-    }
-    validate_axis_subset_inline(permutation, rank).map(|_| ())
+        }
+    })
 }
 
 pub(super) fn validate_axis_selection(

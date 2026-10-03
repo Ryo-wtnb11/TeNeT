@@ -1,7 +1,6 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use smallvec::SmallVec;
 use tenet_core::{
     validate_block_storage_injective, BlockStructure, CoreError, TensorMap, TensorStorage,
 };
@@ -591,9 +590,9 @@ mod tests {
 
         // What: validation remains correct when rank exceeds inline metadata
         // capacity, including a duplicate discovered only at the final axis.
-        assert_eq!(validate_axis_permutation(&reverse, rank), Ok(()));
+        assert_eq!(crate::axis::validate_permutation(&reverse, rank), Ok(()));
         assert_eq!(
-            validate_axis_permutation(&duplicate, rank),
+            crate::axis::validate_permutation(&duplicate, rank),
             Err(OperationError::InvalidPermutation {
                 axes: duplicate,
                 rank,

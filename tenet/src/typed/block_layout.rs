@@ -1307,30 +1307,13 @@ pub(crate) fn lower_adjoint_tree_transform_operation(
 }
 
 pub(crate) fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), Error> {
-    if axes.len() == rank && validate_contracted_axes(axes, rank).is_ok() {
-        return Ok(());
-    }
-    Err(
+    tenet_core::axes::validate_permutation(axes, rank).map_err(|_| {
         tenet_tensors::OperationError::Core(tenet_core::CoreError::InvalidPermutation {
             permutation: axes.to_vec(),
             rank,
         })
-        .into(),
-    )
-}
-
-pub(crate) fn validate_contracted_axes(contracted: &[usize], rank: usize) -> Result<(), Error> {
-    let mut seen = SmallVec::<[bool; 16]>::new();
-    seen.resize(rank, false);
-    for &axis in contracted {
-        if axis >= rank || seen[axis] {
-            return Err(Error::InvalidArgument(format!(
-                "invalid contracted axis list {contracted:?} for rank {rank}"
-            )));
-        }
-        seen[axis] = true;
-    }
-    Ok(())
+        .into()
+    })
 }
 
 /// Direct-sums two sector legs by adding matching degeneracies.

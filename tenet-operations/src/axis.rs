@@ -226,6 +226,15 @@ pub(crate) fn permutation_axes(
     permutation_axes_inline(permutation, rank).map(AxisVec::into_vec)
 }
 
+pub(crate) fn validate_permutation(axes: &[usize], rank: usize) -> Result<(), OperationError> {
+    tenet_core::axes::validate_permutation(axes, rank).map_err(|_| {
+        OperationError::InvalidPermutation {
+            axes: axes.to_vec(),
+            rank,
+        }
+    })
+}
+
 /// [`permutation_axes`] without a heap allocation up to rank 8.
 pub fn permutation_axes_inline(
     permutation: OutputAxisOrder<'_>,
@@ -234,22 +243,7 @@ pub fn permutation_axes_inline(
     match permutation {
         OutputAxisOrder::Identity => Ok((0..rank).collect()),
         OutputAxisOrder::Axes(axes) => {
-            if axes.len() != rank {
-                return Err(OperationError::InvalidPermutation {
-                    axes: axes.to_vec(),
-                    rank,
-                });
-            }
-            let mut seen = SmallVec::<[bool; 16]>::from_elem(false, rank);
-            for &axis in axes {
-                if axis >= rank || seen[axis] {
-                    return Err(OperationError::InvalidPermutation {
-                        axes: axes.to_vec(),
-                        rank,
-                    });
-                }
-                seen[axis] = true;
-            }
+            validate_permutation(axes, rank)?;
             Ok(AxisVec::from_slice(axes))
         }
     }
