@@ -59,30 +59,6 @@ where
     build_compact_factor_plan(input, input.validated_layout())
 }
 
-pub(super) fn source_factor_tree_extents_match(
-    source: &[CoupledSectorRegion],
-    left: &[CoupledSectorRegion],
-    right: &[CoupledSectorRegion],
-) -> bool {
-    let Ok(left_by_sector) = sector_region_index_map(left) else {
-        return false;
-    };
-    let Ok(right_by_sector) = sector_region_index_map(right) else {
-        return false;
-    };
-    source.iter().all(|source_region| {
-        let sector = source_region.coupled();
-        let Some(&left_index) = left_by_sector.get(&sector) else {
-            return false;
-        };
-        let Some(&right_index) = right_by_sector.get(&sector) else {
-            return false;
-        };
-        source_region.row_trees() == left[left_index].row_trees()
-            && source_region.col_trees() == right[right_index].col_trees()
-    })
-}
-
 pub(super) fn build_compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
     source_layout: ValidatedDynamicFusionLayout,

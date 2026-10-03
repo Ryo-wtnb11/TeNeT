@@ -18,16 +18,12 @@ where
             )));
         };
         if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if let Some((q_space, r_space, phases, magnitudes)) =
-                tenet_matrixalgebra::seam::qr_diagonal_dyn_checked_generic(
-                    &body.space,
-                    spectrum,
-                    true,
-                )?
+            if let Some(Qr { q, r }) =
+                tenet_matrixalgebra::seam::qr_diagonal_dyn_checked_generic(&body.space, spectrum)
             {
                 return Ok(Qr {
-                    q: self.with_spectrum_on(q_space, phases),
-                    r: self.with_spectrum_on(r_space, magnitudes),
+                    q: self.with_spectrum(q),
+                    r: self.with_spectrum(r),
                 });
             }
         }
@@ -62,16 +58,12 @@ where
             )));
         };
         if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if let Some((l_space, q_space, phases, magnitudes)) =
-                tenet_matrixalgebra::seam::lq_diagonal_dyn_checked_generic(
-                    &body.space,
-                    spectrum,
-                    false,
-                )?
+            if let Some(Lq { l, q }) =
+                tenet_matrixalgebra::seam::lq_diagonal_dyn_checked_generic(&body.space, spectrum)
             {
                 return Ok(Lq {
-                    l: self.with_spectrum_on(l_space, magnitudes),
-                    q: self.with_spectrum_on(q_space, phases),
+                    l: self.with_spectrum(l),
+                    q: self.with_spectrum(q),
                 });
             }
         }
@@ -109,16 +101,12 @@ where
             )));
         };
         if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if let Some((q_space, r_space, phases, magnitudes)) =
-                tenet_matrixalgebra::seam::qr_diagonal_dyn_checked_generic(
-                    &body.space,
-                    spectrum,
-                    false,
-                )?
+            if let Some(Qr { q, r }) =
+                tenet_matrixalgebra::seam::qr_diagonal_dyn_checked_generic(&body.space, spectrum)
             {
                 return Ok(Qr {
-                    q: self.with_spectrum_on(q_space, phases),
-                    r: self.with_spectrum_on(r_space, magnitudes),
+                    q: self.with_spectrum(q),
+                    r: self.with_spectrum(r),
                 });
             }
         }
@@ -434,16 +422,12 @@ where
             )));
         };
         if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if let Some((l_space, q_space, phases, magnitudes)) =
-                tenet_matrixalgebra::seam::lq_diagonal_dyn_checked_generic(
-                    &body.space,
-                    spectrum,
-                    true,
-                )?
+            if let Some(Lq { l, q }) =
+                tenet_matrixalgebra::seam::lq_diagonal_dyn_checked_generic(&body.space, spectrum)
             {
                 return Ok(Lq {
-                    l: tensor.with_spectrum_on(l_space, magnitudes),
-                    q: tensor.with_spectrum_on(q_space, phases),
+                    l: tensor.with_spectrum(l),
+                    q: tensor.with_spectrum(q),
                 });
             }
         }

@@ -266,8 +266,11 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
     assert_eq!(calls.of(Kernel::QR), 8);
 }
 
+/// A nonfinite compact diagonal takes the dense route, while a finite one is
+/// factorized on its input bond without consulting the provider, so a failing
+/// provider no longer fails `qr_full` (approval A1, #1751).
 #[test]
-fn checked_compact_diagonal_qr_preserves_numeric_and_provider_error_order() {
+fn checked_compact_diagonal_qr_densifies_nonfinite_and_skips_the_provider_when_finite() {
     let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -301,13 +304,19 @@ fn checked_compact_diagonal_qr_preserves_numeric_and_provider_error_order() {
     )
     .unwrap();
     failing_provider.fail_algebra.store(true, Ordering::Relaxed);
-    let error = finite.qr_full(&[0], &[1]).unwrap_err();
-    assert!(matches!(
-        error,
-        GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(
-            ToyError::Algebra
-        ))
-    ));
+    reset_provider_queries(&failing_provider);
+    let Qr { q, r } = finite.qr_full(&[0], &[1]).unwrap();
+    assert_eq!(
+        failing_provider.queries_since_reset.load(Ordering::Relaxed),
+        0
+    );
+    for factor in [&q, &r] {
+        assert!(
+            tenet::typed::__network::network_reuse_class(factor, false)
+                == NetworkReuseClass::Compact
+        );
+        assert_eq!(factor.codomain(), finite.codomain());
+    }
     assert_eq!(calls.of(Kernel::QR), 1);
 }
 
@@ -703,12 +712,12 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
     assert_eq!(calls.total(), before);
 }
 
-/// Provider failures during admission keep their typed error and publish no
-/// factors on a dual bond exactly as on its nondual counterpart: the full
-/// variants query the coupled-dimension map, while a rank-1 compact output
-/// needs no fallible fusion query.
+/// A compact diagonal's QR and LQ factors, full and compact alike, live on
+/// the admitted input bond `V <- V`, dual orientation included: they are
+/// published on the input space itself, so the provider is never queried for
+/// an output space and a failing provider cannot fail them.
 #[test]
-fn checked_dual_diagonal_qr_lq_propagates_output_provider_errors() {
+fn checked_dual_diagonal_qr_lq_publish_on_the_input_bond_without_provider_queries() {
     let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -731,25 +740,25 @@ fn checked_dual_diagonal_qr_lq_propagates_output_provider_errors() {
         )
         .unwrap();
         provider.fail_algebra.store(true, Ordering::Relaxed);
-        for error in [
-            finite.qr_full(&[0], &[1]).err(),
-            finite.lq_full(&[0], &[1]).err(),
-        ] {
-            assert!(matches!(
-                error,
-                Some(GenericTensorError::Plan(
-                    tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
-                ))
-            ));
-        }
+        reset_provider_queries(&provider);
         let Qr { q, r } = finite.qr_compact(&[0], &[1]).unwrap();
         let Lq { l, q: lq_q } = finite.lq_compact(&[0], &[1]).unwrap();
-        for factor in [&q, &r, &l, &lq_q] {
+        let Qr {
+            q: full_q,
+            r: full_r,
+        } = finite.qr_full(&[0], &[1]).unwrap();
+        let Lq {
+            l: full_l,
+            q: full_lq_q,
+        } = finite.lq_full(&[0], &[1]).unwrap();
+        assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 0);
+        for factor in [&q, &r, &l, &lq_q, &full_q, &full_r, &full_l, &full_lq_q] {
             assert!(
                 tenet::typed::__network::network_reuse_class(factor, false)
                     == NetworkReuseClass::Compact
             );
             assert_eq!(factor.codomain(), finite.codomain());
+            assert_eq!(factor.domain(), finite.domain());
             assert_eq!(factor.codomain()[0].is_dual(), dual);
         }
     }
