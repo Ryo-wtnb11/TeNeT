@@ -41,16 +41,20 @@ pub(super) trait FactorSpaceAuthority<R>: sealed::Sealed {
         side: &FusionProductSpace,
     ) -> Result<BTreeMap<SectorId, usize>, Self::Error>;
 
-    /// Whether `homspace`'s codomain and domain have equal coupled-sector
+    /// Whether `space`'s codomain and domain have equal coupled-sector
     /// dimensions (the inverse and solve admission).
-    fn isomorphic(&self, homspace: &FusionTreeHomSpace) -> Result<bool, Self::Error>;
+    fn isomorphic(&self, space: &BoundDynamicFusionMapSpace<R>) -> Result<bool, Self::Error>;
 
     type RootError;
 
     /// An output space that needs no shared pre-commit validation, such as the
-    /// swapped space of an inverse or a solve. The checked authority uses the
-    /// root constructor, which checks the provider's fusion style before it
-    /// enumerates; `stage` + `commit` check it after, at publication.
+    /// swapped space of an inverse or a solve.
+    ///
+    /// Why a separate path from `stage` + `commit`: its errors are the root
+    /// constructor's (`RootError`), which the checked facade reports as the
+    /// public `GenericTensorError::Structure` variant, not as a factor-plan
+    /// error. The checked root constructor also checks the provider's fusion
+    /// style before it enumerates, while `commit` checks it after.
     fn output_space(
         &self,
         homspace: FusionTreeHomSpace,
@@ -95,15 +99,8 @@ where
         Ok(side.coupled_sector_block_dimensions(self.0.provider())?)
     }
 
-    fn isomorphic(&self, homspace: &FusionTreeHomSpace) -> Result<bool, Self::Error> {
-        if homspace.codomain() == homspace.domain() {
-            return Ok(true);
-        }
-        let dimensions = |side: &FusionProductSpace| {
-            side.coupled_sector_block_dimensions(self.0.provider())
-                .map_err(OperationError::from_core_preserving_context)
-        };
-        Ok(dimensions(homspace.codomain())? == dimensions(homspace.domain())?)
+    fn isomorphic(&self, space: &BoundDynamicFusionMapSpace<R>) -> Result<bool, Self::Error> {
+        space.codomain_isomorphic_to_domain()
     }
 
     type RootError = OperationError;
@@ -153,7 +150,8 @@ where
         coupled_sector_block_dimensions_generic_checked(side, self.0.as_ref())
     }
 
-    fn isomorphic(&self, homspace: &FusionTreeHomSpace) -> Result<bool, Self::Error> {
+    fn isomorphic(&self, space: &BoundDynamicFusionMapSpace<R>) -> Result<bool, Self::Error> {
+        let homspace = space.space().homspace();
         Ok(self.coupled_dimensions(homspace.codomain())?
             == self.coupled_dimensions(homspace.domain())?)
     }
@@ -182,6 +180,16 @@ pub(super) fn solve_homspace(
     rhs: &FusionTreeHomSpace,
 ) -> FusionTreeHomSpace {
     FusionTreeHomSpace::new(divisor.domain().clone(), rhs.domain().clone())
+}
+
+/// Checked inverse and solve admission: whether `space`'s codomain and domain
+/// have equal coupled-sector dimensions under its provider, queried codomain
+/// first.
+#[doc(hidden)]
+pub fn factor_isomorphic_checked_generic<R: CheckedGenericFusion>(
+    space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<bool, CheckedGenericFactorPlanError<R::Error>> {
+    CheckedAuthority(space.provider_arc()).isomorphic(space)
 }
 
 /// A checked inverse, pseudo-inverse or solve output space over `provider`,

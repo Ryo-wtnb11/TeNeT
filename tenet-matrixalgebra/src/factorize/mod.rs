@@ -87,10 +87,10 @@ mod sector_matricization_tests;
 // already named there), so a blanket glob re-export of either would be
 // unused. `polar`'s direction helpers, also used by `svd`, are imported by
 // name below.
-pub use authority::factor_output_space_checked_generic;
 #[cfg(test)]
 pub(crate) use authority::MF_FACTOR_SPACE_STAGES;
 use authority::*;
+pub use authority::{factor_isomorphic_checked_generic, factor_output_space_checked_generic};
 pub(crate) use bound::*;
 pub(crate) use compact_plan::*;
 // `dense_stage` items are consumed only by sibling factorization modules.

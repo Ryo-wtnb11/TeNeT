@@ -38,7 +38,7 @@ where
 {
     let authority = MfAuthority(input.space());
     let homspace = input.space().space().homspace();
-    if !authority.isomorphic(homspace)? {
+    if !authority.isomorphic(input.space())? {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: "inv requires isomorphic codomain and domain",
         });
@@ -402,7 +402,7 @@ where
         });
     }
     let authority = MfAuthority(divisor.space());
-    if !authority.isomorphic(divisor_space.homspace())? {
+    if !authority.isomorphic(divisor.space())? {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: "solve requires an isomorphic divisor codomain and domain",
         });

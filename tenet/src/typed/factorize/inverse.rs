@@ -149,15 +149,7 @@ where
             }
         }
         let source = tensor.logical_space();
-        let codomain = tenet_matrixalgebra::seam::coupled_sector_block_dimensions_generic_checked(
-            source.space().homspace().codomain(),
-            source.provider(),
-        )?;
-        let domain = tenet_matrixalgebra::seam::coupled_sector_block_dimensions_generic_checked(
-            source.space().homspace().domain(),
-            source.provider(),
-        )?;
-        if codomain != domain {
+        if !tenet_matrixalgebra::seam::factor_isomorphic_checked_generic(source)? {
             return Err(Error::from(
                 tenet_tensors::OperationError::UnsupportedTensorContractScope {
                     message: "inv requires isomorphic codomain and domain",
