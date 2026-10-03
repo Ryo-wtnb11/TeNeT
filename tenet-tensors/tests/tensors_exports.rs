@@ -265,6 +265,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "expand_physical_host",
         "project_physical_host",
         "PhysicalConversionError",
+        "PivotalCoefficientAlgebra",
         // tenet_core
         "RuleIdentity",
         // tenet_operations
@@ -313,6 +314,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         // tree_context
         "tree_transform_dyn_owned_checked_generic_input_in_context",
         "CheckedTreeTransformInput",
+        "CoefficientAlgebra",
         "TreeTransformExecutionContext",
         // tree_transform
         "build_all_codomain_tree_transform_group_plan",

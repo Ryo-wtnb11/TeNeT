@@ -34,7 +34,7 @@ where
     }
 
     fn dim(provider: &R, sector: SectorId) -> Result<f64, TypedFacadeError<R>> {
-        Ok(provider.dim_scalar(sector))
+        <Self as tenet_tensors::CoefficientAlgebra<R>>::dim(provider, sector).map_err(Into::into)
     }
 }
 
@@ -72,10 +72,14 @@ where
     }
 
     fn dim(provider: &R, sector: SectorId) -> Result<f64, TypedFacadeError<R>> {
-        provider
-            .try_sqrt_dim_scalar(sector)
-            .map(|sqrt_dim| sqrt_dim * sqrt_dim)
-            .map_err(<Self as TypedTensorModeDispatch<R>>::map_provider_error)
+        <Self as tenet_tensors::CoefficientAlgebra<R>>::dim(provider, sector).map_err(|error| {
+            match error {
+                tenet_tensors::CheckedGenericPlanError::Provider(error) => {
+                    <Self as TypedTensorModeDispatch<R>>::map_provider_error(error)
+                }
+                other => GenericTensorError::Plan(other),
+            }
+        })
     }
 }
 

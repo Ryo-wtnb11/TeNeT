@@ -16,6 +16,7 @@ mod cache;
 mod contract;
 mod facade;
 mod lowering;
+mod mode;
 mod oriented_elementwise;
 mod physical;
 mod tensortrace;
@@ -80,6 +81,8 @@ pub use facade::{
     braid_into, braid_into_with, braid_into_with_context, permute_into, permute_into_with,
     permute_into_with_context, transpose_into, transpose_into_with, transpose_into_with_context,
 };
+#[doc(hidden)]
+pub use mode::{CoefficientAlgebra, PivotalCoefficientAlgebra};
 pub(crate) use oriented_elementwise::validate_oriented_fusion_layout;
 #[doc(hidden)]
 pub use oriented_elementwise::{

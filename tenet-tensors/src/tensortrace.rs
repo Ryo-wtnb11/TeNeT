@@ -1482,30 +1482,17 @@ where
     Ok(terms)
 }
 
-/// Checked Generic trace lowering through the existing strided executor.
-///
-/// This is a lower-layer seam only; typed dispatch can adopt it once the
-/// Generic output-space admission is part of the facade contract.
-#[doc(hidden)]
-pub fn tensortrace_fusion_dyn_owned_generic_checked<R, D>(
+/// The checked Generic trace terms and descriptor
+/// [`tensortrace_fusion_dyn_owned_generic_checked`] executes: the structural
+/// half of a checked Generic trace, before any payload is read.
+pub(crate) fn compile_fusion_dyn_generic_checked<R>(
     dst_space: &BoundDynamicFusionMapSpace<R>,
     src_space: &BoundDynamicFusionMapSpace<R>,
-    src_data: &[D],
     axes: TensorTraceAxisSpec<'_>,
-    alpha: D,
-) -> Result<Vec<D>, CheckedGenericPlanError<R::Error>>
+) -> Result<TensorTraceFusionStructure<R::Scalar>, CheckedGenericPlanError<R::Error>>
 where
     R: CheckedGenericPivotal,
     R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
-    D: Copy
-        + Add<D, Output = D>
-        + Mul<D, Output = D>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + RecouplingCoefficientAction<R::Scalar>
-        + strided_kernel::MaybeSendSync,
 {
     let orientation = if axes.source_conjugate() {
         FusionTreePairOrientation::Adjoint
@@ -1571,6 +1558,35 @@ where
         dst_structure: Arc::clone(dst_space.space().structure()),
         src_structure: Arc::clone(src_space.space().structure()),
     };
+    Ok(structure)
+}
+
+/// Checked Generic trace lowering through the existing strided executor.
+///
+/// This is a lower-layer seam only; typed dispatch can adopt it once the
+/// Generic output-space admission is part of the facade contract.
+#[doc(hidden)]
+pub fn tensortrace_fusion_dyn_owned_generic_checked<R, D>(
+    dst_space: &BoundDynamicFusionMapSpace<R>,
+    src_space: &BoundDynamicFusionMapSpace<R>,
+    src_data: &[D],
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: D,
+) -> Result<Vec<D>, CheckedGenericPlanError<R::Error>>
+where
+    R: CheckedGenericPivotal,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<R::Scalar>
+        + strided_kernel::MaybeSendSync,
+{
+    let structure = compile_fusion_dyn_generic_checked(dst_space, src_space, axes)?;
     tensortrace_fusion_dyn_structure_owned(
         &structure,
         dst_space.space(),
