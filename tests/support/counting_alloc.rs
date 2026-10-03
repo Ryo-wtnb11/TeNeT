@@ -10,6 +10,11 @@
 //! in the same binary allocates inside the measured window and breaks the
 //! budget (#1824). Budgets that also depend on process-global caches take
 //! [`serial`] as well.
+//!
+//! A consequence: with a multi-threaded runtime (for example
+//! `transform_owned_parallel`, the CUDA tests, or the default row of the
+//! `eager_overhead_ledger` example) a measurement gates only the calling
+//! thread's allocations, not those made on worker threads.
 
 #![allow(dead_code)]
 
