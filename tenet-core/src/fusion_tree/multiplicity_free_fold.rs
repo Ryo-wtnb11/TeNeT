@@ -103,7 +103,7 @@ where
     Ok(terms.into_vec())
 }
 
-pub(super) fn multiplicity_free_cycle_clockwise_tree_pair<R>(
+pub(crate) fn multiplicity_free_cycle_clockwise_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -118,7 +118,7 @@ where
     )
 }
 
-pub(super) fn multiplicity_free_cycle_anticlockwise_tree_pair<R>(
+pub(crate) fn multiplicity_free_cycle_anticlockwise_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
