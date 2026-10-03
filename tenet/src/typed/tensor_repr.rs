@@ -619,11 +619,11 @@ impl<R, D, S> TensorMap<R, D, S> {
 
     pub(super) fn dense_adjoint_view(&self) -> Result<Self, Error>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     {
         Ok(match &self.repr {
             TypedTensorRepr::Owned(parent) => {
-                let logical_space = tenet_tensors::adjoint_bound_space_dyn(&parent.space)?;
+                let logical_space = <tenet_core::MultiplicityFreeAdmissionMode as tenet_tensors::CoefficientAlgebra<R>>::adjoint_space(&parent.space)?;
                 debug_assert!(Arc::ptr_eq(
                     parent.space.provider_arc(),
                     logical_space.provider_arc()

@@ -1482,30 +1482,17 @@ where
     Ok(terms)
 }
 
-/// Checked Generic trace lowering through the existing strided executor.
-///
-/// This is a lower-layer seam only; typed dispatch can adopt it once the
-/// Generic output-space admission is part of the facade contract.
-#[doc(hidden)]
-pub fn tensortrace_fusion_dyn_owned_generic_checked<R, D>(
+/// The checked Generic trace terms and descriptor
+/// [`tensortrace_fusion_dyn_owned_generic_checked`] executes: the structural
+/// half of a checked Generic trace, before any payload is read.
+pub(crate) fn compile_fusion_dyn_generic_checked<R>(
     dst_space: &BoundDynamicFusionMapSpace<R>,
     src_space: &BoundDynamicFusionMapSpace<R>,
-    src_data: &[D],
     axes: TensorTraceAxisSpec<'_>,
-    alpha: D,
-) -> Result<Vec<D>, CheckedGenericPlanError<R::Error>>
+) -> Result<TensorTraceFusionStructure<R::Scalar>, CheckedGenericPlanError<R::Error>>
 where
     R: CheckedGenericPivotal,
     R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
-    D: Copy
-        + Add<D, Output = D>
-        + Mul<D, Output = D>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + RecouplingCoefficientAction<R::Scalar>
-        + strided_kernel::MaybeSendSync,
 {
     let orientation = if axes.source_conjugate() {
         FusionTreePairOrientation::Adjoint
@@ -1571,6 +1558,35 @@ where
         dst_structure: Arc::clone(dst_space.space().structure()),
         src_structure: Arc::clone(src_space.space().structure()),
     };
+    Ok(structure)
+}
+
+/// Checked Generic trace lowering through the existing strided executor.
+///
+/// This is a lower-layer seam only; typed dispatch can adopt it once the
+/// Generic output-space admission is part of the facade contract.
+#[doc(hidden)]
+pub fn tensortrace_fusion_dyn_owned_generic_checked<R, D>(
+    dst_space: &BoundDynamicFusionMapSpace<R>,
+    src_space: &BoundDynamicFusionMapSpace<R>,
+    src_data: &[D],
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: D,
+) -> Result<Vec<D>, CheckedGenericPlanError<R::Error>>
+where
+    R: CheckedGenericPivotal,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<R::Scalar>
+        + strided_kernel::MaybeSendSync,
+{
+    let structure = compile_fusion_dyn_generic_checked(dst_space, src_space, axes)?;
     tensortrace_fusion_dyn_structure_owned(
         &structure,
         dst_space.space(),
@@ -2172,7 +2188,10 @@ where
     )
 }
 
-fn tensortrace_fusion_dyn_structure_owned<C, D>(
+/// Executes compiled trace terms into a new payload (the execution half of
+/// the owned trace entries).
+#[doc(hidden)]
+pub fn tensortrace_fusion_dyn_structure_owned<C, D>(
     structure: &TensorTraceFusionStructure<C>,
     dst_space: &DynamicFusionMapSpace,
     src_space: &DynamicFusionMapSpace,
@@ -2191,6 +2210,9 @@ where
         + RecouplingCoefficientAction<C>
         + strided_kernel::MaybeSendSync,
 {
+    // Why: a public executor must not replay terms compiled for other spaces;
+    // the pointer-equality fast path keeps compiled-in-place callers free.
+    structure.validate_replay_structures(dst_space.structure(), src_space.structure())?;
     let descriptor = structure.descriptor();
     if descriptor.terms().len() != structure.terms().len() {
         return Err(OperationError::CoefficientCountMismatch {
@@ -2251,7 +2273,10 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tensortrace_fusion_dyn_structure_into_raw<C, D>(
+/// Executes compiled trace terms into `dst_data` (the execution half of the
+/// trace-into entries).
+#[doc(hidden)]
+pub fn tensortrace_fusion_dyn_structure_into_raw<C, D>(
     structure: &TensorTraceFusionStructure<C>,
     dst_space: &DynamicFusionMapSpace,
     dst_data: &mut [D],
@@ -2272,6 +2297,9 @@ where
         + RecouplingCoefficientAction<C>
         + strided_kernel::MaybeSendSync,
 {
+    // Why: a public executor must not replay terms compiled for other spaces;
+    // the pointer-equality fast path keeps compiled-in-place callers free.
+    structure.validate_replay_structures(dst_space.structure(), src_space.structure())?;
     validate_trace_data_extents(
         dst_space.structure(),
         dst_data.len(),

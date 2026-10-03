@@ -717,11 +717,7 @@ where
                 "trace_pairs requires dense CUDA storage".to_string(),
             ));
         };
-        let structure = tenet_tensors::TensorTraceFusionStructure::compile_fusion_dyn_checked(
-            &space,
-            source_space,
-            axes,
-        )?;
+        let structure = <tenet_core::MultiplicityFreeAdmissionMode as tenet_tensors::PivotalCoefficientAlgebra<R>>::trace_terms(&space, source_space, axes)?;
         if source.placement() != Placement::Cuda(self.runtime.cuda_device_ordinal_checked()?) {
             return Err(Error::PlacementMismatch);
         }

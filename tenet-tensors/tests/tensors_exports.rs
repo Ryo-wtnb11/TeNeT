@@ -265,6 +265,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "expand_physical_host",
         "project_physical_host",
         "PhysicalConversionError",
+        "PivotalCoefficientAlgebra",
         // tenet_core
         "RuleIdentity",
         // tenet_operations
@@ -285,6 +286,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "OwnedCatSide",
         "RealStructuralCoefficient",
         "RecouplingCoefficientAction",
+        "RigidCoefficientAlgebra",
         "ReportsPlacement",
         "TensorAddStructure",
         "TensorContractSpec",
@@ -304,6 +306,8 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "tensortrace_fusion_dyn_owned_generic_checked",
         "tensortrace_fusion_dyn_selected_homspace_checked",
         "tensortrace_fusion_dyn_selected_homspace_generic_checked",
+        "tensortrace_fusion_dyn_structure_into_raw",
+        "tensortrace_fusion_dyn_structure_owned",
         "tensortrace_fusion_structure_into_on_cuda",
         "FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING",
         "TensorTraceFusionStructure",
@@ -313,6 +317,7 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         // tree_context
         "tree_transform_dyn_owned_checked_generic_input_in_context",
         "CheckedTreeTransformInput",
+        "CoefficientAlgebra",
         "TreeTransformExecutionContext",
         // tree_transform
         "build_all_codomain_tree_transform_group_plan",

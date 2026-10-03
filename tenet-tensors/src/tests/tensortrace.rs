@@ -2942,3 +2942,65 @@ fn excluded_u1_sector_id_is_rejected_at_admission() {
         }))
     );
 }
+
+#[test]
+fn structure_executors_reject_terms_compiled_for_other_spaces() {
+    // What: the public trace executors replay only terms compiled for the
+    // spaces they are given.
+    let provider = std::sync::Arc::new(U1FusionRule);
+    let source = |degeneracy| {
+        let leg = || SectorLeg::new([(U1Irrep::new(1).sector_id(), degeneracy)], false);
+        BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            std::sync::Arc::clone(&provider),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            [vec![degeneracy, degeneracy]],
+        )
+        .unwrap()
+    };
+    let dst = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        std::sync::Arc::clone(&provider),
+        FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([])),
+        [Vec::<usize>::new()],
+    )
+    .unwrap();
+    let (compiled_for, other) = (source(2), source(3));
+    let axes = TensorTraceAxisSpec::new(&[], &[0], &[1]);
+    let structure =
+        TensorTraceFusionStructure::compile_fusion_dyn_checked(&dst, &compiled_for, axes).unwrap();
+    let data = vec![1.0; 9];
+
+    assert_eq!(
+        crate::tensortrace_fusion_dyn_structure_owned(
+            &structure,
+            dst.space(),
+            other.space(),
+            &data,
+            1.0
+        ),
+        Err(OperationError::StructureMismatch { tensor: "src" })
+    );
+    let mut out = vec![0.0];
+    assert_eq!(
+        crate::tensortrace_fusion_dyn_structure_into_raw(
+            &structure,
+            dst.space(),
+            &mut out,
+            other.space(),
+            &data,
+            1.0,
+            0.0
+        ),
+        Err(OperationError::StructureMismatch { tensor: "src" })
+    );
+    assert!(crate::tensortrace_fusion_dyn_structure_owned(
+        &structure,
+        dst.space(),
+        compiled_for.space(),
+        &data[..4],
+        1.0
+    )
+    .is_ok());
+}
