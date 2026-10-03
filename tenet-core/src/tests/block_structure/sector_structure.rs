@@ -650,6 +650,87 @@ fn rank5_transpose_with_trailing_bend_matches_per_pair_by_key() {
     );
 }
 
+// An empty source domain makes the codomain Artin swap the first compact move
+// of a block braid (no bendleft precedes it), so it starts from the source
+// columns rather than composing through a previous matrix.
+fn assert_domainless_block_braid_matches_per_pair<R>(rule: &R, sectors: &[SectorId])
+where
+    R: MultiplicityFreeRigidSymbols + MultiplicityFreeFusionRule,
+    R::Scalar: Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + std::fmt::Debug
+        + TransposeOracleScalar,
+{
+    use std::collections::BTreeMap;
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, 1)), false);
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg(), leg()]),
+        FusionProductSpace::new(Vec::<SectorLeg>::new()),
+    );
+    let mut blocks: BTreeMap<Vec<usize>, Vec<FusionTreePairKey>> = BTreeMap::new();
+    for key in hom.fusion_tree_keys(rule).iter() {
+        let tag = key
+            .codomain_tree()
+            .uncoupled()
+            .iter()
+            .map(|s| s.id())
+            .collect();
+        blocks.entry(tag).or_default().push(key.clone());
+    }
+    assert!(!blocks.is_empty(), "fixture must have domainless blocks");
+    for (codomain_permutation, domain_permutation, levels) in [
+        (vec![1usize, 0, 2], vec![], vec![0usize, 1, 2]),
+        (vec![2usize, 1, 0], vec![], vec![2usize, 0, 1]),
+        (vec![1usize, 2], vec![0usize], vec![0usize, 1, 2]),
+    ] {
+        for sources in blocks.values() {
+            let compact = multiplicity_free_braid_tree_pair_block(
+                rule,
+                sources,
+                &codomain_permutation,
+                &domain_permutation,
+                &levels,
+                &[],
+            )
+            .unwrap();
+            for (source, compact_rows) in sources.iter().zip(&compact) {
+                let per_pair = multiplicity_free_braid_tree_pair(
+                    rule,
+                    source,
+                    &codomain_permutation,
+                    &domain_permutation,
+                    &levels,
+                    &[],
+                )
+                .unwrap();
+                assert_eq!(compact_rows.len(), per_pair.len(), "{source:?}");
+                for (key, expected) in &per_pair {
+                    let actual = compact_rows
+                        .iter()
+                        .find(|(candidate, _)| candidate == key)
+                        .map(|(_, coefficient)| coefficient)
+                        .unwrap_or_else(|| panic!("compact braid omits {key:?}"));
+                    assert!(
+                        actual.oracle_distance(expected)
+                            <= 1.0e-12 * (1.0 + expected.oracle_magnitude()),
+                        "{key:?}: compact {actual:?} vs per-pair {expected:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn domainless_block_braid_matches_per_pair() {
+    assert_domainless_block_braid_matches_per_pair(&SU2FusionRule, &[su2(0), su2(1), su2(2)]);
+    assert_domainless_block_braid_matches_per_pair(
+        &FibonacciFusionRule,
+        &[SectorId::new(0), SectorId::new(1)],
+    );
+}
+
 #[test]
 fn transpose_tree_pair_block_matches_full_key_fermionic_product_cycle() {
     type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
