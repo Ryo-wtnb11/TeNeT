@@ -32,40 +32,6 @@ where
     }
 }
 
-/// The error message of [`reject_non_symmetric_contraction`], shared with the
-/// device network preflight so a network rejection and a typed `contract`
-/// rejection are indistinguishable.
-#[doc(hidden)]
-pub const NON_SYMMETRIC_CONTRACTION_UNSUPPORTED: &str =
-    "ordinary contraction requires symmetric (bosonic or fermionic) braiding; \
-     use compose for the composition of morphisms (planar contraction is TeNeT#1070)";
-
-/// The ordinary-contraction boundary of every `contract` entry, returning or
-/// overwriting, Host or device, typed or `tensor!`: only a symmetric braiding
-/// (TensorKit `SymmetricBraiding`: Bosonic, Fermionic) is admitted, as by
-/// TensorKit `blas_contract!` before any layout test.
-///
-/// Why not admit the canonical axes of a `NoBraiding` or `Anyonic` rule:
-/// general-axes contraction is defined by braiding legs into place, which is
-/// well defined for arbitrary permutations only under a symmetric braiding.
-/// The one axis pattern that needs no braid is exactly [`TensorMap::compose`]
-/// (TensorKit `mul!`), which stays admitted for every braiding style; planar
-/// contraction for non-symmetric categories is a separate named operation
-/// (#1070).
-#[doc(hidden)]
-pub fn reject_non_symmetric_contraction(
-    braiding: tenet_core::BraidingStyleKind,
-) -> Result<(), tenet_tensors::OperationError> {
-    if !braiding.is_symmetric() {
-        return Err(
-            tenet_tensors::OperationError::UnsupportedTensorContractScope {
-                message: NON_SYMMETRIC_CONTRACTION_UNSUPPORTED,
-            },
-        );
-    }
-    Ok(())
-}
-
 /// The axis lists a validated `trace_pairs` pair list stands for.
 pub(super) struct TracePairAxes {
     pub(super) output_axes: Vec<usize>,

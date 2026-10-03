@@ -400,11 +400,10 @@ pub use factorize::{
 mod checked_generic_contract;
 mod mode_dispatch;
 pub(crate) use checked_generic_contract::TypedFacadeError;
-pub use checked_generic_contract::{
-    reject_non_symmetric_contraction, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED,
-};
 use checked_generic_contract::{trace_pair_axes, write_identity_blocks_generic, TracePairAxes};
 use mode_dispatch::checked_compact_spectrum_layout;
+#[doc(hidden)]
+pub use tenet_tensors::{reject_non_symmetric_contraction, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED};
 mod space;
 use space::{
     require_restriction_set, require_selected_leg_of, restricted_space, restriction_starts,

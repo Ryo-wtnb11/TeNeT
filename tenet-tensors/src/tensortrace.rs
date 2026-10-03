@@ -139,9 +139,6 @@ pub(crate) const PLAIN_TENSORTRACE_FUSION_REQUIRES_FUSION_API: &str =
     "plain tensortrace does not lower fusion-tree blocks; use tensortrace_fusion_*";
 pub(crate) const PLAIN_TENSORTRACE_BLOCK_SPARSE_UNSUPPORTED: &str =
     "block-sparse tensortrace enumeration is not implemented yet";
-#[doc(hidden)]
-pub const FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING: &str =
-    "fusion tensortrace requires symmetric braiding";
 
 #[derive(Clone, Copy)]
 struct OrientedTraceSource<'a> {
@@ -482,11 +479,10 @@ impl<C> TensorTraceFusionStructure<C> {
             &TensorTraceAxisPlan,
         ) -> Result<Option<CheckedTraceGeometry>, OperationError>,
     {
-        if !rule.braiding_style().is_symmetric() {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING,
-            });
-        }
+        crate::admission::require_symmetric_braiding(
+            rule.braiding_style(),
+            crate::admission::SymmetricBraidingOp::Trace,
+        )?;
         let axis_plan =
             TensorTraceAxisPlan::compile(src.structure.rank(), dst_structure.rank(), axes)?;
         let checked_geometry = preflight(src.homspace, &axis_plan)?;
