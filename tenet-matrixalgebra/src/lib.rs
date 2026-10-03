@@ -41,9 +41,10 @@ pub mod seam {
     pub use crate::factorize::{
         coupled_sector_block_dimensions_generic_checked, decide_bond_truncation,
         decide_bond_truncation_generic_checked, diagonal_bond_bound_space_generic_checked,
-        diagonal_bond_bound_space_like, diagonal_bond_data, eig_full_diagonal_dyn,
-        eig_full_diagonal_dyn_checked_generic, eig_full_dyn, eig_full_dyn_checked_generic,
-        eig_vals_diagonal_dyn, eig_vals_dyn, eig_vals_dyn_checked_generic, eigh_full_diagonal_dyn,
+        diagonal_bond_bound_space_like, diagonal_bond_bound_space_on_source_checked_generic,
+        diagonal_bond_data, eig_full_diagonal_dyn, eig_full_diagonal_dyn_checked_generic,
+        eig_full_dyn, eig_full_dyn_checked_generic, eig_vals_diagonal_dyn, eig_vals_dyn,
+        eig_vals_dyn_checked_generic, eigh_full_diagonal_dyn,
         eigh_full_diagonal_dyn_checked_generic, eigh_full_dyn, eigh_full_dyn_checked_generic,
         eigh_vals_diagonal_dyn, eigh_vals_dyn, eigh_vals_dyn_checked_generic,
         factor_isomorphic_checked_generic, factor_output_space_checked_generic,

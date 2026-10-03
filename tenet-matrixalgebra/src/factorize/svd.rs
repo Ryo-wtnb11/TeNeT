@@ -544,6 +544,17 @@ where
             values,
         });
     }
+    if factor_bond_is_input_bond(source, || {
+        SectorLeg::new(pairs.iter().map(|pair| (pair.sector, pair.kept)), false)
+    }) {
+        let (left, right): (Vec<_>, Vec<_>) = pairs
+            .into_iter()
+            .map(|pair| (pair.left, pair.right))
+            .unzip();
+        let u = factor_on_input_space(authority, &source_regions, left)?;
+        let vh = factor_on_input_space(authority, &source_regions, right)?;
+        return Ok(Some((u, vh, singular_values)));
+    }
     let (u, vh) = build_left_right_bound_pair_generic_checked(
         authority.provider_arc(),
         source.homspace(),
@@ -599,6 +610,29 @@ where
         }
     }
 
+    if factor_bond_is_input_bond(source, || {
+        SectorLeg::new(
+            source_dimensions
+                .iter()
+                .map(|(&sector, &dimension)| (sector, dimension)),
+            false,
+        )
+    }) {
+        let (pairs, singular_values) = diagonal_full_svd_pairs(&source_regions, &by_sector);
+        let (left, right): (Vec<_>, Vec<_>) = pairs
+            .into_iter()
+            .map(|pair| (pair.left, pair.right))
+            .unzip();
+        return Ok(CheckedDiagonalFullSvdFactors::Direct(SvdFullFactorsDyn {
+            u: factor_on_input_space(authority, &source_regions, left)?,
+            vh: factor_on_input_space(authority, &source_regions, right)?,
+            singular_values,
+            row_dimensions: source_dimensions.clone(),
+            col_dimensions: source_dimensions,
+            #[cfg(test)]
+            adjoint_space: None,
+        }));
+    }
     let dimensions = coupled_sector_block_dimensions_generic_checked(
         source.homspace().codomain(),
         authority.provider_arc().as_ref(),
@@ -623,6 +657,40 @@ where
         ))));
     }
 
+    let (mut pairs, singular_values) = diagonal_full_svd_pairs(&source_regions, &by_sector);
+    let u = build_bound_factor_generic_checked(
+        authority.provider_arc(),
+        source.homspace(),
+        &source_regions,
+        &mut pairs,
+        &row_dimensions,
+        FactorSide::Left,
+    )?;
+    let vh = build_bound_factor_generic_checked(
+        authority.provider_arc(),
+        source.homspace(),
+        &source_regions,
+        &mut pairs,
+        &col_dimensions,
+        FactorSide::Right,
+    )?;
+    Ok(CheckedDiagonalFullSvdFactors::Direct(SvdFullFactorsDyn {
+        u,
+        vh,
+        singular_values,
+        row_dimensions,
+        col_dimensions,
+        #[cfg(test)]
+        adjoint_space: None,
+    }))
+}
+
+/// Gauged full-SVD factor pairs and singular values of an admitted compact
+/// diagonal, one square sector at a time.
+fn diagonal_full_svd_pairs<D: FactorScalar>(
+    source_regions: &[CoupledSectorRegion],
+    by_sector: &FxHashMap<SectorId, &SectorSpectrum<D>>,
+) -> (Vec<FactorPair<D>>, Vec<SectorSpectrum>) {
     let mut pairs = Vec::with_capacity(source_regions.len());
     let mut singular_values = Vec::with_capacity(source_regions.len());
     for region in source_regions.iter() {
@@ -650,31 +718,7 @@ where
             values,
         });
     }
-    let u = build_bound_factor_generic_checked(
-        authority.provider_arc(),
-        source.homspace(),
-        &source_regions,
-        &mut pairs,
-        &row_dimensions,
-        FactorSide::Left,
-    )?;
-    let vh = build_bound_factor_generic_checked(
-        authority.provider_arc(),
-        source.homspace(),
-        &source_regions,
-        &mut pairs,
-        &col_dimensions,
-        FactorSide::Right,
-    )?;
-    Ok(CheckedDiagonalFullSvdFactors::Direct(SvdFullFactorsDyn {
-        u,
-        vh,
-        singular_values,
-        row_dimensions,
-        col_dimensions,
-        #[cfg(test)]
-        adjoint_space: None,
-    }))
+    (pairs, singular_values)
 }
 
 pub fn svd_compact_factors_dyn<E, R, D>(
@@ -2229,6 +2273,31 @@ where
     );
     BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, homspace)
         .map_err(CheckedGenericFactorPlanError::from)
+}
+
+/// The compact diagonal bond space `W <- W` of `spectrum` for a factor of
+/// the compact diagonal `source`: `source` itself when `W` is its one-leg bond
+/// (TensorKit's `fuse(V) = V`, no provider query), otherwise the checked root
+/// [`diagonal_bond_bound_space_generic_checked`] builds.
+#[doc(hidden)]
+pub fn diagonal_bond_bound_space_on_source_checked_generic<R, V>(
+    source: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<V>],
+) -> Result<BoundDynamicFusionMapSpace<R>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+{
+    if factor_bond_is_input_bond(source.space(), || {
+        SectorLeg::new(
+            spectrum
+                .iter()
+                .map(|entry| (entry.sector, entry.values.len())),
+            false,
+        )
+    }) {
+        return Ok(source.clone());
+    }
+    diagonal_bond_bound_space_generic_checked(Arc::clone(source.provider_arc()), spectrum)
 }
 
 #[doc(hidden)]

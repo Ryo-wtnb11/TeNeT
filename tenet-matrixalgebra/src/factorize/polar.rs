@@ -504,8 +504,34 @@ where
     }) {
         return Ok(None);
     }
-    let source_len = authority
-        .space()
+    let source = authority.space();
+    // TensorKit's polar output (`initialize_output(left_polar!)`) is
+    // `W = space(t)` and `P = domain(t) <- domain(t)` (`codomain <- codomain`
+    // on the right): for a one-leg bond `V <- V` both are the input space, so
+    // they need no provider-built space and no admission query.
+    if source.nout() == 1
+        && source.nin() == 1
+        && source.homspace().codomain() == source.homspace().domain()
+    {
+        if let Ok(Some(regions)) = checked_sector_regions(source.structure(), 1) {
+            let Some(by_sector) = aligned_diagonal_spectrum_by_sector(&regions, spectrum) else {
+                return Ok(None);
+            };
+            let Some((phase, magnitude)) = polar_diagonal_values(
+                &by_sector,
+                regions.iter().map(|region| (region, region, region)),
+            ) else {
+                return Ok(None);
+            };
+            return Ok(Some(CheckedCompactPolarFactors {
+                w_space: authority.clone(),
+                p_space: authority.clone(),
+                phase,
+                magnitude,
+            }));
+        }
+    }
+    let source_len = source
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
     let plan = checked_polar_plan(authority, source_len, direction, direction)?;
@@ -513,15 +539,43 @@ where
     else {
         return Ok(None);
     };
-    let mut phase = Vec::with_capacity(spectrum.len());
-    let mut magnitude = Vec::with_capacity(spectrum.len());
-    for route in &plan.routes {
-        let source = &plan.source_regions[route.source];
-        let w = &plan.w_regions[route.w];
-        let p = &plan.p_regions[route.p];
-        let Some(entry) = by_sector.get(&source.coupled()) else {
-            return Ok(None);
-        };
+    let Some((phase, magnitude)) = polar_diagonal_values(
+        &by_sector,
+        plan.routes.iter().map(|route| {
+            (
+                &plan.source_regions[route.source],
+                &plan.w_regions[route.w],
+                &plan.p_regions[route.p],
+            )
+        }),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(CheckedCompactPolarFactors {
+        w_space: plan.w_space,
+        p_space: plan.p_space,
+        phase,
+        magnitude,
+    }))
+}
+
+/// Phase and magnitude spectra of a compact diagonal over aligned
+/// `(source, W, P)` region triples, or `None` when dense polar must decide.
+#[allow(clippy::type_complexity)]
+fn polar_diagonal_values<'r, D: FactorScalar>(
+    by_sector: &FxHashMap<SectorId, &SectorSpectrum<D>>,
+    triples: impl Iterator<
+        Item = (
+            &'r CoupledSectorRegion,
+            &'r CoupledSectorRegion,
+            &'r CoupledSectorRegion,
+        ),
+    >,
+) -> Option<(Vec<SectorSpectrum<D>>, Vec<SectorSpectrum<D>>)> {
+    let mut phase = Vec::with_capacity(by_sector.len());
+    let mut magnitude = Vec::with_capacity(by_sector.len());
+    for (source, w, p) in triples {
+        let entry = by_sector.get(&source.coupled())?;
         if !w.has_aligned_diagonal()
             || !p.has_aligned_diagonal()
             || source.row_trees().len() != 1
@@ -531,14 +585,12 @@ where
             || p.row_trees().len() != 1
             || p.col_trees().len() != 1
         {
-            return Ok(None);
+            return None;
         }
         let mut phases = Vec::with_capacity(entry.values.len());
         let mut magnitudes = Vec::with_capacity(entry.values.len());
         for &value in &entry.values {
-            let Some((value_phase, value_magnitude)) = diagonal_phase_magnitude(value) else {
-                return Ok(None);
-            };
+            let (value_phase, value_magnitude) = diagonal_phase_magnitude(value)?;
             phases.push(value_phase);
             magnitudes.push(value_magnitude);
         }
@@ -551,12 +603,7 @@ where
             values: magnitudes,
         });
     }
-    Ok(Some(CheckedCompactPolarFactors {
-        w_space: plan.w_space,
-        p_space: plan.p_space,
-        phase,
-        magnitude,
-    }))
+    Some((phase, magnitude))
 }
 
 #[doc(hidden)]

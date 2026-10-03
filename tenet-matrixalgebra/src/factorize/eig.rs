@@ -408,14 +408,23 @@ where
         });
         dimensions.insert(region.coupled(), n);
     }
-    let v = build_bound_factor_generic_checked(
-        authority.provider_arc(),
-        space.homspace(),
-        &regions,
-        &mut pairs,
-        &dimensions,
-        FactorSide::Left,
-    )?;
+    let v = if factor_bond_is_input_bond(space, || {
+        SectorLeg::new(
+            dimensions.iter().map(|(&sector, &dim)| (sector, dim)),
+            false,
+        )
+    }) {
+        factor_on_input_space(authority, &regions, pairs.into_iter().map(|pair| pair.left))?
+    } else {
+        build_bound_factor_generic_checked(
+            authority.provider_arc(),
+            space.homspace(),
+            &regions,
+            &mut pairs,
+            &dimensions,
+            FactorSide::Left,
+        )?
+    };
     Ok(Some(EighFullDyn { v, eigenvalues }))
 }
 
@@ -711,14 +720,23 @@ where
         });
         dimensions.insert(region.coupled(), n);
     }
-    let v = build_bound_factor_generic_checked(
-        authority.provider_arc(),
-        space.homspace(),
-        &regions,
-        &mut pairs,
-        &dimensions,
-        FactorSide::Left,
-    )?;
+    let v = if factor_bond_is_input_bond(space, || {
+        SectorLeg::new(
+            dimensions.iter().map(|(&sector, &dim)| (sector, dim)),
+            false,
+        )
+    }) {
+        factor_on_input_space(authority, &regions, pairs.into_iter().map(|pair| pair.left))?
+    } else {
+        build_bound_factor_generic_checked(
+            authority.provider_arc(),
+            space.homspace(),
+            &regions,
+            &mut pairs,
+            &dimensions,
+            FactorSide::Left,
+        )?
+    };
     Ok(Some(EigFullDyn { v, eigenvalues }))
 }
 

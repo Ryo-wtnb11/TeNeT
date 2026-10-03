@@ -167,7 +167,8 @@ pub use qr_lq::{
 pub use scalar::{FactorScalar, SectorSpectrum, SpectrumMagnitude};
 pub use svd::{
     decide_bond_truncation, decide_bond_truncation_generic_checked,
-    diagonal_bond_bound_space_generic_checked, diagonal_bond_bound_space_like, diagonal_bond_data,
+    diagonal_bond_bound_space_generic_checked, diagonal_bond_bound_space_like,
+    diagonal_bond_bound_space_on_source_checked_generic, diagonal_bond_data,
     rectangular_diagonal_bond_tensor, rectangular_diagonal_bond_tensor_generic_checked,
     scale_axis_by_spectrum, scale_axis_by_spectrum_mapped, svd_compact_adjoint_factors_dyn,
     svd_compact_diagonal_factors_dyn, svd_compact_diagonal_factors_dyn_checked_generic,

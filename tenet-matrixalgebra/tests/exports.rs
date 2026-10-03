@@ -207,6 +207,7 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
             "coupled_sector_block_dimensions_generic_checked decide_bond_truncation \
              decide_bond_truncation_generic_checked \
              diagonal_bond_bound_space_generic_checked diagonal_bond_bound_space_like \
+             diagonal_bond_bound_space_on_source_checked_generic \
              diagonal_bond_data eig_full_diagonal_dyn eig_full_diagonal_dyn_checked_generic \
              eig_full_dyn eig_full_dyn_checked_generic eig_vals_diagonal_dyn eig_vals_dyn \
              eig_vals_dyn_checked_generic eigh_full_diagonal_dyn \

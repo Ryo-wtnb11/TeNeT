@@ -940,18 +940,34 @@ fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
         .unwrap();
     let fault_provider = Arc::new(CheckedOnlyToy::new(1));
     let fault_leg = GradedSpace::try_new(Arc::clone(&fault_provider), [(Label::X, 2)]).unwrap();
-    let fault_compact: TensorMap<_, Complex64> = TensorMap::diagonal(
-        &fault_runtime,
-        &fault_leg,
-        [SectorSpectrum {
-            sector: Label::X,
-            values: vec![Complex64::new(1.0, 1.0), Complex64::new(0.0, -3.0)],
-        }],
-    )
-    .unwrap();
-    // The eligible compact path reaches checked V publication; falling back
-    // to dense EIG would return the injected dense error instead.
+    let compact_on = |leg: &GradedSpace<_>| -> TensorMap<_, Complex64> {
+        TensorMap::diagonal(
+            &fault_runtime,
+            leg,
+            [SectorSpectrum {
+                sector: Label::X,
+                values: vec![Complex64::new(1.0, 1.0), Complex64::new(0.0, -3.0)],
+            }],
+        )
+        .unwrap()
+    };
+    let nondual_compact = compact_on(&fault_leg);
+    let fault_compact = compact_on(&fault_leg.try_dual().unwrap());
     fault_provider.invalid_style.store(true, Ordering::Relaxed);
+    // A nondual bond is its own eigenbasis bond (TensorKit `fuse(V) = V`): `v`
+    // and `d` live on the input space, so the provider is never queried and
+    // the dense eigensolver never runs.
+    reset_provider_queries(&fault_provider);
+    let Eig { d, v } = nondual_compact.eig_full(&[0], &[1]).unwrap();
+    assert_eq!(
+        fault_provider.queries_since_reset.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(v.codomain(), nondual_compact.codomain());
+    assert_eq!(d.codomain(), nondual_compact.codomain());
+    // A dual bond's eigenbasis bond is the fresh nondual `fuse(V)`: the
+    // eligible compact path reaches checked V publication; falling back to
+    // dense EIG would return the injected dense error instead.
     let compact_error = fault_compact.eig_full(&[0], &[1]).unwrap_err();
     assert!(
         matches!(

@@ -133,6 +133,63 @@ pub(super) fn compact_bond_leg(regions: &[CoupledSectorRegion]) -> SectorLeg {
     )
 }
 
+/// Whether a compact diagonal's factor with the nondual bond `bond()` lives
+/// on the input space itself: the input is a nondual one-leg bond `V <- V`
+/// and `bond()` is `V`. TensorKit sizes the factor bond as `fuse(V)`, which is
+/// `V` for a nondual `V`; then the factor HomSpace is the admitted one and
+/// needs no new space. `bond` runs only for such an input, so a dual input,
+/// which keeps the provider-built `fuse(V)`, pays nothing for the check.
+pub(super) fn factor_bond_is_input_bond(
+    space: &DynamicFusionMapSpace,
+    bond: impl FnOnce() -> SectorLeg,
+) -> bool {
+    let homspace = space.homspace();
+    space.nout() == 1
+        && space.nin() == 1
+        && homspace.codomain() == homspace.domain()
+        && !homspace.codomain().legs()[0].is_dual()
+        && homspace.codomain().legs()[0] == bond()
+}
+
+/// A factor on the admitted input space, one dense matrix per coupled-sector
+/// region in `blocks`, written where the region lies.
+pub(super) fn factor_on_input_space<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    regions: &[CoupledSectorRegion],
+    blocks: impl IntoIterator<Item = Vec<D>>,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    D: FactorScalar,
+{
+    let space = authority.space();
+    let len = space.required_len()?;
+    let mut data = Vec::with_capacity(len);
+    let mut placed = Vec::new();
+    for (region, block) in regions.iter().zip(blocks) {
+        let range = region.range();
+        if block.len() != range.len() {
+            return Err(OperationError::ElementCountMismatch {
+                expected: range.len(),
+                actual: block.len(),
+            });
+        }
+        if placed.is_empty() && range.start == data.len() {
+            data.extend(block);
+        } else {
+            // Why not always write in place: regions tile the payload in order
+            // for every layout the admission accepts, so a gap is the rare case.
+            placed.push((range, block));
+        }
+    }
+    if !placed.is_empty() || data.len() != len {
+        data.resize(len, D::zero());
+        for (range, block) in placed {
+            data[range].copy_from_slice(&block);
+        }
+    }
+    BoundDynFactor::from_bound(authority.clone(), data, space.nout(), space.nin())
+}
+
 pub(super) fn compile_compact_factor_routes(
     source_regions: &[CoupledSectorRegion],
     left_regions: &[CoupledSectorRegion],
