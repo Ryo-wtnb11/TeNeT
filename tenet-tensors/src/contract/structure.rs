@@ -621,12 +621,8 @@ impl TensorContractAxisPlan {
         let lhs_seen = validate_axis_subset("lhs", axes.lhs_contracting_axes(), lhs_rank)?;
         let rhs_seen = validate_axis_subset("rhs", axes.rhs_contracting_axes(), rhs_rank)?;
 
-        let lhs_open_axes = (0..lhs_rank)
-            .filter(|&axis| !lhs_seen[axis])
-            .collect::<AxisVec>();
-        let rhs_open_axes = (0..rhs_rank)
-            .filter(|&axis| !rhs_seen[axis])
-            .collect::<AxisVec>();
+        let lhs_open_axes = lhs_seen.complement().collect::<AxisVec>();
+        let rhs_open_axes = rhs_seen.complement().collect::<AxisVec>();
         let core_output_rank = lhs_open_axes.len() + rhs_open_axes.len();
 
         let output_axes = permutation_axes_inline(axes.output_permutation(), core_output_rank)?;
@@ -1378,19 +1374,12 @@ fn validate_axis_subset(
     tensor: &'static str,
     axes: &[usize],
     rank: usize,
-) -> Result<smallvec::SmallVec<[bool; 16]>, OperationError> {
-    let mut seen = smallvec::SmallVec::from_elem(false, rank);
-    for &axis in axes {
-        if axis >= rank || seen[axis] {
-            return Err(OperationError::InvalidAxisSet {
-                tensor,
-                axes: axes.to_vec(),
-                rank,
-            });
-        }
-        seen[axis] = true;
-    }
-    Ok(seen)
+) -> Result<tenet_core::axes::AxisMask, OperationError> {
+    tenet_core::axes::validate_axis_subset(axes, rank).map_err(|_| OperationError::InvalidAxisSet {
+        tensor,
+        axes: axes.to_vec(),
+        rank,
+    })
 }
 
 fn validate_block_index(

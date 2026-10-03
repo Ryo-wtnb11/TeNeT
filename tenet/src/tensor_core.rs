@@ -665,19 +665,9 @@ where
     let lhs_rank = lhs.storage_space().rank();
     let rhs_rank = rhs.storage_space().rank();
     // Keep `TensorContractAxisPlan::compile`'s public error order before any
-    // oriented homspace/provider work. That plan is private to tenet-tensors;
-    // re-exporting it just to share these three syntax checks would widen the
-    // expert API.
+    // oriented homspace/provider work.
     for (tensor, axes, rank) in [("lhs", lhs_axes, lhs_rank), ("rhs", rhs_axes, rhs_rank)] {
-        let mut seen = smallvec::SmallVec::<[bool; 16]>::from_elem(false, rank);
-        if axes.iter().any(|&axis| {
-            if axis >= rank || seen[axis] {
-                true
-            } else {
-                seen[axis] = true;
-                false
-            }
-        }) {
+        if tenet_core::axes::validate_axis_subset(axes, rank).is_err() {
             return Err(tenet_tensors::OperationError::InvalidAxisSet {
                 tensor,
                 axes: axes.to_vec(),
@@ -695,17 +685,7 @@ where
         }
         OutputAxisOrder::Axes(axes) => axes,
     };
-    if output_axes.len() != lhs_open_rank + rhs_open_rank || {
-        let mut seen = smallvec::SmallVec::<[bool; 16]>::from_elem(false, output_axes.len());
-        output_axes.iter().any(|&axis| {
-            if axis >= seen.len() || seen[axis] {
-                true
-            } else {
-                seen[axis] = true;
-                false
-            }
-        })
-    } {
+    if tenet_core::axes::validate_permutation(output_axes, lhs_open_rank + rhs_open_rank).is_err() {
         return Err(tenet_tensors::OperationError::InvalidPermutation {
             axes: output_axes.to_vec(),
             rank: lhs_open_rank + rhs_open_rank,

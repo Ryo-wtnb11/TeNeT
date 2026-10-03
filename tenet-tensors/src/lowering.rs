@@ -162,18 +162,10 @@ fn validate_braid_source_axes<const SRC_NOUT: usize, const SRC_NIN: usize>(
     let mut axes = Vec::with_capacity(codomain_permutation.len() + domain_permutation.len());
     axes.extend_from_slice(codomain_permutation);
     axes.extend_from_slice(domain_permutation);
-    if axes.len() != rank {
-        return Err(OperationError::InvalidPermutation { axes, rank });
+    match tenet_core::axes::validate_permutation(&axes, rank) {
+        Ok(()) => Ok(()),
+        Err(_) => Err(OperationError::InvalidPermutation { axes, rank }),
     }
-
-    let mut seen = vec![false; rank];
-    for &axis in &axes {
-        if axis >= rank || seen[axis] {
-            return Err(OperationError::InvalidPermutation { axes, rank });
-        }
-        seen[axis] = true;
-    }
-    Ok(())
 }
 
 fn validate_distinct_braid_levels(

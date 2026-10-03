@@ -262,6 +262,23 @@ fn large_tree_pair_syntax_validation_does_not_allocate() {
 }
 
 #[test]
+fn axis_validation_is_allocation_free_through_rank_128() {
+    let permutation = (0..128).rev().collect::<Vec<_>>();
+    let subset = (0..128).step_by(3).collect::<Vec<_>>();
+
+    let (open, allocations) = measured_allocations(|| {
+        tenet_core::axes::validate_permutation(&permutation, 128).unwrap();
+        let mask = tenet_core::axes::validate_axis_subset(&subset, 128).unwrap();
+        black_box(mask.complement().count())
+    });
+
+    // What: the shared validator replaces per-call `vec![false; rank]` and
+    // 8/16-entry inline scratch; one inline bitset covers rank <= 128.
+    assert_eq!(open, 128 - subset.len());
+    assert_eq!(allocations, 0);
+}
+
+#[test]
 fn unique_rank_129_preparation_borrows_prebuilt_operation_metadata() {
     let rank = 129;
     let permutation = (0..rank).rev().collect::<Vec<_>>();

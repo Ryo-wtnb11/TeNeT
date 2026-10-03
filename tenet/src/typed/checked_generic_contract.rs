@@ -87,22 +87,19 @@ pub(super) fn trace_pair_axes(
     codomain_rank: usize,
     pairs: &[(usize, usize)],
 ) -> Result<Option<TracePairAxes>, Error> {
-    let mut seen = vec![false; rank];
+    let mut seen = tenet_core::axes::AxisMask::new(rank);
     for &(lhs, rhs) in pairs {
-        for axis in [lhs, rhs] {
-            if axis >= rank || seen[axis] {
-                return Err(Error::InvalidArgument(format!(
-                    "invalid trace pair list {pairs:?} for rank {rank} \
-                     (axes must be in range and distinct)"
-                )));
-            }
-            seen[axis] = true;
+        if seen.insert(lhs).and_then(|()| seen.insert(rhs)).is_err() {
+            return Err(Error::InvalidArgument(format!(
+                "invalid trace pair list {pairs:?} for rank {rank} \
+                 (axes must be in range and distinct)"
+            )));
         }
     }
     if pairs.is_empty() {
         return Ok(None);
     }
-    let output_axes: Vec<usize> = (0..rank).filter(|&axis| !seen[axis]).collect();
+    let output_axes: Vec<usize> = seen.complement().collect();
     let destination_codomain_rank = output_axes
         .iter()
         .filter(|&&axis| axis < codomain_rank)

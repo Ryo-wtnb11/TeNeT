@@ -370,30 +370,9 @@ impl TreeTransformLayoutTable {
         let Some(axes) = axes else {
             return self.push_block(rank, shape, strides, offset);
         };
-        validate_axis_permutation(axes, rank)?;
+        crate::axis::validate_permutation(axes, rank)?;
         self.push_block_mapped(rank, shape, strides, offset, Some(axes))
     }
-}
-
-pub(super) fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), OperationError> {
-    if axes.len() != rank {
-        return Err(OperationError::InvalidPermutation {
-            axes: axes.to_vec(),
-            rank,
-        });
-    }
-    let mut seen = SmallVec::<[bool; 16]>::new();
-    seen.resize(rank, false);
-    for &axis in axes {
-        if axis >= rank || seen[axis] {
-            return Err(OperationError::InvalidPermutation {
-                axes: axes.to_vec(),
-                rank,
-            });
-        }
-        seen[axis] = true;
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]

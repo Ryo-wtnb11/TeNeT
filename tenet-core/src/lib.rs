@@ -39,6 +39,7 @@ pub use tenet_sectors::{
 #[cfg(feature = "racah-generated")]
 pub use tenet_sectors::{SUNFusionRule, SUNFusionRuleError};
 
+pub mod axes;
 mod storage;
 pub use storage::*;
 mod space;
