@@ -222,11 +222,23 @@ fn run_tree_multi_keyed_case(group_count: usize, key_order: KeyOrder) {
 
     let compile_iters = iterations(block_count, 100_000);
     let compile_elapsed = elapsed_per_iter(compile_iters, || {
-        let structure = TreeTransformStructure::compile_keyed(&dst, &src, &specs).unwrap();
+        let structure = TreeTransformStructure::compile_keyed_shared_structures(
+            std::sync::Arc::clone(dst.structure()),
+            std::sync::Arc::clone(src.structure()),
+            &specs,
+            false,
+        )
+        .unwrap();
         black_box(structure.block_count());
     });
 
-    let structure = TreeTransformStructure::compile_keyed(&dst, &src, &specs).unwrap();
+    let structure = TreeTransformStructure::compile_keyed_shared_structures(
+        std::sync::Arc::clone(dst.structure()),
+        std::sync::Arc::clone(src.structure()),
+        &specs,
+        false,
+    )
+    .unwrap();
     let replay_iters = iterations(block_count, 30_000);
     let mut backend = HostTensorOperations;
     let mut workspace = TreeTransformWorkspace::default();

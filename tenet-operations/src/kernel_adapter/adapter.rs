@@ -1231,7 +1231,7 @@ where
 ///
 /// All adapter implementations should validate against the same packed-column
 /// layout before touching data.
-pub fn validate_recoupling_lens(
+pub(crate) fn validate_recoupling_lens(
     destination_len: usize,
     source_len: usize,
     coefficient_len: usize,

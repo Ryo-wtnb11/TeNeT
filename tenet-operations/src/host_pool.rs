@@ -65,7 +65,7 @@ pub fn enter_host_pool(pool: &SharedCpuContext) -> HostPoolGuard {
 }
 
 /// Runs `op` with `pool` as the calling thread's Host pool.
-pub fn with_host_pool<R>(pool: &SharedCpuContext, op: impl FnOnce() -> R) -> R {
+pub(crate) fn with_host_pool<R>(pool: &SharedCpuContext, op: impl FnOnce() -> R) -> R {
     let _entered = enter_host_pool(pool);
     op()
 }

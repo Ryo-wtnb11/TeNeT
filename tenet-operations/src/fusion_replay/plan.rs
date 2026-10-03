@@ -348,13 +348,6 @@ where
     }
 }
 
-pub fn direct_group_matrix_offset(
-    subblocks: &[FusionSubblockMatrixLayout<f64>],
-    covers_matrix: bool,
-) -> Option<usize> {
-    direct_group_matrix_offset_generic(subblocks, covers_matrix)
-}
-
 pub fn direct_group_matrix_offset_generic<C>(
     subblocks: &[FusionSubblockMatrixLayout<C>],
     covers_matrix: bool,

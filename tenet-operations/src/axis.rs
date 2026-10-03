@@ -219,7 +219,7 @@ impl TensorContractSpecOwned {
     }
 }
 
-pub fn permutation_axes(
+pub(crate) fn permutation_axes(
     permutation: OutputAxisOrder<'_>,
     rank: usize,
 ) -> Result<Vec<usize>, OperationError> {

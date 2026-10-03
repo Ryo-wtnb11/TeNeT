@@ -399,7 +399,7 @@ where
         {
             return None;
         }
-        let coefficient = compiled.coefficient(*coefficient);
+        let coefficient = compiled.single_coefficient(*coefficient)?;
         let converted_coefficient = D::coefficient_as_data(coefficient);
         if !coefficient.is_finite()
             || coefficient == 0.0

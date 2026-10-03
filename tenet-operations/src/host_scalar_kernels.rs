@@ -17,7 +17,7 @@ use crate::{ConjugateValue, OperationError};
 /// This module owns the current host-slice scalar kernels used by tensoradd,
 /// pack, scatter, and scale replay. Higher-level tree/fusion algorithms should
 /// call these primitives instead of embedding raw strided loops directly.
-pub fn copy_block_with_strided_kernel<T>(
+pub(crate) fn copy_block_with_strided_kernel<T>(
     dst: BlockViewMut<'_, T>,
     src: BlockView<'_, T>,
 ) -> Result<(), OperationError>
@@ -84,7 +84,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn tensoradd_raw_strided_kernel_trusted<T>(
+pub(crate) fn tensoradd_raw_strided_kernel_trusted<T>(
     zero_strides: &mut Vec<isize>,
     dst_data: &mut [T],
     src_data: &[T],
@@ -415,7 +415,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn axpby_raw_strided_kernel<T>(
+pub(crate) fn axpby_raw_strided_kernel<T>(
     dst_data: &mut [T],
     src_data: &[T],
     shape: &[usize],
@@ -521,7 +521,8 @@ where
 /// Traces a raw strided source after validating all ranks and reachable ranges.
 /// Invalid layout metadata is returned before destination storage is changed.
 #[allow(clippy::too_many_arguments)]
-pub fn tensortrace_raw_strided_kernel<T>(
+#[cfg(test)]
+pub(crate) fn tensortrace_raw_strided_kernel<T>(
     dst_data: &mut [T],
     src_data: &[T],
     output_shape: &[usize],
@@ -672,7 +673,8 @@ where
 /// reachable ranges. Invalid layout metadata is returned before destination
 /// storage is changed.
 #[allow(clippy::too_many_arguments)]
-pub fn tensortrace_raw_strided_kernel_add_with_coefficient<T, C>(
+#[cfg(test)]
+pub(crate) fn tensortrace_raw_strided_kernel_add_with_coefficient<T, C>(
     dst_data: &mut [T],
     src_data: &[T],
     output_shape: &[usize],
