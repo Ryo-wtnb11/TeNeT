@@ -39,3 +39,46 @@ jobs:
       - name: permute U(1) many-charge microbench
         run: cargo bench -p tenet-operations --bench permute_u1_many
         working-directory: tenet
+
+  # Measurement-only tests reach private phases or a counting global
+  # allocator, so they live beside the suites they measure instead of in a
+  # bench target. Why not PR CI: they print numbers and assert no contract,
+  # so they are tagged `#[ignore = "benchmark: run via benchmarks.yml"]` and
+  # run here in release, one thread so their samples do not contend.
+  ignored-measurements:
+    name: Ignored measurement tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - name: Record source revisions
+        run: |
+          git -C tenet log -1 --format='TeNeT %H'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: benchmarks-ignored-measurements
+      - name: typed contract batch measurements
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p tenet-rs --test typed_contract_batch -- --ignored --test-threads=1 --nocapture
+        working-directory: tenet
+      - name: transform-replay member batch measurement
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p tenet-operations --lib -- --ignored --exact transform_replay::member::tests::member_batch_measurement --nocapture
+        working-directory: tenet
+        # Why not plain release: sibling unit tests call the debug-only
+        # `take_checked_block_passes` probe, so the lib test target only
+        # compiles with debug assertions on.
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: 'true'
+      - name: checked-Generic public transform measurement (racah-generated)
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p tenet-rs --no-default-features --features racah-generated,cpu-faer --test permute_overwrite_allocations -- --ignored --exact checked_generic_public_transform_measurement --nocapture
+        working-directory: tenet
+      - name: checked-Generic transform phase measurement (racah-generated)
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p tenet-tensors --no-default-features --features racah-generated,cpu-faer --lib -- --ignored --exact tests::tree_transform_plan::generic::measure_checked_generic_transform_phases --nocapture
+        working-directory: tenet

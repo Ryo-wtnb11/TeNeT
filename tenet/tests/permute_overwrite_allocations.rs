@@ -253,7 +253,7 @@ fn assert_same_checked_tensor(
 /// is the same scope as the established overwrite allocation gates above.
 #[cfg(feature = "racah-generated")]
 #[test]
-#[ignore = "manual checked-Generic public transform measurement"]
+#[ignore = "benchmark: run via benchmarks.yml"]
 fn checked_generic_public_transform_measurement() {
     const CASE_ENV: &str = "TENET_CHECKED_GENERIC_MEASUREMENT_CASE";
     const TEST_NAME: &str = "checked_generic_public_transform_measurement";
