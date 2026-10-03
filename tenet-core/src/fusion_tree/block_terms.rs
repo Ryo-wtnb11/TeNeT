@@ -145,9 +145,8 @@ pub(crate) struct DenseColumns<S> {
 /// single source first reaches is deterministic for identical inputs but
 /// otherwise unspecified (it is neither HomSpace order nor stable across
 /// algorithm changes), so consumers must resolve destinations by key, never by
-/// position. Structurally absent entries remain
-/// distinct from present zero coefficients, and no destination row is wholly
-/// absent.
+/// position. Structurally absent entries remain distinct from present zero
+/// coefficients, and no destination row is wholly absent.
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct OrderedBlockLinearMap<K, S> {

@@ -1594,7 +1594,7 @@ fn tree_transform_execution_context_misses_on_different_tree_pair_operation() {
 // Why a macro, not a generic helper: the replay backend is selected per
 // concrete scalar, and the two fixtures use f64 and Complex64.
 macro_rules! assert_rank5_compact_transpose_replays_like_per_pair {
-    ($rule:expr, $scalar:ty, $sectors:expr) => {{
+    ($rule:expr, $scalar:ty, $sectors:expr, $value:expr) => {{
         let rule = &$rule;
         let sectors: &[SectorId] = &$sectors;
         type T = $scalar;
@@ -1641,7 +1641,7 @@ macro_rules! assert_rank5_compact_transpose_replays_like_per_pair {
 
         let source_len = src_structure.required_len().unwrap();
         let source_data = (0..source_len)
-            .map(|index| T::from(((index * 37 + 11) % 101) as f64 / 7.0 - 5.0))
+            .map(|index| $value(((index * 37 + 11) % 101) as f64 / 7.0 - 5.0))
             .collect::<Vec<_>>();
         let source = TensorMap::<T, 2, 3>::from_vec_with_structure(
             source_data,
@@ -1689,11 +1689,13 @@ fn rank5_compact_transpose_with_trailing_bend_replays_like_per_pair() {
     assert_rank5_compact_transpose_replays_like_per_pair!(
         SU2FusionRule,
         f64,
-        [SectorId::new(0), SectorId::new(1), SectorId::new(2)]
+        [SectorId::new(0), SectorId::new(1), SectorId::new(2)],
+        |x: f64| x
     );
     assert_rank5_compact_transpose_replays_like_per_pair!(
         tenet_core::FibonacciFusionRule,
         Complex64,
-        [SectorId::new(0), SectorId::new(1)]
+        [SectorId::new(0), SectorId::new(1)],
+        |x: f64| Complex64::new(x, 0.5 - x / 3.0)
     );
 }
