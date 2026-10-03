@@ -40,21 +40,22 @@ type Fz2U1Su2Rule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, Fz2U1Su2Codec>;
 type Fz2U1Sector = ProductSector<Z2Irrep, U1Irrep>;
 type Fz2U1Su2Sector = ProductSector<Fz2U1Sector, SU2Irrep>;
 
-fn assert_close(lhs: &[f64], rhs: &[f64], tol: f64) {
-    assert_eq!(lhs.len(), rhs.len(), "data lengths differ");
-    for (index, (a, b)) in lhs.iter().zip(rhs).enumerate() {
-        assert!(
-            (a - b).abs() <= tol * (1.0 + a.abs().max(b.abs())),
-            "element {index} differs: {a} vs {b}"
-        );
-    }
-}
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
-fn assert_scalar_close(lhs: f64, rhs: f64, tol: f64) {
-    assert!(
-        (lhs - rhs).abs() <= tol * (1.0 + lhs.abs().max(rhs.abs())),
-        "{lhs} vs {rhs}"
-    );
+use tenet::typed::Complex32;
+
+/// Floating terms reaching one compared entry of the operation identities: a
+/// composition over a contracted `V ⊗ V` leg plus the recoupling terms of a
+/// tree transform stay below this count on every fixture.
+const TERMS: usize = 64;
+
+/// The cross-library streams compare against TensorKit after long operation
+/// chains on magnitudes up to `1e10`; their oracle agreement is a relative
+/// envelope `rel * max(1, |want|)`, written as the `numerics` bound with one
+/// term and this conditioning.
+fn envelope(rel: f64) -> f64 {
+    rel / (numerics::K * f64::EPSILON)
 }
 
 /// splitmix64, same generator as `TensorMap::rand_with_seed`.
@@ -178,12 +179,18 @@ fn permute_composition_law() {
                         .unwrap();
                     let composed: Vec<usize> = s2.iter().map(|&i| s1[i]).collect();
                     let direct = t.permute(&composed[..n2], &composed[n2..]).unwrap();
-                    assert_close(
+                    numerics::assert_slices_close(
+                        "composed permutation",
                         step2.dense_data().unwrap(),
                         direct.dense_data().unwrap(),
-                        1e-12,
+                        TERMS,
                     );
-                    assert_scalar_close(step2.norm(2.0).unwrap(), t.norm(2.0).unwrap(), 1e-12);
+                    numerics::assert_close(
+                        "permutation norm",
+                        step2.norm(2.0).unwrap(),
+                        t.norm(2.0).unwrap(),
+                        TERMS,
+                    );
                 }
             }
             let _ = ($name, $fermionic);
@@ -219,8 +226,18 @@ fn braid_inverse_roundtrip() {
                 let back = braided
                     .braid(&s_inv[..2], &s_inv[2..], &levels_braided)
                     .unwrap();
-                assert_close(back.dense_data().unwrap(), t.dense_data().unwrap(), 1e-12);
-                assert_scalar_close(braided.norm(2.0).unwrap(), t.norm(2.0).unwrap(), 1e-12);
+                numerics::assert_slices_close(
+                    "braid round trip",
+                    back.dense_data().unwrap(),
+                    t.dense_data().unwrap(),
+                    TERMS,
+                );
+                numerics::assert_close(
+                    "braid norm",
+                    braided.norm(2.0).unwrap(),
+                    t.norm(2.0).unwrap(),
+                    TERMS,
+                );
             }
             let _ = ($name, $fermionic);
         }};
@@ -247,10 +264,11 @@ fn bosonic_braid_equals_permute() {
                         .collect::<Vec<_>>();
                     let braided = t.braid(&s[..2], &s[2..], &levels).unwrap();
                     let permuted = t.permute(&s[..2], &s[2..]).unwrap();
-                    assert_close(
+                    numerics::assert_slices_close(
+                        "braid equals permute",
                         braided.dense_data().unwrap(),
                         permuted.dense_data().unwrap(),
-                        1e-12,
+                        TERMS,
                     );
                 }
             }
@@ -280,7 +298,12 @@ fn yang_baxter_adjacent_swaps() {
             };
             let lhs = swap(&swap(&swap(&t, 0), 1), 0);
             let rhs = swap(&swap(&swap(&t, 1), 0), 1);
-            assert_close(lhs.dense_data().unwrap(), rhs.dense_data().unwrap(), 1e-12);
+            numerics::assert_slices_close(
+                "permute identity",
+                lhs.dense_data().unwrap(),
+                rhs.dense_data().unwrap(),
+                TERMS,
+            );
             let _ = ($name, $fermionic);
         }};
     }
@@ -302,7 +325,8 @@ fn adjoint_involution_and_antihomomorphism() {
                 TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 51).unwrap();
             let b: TensorMap<_, f64> =
                 TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 52).unwrap();
-            assert_close(
+            numerics::assert_slices_close(
+                "double adjoint",
                 a.adjoint()
                     .unwrap()
                     .adjoint()
@@ -310,14 +334,15 @@ fn adjoint_involution_and_antihomomorphism() {
                     .dense_data()
                     .unwrap(),
                 a.dense_data().unwrap(),
-                1e-12,
+                TERMS,
             );
             let lhs = a.compose(&b).unwrap().adjoint().unwrap();
             let rhs = b.adjoint().unwrap().compose(&a.adjoint().unwrap()).unwrap();
-            assert_close(
+            numerics::assert_slices_close(
+                "adjoint of a composition",
                 lhs.materialize().unwrap().dense_data().unwrap(),
                 rhs.dense_data().unwrap(),
-                1e-12,
+                TERMS,
             );
             let _ = ($name, $fermionic);
         }};
@@ -338,10 +363,11 @@ fn trace_cyclicity() {
                     TensorMap::rand_with_seed(&rt, cod.clone(), cod.clone(), seed).unwrap();
                 let b: TensorMap<_, f64> =
                     TensorMap::rand_with_seed(&rt, cod.clone(), cod, seed + 100).unwrap();
-                assert_scalar_close(
+                numerics::assert_close(
+                    "trace cyclicity",
                     a.compose(&b).unwrap().tr().unwrap(),
                     b.compose(&a).unwrap().tr().unwrap(),
-                    1e-12,
+                    TERMS,
                 );
             }
             let _ = ($name, $fermionic);
@@ -364,17 +390,18 @@ fn bosonic_trace_matches_partial_trace_engine() {
                     let pairs: Vec<(usize, usize)> = (0..ncod).map(|i| (i, ncod + i)).collect();
                     let real: TensorMap<_, f64> =
                         TensorMap::rand_with_seed(&rt, cod.clone(), cod.clone(), seed).unwrap();
-                    assert_scalar_close(
+                    numerics::assert_close(
+                        "real trace_pairs",
                         real.tr().unwrap(),
                         real.trace_pairs(&pairs).unwrap().scalar().unwrap(),
-                        1e-12,
+                        TERMS,
                     );
                     let complex: TensorMap<_, Complex64> =
                         TensorMap::rand_with_seed(&rt, cod.clone(), cod, seed).unwrap();
                     let fast = complex.tr().unwrap();
                     let engine = complex.trace_pairs(&pairs).unwrap().scalar().unwrap();
-                    assert_scalar_close(fast.re, engine.re, 1e-12);
-                    assert_scalar_close(fast.im, engine.im, 1e-12);
+                    numerics::assert_close("complex trace_pairs re", fast.re, engine.re, TERMS);
+                    numerics::assert_close("complex trace_pairs im", fast.im, engine.im, TERMS);
                 }
             }
             let _ = $name;
@@ -393,11 +420,11 @@ fn ordinary_trace_of_identity_is_positive_dimension() {
             let v = GradedSpace::try_new($provider, $pairs).unwrap();
             let expected = v.dim().unwrap();
             let real: TensorMap<_, f64> = TensorMap::isomorphism(&rt, [&v], [&v]).unwrap();
-            assert_scalar_close(real.tr().unwrap(), expected, 1e-12);
+            numerics::assert_close("real trace", real.tr().unwrap(), expected, TERMS);
             let complex: TensorMap<_, Complex64> = TensorMap::isomorphism(&rt, [&v], [&v]).unwrap();
             let actual = complex.tr().unwrap();
-            assert_scalar_close(actual.re, expected, 1e-12);
-            assert_scalar_close(actual.im, 0.0, 1e-12);
+            numerics::assert_close("complex trace re", actual.re, expected, TERMS);
+            numerics::assert_close("complex trace im", actual.im, 0.0, TERMS);
             let _ = ($name, $fermionic);
         }};
     }
@@ -421,7 +448,12 @@ fn twist_squares_to_identity_and_naturality() {
                     .unwrap()
                     .twist(&[leg], Direction::Forward)
                     .unwrap();
-                assert_close(twice.dense_data().unwrap(), t.dense_data().unwrap(), 1e-12);
+                numerics::assert_slices_close(
+                    "double twist",
+                    twice.dense_data().unwrap(),
+                    t.dense_data().unwrap(),
+                    TERMS,
+                );
                 let once = t.twist(&[leg], Direction::Forward).unwrap();
                 if $fermionic {
                     // Every leg of these fermionic fixtures carries an odd sector,
@@ -437,7 +469,12 @@ fn twist_squares_to_identity_and_naturality() {
                 } else {
                     // Bosonic: θ ≡ 1, so the twist is the identity and the
                     // short-circuit returns the shared buffer unchanged.
-                    assert_close(once.dense_data().unwrap(), t.dense_data().unwrap(), 1e-12);
+                    numerics::assert_slices_close(
+                        "bosonic twist",
+                        once.dense_data().unwrap(),
+                        t.dense_data().unwrap(),
+                        TERMS,
+                    );
                 }
             }
             let s = rand_perm(&mut state, 4);
@@ -452,7 +489,12 @@ fn twist_squares_to_identity_and_naturality() {
                 .unwrap()
                 .twist(&[pos], Direction::Forward)
                 .unwrap();
-            assert_close(lhs.dense_data().unwrap(), rhs.dense_data().unwrap(), 1e-12);
+            numerics::assert_slices_close(
+                "identity",
+                lhs.dense_data().unwrap(),
+                rhs.dense_data().unwrap(),
+                TERMS,
+            );
         }};
     }
     for_each_space!(case);
@@ -466,7 +508,8 @@ fn isometry_and_isomorphism_are_isometric() {
         ($name:expr, $provider:expr, $pairs:expr, $fermionic:expr) => {{
             let v = GradedSpace::try_new($provider, $pairs).unwrap();
             let id: TensorMap<_, f64> = TensorMap::isomorphism(&rt, [&v], [&v]).unwrap();
-            assert_close(
+            numerics::assert_slices_close(
+                "identity isometry",
                 id.adjoint()
                     .unwrap()
                     .compose(&id)
@@ -474,10 +517,11 @@ fn isometry_and_isomorphism_are_isometric() {
                     .dense_data()
                     .unwrap(),
                 id.dense_data().unwrap(),
-                1e-12,
+                TERMS,
             );
             let w: TensorMap<_, f64> = TensorMap::isometry(&rt, [&v, &v], [&v]).unwrap();
-            assert_close(
+            numerics::assert_slices_close(
+                "isometry",
                 w.adjoint()
                     .unwrap()
                     .compose(&w)
@@ -485,7 +529,7 @@ fn isometry_and_isomorphism_are_isometric() {
                     .dense_data()
                     .unwrap(),
                 id.dense_data().unwrap(),
-                1e-12,
+                TERMS,
             );
             let _ = ($name, $fermionic);
         }};
@@ -532,15 +576,16 @@ fn contraction_order_independence() {
                 .unwrap()
                 .scalar()
                 .unwrap();
-            assert_scalar_close(left, middle, 1e-12);
+            numerics::assert_close("trace association", left, middle, TERMS);
 
             // Open chain: both association orders agree elementwise.
             let assoc_l = x1.compose(&x2).unwrap().compose(&x3).unwrap();
             let assoc_r = x1.compose(&x2.compose(&x3).unwrap()).unwrap();
-            assert_close(
+            numerics::assert_slices_close(
+                "composition associativity",
                 assoc_l.dense_data().unwrap(),
                 assoc_r.dense_data().unwrap(),
-                1e-12,
+                TERMS,
             );
 
             // Rank-4 pair with crossed contracted legs: forces tree transforms
@@ -577,7 +622,12 @@ fn contraction_order_independence() {
                 // default open order [q, r, p, s]
                 .permute(&[2, 0], &[1, 3])
                 .unwrap();
-            assert_close(ab.dense_data().unwrap(), ba.dense_data().unwrap(), 1e-12);
+            numerics::assert_slices_close(
+                "crossed contraction",
+                ab.dense_data().unwrap(),
+                ba.dense_data().unwrap(),
+                TERMS,
+            );
             let _ = ($name, $fermionic);
         }};
     }
@@ -635,7 +685,12 @@ fn su2_nonuniform_degeneracy_crossed_contract() {
         .unwrap()
         .permute(&[2, 0], &[1, 3])
         .unwrap();
-    assert_close(ab.dense_data().unwrap(), ba.dense_data().unwrap(), 1e-12);
+    numerics::assert_slices_close(
+        "contraction order",
+        ab.dense_data().unwrap(),
+        ba.dense_data().unwrap(),
+        TERMS,
+    );
 }
 
 /// Regression test for issue #12, fZ2 shape: decreasing degeneracies
@@ -668,10 +723,11 @@ fn fz2_decreasing_degeneracy_boundary_crossing_contract() {
         .unwrap()
         .compose(&b.permute(&[0], &[1, 2, 3]).unwrap())
         .unwrap();
-    assert_close(
+    numerics::assert_slices_close(
+        "direct contraction",
         direct.dense_data().unwrap(),
         reference.dense_data().unwrap(),
-        1e-12,
+        TERMS,
     );
 }
 
@@ -728,7 +784,12 @@ fn triple_product_nonuniform_degeneracy_crossed_contract() {
         .unwrap()
         .permute(&[2, 0], &[1, 3])
         .unwrap();
-    assert_close(ab.dense_data().unwrap(), ba.dense_data().unwrap(), 1e-12);
+    numerics::assert_slices_close(
+        "contraction order",
+        ab.dense_data().unwrap(),
+        ba.dense_data().unwrap(),
+        TERMS,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -930,7 +991,13 @@ fn weighted_rank_truncation_matches_tensorkit() {
                 .collect();
             kept.sort_unstable();
             assert_eq!(kept, $expected);
-            assert_scalar_close(found.error, $error, 1e-10);
+            numerics::assert_close_scaled(
+                "truncation error",
+                found.error,
+                $error,
+                1,
+                envelope(1e-10),
+            );
         }};
     }
 
@@ -1006,8 +1073,8 @@ macro_rules! invariant_stream_case {
         ];
         for ((step, norm, tr), &(exp_step, exp_norm, exp_tr)) in steps.iter().zip($expected) {
             assert_eq!(*step, exp_step);
-            assert_scalar_close(*norm, exp_norm, 1e-9);
-            assert_scalar_close(*tr, exp_tr, 1e-9);
+            numerics::assert_close_scaled("stream norm", *norm, exp_norm, 1, envelope(1e-9));
+            numerics::assert_close_scaled("stream trace", *tr, exp_tr, 1, envelope(1e-9));
         }
 
         let mut values: Vec<f64> = e
@@ -1020,7 +1087,7 @@ macro_rules! invariant_stream_case {
         assert_eq!(values.len(), $svd_count, "singular value count");
         let cutoff = 1e-6 * $svd_expected[0];
         for (k, (&got, &exp)) in values.iter().zip($svd_expected).enumerate() {
-            assert_scalar_close(got, exp, 1e-8);
+            numerics::assert_close_scaled("stream singular value", got, exp, 1, envelope(1e-8));
             assert!(exp > cutoff, "svd_expected[{k}] below cutoff");
         }
         for &tail in &values[$svd_expected.len()..] {

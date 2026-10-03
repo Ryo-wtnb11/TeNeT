@@ -48,10 +48,11 @@ use tenet::typed::{GradedSpace, TensorMap};
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
 
-/// Relative agreement with the TensorKit oracle. The two engines sum the same
-/// terms in different orders, so exact equality is not the claim; `1e-13` is
-/// far tighter than any weighting or dispatch mistake could survive.
-const RTOL: f64 = 1e-13;
+/// Floating terms per norm: one per stored entry of the fixtures (21). The
+/// two engines sum the same terms in different orders, so exact equality is
+/// not the claim; the `numerics` bound is far tighter than any weighting or
+/// dispatch mistake could survive.
+const TERMS: usize = 21;
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()
@@ -70,13 +71,6 @@ fn complex_fill(indices: &[usize]) -> Complex64 {
         real_fill(indices),
         0.5 + 0.125 * indices[0] as f64 + 0.375 * indices[1] as f64,
     )
-}
-
-fn assert_close(actual: f64, expected: f64, what: &str) {
-    assert!(
-        (actual - expected).abs() <= RTOL * expected.abs(),
-        "{what}: got {actual:.17e}, TensorKit says {expected:.17e}"
-    );
 }
 
 // TensorKit 0.17.0 oracle values, indexed as [p = 1, 2, 3, Inf].
@@ -147,37 +141,53 @@ fn the_fixtures_are_the_tensors_tensorkit_measured() {
         TensorMap::from_subblock_fn(&rt, [&su2_v], [&su2_w], |_, indices| complex_fill(indices))
             .unwrap();
 
-    assert_close(u1_f64.norm(2.0).unwrap(), U1_F64[1], "typed u1 f64 norm()");
-    assert_close(
+    numerics::assert_close(
+        "typed u1 f64 norm()",
+        u1_f64.norm(2.0).unwrap(),
+        U1_F64[1],
+        TERMS,
+    );
+    numerics::assert_close(
+        "typed u1 f64 norm(Inf)",
         u1_f64.norm(f64::INFINITY).unwrap(),
         U1_F64[3],
-        "typed u1 f64 norm(Inf)",
+        TERMS,
     );
-    assert_close(u1_c64.norm(2.0).unwrap(), U1_C64[1], "typed u1 c64 norm()");
-    assert_close(
+    numerics::assert_close(
+        "typed u1 c64 norm()",
+        u1_c64.norm(2.0).unwrap(),
+        U1_C64[1],
+        TERMS,
+    );
+    numerics::assert_close(
+        "typed u1 c64 norm(Inf)",
         u1_c64.norm(f64::INFINITY).unwrap(),
         U1_C64[3],
-        "typed u1 c64 norm(Inf)",
+        TERMS,
     );
-    assert_close(
+    numerics::assert_close(
+        "typed su2 f64 norm()",
         su2_f64.norm(2.0).unwrap(),
         SU2_F64[1],
-        "typed su2 f64 norm()",
+        TERMS,
     );
-    assert_close(
+    numerics::assert_close(
+        "typed su2 f64 norm(Inf)",
         su2_f64.norm(f64::INFINITY).unwrap(),
         SU2_F64[3],
-        "typed su2 f64 norm(Inf)",
+        TERMS,
     );
-    assert_close(
+    numerics::assert_close(
+        "typed su2 c64 norm()",
         su2_c64.norm(2.0).unwrap(),
         SU2_C64[1],
-        "typed su2 c64 norm()",
+        TERMS,
     );
-    assert_close(
+    numerics::assert_close(
+        "typed su2 c64 norm(Inf)",
         su2_c64.norm(f64::INFINITY).unwrap(),
         SU2_C64[3],
-        "typed su2 c64 norm(Inf)",
+        TERMS,
     );
 }
 
@@ -201,23 +211,35 @@ fn typed_norm_p_matches_tensorkit() {
             .unwrap();
 
     for (&p, &expected) in POWERS.iter().zip(&U1_F64) {
-        assert_close(u1_f64.norm(p).unwrap(), expected, &format!("u1 f64 p={p}"));
+        numerics::assert_close(
+            &format!("u1 f64 p={p}"),
+            u1_f64.norm(p).unwrap(),
+            expected,
+            TERMS,
+        );
     }
     for (&p, &expected) in POWERS.iter().zip(&U1_C64) {
-        assert_close(u1_c64.norm(p).unwrap(), expected, &format!("u1 c64 p={p}"));
+        numerics::assert_close(
+            &format!("u1 c64 p={p}"),
+            u1_c64.norm(p).unwrap(),
+            expected,
+            TERMS,
+        );
     }
     for (&p, &expected) in POWERS.iter().zip(&SU2_F64) {
-        assert_close(
+        numerics::assert_close(
+            &format!("su2 f64 p={p}"),
             su2_f64.norm(p).unwrap(),
             expected,
-            &format!("su2 f64 p={p}"),
+            TERMS,
         );
     }
     for (&p, &expected) in POWERS.iter().zip(&SU2_C64) {
-        assert_close(
+        numerics::assert_close(
+            &format!("su2 c64 p={p}"),
             su2_c64.norm(p).unwrap(),
             expected,
-            &format!("su2 c64 p={p}"),
+            TERMS,
         );
     }
 }
@@ -257,10 +279,11 @@ fn compact_norm_p_equals_the_dense_answer() {
         .unwrap();
 
     for p in [1.0, 2.0, 3.0, 0.5, f64::INFINITY] {
-        assert_close(
+        numerics::assert_close(
+            &format!("compact vs dense p={p}"),
             s.norm(p).unwrap(),
             twin.norm(p).unwrap(),
-            &format!("compact vs dense p={p}"),
+            TERMS,
         );
     }
 }
@@ -309,10 +332,11 @@ fn norm_inf_propagates_nan_from_any_block() {
     );
     // The finite entries alone still have the clean maximum, so the NaN is the
     // only reason the assertions above hold.
-    assert_close(
+    numerics::assert_close(
+        "u1 f64 norm(Inf) with the poisoned entry zeroed",
         u1_real_with(0.0).norm(f64::INFINITY).unwrap(),
         U1_F64[3],
-        "u1 f64 norm(Inf) with the poisoned entry zeroed",
+        TERMS,
     );
 }
 

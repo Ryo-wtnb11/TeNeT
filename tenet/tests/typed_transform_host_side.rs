@@ -22,15 +22,14 @@ use common::permute_dense;
 use tenet::sector::{ProductFusionRuleExt, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
-fn assert_close(actual: &[f64], expected: &[f64], what: &str) {
-    assert_eq!(actual.len(), expected.len(), "{what}: length");
-    for (index, (&left, &right)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (left - right).abs() <= 1e-12 * (1.0 + right.abs()),
-            "{what}: element {index} is {left}, expected {right}"
-        );
-    }
-}
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
+
+use tenet::typed::{Complex32, Complex64};
+
+/// Floating terms per physical entry: the fusion-tree expansion of a rank-4
+/// SU(2) tensor with spins up to 1 sums over at most four intermediate spins.
+const TERMS: usize = 4;
 
 /// The fill `typed_cuda_transform.rs` uses, so the pin and the device gate
 /// exercise the same values.
@@ -78,7 +77,7 @@ fn the_dense_permute_oracle_agrees_with_the_host_for_u1_and_su2() {
     let (shape, data) = permute_dense(&source.shape, &source.data, &[1, 0, 3, 2]);
     let actual = permuted.to_physical_dense().unwrap();
     assert_eq!(actual.shape, shape, "U(1) oracle shape");
-    assert_close(&actual.data, &data, "U(1) oracle");
+    numerics::assert_slices_close("U(1) oracle", &actual.data, &data, TERMS);
 
     // SU(2) is the case that matters: the reduced-block replay must recouple
     // to produce what is, physically, a bare axis permutation.
@@ -90,7 +89,7 @@ fn the_dense_permute_oracle_agrees_with_the_host_for_u1_and_su2() {
     let (shape, data) = permute_dense(&source.shape, &source.data, &[1, 0, 3, 2]);
     let actual = permuted.to_physical_dense().unwrap();
     assert_eq!(actual.shape, shape, "SU(2) oracle shape");
-    assert_close(&actual.data, &data, "SU(2) oracle");
+    numerics::assert_slices_close("SU(2) oracle", &actual.data, &data, TERMS);
 
     // Non-vacuity: the reduced payload is not a reordering of the source, so
     // the oracle really did survive a recoupling.

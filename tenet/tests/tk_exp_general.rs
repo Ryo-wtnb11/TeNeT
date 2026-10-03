@@ -51,12 +51,18 @@ use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{BlockFusionTrees, GradedSpace, TensorMap};
 use tenet::typed::{Complex64, Runtime};
 
-/// Relative agreement with the TensorKit oracle. The two engines evaluate the
-/// same approximant at different Padé degrees for the small blocks (Julia drops
-/// to degree 3/5/7/9 below `||A||_1 = 2.1`; TeNeT always uses [13/13]), so this
-/// is approximant agreement, not bitwise agreement — and `1e-12` is orders of
-/// magnitude tighter than any coefficient, scaling or dispatch mistake.
-const RTOL: f64 = 1e-12;
+/// Floating terms per norm: one per stored entry of the fixtures (13). The
+/// two engines evaluate the same approximant at different Padé degrees for
+/// the small blocks (Julia drops to degree 3/5/7/9 below `||A||_1 = 2.1`;
+/// TeNeT always uses [13/13]), so this is approximant agreement, not bitwise
+/// agreement, and still far tighter than any coefficient, scaling or dispatch
+/// mistake.
+const TERMS: usize = 13;
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
+
+use tenet::typed::Complex32;
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()
@@ -107,14 +113,6 @@ fn typed_complex(runtime: &Runtime, scale: f64) -> TensorMap<U1FusionRule, Compl
     .unwrap()
 }
 
-fn assert_close(actual: f64, expected: f64, what: &str) {
-    let relative = (actual - expected).abs() / expected.abs();
-    assert!(
-        relative <= RTOL,
-        "{what}: {actual:.17e} differs from the TensorKit oracle {expected:.17e} by {relative:e}"
-    );
-}
-
 #[test]
 fn general_exp_matches_the_tensorkit_oracle() {
     let runtime = runtime();
@@ -125,30 +123,38 @@ fn general_exp_matches_the_tensorkit_oracle() {
         (4.0, 8.8881944173155887, 15.692503963067267),
     ] {
         let typed = typed_real(&runtime, scale);
-        assert_close(
+        numerics::assert_close(
+            &format!("f64 scale {scale} typed input fixture"),
             typed.norm(2.0).unwrap(),
             input_norm,
-            &format!("f64 scale {scale} typed input fixture"),
+            TERMS,
         );
 
         let typed_exp = typed.exp(&[0], &[1]).unwrap();
-        assert_close(
+        numerics::assert_close(
+            &format!("f64 scale {scale} exp"),
             typed_exp.norm(2.0).unwrap(),
             exponential_norm,
-            &format!("f64 scale {scale} exp"),
+            TERMS,
         );
     }
 
     // c64, where the blocks are non-Hermitian in both parts.
     let typed = typed_complex(&runtime, 1.0);
-    assert_close(
+    numerics::assert_close(
+        "c64 typed input fixture",
         typed.norm(2.0).unwrap(),
         2.5678298230217673,
-        "c64 typed input fixture",
+        TERMS,
     );
 
     let typed_exp = typed.exp(&[0], &[1]).unwrap();
-    assert_close(typed_exp.norm(2.0).unwrap(), 3.1806015158373815, "c64 exp");
+    numerics::assert_close(
+        "c64 exp",
+        typed_exp.norm(2.0).unwrap(),
+        3.1806015158373815,
+        TERMS,
+    );
 }
 
 /// `A = [0 1e16; 1e-16 0]`, whose exponential is closed form:

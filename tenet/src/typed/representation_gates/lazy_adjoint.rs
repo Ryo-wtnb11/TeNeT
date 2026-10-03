@@ -749,9 +749,20 @@ where
             (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
         }));
 
-    assert_close(lazy.inner(&eager).unwrap(), eager.inner(&eager).unwrap());
-    assert_close(eager.inner(&lazy).unwrap(), eager.inner(&eager).unwrap());
-    assert_close(lazy.inner(&lazy).unwrap(), eager.inner(&eager).unwrap());
+    // Why an absolute bound and not `numerics`: the inner products reach
+    // magnitude 520, where the `numerics` bound would exceed the `1e-12` this
+    // gate has always held them to.
+    let eager_inner = eager.inner(&eager).unwrap().widen_complex();
+    for (what, inner) in [
+        ("lazy.inner(&eager)", lazy.inner(&eager).unwrap()),
+        ("eager.inner(&lazy)", eager.inner(&lazy).unwrap()),
+        ("lazy.inner(&lazy)", lazy.inner(&lazy).unwrap()),
+    ] {
+        assert!(
+            (inner.widen_complex() - eager_inner).norm() < 1e-12,
+            "{what}"
+        );
+    }
     assert!((lazy.norm(2.0).unwrap() - eager.norm(2.0).unwrap()).abs() < 1e-12);
     assert!((lazy.norm(f64::INFINITY).unwrap() - eager.norm(f64::INFINITY).unwrap()).abs() < 1e-12);
     assert!((lazy.norm(1.5).unwrap() - eager.norm(1.5).unwrap()).abs() < 1e-12);
@@ -883,11 +894,16 @@ fn adjoint_trace_pairs_stays_parent_native() {
 fn assert_parent_native_tr<R, D>(source: &TensorMap<R, D>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: TensorScalar + core::fmt::Debug,
+    D: TensorScalar + core::fmt::Debug + numerics::Numeric,
 {
     let lazy = source.adjoint().unwrap();
     let eager = eager_adjoint_oracle(source);
-    assert_close(lazy.tr().unwrap(), eager.tr().unwrap());
+    numerics::assert_close(
+        "lazy.tr()",
+        lazy.tr().unwrap(),
+        eager.tr().unwrap(),
+        GATE_TERMS,
+    );
 }
 
 #[test]

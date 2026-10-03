@@ -12,12 +12,10 @@ use tenet::typed::{
     TypedTensorRootDispatch,
 };
 
-fn assert_close(actual: &[f64], expected: &[f64]) {
-    assert_eq!(actual.len(), expected.len());
-    for (&actual, &expected) in actual.iter().zip(expected) {
-        assert!((actual - expected).abs() <= 1.0e-11 * (1.0 + expected.abs()));
-    }
-}
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
+
+use tenet::typed::{Complex32, Complex64};
 
 fn inspect_with_the_existing_root_bound<R, D>(tensor: &TensorMap<R, D>)
 where
@@ -105,7 +103,9 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
 
     let identity =
         TensorMap::<U1FusionRule, f64>::isomorphism(&runtime, [&space], [&space]).unwrap();
-    assert_close(
+    // Each entry sums the two-dimensional contracted leg.
+    numerics::assert_slices_close(
+        "identity contraction",
         identity
             .contract(
                 &tensor,
@@ -120,8 +120,10 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
             .dense_data()
             .unwrap(),
         tensor.dense_data().unwrap(),
+        2,
     );
-    assert_close(
+    numerics::assert_slices_close(
+        "double adjoint",
         tensor
             .adjoint()
             .unwrap()
@@ -130,6 +132,7 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
             .dense_data()
             .unwrap(),
         tensor.dense_data().unwrap(),
+        1,
     );
     assert_eq!(identity.tr().unwrap(), 2.0);
 
@@ -162,9 +165,12 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
         .unwrap();
     let vh = vh.restrict_leg(&[(0, &found.selection)]).unwrap();
     let reconstructed = u.compose(&s).unwrap().compose(&vh).unwrap();
-    assert_close(
+    // Rank-two reconstruction of a rank-two block: two terms per entry.
+    numerics::assert_slices_close(
+        "truncated SVD reconstruction",
         reconstructed.dense_data().unwrap(),
         tensor.dense_data().unwrap(),
+        2,
     );
 }
 
