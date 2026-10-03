@@ -274,8 +274,8 @@ fn fusion_layout_identity_hashes_inner_semantics_not_arc_address() {
 
 #[test]
 fn fusion_layout_global_churn_and_reset_preserve_coupled_structure() {
-    // What: cap overflow gives the rebuilt layout a fresh non-recycling id;
-    // coupled content remains equal, and reset cannot stale-alias live old values.
+    // What: cap overflow and reset rebuild the layout; coupled content remains
+    // equal and a live old structure is never aliased by the rebuilt one.
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -283,11 +283,9 @@ fn fusion_layout_global_churn_and_reset_preserve_coupled_structure() {
     let rule = U1FusionRule;
     let hom = FusionTreeHomSpace::from_sectors([(U1Irrep::new(0), 2)], [(U1Irrep::new(0), 3)]);
     let old_layout = hom.cached_fusion_tree_layout(&rule);
-    let old_id = old_layout.id;
     let old_structure = hom
         .coupled_subblock_structure(&rule, 1, [vec![2, 3]])
         .unwrap();
-    drop(old_layout);
 
     for charge in 1..=(FUSION_TREE_LAYOUT_CACHE_CAP as i32 + 64) {
         let distinct = FusionTreeHomSpace::from_sectors(
@@ -301,7 +299,7 @@ fn fusion_layout_global_churn_and_reset_preserve_coupled_structure() {
     assert!(global_info.charged_payload_bytes() <= global_info.byte_budget());
 
     let rebuilt_layout = hom.cached_fusion_tree_layout(&rule);
-    assert!(rebuilt_layout.id > old_id);
+    assert!(!Arc::ptr_eq(&rebuilt_layout, &old_layout));
     let reused_structure = hom
         .coupled_subblock_structure(&rule, 1, [vec![2, 3]])
         .unwrap();
@@ -313,7 +311,6 @@ fn fusion_layout_global_churn_and_reset_preserve_coupled_structure() {
         .coupled_subblock_structure(&rule, 1, [vec![2, 3]])
         .unwrap();
     assert!(!Arc::ptr_eq(&rebuilt_layout, &after_reset_layout));
-    assert!(after_reset_layout.id > rebuilt_layout.id);
     assert!(!Arc::ptr_eq(&old_structure, &after_reset_structure));
     assert_eq!(old_structure.as_ref(), after_reset_structure.as_ref());
 }

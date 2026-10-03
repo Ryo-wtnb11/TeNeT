@@ -102,7 +102,6 @@ fn fusion_layout_local_cache_bypasses_oversized_rule_identity() {
         FusionTreeHomSpace::from_sectors([(SectorId::new(0), 1)], Vec::<(SectorId, usize)>::new());
     let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
     let layout = Arc::new(fusion_tree_layout_from_data(
-        next_fusion_tree_layout_id(),
         hom.fusion_tree_layout_data_uncached(&rule),
     ));
     let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
@@ -172,7 +171,6 @@ fn fusion_layout_local_cache_bypasses_oversized_product_rule_identity() {
         FusionTreeHomSpace::from_sectors([(SectorId::new(0), 1)], Vec::<(SectorId, usize)>::new());
     let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
     let layout = Arc::new(fusion_tree_layout_from_data(
-        next_fusion_tree_layout_id(),
         hom.fusion_tree_layout_data_uncached(&rule),
     ));
     let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
@@ -594,7 +592,7 @@ fn fusion_layout_shape_and_fermionic_rule_provenance_do_not_alias() {
     );
     let bosonic_layout = hom.cached_fusion_tree_layout(&Z2FusionRule);
     let fermionic_layout = hom.cached_fusion_tree_layout(&FermionParityFusionRule);
-    assert_ne!(bosonic_layout.id, fermionic_layout.id);
+    assert!(!Arc::ptr_eq(&bosonic_layout, &fermionic_layout));
 
     let small = hom
         .coupled_subblock_structure(&FermionParityFusionRule, 1, [vec![1, 1], vec![1, 1]])
@@ -621,4 +619,58 @@ fn fusion_layout_shape_and_fermionic_rule_provenance_do_not_alias() {
         .coupled_subblock_structure(&U1FusionRule, 1, [vec![4, 5]])
         .unwrap();
     assert_eq!(rebuilt.block(0).unwrap().shape(), &[4, 5]);
+}
+
+#[test]
+fn explicit_shape_coupled_structure_reuses_the_bounded_leg_cache() {
+    // What: with shapes equal to the leg degeneracies, the explicit-shape
+    // constructor is answered by the byte-bounded complete-HomSpace cache: one
+    // leg-grid build on the miss, none on the hit, and the same shared value
+    // as the leg-derived constructor.
+    let _guard = test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_core_intern_tables();
+    let leg = SectorLeg::new([(u1(-1), 2), (u1(0), 3), (u1(2), 1)], false);
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let layout = hom.fusion_tree_layout_data_uncached(&U1FusionRule);
+    let grid_sides = layout
+        .sectors
+        .iter()
+        .map(|sector| sector.row_count + sector.col_count)
+        .sum::<usize>();
+    let shapes = hom
+        .fusion_tree_keys(&U1FusionRule)
+        .iter()
+        .map(|key| {
+            key.codomain_uncoupled()
+                .iter()
+                .chain(key.domain_uncoupled())
+                .map(|&sector| hom.codomain().legs()[0].degeneracy(sector).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    reset_coupled_grid_build_observations();
+    let first = hom
+        .coupled_subblock_structure(&U1FusionRule, 2, shapes.clone())
+        .unwrap();
+    assert_eq!(coupled_grid_build_observations().1, grid_sides);
+    let misses = complete_hom_space_structure_cache_info().misses();
+
+    reset_coupled_grid_build_observations();
+    let second = hom
+        .coupled_subblock_structure(&U1FusionRule, 2, shapes)
+        .unwrap();
+    let from_legs = hom
+        .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+        .unwrap();
+    assert_eq!(coupled_grid_build_observations(), (0, 0));
+    assert_eq!(complete_hom_space_structure_cache_info().misses(), misses);
+    assert!(Arc::ptr_eq(&first, &second));
+    assert!(Arc::ptr_eq(&first, &from_legs));
+    assert!(first.storage_tiling_proven());
 }
