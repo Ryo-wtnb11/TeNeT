@@ -1,4 +1,3 @@
-#[allow(unused_imports)]
 use super::*;
 
 /// The provider-labelled identity of one stored block: the fusion tree on each

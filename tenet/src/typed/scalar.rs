@@ -1,4 +1,3 @@
-#[allow(unused_imports)]
 use super::*;
 
 /// Scalar payloads supported by [`TensorMap`], base capability.

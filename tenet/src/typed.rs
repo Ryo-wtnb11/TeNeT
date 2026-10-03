@@ -327,90 +327,61 @@ pub use serialization::{
 
 // --- split leaf #1587: generated module wiring below ---
 mod scalar;
-#[allow(unused_imports)]
 pub(crate) use scalar::ScalarOps;
-#[allow(unused_imports)]
-use scalar::{host_add_impl, host_axpby_into, host_scale_impl, CheckedGenericSpectrumResult};
+use scalar::{host_add_impl, host_axpby_into, host_scale_impl};
 pub use scalar::{
     AdvancedLinalgScalar, FactorizationScalar, NetworkDegeneracyRestriction, TensorScalar,
 };
 #[cfg(feature = "cuda")]
 pub use scalar::{CudaFactorizationPayload, CudaPayload};
 mod numeric;
-#[allow(unused_imports)]
 pub(crate) use numeric::{
     absorb_compact_source, absorb_mapped, coupled_region_inner, coupled_region_weighted_sum,
     sector_regions, validate_norm_p, weighted_inner, weighted_trace,
 };
-#[allow(unused_imports)]
-use numeric::{
-    copy_absorb_prefix, julia_complex32_reciprocal_wide, julia_complex64_reciprocal, max_abs,
-    max_propagating_nan, pinv_seam_error, random_unit, random_unit_f32, robust_cinv, scaled_power,
-    splitmix64,
-};
+use numeric::{max_abs, pinv_seam_error, scaled_power};
 mod block_layout;
 #[cfg(feature = "cuda")]
-#[allow(unused_imports)]
 use block_layout::for_each_block_element;
+#[cfg(feature = "cuda")]
+use block_layout::logical_adjoint_axis_to_parent;
 #[cfg(test)]
-#[allow(unused_imports)]
-use block_layout::observe_cat_result_layout_build;
-#[allow(unused_imports)]
+pub(crate) use block_layout::CAT_PLAN_DECLINES_ORIENTED;
 pub(crate) use block_layout::{
-    apply_fill, cat_homspace, cat_logical_block_key, check_flip_layout_identity, compile_cat_plan,
-    flip_block_factor, flip_toggled_homspace, logical_adjoint_axes_to_parent,
-    lower_adjoint_tree_transform_operation, map_checked_unit_layout_error, oplus_sector_legs,
-    reject_unbraided_nonunit_legs, scale_blocks_impl, twist_block_factor,
-    twist_factor_with_inverse, twist_is_identity_over_blocks, validate_axis_permutation,
-    validate_contracted_axes, with_planar_axes, CatCopyPlan, CatOperandData, CatOperandLayout,
-    Fill, PlanarRequestKind, TensorOrientation,
+    apply_fill, cat_homspace, check_flip_layout_identity, compile_cat_plan, flip_block_factor,
+    flip_toggled_homspace, logical_adjoint_axes_to_parent, lower_adjoint_tree_transform_operation,
+    map_checked_unit_layout_error, oplus_sector_legs, reject_unbraided_nonunit_legs,
+    scale_blocks_impl, twist_block_factor, twist_factor_with_inverse,
+    twist_is_identity_over_blocks, with_planar_axes, CatOperandData, CatOperandLayout, Fill,
+    PlanarRequestKind,
 };
-#[allow(unused_imports)]
-use block_layout::{
-    cat_region_tree_orders_match, cat_source_blocks, cat_source_regions,
-    cat_source_regions_if_monotone, cat_storage_axis, fill_block_elements, fuse_sector_content,
-    logical_adjoint_axis_to_parent, scale_strided_block, uncoupled_sector_of_leg,
-};
+use block_layout::{fuse_sector_content, uncoupled_sector_of_leg};
 pub use block_layout::{Direction, Duality, Side};
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use block_layout::{CAT_PLAN_DECLINES_ORIENTED, CAT_RESULT_LAYOUT_BUILDS};
+#[cfg(feature = "cuda")]
 mod cuda_factor;
 #[cfg(feature = "cuda")]
-#[allow(unused_imports)]
 pub(crate) use cuda_factor::{
     assemble_aligned_left_factor, assemble_left_factor, assemble_right_factor, copy_whole_factor,
     cuda_download_spectra, cuda_hermitian_regions, cuda_qr_region, cuda_svd_region, dense_err,
     fill_diagonal_values, typed_cuda_eigh_region, upload_selector,
 };
 #[cfg(feature = "cuda")]
-#[allow(unused_imports)]
 use cuda_factor::{
-    compile_cuda_eigh_plan, compile_cuda_qr_plan, cuda_factor_layout_is_aligned,
-    cuda_qr_tree_extents_match, download_cuda_reduction_partials,
+    compile_cuda_eigh_plan, compile_cuda_qr_plan, download_cuda_reduction_partials,
     validate_cuda_reduction_placement, validate_cuda_svd_middle_regions, TypedCudaEighPlan,
     TypedCudaEighRoute, TypedCudaQrPlan, TypedCudaQrRoute, TypedCudaQrScratch, TypedCudaSvdScratch,
 };
 #[cfg(all(test, feature = "cuda"))]
-#[allow(unused_imports)]
 use cuda_factor::{
-    observe_cuda_arithmetic, observe_cuda_qr_output_upload,
-    observe_cuda_svd_final_storage_creation, update_cuda_qr_observation,
-    update_cuda_svd_observation, CudaQrObservation, CudaSvdObservation,
+    cuda_factor_layout_is_aligned, cuda_qr_tree_extents_match, observe_cuda_arithmetic,
+    observe_cuda_qr_output_upload, observe_cuda_svd_final_storage_creation,
     CUDA_ARITHMETIC_OBSERVATION, CUDA_EIGH_FAILURE, CUDA_EIGH_SELECTOR_UPLOADS, CUDA_EIGH_TREEWISE,
     CUDA_QR_OBSERVATION, CUDA_REDUCTION_BUFFER_OBSERVATION, CUDA_SVD_OBSERVATION,
     CUDA_SVD_TREEWISE,
 };
-#[cfg(all(test, feature = "cuda"))]
-#[allow(unused_imports)]
-pub(crate) use cuda_factor::{
-    observe_cuda_factor_assembly_gemm, observe_cuda_factor_copy, observe_cuda_qr_decomposition,
-    observe_cuda_qr_selector_upload, observe_cuda_svd_decomposition,
-};
 mod generic_error;
 pub use generic_error::GenericTensorError;
 mod dispatch;
-#[allow(unused_imports)]
 use dispatch::{MultiplicityFreeContractExecution, MultiplicityFreeTransformExecution};
 pub use dispatch::{
     TypedSpaceModeDispatch, TypedTensorAddScaleDispatch, TypedTensorAdjointDispatch,
@@ -424,57 +395,38 @@ pub use dispatch::{
     TypedTensorSvdDispatch, TypedTensorSvdValsDispatch, TypedTensorTraceDispatch,
     TypedTensorTransformDispatch, TypedTensorTwistDispatch, TypedTruncationDispatch,
 };
-mod mode_dispatch;
-#[allow(unused_imports)]
-use mode_dispatch::{
-    checked_generic_flip_destination, checked_generic_owned_bodies, checked_generic_solve_into,
-    contract_checked_generic, flip_checked_generic, flip_checked_generic_owned,
-    twist_checked_generic, twist_checked_generic_owned,
-};
 mod checked_generic_contract;
-#[allow(unused_imports)]
+mod mode_dispatch;
 pub(crate) use checked_generic_contract::TypedFacadeError;
-#[allow(unused_imports)]
-use checked_generic_contract::{
-    compose_multiplicity_free, compose_multiplicity_free_with_lane, contract_destination,
-    contract_multiplicity_free, contract_multiplicity_free_into, trace_pair_axes,
-    trace_pairs_checked_generic, write_dense_identity_blocks, write_identity_blocks_generic,
-    TracePairAxes,
-};
 pub use checked_generic_contract::{
     reject_non_symmetric_contraction, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED,
 };
+use checked_generic_contract::{trace_pair_axes, write_identity_blocks_generic, TracePairAxes};
 mod space;
-#[allow(unused_imports)]
 use space::{
     require_restriction_set, require_selected_leg_of, restricted_space, restriction_starts,
     space_with_replaced_legs,
 };
 pub use space::{GradedSpace, LegSelection, TruncatedSelection};
 mod fusion_tree;
-#[allow(unused_imports)]
+#[cfg(test)]
+use fusion_tree::full_svd_spectrum_matches_bonds;
 use fusion_tree::{
-    add_spectrum_into, decode_block_fusion_trees, decode_sectors, diagonal_factor_on,
-    diagonal_factor_on_bound, diagonal_factor_on_checked, exp_spectrum, full_svd_compact_bond,
-    full_svd_compact_layout, full_svd_spectrum_matches_bonds, inv_spectrum, is_diagonal_bond_space,
-    map_block_fusion_trees, map_spectrum, prepare_product_operand, reject_singular_compact_divisor,
-    scatter_spectrum, spectra_disagree, wrap_factor_on, PreparedProductOperand, TreeExtents,
-    TypedData,
+    add_spectrum_into, decode_block_fusion_trees, diagonal_factor_on, diagonal_factor_on_bound,
+    diagonal_factor_on_checked, exp_spectrum, full_svd_compact_bond, full_svd_compact_layout,
+    inv_spectrum, is_diagonal_bond_space, map_spectrum, prepare_product_operand,
+    reject_singular_compact_divisor, scatter_spectrum, spectra_disagree, wrap_factor_on, TypedData,
 };
 pub use fusion_tree::{
     BlockFusionTrees, CoupledBlock, CoupledBlockPayload, FusionTreeLabels, SectorSpectrum,
 };
 mod tensor_repr;
 #[cfg(test)]
-#[allow(unused_imports)]
 pub(crate) use tensor_repr::ADJOINT_MATERIALIZATIONS;
-#[allow(unused_imports)]
 use tensor_repr::{
     borrowed_view_unsupported, owned_repr, TypedAdjointView, TypedTensorBody, TypedTensorRepr,
-    ViewAdjoint,
 };
 #[cfg(test)]
-#[allow(unused_imports)]
 use tensor_repr::{
     observe_adjoint_materialization, DIAGONAL_MATERIALIZATIONS, UNCACHED_ADJOINT_MATERIALIZATIONS,
 };
@@ -486,11 +438,9 @@ mod cuda_ops;
 #[cfg(feature = "cuda")]
 pub use cuda_ops::CudaTracePairs;
 mod transform_ops;
-#[allow(unused_imports)]
-use transform_ops::{
-    braid_operation, generic_insert_unit, generic_remove_unit, map_spectrum_dtype,
-    tree_operation_matches_axes,
-};
+use transform_ops::map_spectrum_dtype;
+#[cfg(feature = "cuda")]
+use transform_ops::{braid_operation, tree_operation_matches_axes};
 pub use transform_ops::{ContractSpec, TypedTensorUnitDispatch};
 
 /// Representation gates for [`TypedTensorBody`] (#580 PR 0).
