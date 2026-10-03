@@ -362,39 +362,37 @@ where
             actual: levels.len(),
         });
     }
-    let swaps = permutation_to_adjacent_swaps(permutation, rank)?;
+    let steps = PreparedTreeBraid::new(permutation, levels, rank)?.artin_steps;
     let validated = validate_fusion_tree_for_rule(rule, tree)?;
-    generic_braid_tree_validated(validated, permutation, levels, &swaps)
+    generic_braid_tree_validated(validated, permutation, &steps)
 }
 
 #[cfg(test)]
 fn generic_braid_tree_validated<R>(
     tree: ValidatedFusionTree<'_, R>,
     permutation: &[usize],
-    levels: &[usize],
-    swaps: &[usize],
+    steps: &[PreparedArtinStep],
 ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
 where
     R: GenericFusionSymbols,
     R::Scalar: CategoricalScalar,
 {
     let rule = tree.rule;
-    generic_braid_tree_unchecked(rule, tree.key, permutation, levels, swaps)
+    generic_braid_tree_unchecked(rule, tree.key, permutation, steps)
 }
 
 pub(super) fn generic_braid_tree_unchecked<R>(
     rule: &R,
     tree: &FusionTreeKey,
     permutation: &[usize],
-    levels: &[usize],
-    swaps: &[usize],
+    steps: &[PreparedArtinStep],
 ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
 where
     R: GenericFusionSymbols,
     R::Scalar: CategoricalScalar,
 {
     let checked = InfallibleGenericFR(rule);
-    generic_braid_tree_result(&checked, tree, permutation, levels, swaps)
+    generic_braid_tree_result(&checked, tree, permutation, steps)
         .map_err(map_infallible_generic_symbol_error)
 }
 
@@ -402,8 +400,7 @@ pub(super) fn generic_braid_tree_result<C>(
     rule: &C,
     tree: &FusionTreeKey,
     permutation: &[usize],
-    levels: &[usize],
-    swaps: &[usize],
+    steps: &[PreparedArtinStep],
 ) -> Result<GenericTreeTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericFRAccess,
@@ -412,20 +409,7 @@ where
     if permutation.iter().copied().eq(0..rank) {
         return Ok(vec![(tree.clone(), C::Scalar::one())]);
     }
-    let mut current = vec![(tree.clone(), C::Scalar::one())];
-    let mut current_levels = levels.to_vec();
-    for &swap in swaps {
-        let inverse = current_levels[swap] > current_levels[swap + 1];
-        let mut next_terms = FusionTermAccumulator::new();
-        for (tree, coefficient) in current {
-            for (next_tree, step_coefficient) in
-                generic_artin_braid_at_with_inverse_checked(rule, &tree, swap, inverse)?
-            {
-                next_terms.push(next_tree, coefficient.clone() * step_coefficient);
-            }
-        }
-        current_levels.swap(swap, swap + 1);
-        current = next_terms.into_vec();
-    }
-    Ok(current)
+    braid_tree_steps(tree, steps.iter().copied(), |tree, step| {
+        generic_artin_braid_at_with_inverse_checked(rule, tree, step.index, step.inverse)
+    })
 }

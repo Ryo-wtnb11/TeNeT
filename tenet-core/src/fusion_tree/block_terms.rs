@@ -93,27 +93,7 @@ where
     }
 }
 
-pub(crate) fn compose_tree_pair_terms<R, F, I>(
-    rule: &R,
-    terms: Vec<(FusionTreePairKey, R::Scalar)>,
-    mut transform: F,
-) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-    F: FnMut(&R, &FusionTreePairKey) -> Result<I, CoreError>,
-    I: IntoIterator<Item = (FusionTreePairKey, R::Scalar)>,
-{
-    let mut output = FusionTermAccumulator::new();
-    for (key, coefficient) in terms {
-        for (next_key, next_coefficient) in transform(rule, &key)? {
-            output.push(next_key, coefficient.clone() * next_coefficient);
-        }
-    }
-    Ok(output.into_vec())
-}
-
-/// Batched analog of [`compose_tree_pair_terms`]: apply `transform` to every
+/// Batched analog of [`compose_terms`]: apply `transform` to every
 /// tree-pair of a whole block at once, threading a coefficient *matrix* (a
 /// sparse column per original source) instead of re-running the per-source
 /// term list. `columns[i]` maps `src index -> coefficient` for `basis[i]`.
@@ -562,41 +542,65 @@ fn order_generic_tree_pair_block<S: Clone>(
     }
 }
 
-fn generic_repartition_tree_pair_block_terms<R>(
-    rule: &R,
-    mut basis: Vec<FusionTreePairKey>,
-    mut columns: DenseColumns<R::Scalar>,
-    target_codomain_rank: usize,
-) -> Result<(Vec<FusionTreePairKey>, DenseColumns<R::Scalar>), CoreError>
+/// The Generic keyed-block driver of the shared block schedule.
+struct GenericTreePairBlockDriver<'a, R> {
+    rule: &'a R,
+    permutation: &'a [usize],
+    steps: &'a [PreparedArtinStep],
+}
+
+impl<R> BlockDriver for GenericTreePairBlockDriver<'_, R>
 where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let Some(first) = basis.first() else {
-        return Ok((basis, columns));
-    };
-    let total_rank =
-        first.codomain_tree().uncoupled().len() + first.domain_tree().uncoupled().len();
-    if target_codomain_rank > total_rank {
-        return Err(CoreError::DimensionMismatch {
-            expected: total_rank,
-            actual: target_codomain_rank,
-        });
+    type State = (Vec<FusionTreePairKey>, DenseColumns<R::Scalar>);
+    type Error = CoreError;
+
+    fn bend(
+        &mut self,
+        (basis, columns): Self::State,
+        bend: Bend,
+    ) -> Result<Self::State, CoreError> {
+        compose_generic_block_terms(self.rule, &basis, &columns, |rule, key| match bend {
+            Bend::Left => generic_bendleft_tree_pair(rule, key),
+            Bend::Right => generic_bendright_tree_pair(rule, key),
+        })
     }
-    let mut current_codomain_rank = first.codomain_tree().uncoupled().len();
-    while current_codomain_rank < target_codomain_rank {
-        (basis, columns) = compose_generic_block_terms(rule, &basis, &columns, |rule, key| {
-            generic_bendleft_tree_pair(rule, key)
-        })?;
-        current_codomain_rank += 1;
+
+    fn braid_codomain(&mut self, (basis, columns): Self::State) -> Result<Self::State, CoreError> {
+        let (permutation, steps) = (self.permutation, self.steps);
+        compose_generic_block_terms(self.rule, &basis, &columns, |rule, key| {
+            generic_braid_tree_unchecked(rule, key.codomain_tree(), permutation, steps).map(
+                |terms| {
+                    terms
+                        .into_iter()
+                        .map(|(codomain_tree, coefficient)| {
+                            (
+                                FusionTreePairKey::pair(codomain_tree, key.domain_tree().clone()),
+                                coefficient,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+        })
     }
-    while current_codomain_rank > target_codomain_rank {
-        (basis, columns) = compose_generic_block_terms(rule, &basis, &columns, |rule, key| {
-            generic_bendright_tree_pair(rule, key)
-        })?;
-        current_codomain_rank -= 1;
+
+    fn cycle(
+        &mut self,
+        (basis, columns): Self::State,
+        direction: PreparedCycleDirection,
+    ) -> Result<Self::State, CoreError> {
+        compose_generic_block_terms(self.rule, &basis, &columns, |rule, key| match direction {
+            PreparedCycleDirection::Clockwise => {
+                generic_cycle_clockwise_tree_pair_unchecked(rule, key)
+            }
+            PreparedCycleDirection::Anticlockwise => {
+                generic_cycle_anticlockwise_tree_pair_unchecked(rule, key)
+            }
+        })
     }
-    Ok((basis, columns))
 }
 
 #[doc(hidden)]
@@ -652,7 +656,7 @@ where
         codomain_rank,
         domain_rank,
     )?;
-    let swaps = permutation_to_adjacent_swaps(&permutation, codomain_rank + domain_rank)?;
+    validate_permutation_inline(&permutation, codomain_rank + domain_rank)?;
     let identity = tree_pair_axis_map_is_identity(
         codomain_permutation,
         domain_permutation,
@@ -662,32 +666,22 @@ where
     let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
     levels.extend_from_slice(codomain_levels);
     levels.extend(domain_levels.iter().rev().copied());
+    let steps =
+        PreparedTreeBraid::new(&permutation, &levels, codomain_rank + domain_rank)?.artin_steps;
 
     let (mut basis, mut columns) = seed_generic_tree_pair_block(rule, src_keys)?;
     if identity {
         return Ok(order_generic_tree_pair_block(basis, columns));
     }
-    let all_rank = permutation.len();
-    (basis, columns) = generic_repartition_tree_pair_block_terms(rule, basis, columns, all_rank)?;
-    (basis, columns) = compose_generic_block_terms(rule, &basis, &columns, |rule, key| {
-        generic_braid_tree_unchecked(rule, key.codomain_tree(), &permutation, &levels, &swaps).map(
-            |terms| {
-                terms
-                    .into_iter()
-                    .map(|(codomain_tree, coefficient)| {
-                        (
-                            FusionTreePairKey::pair(codomain_tree, key.domain_tree().clone()),
-                            coefficient,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
-    })?;
-    (basis, columns) = generic_repartition_tree_pair_block_terms(
-        rule,
-        basis,
-        columns,
+    (basis, columns) = block_braid(
+        &mut GenericTreePairBlockDriver {
+            rule,
+            permutation: &permutation,
+            steps: &steps,
+        },
+        (basis, columns),
+        codomain_rank,
+        permutation.len(),
         codomain_permutation.len(),
     )?;
     Ok(order_generic_tree_pair_block(basis, columns))
@@ -775,38 +769,22 @@ where
             });
         }
     }
-    let mut position = match permutation.iter().position(|&axis| axis == 0) {
-        Some(position) => position,
-        None => {
-            let (basis, columns) = seed_generic_tree_pair_block(rule, src_keys)?;
-            return Ok(order_generic_tree_pair_block(basis, columns));
-        }
+    let Some(position) = permutation.iter().position(|&axis| axis == 0) else {
+        let (basis, columns) = seed_generic_tree_pair_block(rule, src_keys)?;
+        return Ok(order_generic_tree_pair_block(basis, columns));
     };
     let total_rank = codomain_rank + domain_rank;
-    let (mut basis, mut columns) = seed_generic_tree_pair_block(rule, src_keys)?;
-    (basis, columns) = generic_repartition_tree_pair_block_terms(
-        rule,
-        basis,
-        columns,
+    let (basis, columns) = seed_generic_tree_pair_block(rule, src_keys)?;
+    let (basis, columns) = block_transpose(
+        &mut GenericTreePairBlockDriver {
+            rule,
+            permutation: &[],
+            steps: &[],
+        },
+        (basis, columns),
+        codomain_rank,
         codomain_permutation.len(),
+        transpose_cycles(position, total_rank),
     )?;
-    if total_rank == 0 || position == 0 {
-        return Ok(order_generic_tree_pair_block(basis, columns));
-    }
-
-    let half_rank = total_rank >> 1;
-    while position > 0 && position < half_rank {
-        (basis, columns) = compose_generic_block_terms(rule, &basis, &columns, |rule, key| {
-            generic_cycle_anticlockwise_tree_pair_unchecked(rule, key)
-        })?;
-        position -= 1;
-    }
-    while position >= half_rank && position > 0 {
-        (basis, columns) = compose_generic_block_terms(rule, &basis, &columns, |rule, key| {
-            generic_cycle_clockwise_tree_pair_unchecked(rule, key)
-        })?;
-        position = (position + 1) % total_rank;
-    }
-
     Ok(order_generic_tree_pair_block(basis, columns))
 }

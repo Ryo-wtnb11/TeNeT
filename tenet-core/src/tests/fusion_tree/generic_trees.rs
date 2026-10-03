@@ -631,11 +631,9 @@ fn generic_full_key_block_composition_matches_per_source_replay() {
     let oracle = basis
         .iter()
         .map(|source| {
-            compose_generic_tree_pair_terms(
-                &rule,
-                vec![(source.clone(), 1.0)],
-                generic_bendright_tree_pair,
-            )
+            compose_terms(vec![(source.clone(), 1.0)], |key| {
+                generic_bendright_tree_pair(&rule, key)
+            })
             .unwrap()
         })
         .collect::<Vec<_>>();

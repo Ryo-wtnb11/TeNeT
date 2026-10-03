@@ -130,22 +130,9 @@ where
         return Ok(vec![(destination, coefficient)]);
     }
 
-    let mut current = vec![(tree.clone(), R::Scalar::one())];
-    for step in steps {
-        let mut next_terms = FusionTermAccumulator::new();
-        for (tree, coefficient) in current {
-            for (next_tree, step_coefficient) in multiplicity_free_artin_braid_at_with_inverse(
-                rule,
-                &tree,
-                step.index,
-                step.inverse,
-            )? {
-                next_terms.push(next_tree, coefficient.clone() * step_coefficient);
-            }
-        }
-        current = next_terms.into_vec();
-    }
-    Ok(current)
+    braid_tree_steps(tree, steps, |tree, step| {
+        multiplicity_free_artin_braid_at_with_inverse(rule, tree, step.index, step.inverse)
+    })
 }
 
 /// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain

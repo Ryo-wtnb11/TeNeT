@@ -840,18 +840,9 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                 plan: PreparedTreePairPlan::Identity,
             });
         };
-        let plan = if position == 0 {
-            PreparedTreePairPlan::Repartition
-        } else if position < total_rank >> 1 {
-            PreparedTreePairPlan::Transpose {
-                direction: PreparedCycleDirection::Anticlockwise,
-                count: position,
-            }
-        } else {
-            PreparedTreePairPlan::Transpose {
-                direction: PreparedCycleDirection::Clockwise,
-                count: total_rank - position,
-            }
+        let plan = match transpose_cycles(position, total_rank) {
+            None => PreparedTreePairPlan::Repartition,
+            Some((direction, count)) => PreparedTreePairPlan::Transpose { direction, count },
         };
         Ok(Self {
             source_codomain_rank,
@@ -1044,25 +1035,20 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                 })
             }
             PreparedTreePairPlan::Transpose { direction, count } => {
-                let mut current = multiplicity_free_repartition_tree_pair_validated(
+                let current = multiplicity_free_repartition_tree_pair_validated(
                     validated,
                     self.target_codomain_rank,
                 )?;
-                for _ in 0..*count {
-                    current = match direction {
+                run_cycles(current, Some((*direction, *count)), |terms, direction| {
+                    terms.then(|key| match direction {
                         PreparedCycleDirection::Clockwise => {
-                            compose_tree_pair_terms(rule, current, |rule, key| {
-                                multiplicity_free_cycle_clockwise_tree_pair(rule, key)
-                            })?
+                            multiplicity_free_cycle_clockwise_tree_pair(rule, key)
                         }
                         PreparedCycleDirection::Anticlockwise => {
-                            compose_tree_pair_terms(rule, current, |rule, key| {
-                                multiplicity_free_cycle_anticlockwise_tree_pair(rule, key)
-                            })?
+                            multiplicity_free_cycle_anticlockwise_tree_pair(rule, key)
                         }
-                    };
-                }
-                Ok(current)
+                    })
+                })
             }
         }
     }
@@ -1126,22 +1112,14 @@ impl<'operation> PreparedTreePairOperation<'operation> {
         F: Fn(&R, &FusionTreeKey) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>,
     {
         let rule = validated.rule;
-        let all_rank = self.source_codomain_rank + self.source_domain_rank;
-        let all_codomain = multiplicity_free_repartition_tree_pair_validated(validated, all_rank)?;
-        let braided = compose_tree_pair_terms(rule, all_codomain, |rule, key| {
-            braid_codomain(rule, key.codomain_tree()).map(|terms| {
-                terms
-                    .into_iter()
-                    .map(|(codomain_tree, coefficient)| {
-                        (
-                            FusionTreePairKey::pair(codomain_tree, key.domain_tree().clone()),
-                            coefficient,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-        })?;
-        multiplicity_free_repartition_terms(rule, braided, self.target_codomain_rank)
+        braid_terms_via_codomain(
+            vec![(validated.key.clone(), R::Scalar::one())],
+            self.source_codomain_rank,
+            self.source_codomain_rank + self.source_domain_rank,
+            self.target_codomain_rank,
+            |terms, bend| multiplicity_free_bend_terms(rule, terms, bend),
+            |codomain| braid_codomain(rule, codomain),
+        )
     }
 
     /// Unique-fusion form of [`Self::multiplicity_free_braid_via_codomain`]:
@@ -1201,22 +1179,20 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                     execute_unique_tree_braid_borrowed(rule, codomain, braid)
                 }),
             PreparedTreePairPlan::Transpose { direction, count } => {
-                let mut current = unique_rigid_repartition_tree_pair_validated(
+                let current = unique_rigid_repartition_tree_pair_validated(
                     validated,
                     self.target_codomain_rank,
                 )?;
-                for _ in 0..*count {
-                    let (next, coefficient) = match direction {
+                run_cycles(current, Some((*direction, *count)), |term, direction| {
+                    term.then(|key| match direction {
                         PreparedCycleDirection::Clockwise => {
-                            unique_rigid_cycle_clockwise_tree_pair(rule, &current.0)?
+                            unique_rigid_cycle_clockwise_tree_pair(rule, key)
                         }
                         PreparedCycleDirection::Anticlockwise => {
-                            unique_rigid_cycle_anticlockwise_tree_pair(rule, &current.0)?
+                            unique_rigid_cycle_anticlockwise_tree_pair(rule, key)
                         }
-                    };
-                    current = (next, current.1 * coefficient);
-                }
-                Ok(current)
+                    })
+                })
             }
         }
     }

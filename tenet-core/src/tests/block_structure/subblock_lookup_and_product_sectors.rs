@@ -406,8 +406,8 @@ fn prepared_simple_pair_matches_explicit_generic_composition() {
     let actual = prepared.execute_multiplicity_free(&rule, &source).unwrap();
 
     let all_codomain = multiplicity_free_repartition_tree_pair(&rule, &source, 2).unwrap();
-    let braided = compose_tree_pair_terms(&rule, all_codomain, |rule, key| {
-        multiplicity_free_braid_tree(rule, key.codomain_tree(), &[1, 0], &[0, 1]).map(|terms| {
+    let braided = compose_terms(all_codomain, |key| {
+        multiplicity_free_braid_tree(&rule, key.codomain_tree(), &[1, 0], &[0, 1]).map(|terms| {
             terms
                 .into_iter()
                 .map(|(tree, coefficient)| {

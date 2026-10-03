@@ -172,15 +172,9 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let swapped = FusionTreePairKey::pair(
-        tree_pair.domain_tree().clone(),
-        tree_pair.codomain_tree().clone(),
-    );
-    let (folded, coefficient) = unique_rigid_foldright_tree_pair(rule, &swapped)?;
-    Ok((
-        FusionTreePairKey::pair(folded.domain_tree().clone(), folded.codomain_tree().clone()),
-        (coefficient).conj(),
-    ))
+    left_move_by_swap(tree_pair, |swapped| {
+        unique_rigid_foldright_tree_pair(rule, swapped)
+    })
 }
 
 pub(crate) fn unique_rigid_cycle_clockwise_tree_pair<R>(
@@ -191,17 +185,11 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let (intermediate, first_coefficient) = if tree_pair.codomain_tree().uncoupled().is_empty() {
-        unique_rigid_bendleft_tree_pair(rule, tree_pair)?
-    } else {
-        unique_rigid_foldright_tree_pair(rule, tree_pair)?
-    };
-    let (destination, second_coefficient) = if tree_pair.codomain_tree().uncoupled().is_empty() {
-        unique_rigid_foldright_tree_pair(rule, &intermediate)?
-    } else {
-        unique_rigid_bendleft_tree_pair(rule, &intermediate)?
-    };
-    Ok((destination, first_coefficient * second_coefficient))
+    cycle_clockwise(
+        tree_pair,
+        |key| unique_rigid_bendleft_tree_pair(rule, key),
+        |key| unique_rigid_foldright_tree_pair(rule, key),
+    )
 }
 
 pub(crate) fn unique_rigid_cycle_anticlockwise_tree_pair<R>(
@@ -212,17 +200,11 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let (intermediate, first_coefficient) = if tree_pair.domain_tree().uncoupled().is_empty() {
-        unique_rigid_bendright_tree_pair(rule, tree_pair)?
-    } else {
-        unique_rigid_foldleft_tree_pair(rule, tree_pair)?
-    };
-    let (destination, second_coefficient) = if tree_pair.domain_tree().uncoupled().is_empty() {
-        unique_rigid_foldleft_tree_pair(rule, &intermediate)?
-    } else {
-        unique_rigid_bendright_tree_pair(rule, &intermediate)?
-    };
-    Ok((destination, first_coefficient * second_coefficient))
+    cycle_anticlockwise(
+        tree_pair,
+        |key| unique_rigid_bendright_tree_pair(rule, key),
+        |key| unique_rigid_foldleft_tree_pair(rule, key),
+    )
 }
 
 pub(super) fn unique_rigid_repartition_tree_pair_validated<R>(
@@ -265,21 +247,19 @@ where
     }
 
     let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
-    let mut current = UniqueRigidTreePairState { frame, local };
-    let mut current_codomain_rank = current.frame.codomain.uncoupled.len();
-    let mut coefficient = R::Scalar::one();
-    while current_codomain_rank < target_codomain_rank {
-        let (next, step_coefficient) = unique_rigid_bendleft_state(rule, current)?;
-        coefficient = coefficient * step_coefficient;
-        current = next;
-        current_codomain_rank += 1;
-    }
-    while current_codomain_rank > target_codomain_rank {
-        let (next, step_coefficient) = unique_rigid_bendright_state(rule, current)?;
-        coefficient = coefficient * step_coefficient;
-        current = next;
-        current_codomain_rank -= 1;
-    }
+    let codomain_rank = frame.codomain.uncoupled.len();
+    let (current, coefficient) = repartition_loop(
+        (UniqueRigidTreePairState { frame, local }, R::Scalar::one()),
+        codomain_rank,
+        target_codomain_rank,
+        |(state, coefficient), bend| {
+            let (next, step_coefficient) = match bend {
+                Bend::Left => unique_rigid_bendleft_state(rule, state)?,
+                Bend::Right => unique_rigid_bendright_state(rule, state)?,
+            };
+            Ok::<_, CoreError>((next, coefficient * step_coefficient))
+        },
+    )?;
     Ok((current.frame.materialize(current.local), coefficient))
 }
 

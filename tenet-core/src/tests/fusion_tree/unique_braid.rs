@@ -320,6 +320,31 @@ fn unique_artin_braid_at_uses_f_and_r_symbols_for_later_crossing() {
     );
 }
 
+// Independent transcription of TensorKit `permutation2swaps`
+// (`braiding_manipulations.jl`), the oracle for the prepared Artin schedule.
+fn permutation_to_adjacent_swaps(
+    permutation: &[usize],
+    rank: usize,
+) -> Result<Vec<usize>, CoreError> {
+    validate_permutation_inline(permutation, rank)?;
+
+    let mut work = permutation.to_vec();
+    let mut swaps = Vec::new();
+    for target in 0..rank.saturating_sub(1) {
+        let source = work[target];
+        for swap in (target..source).rev() {
+            swaps.push(swap);
+        }
+        for item in work.iter_mut().take(rank).skip(target + 1) {
+            if *item < source {
+                *item += 1;
+            }
+        }
+        work[target] = target;
+    }
+    Ok(swaps)
+}
+
 #[test]
 fn permutation_to_adjacent_swaps_matches_tensorkit_order() {
     assert_eq!(
@@ -330,6 +355,21 @@ fn permutation_to_adjacent_swaps_matches_tensorkit_order() {
         permutation_to_adjacent_swaps(&[3, 0, 2, 1], 4).unwrap(),
         vec![2, 1, 0, 2]
     );
+    // What: the one prepared schedule every braid executes lowers to the same
+    // adjacent swaps.
+    for (permutation, rank) in [(vec![2usize, 0, 1], 3usize), (vec![3, 0, 2, 1], 4)] {
+        let levels = (0..rank).collect::<Vec<_>>();
+        let steps = PreparedTreeBraid::new(&permutation, &levels, rank)
+            .unwrap()
+            .artin_steps
+            .iter()
+            .map(|step| step.index)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            steps,
+            permutation_to_adjacent_swaps(&permutation, rank).unwrap()
+        );
+    }
 }
 
 #[test]
