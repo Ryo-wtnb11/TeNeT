@@ -414,53 +414,11 @@ fn payload_snapshot<R: DeviceRule, D: DevicePayload>(
     )
 }
 
-mod host_allocations {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-    thread_local! {
-        static ACTIVE: Cell<bool> = const { Cell::new(false) };
-        static CALLS: Cell<usize> = const { Cell::new(0) };
-        static BYTES: Cell<usize> = const { Cell::new(0) };
-    }
-    pub(super) struct Counting;
-    fn record(bytes: usize) {
-        let _ = ACTIVE.try_with(|active| {
-            if active.get() {
-                let _ = CALLS.try_with(|calls| calls.set(calls.get() + 1));
-                let _ = BYTES.try_with(|total| total.set(total.get() + bytes));
-            }
-        });
-    }
-    // SAFETY: all operations delegate unchanged to System; thread-local counting does not allocate.
-    unsafe impl GlobalAlloc for Counting {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            record(layout.size());
-            unsafe { System.alloc(layout) }
-        }
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            record(layout.size());
-            unsafe { System.alloc_zeroed(layout) }
-        }
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(ptr, layout) }
-        }
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-            record(size);
-            unsafe { System.realloc(ptr, layout, size) }
-        }
-    }
-    #[global_allocator]
-    static ALLOCATOR: Counting = Counting;
-    pub(super) fn begin() {
-        CALLS.with(|calls| calls.set(0));
-        BYTES.with(|bytes| bytes.set(0));
-        ACTIVE.with(|active| active.set(true));
-    }
-    pub(super) fn end() -> (usize, usize) {
-        ACTIVE.with(|active| active.set(false));
-        (CALLS.with(Cell::get), BYTES.with(Cell::get))
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
+
+#[global_allocator]
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 #[derive(Clone, Copy)]
 struct Observation {
@@ -481,13 +439,14 @@ impl std::fmt::Display for Observation {
 }
 
 fn observe<T>(run: impl FnOnce() -> T) -> (T, Observation) {
-    host_allocations::begin();
-    let before = cuda_transfer_stats();
-    let start = Instant::now();
-    let value = run();
-    let elapsed = start.elapsed();
-    let after = cuda_transfer_stats();
-    let (host_calls, host_bytes) = host_allocations::end();
+    let ((value, elapsed, before, after), host) = counting_alloc::measure(|| {
+        let before = cuda_transfer_stats();
+        let start = Instant::now();
+        let value = run();
+        let elapsed = start.elapsed();
+        (value, elapsed, before, cuda_transfer_stats())
+    });
+    let (host_calls, host_bytes) = (host.calls as usize, host.bytes as usize);
     let cuda = CudaTransferStats {
         h2d_calls: after.h2d_calls - before.h2d_calls,
         h2d_bytes: after.h2d_bytes - before.h2d_bytes,

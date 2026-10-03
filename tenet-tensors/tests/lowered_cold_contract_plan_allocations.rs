@@ -13,9 +13,7 @@
 //!    delegate removed, the plain entry is the production route and this
 //!    test pins its cold/warm plan-build behavior.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep};
 use tenet_tensors::{
@@ -23,42 +21,17 @@ use tenet_tensors::{
     OutputAxisOrder, RuleIdentity, TensorContractFusionExecutionContext, TensorContractSpec,
 };
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.with(Cell::get) {
-            ALLOCATIONS.with(|count| count.set(count.get() + 1));
-            BYTES.with(|bytes| bytes.set(bytes.get() + layout.size()));
-        }
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
-
-// Why not rely on thread-local allocation counters alone: cache resets and
-// plan compilation mutate shared process-global state.
-static GLOBAL_CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
-    ALLOCATIONS.set(0);
-    BYTES.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let value = operation();
-    COUNTING.set(false);
-    (value, BYTES.with(Cell::get), ALLOCATIONS.with(Cell::get))
+    let allocs = counting_alloc::stop();
+    (value, allocs.bytes as usize, allocs.calls as usize)
 }
 
 fn reset_all_caches() {
@@ -78,9 +51,7 @@ fn chain_homspace(sector_count: i32) -> FusionTreeHomSpace {
 
 #[test]
 fn cold_lowered_enumeration_streams_and_builds_once() {
-    let _global_cache_guard = GLOBAL_CACHE_RESET_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _global_cache_guard = counting_alloc::serial();
 
     // Streaming: admitted keys grow linearly with the sector count while the
     // candidate space (codomain x domain sector pairs) grows quadratically.
@@ -249,9 +220,7 @@ fn run_route() -> RouteRun {
 
 #[test]
 fn cold_contract_plan_build_stays_cached_after_first_run() {
-    let _global_cache_guard = GLOBAL_CACHE_RESET_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _global_cache_guard = counting_alloc::serial();
 
     // Discard one run: the first contraction in the process pays a one-time
     // warmup (lazy statics, thread-local init) that would otherwise skew the

@@ -1,8 +1,6 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 
 use tenet_core::{
@@ -18,44 +16,11 @@ use tenet_tensors::{
     TreeTransformOperation, TreeTransformStructure,
 };
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(ptr, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-
-// Why not rely on thread-local allocation counters alone: categorical plan
-// compilation and reset still mutate shared process-global cache state.
-static GLOBAL_CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 fn su2_f_move_structure() -> BlockStructure {
     let keys = [[0, 1], [2, 1]].map(|inner| {
@@ -218,9 +183,7 @@ fn rank_129_su2_vacuum_structure() -> Arc<BlockStructure> {
 
 #[test]
 fn rank_129_second_exact_warm_structure_hit_has_no_operation_key_allocation_or_provider_work() {
-    let _global_cache_guard = GLOBAL_CACHE_RESET_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _global_cache_guard = counting_alloc::serial();
     reset_global_operation_caches();
 
     let calls = Arc::new(AtomicUsize::new(0));
@@ -238,19 +201,18 @@ fn rank_129_second_exact_warm_structure_hit_has_no_operation_key_allocation_or_p
     assert!(calls.load(Ordering::Relaxed) > 0);
 
     calls.store(0, Ordering::Relaxed);
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let warm = cache
         .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
             &rule, &operation, &structure, &structure, false,
         )
         .unwrap();
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
 
     // What: cloning the runtime-rank operation into the completed-structure
     // lookup key performs no allocation or provider work on an exact warm hit.
     assert!(Arc::ptr_eq(&cold, &warm));
-    assert_eq!(ALLOCATIONS.get(), 0);
+    assert_eq!(allocs.calls, 0);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
@@ -261,18 +223,16 @@ fn su2_f_move_compile_has_no_per_destination_coefficient_rows() {
     let _ =
         build_all_codomain_tree_transform_group_plan(&SU2FusionRule, operation.clone(), &structure)
             .unwrap();
-
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let plan = build_all_codomain_tree_transform_group_plan(&SU2FusionRule, operation, &structure)
         .unwrap();
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
 
     // What: compiling a two-channel SU(2) F move owns one final coefficient
     // matrix without allocating one temporary coefficient Vec per destination.
     assert_eq!(plan.specs().len(), 1);
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src().len(), 4);
-    assert!(ALLOCATIONS.get() <= 32, "allocations={}", ALLOCATIONS.get());
+    assert!(allocs.calls <= 32, "allocations={}", allocs.calls);
 }
 
 #[test]
@@ -281,17 +241,15 @@ fn su2_tree_pair_f_move_compile_has_no_per_destination_coefficient_rows() {
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let _ = build_tree_pair_transform_group_plan(&SU2FusionRule, operation.clone(), &structure)
         .unwrap();
-
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let plan = build_tree_pair_transform_group_plan(&SU2FusionRule, operation, &structure).unwrap();
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
 
     // What: the tree-pair assembler owns one row-major coefficient matrix for
     // the same two-channel F move, independently of the all-codomain builder.
     assert_eq!(plan.specs().len(), 1);
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src().len(), 4);
-    assert!(ALLOCATIONS.get() <= 52, "allocations={}", ALLOCATIONS.get());
+    assert!(allocs.calls <= 52, "allocations={}", allocs.calls);
 }
 
 fn rank_eight_su2_subset(count: usize) -> (TensorMap<f64, 8, 0>, TensorMap<f64, 8, 0>) {
@@ -324,9 +282,7 @@ fn rank_eight_su2_subset(count: usize) -> (TensorMap<f64, 8, 0>, TensorMap<f64, 
 
 #[test]
 fn cold_ordered_tree_pair_compile_stays_within_allocation_envelopes() {
-    let _global_cache_guard = GLOBAL_CACHE_RESET_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _global_cache_guard = counting_alloc::serial();
 
     // What: exact counts cover missing-position plan compilation after registry
     // capacity exists, independently of unrelated typed-cache test order.
@@ -349,9 +305,7 @@ fn cold_ordered_tree_pair_compile_stays_within_allocation_envelopes() {
         let (dst, src) = rank_eight_su2_subset(source_count);
         let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
         cache.set_recoupling_threads(1);
-
-        ALLOCATIONS.set(0);
-        COUNTING.set(true);
+        counting_alloc::start();
         let plan = cache
             .get_or_compile_tree_pair(
                 &SU2FusionRule,
@@ -360,14 +314,14 @@ fn cold_ordered_tree_pair_compile_stays_within_allocation_envelopes() {
                 &src,
             )
             .unwrap();
-        COUNTING.set(false);
+        let allocs = counting_alloc::stop();
 
         // What: the ordered whole-block compiler stays within its prior cold
         // envelope plus one bounded all-rank normalization workspace.
         assert!(
-            ALLOCATIONS.get() <= expected_allocations + 3,
+            (allocs.calls as usize) <= expected_allocations + 3,
             "source_count={source_count}, allocations={}",
-            ALLOCATIONS.get()
+            allocs.calls
         );
         std::hint::black_box(plan);
     }
@@ -379,10 +333,7 @@ fn rank_nine_same_split_groups_do_not_clone_prepared_spill_storage() {
     let operation = TreeTransformOperation::braid([1, 0, 2, 3, 4, 5, 6, 7, 8], [], 0..9, []);
     let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
     cache.set_recoupling_threads(1);
-
-    ALLOCATIONS.set(0);
-    ALLOCATED_BYTES.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let compiled = cache
         .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
             &SU2FusionRule,
@@ -392,13 +343,13 @@ fn rank_nine_same_split_groups_do_not_clone_prepared_spill_storage() {
             false,
         )
         .unwrap();
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
 
     // What: three same-split groups do not regress beyond the prior compiled
     // allocation and byte envelopes.
     assert_eq!(structure.fusion_tree_groups().len(), 3);
-    assert!(ALLOCATIONS.get() <= 217);
-    assert!(ALLOCATED_BYTES.get() < 56_500);
+    assert!(allocs.calls <= 217);
+    assert!(allocs.bytes < 56_500);
     std::hint::black_box(compiled);
 }
 
@@ -424,36 +375,30 @@ fn unique_rank_one_u1_plan_allocations_do_not_scale_with_source_blocks() {
     for count in [1, 2, 4, 8, 16] {
         let structure = rank_one_u1_pair_structure(count);
         let operation = TreeTransformOperation::permute([0], [1]);
-
-        ALLOCATIONS.set(0);
-        COUNTING.set(true);
+        counting_alloc::start();
         let plan =
             build_tree_pair_transform_group_plan(&U1FusionRule, operation, &structure).unwrap();
-        COUNTING.set(false);
+        let allocs = counting_alloc::stop();
 
         // What: every Unique source block is an inline Single and shares the
         // operation axis map, so plan construction owns only the outer specs
         // allocation and the shared axis allocation at every cardinality.
-        assert_eq!(ALLOCATIONS.get(), 2, "source_blocks={count}");
+        assert_eq!(allocs.calls, 2, "source_blocks={count}");
         assert_eq!(plan.specs().len(), count);
 
         let indexed_specs = (0..count)
             .map(|index| TreeTransformBlockSpec::single(index, index, 1.0).with_source_axes([0, 1]))
             .collect::<Vec<_>>();
-
-        ALLOCATIONS.set(0);
-        COUNTING.set(true);
+        counting_alloc::start();
         let direct =
             TreeTransformStructure::compile_structures(&structure, &structure, &indexed_specs)
                 .unwrap();
-        COUNTING.set(false);
-        let direct_allocations = ALLOCATIONS.get();
-
-        ALLOCATIONS.set(0);
-        COUNTING.set(true);
+        let allocs = counting_alloc::stop();
+        let direct_allocations = allocs.calls as usize;
+        counting_alloc::start();
         let grouped = plan.compile_structures(&structure, &structure).unwrap();
-        COUNTING.set(false);
-        let grouped_allocations = ALLOCATIONS.get();
+        let allocs = counting_alloc::stop();
+        let grouped_allocations = allocs.calls as usize;
 
         // What: resolving grouped Single entries owns one descriptor arena but
         // borrows coefficients and shared source axes from the plan.
@@ -496,37 +441,28 @@ fn grouped_multi_compile_borrows_plan_coefficient_matrix() {
         (0..BLOCKS).collect(),
         coefficients,
     )];
-
-    ALLOCATIONS.set(0);
-    ALLOCATED_BYTES.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let _ = grouped_plan
         .compile_structures(&structure, &structure)
         .unwrap();
-    COUNTING.set(false);
-    let cold_grouped_allocations = ALLOCATIONS.get();
-    let cold_grouped_bytes = ALLOCATED_BYTES.get();
+    let allocs = counting_alloc::stop();
+    let cold_grouped_allocations = allocs.calls as usize;
+    let cold_grouped_bytes = allocs.bytes as usize;
     let _ =
         TreeTransformStructure::compile_structures(&structure, &structure, &direct_specs).unwrap();
-
-    ALLOCATIONS.set(0);
-    ALLOCATED_BYTES.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let direct =
         TreeTransformStructure::compile_structures(&structure, &structure, &direct_specs).unwrap();
-    COUNTING.set(false);
-    let direct_allocations = ALLOCATIONS.get();
-    let direct_bytes = ALLOCATED_BYTES.get();
-
-    ALLOCATIONS.set(0);
-    ALLOCATED_BYTES.set(0);
-    COUNTING.set(true);
+    let allocs = counting_alloc::stop();
+    let direct_allocations = allocs.calls as usize;
+    let direct_bytes = allocs.bytes as usize;
+    counting_alloc::start();
     let grouped = grouped_plan
         .compile_structures(&structure, &structure)
         .unwrap();
-    COUNTING.set(false);
-    let grouped_allocations = ALLOCATIONS.get();
-    let grouped_bytes = ALLOCATED_BYTES.get();
+    let allocs = counting_alloc::stop();
+    let grouped_allocations = allocs.calls as usize;
+    let grouped_bytes = allocs.bytes as usize;
 
     // What: the first categorical binding references the spec's matrix and
     // allocates no coefficient buffer beyond what a direct binding does.
@@ -679,11 +615,10 @@ fn assert_sector_change_binding_copies_only_changed_groups(operation: TreeTransf
     let plan_c = build_tree_pair_transform_group_plan(&SU2FusionRule, operation, &c).unwrap();
 
     let bind_bytes = |bind: &dyn Fn()| {
-        ALLOCATED_BYTES.set(0);
-        COUNTING.set(true);
+        counting_alloc::start();
         bind();
-        COUNTING.set(false);
-        ALLOCATED_BYTES.get()
+        let allocs = counting_alloc::stop();
+        allocs.bytes as usize
     };
     // Why compare two scalar widths: the bound plans have identical keys,
     // blocks and layouts, so their binding allocations differ only by the

@@ -1,8 +1,6 @@
 //! Same-process cold/warm measurements for public basic tensor operations.
 
 use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    cell::Cell,
     convert::Infallible,
     hint::black_box,
     sync::Arc,
@@ -42,40 +40,11 @@ use tenet_matrixalgebra::seam::{
 use tenet_matrixalgebra::BoundDynFactor;
 use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace};
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATION_CALLS: Cell<usize> = const { Cell::new(0) };
-    static REQUESTED_BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATION_CALLS.set(ALLOCATION_CALLS.get() + 1);
-            REQUESTED_BYTES.set(REQUESTED_BYTES.get() + layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATION_CALLS.set(ALLOCATION_CALLS.get() + 1);
-            REQUESTED_BYTES.set(REQUESTED_BYTES.get() + new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 #[derive(Clone, Copy)]
 struct Allocations {
@@ -86,17 +55,13 @@ struct Allocations {
 fn measure_allocations<T, E>(
     operation: impl FnOnce() -> Result<T, E>,
 ) -> Result<(T, Allocations), E> {
-    ALLOCATION_CALLS.set(0);
-    REQUESTED_BYTES.set(0);
-    COUNTING.set(true);
-    let result = operation();
-    COUNTING.set(false);
+    let (result, allocs) = counting_alloc::measure(operation);
     result.map(|value| {
         (
             value,
             Allocations {
-                calls: ALLOCATION_CALLS.get(),
-                requested_bytes: REQUESTED_BYTES.get(),
+                calls: allocs.calls as usize,
+                requested_bytes: allocs.bytes as usize,
             },
         )
     })

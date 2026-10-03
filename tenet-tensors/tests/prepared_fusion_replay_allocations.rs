@@ -1,6 +1,3 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-
 use tenet_core::{
     FermionParityFusionRule, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
     MultiplicityFreeRigidSymbols, ProductFusionRule, ProductSectorCodec, SU2Irrep, SectorId,
@@ -11,36 +8,11 @@ use tenet_tensors::{
     TreeTransformRuleCacheKey,
 };
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static REALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if COUNTING.get() {
-            REALLOCATIONS.set(REALLOCATIONS.get() + 1);
-        }
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 const WORKLOADS: [([usize; 2], [usize; 2], [usize; 4]); 3] = [
     ([2, 3], [0, 1], [0, 1, 2, 3]),
@@ -156,10 +128,7 @@ where
                 )
                 .unwrap();
         }
-
-        ALLOCATIONS.set(0);
-        REALLOCATIONS.set(0);
-        COUNTING.set(true);
+        counting_alloc::start();
         let result = context.execute_prepared_tensorcontract_fusion(
             &prepared,
             rule,
@@ -169,12 +138,11 @@ where
             1.0,
             0.0,
         );
-        COUNTING.set(false);
+        let allocs = counting_alloc::stop();
         result.unwrap();
 
         assert_eq!(actual.data(), expected.data());
-        assert_eq!(ALLOCATIONS.get(), 0, "axes={lhs_axes:?}/{output_axes:?}");
-        assert_eq!(REALLOCATIONS.get(), 0, "axes={lhs_axes:?}/{output_axes:?}");
+        assert_eq!(allocs.calls, 0, "axes={lhs_axes:?}/{output_axes:?}");
     }
 }
 

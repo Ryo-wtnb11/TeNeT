@@ -17,73 +17,37 @@
 //! is evidence, not a contract. The measured figures live in
 //! `docs/audit/issue-1315-single-precision-base.md`.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::FactorScalar;
 use tenet::typed::{Complex32, Complex64, GradedSpace, Runtime, TensorMap, Truncation};
 use tenet::typed::{Qr, Svd};
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            BYTES.set(BYTES.get() + layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            BYTES.set(BYTES.get() + new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
-/// This file had no cross-test lock at all: its three tests can run
-/// concurrently under cargo's default in-binary test threading. The
-/// factorization and the plain-pipeline tests both build `u1_space()` — the
-/// same sectors and degeneracies, hence the same key into tenet-core's
-/// process-global fusion-tree-layout and complete-HomSpace-structure caches
-/// (`tenet-core/src/fusion_space/layout_cache.rs`). One test's concurrent
-/// admission or (weakly held, #1610) eviction of that shared entry between
-/// another test's warm-up and measured call changes the measured call's own
-/// allocation count without changing what it computes: reported as 218 f32
-/// allocations against 202 f64 under a full parallel workspace run. Take this
-/// lock for the whole body of every test in this file, the same technique
-/// `transform_owned_parallel.rs` uses.
-static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+// Why `counting_alloc::serial()`: the three tests here can run
+// concurrently under cargo's default in-binary test threading. The
+// factorization and the plain-pipeline tests both build `u1_space()` — the
+// same sectors and degeneracies, hence the same key into tenet-core's
+// process-global fusion-tree-layout and complete-HomSpace-structure caches
+// (`tenet-core/src/fusion_space/layout_cache.rs`). One test's concurrent
+// admission or (weakly held, #1610) eviction of that shared entry between
+// another test's warm-up and measured call changes the measured call's own
+// allocation count without changing what it computes: reported as 218 f32
+// allocations against 202 f64 under a full parallel workspace run. Every test in
+// this file holds `counting_alloc::serial()` for its whole body, the same
+// technique `transform_owned_parallel.rs` uses.
 
 fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
-    ALLOCATIONS.set(0);
-    BYTES.set(0);
-    COUNTING.set(true);
-    let value = operation();
-    COUNTING.set(false);
-    (value, ALLOCATIONS.get(), BYTES.get())
+    let (value, allocs) = counting_alloc::measure(operation);
+    (value, allocs.calls as usize, allocs.bytes as usize)
 }
 
 fn build_runtime() -> Runtime {
@@ -102,7 +66,7 @@ macro_rules! permuted {
 
 #[test]
 fn runtime_construction_does_not_build_unused_dtype_lanes() {
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _measurement = counting_alloc::serial();
     // Warm anything the process initialises once (thread pools, env parsing)
     // so every build measured below is steady state.
     black_box(build_runtime());
@@ -193,7 +157,7 @@ macro_rules! measure_pipeline {
 
 #[test]
 fn single_precision_allocates_as_often_as_double_and_half_the_payload_bytes() {
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _measurement = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = u1_space();
 
@@ -303,7 +267,7 @@ macro_rules! measure_factorizations {
 
 #[test]
 fn single_precision_factorizations_allocate_like_double() {
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _measurement = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = u1_space();
 

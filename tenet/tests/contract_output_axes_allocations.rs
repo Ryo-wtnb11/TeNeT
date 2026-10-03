@@ -5,10 +5,7 @@
 //! the GEMM's: a temporary plus a permuting `tensoradd!` (its `copyC` path),
 //! inside the one call.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
-use std::sync::Mutex;
 
 use num_complex::{Complex32, Complex64};
 use tenet::sector::{
@@ -20,55 +17,16 @@ use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
 
-struct CountingAllocator;
-
-thread_local! {
-    static ENABLED: Cell<bool> = const { Cell::new(false) };
-    static CALLS: Cell<usize> = const { Cell::new(0) };
-    static BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-fn record(size: usize) {
-    if ENABLED.get() {
-        CALLS.set(CALLS.get() + 1);
-        BYTES.set(BYTES.get() + size);
-    }
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record(layout.size());
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        record(layout.size());
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        record(new_size);
-        unsafe { System.realloc(pointer, layout, new_size) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-// Why serialize: process-global layout caches are shared across test threads.
-static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 /// (calls, bytes) allocated while `f` runs; the result is dropped afterwards.
-fn allocations<T>(f: impl FnOnce() -> T) -> ((usize, usize), T) {
-    CALLS.set(0);
-    BYTES.set(0);
-    ENABLED.set(true);
-    let value = f();
-    ENABLED.set(false);
-    ((CALLS.get(), BYTES.get()), value)
+fn allocations<T>(f: impl FnOnce() -> T) -> ((u64, u64), T) {
+    let (value, allocs) = counting_alloc::measure(f);
+    ((allocs.calls, allocs.bytes), value)
 }
 
 /// Warm cost and value of `contract` onto `codomain ← domain` against the
@@ -147,9 +105,7 @@ macro_rules! assert_no_costlier_than_permute {
 /// change the split's size.
 macro_rules! assert_output_axes_cost {
     ($provider:expr, $sectors:expr $(,)?) => {{
-        let _guard = MEASUREMENT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = counting_alloc::serial();
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let v = GradedSpace::try_new(
             std::sync::Arc::new($provider),

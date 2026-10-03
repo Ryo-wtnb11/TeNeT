@@ -6,11 +6,9 @@
 //! same rule, placement and live runtime render differently only when their
 //! content ids differ.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 
 use tenet::expert::{
     block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
@@ -31,50 +29,15 @@ type Fz2U1Rule = ProductFusionRule<
     PackedProductCodec<Fz2SectorLayout, U1SectorLayout>,
 >;
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize) {
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    let value = operation();
-    COUNTING.set(false);
-    (value, ALLOCATIONS.get())
-}
-
-static INTERN_TABLES: Mutex<()> = Mutex::new(());
-
-fn lock() -> MutexGuard<'static, ()> {
-    INTERN_TABLES.lock().unwrap_or_else(PoisonError::into_inner)
+    let (value, allocs) = counting_alloc::measure(operation);
+    (value, allocs.calls as usize)
 }
 
 fn hash_of(signature: &StructureSignature) -> u64 {
@@ -143,7 +106,7 @@ macro_rules! check_fixture {
 
 #[test]
 fn fixtures_are_equal_iff_structure_is_equal() {
-    let _guard = lock();
+    let _guard = counting_alloc::serial();
     check_fixture!("U1", |variant| {
         let q = U1Irrep::new;
         let pairs = match variant {
@@ -190,7 +153,7 @@ fn fixtures_are_equal_iff_structure_is_equal() {
 fn checked_generic_rule_instance_separates_signatures() {
     // What: SU(3) and SU(4) trivial legs share hom space and block structure
     // (the unit test checks the fields), so the rule alone separates them.
-    let _guard = lock();
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let signature = |rank: usize, trivial: Vec<i64>| {
         let rule = Arc::new(tenet::sector::SUNFusionRule::new(rank).unwrap());
@@ -220,7 +183,7 @@ fn u1_signature(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) -> Structure
 
 #[test]
 fn runtime_identity_separates_signatures() {
-    let _guard = lock();
+    let _guard = counting_alloc::serial();
     let leg = u1_leg(-1..=1, 2);
     let first = Runtime::builder().dense_threads(1).build().unwrap();
     let second = Runtime::builder().dense_threads(1).build().unwrap();
@@ -240,7 +203,7 @@ fn runtime_identity_separates_signatures() {
 
 #[test]
 fn equal_across_reset_core_intern_tables() {
-    let _guard = lock();
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let before = u1_signature(&runtime, &u1_leg(-2..=2, 3));
     reset_core_intern_tables();
@@ -255,7 +218,7 @@ fn equal_across_reset_core_intern_tables() {
 
 #[test]
 fn equal_across_interner_eviction() {
-    let _guard = lock();
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let before = u1_signature(&runtime, &u1_leg(-3..=3, 5));
     let evictions = block_structure_intern_cache_info().pressure_evictions();
@@ -282,7 +245,7 @@ fn equal_across_interner_eviction() {
 
 #[test]
 fn equal_for_oversized_structures_that_bypass_the_interner() {
-    let _guard = lock();
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     // One block per charge; far more block bytes than the 8 MiB entry cap.
     let leg = u1_leg(-30_000..=30_000, 1);
@@ -305,7 +268,7 @@ fn equal_for_oversized_structures_that_bypass_the_interner() {
 
 #[test]
 fn shared_structure_comparison_does_not_allocate() {
-    let _guard = lock();
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = u1_leg(-2..=2, 2);
     let first = u1_signature(&runtime, &leg);

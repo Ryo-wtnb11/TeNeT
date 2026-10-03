@@ -4,10 +4,7 @@
 //! store, and the operand projection reuses the parent's memoized adjoint, so
 //! a warm lazy-adjoint call allocates no more than the owned `contract` (#1419).
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
-use std::sync::Mutex;
 
 use tenet::sector::{
     FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
@@ -15,47 +12,15 @@ use tenet::sector::{
 };
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 
-struct CountingAllocator;
-
-thread_local! {
-    static ENABLED: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && ENABLED.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && ENABLED.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-// Why serialize: process-global layout caches are shared across test threads,
-// so a concurrent test's evictions would move this thread's warm counts.
-static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 fn allocations<T>(f: impl FnOnce() -> T) -> (u64, T) {
-    ALLOCATIONS.set(0);
-    ENABLED.set(true);
-    let value = f();
-    ENABLED.set(false);
-    (ALLOCATIONS.get(), value)
+    let (value, allocs) = counting_alloc::measure(f);
+    (allocs.calls, value)
 }
 
 /// Warm `contract_conj` may exceed the owned `contract` by at most this many
@@ -72,9 +37,7 @@ const LAZY_ADJOINT_CEILING: u64 = 64;
 /// row). The Runtime transform store must see no miss on a warm call.
 macro_rules! assert_warm_lazy_adjoint {
     ($provider:expr, $sectors:expr $(,)?) => {{
-        let _guard = MEASUREMENT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = counting_alloc::serial();
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let leg = GradedSpace::try_new(
             std::sync::Arc::new($provider),

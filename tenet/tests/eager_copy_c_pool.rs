@@ -5,60 +5,23 @@
 //! allocates exactly one output-sized buffer: the returned tensor, and a warm
 //! `contract_into` (#1631), which takes the same route, allocates none.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::Arc;
 
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 
-struct CountingAllocator;
-
-thread_local! {
-    static WATCHED_BYTES: Cell<Option<usize>> = const { Cell::new(None) };
-    static MATCHES: Cell<usize> = const { Cell::new(0) };
-}
-
-fn record(bytes: usize) {
-    // `try_with`: the allocator also runs during thread-local teardown.
-    let _ = WATCHED_BYTES.try_with(|watched| {
-        if watched.get() == Some(bytes) {
-            MATCHES.set(MATCHES.get() + 1);
-        }
-    });
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record(layout.size());
-        // SAFETY: forwards the caller's layout unchanged.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        // SAFETY: `pointer` came from `System` with this layout.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        record(new_size);
-        // SAFETY: forwards the caller's pointer and layout unchanged.
-        unsafe { System.realloc(pointer, layout, new_size) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 /// Allocations of exactly `bytes` made while `f` runs; its result is
 /// dropped after counting stops.
 fn sized_allocs<T>(bytes: usize, f: impl FnOnce() -> T) -> usize {
-    MATCHES.set(0);
-    WATCHED_BYTES.set(Some(bytes));
-    let result = f();
-    WATCHED_BYTES.set(None);
+    let (result, allocs) = counting_alloc::measure_matching(bytes..=bytes, f);
     drop(result);
-    MATCHES.get()
+    allocs.matched_calls as usize
 }
 
 type Map = TensorMap<U1FusionRule, f64>;

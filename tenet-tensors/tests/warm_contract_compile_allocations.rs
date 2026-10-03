@@ -1,9 +1,7 @@
 //! #1359: a warm eager contraction compiles its resolution without heap
 //! allocations for rank-sized data.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep};
 use tenet_tensors::{
@@ -12,56 +10,20 @@ use tenet_tensors::{
     RuntimeTreeTransformStore, TensorContractFusionExecutionContext, TensorContractSpec,
 };
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
-
-// Why a lock: the complete-structure and tree-transform caches are process
-// global, and a concurrent test could turn a warm lookup into a miss.
-static SERIAL: Mutex<()> = Mutex::new(());
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 /// Allocations of one warm call, including the drop of its result.
 fn warm_allocations<T>(mut call: impl FnMut() -> T) -> usize {
     drop(call());
     drop(call());
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     drop(call());
-    COUNTING.set(false);
-    ALLOCATIONS.get()
+    let allocs = counting_alloc::stop();
+    allocs.calls as usize
 }
 
 type Space = BoundDynamicFusionMapSpace<U1FusionRule>;
@@ -194,9 +156,7 @@ fn warm_compile_allocations(codomain: usize, domain: usize) -> [usize; 3] {
 
 #[test]
 fn warm_contract_compile_allocations_do_not_scale_with_rank() {
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = counting_alloc::serial();
     for (codomain, domain) in [(2, 1), (2, 2), (3, 2), (3, 3), (4, 3)] {
         let [core, dynamic_tree, plan] = warm_compile_allocations(codomain, domain);
         let rank = codomain + domain;
@@ -265,9 +225,7 @@ fn crossing_compile_base(codomain: usize, domain: usize) -> usize {
 
 #[test]
 fn warm_contract_compile_allocates_nothing_per_leg_that_changes_side() {
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = counting_alloc::serial();
     // Rank 2 is left out: there the planner takes the reversed orientation,
     // whose source transforms keep every leg on its side.
     for (codomain, domain) in [(2, 1), (1, 2), (2, 2), (3, 2), (2, 3), (3, 3)] {
@@ -289,9 +247,7 @@ fn warm_contract_compile_allocates_nothing_per_leg_that_changes_side() {
 /// storage too, so it allocates nothing per crossing leg either.
 #[test]
 fn warm_contract_compile_allocates_nothing_per_crossing_leg_the_dual_moves() {
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = counting_alloc::serial();
     for (codomain, domain) in [(2, 1), (1, 2), (2, 2), (3, 2), (2, 3), (3, 3)] {
         let moved = crossing_compile_allocations(asymmetric_leg, codomain, domain);
         let fixed = crossing_compile_allocations(leg, codomain, domain);

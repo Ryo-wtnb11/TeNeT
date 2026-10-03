@@ -1,9 +1,7 @@
 //! #1368: a warm contraction with a conjugated source reuses its space's
 //! adjoint structure instead of rebuilding it on every call.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tenet_core::{
     CheckedFusionAlgebra, FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace,
@@ -15,48 +13,11 @@ use tenet_tensors::{
     TensorContractSpec, TreeTransformRuleCacheKey,
 };
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static CALLS: Cell<usize> = const { Cell::new(0) };
-    static BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-fn record(size: usize) {
-    if COUNTING.get() {
-        CALLS.set(CALLS.get() + 1);
-        BYTES.set(BYTES.get() + size);
-    }
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record(layout.size());
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        record(layout.size());
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        record(new_size);
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
-
-// Why a lock: the complete-structure and tree-transform caches are process
-// global, and a concurrent test could turn a warm lookup into a miss.
-static SERIAL: Mutex<()> = Mutex::new(());
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 /// Allocation calls and bytes of one warm conjugated-source contraction
 /// `conj(A) · B` over `A, B: V ← V`, plus the retained bytes of the memoized
@@ -117,18 +78,16 @@ where
     };
     call();
     call();
-    CALLS.set(0);
-    BYTES.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     call();
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
     let retained = lhs
         .adjoint_view()
         .unwrap()
         .space()
         .structure()
         .charged_retained_bytes();
-    (CALLS.get(), BYTES.get(), retained)
+    (allocs.calls as usize, allocs.bytes as usize, retained)
 }
 
 fn u1(deg: usize) -> Vec<(SectorId, usize)> {
@@ -157,9 +116,7 @@ fn fz2_u1(deg: usize) -> Vec<(SectorId, usize)> {
 
 #[test]
 fn warm_conjugated_contract_allocations_are_pinned() {
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = counting_alloc::serial();
     let fz2_u1_rule = || {
         ProductFusionRule::<FermionParityFusionRule, U1FusionRule>::new(
             FermionParityFusionRule,
