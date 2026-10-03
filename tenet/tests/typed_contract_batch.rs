@@ -1,4 +1,10 @@
 mod common;
+#[path = "../../tests/support"]
+mod support {
+    use num_complex::{Complex32, Complex64};
+    pub mod numerics;
+}
+use support::numerics;
 #[macro_use]
 #[allow(unused_macros)]
 mod contract_cases;
@@ -23,8 +29,8 @@ fn measure<T>(f: impl FnOnce() -> T) -> (T, Duration, usize, usize) {
     (value, elapsed, allocs.calls as usize, allocs.bytes as usize)
 }
 use contract_cases::{
-    assert_close, blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_su2,
-    fermion_u1, fermionic_blas_contract_oracle, fermionic_blas_contract_oracle_partitioned,
+    blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_su2, fermion_u1,
+    fermionic_blas_contract_oracle, fermionic_blas_contract_oracle_partitioned,
     fermionic_canonical_nonuniform, fermionic_twist_roles, fill, poisoned_destination, su2,
     su2_bent, su2_reordered, u1, u1_inactive_cases, u1_non_self_dual, u1_reordered,
     u1_rhs_identity, Case, Payload, TwistRole,
@@ -72,16 +78,21 @@ where
         for (i, member_case) in members.iter().enumerate() {
             let member = result.member(i).unwrap();
             let reference = blas_contract_oracle(member_case);
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                case.name,
                 member.dense_data().unwrap(),
                 reference.dense_data().unwrap(),
                 case.terms(),
-                case.name,
             );
             if member_case.dense {
                 let (_, expected) = dense_oracle(member_case);
                 let physical = member.to_physical_dense().unwrap();
-                assert_close(&physical.data, &expected, case.terms(), case.name);
+                numerics::assert_nonzero_slices_close(
+                    case.name,
+                    &physical.data,
+                    &expected,
+                    case.terms(),
+                );
             }
             let eager = member_case.host();
             assert_eq!(member.codomain_rank(), eager.codomain_rank());
@@ -91,11 +102,11 @@ where
                 "{} member {i}: full output structure differs",
                 case.name,
             );
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                case.name,
                 member.dense_data().unwrap(),
                 eager.dense_data().unwrap(),
                 case.terms(),
-                case.name,
             );
         }
         let poison: Vec<_> = members.iter().map(poisoned_destination).collect();
@@ -105,19 +116,19 @@ where
         for (i, member_case) in members.iter().enumerate() {
             let member = destination.member(i).unwrap();
             let reference = blas_contract_oracle(member_case);
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                case.name,
                 member.dense_data().unwrap(),
                 reference.dense_data().unwrap(),
                 case.terms(),
-                case.name,
             );
             if member_case.dense {
                 let (_, expected) = dense_oracle(member_case);
-                assert_close(
+                numerics::assert_nonzero_slices_close(
+                    case.name,
                     &member.to_physical_dense().unwrap().data,
                     &expected,
                     case.terms(),
-                    case.name,
                 );
             }
         }
@@ -190,11 +201,11 @@ fn swapped_core_uses_rhs_member_length_and_nondefault_output_split() {
     };
     let eager = lhs.contract(&rhs, &spec).unwrap();
     let reference = rhs.compose(&lhs).unwrap();
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        "swapped eager",
         eager.dense_data().unwrap(),
         reference.dense_data().unwrap(),
         64,
-        "swapped eager",
     );
     let left = StackedTensorMap::pack(&[&lhs, &lhs]).unwrap();
     let right = StackedTensorMap::pack(&[&rhs, &rhs]).unwrap();
@@ -207,11 +218,11 @@ fn swapped_core_uses_rhs_member_length_and_nondefault_output_split() {
     let actual = plan.execute(&left, &right, &mut workspace).unwrap();
     for i in 0..2 {
         assert_eq!(actual.member(i).unwrap().codomain_rank(), 2);
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            "swapped batch",
             actual.member(i).unwrap().dense_data().unwrap(),
             reference.dense_data().unwrap(),
             64,
-            "swapped batch",
         );
     }
 }
@@ -348,11 +359,11 @@ fn public_copy_c_matches_eager() {
             StackedTensorMap::pack(&[&expected]).unwrap().signature(),
             StackedTensorMap::pack(&[&result]).unwrap().signature(),
         );
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            "copyC",
             result.dense_data().unwrap(),
             expected.dense_data().unwrap(),
             16,
-            "copyC",
         );
     }
 }
@@ -776,17 +787,17 @@ fn check_fermionic_unit_batch<R, D>(
                 "{} member {index}: output structure",
                 case.name
             );
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                case.name,
                 actual.dense_data().unwrap(),
                 oracle.dense_data().unwrap(),
                 case.terms(),
-                case.name,
             );
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                case.name,
                 actual.dense_data().unwrap(),
                 eager.dense_data().unwrap(),
                 case.terms(),
-                case.name,
             );
         }
         if count == 2 {
@@ -905,11 +916,11 @@ fn fermionic_uniform_negative_core_is_admitted() {
         .unwrap()
         .member(0)
         .unwrap();
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         actual.dense_data().unwrap(),
         case.host().dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
 }
 
@@ -940,11 +951,11 @@ fn mixed_signed_fermionic_core_is_admitted() {
                 .unwrap()
         },
     );
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         eager.dense_data().unwrap(),
         oracle.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
     let lhs = StackedTensorMap::pack(&[&case.lhs]).unwrap();
     let rhs = StackedTensorMap::pack(&[&case.rhs]).unwrap();
@@ -954,11 +965,11 @@ fn mixed_signed_fermionic_core_is_admitted() {
         .unwrap()
         .member(0)
         .unwrap();
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         actual.dense_data().unwrap(),
         oracle.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
 }
 
@@ -1023,11 +1034,11 @@ fn check_mixed_signed_members<R, D>(
                 1,
                 twist,
             );
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                member.name,
                 result.member(i).unwrap().dense_data().unwrap(),
                 oracle.dense_data().unwrap(),
                 member.terms(),
-                member.name,
             );
             if swapped {
                 // The public A-side oracle alone cannot check the selected
@@ -1043,11 +1054,11 @@ fn check_mixed_signed_members<R, D>(
                 };
                 let selected_oracle =
                     fermionic_blas_contract_oracle_partitioned(&selected, TwistRole::B, 1, twist);
-                assert_close(
+                numerics::assert_nonzero_slices_close(
+                    selected.name,
                     result.member(i).unwrap().dense_data().unwrap(),
                     selected_oracle.dense_data().unwrap(),
                     selected.terms(),
-                    selected.name,
                 );
                 let untwisted = fermionic_blas_contract_oracle_partitioned(
                     &selected,
@@ -1072,11 +1083,11 @@ fn check_mixed_signed_members<R, D>(
                     D::NAME,
                 );
             }
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                member.name,
                 result.member(i).unwrap().dense_data().unwrap(),
                 eager[i].dense_data().unwrap(),
                 member.terms(),
-                member.name,
             );
         }
         let poisoned: Vec<_> = members.iter().map(poisoned_destination).collect();
@@ -1085,11 +1096,11 @@ fn check_mixed_signed_members<R, D>(
         plan.execute_into(&lhs, &rhs, &mut dst, &mut other_workspace)
             .unwrap();
         for (i, expected) in eager.iter().enumerate() {
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                base.name,
                 dst.member(i).unwrap().dense_data().unwrap(),
                 expected.dense_data().unwrap(),
                 base.terms(),
-                base.name,
             );
         }
         if count == 2 {
@@ -1180,11 +1191,11 @@ fn partitioned_output_uses_requested_codomain_rank() {
             .member(0)
             .unwrap();
         assert_eq!(actual.codomain_rank(), split);
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            case.name,
             actual.dense_data().unwrap(),
             expected.dense_data().unwrap(),
             case.terms(),
-            case.name,
         );
         admitted += 1;
     }

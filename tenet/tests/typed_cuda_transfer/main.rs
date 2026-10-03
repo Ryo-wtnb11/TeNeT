@@ -32,6 +32,13 @@ use tenet::typed::{
 #[path = "../../../tests/support/numerics.rs"]
 mod numerics;
 
+/// Floating terms per compared entry, per family of device gates: an
+/// elementwise combination, a contraction over the fixtures' bond, and a
+/// factorization or its reconstruction over the fixtures' blocks.
+const ELEMENTWISE_TERMS: usize = 4;
+const CONTRACT_TERMS: usize = 16;
+const FACTOR_TERMS: usize = 64;
+
 /// The Host truncated SVD the device composition is compared with: the same
 /// composition on Host factors, with the kept values widened to `f64` and
 /// ordered by provider label.
@@ -250,16 +257,6 @@ where
     }
 }
 
-fn assert_close(actual: &[f64], expected: &[f64], tolerance: f64) {
-    assert_eq!(actual.len(), expected.len());
-    for (&actual, &expected) in actual.iter().zip(expected) {
-        assert!(
-            (actual - expected).abs() <= tolerance * (1.0 + expected.abs()),
-            "actual {actual:?}, expected {expected:?}"
-        );
-    }
-}
-
 fn assert_typed_cuda_svd_matches_host<R>(source: &TensorMap<R, f64>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -305,10 +302,11 @@ fn assert_cuda_svd_result<R>(
         factors.s.to_host().unwrap(),
         factors.vh.to_host().unwrap(),
     );
-    assert_close(
+    numerics::assert_slices_close(
+        "actual.1",
         actual.1.materialize().unwrap().dense_data().unwrap(),
         expected.s.materialize().unwrap().dense_data().unwrap(),
-        1e-10,
+        FACTOR_TERMS,
     );
     assert_eq!(
         structural_snapshot(&actual.0),
@@ -330,10 +328,11 @@ fn assert_cuda_svd_result<R>(
         .unwrap()
         .compose(&actual.2)
         .unwrap();
-    assert_close(
+    numerics::assert_slices_close(
+        "rebuilt",
         rebuilt.materialize().unwrap().dense_data().unwrap(),
         source.materialize().unwrap().dense_data().unwrap(),
-        1e-10,
+        FACTOR_TERMS,
     );
 }
 
@@ -347,16 +346,6 @@ fn assert_cuda_svd_result<R>(
 fn complex_entry(indices: &[usize], seed: f64) -> Complex64 {
     let ramp = indices.iter().map(|&index| index as f64).sum::<f64>();
     Complex64::new(ramp + seed, -(ramp + seed + 0.75))
-}
-
-fn assert_close_c64(actual: &[Complex64], expected: &[Complex64], tolerance: f64) {
-    assert_eq!(actual.len(), expected.len());
-    for (&actual, &expected) in actual.iter().zip(expected) {
-        assert!(
-            (actual - expected).norm() <= tolerance * (1.0 + expected.norm()),
-            "actual {actual:?}, expected {expected:?}"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -431,14 +420,16 @@ where
     }
     // `u`/`vh` keep the raw device gauge, so only gauge-invariant quantities
     // are compared: the spectrum, both orthonormality relations, and `u s vh`.
-    assert_close_c64(
+    numerics::assert_slices_close(
+        "s",
         s.materialize().unwrap().dense_data().unwrap(),
         expected.s.materialize().unwrap().dense_data().unwrap(),
-        1e-9,
+        FACTOR_TERMS,
     );
     assert!(is_isometric!(u, 1e-10), "U^H U = I");
     assert!(is_isometric!(vh.adjoint().unwrap(), 1e-10), "V^H V = I");
-    assert_close_c64(
+    numerics::assert_slices_close(
+        "u.compose(s)  .compose(vh)",
         u.compose(&s)
             .unwrap()
             .compose(&vh)
@@ -448,7 +439,7 @@ where
             .dense_data()
             .unwrap(),
         &source_data,
-        1e-9,
+        FACTOR_TERMS,
     );
     assert_eq!(device.to_host().unwrap().dense_data().unwrap(), source_data);
 }

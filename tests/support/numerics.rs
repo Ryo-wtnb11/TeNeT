@@ -107,3 +107,14 @@ pub fn assert_slices_close_scaled<T: Numeric>(
         );
     }
 }
+
+/// [`assert_slices_close`] for an oracle that must not be all zero: against
+/// an all-zero oracle a bounded error proves nothing.
+#[track_caller]
+pub fn assert_nonzero_slices_close<T: Numeric>(what: &str, got: &[T], want: &[T], terms: usize) {
+    assert!(
+        want.iter().any(|value| value.wide().norm() > 0.0),
+        "{what}: an all-zero oracle proves nothing"
+    );
+    assert_slices_close(what, got, want, terms);
+}

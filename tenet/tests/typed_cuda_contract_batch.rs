@@ -5,6 +5,12 @@
 
 mod braiding_probe;
 mod common;
+#[path = "../../tests/support"]
+mod support {
+    use num_complex::{Complex32, Complex64};
+    pub mod numerics;
+}
+use support::numerics;
 #[macro_use]
 #[allow(unused_macros)]
 mod contract_cases;
@@ -12,8 +18,8 @@ mod contract_cases;
 use braiding_probe::{ProbeSector, RealBraidingProbe};
 use common::{DevicePayload, DeviceRule};
 use contract_cases::{
-    assert_close, blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_su2,
-    fermion_u1, fermionic_blas_contract_oracle, fermionic_blas_contract_oracle_partitioned,
+    blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_su2, fermion_u1,
+    fermionic_blas_contract_oracle, fermionic_blas_contract_oracle_partitioned,
     fermionic_canonical_nonuniform, fermionic_twist_roles, fill, poisoned_destination, su2,
     su2_bent, u1, u1_inactive_cases, u1_non_self_dual, u1_reordered, Case, FermionU1, TwistRole,
 };
@@ -136,11 +142,11 @@ fn check_signed_core<R: DeviceRule, D: DevicePayload>(
             let untwisted =
                 fermionic_blas_contract_oracle_partitioned(&selected, TwistRole::None, 1, twist);
             let expected = oracle.dense_data().unwrap();
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                base.name,
                 expected,
                 selected_oracle.dense_data().unwrap(),
                 member.terms(),
-                base.name,
             );
             let selected_data = selected_oracle.dense_data().unwrap();
             let scale = selected_data
@@ -156,11 +162,11 @@ fn check_signed_core<R: DeviceRule, D: DevicePayload>(
                 "twist must change signed {}",
                 D::NAME
             );
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                base.name,
                 result.member(i).unwrap().dense_data().unwrap(),
                 expected,
                 member.terms(),
-                base.name,
             );
             let eager = member
                 .lhs
@@ -170,11 +176,11 @@ fn check_signed_core<R: DeviceRule, D: DevicePayload>(
                 .unwrap()
                 .to_host()
                 .unwrap();
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                base.name,
                 result.member(i).unwrap().dense_data().unwrap(),
                 eager.dense_data().unwrap(),
                 member.terms(),
-                base.name,
             );
         }
         let poisoned: Vec<_> = members.iter().map(poisoned_destination).collect();
@@ -188,11 +194,11 @@ fn check_signed_core<R: DeviceRule, D: DevicePayload>(
         assert_eq!(into.cuda.gemm_calls, gemms);
         let written = dst.to_host().unwrap();
         for (i, member) in members.iter().enumerate() {
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                base.name,
                 written.member(i).unwrap().dense_data().unwrap(),
                 result.member(i).unwrap().dense_data().unwrap(),
                 member.terms(),
-                base.name,
             );
         }
         if count == 2 {
@@ -318,11 +324,11 @@ fn signed_fixture_twist_is_nonvacuous_without_a_device() {
         .iter()
         .zip(absent.dense_data().unwrap())
         .any(|(&x, &y)| (x - y).abs() > 1e-10));
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         case.host().dense_data().unwrap(),
         signed.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
 }
 
@@ -391,11 +397,11 @@ fn signed_core_zeroes_inactive_blocks_after_poisoning() {
                 .unwrap();
             let result = dst.to_host().unwrap();
             for i in 0..count {
-                assert_close(
+                numerics::assert_nonzero_slices_close(
+                    case.name,
                     result.member(i).unwrap().dense_data().unwrap(),
                     expected,
                     case.terms(),
-                    case.name,
                 );
             }
         }
@@ -548,17 +554,17 @@ fn check<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
                 .unwrap();
             let actual = output.member(i).unwrap();
             assert_eq!(actual.codomain_rank(), eager.codomain_rank());
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                case.name,
                 actual.dense_data().unwrap(),
                 oracle.dense_data().unwrap(),
                 case.terms(),
-                case.name,
             );
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                case.name,
                 actual.dense_data().unwrap(),
                 eager.dense_data().unwrap(),
                 case.terms(),
-                case.name,
             );
         }
         let poison: Vec<_> = (0..count).map(|_| poisoned_destination(&case)).collect();
@@ -573,11 +579,11 @@ fn check<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
         assert_eq!(after.copy_calls - before.copy_calls, 0);
         let result = dst.to_host().unwrap();
         for i in 0..count {
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                case.name,
                 result.member(i).unwrap().dense_data().unwrap(),
                 output.member(i).unwrap().dense_data().unwrap(),
                 case.terms(),
-                case.name,
             );
         }
         let wrong_indices: &[usize] = if count == 1 { &[0, 0] } else { &[0] };
@@ -656,11 +662,11 @@ fn swapped_core_uses_rhs_stride_and_nondefault_split() {
     for i in 0..2 {
         let member = actual.member(i).unwrap();
         assert_eq!(member.codomain_rank(), 2);
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            "swapped stride",
             member.dense_data().unwrap(),
             oracle.dense_data().unwrap(),
             64,
-            "swapped stride",
         );
     }
 }
@@ -722,11 +728,11 @@ fn inactive_core_zeroes_each_poisoned_member_with_one_extra_submission() {
         assert_eq!(after.d2h_calls - before.d2h_calls, 0);
         let actual = dst.to_host().unwrap();
         for i in 0..count {
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                case.name,
                 actual.member(i).unwrap().dense_data().unwrap(),
                 oracle.dense_data().unwrap(),
                 case.terms(),
-                case.name,
             );
         }
     }
@@ -847,11 +853,11 @@ fn negative_only_signed_core_matches_literal_twist() {
         .iter()
         .zip(untwisted.dense_data().unwrap())
         .any(|(&x, &y)| (x - y).abs() > 1e-10));
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         case.host().dense_data().unwrap(),
         expected,
         case.terms(),
-        case.name,
     );
     let left = StackedTensorMap::pack(&[&case.lhs])
         .unwrap()
@@ -867,11 +873,11 @@ fn negative_only_signed_core_matches_literal_twist() {
         .unwrap()
         .to_host()
         .unwrap();
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         actual.member(0).unwrap().dense_data().unwrap(),
         expected,
         case.terms(),
-        case.name,
     );
 }
 
@@ -972,11 +978,11 @@ fn copy_c_nonzero_single_public_admission() {
                 for (i, member) in members.iter().enumerate() {
                     let actual = output.member(i).unwrap();
                     let oracle = blas_contract_oracle(member);
-                    assert_close(
+                    numerics::assert_nonzero_slices_close(
+                        case.name,
                         actual.dense_data().unwrap(),
                         oracle.dense_data().unwrap(),
                         member.terms(),
-                        case.name,
                     );
                     let eager = member
                         .lhs
@@ -986,19 +992,19 @@ fn copy_c_nonzero_single_public_admission() {
                         .unwrap()
                         .to_host()
                         .unwrap();
-                    assert_close(
+                    numerics::assert_nonzero_slices_close(
+                        case.name,
                         actual.dense_data().unwrap(),
                         eager.dense_data().unwrap(),
                         member.terms(),
-                        case.name,
                     );
                     if member.dense {
                         let (_, physical) = dense_oracle(member);
-                        assert_close(
+                        numerics::assert_nonzero_slices_close(
+                            case.name,
                             &actual.to_physical_dense().unwrap().data,
                             &physical,
                             member.terms(),
-                            case.name,
                         );
                     }
                 }
@@ -1044,11 +1050,11 @@ fn copy_c_nonzero_single_public_admission() {
                 );
                 let written = dst.to_host().unwrap();
                 for (i, member) in members.iter().enumerate() {
-                    assert_close(
+                    numerics::assert_nonzero_slices_close(
+                        case.name,
                         written.member(i).unwrap().dense_data().unwrap(),
                         output.member(i).unwrap().dense_data().unwrap(),
                         member.terms(),
-                        case.name,
                     );
                 }
                 if count == 2 {
@@ -1190,15 +1196,20 @@ fn check_dynamic_tree<R: DeviceRule, D: DevicePayload>(
             let expected = oracle(member);
             for reference in [&eager, &expected] {
                 assert_eq!(actual.codomain_rank(), reference.codomain_rank());
-                assert_close(
+                numerics::assert_nonzero_slices_close(
+                    case.name,
                     actual.dense_data().unwrap(),
                     reference.dense_data().unwrap(),
                     member.terms(),
-                    case.name,
                 );
             }
             if let Some((actual, expected)) = physical(member, &actual) {
-                assert_close(&actual, &expected, member.terms(), case.name);
+                numerics::assert_nonzero_slices_close(
+                    case.name,
+                    &actual,
+                    &expected,
+                    member.terms(),
+                );
             }
         }
         let poison: Vec<_> = members.iter().map(poisoned_destination).collect();
@@ -1228,11 +1239,11 @@ fn check_dynamic_tree<R: DeviceRule, D: DevicePayload>(
         );
         let written = dst.to_host().unwrap();
         for (i, member) in members.iter().enumerate() {
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                case.name,
                 written.member(i).unwrap().dense_data().unwrap(),
                 output.member(i).unwrap().dense_data().unwrap(),
                 member.terms(),
-                case.name,
             );
         }
         if count == 2 {

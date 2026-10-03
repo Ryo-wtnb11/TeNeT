@@ -13,12 +13,13 @@ use std::sync::Arc;
 use num_complex::Complex64;
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::OperationError;
-use tenet::typed::{Error, Runtime, TensorMap, Truncation};
+use tenet::typed::{Error, TensorMap, Truncation};
 use tenet::typed::{GradedSpace, SectorSpectrum};
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 fn policies() -> Vec<Truncation> {
     vec![
@@ -51,7 +52,7 @@ macro_rules! assert_nan_spectrum_is_rejected {
                 "find_truncated accepted a NaN spectrum under {policy:?}"
             );
         }
-        let diagonal = TensorMap::diagonal(&runtime(), leg, spectra).unwrap();
+        let diagonal = TensorMap::diagonal(&host_runtime(), leg, spectra).unwrap();
         for rcond in [0.0, 0.1] {
             assert!(
                 matches!(
@@ -141,7 +142,7 @@ fn su2_complex_nan_spectrum_is_rejected() {
 #[test]
 fn compact_svd_rejects_infinite_input_without_changing_spectrum() {
     let input: TensorMap<_, f64> = TensorMap::diagonal(
-        &runtime(),
+        &host_runtime(),
         &u1(),
         [
             SectorSpectrum {
@@ -164,7 +165,7 @@ fn compact_svd_rejects_infinite_input_without_changing_spectrum() {
 fn compact_pinv_of_a_finite_diagonal_is_unchanged() {
     // Hand-computed: sigma_max = 4, rcond 0.2 -> cutoff 0.8; 0.5 is cut.
     let diagonal: TensorMap<_, f64> = TensorMap::diagonal(
-        &runtime(),
+        &host_runtime(),
         &u1(),
         [
             SectorSpectrum {
@@ -192,7 +193,7 @@ fn compact_pinv_of_a_finite_diagonal_is_unchanged() {
 /// `Error::InvalidArgument`. Either way the result is never `Ok`.
 #[test]
 fn dense_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let leg = u1();
     let real: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |trees, index: &[usize]| {

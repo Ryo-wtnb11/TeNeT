@@ -18,6 +18,12 @@
 //! L4 `P'[2,3]·B[0,1]`).
 
 mod common;
+#[path = "../../tests/support"]
+mod support {
+    use num_complex::{Complex32, Complex64};
+    pub mod numerics;
+}
+use support::numerics;
 #[allow(unused_macros)]
 mod contract_cases;
 
@@ -26,7 +32,7 @@ use tenet::typed::ContractSpec;
 use tenet::typed::Direction;
 
 use contract_cases::{
-    assert_close, blas_contract_oracle, candidate_core_probes as probes, dense_oracle, fermion_u1,
+    blas_contract_oracle, candidate_core_probes as probes, dense_oracle, fermion_u1,
     fermionic_blas_contract_oracle, fill, su2, u1, u1_non_self_dual, Case, FermionU1, Payload,
     TwistRole,
 };
@@ -52,11 +58,11 @@ fn check<R, D>(
 {
     for (case, _) in probes::<R, D>(runtime, v) {
         let expected = oracle(&case);
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            &format!("{symmetry} {}", case.name),
             case.host().dense_data().unwrap(),
             expected.dense_data().unwrap(),
             case.terms(),
-            &format!("{symmetry} {}", case.name),
         );
     }
 }
@@ -173,11 +179,11 @@ fn fermionic_values<D: Payload>() {
         };
         let host = case.host();
         let twisted = fermionic_blas_contract_oracle(&case, TwistRole::B, twist);
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            name,
             host.dense_data().unwrap(),
             twisted.dense_data().unwrap(),
             case.terms(),
-            name,
         );
         let untwisted = fermionic_blas_contract_oracle(&case, TwistRole::None, twist);
         assert!(
@@ -288,17 +294,17 @@ where
     for case in mixed_cases::<R, D>(&runtime, v, w) {
         let what = format!("{symmetry} {} [{}]", case.name, D::NAME);
         let host = case.host();
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            &what,
             host.dense_data().unwrap(),
             blas_contract_oracle(&case).dense_data().unwrap(),
             case.terms(),
-            &what,
         );
         if case.dense {
             let (shape, expected) = dense_oracle(&case);
             let actual = host.to_physical_dense().unwrap();
             assert_eq!(actual.shape, shape, "{what}");
-            assert_close(&actual.data, &expected, case.terms(), &what);
+            numerics::assert_nonzero_slices_close(&what, &actual.data, &expected, case.terms());
         }
     }
 }
@@ -549,17 +555,17 @@ where
         // What: the left-authority provider rule holds after a swap.
         assert!(std::ptr::eq(host.provider(), case.lhs.provider()), "{what}");
         assert_eq!(host.codomain_rank(), case.lhs.rank() - case.lhs_axes.len());
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            &what,
             host.dense_data().unwrap(),
             blas_contract_oracle(&case).dense_data().unwrap(),
             case.terms(),
-            &what,
         );
         if case.dense {
             let (shape, expected) = dense_oracle(&case);
             let actual = host.to_physical_dense().unwrap();
             assert_eq!(actual.shape, shape, "{what}");
-            assert_close(&actual.data, &expected, case.terms(), &what);
+            numerics::assert_nonzero_slices_close(&what, &actual.data, &expected, case.terms());
         }
     }
 }
@@ -717,11 +723,11 @@ fn fermionic_output_permute_values<D: Payload>() {
     for role in [TwistRole::B, TwistRole::A] {
         for (case, _) in output_permute_probes::<_, D>(&runtime, &fermion_u1()) {
             let expected = fermionic_blas_contract_oracle(&case, role, twist);
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                &format!("fZ2xU(1) {} [{}]", case.name, D::NAME),
                 case.host().dense_data().unwrap(),
                 expected.dense_data().unwrap(),
                 case.terms(),
-                &format!("fZ2xU(1) {} [{}]", case.name, D::NAME),
             );
         }
     }
@@ -745,11 +751,11 @@ fn fermionic_output_permute_values<D: Payload>() {
         dense: false,
     };
     let expected = fermionic_blas_contract_oracle(&case, TwistRole::B, twist);
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         case.host().dense_data().unwrap(),
         expected.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
 }
 
@@ -863,11 +869,11 @@ fn large_output_from_small_operands_copies_the_operands_not_c() {
         let name = case.name;
         let host = case.host();
         let output_bytes = std::mem::size_of_val(host.dense_data().unwrap()) as u64;
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            name,
             host.dense_data().unwrap(),
             blas_contract_oracle(&case).dense_data().unwrap(),
             case.terms(),
-            name,
         );
         let (calls, bytes, lookups) = warm(&runtime, &case);
         eprintln!("U(1) {name}: {calls} calls, {bytes} B, {lookups} transform lookups, dim(C) {output_bytes} B");
@@ -946,11 +952,11 @@ fn small_output_takes_copy_c_without_scoring() {
     ];
     for case in &cases {
         let name = case.name;
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            name,
             case.host().dense_data().unwrap(),
             blas_contract_oracle(case).dense_data().unwrap(),
             case.terms(),
-            name,
         );
         let operand_bytes = std::mem::size_of_val(case.lhs.dense_data().unwrap()) as u64;
         let (calls, bytes, _) = warm(&runtime, case);
@@ -981,10 +987,10 @@ fn swapped_tie_with_an_identity_output_matches_tensorkit() {
         output_axes: vec![0, 1, 2, 3],
         dense: false,
     };
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         case.host().dense_data().unwrap(),
         blas_contract_oracle(&case).dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
 }

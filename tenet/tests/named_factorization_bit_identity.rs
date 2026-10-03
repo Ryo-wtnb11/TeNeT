@@ -17,9 +17,7 @@ use tenet::sector::{
     SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::__network::NetworkReuseClass;
-use tenet::typed::{
-    Eig, Eigh, GradedSpace, LeftPolar, Lq, Qr, RightPolar, Runtime, Svd, TensorMap,
-};
+use tenet::typed::{Eig, Eigh, GradedSpace, LeftPolar, Lq, Qr, RightPolar, Svd, TensorMap};
 
 // The old tuple order of every result.
 fn svd<T>(x: Svd<T>) -> (T, T, T) {
@@ -194,9 +192,10 @@ fn check(label: &str, actual: &[(u64, u64)], structure: &[u64; 20], exact: &[u64
     }
 }
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 fn u1_leg() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
@@ -231,7 +230,7 @@ fn fz2_u1_leg() -> GradedSpace<ProductFusionRule<FermionParityFusionRule, U1Fusi
 /// and block order follows them, so the fingerprints assume this sequence.
 #[test]
 fn named_results_match_the_tuple_results() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let v = u1_leg();
     check(
         "u1 f64",

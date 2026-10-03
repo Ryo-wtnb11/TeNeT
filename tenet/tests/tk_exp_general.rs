@@ -64,9 +64,10 @@ mod numerics;
 
 use tenet::typed::Complex32;
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 fn real_fill(charge: i32, indices: &[usize], scale: f64) -> f64 {
     scale * (0.5 + 0.25 * indices[0] as f64 - 0.75 * indices[1] as f64 + 0.125 * charge as f64)
@@ -115,7 +116,7 @@ fn typed_complex(runtime: &Runtime, scale: f64) -> TensorMap<U1FusionRule, Compl
 
 #[test]
 fn general_exp_matches_the_tensorkit_oracle() {
-    let runtime = runtime();
+    let runtime = host_runtime();
 
     // (scale, norm(t), norm(exp(t))) from the Julia session quoted above.
     for (scale, input_norm, exponential_norm) in [
@@ -170,7 +171,7 @@ fn general_exp_balances_a_badly_scaled_block_like_julia() {
     // approximant's error; balanced, its norm is ~1.11 and the approximant is
     // evaluated directly. The exact answer is the same either way, so only the
     // balancing shows up in the values.
-    let runtime = runtime();
+    let runtime = host_runtime();
     let space = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let tensor = TensorMap::from_subblock_fn(&runtime, [&space], [&space], |_, indices| {
         BALANCE_FIXTURE[indices[0] + 2 * indices[1]]

@@ -22,15 +22,10 @@ use tenet::sector::{
 use tenet::typed::{Complex64, Runtime};
 use tenet::typed::{GradedSpace, Qr, Svd, TensorMap, Truncation};
 
-/// The receiver's own split as leg roles: `rows = 0..nout`.
-fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (0..t.codomain_rank()).collect()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
 
-/// The receiver's own split as leg roles: `cols = nout..rank`.
-fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (t.codomain_rank()..t.rank()).collect()
-}
+use fixtures::{codomain_axes, domain_axes};
 
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;

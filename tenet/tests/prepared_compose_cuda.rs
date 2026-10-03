@@ -16,10 +16,9 @@ mod prepared;
 
 use std::collections::{BTreeSet, HashSet};
 use std::fmt::Debug;
-use std::sync::Mutex;
 
 use num_complex::{Complex32, Complex64};
-use tenet::expert::{cuda_transfer_stats, CudaPlanCacheStats, CudaTransferStats};
+use tenet::expert::cuda_transfer_stats;
 use tenet::sector::U1FusionRule;
 use tenet::typed::{
     ComposePlan, GradedSpace, PreparedCompose, Runtime, StackedTensorMap, TensorMap,
@@ -27,11 +26,13 @@ use tenet::typed::{
 
 use common::{DevicePayload, DeviceRule};
 use prepared::{
-    assert_close, compose_oracle, expected_plan_entries, filled, fz2u1_legs, members, su2_legs,
-    u1_legs,
+    compose_oracle, expected_plan_entries, filled, fz2u1_legs, members, su2_legs, u1_legs,
 };
 
-static SERIAL: Mutex<()> = Mutex::new(());
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::{delta, plans, serial};
 
 #[test]
 #[ignore = "requires a real CUDA device"]
@@ -54,30 +55,6 @@ fn workspace_releases_its_claim_after_plan_is_dropped() {
     assert_eq!(plans(&runtime).reserved_entries, baseline + claimed / 2);
     drop(second);
     assert_eq!(plans(&runtime).reserved_entries, baseline);
-}
-
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn delta(after: CudaTransferStats, before: CudaTransferStats) -> CudaTransferStats {
-    CudaTransferStats {
-        h2d_calls: after.h2d_calls - before.h2d_calls,
-        h2d_bytes: after.h2d_bytes - before.h2d_bytes,
-        d2h_calls: after.d2h_calls - before.d2h_calls,
-        d2h_bytes: after.d2h_bytes - before.d2h_bytes,
-        device_allocs: after.device_allocs - before.device_allocs,
-        gemm_calls: after.gemm_calls - before.gemm_calls,
-        solver_calls: after.solver_calls - before.solver_calls,
-        copy_calls: after.copy_calls - before.copy_calls,
-        gauge_ops: after.gauge_ops - before.gauge_ops,
-    }
-}
-
-fn plans(runtime: &Runtime) -> CudaPlanCacheStats {
-    runtime.cuda_plan_cache_stats().unwrap().unwrap()
 }
 
 /// Coupled sectors both operands carry: the plan's direct GEMM jobs, read
@@ -123,11 +100,11 @@ where
                 let eager = x.compose(y).unwrap();
                 let (oracle, unreached) = compose_oracle(x, y, &eager);
                 assert!(unreached > 0, "{label}: fixture must have inactive blocks");
-                assert_close(
+                numerics::assert_nonzero_slices_close(
+                    &format!("{label}: Host eager"),
                     eager.dense_data().unwrap(),
                     &oracle,
                     terms,
-                    &format!("{label}: Host eager"),
                 );
                 oracle
             })
@@ -135,11 +112,11 @@ where
         let check = |stack: &StackedTensorMap<R, D, tenet::typed::CudaStorage<D>>, what: &str| {
             let host = stack.to_host().unwrap();
             for (index, oracle) in oracles.iter().enumerate() {
-                assert_close(
+                numerics::assert_nonzero_slices_close(
+                    &format!("{label}: {what}, member {index}"),
                     host.member(index).unwrap().dense_data().unwrap(),
                     oracle,
                     terms,
-                    &format!("{label}: {what}, member {index}"),
                 );
             }
         };
@@ -338,11 +315,11 @@ fn handles_and_an_eager_permute_past_the_default_bound_evict_no_plan() {
         for (index, (x, y)) in a.iter().zip(&b).enumerate() {
             let eager = x.compose(y).unwrap();
             let (oracle, _) = compose_oracle(x, y, &eager);
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                &format!("execute_into at B={wide}, member {index}"),
                 host.member(index).unwrap().dense_data().unwrap(),
                 &oracle,
                 x.dense_data().unwrap().len(),
-                &format!("execute_into at B={wide}, member {index}"),
             );
         }
     }

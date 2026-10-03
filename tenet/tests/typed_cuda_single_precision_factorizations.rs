@@ -49,20 +49,21 @@ use tenet::typed::{
 };
 
 mod common;
+#[path = "../../tests/support"]
+mod support {
+    use num_complex::{Complex32, Complex64};
+    pub mod numerics;
+}
+use support::numerics;
 mod single_precision_oracle;
 
 use common::{DevicePayload, DeviceRule};
 use single_precision_oracle::{fermion_su2_leg_with, K};
 
-/// The receiver's own split as leg roles: `rows = 0..nout`.
-fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (0..t.codomain_rank()).collect()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
 
-/// The receiver's own split as leg roles: `cols = nout..rank`.
-fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (t.codomain_rank()..t.rank()).collect()
-}
+use fixtures::{codomain_axes, cuda_runtime, domain_axes};
 
 // ---------------------------------------------------------------------------
 // Payload markers
@@ -79,19 +80,6 @@ impl<D> FactorPayload for D where D: DevicePayload + CudaFactorizationPayload {}
 /// `K * sqrt(terms) * eps(real(D)) * max(scale, 1) * kappa`.
 fn tolerance<D: DevicePayload>(terms: usize, scale: f64, kappa: f64) -> f64 {
     K * (terms as f64).sqrt() * D::EPS * scale.max(1.0) * kappa
-}
-
-fn assert_close<D: DevicePayload>(actual: &[D], expected: &[D], bound: f64, what: &str) {
-    assert_eq!(actual.len(), expected.len(), "{what} [{}]: length", D::NAME);
-    for (index, (&left, &right)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            left.distance(right) <= bound,
-            "{what} [{}]: entry {index} is {left:?}, expected {right:?} \
-             (distance {}, bound {bound:e})",
-            D::NAME,
-            left.distance(right)
-        );
-    }
 }
 
 /// `||actual - expected||` over the whole tensor, against an absolute bound.
@@ -145,10 +133,6 @@ where
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
-
-fn runtime() -> Runtime {
-    Runtime::builder().cuda(0).dense_threads(1).build().unwrap()
-}
 
 /// Well-separated, distinct, positive: the default fixture diagonal.
 const POSITIVE: [f64; 4] = [8.0, 4.0, 2.0, 1.0];
@@ -333,11 +317,12 @@ fn assert_device_svd_matches_host<R, D>(
     }
 
     // The spectrum is gauge independent, so it is a pointwise oracle.
-    assert_close(
+    numerics::assert_slices_close_scaled(
+        &format!("{} [{}]", "svd spectrum", D::NAME),
         s.materialize().unwrap().dense_data().unwrap(),
         host_s.materialize().unwrap().dense_data().unwrap(),
-        bound,
-        "svd spectrum",
+        terms,
+        kappa,
     );
 
     // Descending and non-negative within every coupled sector: the contract
@@ -400,7 +385,7 @@ fn assert_device_svd_matches_host<R, D>(
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_svd_compact_matches_the_host_at_every_payload() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let square = u1_leg([2, 3, 2]);
     let tall = u1_leg([3, 4, 3]);
     let su2 = su2_leg();
@@ -463,17 +448,19 @@ fn assert_device_qr_matches_host<R, D>(
 
     // QR *is* gauge-fixed on device (positive diagonal), so — unlike the SVD —
     // host and device factors are the same object and compare pointwise.
-    assert_close(
+    numerics::assert_slices_close_scaled(
+        &format!("{} [{}]", "qr q", D::NAME),
         q.dense_data().unwrap(),
         host_q.dense_data().unwrap(),
-        bound,
-        "qr q",
+        terms,
+        kappa,
     );
-    assert_close(
+    numerics::assert_slices_close_scaled(
+        &format!("{} [{}]", "qr r", D::NAME),
         r.dense_data().unwrap(),
         host_r.dense_data().unwrap(),
-        bound,
-        "qr r",
+        terms,
+        kappa,
     );
 
     assert_residual(
@@ -499,7 +486,7 @@ fn device_qr_compact_matches_the_host_at_every_payload() {
         assert_device_qr_matches_host::<_, Complex32>(runtime, codomain, domain);
     }
 
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let square = u1_leg([2, 3, 2]);
     let tall = u1_leg([3, 4, 3]);
     let su2 = su2_leg();
@@ -607,7 +594,7 @@ fn device_qr_compact_obeys_its_laws_on_rank_deficient_and_dual_multileg_blocks()
         assert_device_qr_laws(&multileg, "dual multileg qr");
     }
 
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     cases::<f64>(&runtime);
     cases::<Complex64>(&runtime);
     cases::<f32>(&runtime);
@@ -652,7 +639,7 @@ fn device_qr_returns_the_positive_diagonal_gauge_at_every_payload() {
         }
     }
 
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let leg = u1_leg([2, 3, 2]);
     assert_gauge::<f64>(&runtime, &leg);
     assert_gauge::<Complex64>(&runtime, &leg);
@@ -701,7 +688,7 @@ fn device_qr_fixes_a_hand_computed_complex_phase() {
         }
     }
 
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     case::<Complex64>(&runtime);
     case::<Complex32>(&runtime);
 }
@@ -750,11 +737,12 @@ fn assert_device_eigh_matches_host<R, D>(
 
     // Eigenvalues are gauge independent up to the documented |lambda|
     // ordering, which both sides share, so they compare pointwise.
-    assert_close(
+    numerics::assert_slices_close_scaled(
+        &format!("{} [{}]", "eigh spectrum", D::NAME),
         d.materialize().unwrap().dense_data().unwrap(),
         host_d.materialize().unwrap().dense_data().unwrap(),
-        bound,
-        "eigh spectrum",
+        terms,
+        kappa,
     );
 
     // |lambda| descending within every coupled sector.
@@ -792,7 +780,7 @@ fn assert_device_eigh_matches_host<R, D>(
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_eigh_full_matches_the_host_at_every_payload() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let u1 = u1_leg([2, 3, 2]);
     let su2 = su2_leg();
     let fermion = fermion_su2_leg_with([2, 2, 1]);
@@ -844,7 +832,7 @@ fn device_eigh_admits_a_nearly_hermitian_single_precision_block() {
         .unwrap()
     }
 
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let leg = u1_leg([2, 3, 2]);
     // 2^-20 against a fixture of Frobenius norm >= 8: a relative residual near
     // 6e-8, inside 64*eps(f32) = 7.6e-6 and far outside 64*eps(f64) = 1.4e-14.
@@ -950,7 +938,7 @@ fn device_factorization_rejections_do_not_depend_on_the_payload() {
         );
     }
 
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let leg = u1_leg([2, 3, 2]);
     assert_rejections::<f64>(&runtime, &leg);
     assert_rejections::<Complex64>(&runtime, &leg);
@@ -975,7 +963,7 @@ fn device_factorization_rejections_do_not_depend_on_the_payload() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_factorizations_handle_blocks_at_unaligned_offsets_at_every_payload() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let u1 = Arc::new(U1FusionRule);
 
     for (d0, d1) in [(3usize, 2usize), (5, 2), (3, 3), (4, 2), (2, 2)] {
@@ -1124,7 +1112,7 @@ fn assert_truncation_composition<R, D>(
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn the_device_truncation_composition_matches_the_host_composition_at_every_payload() {
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let leg = u1_leg([2, 3, 2]);
     let su2 = su2_leg();
 
@@ -1214,7 +1202,7 @@ fn device_factorizations_cost_the_same_calls_and_half_the_bytes() {
         )
     }
 
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let leg = u1_leg([2, 3, 2]);
 
     for (narrow, wide, name) in [
@@ -1280,7 +1268,7 @@ fn complex_device_qr_costs_the_real_calls_and_twice_the_bytes() {
         )
     }
 
-    let runtime = runtime();
+    let runtime = cuda_runtime();
     let leg = u1_leg([2, 3, 2]);
     for (complex, real, name) in [
         (

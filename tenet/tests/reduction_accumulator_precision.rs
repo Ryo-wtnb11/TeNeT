@@ -53,14 +53,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::typed::{Complex32, Complex64, GradedSpace, Runtime, SectorSpectrum, TensorMap};
+use tenet::typed::{Complex32, Complex64, GradedSpace, SectorSpectrum, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 /// One U(1) charge with degeneracy 4: a single 4x4 dense block, a 4-entry
 /// compact spectrum, and `dim(c) == 1` so the weight cannot mask a difference.
@@ -366,7 +367,7 @@ fn su2_dim(sector: &SU2Irrep) -> f64 {
 }
 
 fn double_precision_measurements() -> Vec<Measurement> {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let u1 = u1_multi_leg();
     let su2 = su2_leg();
     let real = |v: f64| Complex64::new(v, 0.0);
@@ -451,7 +452,7 @@ fn wide_sum(n: usize) -> f64 {
 
 #[test]
 fn mixed_compact_dense_single_precision_cancellation_accumulates_wide() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let leg = wide_leg();
     let large = PEAK * PEAK;
     let mut narrow = large;
@@ -508,7 +509,7 @@ fn mixed_compact_dense_single_precision_cancellation_accumulates_wide() {
 
 #[test]
 fn single_precision_reductions_accumulate_in_double() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let leg = wide_leg();
     let dense_entries = 32 * 32;
     let dense: TensorMap<U1FusionRule, f32> =
@@ -585,7 +586,7 @@ fn single_precision_reductions_accumulate_in_double() {
 
 #[test]
 fn complex32_reductions_accumulate_in_double() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let leg = wide_leg();
     let dense_entries = 32 * 32;
     let dense: TensorMap<U1FusionRule, Complex32> =
@@ -609,7 +610,7 @@ fn complex32_reductions_accumulate_in_double() {
 fn single_precision_norm_stays_finite_where_a_narrow_accumulator_overflows() {
     // 1e20^2 = 1e40, past the f32 maximum of ~3.4e38: a narrow accumulator
     // saturates to +inf and the storage form would decide the answer.
-    let runtime = runtime();
+    let runtime = host_runtime();
     let leg = leg();
     let value = 1e20f32;
     assert!(
@@ -665,7 +666,7 @@ mod checked_generic {
     }
 
     fn measurements() -> Vec<Measurement> {
-        let runtime = runtime();
+        let runtime = host_runtime();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
         let adjoint = vec![2i64, 2];
         let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 2)]).unwrap();

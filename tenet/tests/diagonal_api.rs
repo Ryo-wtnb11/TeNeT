@@ -2,15 +2,16 @@ use std::sync::Arc;
 
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::Eigh;
-use tenet::typed::{Complex64, GradedSpace, Runtime, SectorSpectrum, TensorMap};
+use tenet::typed::{Complex64, GradedSpace, SectorSpectrum, TensorMap};
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 #[test]
 fn typed_diagonal_preserves_canonical_positions_and_dual_leg() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let bond = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(-1), 2), (U1Irrep::new(1), 1)],
@@ -44,7 +45,7 @@ fn typed_diagonal_preserves_canonical_positions_and_dual_leg() {
 
 #[test]
 fn typed_real_c64_eigenvalue_readback_stays_compact() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let source =
         TensorMap::<U1FusionRule, Complex64>::from_subblock_fn(&runtime, [&v], [&v], |_, index| {
@@ -70,7 +71,7 @@ fn typed_real_c64_eigenvalue_readback_stays_compact() {
 
 #[test]
 fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_offdiag() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let rule = Arc::new(SU2FusionRule);
     let bond = GradedSpace::try_new(
         Arc::clone(&rule),

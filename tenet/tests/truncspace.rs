@@ -15,12 +15,13 @@
 use std::sync::Arc;
 
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::typed::{Error, Runtime, Truncation};
+use tenet::typed::{Error, Truncation};
 use tenet::typed::{GradedSpace, Svd, TensorMap};
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 /// A deterministic but structureless fill, so the singular values carry no
 /// pattern a magnitude-driven policy could accidentally reproduce.
@@ -42,7 +43,10 @@ fn typed_leg(entries: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
 fn typed_source(seed: u64) -> TensorMap<SU2FusionRule, f64> {
     let leg = typed_leg(&[(0, 4), (1, 4), (2, 4)]);
     let mut state = seed;
-    TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap()
+    TensorMap::from_subblock_fn(&host_runtime(), [&leg], [&leg], move |_, _| {
+        fill(&mut state)
+    })
+    .unwrap()
 }
 
 /// The truncated SVD's `u` and error: `svd_compact` -> `diagview` ->
@@ -157,9 +161,13 @@ fn typed_truncspace_from_another_rule_is_a_typed_error() {
 #[test]
 fn typed_truncspace_follows_stored_sectors_not_the_dual_flag() {
     let leg = typed_u1_leg(&[(-1, 3), (0, 3), (1, 3)]);
-    let source =
-        TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime(), [&leg], [&leg], 0x5eed_6000)
-            .unwrap();
+    let source = TensorMap::<U1FusionRule, f64>::rand_with_seed(
+        &host_runtime(),
+        [&leg],
+        [&leg],
+        0x5eed_6000,
+    )
+    .unwrap();
     let bond = |space: &GradedSpace<U1FusionRule>| {
         truncated_svd(&source, &Truncation::space(space.truncspace()))
             .unwrap()

@@ -3,6 +3,12 @@
 #![cfg(feature = "cuda")]
 
 mod common;
+#[path = "../../tests/support"]
+mod support {
+    use num_complex::{Complex32, Complex64};
+    pub mod numerics;
+}
+use support::numerics;
 #[macro_use]
 #[allow(unused_macros)]
 mod contract_cases;

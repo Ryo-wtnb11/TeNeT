@@ -14,9 +14,10 @@ use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::{Complex32, Complex64, Error, Runtime};
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 fn real_fill(indices: &[usize]) -> f64 {
     1.0 + 0.5 * indices[0] as f64 - 0.25 * indices[1] as f64
@@ -109,7 +110,7 @@ fn assert_golden(name: &str, norm: impl Fn(f64) -> Result<f64, Error>) {
 
 #[test]
 fn every_arm_is_bit_identical_to_the_method_it_replaced() {
-    let rt = runtime();
+    let rt = host_runtime();
     let (uv, uw) = u1();
     let (sv, sw) = su2();
     let u1_f64: TensorMap<U1FusionRule, f64> =
@@ -148,7 +149,7 @@ fn every_arm_is_bit_identical_to_the_method_it_replaced() {
 
 #[test]
 fn infinity_arm_propagates_nan_and_is_positive_zero_without_entries() {
-    let rt = runtime();
+    let rt = host_runtime();
     let (uv, uw) = u1();
     let poisoned: TensorMap<U1FusionRule, Complex64> =
         TensorMap::from_subblock_fn(&rt, [&uv], [&uw], |trees, i| {
@@ -184,7 +185,7 @@ fn infinity_arm_propagates_nan_and_is_positive_zero_without_entries() {
 
 #[test]
 fn invalid_exponents_are_typed_errors() {
-    let rt = runtime();
+    let rt = host_runtime();
     let (uv, uw) = u1();
     let tensor: TensorMap<U1FusionRule, f64> =
         TensorMap::from_subblock_fn(&rt, [&uv], [&uw], |_, i| real_fill(i)).unwrap();

@@ -19,14 +19,20 @@
 //!   overwrite is the same oracle the device overwrite is gated against.
 
 mod common;
+#[path = "../../tests/support"]
+mod support {
+    use num_complex::{Complex32, Complex64};
+    pub mod numerics;
+}
+use support::numerics;
 #[macro_use]
 mod contract_cases;
 
 use contract_cases::{
-    assert_close, blas_contract_oracle, dense_oracle, fermionic_blas_contract_oracle,
-    fz2_tensorkit_loops, lazy_cases, poisoned_destination, product_general, su2_bent,
-    su2_reordered, su2_structure_cases, u1_inactive_cases, u1_lhs_identity, u1_rank_five,
-    u1_reordered, u1_rhs_identity, Case, Payload, TwistRole,
+    blas_contract_oracle, dense_oracle, fermionic_blas_contract_oracle, fz2_tensorkit_loops,
+    lazy_cases, poisoned_destination, product_general, su2_bent, su2_reordered,
+    su2_structure_cases, u1_inactive_cases, u1_lhs_identity, u1_rank_five, u1_reordered,
+    u1_rhs_identity, Case, Payload, TwistRole,
 };
 use num_complex::{Complex32, Complex64};
 use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
@@ -45,11 +51,11 @@ where
         "{}",
         case.name
     );
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         host.dense_data().unwrap(),
         oracle.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
 }
 
@@ -96,7 +102,7 @@ where
     let (shape, expected) = dense_oracle(&case);
     let actual = case.host().to_physical_dense().unwrap();
     assert_eq!(actual.shape, shape, "{}", case.name);
-    assert_close(&actual.data, &expected, case.terms(), case.name);
+    numerics::assert_nonzero_slices_close(case.name, &actual.data, &expected, case.terms());
 }
 
 #[test]
@@ -118,17 +124,17 @@ fn check_fermionic<R, D>(
     let host = case.host();
     let b_role = fermionic_blas_contract_oracle(&case, TwistRole::B, twist);
     let a_role = fermionic_blas_contract_oracle(&case, TwistRole::A, twist);
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         a_role.dense_data().unwrap(),
         b_role.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         host.dense_data().unwrap(),
         b_role.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
     let untwisted = fermionic_blas_contract_oracle(&case, TwistRole::None, twist);
     let scale = host
@@ -187,11 +193,11 @@ where
             D::entry(0.0, 0.0),
         )
         .unwrap();
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         destination.dense_data().unwrap(),
         case.host().dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
 }
 

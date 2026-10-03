@@ -17,7 +17,6 @@ use tenet::sector::{
     U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::__network::NetworkReuseClass;
-use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
 trait Scalar: Copy + std::fmt::Debug + PartialEq {
@@ -43,9 +42,10 @@ impl Scalar for Complex64 {
     }
 }
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 fn u1_leg() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
@@ -168,7 +168,7 @@ fn assert_physical_dagger<D: Scalar>(
 
 macro_rules! physical_case {
     ($leg:expr, $what:expr, $dtype:ty, $codomain:expr, $domain:expr, $seed:expr) => {{
-        let runtime = runtime();
+        let runtime = host_runtime();
         let leg = $leg;
         let dual = leg.try_dual().unwrap();
         let what: &str = $what;
@@ -367,7 +367,7 @@ macro_rules! assert_swapped_tree_dagger {
 
 macro_rules! fermionic_case {
     ($dtype:ty, $what:expr, $codomain:expr, $domain:expr, $seed:expr) => {{
-        let runtime = runtime();
+        let runtime = host_runtime();
         let leg = fz2_u1_leg!();
         let dual = leg.try_dual().unwrap();
         let what: &str = $what;
@@ -431,7 +431,7 @@ fn expected_diagonal<D: Scalar + Default>(blocks: &[(Vec<D>, usize)]) -> (usize,
 
 macro_rules! diagonal_case {
     ($bond:expr, $dtype:ty, $spectra:expr, $expected:expr, $what:expr) => {{
-        let runtime = runtime();
+        let runtime = host_runtime();
         let what: &str = $what;
         let bond = $bond;
         let diagonal: TensorMap<_, $dtype> =
@@ -513,7 +513,7 @@ fn materialize_densifies_a_compact_diagonal() {
 
 #[test]
 fn materialize_is_the_remedy_for_apis_that_reject_lazy_adjoints() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let leg = u1_leg();
     let tensor: TensorMap<_, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 21).unwrap();
@@ -553,7 +553,7 @@ mod checked_generic {
     macro_rules! su3_case {
         ($dtype:ty, $value:expr, $what:expr) => {{
             let (value, what): (fn(f64, f64) -> $dtype, &str) = ($value, $what);
-            let runtime = runtime();
+            let runtime = host_runtime();
             let provider = Arc::new(SUNFusionRule::new(3).unwrap());
             // The adjoint irrep 8 (Dynkin [1, 1]) couples 8 ⊗ 8 → 8 with multiplicity 2.
             let a = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 2)]).unwrap();

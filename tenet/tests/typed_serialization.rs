@@ -367,9 +367,10 @@ impl TypedPersistenceCodec<GenericToy> for GenericCodec {
     }
 }
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 fn su2_leg(provider: &Arc<SU2FusionRule>, dual: bool) -> GradedSpace<SU2FusionRule> {
     GradedSpace::try_new(
@@ -415,7 +416,7 @@ fn dense_leg_degeneracy_offsets(bytes: &[u8]) -> Vec<usize> {
 
 #[test]
 fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(GenericToy);
     let codec = GenericCodec {
         provider: Arc::clone(&provider),
@@ -667,7 +668,7 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
 
 #[test]
 fn admitted_shape_limit_precedes_dense_payload_allocation() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(GenericToy);
     let codec = GenericCodec {
         provider: Arc::clone(&provider),
@@ -745,7 +746,7 @@ fn non_self_dual_u1_space_roundtrip_does_not_dualize_twice() {
 
 #[test]
 fn dense_su2_f64_and_c64_roundtrip_exact_bits_and_semantic_blocks() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(SU2FusionRule);
     let codec = Su2Codec::new(Arc::clone(&provider));
     let codomain = su2_leg(&provider, false);
@@ -849,7 +850,7 @@ fn dense_su2_f64_and_c64_roundtrip_exact_bits_and_semantic_blocks() {
 
 #[test]
 fn compact_and_lazy_representations_survive_roundtrip() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(SU2FusionRule);
     let codec = Su2Codec::new(Arc::clone(&provider));
     let leg = su2_leg(&provider, false);
@@ -1041,7 +1042,7 @@ fn legacy_adjoint_diagonal_records_decode_to_the_owned_conjugated_diagonal() {
         bytes.insert(repr, 3);
         bytes
     }
-    let runtime = runtime();
+    let runtime = host_runtime();
     let values = vec![Complex64::new(2.0, 1.5), Complex64::new(-3.0, -0.5)];
 
     let provider = Arc::new(GenericToy);
@@ -1191,7 +1192,7 @@ fn malformed_framing_limits_and_provider_failures_are_typed_and_ordered() {
 
 #[test]
 fn malformed_tensor_tags_and_duplicate_or_missing_blocks_are_rejected() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(SU2FusionRule);
     let codec = Su2Codec::new(Arc::clone(&provider));
     let leg =
@@ -1320,7 +1321,7 @@ fn golden_diagonal_c64(
 
 #[test]
 fn version_one_golden_files_decode_and_reencode_byte_for_byte() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(SU2FusionRule);
     let codec = Su2Codec::new(Arc::clone(&provider));
     let golden = |name: &str| std::fs::read(format!("{GOLDEN_DIR}/{name}")).unwrap();
@@ -1480,7 +1481,7 @@ macro_rules! single_precision_roundtrip {
     ($name:ident, $scalar:ty, $value:expr) => {
         #[test]
         fn $name() {
-            let runtime = runtime();
+            let runtime = host_runtime();
             let value: fn(usize) -> $scalar = $value;
 
             fn check<R, C>(
@@ -1826,7 +1827,7 @@ macro_rules! assert_only_decodes_as {
 
 #[test]
 fn every_scalar_mismatch_direction_is_typed_and_precedes_provider_resolution() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(U1FusionRule);
     let codec = U1Codec {
         provider: Arc::clone(&provider),
@@ -1898,7 +1899,7 @@ fn every_scalar_mismatch_direction_is_typed_and_precedes_provider_resolution() {
 
 #[test]
 fn dual_compact_qr_lq_factor_roundtrip_preserves_space_and_storage() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(U1FusionRule);
     let codec = U1Codec {
         provider: Arc::clone(&provider),
@@ -1938,7 +1939,7 @@ fn dual_compact_qr_lq_factor_roundtrip_preserves_space_and_storage() {
 
 #[test]
 fn dual_diagonal_full_svd_s_roundtrip_preserves_bond_and_storage() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(U1FusionRule);
     let codec = U1Codec {
         provider: Arc::clone(&provider),
@@ -1986,7 +1987,7 @@ fn dual_diagonal_full_svd_s_roundtrip_preserves_bond_and_storage() {
 
 #[test]
 fn dual_compact_polar_factor_roundtrip_preserves_space_and_storage() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(U1FusionRule);
     let codec = U1Codec {
         provider: Arc::clone(&provider),

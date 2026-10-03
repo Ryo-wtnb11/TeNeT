@@ -22,15 +22,10 @@ use tenet::sector::{
 };
 use tenet::typed::{Complex64, Eigh, GradedSpace, Lq, Runtime, TensorMap};
 
-/// The receiver's own split as leg roles: `rows = 0..nout`.
-fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (0..t.codomain_rank()).collect()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
 
-/// The receiver's own split as leg roles: `cols = nout..rank`.
-fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (t.codomain_rank()..t.rank()).collect()
-}
+use fixtures::{codomain_axes, domain_axes};
 
 static COUNTER_LOCK: Mutex<()> = Mutex::new(());
 

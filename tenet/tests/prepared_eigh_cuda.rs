@@ -21,10 +21,9 @@ mod prepared;
 
 use std::collections::BTreeSet;
 use std::fmt::Debug;
-use std::sync::Mutex;
 
 use num_complex::{Complex32, Complex64};
-use tenet::expert::{cuda_transfer_stats, CudaPlanCacheStats, CudaTransferStats};
+use tenet::expert::cuda_transfer_stats;
 use tenet::sector::{SU2FusionRule, SU2Irrep};
 use tenet::typed::Error;
 use tenet::typed::{
@@ -39,41 +38,10 @@ use prepared::eigh::{
 };
 use prepared::{fz2u1_legs, members, su2_legs, u1_legs};
 
-/// The receiver's own split as leg roles: `rows = 0..nout`.
-fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (0..t.codomain_rank()).collect()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
 
-/// The receiver's own split as leg roles: `cols = nout..rank`.
-fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (t.codomain_rank()..t.rank()).collect()
-}
-
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn delta(after: CudaTransferStats, before: CudaTransferStats) -> CudaTransferStats {
-    CudaTransferStats {
-        h2d_calls: after.h2d_calls - before.h2d_calls,
-        h2d_bytes: after.h2d_bytes - before.h2d_bytes,
-        d2h_calls: after.d2h_calls - before.d2h_calls,
-        d2h_bytes: after.d2h_bytes - before.d2h_bytes,
-        device_allocs: after.device_allocs - before.device_allocs,
-        gemm_calls: after.gemm_calls - before.gemm_calls,
-        solver_calls: after.solver_calls - before.solver_calls,
-        copy_calls: after.copy_calls - before.copy_calls,
-        gauge_ops: after.gauge_ops - before.gauge_ops,
-    }
-}
-
-fn plans(runtime: &Runtime) -> CudaPlanCacheStats {
-    runtime.cuda_plan_cache_stats().unwrap().unwrap()
-}
+use fixtures::{codomain_axes, delta, domain_axes, plans, serial};
 
 /// Checks every member of one device execute against device eager (and at
 /// `B = 1` bit for bit), and against Host eager through the oracle.

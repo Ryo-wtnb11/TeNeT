@@ -42,7 +42,7 @@
 use std::sync::Arc;
 
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::typed::{Complex32, Complex64, Error, Runtime};
+use tenet::typed::{Complex32, Complex64, Error};
 use tenet::typed::{GradedSpace, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
@@ -54,9 +54,10 @@ mod numerics;
 /// dispatch mistake could survive.
 const TERMS: usize = 21;
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 /// The real fill, in the engine's 0-based degeneracy coordinates.
 ///
@@ -124,7 +125,7 @@ fn typed_su2() -> (GradedSpace<SU2FusionRule>, GradedSpace<SU2FusionRule>) {
 
 #[test]
 fn the_fixtures_are_the_tensors_tensorkit_measured() {
-    let rt = runtime();
+    let rt = host_runtime();
     let (u1_v, u1_w) = typed_u1();
     let (su2_v, su2_w) = typed_su2();
 
@@ -193,7 +194,7 @@ fn the_fixtures_are_the_tensors_tensorkit_measured() {
 
 #[test]
 fn typed_norm_p_matches_tensorkit() {
-    let rt = runtime();
+    let rt = host_runtime();
     let (u1_v, u1_w) = typed_u1();
     let (su2_v, su2_w) = typed_su2();
 
@@ -246,7 +247,7 @@ fn typed_norm_p_matches_tensorkit() {
 
 #[test]
 fn typed_norm_p_rejects_non_positive_and_non_finite_p() {
-    let rt = runtime();
+    let rt = host_runtime();
     let (v, w) = typed_u1();
     let tensor: TensorMap<U1FusionRule, f64> =
         TensorMap::from_subblock_fn(&rt, [&v], [&w], |_, indices| real_fill(indices)).unwrap();
@@ -264,7 +265,7 @@ fn typed_norm_p_rejects_non_positive_and_non_finite_p() {
 /// byte counting in `typed_diagonal_allocations.rs`; this is the value half.)
 #[test]
 fn compact_norm_p_equals_the_dense_answer() {
-    let rt = runtime();
+    let rt = host_runtime();
     let (v, w) = typed_su2();
     let dense: TensorMap<SU2FusionRule, f64> =
         TensorMap::from_subblock_fn(&rt, [&v], [&w], |_, indices| real_fill(indices)).unwrap();
@@ -307,7 +308,7 @@ fn poisoned(trees: &tenet::typed::BlockFusionTrees<U1Irrep>) -> bool {
 }
 
 fn u1_real_with(value: f64) -> TensorMap<U1FusionRule, f64> {
-    let rt = runtime();
+    let rt = host_runtime();
     let (v, w) = typed_u1();
     TensorMap::from_subblock_fn(&rt, [&v], [&w], |trees, indices| {
         if poisoned(trees) && indices == [0, 0] {
@@ -342,7 +343,7 @@ fn norm_inf_propagates_nan_from_any_block() {
 
 #[test]
 fn norm_inf_propagates_nan_hidden_in_the_imaginary_part() {
-    let rt = runtime();
+    let rt = host_runtime();
     let (v, w) = typed_u1();
     let tensor: TensorMap<U1FusionRule, Complex64> =
         TensorMap::from_subblock_fn(&rt, [&v], [&w], |trees, indices| {
@@ -362,7 +363,7 @@ fn norm_inf_propagates_nan_hidden_in_the_imaginary_part() {
 
 #[test]
 fn norm_inf_propagates_nan_through_compact_and_lazy_storage() {
-    let rt = runtime();
+    let rt = host_runtime();
     let (bond, _) = typed_u1();
     let compact = TensorMap::<_, f64>::diagonal(
         &rt,
@@ -407,7 +408,7 @@ fn norm_inf_reports_infinity_and_zero_payloads() {
         );
     }
 
-    let rt = runtime();
+    let rt = host_runtime();
     let (v, w) = typed_u1();
     let zeros: TensorMap<U1FusionRule, f64> = TensorMap::zeros(&rt, [&v], [&w]).unwrap();
     assert_eq!(zeros.norm(f64::INFINITY).unwrap(), 0.0, "all-zero payload");

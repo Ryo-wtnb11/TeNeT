@@ -3,25 +3,26 @@
 use num_complex::Complex64;
 use std::sync::Arc;
 
+use tenet::typed::Error;
 use tenet::typed::{
     BatchMemberRepresentation, GradedSpace, SectorSpectrum, SignatureField, StackedTensorMap,
     TensorMap,
 };
-use tenet::typed::{Error, Runtime};
 
 #[macro_use]
 #[path = "stacked/fixtures.rs"]
 mod fixtures;
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod shared_fixtures;
+
+use shared_fixtures::host_runtime;
 
 macro_rules! round_trip {
     ($label:expr, $leg:expr) => {{
         let leg = $leg;
         let a = leg(0);
-        let runtime = runtime();
+        let runtime = host_runtime();
         round_trip!(@dtype $label, &runtime, &a, f64);
         round_trip!(@dtype $label, &runtime, &a, Complex64);
     }};
@@ -66,7 +67,7 @@ macro_rules! space_drift {
         let leg = $leg;
         let (a, degeneracy) = (leg(0), leg(1));
         let dual = a.try_dual().unwrap();
-        let runtime = runtime();
+        let runtime = host_runtime();
         let base = members!(&runtime, &a, f64, 2);
         for other in [&degeneracy, &dual] {
             let drifted = TensorMap::<_, f64>::zeros(&runtime, [&a, other], [&a]).unwrap();
@@ -93,7 +94,7 @@ fn runtime_drift_names_the_member_and_field() {
         ],
     )
     .unwrap();
-    let (first, second) = (runtime(), runtime());
+    let (first, second) = (host_runtime(), host_runtime());
     let base = members!(&first, &leg, f64, 2);
     let drifted = members!(&second, &leg, f64, 1);
     assert_drift(
@@ -105,7 +106,7 @@ fn runtime_drift_names_the_member_and_field() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn rule_instance_drift_names_the_member_and_field() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let tensor = |rank: usize, trivial: Vec<i64>| {
         let rule = Arc::new(tenet::sector::SUNFusionRule::new(rank).unwrap());
         let leg = GradedSpace::try_new(rule, [(trivial, 2)]).unwrap();
@@ -120,7 +121,7 @@ fn rule_instance_drift_names_the_member_and_field() {
 
 #[test]
 fn lazy_adjoint_and_compact_diagonal_members_are_rejected() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let q = fixtures::U1Irrep::new;
     let bond =
         GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(0), 2), (q(1), 1)]).unwrap();
@@ -174,7 +175,7 @@ macro_rules! select_members {
     ($label:expr, $leg:expr) => {{
         let leg = $leg;
         let a = leg(0);
-        let runtime = runtime();
+        let runtime = host_runtime();
         select_members!(@dtype $label, &runtime, &a, f64);
         select_members!(@dtype $label, &runtime, &a, Complex64);
     }};
@@ -213,7 +214,7 @@ fn select_holds_the_chosen_members_in_order() {
 
 #[test]
 fn select_rejects_out_of_range_and_empty_selections() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let q = fixtures::U1Irrep::new;
     let bond =
         GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(0), 2), (q(1), 1)]).unwrap();
@@ -228,7 +229,7 @@ fn select_rejects_out_of_range_and_empty_selections() {
 
 #[test]
 fn select_of_a_blockless_structure_is_empty() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let q = fixtures::U1Irrep::new;
     let charged = GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(1), 2)]).unwrap();
     let neutral = GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(0), 2)]).unwrap();

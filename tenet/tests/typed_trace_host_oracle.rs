@@ -5,11 +5,17 @@
 //! dtype, without a device, so ordinary CI holds them.
 
 mod common;
+#[path = "../../tests/support"]
+mod support {
+    use num_complex::{Complex32, Complex64};
+    pub mod numerics;
+}
+use support::numerics;
 #[allow(unused_macros)] // the fermionic contraction fixture macro
 mod contract_cases;
 mod trace_cases;
 
-use contract_cases::{assert_close, Payload};
+use contract_cases::Payload;
 use num_complex::{Complex32, Complex64};
 use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::typed::Runtime;
@@ -30,11 +36,11 @@ where
             "{}",
             case.name
         );
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            case.name,
             host.dense_data().unwrap(),
             identity.dense_data().unwrap(),
             case.terms(),
-            case.name,
         );
     }
 }
@@ -50,7 +56,7 @@ where
     check_identity(case);
     if case.dense {
         let host = case.host().to_physical_dense().unwrap().data;
-        assert_close(&host, &dense_trace(case), case.terms(), case.name);
+        numerics::assert_nonzero_slices_close(case.name, &host, &dense_trace(case), case.terms());
     }
 }
 

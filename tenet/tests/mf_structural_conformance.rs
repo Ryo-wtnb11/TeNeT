@@ -10,15 +10,16 @@ use tenet::sector::{
     product_sector, CU1FusionRule, CU1Irrep, FermionParityFusionRule, ProductFusionRuleExt,
     SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
 };
-use tenet::typed::{Complex64, GradedSpace, Runtime, TensorMap};
+use tenet::typed::{Complex64, GradedSpace, TensorMap};
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 #[test]
 fn zn3_index_flip_and_units_keep_the_original_provider() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(ZNFusionRule::new(3).unwrap());
     let charge = |value| provider.irrep(value);
     let leg = GradedSpace::try_new(
@@ -77,7 +78,7 @@ fn zn3_index_flip_and_units_keep_the_original_provider() {
 
 #[test]
 fn z2_cat_and_absorb_have_hand_computed_slabs() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(Z2FusionRule);
     let codomain = GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)]).unwrap();
     let lhs_domain = GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::EVEN, 1)]).unwrap();
@@ -128,7 +129,7 @@ fn z2_cat_and_absorb_have_hand_computed_slabs() {
 
 #[test]
 fn fermionic_product_contract_otimes_and_reductions_keep_provider_and_signs() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let odd = product_sector(Z2Irrep::ODD, U1Irrep::new(1));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(odd, 1)]).unwrap();
@@ -164,7 +165,7 @@ fn fermionic_product_contract_otimes_and_reductions_keep_provider_and_signs() {
 
 #[test]
 fn nested_fermionic_su2_product_and_complex_adjoint_are_publicly_conformant() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(
         FermionParityFusionRule
             .product(U1FusionRule)
@@ -209,7 +210,7 @@ fn nested_fermionic_su2_product_and_complex_adjoint_are_publicly_conformant() {
 
 #[test]
 fn zn3_extended_structural_paths_execute_on_the_original_arc() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(ZNFusionRule::new(3).unwrap());
     let charge = |value| provider.irrep(value);
     let leg = GradedSpace::try_new(
@@ -277,7 +278,7 @@ fn zn3_extended_structural_paths_execute_on_the_original_arc() {
 
 #[test]
 fn cu1_charged_structural_paths_keep_the_original_arc() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     let provider = Arc::new(CU1FusionRule);
     let charged = CU1Irrep::from_twice_charge(1);
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(charged, 1)]).unwrap();
@@ -348,7 +349,7 @@ fn cu1_charged_structural_paths_keep_the_original_arc() {
 
 #[test]
 fn su2_and_exact_products_keep_their_provider_through_flip_and_units() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     macro_rules! check {
         ($provider:expr, $label:expr) => {{
             let provider = Arc::new($provider);
@@ -386,7 +387,7 @@ fn su2_and_exact_products_keep_their_provider_through_flip_and_units() {
 
 #[test]
 fn dual_nonabelian_flip_pins_the_pivotal_phase() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     macro_rules! check {
         ($provider:expr, $label:expr, $axis:expr, $codomain_dual:expr, $domain_dual:expr) => {{
             let provider = Arc::new($provider);
@@ -428,7 +429,7 @@ fn dual_nonabelian_flip_pins_the_pivotal_phase() {
 
 #[test]
 fn covered_builtin_multiplicity_free_providers_have_cat_and_absorb_execution() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     macro_rules! check {
         ($provider:expr, $label:expr) => {{
             let provider = Arc::new($provider);
@@ -481,7 +482,7 @@ fn covered_builtin_multiplicity_free_providers_have_cat_and_absorb_execution() {
 
 #[test]
 fn zn3_and_cu1_arithmetic_contraction_and_reductions_have_scalar_oracles() {
-    let runtime = runtime();
+    let runtime = host_runtime();
     macro_rules! check {
         ($provider:expr, $label:expr, $qdim:expr) => {{
             let provider = Arc::new($provider);

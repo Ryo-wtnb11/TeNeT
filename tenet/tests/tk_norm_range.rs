@@ -43,7 +43,7 @@ use std::sync::Arc;
 use tenet::sector::{
     FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::typed::{Complex32, Complex64, Runtime};
+use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
 #[path = "../../tests/support/numerics.rs"]
@@ -51,9 +51,10 @@ mod numerics;
 
 use numerics::Numeric;
 
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
+
+use fixtures::host_runtime;
 
 fn real_fill(indices: &[usize]) -> f64 {
     1.0 + 0.5 * indices[0] as f64 - 0.25 * indices[1] as f64
@@ -124,7 +125,7 @@ macro_rules! tensor {
     ($spaces:expr, $d:ty, $fill:expr) => {{
         let (v, w) = $spaces;
         let tensor: TensorMap<_, $d> =
-            TensorMap::from_subblock_fn(&runtime(), [&v], [&w], $fill).unwrap();
+            TensorMap::from_subblock_fn(&host_runtime(), [&v], [&w], $fill).unwrap();
         tensor
     }};
 }
@@ -492,7 +493,7 @@ fn non_finite_entries_follow_julia() {
 fn zero_and_empty_payloads_have_zero_norm() {
     let zeros: TensorMap<SU2FusionRule, Complex64> = {
         let (v, w) = su2();
-        TensorMap::zeros(&runtime(), [&v], [&w]).unwrap()
+        TensorMap::zeros(&host_runtime(), [&v], [&w]).unwrap()
     };
     assert_rows::<f64>("zeros", norms!(zeros), [0.0; 4], 21);
 
@@ -502,7 +503,7 @@ fn zero_and_empty_payloads_have_zero_norm() {
     let only_zero = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)]).unwrap();
     let only_one = GradedSpace::try_new(rule, [(U1Irrep::new(1), 3)]).unwrap();
     let empty: TensorMap<U1FusionRule, f64> =
-        TensorMap::zeros(&runtime(), [&only_zero], [&only_one]).unwrap();
+        TensorMap::zeros(&host_runtime(), [&only_zero], [&only_one]).unwrap();
     assert_rows::<f64>("empty", norms!(empty), [0.0; 4], 1);
 }
 
@@ -516,7 +517,7 @@ fn compact_diagonal_norms_rescale_with_quantum_dimensions() {
     let (bond, _) = su2();
     for s in [1e200, 1e-200] {
         let compact = TensorMap::<_, f64>::diagonal(
-            &runtime(),
+            &host_runtime(),
             &bond,
             [
                 (0, vec![2.0, 3.0]),

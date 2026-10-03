@@ -32,13 +32,19 @@
 #![cfg(feature = "cuda")]
 
 mod common;
+#[path = "../../tests/support"]
+mod support {
+    use num_complex::{Complex32, Complex64};
+    pub mod numerics;
+}
+use support::numerics;
 #[macro_use]
 mod contract_cases;
 
 use common::{DevicePayload, DeviceRule};
 use contract_cases::{
-    assert_close, blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_su2,
-    fermion_u1, fermionic_blas_contract_oracle, fermionic_general, fz2_tensorkit_loops, lazy_cases,
+    blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_su2, fermion_u1,
+    fermionic_blas_contract_oracle, fermionic_general, fz2_tensorkit_loops, lazy_cases,
     poisoned_destination, product_general, su2, su2_bent, su2_reordered, su2_structure_cases,
     u1_inactive_cases, u1_lhs_identity, u1_non_self_dual, u1_rank_five, u1_reordered,
     u1_rhs_identity, Case, FermionU1, TwistRole,
@@ -98,18 +104,18 @@ where
         case.name
     );
     assert_eq!(device.domain_rank(), host.domain_rank(), "{}", case.name);
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         device.dense_data().unwrap(),
         host.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
     let oracle = blas_contract_oracle(&case);
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         device.dense_data().unwrap(),
         oracle.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
 }
 
@@ -155,7 +161,7 @@ fn general_axes_match_the_physical_basis_contraction() {
             .to_physical_dense()
             .unwrap();
         assert_eq!(device.shape, shape, "{}", case.name);
-        assert_close(&device.data, &expected, case.terms(), case.name);
+        numerics::assert_nonzero_slices_close(case.name, &device.data, &expected, case.terms());
     }
     dense(u1_reordered::<f64>(&runtime));
     dense(u1_reordered::<Complex64>(&runtime));
@@ -300,28 +306,28 @@ fn the_scratch_grows_only_at_a_high_water_mark_and_is_released_by_the_clear_path
     assert_eq!(counters.device_allocs, 1, "{counters:?}");
     assert_eq!(counters.h2d_calls, 1, "{counters:?}");
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), high_water);
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        "narrowed scratch",
         result.to_host().unwrap().dense_data().unwrap(),
         small.host().dense_data().unwrap(),
         small.terms(),
-        "narrowed scratch",
     );
     // And the large one again, after the narrowing, is still right.
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        "re-widened",
         run(&large).dense_data().unwrap(),
         large.host().dense_data().unwrap(),
         large.terms(),
-        "re-widened",
     );
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), high_water);
 
     runtime.clear_tree_transform_cache();
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), 0);
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        "after clear",
         run(&small).dense_data().unwrap(),
         small.host().dense_data().unwrap(),
         small.terms(),
-        "after clear",
     );
 }
 
@@ -352,19 +358,19 @@ fn check_fermionic<R, D>(
         "{}",
         case.name
     );
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         device.dense_data().unwrap(),
         host.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
     for role in [TwistRole::B, TwistRole::A] {
         let oracle = fermionic_blas_contract_oracle(&case, role, twist);
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            &format!("{} vs the {role:?}-role oracle", case.name),
             device.dense_data().unwrap(),
             oracle.dense_data().unwrap(),
             case.terms(),
-            &format!("{} vs the {role:?}-role oracle", case.name),
         );
     }
 }
@@ -423,11 +429,11 @@ fn a_warm_fermionic_contraction_uploads_only_its_output() {
     assert_eq!(warm.device_allocs, 1, "{warm:?}");
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), scratch);
     assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), transforms);
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        "warm",
         result.to_host().unwrap().dense_data().unwrap(),
         case.host().dense_data().unwrap(),
         case.terms(),
-        "warm",
     );
     println!("fZ2xSU2 mixed θ f64: output {output_bytes} B; warm {warm:?}; {transforms:?}");
 }
@@ -495,11 +501,11 @@ fn check_splits<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
             let device = lhs.contract(&rhs, &spec).unwrap().to_host().unwrap();
             assert_eq!(device.codomain(), host.codomain(), "{label}");
             assert_eq!(device.domain(), host.domain(), "{label}");
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                &label,
                 device.dense_data().unwrap(),
                 host.dense_data().unwrap(),
                 case.terms(),
-                &label,
             );
             let mut destination = host.scale(D::entry(7.5, 0.0)).to_cuda().unwrap();
             lhs.contract_into(
@@ -510,11 +516,11 @@ fn check_splits<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
                 D::entry(0.0, 0.0),
             )
             .unwrap();
-            assert_close(
+            numerics::assert_nonzero_slices_close(
+                &label,
                 destination.to_host().unwrap().dense_data().unwrap(),
                 host.dense_data().unwrap(),
                 case.terms(),
-                &label,
             );
         }
     }
@@ -592,18 +598,18 @@ fn device_overwrite<R: DeviceRule, D: DevicePayload>(case: &Case<R, D>) -> Tenso
 
 fn check_overwrite<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
     let written = device_overwrite(&case);
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         written.dense_data().unwrap(),
         case.host().dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
     let oracle = blas_contract_oracle(&case);
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         written.dense_data().unwrap(),
         oracle.dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
 }
 
@@ -615,19 +621,19 @@ fn check_overwrite_fermionic<R, D>(
     D: DevicePayload,
 {
     let written = device_overwrite(&case);
-    assert_close(
+    numerics::assert_nonzero_slices_close(
+        case.name,
         written.dense_data().unwrap(),
         case.host().dense_data().unwrap(),
         case.terms(),
-        case.name,
     );
     for role in [TwistRole::B, TwistRole::A] {
         let oracle = fermionic_blas_contract_oracle(&case, role, twist);
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            &format!("{} overwrite vs the {role:?}-role oracle", case.name),
             written.dense_data().unwrap(),
             oracle.dense_data().unwrap(),
             case.terms(),
-            &format!("{} overwrite vs the {role:?}-role oracle", case.name),
         );
     }
 }
@@ -734,11 +740,11 @@ fn a_warm_overwrite_transfers_and_allocates_nothing() {
         assert!(counters.gemm_calls > 0, "{}: vacuous", case.name);
         assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), scratch);
         assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), transforms);
-        assert_close(
+        numerics::assert_nonzero_slices_close(
+            case.name,
             destination.to_host().unwrap().dense_data().unwrap(),
             case.host().dense_data().unwrap(),
             case.terms(),
-            case.name,
         );
     }
     warm(&runtime, u1_rank_five::<f64>(&runtime));

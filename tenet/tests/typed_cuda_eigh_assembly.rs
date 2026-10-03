@@ -15,15 +15,10 @@ use tenet::expert::cuda_transfer_stats;
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{Eigh, GradedSpace, Runtime, TensorMap};
 
-/// The receiver's own split as leg roles: `rows = 0..nout`.
-fn codomain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (0..t.codomain_rank()).collect()
-}
+#[path = "../../tests/support/fixtures.rs"]
+mod fixtures;
 
-/// The receiver's own split as leg roles: `cols = nout..rank`.
-fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
-    (t.codomain_rank()..t.rank()).collect()
-}
+use fixtures::{codomain_axes, domain_axes};
 
 fn leg(charges: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
