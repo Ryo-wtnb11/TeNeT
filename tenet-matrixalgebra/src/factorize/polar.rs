@@ -998,3 +998,58 @@ where
     polar_dyn_checked_generic_reported(dense, parent, PolarDirection::Left, PolarDirection::Right)
         .map(|(w, p)| LeftPolar { w, p })
 }
+
+#[derive(Clone, Copy)]
+pub(super) enum PolarDirection {
+    Left,
+    Right,
+}
+
+impl PolarDirection {
+    pub(super) fn accepts(self, rows: usize, cols: usize) -> bool {
+        match self {
+            Self::Left => rows >= cols,
+            Self::Right => cols >= rows,
+        }
+    }
+
+    pub(super) fn error(self) -> OperationError {
+        OperationError::InvalidArgument {
+            message: match self {
+                Self::Left => "left_polar requires rows >= columns in every coupled-sector matrix",
+                Self::Right => {
+                    "right_polar requires columns >= rows in every coupled-sector matrix"
+                }
+            },
+        }
+    }
+}
+
+pub(super) fn validate_polar_direction(
+    acceptance_direction: PolarDirection,
+    error_direction: PolarDirection,
+    space: &BoundDynamicFusionMapSpace<impl FusionRule>,
+) -> Result<(), OperationError> {
+    let row_dimensions = space
+        .space()
+        .homspace()
+        .codomain()
+        .coupled_sector_block_dimensions(space.provider())?;
+    let col_dimensions = space
+        .space()
+        .homspace()
+        .domain()
+        .coupled_sector_block_dimensions(space.provider())?;
+    for (&sector, &rows) in &row_dimensions {
+        let cols = col_dimensions.get(&sector).copied().unwrap_or(0);
+        if !acceptance_direction.accepts(rows, cols) {
+            return Err(error_direction.error());
+        }
+    }
+    for (&sector, &cols) in &col_dimensions {
+        if !row_dimensions.contains_key(&sector) && !acceptance_direction.accepts(0, cols) {
+            return Err(error_direction.error());
+        }
+    }
+    Ok(())
+}

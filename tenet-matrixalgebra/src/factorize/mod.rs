@@ -49,12 +49,18 @@ macro_rules! with_input_geometry {
     };
 }
 
+mod bound;
+mod compact_plan;
+mod dense_stage;
 mod eig;
 mod inverse;
+mod matricize;
 mod null_space;
 mod polar;
+mod publish_checked;
+mod publish_mf;
 mod qr_lq;
-mod region;
+mod scalar;
 mod svd;
 
 #[cfg(test)]
@@ -75,11 +81,22 @@ mod sector_matricization_tests;
 // `null_space` and `polar` have no crate-internal consumer outside the
 // explicit `pub use` blocks below (every item another file needs is
 // already named there), so a blanket glob re-export of either would be
-// unused.
+// unused. `polar`'s direction helpers, also used by `svd`, are imported by
+// name below.
+pub(crate) use bound::*;
+pub(crate) use compact_plan::*;
+// `dense_stage` items are consumed only by sibling factorization modules.
+use dense_stage::*;
 pub(crate) use eig::*;
 pub(crate) use inverse::*;
+pub(crate) use matricize::*;
+pub(crate) use publish_checked::*;
+// `publish_mf` exposes crate-visible items only to the unit tests.
+#[cfg(test)]
+pub(crate) use publish_mf::*;
+#[cfg(not(test))]
+use publish_mf::*;
 pub(crate) use qr_lq::*;
-pub(crate) use region::*;
 pub(crate) use svd::*;
 
 // Explicit overrides: an item re-exported through the blanket globs above
@@ -89,6 +106,8 @@ pub(crate) use svd::*;
 // these specific names to be fully `pub` here, so each one is reimported by
 // name; an explicit import always shadows the same name brought in by a
 // glob.
+pub use bound::{BoundDynFactor, BoundTensorMap, BoundTensorMapRef};
+pub use compact_plan::CheckedGenericFactorPlanError;
 pub use eig::{
     eig_full, eig_full_diagonal_dyn, eig_full_diagonal_dyn_checked_generic, eig_full_dyn,
     eig_full_dyn_checked_generic, eig_vals, eig_vals_diagonal_dyn, eig_vals_dyn,
@@ -97,6 +116,12 @@ pub use eig::{
     eigh_vals, eigh_vals_diagonal_dyn, eigh_vals_dyn, eigh_vals_dyn_checked_generic,
     validate_hermitian_regions, EigFull, EigFullDyn, EighFull, EighFullDyn,
 };
+pub use matricize::{
+    coupled_sector_block_dimensions_generic_checked, validate_endomorphism_region_stacking,
+    EIGH_FULL_STACKING,
+};
+#[cfg(feature = "diagnostics")]
+pub use matricize::{sector_matricization_diagnostic, SectorMatricizationDiagnostic};
 pub use null_space::{
     left_null, left_null_diagonal_dyn, left_null_diagonal_dyn_checked_generic, left_null_dyn,
     left_null_dyn_checked_generic, left_null_dyn_checked_generic_with_dimensions, right_null,
@@ -113,6 +138,8 @@ pub use polar::{
     right_polar_diagonal_spectra_dyn, right_polar_diagonal_spectra_dyn_checked_generic,
     right_polar_dyn, right_polar_dyn_checked_generic, CheckedCompactPolarFactors,
 };
+use polar::{validate_polar_direction, PolarDirection};
+pub use publish_checked::build_bound_factor_space_generic_checked;
 use qr_lq::diagonal_phase_magnitude;
 pub use qr_lq::{
     lq_compact, lq_compact_dyn, lq_compact_dyn_checked_generic, lq_compact_dyn_generic,
@@ -120,14 +147,7 @@ pub use qr_lq::{
     qr_compact_dyn, qr_compact_dyn_checked_generic, qr_compact_dyn_generic, qr_diagonal_dyn,
     qr_diagonal_dyn_checked_generic, qr_full, qr_full_dyn, qr_full_dyn_checked_generic,
 };
-pub use region::{
-    build_bound_factor_space_generic_checked, coupled_sector_block_dimensions_generic_checked,
-    validate_endomorphism_region_stacking, BoundDynFactor, BoundTensorMap, BoundTensorMapRef,
-    CheckedGenericFactorPlanError, FactorScalar, SectorSpectrum, SpectrumMagnitude,
-    EIGH_FULL_STACKING,
-};
-#[cfg(feature = "diagnostics")]
-pub use region::{sector_matricization_diagnostic, SectorMatricizationDiagnostic};
+pub use scalar::{FactorScalar, SectorSpectrum, SpectrumMagnitude};
 pub use svd::{
     decide_bond_truncation, decide_bond_truncation_generic_checked, diagonal_bond_bound_space,
     diagonal_bond_bound_space_generic, diagonal_bond_bound_space_generic_checked,
