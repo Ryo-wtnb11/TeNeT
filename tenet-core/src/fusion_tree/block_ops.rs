@@ -976,44 +976,33 @@ where
     };
 
     let num_src = src_keys.len();
-    let mut basis = src_keys.to_vec();
     let mut columns = DenseColumns::with_capacity(num_src, num_src);
     for source in 0..num_src {
         let row = columns.push_empty_row();
         columns.row_mut(row)[source] = Some(R::Scalar::one());
     }
 
-    let target_codomain_rank = prepared.target_codomain_rank;
-    let mut current_codomain_rank = group.codomain_rank;
-    while current_codomain_rank < target_codomain_rank {
-        (basis, columns) = compose_block_terms(&basis, &columns, |key| {
-            multiplicity_free_bendleft_tree_pair(rule, key)
-        })?;
-        current_codomain_rank += 1;
-    }
-    while current_codomain_rank > target_codomain_rank {
-        (basis, columns) = compose_block_terms(&basis, &columns, |key| {
-            multiplicity_free_bendright_tree_pair(rule, key)
-        })?;
-        current_codomain_rank -= 1;
-    }
-
-    if let Some((direction, count)) = cycle {
-        for _ in 0..count {
-            (basis, columns) = match direction {
-                PreparedCycleDirection::Clockwise => {
-                    compose_block_terms(&basis, &columns, |key| {
-                        multiplicity_free_cycle_clockwise_tree_pair_legacy_oracle(rule, key)
-                    })?
-                }
-                PreparedCycleDirection::Anticlockwise => {
-                    compose_block_terms(&basis, &columns, |key| {
-                        multiplicity_free_cycle_anticlockwise_tree_pair_legacy_oracle(rule, key)
-                    })?
-                }
-            };
-        }
-    }
+    let repartitioned = repartition_loop(
+        (src_keys.to_vec(), columns),
+        group.codomain_rank,
+        prepared.target_codomain_rank,
+        |(basis, columns), bend| {
+            compose_block_terms(&basis, &columns, |key| match bend {
+                Bend::Left => multiplicity_free_bendleft_tree_pair(rule, key),
+                Bend::Right => multiplicity_free_bendright_tree_pair(rule, key),
+            })
+        },
+    )?;
+    let (basis, columns) = run_cycles(repartitioned, cycle, |(basis, columns), direction| {
+        compose_block_terms(&basis, &columns, |key| match direction {
+            PreparedCycleDirection::Clockwise => {
+                multiplicity_free_cycle_clockwise_tree_pair_legacy_oracle(rule, key)
+            }
+            PreparedCycleDirection::Anticlockwise => {
+                multiplicity_free_cycle_anticlockwise_tree_pair_legacy_oracle(rule, key)
+            }
+        })
+    })?;
 
     let mut rows_per_source = vec![Vec::new(); num_src];
     for (destination_row, destination) in basis.iter().enumerate() {

@@ -373,73 +373,7 @@ fn order_generic_tree_pair_block<S: Clone>(
     basis: Vec<FusionTreePairKey>,
     columns: DenseColumns<S>,
 ) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
-    let source_count = columns.num_src;
-    let mut ordered_basis_rows = Vec::with_capacity(basis.len());
-    let mut ordered_row_for_basis = vec![usize::MAX; basis.len()];
-    let mut singleton_basis_rows = Vec::with_capacity(source_count);
-    let mut is_singleton = true;
-
-    for source in 0..source_count {
-        let mut only_basis_row = None;
-        for (basis_row, ordered_row) in ordered_row_for_basis.iter_mut().enumerate() {
-            if columns.row(basis_row)[source].is_none() {
-                continue;
-            }
-            if *ordered_row == usize::MAX {
-                *ordered_row = ordered_basis_rows.len();
-                ordered_basis_rows.push(basis_row);
-            }
-            if only_basis_row.replace(basis_row).is_some() {
-                is_singleton = false;
-            }
-        }
-        match only_basis_row {
-            Some(basis_row) => singleton_basis_rows.push(basis_row),
-            None => {
-                is_singleton = false;
-                singleton_basis_rows.push(usize::MAX);
-            }
-        }
-    }
-
-    let destinations = ordered_basis_rows
-        .iter()
-        .map(|&basis_row| basis[basis_row].clone())
-        .collect::<Vec<_>>();
-    let storage = if is_singleton {
-        let mut destination_rows = Vec::with_capacity(source_count);
-        let mut coefficients = Vec::with_capacity(source_count);
-        for (source, basis_row) in singleton_basis_rows.into_iter().enumerate() {
-            destination_rows.push(ordered_row_for_basis[basis_row]);
-            coefficients.push(
-                columns.data[basis_row * source_count + source]
-                    .clone()
-                    .expect("singleton source has one present coefficient"),
-            );
-        }
-        OrderedBlockLinearStorage::SingletonColumns {
-            destination_rows,
-            coefficients,
-        }
-    } else {
-        let mut coefficients =
-            Vec::with_capacity(ordered_basis_rows.len().saturating_mul(source_count));
-        for basis_row in ordered_basis_rows {
-            let row_start = basis_row * source_count;
-            coefficients.extend(
-                columns.data[row_start..row_start + source_count]
-                    .iter()
-                    .cloned(),
-            );
-        }
-        OrderedBlockLinearStorage::DenseDstSrc(coefficients)
-    };
-
-    OrderedBlockLinearMap {
-        destinations,
-        source_count: columns.num_src,
-        storage,
-    }
+    order_block_columns(basis.len(), columns, |basis_row| basis[basis_row].clone())
 }
 
 /// The Generic keyed-block driver of the shared block schedule.
