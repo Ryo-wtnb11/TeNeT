@@ -27,21 +27,23 @@ mod tree_transform;
 pub use tenet_core::RuleIdentity;
 
 pub use adjoint::{
-    adjoint, adjoint_bound_dyn, adjoint_bound_dyn_generic, adjoint_bound_space_dyn,
-    adjoint_bound_space_dyn_generic, materialize_adjoint_data_dyn, AdjointScalar,
+    adjoint, adjoint_bound_dyn, adjoint_bound_space_dyn, materialize_adjoint_data_dyn,
+    AdjointScalar,
 };
 pub use backend_trace::TensorTraceOperationsBackend;
 pub use bound_tensor::BoundDynamicTensorRef;
-pub use cache::{
-    reset_global_operation_caches, BlockStructureCacheBlockKey, BlockStructureCacheKey,
-    OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
-    TreeTransformStructureCache, TreeTransformStructureCacheKey,
+pub(crate) use cache::TreeTransformStructureCache;
+pub use cache::{reset_global_operation_caches, OperationCachePolicy};
+#[cfg(test)]
+pub(crate) use cache::{
+    TensorContractStructureCache, TensorContractStructureCacheKey, TreeTransformStructureCacheKey,
 };
+#[cfg(test)]
+pub(crate) use contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
 #[doc(hidden)]
 pub use contract::{
     compile_direct_composition_plan, tensorcompose_fusion_dyn_prelowered_direct_on_storage,
     tensorcompose_owned_checked_generic_in_context,
-    tensorcontract_fusion_dyn_prelowered_direct_on_storage, tensorcontract_owned_checked_generic,
     tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
     DynamicTreeMembersWorkspace, StorageContractResolution,
 };
@@ -56,18 +58,19 @@ pub use contract::{
     tensorcontract_fusion_into_with, tensorcontract_fusion_into_with_backends,
     tensorcontract_fusion_prepared_into, tensorcontract_fusion_prepared_into_core_dst,
     tensorcontract_fusion_prepared_into_core_dst_with, tensorcontract_fusion_prepared_into_with,
-    tensorcontract_fusion_structure, tensorcontract_fusion_structure_dyn,
     tensorcontract_fusion_via_tree_pair_transforms_into, tensorcontract_into,
-    tensorcontract_into_with, tensorcontract_into_with_context, tensorcontract_structure,
-    tensorproduct_fusion_into, tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
+    tensorcontract_into_with, tensorcontract_into_with_context, tensorproduct_fusion_into,
+    tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
     tensorproduct_into_with_conjugation, zero_copy_contract_order_for_output_permute,
     FusionContractOrientation, FusionContractPlan, HostTensorContractBackend,
     HostTensorContractWorkspace, HostTreeFusionExecutionContext, PreparedTensorContractFusion,
     TensorContractBackend, TensorContractBlockSpec, TensorContractCache, TensorContractCacheStats,
     TensorContractExecutionContext, TensorContractFusionExecutionContext,
-    TensorContractFusionProfile, TensorContractFusionRoute, TensorContractPlanKey,
-    TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
+    TensorContractFusionProfile, TensorContractPlanKey, TensorContractStructure,
+    TensorContractStructureTerm, TensorContractWorkspace,
 };
+#[cfg(test)]
+pub(crate) use contract::{tensorcontract_fusion_structure, TensorContractFusionRoute};
 pub use contract::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
@@ -76,12 +79,12 @@ pub use facade::{
     braid_into, braid_into_with, braid_into_with_context, permute_into, permute_into_with,
     permute_into_with_context, transpose_into, transpose_into_with, transpose_into_with_context,
 };
+pub(crate) use oriented_elementwise::validate_oriented_fusion_layout;
 #[doc(hidden)]
 pub use oriented_elementwise::{
     fusion_scatter_add_assign, oriented_fusion_add_owned, oriented_fusion_axpby_into,
     oriented_fusion_inner, oriented_fusion_inner_with, oriented_fusion_restrict_owned,
-    stacked_fusion_restrict_owned, validate_oriented_fusion_layout, SectorRangeTable,
-    SectorStartTable,
+    stacked_fusion_restrict_owned, SectorRangeTable, SectorStartTable,
 };
 // Stage B3a: Generic-fusion (outer-multiplicity) facade siblings.
 pub use adjoint::adjoint_bound_space_dyn_generic_checked;
@@ -108,70 +111,71 @@ pub use facade::{
     tree_transform_overwrite_into_with_context, tree_transform_structure,
 };
 #[doc(hidden)]
-pub use physical::{
-    expand_physical_host, project_physical_host, PhysicalConversionError, PhysicalExpansionPlan,
-    PhysicalHostBuffer,
-};
+pub use physical::{expand_physical_host, project_physical_host, PhysicalConversionError};
 /// CUDA storage and GEMM seams (flat device buffers, never host-readable).
 #[cfg(feature = "cuda")]
 pub use tenet_operations::cuda;
 #[doc(hidden)]
 pub use tenet_operations::host_pool;
 pub use tenet_operations::ContractDestinationInit;
+#[cfg(test)]
+pub(crate) use tenet_operations::HostTreeTransformWorkspace;
 pub use tenet_operations::OperationError;
-pub use tenet_operations::ReportsPlacement;
-pub use tenet_operations::TreeTransformReplayProfile;
+pub(crate) use tenet_operations::ReportsPlacement;
+pub use tenet_operations::TensorAddStructure;
+pub(crate) use tenet_operations::TensorOperationsBackend;
+pub(crate) use tenet_operations::TreeTransformReplayProfile;
 pub use tenet_operations::TreeTransformStructure;
+pub use tenet_operations::TreeTransformWorkspace;
 pub(crate) use tenet_operations::{host_scratch, storage_scratch, strided};
-pub use tenet_operations::{
-    tensoradd_structure, tensoradd_structure_with_conjugation, TensorAddStructure,
-    TensorAddStructureTerm,
-};
 #[doc(hidden)]
-pub use tenet_operations::{
-    try_cat_owned_c64_raw, try_cat_owned_raw, OwnedCatC64Source, OwnedCatCopy, OwnedCatSide,
-};
+pub use tenet_operations::{try_cat_owned_raw, OwnedCatCopy, OwnedCatSide};
 #[doc(hidden)]
 pub use tenet_operations::{zeroed_payload, ZeroBytes};
+pub(crate) use tenet_operations::{ConjugateValue, TreeTransformScalar};
 pub use tenet_operations::{
-    ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
-    RecouplingCoefficientAction, TreeTransformScalar, WideScalar,
+    DenseBlockScalar, DenseRecouplingScalar, RecouplingCoefficientAction, WideScalar,
 };
 pub use tenet_operations::{
-    DenseTreeTransformOperations, HostAllocator, HostTensorOperations, HostTensorOperationsBackend,
-    HostTensorOperationsWorkspace, HostTreeTransformBackend, TensorOperationsBackend,
-    TreeTransformBackend,
+    DenseTreeTransformOperations, HostAllocator, HostTensorOperations, TreeTransformBackend,
 };
 pub(crate) use tenet_operations::{HostKernelAdapter, StridedHostKernelAdapter};
-pub use tenet_operations::{HostTreeTransformWorkspace, TreeTransformWorkspace};
 pub use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec};
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub use tensortrace::tensortrace_fusion_structure_into_on_cuda;
 #[doc(hidden)]
 pub use tensortrace::FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING;
+#[cfg(test)]
+pub(crate) use tensortrace::{
+    tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_owned, tensortrace_fusion_structure,
+    tensortrace_structure,
+};
 pub use tensortrace::{
-    tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_into_checked, tensortrace_fusion_dyn_owned,
-    tensortrace_fusion_dyn_owned_checked, tensortrace_fusion_dyn_owned_generic_checked,
-    tensortrace_fusion_dyn_selected_homspace_checked,
-    tensortrace_fusion_dyn_selected_homspace_generic_checked, tensortrace_fusion_structure,
-    tensortrace_structure, TensorTraceFusionStructure, TensorTraceFusionStructureTerm,
-    TensorTraceStructure, TensorTraceStructureTerm,
+    tensortrace_fusion_dyn_into_checked, tensortrace_fusion_dyn_owned_checked,
+    tensortrace_fusion_dyn_owned_generic_checked, tensortrace_fusion_dyn_selected_homspace_checked,
+    tensortrace_fusion_dyn_selected_homspace_generic_checked, TensorTraceFusionStructure,
+    TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm,
+};
+#[cfg(test)]
+pub(crate) use tree_context::{
+    tree_transform_dyn_owned_checked_generic, tree_transform_dyn_owned_checked_generic_in_context,
 };
 pub use tree_context::{
-    tree_transform_dyn_owned_checked_generic, tree_transform_dyn_owned_checked_generic_in_context,
     tree_transform_dyn_owned_checked_generic_input_in_context, CheckedTreeTransformInput,
     TreeTransformExecutionContext,
 };
 pub use tree_transform::{
-    build_all_codomain_tree_transform_group_plan,
-    build_checked_generic_tree_pair_transform_group_plan,
-    build_generic_tree_pair_transform_group_plan, build_tree_pair_transform_group_plan,
-    build_tree_transform_group_plan, CheckedGenericPlanError, RuntimeTreeTransformCacheInfo,
-    RuntimeTreeTransformCacheLedger, RuntimeTreeTransformStore, TreePairTransformCache,
-    TreeTransformBlockSpec, TreeTransformCache, TreeTransformCacheStats,
+    build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
+    CheckedGenericPlanError, RuntimeTreeTransformCacheInfo, RuntimeTreeTransformCacheLedger,
+    RuntimeTreeTransformStore, TreeTransformBlockSpec, TreeTransformCache, TreeTransformCacheStats,
     TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
     TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
+};
+#[cfg(test)]
+pub(crate) use tree_transform::{
+    build_checked_generic_tree_pair_transform_group_plan,
+    build_generic_tree_pair_transform_group_plan, build_tree_transform_group_plan,
 };
 #[cfg(test)]
 pub(crate) use tree_transform::{

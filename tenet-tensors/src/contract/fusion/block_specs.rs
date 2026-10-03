@@ -12,8 +12,7 @@ use crate::{DenseBlockScalar, OperationError};
 use tenet_operations::TensorContractSpec;
 
 use super::super::dynamic_space::{
-    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperandLayout, LayoutKeyBuilder,
-    MetadataOutput, MetadataRequest,
+    DynamicFusionMapSpace, FusionOperandLayout, LayoutKeyBuilder, MetadataOutput, MetadataRequest,
 };
 use super::super::fusion_block::validate_fusion_contract_rule;
 use super::super::structure::{
@@ -169,33 +168,6 @@ where
         &DynamicFusionMapSpace::from_typed(rhs_fusion),
         Arc::clone(lhs.structure()),
         Arc::clone(rhs.structure()),
-        axes,
-    )
-}
-
-/// Dynamic-rank variant of [`tensorcontract_fusion_structure`] retaining the
-/// checked provider authority carried by the spaces.
-pub fn tensorcontract_fusion_structure_dyn<R>(
-    dst: &BoundDynamicFusionMapSpace<R>,
-    lhs: &BoundDynamicFusionMapSpace<R>,
-    rhs: &BoundDynamicFusionMapSpace<R>,
-    lhs_storage_structure: Arc<tenet_core::BlockStructure>,
-    rhs_storage_structure: Arc<tenet_core::BlockStructure>,
-    axes: TensorContractSpec<'_>,
-) -> Result<TensorContractStructure<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    // Why not accept a separate rule: a caller must not be able to pair a
-    // layout with a second semantic provider after the checked bind boundary.
-    tensorcontract_fusion_structure_dyn_raw(
-        lhs.provider(),
-        dst.space(),
-        lhs.space(),
-        rhs.space(),
-        lhs_storage_structure,
-        rhs_storage_structure,
         axes,
     )
 }

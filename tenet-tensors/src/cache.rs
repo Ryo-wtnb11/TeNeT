@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use tenet_core::{BlockStructure, BlockStructureContent, BlockStructureContentBlock};
+use tenet_core::{BlockStructure, BlockStructureContent};
 
 use crate::{OperationError, TensorContractStructure, TreeTransformStructure};
 
@@ -125,16 +125,6 @@ impl BlockStructureCacheKey {
     }
 
     #[inline]
-    pub fn rank(&self) -> usize {
-        self.content.rank()
-    }
-
-    #[inline]
-    pub fn blocks(&self) -> &[BlockStructureCacheBlockKey] {
-        self.content.blocks()
-    }
-
-    #[inline]
     pub(crate) fn charged_retained_bytes(&self) -> usize {
         self.content.charged_retained_bytes()
     }
@@ -161,8 +151,6 @@ impl Hash for BlockStructureCacheKey {
     }
 }
 
-pub type BlockStructureCacheBlockKey = BlockStructureContentBlock;
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TreeTransformStructureCacheKey<PlanKey> {
     plan: PlanKey,
@@ -175,6 +163,7 @@ impl<PlanKey> TreeTransformStructureCacheKey<PlanKey>
 where
     PlanKey: Clone,
 {
+    #[cfg(test)]
     pub fn from_structures(
         plan: PlanKey,
         dst_structure: &BlockStructure,
@@ -302,26 +291,6 @@ where
             rhs: BlockStructureCacheKey::from_structure(rhs_structure)?,
         })
     }
-
-    #[inline]
-    pub fn plan(&self) -> &PlanKey {
-        &self.plan
-    }
-
-    #[inline]
-    pub fn dst(&self) -> &BlockStructureCacheKey {
-        &self.dst
-    }
-
-    #[inline]
-    pub fn lhs(&self) -> &BlockStructureCacheKey {
-        &self.lhs
-    }
-
-    #[inline]
-    pub fn rhs(&self) -> &BlockStructureCacheKey {
-        &self.rhs
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -346,6 +315,7 @@ impl<C, PlanKey> TensorContractStructureCache<C, PlanKey>
 where
     PlanKey: Clone + Eq + Hash,
 {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -391,19 +361,13 @@ where
         self.structures.get(key).map(Arc::as_ref)
     }
 
-    pub fn get_arc(
-        &self,
-        key: &TensorContractStructureCacheKey<PlanKey>,
-    ) -> Option<Arc<TensorContractStructure<C>>> {
-        self.structures.get(key).map(Arc::clone)
-    }
-
     pub fn touch(&mut self, key: &TensorContractStructureCacheKey<PlanKey>) {
         if self.policy.max_entries().is_some() && self.structures.contains_key(key) {
             touch_lru_key(&mut self.lru_order, key);
         }
     }
 
+    #[cfg(test)]
     pub fn insert(
         &mut self,
         key: TensorContractStructureCacheKey<PlanKey>,
@@ -435,6 +399,7 @@ impl<T, PlanKey> TreeTransformStructureCache<T, PlanKey>
 where
     PlanKey: Clone + Eq + Hash,
 {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -446,6 +411,7 @@ where
         }
     }
 
+    #[cfg(test)]
     #[inline]
     pub fn policy(&self) -> OperationCachePolicy {
         self.policy
@@ -469,13 +435,6 @@ where
         self.structures.is_empty()
     }
 
-    pub fn get(
-        &self,
-        key: &TreeTransformStructureCacheKey<PlanKey>,
-    ) -> Option<&TreeTransformStructure<T>> {
-        self.structures.peek(key).map(Arc::as_ref)
-    }
-
     pub fn get_arc(
         &self,
         key: &TreeTransformStructureCacheKey<PlanKey>,
@@ -485,14 +444,6 @@ where
 
     pub fn touch(&mut self, key: &TreeTransformStructureCacheKey<PlanKey>) {
         let _ = self.structures.get(key);
-    }
-
-    pub fn insert(
-        &mut self,
-        key: TreeTransformStructureCacheKey<PlanKey>,
-        structure: TreeTransformStructure<T>,
-    ) -> Option<Arc<TreeTransformStructure<T>>> {
-        self.insert_arc(key, Arc::new(structure))
     }
 
     pub fn insert_arc(

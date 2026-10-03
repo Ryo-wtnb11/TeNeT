@@ -4,14 +4,16 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage,
-    TensorMap, TensorStorage,
+    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, TensorMap, TensorStorage,
 };
+#[cfg(test)]
+use tenet_core::{ScratchStorage, SimilarStorage};
 
 use crate::cache::{
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
 };
 use crate::lowering::adjoint_fusion_space_view;
+#[cfg(test)]
 use crate::storage_scratch::StorageTensorContractWorkspace;
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::TreeTransformRuleCacheKey;
@@ -21,9 +23,9 @@ use crate::{
 };
 use tenet_operations::{ContractDestinationInit, TensorContractSpec, TensorContractSpecOwned};
 
-use super::backend::{
-    tensorcontract_structure_with_storage_workspace_dense_executor, TensorContractBackend,
-};
+#[cfg(test)]
+use super::backend::tensorcontract_structure_with_storage_workspace_dense_executor;
+use super::backend::TensorContractBackend;
 use super::dynamic::DynamicFusionSpaceCache;
 use super::dynamic_space::{
     encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
@@ -42,10 +44,11 @@ use super::resolution::{
     compile_composition_plan, compile_core_plan, compile_prelowered_resolution, compile_resolution,
     compile_storage_resolution, try_compile_oriented_canonical_core_resolution,
     try_compile_oriented_storage_composition_plan,
-    try_compile_oriented_storage_contract_candidate_plan,
-    try_compile_oriented_storage_contract_plan, NonuniformTwist, Resolution,
-    StorageContractResolution, StorageContractRoute,
+    try_compile_oriented_storage_contract_candidate_plan, Resolution, StorageContractResolution,
+    StorageContractRoute,
 };
+#[cfg(test)]
+use super::resolution::{try_compile_oriented_storage_contract_plan, NonuniformTwist};
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
 use crate::host_scratch::HostScratchBuffer;
@@ -402,7 +405,7 @@ impl<D> TensorContractExecutionContext<D, DenseTreeTransformOperations>
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
 {
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn tensorcontract_into_storage_workspace<
         const DST_NOUT: usize,
@@ -1056,8 +1059,8 @@ where
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)]
     pub(crate) fn tensorcontract_fusion_dyn_into_raw<R>(
         &mut self,
         rule: &R,
@@ -2881,6 +2884,7 @@ where
     StorageContractResolution::new(route).map(Some)
 }
 
+#[cfg(test)]
 /// Canonical storage contraction over parent buffers with lazy operand
 /// orientation. A miss is unsupported; this device leaf never prepares
 /// logical-key projections or source transforms.

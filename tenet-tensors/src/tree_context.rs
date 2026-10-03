@@ -65,6 +65,7 @@ impl<'a, P, D> CheckedTreeTransformInput<'a, P, D> {
     }
 }
 
+#[cfg(test)]
 /// Applies one checked Generic permute, braid, or transpose and returns its owned output.
 ///
 /// Provider queries and replay compilation finish against an uninterned
@@ -95,6 +96,7 @@ where
     )
 }
 
+#[cfg(test)]
 /// Runtime-context variant of [`tree_transform_dyn_owned_checked_generic`].
 ///
 /// A completed structure is published only after replay and destination commit.

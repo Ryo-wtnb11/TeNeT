@@ -390,20 +390,21 @@ pub(crate) fn compile_checked_generic_core_plan(
     )
 }
 
+#[cfg(test)]
 /// Host implementation of [`StorageGemm`] over host-readable storages.
-#[allow(dead_code)]
 pub(crate) struct HostStorageGemm<'a, B, W> {
     backend: &'a mut B,
     workspace: &'a mut W,
 }
 
+#[cfg(test)]
 impl<'a, B, W> HostStorageGemm<'a, B, W> {
-    #[allow(dead_code)]
     pub(crate) fn new(backend: &'a mut B, workspace: &'a mut W) -> Self {
         Self { backend, workspace }
     }
 }
 
+#[cfg(test)]
 impl<'a, B, D, DDst, DLhs, DRhs> StorageGemm<D, DDst, DLhs, DRhs>
     for HostStorageGemm<'a, B, B::Workspace>
 where
@@ -560,8 +561,8 @@ impl FusionBlockMatrixLayout {
                     index: block_index,
                 });
             };
-            let coupled = coupled_sector_generic(key.codomain_tree());
-            if coupled != coupled_sector_generic(key.domain_tree()) {
+            let coupled = coupled_sector(key.codomain_tree());
+            if coupled != coupled_sector(key.domain_tree()) {
                 return Err(OperationError::FusionTreeGroupMismatch {
                     tensor: "fusion",
                     index: block_index,
@@ -1125,10 +1126,5 @@ struct TreeMatrixOffset {
 }
 
 fn coupled_sector(tree: &FusionTreeKey) -> SectorId {
-    tree.coupled()
-}
-
-/// Generic-fusion sibling retained as a named algorithm boundary.
-fn coupled_sector_generic(tree: &FusionTreeKey) -> SectorId {
     tree.coupled()
 }

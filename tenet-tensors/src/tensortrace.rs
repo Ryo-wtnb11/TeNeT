@@ -268,7 +268,7 @@ fn record_trace_selected_homspace_derivation() {
 
 /// A compiled fusion-aware trace whose valid terms retain global source order.
 ///
-/// See [`tensortrace_fusion_structure`] for the non-`Unique` grouped path's
+/// See `tensortrace_fusion_structure` for the non-`Unique` grouped path's
 /// block-atomic error-ordering contract for expert incomplete layouts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorTraceFusionStructure<C> {
@@ -347,6 +347,7 @@ impl<C> TensorTraceFusionStructure<C> {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn compile_fusion_dyn_raw<R>(
         rule: &R,
         dst: &DynamicFusionMapSpace,
@@ -1974,6 +1975,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 /// Dynamic-rank fusion tensortrace: partial (or full) trace of `src` over
 /// the `axes` trace pairs into caller-allocated `dst_data`
 /// (`dst = beta * dst + alpha * trace(src)`), operating on
@@ -2056,6 +2058,7 @@ where
     )
 }
 
+#[cfg(test)]
 /// Internal owned-output trace path for built-in host storage.
 ///
 /// This compiles the oriented trace semantics once, then either uses the
@@ -2136,6 +2139,7 @@ where
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensortrace_fusion_dyn_into_raw<R, D>(
     rule: &R,

@@ -5,7 +5,9 @@ use tenet_core::{
     BraidingStyleKind, CheckedGenericRigidSymbols, CoreError, FusionStyleKind, FusionTreeHomSpace,
     RuleIdentity, StructurallyValidatedFusionTreeSubset,
 };
-use tenet_operations::{DenseTreeTransformOperations, TensorContractSpec, TreeTransformBackend};
+#[cfg(test)]
+use tenet_operations::DenseTreeTransformOperations;
+use tenet_operations::{TensorContractSpec, TreeTransformBackend};
 
 use crate::tree_transform::{
     build_checked_generic_tree_pair_transform_group_plan, CheckedGenericPlanError,
@@ -66,6 +68,7 @@ impl CheckedStagedOperand<'_> {
     }
 }
 
+#[cfg(test)]
 fn same_axes(lhs: &[usize], rhs: &[usize]) -> bool {
     let mut lhs = lhs.to_vec();
     let mut rhs = rhs.to_vec();
@@ -287,6 +290,7 @@ where
     Ok(Some(data))
 }
 
+#[cfg(test)]
 /// Contracts two direct checked Generic tensors using the shared stable
 /// candidate policy. The result retains the left provider allocation.
 #[doc(hidden)]
@@ -519,6 +523,7 @@ where
     )
 }
 
+#[cfg(test)]
 /// Runs exactly one caller-selected checked Generic contraction candidate.
 ///
 /// Every destination remains a read-only staged structure until replay and
@@ -565,6 +570,7 @@ where
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn tensorcontract_owned_checked_generic_preselected_with_core_gemm<P, D, G, B>(
     lhs_space: &BoundDynamicFusionMapSpace<P>,

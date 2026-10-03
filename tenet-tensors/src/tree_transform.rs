@@ -7,17 +7,16 @@ pub(crate) use cache::take_oriented_tree_pair_compiles;
 pub(crate) use cache::GroupSpecReuse;
 pub use cache::{
     RuntimeTreeTransformCacheInfo, RuntimeTreeTransformCacheLedger, RuntimeTreeTransformStore,
-    TreePairTransformCache, TreeTransformCache, TreeTransformCacheStats,
+    TreeTransformCache, TreeTransformCacheStats,
 };
 pub use operation::{
     TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };
 pub use plan::{
     build_all_codomain_tree_transform_group_plan,
-    build_checked_generic_tree_pair_transform_group_plan,
-    build_generic_tree_pair_transform_group_plan, build_tree_pair_transform_group_plan,
-    build_tree_transform_group_plan, CheckedGenericPlanError, TreeTransformBlockSpec,
-    TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
+    build_checked_generic_tree_pair_transform_group_plan, build_tree_pair_transform_group_plan,
+    CheckedGenericPlanError, TreeTransformBlockSpec, TreeTransformGroupBlockSpec,
+    TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
 };
 #[cfg(test)]
 pub(crate) use plan::{
@@ -39,3 +38,5 @@ pub(crate) use plan::{
     compile_multiplicity_free_tree_pair_structure,
     validate_checked_generic_tree_pair_plan_preflight, validate_generic_tree_pair_preflight,
 };
+#[cfg(test)]
+pub use plan::{build_generic_tree_pair_transform_group_plan, build_tree_transform_group_plan};

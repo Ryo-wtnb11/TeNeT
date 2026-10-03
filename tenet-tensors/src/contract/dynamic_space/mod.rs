@@ -802,7 +802,7 @@ impl DynamicFusionMapSpace {
         Self::contracted_space_from_plan(rule, lhs, rhs, axes, &axis_plan, nout, nin, primer)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn validate_contracted_homspace<R>(
         rule: &R,
         lhs: &Self,
@@ -823,6 +823,7 @@ impl DynamicFusionMapSpace {
         )
     }
 
+    #[cfg(test)]
     fn validate_contracted_homspace_with_primer<R>(
         rule: &R,
         lhs: &Self,
