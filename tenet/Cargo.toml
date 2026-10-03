@@ -2,7 +2,7 @@
 name = "tenet-rs"
 version = "0.1.1"
 description = "Symmetric tensors and tensor-network operations"
-edition.workspace = true
+edition = "2024"
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -37,3 +37,9 @@ tenet-dense = { version = "0.1.1", path = "../tenet-dense", default-features = f
 tenet-matrixalgebra = { version = "0.1.1", path = "../tenet-matrixalgebra", default-features = false }
 tenet-operations = { version = "0.1.1", path = "../tenet-operations", default-features = false }
 tenet-tensors = { version = "0.1.1", path = "../tenet-tensors", default-features = false }
+
+[lints.clippy]
+# Edition 2024 (merged doctests) makes clippy suggest let-chains for nested
+# `if let`. Why-not apply them: the workspace's 2021 rustfmt style cannot
+# format let-chains, and the 2024 style would reformat the whole crate.
+collapsible_if = "allow"

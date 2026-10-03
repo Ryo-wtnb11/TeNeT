@@ -1,0 +1,3 @@
+# The tenet crate uses edition 2024 for merged doctests; keep the 2021
+# style so that switch did not reformat the crate.
+style_edition = "2021"
