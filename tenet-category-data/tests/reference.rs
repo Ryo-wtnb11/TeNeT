@@ -637,6 +637,65 @@ fn checked_and_infallible_fusion_queries_agree() {
     );
 }
 
+/// Issue #1737: the infallible symbol methods have no checked twin, so an
+/// out-of-domain id must panic with the typed domain error, exactly where
+/// `try_nsymbol` errs — never alias another table entry, never fail on a raw
+/// slice index.
+#[test]
+fn infallible_symbols_panic_with_the_domain_error_on_out_of_domain_ids() {
+    use std::panic::{self, AssertUnwindSafe};
+
+    fn assert_domain_panic(what: &str, invalid: SectorId, call: impl FnOnce() -> Complex64) {
+        let payload = panic::catch_unwind(AssertUnwindSafe(call))
+            .expect_err(&format!("{what} returned a value for {invalid:?}"));
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        let expected = FusionAlgebraError::InvalidSector { sector: invalid }.to_string();
+        assert!(
+            message.contains(what) && message.contains(&expected),
+            "{what} on {invalid:?} panicked with {message:?}, expected the domain error"
+        );
+    }
+
+    let fib = table();
+    let ok = SECTORS[1];
+    for invalid in [
+        SectorId::new(2),
+        SectorId::new(3),
+        SectorId::new(5),
+        SectorId::new(usize::MAX),
+    ] {
+        assert!(fib.try_nsymbol(ok, ok, invalid).is_err());
+        for slot in 0..6 {
+            let mut ids = [ok; 6];
+            ids[slot] = invalid;
+            let [a, b, c, d, e, f] = ids;
+            assert_domain_panic("f_symbol_scalar", invalid, || {
+                fib.f_symbol_scalar(a, b, c, d, e, f)
+            });
+        }
+        for slot in 0..3 {
+            let mut ids = [SECTORS[0]; 3];
+            ids[slot] = invalid;
+            let [a, b, c] = ids;
+            assert_domain_panic("r_symbol_scalar", invalid, || fib.r_symbol_scalar(a, b, c));
+        }
+        assert_domain_panic("dim_scalar", invalid, || fib.dim_scalar(invalid));
+        assert_domain_panic("inv_dim_scalar", invalid, || fib.inv_dim_scalar(invalid));
+        assert_domain_panic("sqrt_dim_scalar", invalid, || fib.sqrt_dim_scalar(invalid));
+        assert_domain_panic("inv_sqrt_dim_scalar", invalid, || {
+            fib.inv_sqrt_dim_scalar(invalid)
+        });
+        assert_domain_panic("twist_scalar", invalid, || fib.twist_scalar(invalid));
+        assert_domain_panic("frobenius_schur_phase_scalar", invalid, || {
+            fib.frobenius_schur_phase_scalar(invalid)
+        });
+    }
+}
+
 // -------------------------------------------------------------------------
 // Public planar Fibonacci workflow (#633)
 // -------------------------------------------------------------------------

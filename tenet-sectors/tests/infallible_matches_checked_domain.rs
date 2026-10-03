@@ -12,7 +12,9 @@
 //! indirectly, through whichever components do forward. `tenet-category-data`'s
 //! Fibonacci provider is converted but not swept here, because this test lives
 //! in `tenet-sectors` and that crate is not a dependency; a reintroduced
-//! recursion there would overflow the stack in that crate's own tests.
+//! recursion there would overflow the stack in that crate's own tests, and its
+//! out-of-domain sweep (including the F/R/dim/twist symbols, #1737) lives in
+//! `tenet-category-data/tests/reference.rs`.
 
 use std::panic::{self, AssertUnwindSafe};
 
