@@ -633,8 +633,10 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
 }
 
 /// Device QR is gauge-fixed like Host QR (positive diagonal), so the factors
-/// compare pointwise, at `64 sqrt(n) eps(f64) kappa` relative to the source
-/// norm, `kappa` the measured `sigma_max / sigma_min` of the source.
+/// compare pointwise, within the `numerics` rule
+/// `32 eps(f64) sqrt(n) max(1, L) kappa`: `n` the stored entries, `L` the
+/// largest compared magnitude, `kappa = sigma_max / sigma_min` of the source
+/// from its `svd_vals`.
 fn assert_c64_qr_matches_host<R>(source: &TensorMap<R, Complex64>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -651,9 +653,9 @@ where
         }
     }
     assert!(smallest > 0.0, "the QR fixture must have full rank");
-    // The rule over the stored entries, conditioned by the R diagonal's
-    // spread. Its slice scale (largest |entry| of Q, R or QR) never exceeds
-    // `||A||_F`, so this stays within the former `64 sqrt(n) eps ||A|| kappa`.
+    // `kappa` conditions the rule by the source's singular-value spread. The
+    // slice scale `L` (largest |entry| of Q, R or QR) never exceeds `||A||_F`,
+    // so the bound stays within the former `64 sqrt(n) eps ||A|| kappa`.
     let terms = source_data.len().max(1);
     let kappa = largest / smallest;
     let Qr {
