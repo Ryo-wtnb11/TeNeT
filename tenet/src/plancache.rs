@@ -344,6 +344,9 @@ pub struct PlanCacheStats {
     pub replans: u64,
     /// Current number of cached plans.
     pub entries: usize,
+    /// Current number of persisted contraction orders (see `tenet-network`'s
+    /// `load_plan_cache`), bounded by [`PlanCacheConfig::capacity`].
+    pub persisted_orders: usize,
     /// Execution workspaces allocated because no cached lease was available.
     pub workspaces_created: u64,
     /// Execution workspace leases served from the per-plan pool.

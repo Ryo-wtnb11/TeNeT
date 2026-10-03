@@ -225,6 +225,64 @@ fn persisted_typed_order_roundtrips_into_a_fresh_runtime() {
 }
 
 #[test]
+fn clear_plan_cache_drops_persisted_orders_and_turns_persistence_off() {
+    let first = Runtime::builder().build().unwrap();
+    assert_eq!(load_plan_cache(&first, ""), 0);
+    let first_space = space(Arc::new(U1FusionRule), 2);
+    let (a, b) = pair(&first, &first_space, 82);
+    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    let saved = save_plan_cache(&first);
+
+    let runtime = Runtime::builder().build().unwrap();
+    assert_eq!(load_plan_cache(&runtime, &saved), 1);
+    assert_eq!(plan_cache_stats(&runtime).persisted_orders, 1);
+    clear_plan_cache(&runtime);
+    assert_eq!(plan_cache_stats(&runtime), Default::default());
+
+    // The miss searches afresh: nothing is replayed, and with persistence off
+    // the fresh order is not recorded either.
+    let space = space(Arc::new(U1FusionRule), 2);
+    let (c, d) = pair(&runtime, &space, 84);
+    drop(tensor!([i; k] = c[i; j] * d[j; k]).unwrap());
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!((stats.misses, stats.persisted_orders), (1, 0));
+    assert!(!save_plan_cache(&runtime).contains("TOPO "));
+}
+
+#[test]
+fn persisted_orders_are_bounded_by_the_plan_cache_capacity() {
+    let runtime = Runtime::builder().build().unwrap();
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            capacity: 2,
+            ..Default::default()
+        },
+    );
+    assert_eq!(load_plan_cache(&runtime, ""), 0);
+    let space = space(Arc::new(U1FusionRule), 2);
+    let (a, b) = pair(&runtime, &space, 86);
+    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    drop(tensor!([k; i] = a[i; j] * b[j; k]).unwrap());
+    drop(tensor!([i, k] = a[i; j] * b[j; k]).unwrap());
+    assert_eq!(plan_cache_stats(&runtime).persisted_orders, 2);
+    let saved = save_plan_cache(&runtime);
+    assert_eq!(saved.matches("TOPO ").count(), 2);
+
+    // A loaded file larger than the bound keeps only the bound.
+    let fresh = Runtime::builder().build().unwrap();
+    configure_plan_cache(
+        &fresh,
+        PlanCacheConfig {
+            capacity: 1,
+            ..Default::default()
+        },
+    );
+    assert_eq!(load_plan_cache(&fresh, &saved), 2);
+    assert_eq!(plan_cache_stats(&fresh).persisted_orders, 1);
+}
+
+#[test]
 fn concurrent_macro_calls_share_one_plan_and_bound_idle_pool() {
     let runtime = Runtime::builder().build().unwrap();
     let space = space(Arc::new(U1FusionRule), 8);

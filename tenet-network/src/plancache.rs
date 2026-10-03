@@ -23,7 +23,6 @@
 //! plans or counters.
 
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -544,7 +543,8 @@ struct PlanCache {
     /// [`topology_text`]), populated by [`load_plan_cache`] and grown on
     /// every fresh search. A disk hit skips the (cold) optimal-order search
     /// entirely — the plancache analog of `@tensoropt`'s compile-time bake.
-    disk: HashMap<String, crate::plan::ContractionPlan>,
+    /// LRU-bounded by `PlanCacheConfig::capacity`, like `map`.
+    disk: LruCache<String, crate::plan::ContractionPlan>,
     /// Whether cross-process persistence is in use. Set by [`load_plan_cache`]
     /// (the application's opt-in) and only then is [`disk`] consulted/grown.
     /// Off by default so the in-memory replan behavior is byte-identical when
@@ -600,7 +600,7 @@ impl PlanCache {
             topology_materializations: 0,
             map: LruCache::new(lru_capacity(DEFAULT_PLAN_CACHE_CAPACITY)),
             static_aliases: LruCache::new(lru_capacity(DEFAULT_PLAN_CACHE_CAPACITY)),
-            disk: HashMap::new(),
+            disk: LruCache::new(lru_capacity(DEFAULT_PLAN_CACHE_CAPACITY)),
             persist: false,
             workspace_budget: Arc::new(WorkspaceBudget::new(workspace_budget_bytes)),
         }
@@ -716,6 +716,7 @@ pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
                 let capacity = lru_capacity(next.capacity);
                 cache.map.resize(capacity);
                 cache.static_aliases.resize(capacity);
+                cache.disk.resize(capacity);
             }
         }
         cache
@@ -757,6 +758,7 @@ pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
             misses: cache.misses,
             replans: cache.replans,
             entries: cache.map.len(),
+            persisted_orders: cache.disk.len(),
             workspaces_created,
             workspace_reuses,
             workspace_slot_grows,
@@ -773,11 +775,18 @@ pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
 }
 
 /// Drops every cached plan and resets the counters (not the configuration).
+///
+/// This includes the persisted orders loaded by [`load_plan_cache`] or
+/// recorded since, and it turns persistence off until the next
+/// [`load_plan_cache`], so the next miss searches afresh. Files the
+/// application wrote from [`save_plan_cache`] are not touched.
 pub fn clear_plan_cache(runtime: &Runtime) {
     runtime.with_plan_cache(|config, slot| {
         let cache = cache_mut(slot, config.workspace_budget_bytes);
         cache.map.clear();
         cache.static_aliases.clear();
+        cache.disk.clear();
+        cache.persist = false;
         cache.hits = 0;
         cache.misses = 0;
         cache.replans = 0;
@@ -796,12 +805,12 @@ pub fn save_plan_cache(runtime: &Runtime) -> String {
         let cache = cache_mut(slot, config.workspace_budget_bytes);
         let mut text = String::from(PLAN_CACHE_FILE_VERSION);
         text.push('\n');
-        // Sort at save rather than switching `disk` to a BTreeMap: saving is
-        // cold (once per process, at shutdown/checkpoint) while `disk` is
+        // Sort at save rather than switching `disk` to an ordered map: saving
+        // is cold (once per process, at shutdown/checkpoint) while `disk` is
         // read on every cache miss, so paying the sort here keeps the hot
-        // lookup path's HashMap unchanged. Without this, iterating the
-        // HashMap's std RandomState order made the saved bytes vary run to
-        // run for identical content, breaking reproducible builds and
+        // lookup path's hash lookup unchanged. Without this, the iteration
+        // order (hash order, now recency order) made the saved bytes vary run
+        // to run for identical content, breaking reproducible builds and
         // content-addressed/git-diffed cache blobs (issue #151).
         let mut entries: Vec<(&String, &crate::plan::ContractionPlan)> =
             cache.disk.iter().collect();
@@ -824,7 +833,12 @@ pub fn save_plan_cache(runtime: &Runtime) -> String {
 /// Restore orders saved by [`save_plan_cache`]. A blob whose version header
 /// does not match this build is ignored (returns 0): a stale file would
 /// replay now-suboptimal orders and silently drift truncation, so it is
-/// dropped rather than trusted. Returns the number of orders loaded.
+/// dropped rather than trusted. Returns the number of orders parsed.
+///
+/// The persisted store is bounded by `PlanCacheConfig::capacity` entries
+/// with least-recently-used eviction, the same bound as the compiled plans;
+/// a larger file keeps its last `capacity` orders. [`clear_plan_cache`]
+/// empties it and turns persistence off.
 ///
 /// Loading any blob with a matching header, even an empty one, turns
 /// persistence on for this runtime. From then on a topology that has a
@@ -846,6 +860,10 @@ pub fn load_plan_cache(runtime: &Runtime, text: &str) -> usize {
         // The application opted into persistence: from now on record and reuse
         // orders through the disk map (even if this file was empty).
         cache.persist = true;
+        let capacity = lru_capacity(config.capacity);
+        if cache.disk.cap() != capacity {
+            cache.disk.resize(capacity);
+        }
         let mut loaded = 0;
         while let Some(topo_line) = lines.next() {
             let Some(topo) = topo_line.strip_prefix("TOPO ") else {
@@ -867,7 +885,7 @@ pub fn load_plan_cache(runtime: &Runtime, text: &str) -> usize {
                         acc
                     });
             if let Ok(plan) = crate::plan::ContractionPlan::from_text(&plan_text) {
-                cache.disk.insert(topo.to_string(), plan);
+                cache.disk.put(topo.to_string(), plan);
                 loaded += 1;
             }
         }
@@ -1343,7 +1361,10 @@ where
                     cache.topology_materializations += 1;
                     if cache.persist {
                         if let Some(plan_copy) = &fresh_plan_copy {
-                            cache.disk.insert(topo_key.clone(), plan_copy.clone());
+                            if cache.disk.cap() != capacity {
+                                cache.disk.resize(capacity);
+                            }
+                            cache.disk.put(topo_key.clone(), plan_copy.clone());
                         }
                     }
                     match outcome {
