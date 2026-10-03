@@ -472,10 +472,7 @@ where
         )
     }
 
-    pub fn subblock_by_tree(
-        &self,
-        key: &FusionTreePairKey,
-    ) -> Result<BlockView<'_, T>, CoreError> {
+    pub fn subblock_by_tree(&self, key: &FusionTreePairKey) -> Result<BlockView<'_, T>, CoreError> {
         let block = self.structure.fusion_tree_pair_block(key)?;
         BlockView::new(
             self.validated_host_data()?,

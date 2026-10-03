@@ -86,10 +86,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     ) -> Result<Self, CoreError> {
         Self::validate_homspace_rank(&homspace)?;
         Self::validate_structure_rank(&subblock_structure)?;
-        if subblock_structure
-            .coupled_sector_regions(NOUT)?
-            .is_none()
-        {
+        if subblock_structure.coupled_sector_regions(NOUT)?.is_none() {
             validate_block_storage_injective(&subblock_structure)?;
         }
         Ok(Self::from_admitted_shared_subblock_structure(
@@ -203,12 +200,14 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         Self::validate_homspace_rank(&homspace)?;
         let subblock_structure = homspace.coupled_subblock_structure(rule, NOUT, shapes)?;
         Self::validate_structure_rank(&subblock_structure)?;
-        Ok(Self::from_admitted_shared_subblock_structure(
-            dense_space,
-            homspace,
-            subblock_structure,
+        Ok(
+            Self::from_admitted_shared_subblock_structure(
+                dense_space,
+                homspace,
+                subblock_structure,
+            )
+            .with_complete_rule(rule.rule_identity()),
         )
-        .with_complete_rule(rule.rule_identity()))
     }
 
     fn validate_homspace_rank(homspace: &FusionTreeHomSpace) -> Result<(), CoreError> {
@@ -273,8 +272,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
             strides.extend_from_slice(&block.strides()[..NOUT]);
             blocks.push(BlockSpec::with_key(key, shape, strides, block.offset())?);
         }
-        let structure =
-            BlockStructure::from_blocks_with_rank(rank, blocks)?.into_shared();
+        let structure = BlockStructure::from_blocks_with_rank(rank, blocks)?.into_shared();
         Ok(FusionTensorMapSpace::<NIN, NOUT> {
             dense_space,
             homspace: Arc::new(homspace),
@@ -318,10 +316,12 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
 
     pub fn validate_rule<R: FusionRule>(&self, rule: &R) -> Result<(), CoreError> {
         match self.admission.rule_identity() {
-            Some(expected) if expected != &rule.rule_identity() => Err(CoreError::FusionRuleMismatch {
-                expected: expected.clone(),
-                actual: rule.rule_identity(),
-            }),
+            Some(expected) if expected != &rule.rule_identity() => {
+                Err(CoreError::FusionRuleMismatch {
+                    expected: expected.clone(),
+                    actual: rule.rule_identity(),
+                })
+            }
             Some(_) => Ok(()),
             None => Err(CoreError::MissingFusionRuleIdentity),
         }
@@ -356,10 +356,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     ///
     /// An existing matching admission is deliberately revalidated because a
     /// legacy stamp does not prove checked finite-algebra closure.
-    pub fn try_bind_rule_checked<R>(
-        mut self,
-        rule: &R,
-    ) -> Result<Self, CheckedFusionSpaceError>
+    pub fn try_bind_rule_checked<R>(mut self, rule: &R) -> Result<Self, CheckedFusionSpaceError>
     where
         R: CheckedFusionAlgebra,
     {

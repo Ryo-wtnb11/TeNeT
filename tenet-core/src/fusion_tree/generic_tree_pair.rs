@@ -231,13 +231,7 @@ where
         tree_pair,
         |tree| generic_multi_fmove_tree_checked(rule, tree),
         |leading, coupled, tree, leading_is_dual| {
-            generic_multi_fmove_inv_tree_checked(
-                rule,
-                leading,
-                coupled,
-                tree,
-                leading_is_dual,
-            )
+            generic_multi_fmove_inv_tree_checked(rule, leading, coupled, tree, leading_is_dual)
         },
     )
 }
@@ -267,14 +261,13 @@ where
         }
         .into());
     };
-    let is_dual_a =
-        codomain
-            .is_dual()
-            .first()
-            .copied()
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "codomain tree is missing the first duality flag",
-            })?;
+    let is_dual_a = codomain
+        .is_dual()
+        .first()
+        .copied()
+        .ok_or(CoreError::MalformedFusionTree {
+            message: "codomain tree is missing the first duality flag",
+        })?;
     let kappa = rule
         .try_frobenius_schur_phase_scalar(a)
         .map_err(CheckedGenericSymbolError::Provider)?;
@@ -294,9 +287,7 @@ where
             * rule
                 .try_inv_sqrt_dim_scalar(b)
                 .map_err(CheckedGenericSymbolError::Provider)?;
-        for (domain_prime, coeff2) in
-            inverse(dual_a, b, tree_pair.domain_tree(), !is_dual_a)?
-        {
+        for (domain_prime, coeff2) in inverse(dual_a, b, tree_pair.domain_tree(), !is_dual_a)? {
             if coeff1.len() != rows || coeff2.len() != cols {
                 return Err(CoreError::MalformedFusionTree {
                     message: "foldright: coefficient-vector length disagrees with A-matrix shape",
@@ -307,8 +298,7 @@ where
             for (j, coeff2_j) in coeff2.iter().enumerate() {
                 let mut column = C::Scalar::zero();
                 for (i, coeff1_i) in coeff1.iter().enumerate() {
-                    column =
-                        column + a_matrix.get(i, j).clone() * coeff1_i.clone();
+                    column = column + a_matrix.get(i, j).clone() * coeff1_i.clone();
                 }
                 inner = inner + coeff2_j.conj() * column;
             }
@@ -580,14 +570,8 @@ where
     let all_rank = permutation.len();
     let mut current = generic_repartition_tree_pair_result(rule, tree_pair, all_rank)?;
     current = compose_generic_tree_pair_terms_result(current, |key| {
-        generic_braid_tree_result(
-            rule,
-            key.codomain_tree(),
-            permutation,
-            levels,
-            swaps,
-        )
-        .map(|terms| {
+        generic_braid_tree_result(rule, key.codomain_tree(), permutation, levels, swaps).map(
+            |terms| {
                 terms
                     .into_iter()
                     .map(|(codomain_tree, coefficient)| {
@@ -597,7 +581,8 @@ where
                         )
                     })
                     .collect::<Vec<_>>()
-            })
+            },
+        )
     })?;
     compose_generic_tree_pair_terms_result(current, |key| {
         generic_repartition_tree_pair_result(rule, key, target_codomain_rank)

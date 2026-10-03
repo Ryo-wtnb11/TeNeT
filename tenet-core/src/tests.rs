@@ -59,12 +59,12 @@ pub(crate) mod test_support {
 mod support;
 use support::*;
 
-mod storage;
-mod sector;
+mod block_structure;
+mod checked_rank1_tree_admission;
+mod error;
 mod fusion_space;
 mod fusion_tree;
 mod generic_symbol_shape_mismatch;
-mod checked_rank1_tree_admission;
-mod block_structure;
+mod sector;
+mod storage;
 mod tensor_map;
-mod error;

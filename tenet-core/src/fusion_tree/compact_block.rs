@@ -47,22 +47,15 @@ pub(super) fn compact_artin_tree_block_first<R>(
     basis: CompactMultiplicityFreeTreeBasis,
     index: usize,
     inverse: bool,
-) -> Result<
-    (
-        CompactMultiplicityFreeTreeBasis,
-        DenseColumns<R::Scalar>,
-    ),
-    CoreError,
->
+) -> Result<(CompactMultiplicityFreeTreeBasis, DenseColumns<R::Scalar>), CoreError>
 where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     let prepared = prepare_multiplicity_free_artin(rule, &basis.frame, index, inverse)?;
-    let (locals, columns) =
-        apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
-            prepared.apply(rule, local)
-        })?;
+    let (locals, columns) = apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
+        prepared.apply(rule, local)
+    })?;
     Ok((
         CompactMultiplicityFreeTreeBasis {
             frame: prepared.output_frame,
@@ -78,13 +71,7 @@ pub(super) fn compact_artin_tree_block_step<R>(
     columns: &DenseColumns<R::Scalar>,
     index: usize,
     inverse: bool,
-) -> Result<
-    (
-        CompactMultiplicityFreeTreeBasis,
-        DenseColumns<R::Scalar>,
-    ),
-    CoreError,
->
+) -> Result<(CompactMultiplicityFreeTreeBasis, DenseColumns<R::Scalar>), CoreError>
 where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
@@ -139,13 +126,11 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     let prepared = prepare_multiplicity_free_bendright(rule, &basis.frame)?;
-    let (locals, columns) =
-        apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
-            let validated =
-                prepared.validate_local(rule, &local.codomain, &local.domain)?;
-            let coefficient = prepared.coefficient(rule, &validated);
-            Ok(std::iter::once((validated.local, coefficient)))
-        })?;
+    let (locals, columns) = apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
+        let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
+        let coefficient = prepared.coefficient(rule, &validated);
+        Ok(std::iter::once((validated.local, coefficient)))
+    })?;
     let frame = prepared.output_frame(rule)?;
     Ok((
         CompactMultiplicityFreeTreePairBasis { frame, locals },
@@ -168,12 +153,10 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     let prepared = prepare_multiplicity_free_bendleft(rule, &basis.frame)?;
-    let (locals, columns) =
-        apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
-            let validated =
-                prepared.validate_local(rule, &local.codomain, &local.domain)?;
-            Ok(std::iter::once(prepared.finish_local(rule, validated)))
-        })?;
+    let (locals, columns) = apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
+        let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
+        Ok(std::iter::once(prepared.finish_local(rule, validated)))
+    })?;
     let frame = prepared.output_frame(rule)?;
     Ok((
         CompactMultiplicityFreeTreePairBasis { frame, locals },
@@ -207,8 +190,7 @@ where
     } else {
         prepared.output_frame.clone()
     };
-    let output_locals =
-        collect_multiplicity_free_tree_pair_locals_for_frame(rule, &output_frame);
+    let output_locals = collect_multiplicity_free_tree_pair_locals_for_frame(rule, &output_frame);
     let output_index = output_locals
         .iter()
         .cloned()
@@ -228,26 +210,16 @@ where
         MultiplicityFreeTreeLocalTerms<R::Scalar>,
     > = FxHashMap::default();
     let mut inverse_cache: MultiplicityFreeFoldInverseCache<R::Scalar> = FxHashMap::default();
-    let mut coefficient_cache: FxHashMap<
-        (SectorId, SectorId),
-        (R::Scalar, R::Scalar),
-    > = FxHashMap::default();
+    let mut coefficient_cache: FxHashMap<(SectorId, SectorId), (R::Scalar, R::Scalar)> =
+        FxHashMap::default();
 
     for (source_row, source) in basis.locals.iter().enumerate() {
-        if columns.is_some_and(|columns| {
-            columns
-                .row(source_row)
-                .iter()
-                .all(Option::is_none)
-        }) {
+        if columns.is_some_and(|columns| columns.row(source_row).iter().all(Option::is_none)) {
             continue;
         }
         if !forward_cache.contains_key(&source.codomain) {
-            let terms = multiplicity_free_multi_fmove_local(
-                rule,
-                &basis.frame.codomain,
-                &source.codomain,
-            )?;
+            let terms =
+                multiplicity_free_multi_fmove_local(rule, &basis.frame.codomain, &source.codomain)?;
             forward_cache.insert(source.codomain.clone(), terms);
         }
         let forward = forward_cache
@@ -291,11 +263,13 @@ where
                         domain: destination.codomain,
                     };
                 }
-                let destination_row = *output_index.get(&destination).ok_or(
-                    CoreError::MalformedFusionTree {
-                        message: "compact fold destination is outside the canonical output basis",
-                    },
-                )?;
+                let destination_row =
+                    *output_index
+                        .get(&destination)
+                        .ok_or(CoreError::MalformedFusionTree {
+                            message:
+                                "compact fold destination is outside the canonical output basis",
+                        })?;
                 let mut coefficient = normalization.clone()
                     * (domain_coefficient.clone()).conj()
                     * a_symbol.clone()
@@ -313,8 +287,7 @@ where
                         let Some(source_coefficient) = source_coefficient else {
                             continue;
                         };
-                        let contribution =
-                            coefficient.clone() * source_coefficient.clone();
+                        let contribution = coefficient.clone() * source_coefficient.clone();
                         destination_column[source] =
                             Some(match destination_column[source].take() {
                                 Some(existing) => existing + contribution,
@@ -405,24 +378,21 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let prepared =
-        prepare_multiplicity_free_artin(rule, &basis.frame.codomain, index, inverse)?;
-    let (locals, columns) =
-        apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
-            let domain = local.domain.clone();
-            Ok(prepared
-                .apply(rule, &local.codomain)?
-                .into_iter()
-                .map(move |(codomain, coefficient)| {
-                    (
-                        MultiplicityFreeTreePairLocal {
-                            codomain,
-                            domain: domain.clone(),
-                        },
-                        coefficient,
-                    )
-                }))
-        })?;
+    let prepared = prepare_multiplicity_free_artin(rule, &basis.frame.codomain, index, inverse)?;
+    let (locals, columns) = apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
+        let domain = local.domain.clone();
+        Ok(prepared.apply(rule, &local.codomain)?.into_iter().map(
+            move |(codomain, coefficient)| {
+                (
+                    MultiplicityFreeTreePairLocal {
+                        codomain,
+                        domain: domain.clone(),
+                    },
+                    coefficient,
+                )
+            },
+        ))
+    })?;
     let frame = MultiplicityFreeTreePairFrame {
         codomain: prepared.output_frame,
         domain: basis.frame.domain,
@@ -451,8 +421,7 @@ where
     let prepared = prepare_multiplicity_free_bendright(rule, &basis.frame)?;
     let (locals, next_columns) =
         compose_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
-            let validated =
-                prepared.validate_local(rule, &local.codomain, &local.domain)?;
+            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
             let coefficient = prepared.coefficient(rule, &validated);
             Ok(std::iter::once((validated.local, coefficient)))
         })?;
@@ -481,8 +450,7 @@ where
     let prepared = prepare_multiplicity_free_bendleft(rule, &basis.frame)?;
     let (locals, next_columns) =
         compose_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
-            let validated =
-                prepared.validate_local(rule, &local.codomain, &local.domain)?;
+            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
             Ok(std::iter::once(prepared.finish_local(rule, validated)))
         })?;
     let frame = prepared.output_frame(rule)?;
@@ -559,15 +527,12 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let prepared =
-        prepare_multiplicity_free_artin(rule, &basis.frame.codomain, index, inverse)?;
+    let prepared = prepare_multiplicity_free_artin(rule, &basis.frame.codomain, index, inverse)?;
     let (locals, next_columns) =
         compose_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
             let domain = local.domain.clone();
-            Ok(prepared
-                .apply(rule, &local.codomain)?
-                .into_iter()
-                .map(move |(codomain, coefficient)| {
+            Ok(prepared.apply(rule, &local.codomain)?.into_iter().map(
+                move |(codomain, coefficient)| {
                     (
                         MultiplicityFreeTreePairLocal {
                             codomain,
@@ -575,7 +540,8 @@ where
                         },
                         coefficient,
                     )
-                }))
+                },
+            ))
         })?;
     let frame = MultiplicityFreeTreePairFrame {
         codomain: prepared.output_frame,
@@ -812,16 +778,11 @@ pub(super) fn scatter_compact_tree_pair_block<S: Clone>(
         scatter_compact_block(block.basis, block.columns)
     } else {
         let mut rows_per_source = vec![Vec::new(); block.columns.num_src];
-        for (destination_row, destination_local) in
-            block.basis.locals.into_iter().enumerate()
-        {
+        for (destination_row, destination_local) in block.basis.locals.into_iter().enumerate() {
             let destination = block.basis.frame.materialize(destination_local);
-            for (source, coefficient) in
-                block.columns.row(destination_row).iter().enumerate()
-            {
+            for (source, coefficient) in block.columns.row(destination_row).iter().enumerate() {
                 if let Some(coefficient) = coefficient {
-                    rows_per_source[source]
-                        .push((destination.clone(), coefficient.clone()));
+                    rows_per_source[source].push((destination.clone(), coefficient.clone()));
                 }
             }
         }
@@ -900,24 +861,20 @@ where
     R: MultiplicityFreeRigidSymbols,
 {
     let rule = group.rule;
-    let (initial_frame, first_local) = MultiplicityFreeTreePairFrame::split(
-        group
-            .projection
-            .pair_at(0)
-            .ok_or(CoreError::MalformedFusionTree {
+    let (initial_frame, first_local) =
+        MultiplicityFreeTreePairFrame::split(group.projection.pair_at(0).ok_or(
+            CoreError::MalformedFusionTree {
                 message: "compact repartition requires at least one source",
-            })?,
-    );
+            },
+        )?);
     if current_codomain_rank > target_codomain_rank {
-        let mut steps: SmallVec<[PreparedMultiplicityFreeBendRight; 8]> =
-            SmallVec::new();
+        let mut steps: SmallVec<[PreparedMultiplicityFreeBendRight; 8]> = SmallVec::new();
         let mut frame = initial_frame.clone();
         let mut local = first_local;
         let num_steps = current_codomain_rank - target_codomain_rank;
         for step in 0..num_steps {
             let prepared = prepare_multiplicity_free_bendright(rule, &frame)?;
-            let validated =
-                prepared.validate_local(rule, &local.codomain, &local.domain)?;
+            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
             local = validated.local;
             if step + 1 == num_steps {
                 prepared.validate_output_frame()?;
@@ -927,13 +884,12 @@ where
             steps.push(prepared);
         }
         for index in 1..group.source_len {
-            let (source_frame, mut local) =
-                MultiplicityFreeTreePairFrame::split(
-                    group
-                        .projection
-                        .pair_at(index)
-                        .expect("validated projection covers every source"),
-                );
+            let (source_frame, mut local) = MultiplicityFreeTreePairFrame::split(
+                group
+                    .projection
+                    .pair_at(index)
+                    .expect("validated projection covers every source"),
+            );
             if source_frame != initial_frame {
                 return Err(CoreError::MalformedFusionTree {
                     message: TREE_PAIR_BLOCK_GROUP_ERROR,
@@ -946,15 +902,13 @@ where
             }
         }
     } else {
-        let mut steps: SmallVec<[PreparedMultiplicityFreeBendLeft; 8]> =
-            SmallVec::new();
+        let mut steps: SmallVec<[PreparedMultiplicityFreeBendLeft; 8]> = SmallVec::new();
         let mut frame = initial_frame.clone();
         let mut local = first_local;
         let num_steps = target_codomain_rank - current_codomain_rank;
         for step in 0..num_steps {
             let prepared = prepare_multiplicity_free_bendleft(rule, &frame)?;
-            let validated =
-                prepared.validate_local(rule, &local.codomain, &local.domain)?;
+            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
             local = PreparedMultiplicityFreeBendLeft::finish_local_structure(validated);
             if step + 1 == num_steps {
                 prepared.validate_output_frame()?;
@@ -964,23 +918,20 @@ where
             steps.push(prepared);
         }
         for index in 1..group.source_len {
-            let (source_frame, mut local) =
-                MultiplicityFreeTreePairFrame::split(
-                    group
-                        .projection
-                        .pair_at(index)
-                        .expect("validated projection covers every source"),
-                );
+            let (source_frame, mut local) = MultiplicityFreeTreePairFrame::split(
+                group
+                    .projection
+                    .pair_at(index)
+                    .expect("validated projection covers every source"),
+            );
             if source_frame != initial_frame {
                 return Err(CoreError::MalformedFusionTree {
                     message: TREE_PAIR_BLOCK_GROUP_ERROR,
                 });
             }
             for prepared in &steps {
-                let validated =
-                    prepared.validate_local(rule, &local.codomain, &local.domain)?;
-                local =
-                    PreparedMultiplicityFreeBendLeft::finish_local_structure(validated);
+                let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
+                local = PreparedMultiplicityFreeBendLeft::finish_local_structure(validated);
             }
         }
     }
@@ -1018,24 +969,21 @@ where
         current_codomain_rank,
         target_codomain_rank,
     )?;
-    let (mut frame, first_local) = MultiplicityFreeTreePairFrame::split(
-        group
-            .projection
-            .pair_at(0)
-            .ok_or(CoreError::MalformedFusionTree {
+    let (mut frame, first_local) =
+        MultiplicityFreeTreePairFrame::split(group.projection.pair_at(0).ok_or(
+            CoreError::MalformedFusionTree {
                 message: "compact repartition requires at least one source",
-            })?,
-    );
+            },
+        )?);
     let mut rows = Vec::with_capacity(group.source_len);
     rows.push((first_local, R::Scalar::one()));
     for index in 1..group.source_len {
-        let (source_frame, source_local) =
-            MultiplicityFreeTreePairFrame::split(
-                group
-                    .projection
-                    .pair_at(index)
-                    .expect("validated projection covers every source"),
-            );
+        let (source_frame, source_local) = MultiplicityFreeTreePairFrame::split(
+            group
+                .projection
+                .pair_at(index)
+                .expect("validated projection covers every source"),
+        );
         if source_frame != frame {
             return Err(CoreError::MalformedFusionTree {
                 message: TREE_PAIR_BLOCK_GROUP_ERROR,
@@ -1047,8 +995,7 @@ where
     while current_codomain_rank > target_codomain_rank {
         let prepared = prepare_multiplicity_free_bendright(rule, &frame)?;
         for (local, coefficient) in &mut rows {
-            let validated =
-                prepared.validate_local(rule, &local.codomain, &local.domain)?;
+            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
             let step_coefficient = prepared.coefficient(rule, &validated);
             *local = validated.local;
             *coefficient = coefficient.clone() * step_coefficient;
@@ -1059,10 +1006,8 @@ where
     while current_codomain_rank < target_codomain_rank {
         let prepared = prepare_multiplicity_free_bendleft(rule, &frame)?;
         for (local, coefficient) in &mut rows {
-            let validated =
-                prepared.validate_local(rule, &local.codomain, &local.domain)?;
-            let (next_local, step_coefficient) =
-                prepared.finish_local(rule, validated);
+            let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
+            let (next_local, step_coefficient) = prepared.finish_local(rule, validated);
             *local = next_local;
             *coefficient = coefficient.clone() * step_coefficient;
         }

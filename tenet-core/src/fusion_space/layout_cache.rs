@@ -21,13 +21,8 @@ impl PartialEq for FusionTreeHomSpaceCacheKey {
     fn eq(&self, other: &Self) -> bool {
         self.rule == other.rule
             && (Arc::ptr_eq(&self.homspace, &other.homspace)
-                || (product_space_signature_eq(
-                    &self.homspace.codomain,
-                    &other.homspace.codomain,
-                ) && product_space_signature_eq(
-                    &self.homspace.domain,
-                    &other.homspace.domain,
-                )))
+                || (product_space_signature_eq(&self.homspace.codomain, &other.homspace.codomain)
+                    && product_space_signature_eq(&self.homspace.domain, &other.homspace.domain)))
     }
 }
 
@@ -41,15 +36,14 @@ impl std::hash::Hash for FusionTreeHomSpaceCacheKey {
     }
 }
 
-pub(super) fn product_space_signature_eq(left: &FusionProductSpace, right: &FusionProductSpace) -> bool {
+pub(super) fn product_space_signature_eq(
+    left: &FusionProductSpace,
+    right: &FusionProductSpace,
+) -> bool {
     left.legs().len() == right.legs().len()
-        && left
-            .legs()
-            .iter()
-            .zip(right.legs())
-            .all(|(left, right)| {
-                left.is_dual() == right.is_dual() && left.sectors() == right.sectors()
-            })
+        && left.legs().iter().zip(right.legs()).all(|(left, right)| {
+            left.is_dual() == right.is_dual() && left.sectors() == right.sectors()
+        })
 }
 
 fn hash_product_space_signature<H: std::hash::Hasher>(space: &FusionProductSpace, state: &mut H) {
@@ -158,7 +152,10 @@ pub(crate) const FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES: usize = 8 * 1024 * 10
 
 impl FusionTreeLayoutCache {
     pub(crate) fn new(entry_capacity: usize, byte_budget: usize, max_entry_bytes: usize) -> Self {
-        assert!(entry_capacity > 0, "fusion-tree layout cache capacity must be positive");
+        assert!(
+            entry_capacity > 0,
+            "fusion-tree layout cache capacity must be positive"
+        );
         Self {
             entries: lru::LruCache::with_hasher(
                 std::num::NonZeroUsize::new(entry_capacity).unwrap(),
@@ -204,10 +201,7 @@ impl FusionTreeLayoutCache {
             return layout;
         }
         while self.entries.len() == self.entry_capacity
-            || self
-                .charged_payload_bytes
-                .saturating_add(charged_bytes)
-                > self.byte_budget
+            || self.charged_payload_bytes.saturating_add(charged_bytes) > self.byte_budget
         {
             let Some((_, evicted)) = self.entries.pop_lru() else {
                 break;
@@ -315,7 +309,8 @@ pub(crate) fn fusion_tree_layout_cache() -> &'static RwLock<FusionTreeLayoutCach
 
 /// Acquires the layout cache for admission. Every commit-path writer goes
 /// through here, so tests can assert that a warm commit takes none.
-pub(super) fn fusion_tree_layout_cache_write() -> std::sync::RwLockWriteGuard<'static, FusionTreeLayoutCache> {
+pub(super) fn fusion_tree_layout_cache_write(
+) -> std::sync::RwLockWriteGuard<'static, FusionTreeLayoutCache> {
     #[cfg(test)]
     FUSION_TREE_LAYOUT_WRITE_LOCKS.set(FUSION_TREE_LAYOUT_WRITE_LOCKS.get() + 1);
     fusion_tree_layout_cache()
@@ -346,21 +341,15 @@ pub(crate) fn charged_fusion_tree_layout_bytes(
         .saturating_add(identity.homspace.charged_retained_bytes())
         .saturating_add(identity.rule.charged_retained_bytes());
     let mut frozen_backings = rustc_hash::FxHashSet::default();
-    let tree_bytes = layout
-        .keys
-        .iter()
-        .fold(0usize, |bytes, key| {
-            [key.codomain_tree(), key.domain_tree()]
-                .iter()
-                .fold(bytes, |tree_bytes, tree| {
-                    tree_bytes
-                        .saturating_add(std::mem::size_of::<FusionTreeKey>())
-                        .saturating_add(charge_fusion_tree_key_backings(
-                            &mut frozen_backings,
-                            tree,
-                        ))
-                })
-        });
+    let tree_bytes = layout.keys.iter().fold(0usize, |bytes, key| {
+        [key.codomain_tree(), key.domain_tree()]
+            .iter()
+            .fold(bytes, |tree_bytes, tree| {
+                tree_bytes
+                    .saturating_add(std::mem::size_of::<FusionTreeKey>())
+                    .saturating_add(charge_fusion_tree_key_backings(&mut frozen_backings, tree))
+            })
+    });
     let sector_bytes = layout
         .sectors
         .capacity()
@@ -435,7 +424,10 @@ pub(crate) const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES: usize = 1_6
 
 impl CompleteHomSpaceStructureCache {
     pub(crate) fn new(entry_capacity: usize, byte_budget: usize, max_entry_bytes: usize) -> Self {
-        assert!(entry_capacity > 0, "complete HomSpace cache capacity must be positive");
+        assert!(
+            entry_capacity > 0,
+            "complete HomSpace cache capacity must be positive"
+        );
         Self {
             // Unbounded here because `admit` enforces `entry_capacity`; a
             // bounded constructor would preallocate the table for the whole
@@ -470,15 +462,21 @@ impl CompleteHomSpaceStructureCache {
         &self,
         key: &CompleteHomSpaceStructureCacheKey,
     ) -> Option<CompleteHomSpaceStructureLookup> {
-        self.entries.peek(key).map(|entry| match entry.wrapper.upgrade() {
-            Some(wrapper) => CompleteHomSpaceStructureLookup::Wrapper(wrapper),
-            None => CompleteHomSpaceStructureLookup::Content(Arc::clone(&entry.content)),
-        })
+        self.entries
+            .peek(key)
+            .map(|entry| match entry.wrapper.upgrade() {
+                Some(wrapper) => CompleteHomSpaceStructureLookup::Wrapper(wrapper),
+                None => CompleteHomSpaceStructureLookup::Content(Arc::clone(&entry.content)),
+            })
     }
 
     /// Repoints a retained entry at the canonical wrapper after its previous
     /// wrapper died; a no-op when the key was evicted meanwhile.
-    fn refresh(&mut self, key: &CompleteHomSpaceStructureCacheKey, structure: &Arc<BlockStructure>) {
+    fn refresh(
+        &mut self,
+        key: &CompleteHomSpaceStructureCacheKey,
+        structure: &Arc<BlockStructure>,
+    ) {
         if let Some(entry) = self.entries.peek_mut(key) {
             // Content and wrapper must come from one interning generation:
             // a racing admit after intern-table eviction could otherwise pair
@@ -587,22 +585,43 @@ pub struct CompleteHomSpaceStructureCacheInfo {
 }
 
 impl CompleteHomSpaceStructureCacheInfo {
-    pub fn entries(self) -> usize { self.entries }
-    pub fn charged_bytes(self) -> usize { self.charged_bytes }
-    pub fn entry_capacity(self) -> usize { self.entry_capacity }
-    pub fn byte_budget(self) -> usize { self.byte_budget }
-    pub fn max_entry_bytes(self) -> usize { self.max_entry_bytes }
-    pub fn hits(self) -> usize { self.hits }
+    pub fn entries(self) -> usize {
+        self.entries
+    }
+    pub fn charged_bytes(self) -> usize {
+        self.charged_bytes
+    }
+    pub fn entry_capacity(self) -> usize {
+        self.entry_capacity
+    }
+    pub fn byte_budget(self) -> usize {
+        self.byte_budget
+    }
+    pub fn max_entry_bytes(self) -> usize {
+        self.max_entry_bytes
+    }
+    pub fn hits(self) -> usize {
+        self.hits
+    }
     /// Completed builds that reached admission, including bypassed entries
     /// and racing duplicates. Failed builds are not counted, and a hit peek
     /// counts no miss, so `hits + misses` is not the lookup count.
-    pub fn misses(self) -> usize { self.misses }
-    pub fn admissions(self) -> usize { self.admissions }
-    pub fn evictions(self) -> usize { self.evictions }
-    pub fn bypasses(self) -> usize { self.bypasses }
+    pub fn misses(self) -> usize {
+        self.misses
+    }
+    pub fn admissions(self) -> usize {
+        self.admissions
+    }
+    pub fn evictions(self) -> usize {
+        self.evictions
+    }
+    pub fn bypasses(self) -> usize {
+        self.bypasses
+    }
 }
 
-pub(crate) fn complete_hom_space_structure_cache() -> &'static RwLock<CompleteHomSpaceStructureCache> {
+pub(crate) fn complete_hom_space_structure_cache() -> &'static RwLock<CompleteHomSpaceStructureCache>
+{
     static CACHE: OnceLock<RwLock<CompleteHomSpaceStructureCache>> = OnceLock::new();
     CACHE.get_or_init(|| {
         RwLock::new(CompleteHomSpaceStructureCache::new(

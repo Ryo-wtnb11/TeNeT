@@ -99,12 +99,7 @@ where
     if prepared.permutation.iter().copied().eq(0..rank) {
         return Ok(vec![(tree.clone(), R::Scalar::one())]);
     }
-    execute_multiplicity_free_tree_braid(
-        rule,
-        tree,
-        &prepared.permutation,
-        &prepared.artin_steps,
-    )
+    execute_multiplicity_free_tree_braid(rule, tree, &prepared.permutation, &prepared.artin_steps)
 }
 
 pub(crate) fn execute_multiplicity_free_tree_braid<R>(
@@ -145,14 +140,12 @@ where
     for step in steps {
         let mut next_terms = FusionTermAccumulator::new();
         for (tree, coefficient) in current {
-            for (next_tree, step_coefficient) in
-                multiplicity_free_artin_braid_at_with_inverse(
-                    rule,
-                    &tree,
-                    step.index,
-                    step.inverse,
-                )?
-            {
+            for (next_tree, step_coefficient) in multiplicity_free_artin_braid_at_with_inverse(
+                rule,
+                &tree,
+                step.index,
+                step.inverse,
+            )? {
                 next_terms.push(next_tree, coefficient.clone() * step_coefficient);
             }
         }

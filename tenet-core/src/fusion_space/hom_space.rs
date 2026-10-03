@@ -11,14 +11,9 @@ impl FusionTreeHomSpaceContent {
         fn product_space_bytes(space: &FusionProductSpace) -> usize {
             std::mem::size_of::<FusionProductSpace>()
                 .saturating_add(spilled_smallvec_heap_bytes(&space.legs))
-                .saturating_add(
-                    space
-                        .legs
-                        .iter()
-                        .fold(0usize, |bytes, leg| {
-                            bytes.saturating_add(leg.charged_retained_bytes())
-                        }),
-                )
+                .saturating_add(space.legs.iter().fold(0usize, |bytes, leg| {
+                    bytes.saturating_add(leg.charged_retained_bytes())
+                }))
         }
 
         product_space_bytes(&self.codomain)
@@ -92,7 +87,8 @@ impl Clone for FusionTreeHomSpace {
 
 impl PartialEq for FusionTreeHomSpace {
     fn eq(&self, other: &Self) -> bool {
-        self.content.codomain == other.content.codomain && self.content.domain == other.content.domain
+        self.content.codomain == other.content.codomain
+            && self.content.domain == other.content.domain
     }
 }
 
@@ -523,10 +519,7 @@ impl FusionTreeHomSpace {
             validate_composed_leg(lhs_domain, rhs_codomain, (lhs_codomain_rank + index, index))?;
         }
         let descriptor = HomSpaceDescriptor::new(
-            lhs.codomain()
-                .legs()
-                .iter()
-                .map(OrientedLegView::borrowed),
+            lhs.codomain().legs().iter().map(OrientedLegView::borrowed),
             rhs.domain().legs().iter().map(OrientedLegView::borrowed),
         );
         Ok(descriptor.materialize(rule))
@@ -743,10 +736,7 @@ impl FusionTreeHomSpace {
 
         let data = build()?;
         Ok(PreparedFusionTreeLayout {
-            state: PreparedFusionTreeLayoutState::Cold {
-                key,
-                data,
-            },
+            state: PreparedFusionTreeLayoutState::Cold { key, data },
         })
     }
 
@@ -856,8 +846,7 @@ impl FusionTreeHomSpace {
         }
 
         let layout = self.cached_fusion_tree_layout(rule);
-        let (sector, degeneracy) =
-            coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
+        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
         let built = BlockStructure::from_parts(sector, degeneracy)?;
         built.record_storage_tiling();
         Ok(admit_complete_hom_space_structure(key, built.into_shared()))
@@ -873,13 +862,11 @@ impl FusionTreeHomSpace {
         R: MultiplicityFreeFusionRule,
     {
         let layout = self.fusion_tree_layout_data_uncached(rule);
-        let (sector, degeneracy) =
-            coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
+        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
         let required_len = degeneracy.required_len()?;
         Ok((
             required_len,
-            source.sector_structure() == &sector
-                && source.degeneracy_structure() == &degeneracy,
+            source.sector_structure() == &sector && source.degeneracy_structure() == &degeneracy,
         ))
     }
 
@@ -897,8 +884,7 @@ impl FusionTreeHomSpace {
         R: FusionRule,
     {
         let layout = self.fusion_tree_layout_data_generic(rule)?;
-        let (sector, degeneracy) =
-            coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
+        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
         let built = BlockStructure::from_parts(sector, degeneracy)?;
         built.record_storage_tiling();
         Ok(built.into_shared())
@@ -932,8 +918,7 @@ impl FusionTreeHomSpace {
         R: CheckedGenericFusion,
     {
         let layout = self.fusion_tree_layout_data_generic_checked(rule)?;
-        let (sector, degeneracy) =
-            coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
+        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
         PreparedBlockStructure::from_parts(sector, degeneracy)
             .map(PreparedBlockStructure::with_storage_tiling)
             .map_err(Into::into)
@@ -1009,7 +994,10 @@ impl FusionTreeHomSpace {
         keys
     }
 
-    pub(crate) fn fusion_tree_layout_data_uncached<R>(&self, rule: &R) -> FusionTreeHomSpaceLayoutData
+    pub(crate) fn fusion_tree_layout_data_uncached<R>(
+        &self,
+        rule: &R,
+    ) -> FusionTreeHomSpaceLayoutData
     where
         R: MultiplicityFreeFusionRule,
     {
@@ -1044,10 +1032,7 @@ impl FusionTreeHomSpace {
     /// the codomain∩domain merge — conservative on purpose; use
     /// [`Self::fusion_tree_keys_generic_for_coupled`] for a single provably
     /// clean sector. Unbounded Generic rules never err.
-    pub fn fusion_tree_keys_generic<R>(
-        &self,
-        rule: &R,
-    ) -> Result<Vec<FusionTreePairKey>, CoreError>
+    pub fn fusion_tree_keys_generic<R>(&self, rule: &R) -> Result<Vec<FusionTreePairKey>, CoreError>
     where
         R: FusionRule,
     {
@@ -1066,7 +1051,10 @@ impl FusionTreeHomSpace {
     where
         R: CheckedGenericFusion,
     {
-        Ok(self.fusion_tree_layout_data_generic_checked(rule)?.keys.to_vec())
+        Ok(self
+            .fusion_tree_layout_data_generic_checked(rule)?
+            .keys
+            .to_vec())
     }
 
     fn fusion_tree_layout_data_generic<R>(
@@ -1129,11 +1117,13 @@ impl FusionTreeHomSpace {
             &domain,
             &domain_fold,
             coupled,
-            |side, fold, coupled| CoreError::FusionOutsideTable {
+            |side, fold, coupled| {
+                CoreError::FusionOutsideTable {
                 message: format!(
                     "coupled sector {coupled:?} on the {side} side requires out-of-catalog intermediates. {}",
                     fusion_fold_error_message(side, fold),
                 ),
+            }
             },
         )
     }

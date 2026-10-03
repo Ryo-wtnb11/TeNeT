@@ -25,7 +25,11 @@ where
         })
 }
 
-pub(super) fn only_fusion_channel<R>(rule: &R, left: SectorId, right: SectorId) -> Result<SectorId, CoreError>
+pub(super) fn only_fusion_channel<R>(
+    rule: &R,
+    left: SectorId,
+    right: SectorId,
+) -> Result<SectorId, CoreError>
 where
     R: FusionRule,
 {
@@ -134,14 +138,13 @@ where
         });
     }
     let a = codomain.uncoupled()[0];
-    let is_dual_a =
-        codomain
-            .is_dual()
-            .first()
-            .copied()
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "codomain tree is missing the first duality flag",
-            })?;
+    let is_dual_a = codomain
+        .is_dual()
+        .first()
+        .copied()
+        .ok_or(CoreError::MalformedFusionTree {
+            message: "codomain tree is missing the first duality flag",
+        })?;
     let kappa = rule.frobenius_schur_phase_scalar(a);
     let c = codomain.coupled();
 
@@ -156,8 +159,7 @@ where
         tree_pair.domain_tree(),
         !is_dual_a,
     )?;
-    let mut coefficient =
-        coeff0 * (coeff2).conj() * a_symbol * coeff1;
+    let mut coefficient = coeff0 * (coeff2).conj() * a_symbol * coeff1;
     if is_dual_a {
         coefficient = coefficient * kappa;
     }
@@ -194,18 +196,16 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let (intermediate, first_coefficient) =
-        if tree_pair.codomain_tree().uncoupled().is_empty() {
-            unique_rigid_bendleft_tree_pair(rule, tree_pair)?
-        } else {
-            unique_rigid_foldright_tree_pair(rule, tree_pair)?
-        };
-    let (destination, second_coefficient) =
-        if tree_pair.codomain_tree().uncoupled().is_empty() {
-            unique_rigid_foldright_tree_pair(rule, &intermediate)?
-        } else {
-            unique_rigid_bendleft_tree_pair(rule, &intermediate)?
-        };
+    let (intermediate, first_coefficient) = if tree_pair.codomain_tree().uncoupled().is_empty() {
+        unique_rigid_bendleft_tree_pair(rule, tree_pair)?
+    } else {
+        unique_rigid_foldright_tree_pair(rule, tree_pair)?
+    };
+    let (destination, second_coefficient) = if tree_pair.codomain_tree().uncoupled().is_empty() {
+        unique_rigid_foldright_tree_pair(rule, &intermediate)?
+    } else {
+        unique_rigid_bendleft_tree_pair(rule, &intermediate)?
+    };
     Ok((destination, first_coefficient * second_coefficient))
 }
 
@@ -217,18 +217,16 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let (intermediate, first_coefficient) =
-        if tree_pair.domain_tree().uncoupled().is_empty() {
-            unique_rigid_bendright_tree_pair(rule, tree_pair)?
-        } else {
-            unique_rigid_foldleft_tree_pair(rule, tree_pair)?
-        };
-    let (destination, second_coefficient) =
-        if tree_pair.domain_tree().uncoupled().is_empty() {
-            unique_rigid_foldleft_tree_pair(rule, &intermediate)?
-        } else {
-            unique_rigid_bendright_tree_pair(rule, &intermediate)?
-        };
+    let (intermediate, first_coefficient) = if tree_pair.domain_tree().uncoupled().is_empty() {
+        unique_rigid_bendright_tree_pair(rule, tree_pair)?
+    } else {
+        unique_rigid_foldleft_tree_pair(rule, tree_pair)?
+    };
+    let (destination, second_coefficient) = if tree_pair.domain_tree().uncoupled().is_empty() {
+        unique_rigid_foldleft_tree_pair(rule, &intermediate)?
+    } else {
+        unique_rigid_bendright_tree_pair(rule, &intermediate)?
+    };
     Ok((destination, first_coefficient * second_coefficient))
 }
 
@@ -299,10 +297,11 @@ where
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
     let destination = unique_multi_fmove_tree(rule, tree)?;
-    let coefficient = multiplicity_free_multi_associator_scalar(rule, tree, &destination)?
-        .ok_or(CoreError::MalformedFusionTree {
+    let coefficient = multiplicity_free_multi_associator_scalar(rule, tree, &destination)?.ok_or(
+        CoreError::MalformedFusionTree {
             message: "unique multi_Fmove destination does not match the source tail",
-        })?;
+        },
+    )?;
     Ok((destination, coefficient))
 }
 
@@ -319,10 +318,11 @@ where
 {
     let destination =
         unique_multi_fmove_inv_tree(rule, leading_sector, coupled, tree, leading_is_dual)?;
-    let coefficient = multiplicity_free_multi_associator_scalar(rule, &destination, tree)?
-        .ok_or(CoreError::MalformedFusionTree {
+    let coefficient = multiplicity_free_multi_associator_scalar(rule, &destination, tree)?.ok_or(
+        CoreError::MalformedFusionTree {
             message: "unique inverse multi_Fmove destination does not match the source tail",
-        })?;
+        },
+    )?;
     Ok((destination, (coefficient).conj()))
 }
 

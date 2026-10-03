@@ -182,7 +182,10 @@ impl fmt::Display for CoreError {
                 )
             }
             Self::UnitLayoutCorrespondence => {
-                write!(f, "unit-leg layout does not correspond to the supplied source layout")
+                write!(
+                    f,
+                    "unit-leg layout does not correspond to the supplied source layout"
+                )
             }
             Self::UnsupportedFusionStyle { expected, actual } => {
                 write!(
@@ -204,13 +207,19 @@ impl fmt::Display for CoreError {
             }
             Self::InvalidSector { sector } => write!(f, "invalid sector {sector:?}"),
             Self::InvalidMultiplicityIndex { value } => {
-                write!(f, "invalid multiplicity index {value}; labels are one-based")
+                write!(
+                    f,
+                    "invalid multiplicity index {value}; labels are one-based"
+                )
             }
             Self::SectorMismatch { expected, actual } => {
                 write!(f, "sector mismatch: expected {expected:?}, got {actual:?}")
             }
             Self::FusionRuleMismatch { expected, actual } => {
-                write!(f, "fusion rule mismatch: expected {expected:?}, got {actual:?}")
+                write!(
+                    f,
+                    "fusion rule mismatch: expected {expected:?}, got {actual:?}"
+                )
             }
             Self::MissingFusionRuleIdentity => write!(f, "fusion space has no bound rule identity"),
             Self::LegDegeneracyMismatch {
@@ -403,7 +412,8 @@ pub(crate) fn storage_end_exclusive(
 
 pub(crate) fn checked_product(dims: &[usize]) -> Result<usize, CoreError> {
     dims.iter().try_fold(1usize, |acc, &dim| {
-        acc.checked_mul(dim).ok_or_else(|| CoreError::ElementCountOverflow)
+        acc.checked_mul(dim)
+            .ok_or_else(|| CoreError::ElementCountOverflow)
     })
 }
 

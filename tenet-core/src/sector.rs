@@ -219,9 +219,11 @@ impl SectorLeg {
     /// never grows a charge a cache has already admitted.
     #[doc(hidden)]
     pub fn charged_retained_bytes(&self) -> usize {
-        let dual_map = self.data.sectors.len().saturating_mul(
-            3 * std::mem::size_of::<SectorId>() + std::mem::size_of::<usize>(),
-        );
+        let dual_map = self
+            .data
+            .sectors
+            .len()
+            .saturating_mul(3 * std::mem::size_of::<SectorId>() + std::mem::size_of::<usize>());
         std::mem::size_of::<SectorLegData>()
             .saturating_add(2 * std::mem::size_of::<usize>())
             .saturating_add(spilled_smallvec_heap_bytes(&self.data.sectors))
@@ -396,8 +398,14 @@ impl SectorLeg {
                 if dual != image {
                     // A rule that disagrees with the filling rule: build the
                     // dual as a fresh leg and leave the shared map untouched.
-                    let mut pairs = SmallVec::<[(SectorId, usize); 8]>::with_capacity(sectors.len());
-                    pairs.extend(images[..index].iter().copied().zip(degeneracies.iter().copied()));
+                    let mut pairs =
+                        SmallVec::<[(SectorId, usize); 8]>::with_capacity(sectors.len());
+                    pairs.extend(
+                        images[..index]
+                            .iter()
+                            .copied()
+                            .zip(degeneracies.iter().copied()),
+                    );
                     pairs.push((dual, degeneracies[index]));
                     for (&sector, &degeneracy) in
                         sectors[index + 1..].iter().zip(&degeneracies[index + 1..])
@@ -416,7 +424,8 @@ impl SectorLeg {
 
         // First dual query on this storage. Only an unmoved leg gets here: a
         // moved leg exists only after its storage's dual map is filled.
-        let mut triples = SmallVec::<[(SectorId, usize, SectorId); 8]>::with_capacity(sectors.len());
+        let mut triples =
+            SmallVec::<[(SectorId, usize, SectorId); 8]>::with_capacity(sectors.len());
         for (&sector, &degeneracy) in sectors.iter().zip(degeneracies) {
             triples.push((dual_of(sector)?, degeneracy, sector));
         }
@@ -433,7 +442,10 @@ impl SectorLeg {
             .eq(self.iter());
         let moved = (!unchanged).then(|| MovedSectorMap {
             sectors: triples.iter().map(|&(dual, _, _)| dual).collect(),
-            degeneracies: triples.iter().map(|&(_, degeneracy, _)| degeneracy).collect(),
+            degeneracies: triples
+                .iter()
+                .map(|&(_, degeneracy, _)| degeneracy)
+                .collect(),
             images: triples.iter().map(|&(_, _, source)| source).collect(),
         });
         Ok(self.install_dual_map(DualSectorMap { images, moved }))

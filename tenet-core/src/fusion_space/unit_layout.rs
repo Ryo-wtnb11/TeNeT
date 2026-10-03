@@ -13,9 +13,7 @@ pub struct StructurallyValidatedFusionTreeSubset<'homspace, 'structure> {
 }
 
 #[doc(hidden)]
-impl<'homspace, 'structure>
-    StructurallyValidatedFusionTreeSubset<'homspace, 'structure>
-{
+impl<'homspace, 'structure> StructurallyValidatedFusionTreeSubset<'homspace, 'structure> {
     pub fn try_new(
         homspace: &'homspace FusionTreeHomSpace,
         structure: &'structure BlockStructure,
@@ -82,8 +80,7 @@ impl<'homspace, 'structure>
                     let expected =
                         leg.degeneracy(sector)
                             .ok_or(CoreError::MalformedFusionTree {
-                                message:
-                                    "fusion tree uses a sector absent from its HomSpace leg",
+                                message: "fusion tree uses a sector absent from its HomSpace leg",
                             })?;
                     if expected != actual {
                         return Err(CoreError::LegDegeneracyMismatch {
@@ -117,10 +114,7 @@ impl<'homspace, 'structure>
         Ok(())
     }
 
-    pub fn validate_for_rule_checked<R>(
-        &self,
-        rule: &R,
-    ) -> Result<(), CheckedFusionSpaceError>
+    pub fn validate_for_rule_checked<R>(&self, rule: &R) -> Result<(), CheckedFusionSpaceError>
     where
         R: CheckedFusionAlgebra,
     {
@@ -203,15 +197,14 @@ pub fn validate_unit_layout_correspondence_checked<R>(
 where
     R: CheckedFusionAlgebra,
 {
-    let (is_codomain, local_position) = unit_insertion_side(smaller.0, insertion)
-        .ok_or(CoreError::UnitLayoutCorrespondence)?;
+    let (is_codomain, local_position) =
+        unit_insertion_side(smaller.0, insertion).ok_or(CoreError::UnitLayoutCorrespondence)?;
     if larger.0.rank() != smaller.0.rank() + 1 || larger.1.rank() != smaller.1.rank() + 1 {
         return Err(CoreError::UnitLayoutCorrespondence.into());
     }
     let smaller_validated = StructurallyValidatedFusionTreeSubset::try_new(smaller.0, smaller.1)?;
     let larger_validated = StructurallyValidatedFusionTreeSubset::try_new(larger.0, larger.1)?;
-    smaller_validated
-        .validate_for_rule_checked(rule)?;
+    smaller_validated.validate_for_rule_checked(rule)?;
     larger_validated.validate_for_rule_checked(rule)?;
     validate_unit_layout_correspondence_after_preflight(
         FusionRule::vacuum(rule),
@@ -239,8 +232,8 @@ pub fn validate_unit_layout_correspondence_generic_checked<R>(
 where
     R: CheckedGenericFusion,
 {
-    let (is_codomain, local_position) = unit_insertion_side(smaller.0, insertion)
-        .ok_or(CoreError::UnitLayoutCorrespondence)?;
+    let (is_codomain, local_position) =
+        unit_insertion_side(smaller.0, insertion).ok_or(CoreError::UnitLayoutCorrespondence)?;
     if larger.0.rank() != smaller.0.rank() + 1 || larger.1.rank() != smaller.1.rank() + 1 {
         return Err(CoreError::UnitLayoutCorrespondence.into());
     }
@@ -266,8 +259,12 @@ fn unit_insertion_side(
         return None;
     }
     match insertion {
-        UnitLegInsertion::Left { .. } if position < homspace.codomain().len() => Some((true, position)),
-        UnitLegInsertion::Right { .. } if position <= homspace.codomain().len() => Some((true, position)),
+        UnitLegInsertion::Left { .. } if position < homspace.codomain().len() => {
+            Some((true, position))
+        }
+        UnitLegInsertion::Right { .. } if position <= homspace.codomain().len() => {
+            Some((true, position))
+        }
         _ => Some((false, position - homspace.codomain().len())),
     }
 }
@@ -280,8 +277,7 @@ fn validate_unit_layout_correspondence_after_preflight(
     insertion: UnitLegInsertion,
     is_codomain: bool,
     local_position: usize,
-) -> Result<(), CoreError>
-{
+) -> Result<(), CoreError> {
     let (smaller_homspace, smaller_structure) = smaller;
     let (larger_homspace, larger_structure) = larger;
     let (smaller_side, larger_side, smaller_other, larger_other) = if is_codomain {
@@ -318,7 +314,9 @@ fn validate_unit_layout_correspondence_after_preflight(
         {
             return Err(CoreError::UnitLayoutCorrespondence);
         }
-        let (BlockKey::FusionTree(small_key), BlockKey::FusionTree(large_key)) = (small.key(), large.key()) else {
+        let (BlockKey::FusionTree(small_key), BlockKey::FusionTree(large_key)) =
+            (small.key(), large.key())
+        else {
             return Err(CoreError::UnitLayoutCorrespondence);
         };
         let (small_tree, large_tree) = if is_codomain {
@@ -332,7 +330,13 @@ fn validate_unit_layout_correspondence_after_preflight(
             (small_key.codomain_tree(), large_key.codomain_tree())
         };
         if small_other != large_other
-            || !unit_tree_matches(unit, small_tree, large_tree, local_position, insertion.dual())
+            || !unit_tree_matches(
+                unit,
+                small_tree,
+                large_tree,
+                local_position,
+                insertion.dual(),
+            )
         {
             return Err(CoreError::UnitLayoutCorrespondence);
         }

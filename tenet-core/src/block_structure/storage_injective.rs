@@ -48,17 +48,17 @@ pub fn validate_block_storage_injective(structure: &BlockStructure) -> Result<()
         else {
             continue;
         };
-        let proven_injective =
-            block_layout_is_proven_injective(layout.shape(), layout.strides());
+        let proven_injective = block_layout_is_proven_injective(layout.shape(), layout.strides());
         if !proven_injective {
             #[cfg(test)]
             EXACT_STORAGE_FALLBACKS.with(|count| count.set(count.get() + 1));
             let mut offsets = FxHashMap::<usize, ()>::default();
-            if let Some(offset) =
-                visit_block_layout_offsets(layout.shape(), layout.strides(), layout.offset(), |at| {
-                    offsets.insert(at, ()).is_some()
-                })?
-            {
+            if let Some(offset) = visit_block_layout_offsets(
+                layout.shape(),
+                layout.strides(),
+                layout.offset(),
+                |at| offsets.insert(at, ()).is_some(),
+            )? {
                 return Err(CoreError::OverlappingBlockStorage {
                     first_block: block,
                     second_block: block,
@@ -66,11 +66,7 @@ pub fn validate_block_storage_injective(structure: &BlockStructure) -> Result<()
                 });
             }
         }
-        bounded.push(BoundedBlock {
-            block,
-            start,
-            end,
-        });
+        bounded.push(BoundedBlock { block, start, end });
     }
     bounded.sort_by_key(|entry| entry.start);
 

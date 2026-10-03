@@ -89,14 +89,15 @@ pub(crate) fn hom_space_intern_table() -> &'static RwLock<HomSpaceInternTable> {
     static TABLE: OnceLock<RwLock<HomSpaceInternTable>> = OnceLock::new();
     TABLE.get_or_init(|| {
         RwLock::new(HomSpaceInternTable {
-            entries: lru::LruCache::new(
-                std::num::NonZeroUsize::new(HOM_SPACE_INTERN_CAP).unwrap(),
-            ),
+            entries: lru::LruCache::new(std::num::NonZeroUsize::new(HOM_SPACE_INTERN_CAP).unwrap()),
         })
     })
 }
 
-pub(super) fn intern_hom_space(codomain: &FusionProductSpace, domain: &FusionProductSpace) -> HomSpaceId {
+pub(super) fn intern_hom_space(
+    codomain: &FusionProductSpace,
+    domain: &FusionProductSpace,
+) -> HomSpaceId {
     #[cfg(test)]
     HOM_SPACE_INTERN_CALLS.set(HOM_SPACE_INTERN_CALLS.get() + 1);
     let key = HomSpaceInternKey {

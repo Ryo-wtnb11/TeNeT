@@ -62,7 +62,10 @@ impl<E: fmt::Display> fmt::Display for CheckedGenericSymbolError<E> {
                 symbol,
                 expected,
                 actual,
-            } => write!(formatter, "{symbol} shape mismatch: expected {expected:?}, got {actual:?}"),
+            } => write!(
+                formatter,
+                "{symbol} shape mismatch: expected {expected:?}, got {actual:?}"
+            ),
             Self::Core(error) => error.fmt(formatter),
         }
     }
@@ -102,8 +105,20 @@ pub(crate) trait GenericFRAccess {
     fn vacuum(&self) -> SectorId;
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error>;
     fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error>;
-    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error>;
-    fn try_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error>;
+    fn try_fusion_channels_in_table(
+        &self,
+        a: SectorId,
+        b: SectorId,
+    ) -> Result<SectorVec, Self::Error>;
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error>;
     fn try_validated_f_symbol_generic(
         &self,
         a: SectorId,
@@ -113,7 +128,12 @@ pub(crate) trait GenericFRAccess {
         e: SectorId,
         f: SectorId,
     ) -> Result<GenericFArray<Self::Scalar>, CheckedGenericSymbolError<Self::Error>>;
-    fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error>;
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error>;
 }
 
 pub(crate) trait GenericRigidAccess: GenericFRAccess {
@@ -147,29 +167,115 @@ where
 {
     type Scalar = R::Scalar;
     type Error = std::convert::Infallible;
-    fn fusion_style(&self) -> FusionStyleKind { self.0.fusion_style() }
-    fn braiding_style(&self) -> BraidingStyleKind { self.0.braiding_style() }
-    fn vacuum(&self) -> SectorId { self.0.vacuum() }
-    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> { Ok(self.0.dual(sector)) }
-    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.0.nsymbol(a, b, c)) }
-    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels(a, b)) }
-    fn try_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
-    fn try_validated_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
-    fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { Ok(self.0.r_symbol_generic(a,b,c)) }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.0.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.0.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.0.vacuum()
+    }
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        Ok(self.0.dual(sector))
+    }
+    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> {
+        Ok(self.0.nsymbol(a, b, c))
+    }
+    fn try_fusion_channels_in_table(
+        &self,
+        a: SectorId,
+        b: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        Ok(self.0.fusion_channels(a, b))
+    }
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+        Ok(self.0.f_symbol_generic(a, b, c, d, e, f))
+    }
+    fn try_validated_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> {
+        Ok(self.0.f_symbol_generic(a, b, c, d, e, f))
+    }
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+        Ok(self.0.r_symbol_generic(a, b, c))
+    }
 }
 
 impl<P: CheckedGenericRigidSymbols> GenericFRAccess for P {
     type Scalar = P::Scalar;
     type Error = P::Error;
-    fn fusion_style(&self) -> FusionStyleKind { CheckedGenericFusion::fusion_style(self) }
-    fn braiding_style(&self) -> BraidingStyleKind { CheckedGenericFusion::braiding_style(self) }
-    fn vacuum(&self) -> SectorId { CheckedGenericFusion::vacuum(self) }
-    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> { CheckedGenericFusion::try_dual(self, sector) }
-    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { CheckedGenericFusion::try_nsymbol(self,a,b,c) }
-    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { CheckedGenericFusion::try_fusion_channels_in_table(self,a,b) }
-    fn try_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { CheckedGenericRigidSymbols::try_f_symbol_generic(self,a,b,c,d,e,f) }
-    fn try_validated_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> { checked_generic_f_symbol(self,a,b,c,d,e,f) }
-    fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { CheckedGenericRigidSymbols::try_r_symbol_generic(self,a,b,c) }
+    fn fusion_style(&self) -> FusionStyleKind {
+        CheckedGenericFusion::fusion_style(self)
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        CheckedGenericFusion::braiding_style(self)
+    }
+    fn vacuum(&self) -> SectorId {
+        CheckedGenericFusion::vacuum(self)
+    }
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        CheckedGenericFusion::try_dual(self, sector)
+    }
+    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> {
+        CheckedGenericFusion::try_nsymbol(self, a, b, c)
+    }
+    fn try_fusion_channels_in_table(
+        &self,
+        a: SectorId,
+        b: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        CheckedGenericFusion::try_fusion_channels_in_table(self, a, b)
+    }
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+        CheckedGenericRigidSymbols::try_f_symbol_generic(self, a, b, c, d, e, f)
+    }
+    fn try_validated_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> {
+        checked_generic_f_symbol(self, a, b, c, d, e, f)
+    }
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+        CheckedGenericRigidSymbols::try_r_symbol_generic(self, a, b, c)
+    }
 }
 
 pub(super) struct InfallibleGenericRigid<'a, R>(pub(super) &'a R);
@@ -181,15 +287,58 @@ where
 {
     type Scalar = R::Scalar;
     type Error = std::convert::Infallible;
-    fn fusion_style(&self) -> FusionStyleKind { self.0.fusion_style() }
-    fn braiding_style(&self) -> BraidingStyleKind { self.0.braiding_style() }
-    fn vacuum(&self) -> SectorId { self.0.vacuum() }
-    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> { Ok(self.0.dual(sector)) }
-    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.0.nsymbol(a, b, c)) }
-    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels(a, b)) }
-    fn try_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
-    fn try_validated_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
-    fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { Ok(self.0.r_symbol_generic(a,b,c)) }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.0.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.0.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.0.vacuum()
+    }
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        Ok(self.0.dual(sector))
+    }
+    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> {
+        Ok(self.0.nsymbol(a, b, c))
+    }
+    fn try_fusion_channels_in_table(
+        &self,
+        a: SectorId,
+        b: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        Ok(self.0.fusion_channels(a, b))
+    }
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+        Ok(self.0.f_symbol_generic(a, b, c, d, e, f))
+    }
+    fn try_validated_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> {
+        Ok(self.0.f_symbol_generic(a, b, c, d, e, f))
+    }
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+        Ok(self.0.r_symbol_generic(a, b, c))
+    }
 }
 
 impl<R> GenericRigidAccess for InfallibleGenericRigid<'_, R>
@@ -306,9 +455,7 @@ pub(super) fn map_checked_generic_structure_error<E>(
     error: CheckedGenericStructureError<E>,
 ) -> CheckedGenericSymbolError<E> {
     match error {
-        CheckedGenericStructureError::Provider(error) => {
-            CheckedGenericSymbolError::Provider(error)
-        }
+        CheckedGenericStructureError::Provider(error) => CheckedGenericSymbolError::Provider(error),
         CheckedGenericStructureError::Core(error) => CheckedGenericSymbolError::Core(error),
     }
 }
@@ -358,13 +505,10 @@ pub(super) fn checked_generic_r_symbol<C>(
 where
     C: GenericFRAccess,
 {
-    let expected = [
-        rule.try_nsymbol(a, b, c),
-        rule.try_nsymbol(b, a, c),
-    ]
-    .into_iter()
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(CheckedGenericSymbolError::Provider)?;
+    let expected = [rule.try_nsymbol(a, b, c), rule.try_nsymbol(b, a, c)]
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(CheckedGenericSymbolError::Provider)?;
     let symbol = rule
         .try_r_symbol_generic(a, b, c)
         .map_err(CheckedGenericSymbolError::Provider)?;
@@ -453,10 +597,7 @@ where
     let mut data = Vec::with_capacity(rows * cols);
     for kappa in 0..rows {
         for lambda in 0..cols {
-            data.push(
-                factor.clone()
-                    * (fs.clone() * f.get(0, 0, kappa, lambda).clone()).conj(),
-            );
+            data.push(factor.clone() * (fs.clone() * f.get(0, 0, kappa, lambda).clone()).conj());
         }
     }
     Ok(GenericRMatrix::new(data, rows, cols))

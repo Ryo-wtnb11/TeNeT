@@ -14,11 +14,15 @@ pub(super) fn prepare_multiplicity_free_foldright<R>(
 where
     R: MultiplicityFreeRigidSymbols,
 {
-    let first = frame.codomain.uncoupled.first().copied().ok_or(
-        CoreError::MalformedFusionTree {
-            message: "foldright requires at least one codomain leg",
-        },
-    )?;
+    let first =
+        frame
+            .codomain
+            .uncoupled
+            .first()
+            .copied()
+            .ok_or(CoreError::MalformedFusionTree {
+                message: "foldright requires at least one codomain leg",
+            })?;
     let first_is_dual =
         frame
             .codomain
@@ -188,12 +192,7 @@ fn collect_multiplicity_free_tree_locals_for_coupled<R>(
 where
     R: MultiplicityFreeFusionRule,
 {
-    collect_multiplicity_free_tree_locals_for_coupled_where(
-        rule,
-        effective,
-        coupled,
-        |_, _| true,
-    )
+    collect_multiplicity_free_tree_locals_for_coupled_where(rule, effective, coupled, |_, _| true)
 }
 
 fn collect_multiplicity_free_tree_locals_for_coupled_where<R, P>(
@@ -278,8 +277,7 @@ where
 {
     let mut targets = SectorVec::with_capacity(long_uncoupled.len().saturating_sub(2));
     for leg_index in 2..long_uncoupled.len() {
-        let (_, right) =
-            fusion_tree_vertex_neighbors_from_parts(long_uncoupled, long, leg_index)?;
+        let (_, right) = fusion_tree_vertex_neighbors_from_parts(long_uncoupled, long, leg_index)?;
         targets.push(right);
     }
     Ok(targets)
@@ -316,11 +314,7 @@ where
     R: MultiplicityFreeFusionRule,
 {
     tail_prefix_len < 2
-        || rule.nsymbol(
-            leading,
-            tail_prefix_coupled,
-            targets[tail_prefix_len - 2],
-        ) != 0
+        || rule.nsymbol(leading, tail_prefix_coupled, targets[tail_prefix_len - 2]) != 0
 }
 
 #[inline]
@@ -387,8 +381,7 @@ where
     let coupled = local.coupled;
     let tail_uncoupled = &frame.uncoupled[1..];
     let tail_is_dual = &frame.is_dual[1..];
-    let prefix_targets =
-        multiplicity_free_forward_prefix_targets(&frame.uncoupled, local)?;
+    let prefix_targets = multiplicity_free_forward_prefix_targets(&frame.uncoupled, local)?;
     let mut candidates = Vec::new();
     for tail_coupled in rule.fusion_channels(rule.dual(first), coupled) {
         candidates.extend(collect_multiplicity_free_tree_locals_for_coupled_where(
@@ -453,8 +446,7 @@ where
         });
     }
 
-    let prefix_targets =
-        multiplicity_free_inverse_prefix_targets(&source_frame.uncoupled, source)?;
+    let prefix_targets = multiplicity_free_inverse_prefix_targets(&source_frame.uncoupled, source)?;
     let candidates = collect_multiplicity_free_tree_locals_for_coupled_where(
         rule,
         &output_frame.uncoupled,
@@ -607,14 +599,7 @@ where
             return Ok(None);
         }
         coefficient = coefficient
-            * rule.f_symbol_scalar(
-                first,
-                middle,
-                right,
-                coupled,
-                left_coupled,
-                right_coupled,
-            );
+            * rule.f_symbol_scalar(first, middle, right, coupled, left_coupled, right_coupled);
     }
     Ok(Some(coefficient))
 }
@@ -982,12 +967,8 @@ where
             fusion_tree_vertex_neighbors_from_parts(long_uncoupled, long, tensor_kit_k)?;
         let (short_left, short_right) =
             fusion_tree_vertex_neighbors_from_parts(short_uncoupled, short, tensor_kit_k - 1)?;
-        if !multi_associator_new_cross_channel_is_admissible(
-            rule,
-            first,
-            short_right,
-            middle_right,
-        ) {
+        if !multi_associator_new_cross_channel_is_admissible(rule, first, short_right, middle_right)
+        {
             return Ok(None);
         }
         coefficient = coefficient

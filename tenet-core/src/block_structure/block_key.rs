@@ -201,7 +201,6 @@ impl FusionTreePairKey {
             Arc::clone(&self.domain_tree.is_dual),
         )
     }
-
 }
 
 /// Application-defined block identity with no categorical interpretation.

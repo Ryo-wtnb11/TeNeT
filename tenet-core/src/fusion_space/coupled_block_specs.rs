@@ -46,8 +46,7 @@ pub(crate) fn coupled_subblock_parts_from_leg_degeneracies(
 
     let sector_structure =
         SectorStructure::from_keys(rank, layout.keys.iter().cloned().map(BlockKey::from))?;
-    let degeneracy_structure =
-        DegeneracyStructure::from_blocks_with_rank(rank, degeneracy_blocks)?;
+    let degeneracy_structure = DegeneracyStructure::from_blocks_with_rank(rank, degeneracy_blocks)?;
     Ok((sector_structure, degeneracy_structure))
 }
 
@@ -241,9 +240,7 @@ where
     while run_start < keys.len() {
         let coupled = keys[run_start].borrow().codomain_tree().coupled();
         let mut run_end = run_start;
-        while run_end < keys.len()
-            && keys[run_end].borrow().codomain_tree().coupled() == coupled
-        {
+        while run_end < keys.len() && keys[run_end].borrow().codomain_tree().coupled() == coupled {
             if keys[run_end].borrow().domain_tree().coupled() != coupled {
                 return Err(CoreError::MalformedFusionTree {
                     message: "codomain and domain trees must share the coupled sector",
