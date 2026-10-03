@@ -370,6 +370,7 @@ fn checked_compact_diagonal_svd_compact_preserves_fallback_error_order() {
         ))
     ));
     assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(svd_calls.total(), 0);
 
     provider.invalid_style.store(false, Ordering::Relaxed);
     provider.fail_algebra.store(true, Ordering::Relaxed);
@@ -379,6 +380,7 @@ fn checked_compact_diagonal_svd_compact_preserves_fallback_error_order() {
     let expected = dense.svd_full(&[0], &[1]).unwrap_err();
     let expected_queries = provider.queries_since_reset.load(Ordering::Relaxed);
     assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(svd_calls.total(), 0);
     reset_provider_queries(provider.as_ref());
     svd_calls.reset();
     let actual = finite.svd_full(&[0], &[1]).unwrap_err();
@@ -388,6 +390,7 @@ fn checked_compact_diagonal_svd_compact_preserves_fallback_error_order() {
         expected_queries
     );
     assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(svd_calls.total(), 0);
 }
 
 #[test]

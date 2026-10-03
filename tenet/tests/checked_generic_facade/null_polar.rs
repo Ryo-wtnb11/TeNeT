@@ -308,6 +308,7 @@ fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
         }
         assert_eq!(svd_calls.of(PINV_SVD), expected_svd);
         assert_eq!(gemm_calls.of(Kernel::GEMM), expected_gemm);
+        assert_eq!(svd_calls.total(), expected_svd + expected_gemm);
         assert_eq!(source.dense_data().unwrap(), before.as_slice());
     }
 }
@@ -349,6 +350,7 @@ fn checked_only_compact_diagonal_polar_is_direct_and_keeps_dense_fallback() {
         };
         assert_eq!(svd_calls.of(PINV_SVD), 0);
         assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+        assert_eq!(gemm_calls.total(), 0);
         assert!(std::ptr::eq(w.provider(), provider.as_ref()));
         assert!(std::ptr::eq(p.provider(), provider.as_ref()));
         assert_eq!(w.codomain(), source.codomain());
@@ -449,6 +451,7 @@ fn checked_only_compact_diagonal_polar_is_direct_and_keeps_dense_fallback() {
     );
     assert_eq!(svd_calls.of(PINV_SVD), 0);
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+    assert_eq!(gemm_calls.total(), 0);
 
     for bad_value in [
         Complex64::new(f64::NAN, 0.0),
@@ -523,6 +526,7 @@ fn checked_generic_lazy_polar_second_svd_failure_keeps_parent_unchanged() {
         ));
         assert_eq!(svd_calls.of(PINV_SVD), 2);
         assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+        assert_eq!(gemm_calls.total(), 2);
         assert_eq!(source.dense_data().unwrap(), before.as_slice());
     }
 }
@@ -560,6 +564,7 @@ fn checked_generic_polar_provider_error_precedes_dense_work() {
     ));
     assert_eq!(svd_calls.of(PINV_SVD), 0);
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+    assert_eq!(gemm_calls.total(), 0);
     assert_eq!(source.dense_data().unwrap(), before);
     assert!(matches!(
         refused_compact.left_polar(&[0], &[1]),
@@ -569,6 +574,7 @@ fn checked_generic_polar_provider_error_precedes_dense_work() {
     ));
     assert_eq!(svd_calls.of(PINV_SVD), 0);
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+    assert_eq!(gemm_calls.total(), 0);
 }
 
 #[test]

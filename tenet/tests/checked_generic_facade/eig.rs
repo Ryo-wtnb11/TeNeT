@@ -586,6 +586,7 @@ fn checked_generic_eigh_preflights_all_sectors_and_runs_once_per_sector() {
         .unwrap();
     assert!(nonhermitian.eigh_full(&[0], &[1]).is_err());
     assert_eq!(calls.of(EIGH_OWNED), 0);
+    assert_eq!(calls.total(), 0);
 }
 
 #[test]

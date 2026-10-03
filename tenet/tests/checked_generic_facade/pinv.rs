@@ -354,6 +354,7 @@ fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
         }
         assert_eq!(svd_calls.of(PINV_SVD), expected_svd);
         assert_eq!(gemm_calls.of(Kernel::GEMM), expected_gemm);
+        assert_eq!(svd_calls.total(), expected_svd + expected_gemm);
         assert_eq!(source.dense_data().unwrap(), before.as_slice());
     }
 }
@@ -469,6 +470,7 @@ fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
     assert!(result.dense_data().is_err());
     assert_eq!(svd_calls.of(PINV_SVD), 0);
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+    assert_eq!(gemm_calls.total(), 0);
 
     provider.invalid_style.store(true, Ordering::Relaxed);
     assert!(matches!(
@@ -484,6 +486,7 @@ fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
     provider.invalid_style.store(false, Ordering::Relaxed);
     assert_eq!(svd_calls.of(PINV_SVD), 0);
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+    assert_eq!(gemm_calls.total(), 0);
 
     let complex: TensorMap<_, Complex64> = TensorMap::diagonal(
         &runtime,
@@ -525,6 +528,7 @@ fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
     assert!(complex_result.dense_data().is_err());
     assert_eq!(svd_calls.of(PINV_SVD), 0);
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+    assert_eq!(gemm_calls.total(), 0);
 
     let dual_bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)])
         .unwrap()
@@ -547,6 +551,7 @@ fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
     assert!(dual_result.dense_data().is_err());
     assert_eq!(svd_calls.of(PINV_SVD), 0);
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+    assert_eq!(gemm_calls.total(), 0);
 }
 
 #[test]
@@ -777,6 +782,7 @@ fn checked_generic_pinv_normalized_empty_skips_dense_execution() {
     assert!(std::ptr::eq(pseudo.provider(), provider.as_ref()));
     assert_eq!(svd_calls.of(PINV_SVD), 0);
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
+    assert_eq!(gemm_calls.total(), 0);
 }
 
 #[cfg(feature = "racah-generated")]

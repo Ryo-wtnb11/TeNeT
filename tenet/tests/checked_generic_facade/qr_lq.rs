@@ -132,6 +132,7 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
         assert_factors(&q, &l);
     }
     assert_eq!(calls.of(Kernel::QR), 0);
+    assert_eq!(calls.total(), 0);
 
     let narrow = input.convert::<Complex32>();
     for factor in [
@@ -238,6 +239,7 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
         assert_eq!(factor.domain(), dual.domain());
     }
     assert_eq!(calls.of(Kernel::QR), 0);
+    assert_eq!(calls.total(), 0);
 
     // Materialized dual input keeps the dense route and its fresh nondual W.
     let dense_dual = dual.materialize().unwrap();
@@ -454,7 +456,7 @@ macro_rules! assert_dual_diagonal_qr_lq {
         let source = input.diagview().unwrap();
         let dense = input.materialize().unwrap();
         let identity = TensorMap::isomorphism(&$runtime, [bond], [bond]).unwrap();
-        let before = $calls.of(Kernel::QR);
+        let before = $calls.total();
         let results = [
             input.qr_compact(&[0], &[1]).map(|Qr { q, r }| (q, r, true)),
             input.qr_full(&[0], &[1]).map(|Qr { q, r }| (q, r, true)),
@@ -463,7 +465,7 @@ macro_rules! assert_dual_diagonal_qr_lq {
                 .map(|Lq { l, q }| (q, l, false)),
             input.lq_full(&[0], &[1]).map(|Lq { l, q }| (q, l, false)),
         ];
-        assert_eq!($calls.of(Kernel::QR), before);
+        assert_eq!($calls.total(), before);
         for result in results {
             let (phase, magnitude, qr) = result.unwrap();
             for factor in [&phase, &magnitude] {
@@ -609,6 +611,7 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
     // The compact adjoint of an admitted diagonal is itself admitted.
     assert_dual_diagonal_qr_lq!(runtime, u1_complex.adjoint().unwrap(), calls);
     assert_eq!(calls.of(Kernel::QR), 0);
+    assert_eq!(calls.total(), 0);
 
     // Swapped leg roles: checked `permute` publishes a dense `V' <- V'`
     // view, so QR/LQ keep the dense route and its nondual W.
@@ -680,7 +683,7 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
 
     // A lazy adjoint of a dense dual tensor keeps its typed refusal.
     let lazy = u1_real.materialize().unwrap().adjoint().unwrap();
-    let before = calls.of(Kernel::QR);
+    let before = calls.total();
     for error in [
         lazy.qr_compact(&[0], &[1]).err(),
         lazy.qr_full(&[0], &[1]).err(),
@@ -697,7 +700,7 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
             ))
         ));
     }
-    assert_eq!(calls.of(Kernel::QR), before);
+    assert_eq!(calls.total(), before);
 }
 
 /// Provider failures during admission keep their typed error and publish no
@@ -751,6 +754,7 @@ fn checked_dual_diagonal_qr_lq_propagates_output_provider_errors() {
         }
     }
     assert_eq!(calls.of(Kernel::QR), 0);
+    assert_eq!(calls.total(), 0);
 }
 
 #[cfg(feature = "racah-generated")]

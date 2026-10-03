@@ -45,6 +45,7 @@ fn compact_diagonal_svd_submits_no_dense_svd() {
     .unwrap();
     let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
     assert_eq!(read(&counts), (0, 0, 0, 0));
+    assert_eq!(counts.total(), 0);
     let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
     for (actual, expected) in rebuilt
         .dense_data()
@@ -143,11 +144,17 @@ fn compact_diagonal_exp_drives_no_dense_kernel() {
     assert!(svd > 0, "the fixture never reached the injected backend");
 
     let before = read(&counts);
+    let before_total = counts.total();
     let image = s.exp(&[0], &[1]).unwrap();
     let (_, eigh, gemm, solve) = read(&counts);
     assert_eq!(
         (eigh, gemm, solve),
         (before.1, before.2, before.3),
+        "compact exp drove a dense kernel"
+    );
+    assert_eq!(
+        counts.total(),
+        before_total,
         "compact exp drove a dense kernel"
     );
 
