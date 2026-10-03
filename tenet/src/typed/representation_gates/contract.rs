@@ -1,0 +1,120 @@
+use super::*;
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_generic_contract_reuses_one_runtime_generic_lane() {
+    use tenet_core::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1_i64, 1_i64], 1)]).unwrap();
+    let tensor: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
+            trees.codomain_vertices()[0].get() as f64
+        })
+        .unwrap();
+    let identity: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
+
+    for _ in 0..2 {
+        let output = tensor
+            .contract(
+                &identity,
+                &ContractSpec {
+                    lhs: &[2],
+                    rhs: &[0],
+                    codomain: &[0, 1],
+                    domain: &[2],
+                },
+            )
+            .unwrap();
+        assert_eq!(output.dense_data().unwrap(), tensor.dense_data().unwrap());
+        assert!(std::ptr::eq(output.provider(), provider.as_ref()));
+    }
+
+    let mut lease = runtime.lease_context().unwrap();
+    let context = lease.context();
+    assert_eq!(context.generic_lane_uses(), 2);
+}
+
+#[test]
+fn coupled_region_inner_rejects_malformed_scalar_range() {
+    let tensor = su2_lazy_fixture();
+    let structure = owned(&tensor).space.space().structure();
+    let data = tensor.dense_data().unwrap();
+    let error = coupled_region_inner(
+        structure,
+        owned(&tensor).space.space().nout(),
+        &data[..data.len() - 1],
+        data,
+        |_| Ok::<_, Error>(1.0),
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::InvalidArgument(message) if
+        message.contains("internal coupled-layout invariant violated")));
+}
+
+#[test]
+fn coupled_region_inner_keeps_empty_and_non_fusion_boundaries() {
+    let empty = BlockStructure::empty(3);
+    assert_eq!(
+        coupled_region_inner::<f64, _, Error>(&empty, 1, &[], &[], |_| Ok(7.0)).unwrap(),
+        Complex64::new(0.0, 0.0)
+    );
+
+    let trivial = BlockStructure::trivial(&[2, 2]).unwrap();
+    let error = coupled_region_inner(&trivial, 1, &[1.0; 4], &[1.0; 4], |_| Ok::<_, Error>(1.0))
+        .unwrap_err();
+    assert!(matches!(error, Error::InvalidArgument(message) if
+        message.contains("non-packed coupled-sector layout")));
+}
+
+#[test]
+fn weighted_trace_keeps_misaligned_and_nonpacked_layouts_on_the_literal_walk() {
+    let tree = |dual| {
+        FusionTreeKey::try_from_sector_ids_for_rule(&Z2FusionRule, [0], 0, [dual], [], []).unwrap()
+    };
+    let (a, b) = (tree(false), tree(true));
+    let block = |row: &FusionTreeKey, col: &FusionTreeKey, offset| {
+        BlockSpec::with_key(
+            BlockKey::FusionTree(FusionTreePairKey::pair(row.clone(), col.clone())),
+            vec![1, 1],
+            vec![1, 2],
+            offset,
+        )
+        .unwrap()
+    };
+    // The packed matrix's logical row order is [a, b] while its columns
+    // are [b, a]; its two literal diagonal blocks occur b then a.
+    let misaligned = BlockStructure::from_blocks(vec![
+        block(&a, &b, 0),
+        block(&b, &b, 1),
+        block(&a, &a, 2),
+        block(&b, &a, 3),
+    ])
+    .unwrap();
+    assert!(!misaligned.coupled_sector_regions(1).unwrap().unwrap()[0].has_aligned_diagonal());
+    let mut weights = Vec::new();
+    let value = weighted_trace(&misaligned, 1, &[10.0, 20.0, 30.0, 40.0], |sector| {
+        weights.push(sector);
+        Ok::<_, Error>(2.0)
+    })
+    .unwrap();
+    assert_eq!(value, Complex64::new(100.0, 0.0));
+    assert_eq!(weights, vec![SectorId::new(0), SectorId::new(0)]);
+
+    let nonpacked = BlockStructure::from_blocks(vec![BlockSpec::with_key(
+        BlockKey::FusionTree(FusionTreePairKey::pair(a.clone(), a)),
+        vec![2, 2],
+        vec![2, 4],
+        0,
+    )
+    .unwrap()])
+    .unwrap();
+    assert_eq!(nonpacked.coupled_sector_regions(1).unwrap(), None);
+    let value = weighted_trace(&nonpacked, 1, &[3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0], |_| {
+        Ok::<_, Error>(2.0)
+    })
+    .unwrap();
+    assert_eq!(value, Complex64::new(16.0, 0.0));
+}
