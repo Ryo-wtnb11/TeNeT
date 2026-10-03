@@ -1,3 +1,5 @@
+use super::*;
+
 /// Proof that one exact [`BlockStructure`] is categorically valid for `rule`.
 ///
 /// This proof is deliberately LOCAL: it covers tree shape, fusion and
@@ -11,7 +13,7 @@
 /// documentation.
 #[doc(hidden)]
 pub struct LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R> {
-    rule: &'rule R,
+    pub(crate) rule: &'rule R,
     structure: &'structure BlockStructure,
 }
 
@@ -447,7 +449,7 @@ impl<'rule, 'structure, R> LocallyValidatedFusionTreeBlockStructure<'rule, 'stru
 where
     R: FusionRule,
 {
-    fn required_fusion_tree_pair_key(
+    pub(crate) fn required_fusion_tree_pair_key(
         &self,
         index: usize,
     ) -> Result<&'structure FusionTreePairKey, CoreError> {

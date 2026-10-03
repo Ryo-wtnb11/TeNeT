@@ -1,7 +1,9 @@
+use super::*;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockRef<'a> {
-    key: &'a BlockKey,
-    degeneracy: &'a DegeneracyBlock,
+    pub(super) key: &'a BlockKey,
+    pub(super) degeneracy: &'a DegeneracyBlock,
 }
 
 impl<'a> BlockRef<'a> {
@@ -37,9 +39,9 @@ impl<'a> BlockRef<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// One fusion tree's contiguous row or column extent inside a coupled-sector matrix.
 pub struct CoupledTreeExtent {
-    tree: FusionTreeKey,
-    offset: usize,
-    shape: DimVec,
+    pub(super) tree: FusionTreeKey,
+    pub(super) offset: usize,
+    pub(super) shape: DimVec,
 }
 
 impl CoupledTreeExtent {
@@ -67,14 +69,14 @@ impl CoupledTreeExtent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Checked contiguous column-major storage region for one coupled sector.
 pub struct CoupledSectorRegion {
-    coupled: SectorId,
-    rows: usize,
-    cols: usize,
-    range: core::ops::Range<usize>,
+    pub(super) coupled: SectorId,
+    pub(super) rows: usize,
+    pub(super) cols: usize,
+    pub(super) range: core::ops::Range<usize>,
     /// Row trees, then column trees: one allocation per region.
-    trees: Box<[CoupledTreeExtent]>,
-    row_tree_count: usize,
-    aligned_diagonal: bool,
+    pub(super) trees: Box<[CoupledTreeExtent]>,
+    pub(super) row_tree_count: usize,
+    pub(super) aligned_diagonal: bool,
 }
 
 impl CoupledSectorRegion {
@@ -116,10 +118,10 @@ impl CoupledSectorRegion {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct BlockStructureContentBlock {
-    key: BlockKey,
-    shape: DimVec,
-    strides: DimVec,
-    offset: usize,
+    pub(crate) key: BlockKey,
+    pub(crate) shape: DimVec,
+    pub(crate) strides: DimVec,
+    pub(crate) offset: usize,
 }
 
 impl BlockStructureContentBlock {
@@ -145,16 +147,16 @@ impl BlockStructureContentBlock {
 }
 
 type CoupledRegionResult = Result<Option<Arc<[CoupledSectorRegion]>>, CoreError>;
-type CoupledRegionCache = Arc<[OnceLock<CoupledRegionResult>]>;
+pub(super) type CoupledRegionCache = Arc<[OnceLock<CoupledRegionResult>]>;
 
 #[derive(Clone, Eq)]
 pub struct BlockStructureContent {
-    id: usize,
-    sector: SectorStructure,
-    degeneracy: DegeneracyStructure,
-    blocks: Arc<[BlockStructureContentBlock]>,
-    required_len: usize,
-    storage_tiling: StorageTilingProof,
+    pub(crate) id: usize,
+    pub(crate) sector: SectorStructure,
+    pub(crate) degeneracy: DegeneracyStructure,
+    pub(crate) blocks: Arc<[BlockStructureContentBlock]>,
+    pub(crate) required_len: usize,
+    pub(crate) storage_tiling: StorageTilingProof,
 }
 
 /// Set once a constructor proved that the blocks' reachable offsets partition
@@ -164,7 +166,7 @@ pub struct BlockStructureContent {
 /// general check (`coupled_sector_regions`) allocates and hashes, and is
 /// cached on the short-lived wrapper, not on this interned content.
 #[derive(Debug, Default)]
-struct StorageTilingProof(core::sync::atomic::AtomicBool);
+pub(crate) struct StorageTilingProof(core::sync::atomic::AtomicBool);
 
 // A derived fact about the compared geometry, never part of equality.
 impl PartialEq for StorageTilingProof {
@@ -233,7 +235,7 @@ impl BlockStructureContent {
     /// so that the blocks are pairwise disjoint and each reaches its offsets
     /// once; the element counts are checked here to sum to `required_len`, so
     /// the disjoint blocks cover all of it.
-    fn record_storage_tiling(&self) {
+    pub(super) fn record_storage_tiling(&self) {
         let covered = self.blocks.iter().try_fold(0usize, |total, block| {
             block
                 .shape

@@ -1,8 +1,10 @@
+use super::*;
+
 /// Categorical identity of one codomain/domain fusion-tree basis pair.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FusionTreePairKey {
-    codomain_tree: FusionTreeKey,
-    domain_tree: FusionTreeKey,
+    pub(crate) codomain_tree: FusionTreeKey,
+    pub(crate) domain_tree: FusionTreeKey,
 }
 
 impl FusionTreePairKey {
@@ -208,7 +210,7 @@ impl FusionTreePairKey {
 /// a storage detail and never selects an execution path.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct OpaqueBlockKey {
-    words: SmallVec<[u64; 2]>,
+    pub(super) words: SmallVec<[u64; 2]>,
 }
 
 impl OpaqueBlockKey {
@@ -367,7 +369,7 @@ impl BlockKey {
         }
     }
 
-    fn compact_id(&self) -> Option<usize> {
+    pub(super) fn compact_id(&self) -> Option<usize> {
         match self {
             Self::Dense => Some(0),
             Self::Opaque(key) => key.compact_id(),

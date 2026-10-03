@@ -1,3 +1,5 @@
+use super::*;
+
 #[cfg(test)]
 thread_local! {
     static EXACT_STORAGE_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

@@ -1,3 +1,5 @@
+use super::*;
+
 use core::num::NonZeroUsize;
 
 /// One-based outer-multiplicity label at a fusion vertex.
@@ -69,19 +71,19 @@ struct SectorLegData {
     dual: OnceLock<Box<DualSectorMap>>,
 }
 
-struct DualSectorMap {
+pub(crate) struct DualSectorMap {
     /// `dual(sectors[i])` under the rule that filled this map.
-    images: Box<[SectorId]>,
+    pub(crate) images: Box<[SectorId]>,
     /// The sorted dual map, `None` when it equals the source map.
-    moved: Option<MovedSectorMap>,
+    pub(crate) moved: Option<MovedSectorMap>,
 }
 
-struct MovedSectorMap {
-    sectors: Box<[SectorId]>,
-    degeneracies: Box<[usize]>,
+pub(crate) struct MovedSectorMap {
+    pub(crate) sectors: Box<[SectorId]>,
+    pub(crate) degeneracies: Box<[usize]>,
     /// `dual(sectors[j])` under the filling rule: the source sector that
     /// `sectors[j]` is the dual of.
-    images: Box<[SectorId]>,
+    pub(crate) images: Box<[SectorId]>,
 }
 
 #[non_exhaustive]
@@ -439,7 +441,7 @@ impl SectorLeg {
 
     /// The dual leg once `map`, computed from this leg's own sectors, is
     /// offered to the shared storage.
-    fn install_dual_map(&self, map: DualSectorMap) -> Self {
+    pub(crate) fn install_dual_map(&self, map: DualSectorMap) -> Self {
         match self.data.dual.set(Box::new(map)) {
             Ok(()) => self.flipped(),
             // Another thread filled the map first; share it only when its
@@ -527,21 +529,21 @@ impl SectorLeg {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-struct FusionTreeLeg {
+pub(crate) struct FusionTreeLeg {
     sector: SectorId,
     is_dual: bool,
 }
 
 impl FusionTreeLeg {
-    const fn new(sector: SectorId, is_dual: bool) -> Self {
+    pub(crate) const fn new(sector: SectorId, is_dual: bool) -> Self {
         Self { sector, is_dual }
     }
 
-    const fn sector(self) -> SectorId {
+    pub(crate) const fn sector(self) -> SectorId {
         self.sector
     }
 
-    const fn is_dual(self) -> bool {
+    pub(crate) const fn is_dual(self) -> bool {
         self.is_dual
     }
 }

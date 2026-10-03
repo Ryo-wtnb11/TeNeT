@@ -1,7 +1,9 @@
+use super::*;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DegeneracyBlock {
-    shape: DimVec,
-    strides: DimVec,
+    pub(super) shape: DimVec,
+    pub(super) strides: DimVec,
     offset: usize,
 }
 
@@ -56,8 +58,8 @@ impl DegeneracyBlock {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DegeneracyStructure {
-    rank: usize,
-    blocks: Vec<DegeneracyBlock>,
+    pub(super) rank: usize,
+    pub(super) blocks: Vec<DegeneracyBlock>,
 }
 
 impl DegeneracyStructure {

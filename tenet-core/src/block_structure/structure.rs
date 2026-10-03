@@ -1,10 +1,12 @@
+use super::*;
+
 #[derive(Default)]
-struct BlockStructureRegionState {
+pub(crate) struct BlockStructureRegionState {
     coupled_region_cache: OnceLock<CoupledRegionCache>,
 }
 
 pub struct BlockStructure {
-    content: Arc<BlockStructureContent>,
+    pub(super) content: Arc<BlockStructureContent>,
     regions: Arc<BlockStructureRegionState>,
 }
 
@@ -74,7 +76,7 @@ impl PreparedBlockStructure {
         Self::from_parts(sector, degeneracy)
     }
 
-    fn from_parts(
+    pub(crate) fn from_parts(
         sector: SectorStructure,
         degeneracy: DegeneracyStructure,
     ) -> Result<Self, CoreError> {

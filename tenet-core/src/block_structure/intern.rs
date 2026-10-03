@@ -1,7 +1,9 @@
+use super::*;
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct BlockStructureInternKey {
-    rank: usize,
-    blocks: Arc<[BlockStructureContentBlock]>,
+pub(crate) struct BlockStructureInternKey {
+    pub(crate) rank: usize,
+    pub(crate) blocks: Arc<[BlockStructureContentBlock]>,
 }
 
 struct BlockStructureInternEntry {
@@ -9,7 +11,7 @@ struct BlockStructureInternEntry {
     charged_key_bytes: usize,
 }
 
-struct BlockStructureInternTable {
+pub(crate) struct BlockStructureInternTable {
     entries: lru::LruCache<
         BlockStructureInternKey,
         BlockStructureInternEntry,
@@ -29,7 +31,7 @@ struct BlockStructureInternTable {
 /// grow these tables without bound over a χ sweep. See
 /// `BLOCK_STRUCTURE_CONTENT_ID` for why capping this particular table is
 /// aliasing-safe despite its ids being consumed as cache keys downstream.
-const BLOCK_STRUCTURE_INTERN_CAP: usize = 8192;
+pub(crate) const BLOCK_STRUCTURE_INTERN_CAP: usize = 8192;
 const BLOCK_STRUCTURE_INTERN_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 const BLOCK_STRUCTURE_INTERN_MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 // Why-not allocator-exact accounting: allocator headers are not portable.
@@ -39,7 +41,7 @@ const BLOCK_STRUCTURE_INTERN_CONTROL_ALLOWANCE_BYTES: usize =
     std::mem::size_of::<BlockStructureContent>() + 8 * std::mem::size_of::<usize>();
 
 impl BlockStructureInternTable {
-    fn new(entry_capacity: usize, byte_budget: usize, max_entry_bytes: usize) -> Self {
+    pub(crate) fn new(entry_capacity: usize, byte_budget: usize, max_entry_bytes: usize) -> Self {
         assert!(
             entry_capacity > 0,
             "block-structure intern capacity must be positive"
@@ -58,13 +60,13 @@ impl BlockStructureInternTable {
         }
     }
 
-    fn lookup(&self, key: &BlockStructureInternKey) -> Option<Arc<BlockStructureContent>> {
+    pub(crate) fn lookup(&self, key: &BlockStructureInternKey) -> Option<Arc<BlockStructureContent>> {
         self.entries
             .peek(key)
             .and_then(|entry| entry.content.upgrade())
     }
 
-    fn intern_with<C, F>(
+    pub(crate) fn intern_with<C, F>(
         &mut self,
         key: BlockStructureInternKey,
         charge_key: C,
@@ -120,14 +122,14 @@ impl BlockStructureInternTable {
         content
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.charged_key_bytes = 0;
         self.pressure_evictions = 0;
         self.oversized_admission_bypasses = 0;
     }
 
-    fn info(&self) -> BlockStructureInternCacheInfo {
+    pub(crate) fn info(&self) -> BlockStructureInternCacheInfo {
         BlockStructureInternCacheInfo {
             entries: self.entries.len(),
             entry_capacity: self.entry_capacity,
@@ -204,7 +206,7 @@ pub fn block_structure_intern_cache_info() -> BlockStructureInternCacheInfo {
         .info()
 }
 
-fn spilled_smallvec_heap_bytes<A>(values: &SmallVec<A>) -> usize
+pub(crate) fn spilled_smallvec_heap_bytes<A>(values: &SmallVec<A>) -> usize
 where
     A: smallvec::Array,
 {
@@ -217,7 +219,7 @@ where
     }
 }
 
-fn charged_block_structure_intern_key_bytes(key: &BlockStructureInternKey) -> usize {
+pub(crate) fn charged_block_structure_intern_key_bytes(key: &BlockStructureInternKey) -> usize {
     let mut frozen_backings = rustc_hash::FxHashSet::default();
     key.blocks
         .iter()
@@ -267,7 +269,7 @@ fn charged_block_structure_intern_key_bytes(key: &BlockStructureInternKey) -> us
 /// that minted that id; content re-interned after eviction/reset receives a
 /// fresh, higher id and simply misses (recompute), never aliases. A 64-bit
 /// counter cannot realistically overflow.
-static BLOCK_STRUCTURE_CONTENT_ID: AtomicUsize = AtomicUsize::new(1);
+pub(crate) static BLOCK_STRUCTURE_CONTENT_ID: AtomicUsize = AtomicUsize::new(1);
 
 #[cfg(test)]
 std::thread_local! {
@@ -286,7 +288,7 @@ pub(crate) fn block_structure_intern_calls() -> usize {
     BLOCK_STRUCTURE_INTERN_CALLS.get()
 }
 
-fn intern_block_structure_content(
+pub(super) fn intern_block_structure_content(
     sector: SectorStructure,
     degeneracy: DegeneracyStructure,
     required_len: usize,
@@ -321,7 +323,7 @@ fn intern_block_structure_content(
     })
 }
 
-fn block_structure_content_blocks(
+pub(super) fn block_structure_content_blocks(
     sector: &SectorStructure,
     degeneracy: &DegeneracyStructure,
 ) -> Arc<[BlockStructureContentBlock]> {
@@ -355,7 +357,7 @@ fn block_structure_arc_table() -> &'static RwLock<BlockStructureArcTable> {
     })
 }
 
-fn canonicalize_block_structure_arc(structure: Arc<BlockStructure>) -> Arc<BlockStructure> {
+pub(super) fn canonicalize_block_structure_arc(structure: Arc<BlockStructure>) -> Arc<BlockStructure> {
     let id = structure.content_id();
     let table = block_structure_arc_table();
     // Read-lock fast path uses `peek` (does not bump recency; `get` needs `&mut`).
