@@ -538,9 +538,21 @@ fn full_factorizations_skip_dense_backend_for_disjoint_support() {
     let tensor = TensorMap::from_vec_with_fusion_space(Vec::<f64>::new(), space).unwrap();
     let input = bound_tensor(Arc::new(rule), &tensor);
 
-    svd_full(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
-    qr_full(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
-    lq_full(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
+    svd_full(
+        &mut ScriptedExecutor::new(RejectExecutorCalls),
+        &input.as_ref(),
+    )
+    .unwrap();
+    qr_full(
+        &mut ScriptedExecutor::new(RejectExecutorCalls),
+        &input.as_ref(),
+    )
+    .unwrap();
+    lq_full(
+        &mut ScriptedExecutor::new(RejectExecutorCalls),
+        &input.as_ref(),
+    )
+    .unwrap();
 }
 
 fn assert_value_region_paths_match<R, D>(
@@ -884,45 +896,23 @@ fn eigenvector_gauge_matches_matrixalgebrakit_phase_rule() {
 /// Returns a batch that violates the `factorize_batch` contract: one input's
 /// entry missing, or one entry missing a factor.
 struct MalformedBatch {
-    inner: tenet_dense::DefaultDenseExecutor,
     drop_entry: bool,
 }
 
-impl DenseExecutor for MalformedBatch {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.svd(input)
+impl Observer for MalformedBatch {
+    fn script(script: &mut Script) {
+        script.set(Op::FactorizeBatch, Action::Forward).set(
+            Op::DotGeneral,
+            Action::Panic("test only exercises factorizations"),
+        );
     }
 
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.eigh(input)
-    }
-
-    fn factorize_batch(
-        &mut self,
-        op: tenet_dense::DenseFactorization,
-        inputs: &[DenseRead<'_>],
-    ) -> Result<Vec<Vec<DenseTensor>>, DenseError> {
-        let mut outputs = self.inner.factorize_batch(op, inputs)?;
+    fn batch_outputs(&mut self, outputs: &mut Vec<Vec<DenseTensor>>) {
         if self.drop_entry {
             outputs.pop();
         } else {
             outputs[0].pop();
         }
-        Ok(outputs)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises factorizations")
     }
 }
 
@@ -939,10 +929,7 @@ fn compact_factorizations_reject_a_malformed_executor_batch() {
         (true, "factorize_batch", "factorize_batch"),
         (false, "qr_into", "svd_into"),
     ] {
-        let mut dense = MalformedBatch {
-            inner: tenet_dense::DefaultDenseExecutor::new(),
-            drop_entry,
-        };
+        let mut dense = ScriptedExecutor::new(MalformedBatch { drop_entry });
         let is_backend_error = |error: &OperationError, expected: &str| {
             matches!(
                 error,

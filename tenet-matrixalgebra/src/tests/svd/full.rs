@@ -8,14 +8,14 @@ fn full_svd_late_error_preserves_input_and_publishes_no_factors() {
     let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let before = tensor.data().to_vec();
     let bound = bound_tensor(Arc::new(rule), &tensor);
-    let mut dense = FailSecondSvd::default();
+    let mut dense = ScriptedExecutor::<FailSecondSvd>::default();
 
     crate::factorize::reset_factor_buffer_build_counts_for_test();
     let result = svd_full_adjoint_dyn(&mut dense, &bound.as_ref().dynamic());
 
     assert!(matches!(result, Err(OperationError::Dense(_))));
     assert_eq!(tensor.data(), before);
-    assert_eq!(dense.calls, 2);
+    assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 2);
     assert_eq!(
         crate::factorize::factor_buffer_build_counts_for_test(),
         (0, 0)
@@ -76,9 +76,9 @@ fn full_svd_adjoint_builds_only_the_final_factor_buffers() {
 fn full_svd_adjoint_completion_reconstructs_rectangular_input() {
     let tensor = one_sector_rectangular_matrix(vec![1.0, 2.0, 3.0, 4.0, 5.0, 7.0], 2, 3);
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-    let mut dense = SvdCallSpy::default();
+    let mut dense = ScriptedExecutor::<SvdCallSpy>::default();
     let output = svd_full_adjoint_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
-    assert_eq!(dense.svd_calls, 1);
+    assert_eq!(dense.counts().svd, 1);
     let u = output.u().data();
     let s = output.s().data();
     let vh = output.vh().data();
@@ -102,7 +102,7 @@ fn full_svd_adjoint_completion_reconstructs_rectangular_input() {
 fn svd_full_rejects_a_different_provider_before_dense_execution() {
     let tensor = tsvd_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
 
-    let _backend = RejectExecutorCalls;
+    let _backend = ScriptedExecutor::new(RejectExecutorCalls);
     let error = match BoundTensorMap::try_new(Arc::new(U1FusionRule), tensor) {
         Ok(_) => panic!("mismatched provider must not produce an authority"),
         Err(error) => error,
@@ -218,7 +218,7 @@ fn svd_full_uses_native_owned_full_svd_without_legacy_completion() {
 
     let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
 
-    assert_eq!(dense.full_calls, 1);
+    assert_eq!(dense.counts().svd_full, 1);
     assert!(!full.singular_values().is_empty());
 }
 
@@ -240,7 +240,7 @@ fn assert_native_full_svd_uses_builtin_owned_dtype<D: FactorScalar>() {
 
     let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
 
-    assert_eq!(dense.full_calls, 2);
+    assert_eq!(dense.counts().svd_full, 2);
     assert_eq!(full.singular_values().len(), 2);
     assert!(full
         .singular_values()
@@ -274,7 +274,7 @@ fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
     };
 
     let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
-    assert_eq!(dense.full_calls, 2);
+    assert_eq!(dense.counts().svd_full, 2);
 
     let input_regions = tensor
         .structure()
@@ -465,7 +465,11 @@ fn assert_native_full_svd_oracle<D: FactorScalar>(tol: f64) {
             let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
 
             let context = format!("{kind} {rows}x{cols}");
-            assert_eq!(dense.full_calls, 1, "{context}: direct provider call");
+            assert_eq!(
+                dense.counts().svd_full,
+                1,
+                "{context}: direct provider call"
+            );
             let (u_rows, u_cols, u) = single_sector_block(full.u());
             let (s_rows, s_cols, s) = single_sector_block(full.s());
             let (vh_rows, vh_cols, vh) = single_sector_block(full.vh());
@@ -574,7 +578,7 @@ fn native_full_svd_late_failure_does_not_publish_or_retry_compatibility() {
     let result = svd_full_dyn(&mut dense, &input.as_ref().dynamic());
 
     assert!(matches!(result, Err(OperationError::Dense(_))));
-    assert_eq!(dense.calls, 2);
+    assert_eq!(dense.counts().svd_full, 2);
     assert_eq!(input.data(), before);
     assert_eq!(
         crate::factorize::factor_buffer_build_counts_for_test(),
@@ -602,7 +606,7 @@ fn native_full_svd_reconstructs_complex_square_and_padded_inputs() {
 
         let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
 
-        assert_eq!(dense.full_calls, 1);
+        assert_eq!(dense.counts().svd_full, 1);
         assert_compact_factors_reconstruct_input(
             &input.as_ref().dynamic(),
             full.u(),

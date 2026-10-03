@@ -676,7 +676,7 @@ pub(super) fn assert_eigh_preflight<D: FactorScalar + std::fmt::Debug>(
     tensor: &TensorMap<D, 1, 1>,
     accepted: bool,
 ) {
-    let mut dense = EighCallSpy::default();
+    let mut dense = ScriptedExecutor::<EighCallSpy>::default();
     let error = eigh_full(
         &mut dense,
         &bound_tensor_ref!(Arc::new(Z2FusionRule), tensor),
@@ -685,10 +685,10 @@ pub(super) fn assert_eigh_preflight<D: FactorScalar + std::fmt::Debug>(
 
     if accepted {
         assert!(matches!(error, OperationError::Dense(_)));
-        assert_eq!(dense.calls, 1);
+        assert_eq!(dense.counts().of(EIGH_ENTRIES), 1);
     } else {
         assert!(matches!(error, OperationError::InvalidArgument { .. }));
-        assert_eq!(dense.calls, 0);
+        assert_eq!(dense.counts().of(EIGH_ENTRIES), 0);
     }
 }
 

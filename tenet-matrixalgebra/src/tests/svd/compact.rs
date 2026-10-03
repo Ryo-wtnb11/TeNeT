@@ -44,43 +44,43 @@ fn compact_svd_noncanonical_layout_uses_copy_fallback() {
 #[test]
 fn direct_compact_svd_uses_owned_executor_outputs_only() {
     let tensor = rectangular_svd_tensor(3, 2);
-    let mut direct = RejectSvdInto::default();
+    let mut direct = ScriptedExecutor::<RejectSvdInto>::default();
     svd_compact(
         &mut direct,
         &bound_tensor_ref!(Arc::new(Z2FusionRule), &tensor),
     )
     .unwrap();
-    assert_eq!(direct.svd_calls, 1);
-    assert_eq!(direct.svd_into_calls, 0);
+    assert_eq!(direct.counts().svd, 1);
+    assert_eq!(direct.counts().svd_into, 0);
 
     let (space, data) = generic_factorization_input();
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
-    let mut generic = RejectSvdInto::default();
+    let mut generic = ScriptedExecutor::<RejectSvdInto>::default();
     svd_compact_factors_dyn_generic(&mut generic, &input).unwrap();
-    assert!(generic.svd_calls > 0);
-    assert_eq!(generic.svd_into_calls, 0);
+    assert!(generic.counts().svd > 0);
+    assert_eq!(generic.counts().svd_into, 0);
 
     let (_, checked_space) = bind_checked_only(&space);
     let checked_input = BoundDynamicTensorRef::try_new(&checked_space, &data).unwrap();
-    let mut checked = RejectSvdInto::default();
+    let mut checked = ScriptedExecutor::<RejectSvdInto>::default();
     svd_compact_dyn_checked_generic(&mut checked, &checked_input).unwrap();
-    assert!(checked.svd_calls > 0);
-    assert_eq!(checked.svd_into_calls, 0);
+    assert!(checked.counts().svd > 0);
+    assert_eq!(checked.counts().svd_into, 0);
 
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-    let mut polar = RejectSvdInto::default();
+    let mut polar = ScriptedExecutor::<RejectSvdInto>::default();
     let mut context = default_context();
     left_polar(&mut polar, &mut context, &bound.as_ref()).unwrap();
-    assert_eq!(polar.svd_calls, 1);
-    assert_eq!(polar.svd_into_calls, 0);
+    assert_eq!(polar.counts().svd, 1);
+    assert_eq!(polar.counts().svd_into, 0);
 
     let fallback_space = bound.space().adjoint_view().unwrap();
     let fallback = BoundDynamicTensorRef::try_new(&fallback_space, bound.data()).unwrap();
-    let mut legacy = RejectSvdInto::default();
+    let mut legacy = ScriptedExecutor::<RejectSvdInto>::default();
     crate::factorize::reset_compact_svd_copy_probe();
     svd_compact_dyn(&mut legacy, &fallback).unwrap();
-    assert!(legacy.svd_calls > 0);
-    assert_eq!(legacy.svd_into_calls, 0);
+    assert!(legacy.counts().svd > 0);
+    assert_eq!(legacy.counts().svd_into, 0);
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
     assert!(probe.output_scatter_calls > 0);
@@ -100,15 +100,15 @@ fn assert_mf_compact_svd_fallback_live_owners<D: crate::factorize::FactorScalar>
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
     let fallback_space = bound.space().adjoint_view().unwrap();
     let fallback = BoundDynamicTensorRef::try_new(&fallback_space, bound.data()).unwrap();
-    let mut dense = RejectSvdInto::default();
+    let mut dense = ScriptedExecutor::<RejectSvdInto>::default();
 
     crate::factorize::reset_compact_svd_copy_probe();
     crate::factorize::reset_mf_compact_svd_fallback_pointers();
     svd_compact_dyn(&mut dense, &fallback).unwrap();
     let stage = crate::factorize::mf_compact_svd_fallback_pointers();
 
-    assert_eq!(dense.svd_into_calls, 0);
-    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.counts().svd_into, 0);
+    assert_eq!(dense.counts().svd, 2);
     assert_eq!(dense.output_ptrs, stage);
     assert_eq!(stage.len(), 2);
     assert!(stage.iter().all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
@@ -116,13 +116,13 @@ fn assert_mf_compact_svd_fallback_live_owners<D: crate::factorize::FactorScalar>
     assert!(probe.input_pack_calls > 0);
     assert!(probe.output_scatter_calls > 0);
 
-    let mut adjoint_dense = RejectSvdInto::default();
+    let mut adjoint_dense = ScriptedExecutor::<RejectSvdInto>::default();
     crate::factorize::reset_compact_svd_copy_probe();
     crate::factorize::reset_mf_compact_svd_fallback_pointers();
     svd_compact_adjoint_factors_dyn(&mut adjoint_dense, &fallback).unwrap();
     let adjoint_stage = crate::factorize::mf_compact_svd_fallback_pointers();
-    assert_eq!(adjoint_dense.svd_into_calls, 0);
-    assert_eq!(adjoint_dense.svd_calls, 2);
+    assert_eq!(adjoint_dense.counts().svd_into, 0);
+    assert_eq!(adjoint_dense.counts().svd, 2);
     assert_eq!(adjoint_dense.output_ptrs, adjoint_stage);
     assert_eq!(adjoint_stage.len(), 2);
     assert!(adjoint_stage
@@ -147,13 +147,13 @@ fn generic_compact_svd_padded_fallback_uses_owned_outputs_and_scatter() {
     let (padded_space, padded_data) =
         padded_generic_factorization_input(&canonical_space, &canonical_data);
     let padded = BoundDynamicTensorRef::try_new(&padded_space, &padded_data).unwrap();
-    let mut dense = RejectSvdInto::default();
+    let mut dense = ScriptedExecutor::<RejectSvdInto>::default();
 
     crate::factorize::reset_compact_svd_copy_probe();
     svd_compact_factors_dyn_generic(&mut dense, &padded).unwrap();
 
-    assert!(dense.svd_calls > 0);
-    assert_eq!(dense.svd_into_calls, 0);
+    assert!(dense.counts().svd > 0);
+    assert_eq!(dense.counts().svd_into, 0);
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
     assert!(probe.output_scatter_calls > 0);
@@ -168,14 +168,14 @@ fn assert_generic_compact_svd_fallback_live_owners<D: crate::factorize::FactorSc
         .map(D::from_real)
         .collect::<Vec<_>>();
     let padded = BoundDynamicTensorRef::try_new(&padded_space, &data).unwrap();
-    let mut dense = RejectSvdInto::default();
+    let mut dense = ScriptedExecutor::<RejectSvdInto>::default();
 
     crate::factorize::reset_compact_svd_copy_probe();
     crate::factorize::reset_generic_compact_svd_fallback_pointers();
     svd_compact_factors_dyn_generic(&mut dense, &padded).unwrap();
     let stage = crate::factorize::generic_compact_svd_fallback_pointers();
 
-    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.counts().svd_into, 0);
     assert_eq!(dense.output_ptrs, stage);
     assert_eq!(stage.len(), 2);
     assert!(stage.iter().all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
@@ -248,10 +248,10 @@ fn generic_compact_svd_padded_complex_rectangular_fallback_matches_canonical_gau
 
     let canonical_svd = svd_compact_factors_dyn_generic(&mut dense, &canonical).unwrap();
     crate::factorize::reset_compact_svd_copy_probe();
-    let mut reject = RejectSvdInto::default();
+    let mut reject = ScriptedExecutor::<RejectSvdInto>::default();
     let padded_svd = svd_compact_factors_dyn_generic(&mut reject, &padded).unwrap();
 
-    assert_eq!(reject.svd_into_calls, 0);
+    assert_eq!(reject.counts().svd_into, 0);
     let padded_s = generic_diagonal_factor(&padded_svd.0, &padded_svd.2);
     assert_compact_factors_reconstruct_input(
         &padded,
@@ -273,7 +273,7 @@ fn generic_compact_svd_second_dense_failure_preserves_source() {
     let (space, data) = padded_generic_svd_truncation_input(&source_space, &source_data);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let before = input.data().to_vec();
-    let mut dense = FailSecondSvd::default();
+    let mut dense = ScriptedExecutor::<FailSecondSvd>::default();
 
     crate::factorize::reset_compact_svd_copy_probe();
     match svd_compact_factors_dyn_generic(&mut dense, &input) {
@@ -281,7 +281,7 @@ fn generic_compact_svd_second_dense_failure_preserves_source() {
         Err(error) => panic!("unexpected Generic SVD failure: {error}"),
         Ok(_) => panic!("second compact SVD must fail"),
     }
-    assert_eq!(dense.calls, 2);
+    assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 2);
     assert_eq!(input.data(), before);
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
@@ -302,7 +302,7 @@ fn generic_compact_svd_empty_input_skips_dense_execution() {
     .unwrap();
     let data: [f64; 0] = [];
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
-    let mut reject = RejectExecutorCalls;
+    let mut reject = ScriptedExecutor::new(RejectExecutorCalls);
 
     let (u, vh, singular_values) = svd_compact_factors_dyn_generic(&mut reject, &input).unwrap();
 
@@ -319,7 +319,7 @@ fn compact_svd_adjoint_error_preserves_borrowed_input_and_publishes_no_factors()
     let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let before = tensor.data().to_vec();
     let bound = bound_tensor(Arc::new(rule), &tensor);
-    let mut adjoint_dense = FailAfterObservingSvdInput::default();
+    let mut adjoint_dense = ScriptedExecutor::<FailAfterObservingSvdInput>::default();
     let result = svd_compact_adjoint_factors_dyn(&mut adjoint_dense, &bound.as_ref().dynamic());
     assert!(matches!(result, Err(OperationError::Dense(_))));
     assert_eq!(tensor.data(), before);
@@ -333,14 +333,14 @@ fn compact_svd_adjoint_late_error_preserves_borrowed_input_and_publishes_no_fact
     let tensor = padded_copy(&rule, &canonical);
     let before = tensor.data().to_vec();
     let bound = bound_tensor(Arc::new(rule), &tensor);
-    let mut dense = FailSecondSvd::default();
+    let mut dense = ScriptedExecutor::<FailSecondSvd>::default();
     crate::factorize::reset_compact_svd_copy_probe();
 
     let result = svd_compact_adjoint_factors_dyn(&mut dense, &bound.as_ref().dynamic());
 
     assert!(matches!(result, Err(OperationError::Dense(_))));
     assert_eq!(tensor.data(), before);
-    assert_eq!(dense.calls, 2);
+    assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 2);
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
     assert!(probe.output_scatter_calls > 0);
@@ -372,10 +372,10 @@ fn compact_owned_svd_preserves_svd_into_output_precedence() {
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
     let input = bound.as_ref();
     let check = |outputs: Vec<DenseTensor>, expected: &str| {
-        let mut dense = FailAfterObservingSvdInput {
+        let mut dense = ScriptedExecutor::new(FailAfterObservingSvdInput {
             outputs: Some(outputs),
             ..Default::default()
-        };
+        });
         let error = svd_compact(&mut dense, &input).unwrap_err();
         assert!(format!("{error}").contains(expected), "{error:?}");
     };
@@ -399,30 +399,30 @@ fn compact_owned_svd_preserves_svd_into_output_precedence() {
     );
     let outputs = c64_svd_outputs(2, 2);
     let expected = outputs[0].as_f64_slice().unwrap_err();
-    let mut dense = FailAfterObservingSvdInput {
+    let mut dense = ScriptedExecutor::new(FailAfterObservingSvdInput {
         outputs: Some(outputs),
         ..Default::default()
-    };
+    });
     let error = svd_compact(&mut dense, &input).unwrap_err();
     assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
 
     let mut outputs = f64_svd_outputs(2, 2);
     outputs[1] = c64_svd_outputs(2, 2).remove(0);
     let expected = outputs[1].as_f64_slice().unwrap_err();
-    let mut dense = FailAfterObservingSvdInput {
+    let mut dense = ScriptedExecutor::new(FailAfterObservingSvdInput {
         outputs: Some(outputs),
         ..Default::default()
-    };
+    });
     let error = svd_compact(&mut dense, &input).unwrap_err();
     assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
 
     let mut outputs = f64_svd_outputs(2, 2);
     outputs[2] = c64_svd_outputs(2, 2).remove(0);
     let expected = outputs[2].as_f64_slice().unwrap_err();
-    let mut dense = FailAfterObservingSvdInput {
+    let mut dense = ScriptedExecutor::new(FailAfterObservingSvdInput {
         outputs: Some(outputs),
         ..Default::default()
-    };
+    });
     let error = svd_compact(&mut dense, &input).unwrap_err();
     assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
 }
@@ -433,7 +433,7 @@ fn compact_svd_error_preserves_borrowed_input_and_publishes_no_factors() {
     let rule = Z2FusionRule;
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let before = tensor.data().to_vec();
-    let mut dense = FailAfterObservingSvdInput::default();
+    let mut dense = ScriptedExecutor::<FailAfterObservingSvdInput>::default();
 
     let result = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor));
 
@@ -523,7 +523,7 @@ fn compact_svd_direct_spans_reconstruct_tall_and_wide_matrices() {
 #[test]
 fn compact_svd_direct_outputs_keep_executor_factor_owners() {
     fn check<D: crate::factorize::FactorScalar>(tensor: &TensorMap<D, 1, 1>) {
-        let mut dense = RejectSvdInto::default();
+        let mut dense = ScriptedExecutor::<RejectSvdInto>::default();
         let bound = bound_tensor(Arc::new(Z2FusionRule), tensor);
         crate::factorize::reset_compact_svd_copy_probe();
         let svd = svd_compact(&mut dense, &bound.as_ref()).unwrap();
@@ -1140,7 +1140,7 @@ fn svd_compact_preserves_asymmetric_non_self_dual_u1_factor_layouts() {
 fn svd_rejects_a_different_provider_before_dense_execution() {
     let tensor = hermitian_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
 
-    let _backend = RejectExecutorCalls;
+    let _backend = ScriptedExecutor::new(RejectExecutorCalls);
     let error = match BoundTensorMap::try_new(Arc::new(U1FusionRule), tensor) {
         Ok(_) => panic!("mismatched provider must not produce an authority"),
         Err(error) => error,
@@ -1159,7 +1159,7 @@ fn public_svd_authority_rejects_same_type_with_different_identity_and_qdim() {
     let other_rule = IdentityQdimRule::new((1.0 + 5.0_f64.sqrt()) / 2.0);
     let tensor = tsvd_test_tensor(&source_rule, &[SectorId::new(0)]);
 
-    let _backend = RejectExecutorCalls;
+    let _backend = ScriptedExecutor::new(RejectExecutorCalls);
     let error = match BoundTensorMap::try_new(Arc::new(other_rule), tensor) {
         Ok(_) => panic!("different provider identity must not produce an authority"),
         Err(error) => error,
@@ -1220,7 +1220,7 @@ fn svd_compact_dense_failure_preserves_input_and_builds_no_diagonal_factor() {
     let rule = Z2FusionRule;
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let before = tensor.data().to_vec();
-    let mut dense = FailAfterObservingSvdInput::default();
+    let mut dense = ScriptedExecutor::<FailAfterObservingSvdInput>::default();
 
     crate::factorize::reset_diagonal_bond_build_probe();
     let result = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor));

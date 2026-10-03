@@ -127,7 +127,9 @@ fn checked_generic_polar_and_pinv_reject_a_tiled_source_whose_tree_order_differs
         .zip(fresh_regions.iter())
         .any(|(source, fresh)| source.col_trees() != fresh.col_trees()));
 
-    let polar = left_polar_dyn_checked_generic(&mut RejectExecutorCalls, &input).unwrap_err();
+    let polar =
+        left_polar_dyn_checked_generic(&mut ScriptedExecutor::new(RejectExecutorCalls), &input)
+            .unwrap_err();
     assert!(
         matches!(
             polar,
@@ -145,7 +147,13 @@ fn checked_generic_polar_and_pinv_reject_a_tiled_source_whose_tree_order_differs
         ),
     )
     .unwrap();
-    let pinv = pinv_direct_into_dyn(&mut RejectExecutorCalls, &input, output, 0.0).unwrap_err();
+    let pinv = pinv_direct_into_dyn(
+        &mut ScriptedExecutor::new(RejectExecutorCalls),
+        &input,
+        output,
+        0.0,
+    )
+    .unwrap_err();
     assert!(
         matches!(pinv, OperationError::UnsupportedTensorContractScope { .. }),
         "{pinv:?}"
@@ -199,7 +207,7 @@ fn polar_rejects_wrong_rectangular_direction_before_dense_execution() {
     let rule = Z2FusionRule;
     for (operation, rows, cols) in [("left_polar", 2, 3), ("right_polar", 3, 2)] {
         let tensor = rectangular_svd_tensor(rows, cols);
-        let mut dense = RejectExecutorCalls;
+        let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
         let mut context = default_context();
         let result = if operation == "left_polar" {
             left_polar(
@@ -228,7 +236,7 @@ fn polar_rejects_wrong_rectangular_direction_before_dense_execution() {
 
 fn assert_polar_direction_error_before_dense(tensor: &TensorMap<f64, 1, 1>, left: bool) {
     let before = tensor.data().to_vec();
-    let mut dense = RejectExecutorCalls;
+    let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
     let mut context = default_context();
     let input = bound_tensor(Arc::new(U1FusionRule), tensor);
     let error = if left {
@@ -312,7 +320,7 @@ fn polar_complete_dimension_preflight_handles_empty_sides_and_empty_products() {
     // empty larger side is rejected; rank-zero products still carry vacuum.
     let empty_codomain = u1_cross_space_map::<f64>(&[], &[(0, 2)]);
     assert_polar_direction_error_before_dense(&empty_codomain, true);
-    let mut dense = RejectExecutorCalls;
+    let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
     let mut context = default_context();
     right_polar(
         &mut dense,
@@ -323,7 +331,7 @@ fn polar_complete_dimension_preflight_handles_empty_sides_and_empty_products() {
 
     let empty_domain = u1_cross_space_map::<f64>(&[(0, 2)], &[]);
     assert_polar_direction_error_before_dense(&empty_domain, false);
-    let mut dense = RejectExecutorCalls;
+    let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
     let mut context = default_context();
     left_polar(
         &mut dense,
@@ -333,7 +341,7 @@ fn polar_complete_dimension_preflight_handles_empty_sides_and_empty_products() {
     .unwrap();
 
     let empty = u1_cross_space_map::<f64>(&[], &[]);
-    let mut dense = RejectExecutorCalls;
+    let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
     let mut context = default_context();
     let input = bound_tensor(Arc::new(U1FusionRule), &empty);
     left_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
@@ -371,7 +379,7 @@ fn polar_second_sector_failure_leaves_the_source_unchanged() {
     let before = tensor.data().to_vec();
     let input = bound_tensor(Arc::new(U1FusionRule), &tensor);
     for left in [true, false] {
-        let mut dense = FailSecondSvd::default();
+        let mut dense = ScriptedExecutor::<FailSecondSvd>::default();
         let mut context = default_context();
         crate::factorize::reset_compact_svd_copy_probe();
         let result = if left {
@@ -380,7 +388,7 @@ fn polar_second_sector_failure_leaves_the_source_unchanged() {
             right_polar(&mut dense, &mut context, &input.as_ref()).map(drop)
         };
         assert!(matches!(result, Err(OperationError::Dense(_))));
-        assert_eq!(dense.calls, 2);
+        assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 2);
         assert_eq!(tensor.data(), before);
         let probe = crate::factorize::compact_svd_copy_probe();
         assert!(probe.input_pack_calls > 0);
