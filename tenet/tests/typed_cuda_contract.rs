@@ -48,60 +48,13 @@ use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
 use tenet::typed::Direction;
 use tenet::typed::{ContractSpec, Runtime, TensorMap};
 
-/// Counts Host allocations made by the thread that set `COUNTING` (device
-/// runtime threads never do), for the warm host-allocation contract.
-mod host_allocations {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
+// Host allocations are counted on the measuring thread only; device runtime
+// threads never allocate for the warm host-allocation contract.
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
-    thread_local! {
-        static COUNTING: Cell<bool> = const { Cell::new(false) };
-        static CALLS: Cell<u64> = const { Cell::new(0) };
-    }
-
-    struct Counting;
-
-    fn record() {
-        // `try_with`: the allocator also runs during thread teardown.
-        let _ = COUNTING.try_with(|counting| {
-            if counting.get() {
-                let _ = CALLS.try_with(|calls| calls.set(calls.get() + 1));
-            }
-        });
-    }
-
-    // SAFETY: every call forwards unchanged to `System`; the bookkeeping only
-    // touches thread-local `Cell`s and never allocates.
-    unsafe impl GlobalAlloc for Counting {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            record();
-            unsafe { System.alloc(layout) }
-        }
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            record();
-            unsafe { System.alloc_zeroed(layout) }
-        }
-        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(pointer, layout) }
-        }
-        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-            record();
-            unsafe { System.realloc(pointer, layout, size) }
-        }
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: Counting = Counting;
-
-    /// Host allocation calls `body` makes on this thread.
-    pub fn count(body: impl FnOnce()) -> u64 {
-        CALLS.with(|calls| calls.set(0));
-        COUNTING.with(|counting| counting.set(true));
-        body();
-        COUNTING.with(|counting| counting.set(false));
-        CALLS.with(Cell::get)
-    }
-}
+#[global_allocator]
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 fn delta<T>(body: impl FnOnce() -> T) -> (T, CudaTransferStats) {
     let before = cuda_transfer_stats();
@@ -755,9 +708,9 @@ fn a_warm_overwrite_transfers_and_allocates_nothing() {
         // (#1359 removed its rank-sized allocations); the inactive-region
         // list is rewritten in place in the lease's contract scratch.
         let host_allocations = [
-            host_allocations::count(&mut call),
-            host_allocations::count(&mut call),
-            host_allocations::count(&mut call),
+            counting_alloc::measure(&mut call).1.calls,
+            counting_alloc::measure(&mut call).1.calls,
+            counting_alloc::measure(&mut call).1.calls,
         ];
         eprintln!("{}: warm host allocations {host_allocations:?}", case.name);
         assert!(host_allocations[0] > 0, "{}: vacuous count", case.name);

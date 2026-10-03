@@ -27,8 +27,6 @@
 //! folds that tree into phases. No production code carries a hook for this.
 
 use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    cell::Cell,
     hint::black_box,
     time::{Duration, Instant},
 };
@@ -39,49 +37,11 @@ use tenet::sector::{
 };
 use tenet::typed::{Complex64, ContractSpec, GradedSpace, LegSelection, Runtime, TensorMap};
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATION_CALLS: Cell<usize> = const { Cell::new(0) };
-    static REQUESTED_BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATION_CALLS.set(ALLOCATION_CALLS.get() + 1);
-            REQUESTED_BYTES.set(REQUESTED_BYTES.get() + layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATION_CALLS.set(ALLOCATION_CALLS.get() + 1);
-            REQUESTED_BYTES.set(REQUESTED_BYTES.get() + layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATION_CALLS.set(ALLOCATION_CALLS.get() + 1);
-            REQUESTED_BYTES.set(REQUESTED_BYTES.get() + new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 /// One tensor shape: `nc` codomain and `nd` domain copies of a leg with
 /// `sectors` sectors of degeneracy `deg` each.
@@ -181,12 +141,8 @@ fn time_calls<T>(mut call: impl FnMut() -> T) -> (usize, f64, f64) {
 /// including the drop of its result.
 fn count_allocations<T>(mut call: impl FnMut() -> T) -> (usize, usize) {
     black_box(call());
-    ALLOCATION_CALLS.set(0);
-    REQUESTED_BYTES.set(0);
-    COUNTING.set(true);
-    drop(black_box(call()));
-    COUNTING.set(false);
-    (ALLOCATION_CALLS.get(), REQUESTED_BYTES.get())
+    let ((), allocs) = counting_alloc::measure(|| drop(black_box(call())));
+    (allocs.calls as usize, allocs.bytes as usize)
 }
 
 /// Loops `call` while `/usr/bin/sample` records this process. Never inlined:

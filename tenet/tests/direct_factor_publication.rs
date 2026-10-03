@@ -6,8 +6,6 @@
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::Arc;
 
@@ -25,58 +23,11 @@ fn domain_axes<R, D, S>(t: &tenet::typed::TensorMap<R, D, S>) -> Vec<usize> {
     (t.codomain_rank()..t.rank()).collect()
 }
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static BYTES: Cell<usize> = const { Cell::new(0) };
-    static ZEROED_BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-fn record(layout: Layout, zeroed: bool) {
-    if COUNTING.get() {
-        BYTES.set(BYTES.get() + layout.size());
-        if zeroed {
-            ZEROED_BYTES.set(ZEROED_BYTES.get() + layout.size());
-        }
-    }
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() {
-            record(layout, false);
-        }
-        pointer
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() {
-            record(layout, true);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() {
-            record(
-                Layout::from_size_align(new_size, layout.align()).unwrap(),
-                false,
-            );
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 #[derive(Debug)]
 #[cfg_attr(
@@ -92,14 +43,10 @@ struct Counts {
 }
 
 fn measured<T>(operation: impl FnOnce() -> T) -> (T, Counts) {
-    BYTES.set(0);
-    ZEROED_BYTES.set(0);
-    COUNTING.set(true);
-    let value = operation();
-    COUNTING.set(false);
+    let (value, allocs) = counting_alloc::measure(operation);
     let counts = Counts {
-        bytes: BYTES.get(),
-        zeroed_bytes: ZEROED_BYTES.get(),
+        bytes: allocs.bytes as usize,
+        zeroed_bytes: allocs.zeroed_bytes as usize,
     };
     (value, counts)
 }
@@ -236,7 +183,6 @@ fn compact_lq_requests_no_zeroed_output_storage() {
 #[cfg(feature = "racah-generated")]
 mod checked_generic {
     use super::*;
-    use std::sync::Mutex;
     use tenet::sector::SUNFusionRule;
     use tenet::typed::{LeftPolar, RightPolar, Svd};
 
@@ -271,18 +217,17 @@ mod checked_generic {
         std::mem::size_of_val(tensor.dense_data().unwrap())
     }
 
-    /// This module has no other cross-test lock.
-    /// `checked_generic_polar_allocates_no_per_sector_temporaries` compares
-    /// two `measured` calls' byte growth against each other and shares its
-    /// `tall_legs(&provider, 1)` fixture with
-    /// `checked_generic_polar_and_lq_match_reconstruction_oracles`'s `cases!`
-    /// invocation (same rows/cols sectors and degeneracies, hence the same
-    /// key into tenet-core's process-global fusion-tree-layout and
-    /// complete-HomSpace-structure caches). Either test running unlocked
-    /// beside the other can warm or (weakly held, #1610) evict that shared
-    /// entry mid-measurement, moving the scratch-byte delta the assertion
-    /// compares. Take this lock in both.
-    static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+    // Why both tests take `counting_alloc::serial()`:
+    // `checked_generic_polar_allocates_no_per_sector_temporaries` compares
+    // two `measured` calls' byte growth against each other and shares its
+    // `tall_legs(&provider, 1)` fixture with
+    // `checked_generic_polar_and_lq_match_reconstruction_oracles`'s `cases!`
+    // invocation (same rows/cols sectors and degeneracies, hence the same
+    // key into tenet-core's process-global fusion-tree-layout and
+    // complete-HomSpace-structure caches). Either test running unlocked
+    // beside the other can warm or (weakly held, #1610) evict that shared
+    // entry mid-measurement, moving the scratch-byte delta the assertion
+    // compares.
 
     /// Left: `A = W P`, right: `A = P W`, with `W` an isometry (`Wᴴ W = 1`
     /// left, `W Wᴴ = 1` right: every eigenvalue of the Gram matrix is one)
@@ -356,7 +301,7 @@ mod checked_generic {
 
     #[test]
     fn checked_generic_polar_and_lq_match_reconstruction_oracles() {
-        let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _measurement = counting_alloc::serial();
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         cases!(f64, &runtime);
         cases!(Complex64, &runtime);
@@ -374,7 +319,7 @@ mod checked_generic {
     // which it would by the size of the temporaries before #1478.
     #[test]
     fn checked_generic_polar_allocates_no_per_sector_temporaries() {
-        let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _measurement = counting_alloc::serial();
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
         let scratch = |scale| {

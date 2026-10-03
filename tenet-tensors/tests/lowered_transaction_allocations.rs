@@ -1,32 +1,13 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::Arc;
 
 use tenet_core::{FusionProductSpace, FusionTreeHomSpace, U1FusionRule};
 use tenet_tensors::{reset_global_operation_caches, BoundDynamicFusionMapSpace};
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.with(Cell::get) {
-            ALLOCATIONS.with(|count| count.set(count.get() + 1));
-        }
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 #[test]
 fn lowered_scratch_hit_matches_encoded_hit_allocation_and_identity() {
@@ -44,26 +25,24 @@ fn lowered_scratch_hit_matches_encoded_hit_allocation_and_identity() {
     .unwrap();
 
     let lowered_homspace = cold.space().homspace().clone();
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let lowered = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
         Arc::clone(&provider),
         lowered_homspace,
     )
     .unwrap();
-    COUNTING.set(false);
-    let lowered_allocations = ALLOCATIONS.get();
+    let allocs = counting_alloc::stop();
+    let lowered_allocations = allocs.calls as usize;
 
     let encoded_homspace = cold.space().homspace().clone();
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let encoded = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
         provider,
         encoded_homspace,
     )
     .unwrap();
-    COUNTING.set(false);
-    let encoded_allocations = ALLOCATIONS.get();
+    let allocs = counting_alloc::stop();
+    let encoded_allocations = allocs.calls as usize;
 
     assert_eq!(lowered_allocations, encoded_allocations);
     assert!(Arc::ptr_eq(

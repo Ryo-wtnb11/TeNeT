@@ -1,7 +1,5 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tenet::sector::{
     product_sector, ProductFusionRuleExt, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep,
@@ -12,66 +10,35 @@ use tenet::typed::{GradedSpace, TensorMap};
 #[cfg(feature = "racah-generated")]
 use tenet::sector::SUNFusionRule;
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            BYTES.set(BYTES.get() + layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            BYTES.set(BYTES.get() + new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 fn measure(f: impl FnOnce()) -> (usize, usize) {
-    ALLOCATIONS.set(0);
-    BYTES.set(0);
-    COUNTING.set(true);
-    f();
-    COUNTING.set(false);
-    (ALLOCATIONS.get(), BYTES.get())
+    let ((), allocs) = counting_alloc::measure(f);
+    (allocs.calls as usize, allocs.bytes as usize)
 }
 
 #[cfg(feature = "racah-generated")]
 fn measure_value<T>(f: impl FnOnce() -> T) -> (T, usize, usize, u128) {
-    ALLOCATIONS.set(0);
-    BYTES.set(0);
-    COUNTING.set(true);
-    let started = std::time::Instant::now();
-    let output = f();
-    let elapsed = started.elapsed().as_nanos();
-    COUNTING.set(false);
-    (output, ALLOCATIONS.get(), BYTES.get(), elapsed)
+    let ((output, elapsed), allocs) = counting_alloc::measure(|| {
+        let started = std::time::Instant::now();
+        let output = f();
+        (output, started.elapsed().as_nanos())
+    });
+    (
+        output,
+        allocs.calls as usize,
+        allocs.bytes as usize,
+        elapsed,
+    )
 }
 
 #[test]
 fn cached_permute_overwrite_does_not_allocate_on_the_caller_thread() {
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let _measurement = counting_alloc::serial();
     // What: a warmed multiplicity-free non-Abelian permutation reuses its
     // compiled plan and replay workspace without allocating on the caller.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -107,23 +74,21 @@ fn cached_permute_overwrite_does_not_allocate_on_the_caller_thread() {
         .unwrap();
     let destination_data = destination.dense_data().unwrap().as_ptr();
 
-    ALLOCATIONS.set(0);
-    BYTES.set(0);
-    COUNTING.set(true);
-    source
-        .permute_into(&[1], &[2, 0], &mut destination, 1.0, 0.0)
-        .unwrap();
-    COUNTING.set(false);
+    let cost = measure(|| {
+        source
+            .permute_into(&[1], &[2, 0], &mut destination, 1.0, 0.0)
+            .unwrap();
+    });
     black_box(destination.dense_data().unwrap());
 
-    assert_eq!((ALLOCATIONS.get(), BYTES.get()), (0, 0));
+    assert_eq!(cost, (0, 0));
     assert_eq!(destination.dense_data().unwrap().as_ptr(), destination_data);
     assert!(std::ptr::eq(destination.provider(), provider.as_ref()));
 }
 
 #[test]
 fn cached_u1_permute_overwrite_does_not_allocate_on_the_caller_thread() {
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let _measurement = counting_alloc::serial();
     // What: a warmed UniqueFusion permutation reuses its completed transformer
     // and replay workspace without allocating on the caller.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -146,23 +111,21 @@ fn cached_u1_permute_overwrite_does_not_allocate_on_the_caller_thread() {
         .unwrap();
     let destination_data = destination.dense_data().unwrap().as_ptr();
 
-    ALLOCATIONS.set(0);
-    BYTES.set(0);
-    COUNTING.set(true);
-    source
-        .permute_into(&[1], &[2, 0], &mut destination, 1.0, 0.0)
-        .unwrap();
-    COUNTING.set(false);
+    let cost = measure(|| {
+        source
+            .permute_into(&[1], &[2, 0], &mut destination, 1.0, 0.0)
+            .unwrap();
+    });
     black_box(destination.dense_data().unwrap());
 
-    assert_eq!((ALLOCATIONS.get(), BYTES.get()), (0, 0));
+    assert_eq!(cost, (0, 0));
     assert_eq!(destination.dense_data().unwrap().as_ptr(), destination_data);
     assert!(std::ptr::eq(destination.provider(), provider.as_ref()));
 }
 
 #[test]
 fn cached_planar_overwrites_do_not_allocate_on_the_caller_thread() {
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let _measurement = counting_alloc::serial();
     // What: the shared typed destination seam also reuses admitted full,
     // explicit, and repartition transpose operations without caller allocation.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -291,7 +254,7 @@ fn checked_generic_public_transform_measurement() {
         return;
     };
     let case = case.to_str().unwrap();
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let _measurement = counting_alloc::serial();
     println!("case={case} allocation_scope=caller_thread_requested");
 
     if case == "su2_permute_control" {

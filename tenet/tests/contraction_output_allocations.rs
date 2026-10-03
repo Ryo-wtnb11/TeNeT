@@ -3,10 +3,8 @@
 //! for both dtypes, and nothing else on the warmed path allocates zeroed
 //! memory or re-touches the inactive blocks.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tenet::typed::ContractSpec;
 
 use num_complex::{Complex32, Complex64};
@@ -14,90 +12,16 @@ use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, TensorMap, TensorScalar};
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static ZEROED_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    // Sizes of the zeroed allocations in order; the allocator cannot grow a
-    // `Vec` while it is being called, so the log is a fixed ring.
-    static ZEROED_SIZES: [Cell<usize>; ZEROED_LOG_CAPACITY] =
-        const { [const { Cell::new(0) }; ZEROED_LOG_CAPACITY] };
-}
-
-const ZEROED_LOG_CAPACITY: usize = 64;
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-
-    // Why override: the default `alloc_zeroed` is `alloc` + `write_bytes`,
-    // which would hide a TeNeT-side zero fill behind the same counter.
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            let index = ZEROED_ALLOCATIONS.get();
-            ZEROED_ALLOCATIONS.set(index + 1);
-            if index < ZEROED_LOG_CAPACITY {
-                ZEROED_SIZES.with(|sizes| sizes[index].set(layout.size()));
-            }
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
-struct Measurement {
-    allocations: usize,
-    zeroed_sizes: Vec<usize>,
-}
-
-impl Measurement {
-    fn zeroed_allocations_of(&self, bytes: usize) -> usize {
-        self.zeroed_sizes
-            .iter()
-            .filter(|&&size| size == bytes)
-            .count()
-    }
-}
-
-fn measure(f: impl FnOnce()) -> Measurement {
-    ALLOCATIONS.set(0);
-    ZEROED_ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    f();
-    COUNTING.set(false);
-    Measurement {
-        allocations: ALLOCATIONS.get(),
-        zeroed_sizes: ZEROED_SIZES.with(|sizes| {
-            sizes[..ZEROED_ALLOCATIONS.get().min(ZEROED_LOG_CAPACITY)]
-                .iter()
-                .map(Cell::get)
-                .collect()
-        }),
-    }
+/// Allocations of `f` on this thread; `matched_zeroed_calls` counts the
+/// allocator-zeroed ones of exactly `payload_bytes`.
+fn measure(payload_bytes: usize, f: impl FnOnce()) -> counting_alloc::Allocs {
+    counting_alloc::measure_matching(payload_bytes..=payload_bytes, f).1
 }
 
 fn u1_space(provider: &Arc<U1FusionRule>, sectors: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
@@ -125,10 +49,8 @@ fn su2_space(
 
 /// The contracted bond carries only charge 0, so the destination `[a] <- [c]`
 /// has coupled charges -1 and 1 that no GEMM writes (inactive blocks).
-fn u1_contract_measurement<D: TensorScalar + std::fmt::Debug>(max_allocations: usize, seed: u64) {
-    let _measurement = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+fn u1_contract_measurement<D: TensorScalar + std::fmt::Debug>(max_allocations: u64, seed: u64) {
+    let _measurement = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let open = u1_space(&provider, &[(-1, 2), (0, 3), (1, 2)]);
@@ -151,8 +73,9 @@ fn u1_contract_measurement<D: TensorScalar + std::fmt::Debug>(max_allocations: u
     assert_eq!(payload_len, 2 * 2 + 3 * 3 + 2 * 2);
     assert_eq!(warm.subblock_count(), 3);
 
+    let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
     let mut output = None;
-    let measurement = measure(|| {
+    let measurement = measure(payload_bytes, || {
         output = Some(black_box(
             lhs.contract(
                 &rhs,
@@ -169,17 +92,16 @@ fn u1_contract_measurement<D: TensorScalar + std::fmt::Debug>(max_allocations: u
     let output = output.unwrap();
     assert_eq!(output.dense_data().unwrap(), warm.dense_data().unwrap());
 
-    let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
     assert_eq!(
-        measurement.zeroed_allocations_of(payload_bytes),
+        measurement.matched_zeroed_calls,
         1,
-        "the owned output must be exactly one allocator-zeroed payload of {payload_bytes} bytes; zeroed sizes {:?}",
-        measurement.zeroed_sizes
+        "the owned output must be exactly one allocator-zeroed payload of {payload_bytes} bytes; got {:?}",
+        measurement
     );
     assert!(
-        measurement.allocations <= max_allocations,
+        measurement.calls <= max_allocations,
         "owned U(1) contraction allocated {} times (limit {max_allocations})",
-        measurement.allocations
+        measurement.calls
     );
 }
 
@@ -188,7 +110,7 @@ fn u1_contract_measurement<D: TensorScalar + std::fmt::Debug>(max_allocations: u
 // f64 38 calls / 2380 bytes with one 136-byte zeroed payload; Complex64 38
 // calls / 2516 bytes with no zeroed payload (TeNeT-side fill). After #1212:
 // f64 38 / 2380, Complex64 38 / 2516, each with exactly one zeroed payload.
-const TOTAL_ALLOCATIONS_U1: usize = 38;
+const TOTAL_ALLOCATIONS_U1: u64 = 38;
 
 #[test]
 fn owned_f64_contraction_output_is_one_allocator_zeroed_payload() {
@@ -202,10 +124,8 @@ fn owned_c64_contraction_output_is_one_allocator_zeroed_payload() {
 
 /// SU(2) compose: non-abelian recoupling, so this is the fixture where the
 /// coefficient scratch is converted per structure identity.
-fn su2_compose_measurement<D: TensorScalar>(seed: u64) -> usize {
-    let _measurement = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+fn su2_compose_measurement<D: TensorScalar>(seed: u64) -> u64 {
+    let _measurement = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SU2FusionRule);
     // Destination `[a, c] <- [d, e]` couples to spins 1/2 and 3/2; the bond
@@ -217,23 +137,22 @@ fn su2_compose_measurement<D: TensorScalar>(seed: u64) -> usize {
     let rhs: TensorMap<_, D> =
         TensorMap::rand_with_seed(&runtime, [&b], [&a, &c], seed + 1).unwrap();
     let warm = lhs.compose(&rhs).unwrap();
-    let measurement = measure(|| {
+    let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
+    let measurement = measure(payload_bytes, || {
         black_box(lhs.compose(&rhs).unwrap());
     });
-    let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
     assert_eq!(
-        measurement.zeroed_allocations_of(payload_bytes),
-        1,
+        measurement.matched_zeroed_calls, 1,
         "the owned output must be exactly one allocator-zeroed payload of \
-         {payload_bytes} bytes; zeroed sizes {:?}",
-        measurement.zeroed_sizes
+         {payload_bytes} bytes; got {:?}",
+        measurement
     );
     assert!(
-        measurement.allocations <= 36,
+        measurement.calls <= 36,
         "owned SU(2) compose allocated {} times",
-        measurement.allocations
+        measurement.calls
     );
-    measurement.allocations
+    measurement.calls
 }
 
 #[test]

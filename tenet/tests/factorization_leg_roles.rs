@@ -10,9 +10,7 @@
 //! Reconstructions against the permuted tensor are checked as well, so a
 //! wrong permutation cannot hide behind an equally wrong oracle.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use num_complex::Complex64;
 use tenet::sector::{
@@ -26,59 +24,15 @@ use tenet::typed::{
     TypedTensorSolveDispatch,
 };
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static BYTES: Cell<usize> = const { Cell::new(0) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            BYTES.set(BYTES.get() + layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            BYTES.set(BYTES.get() + new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
-
-/// Every test here runs alone: allocations are counted per thread, but
-/// first-use interning and cache admission are process-wide, so a test on
-/// another thread could otherwise move a measured call's request count.
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 /// `(allocations, bytes)` requested on this thread while `f` runs.
 fn measure<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
-    ALLOCATIONS.set(0);
-    BYTES.set(0);
-    COUNTING.set(true);
-    let value = f();
-    COUNTING.set(false);
-    (value, ALLOCATIONS.get(), BYTES.get())
+    let (value, allocs) = counting_alloc::measure(f);
+    (value, allocs.calls as usize, allocs.bytes as usize)
 }
 
 fn runtime() -> Runtime {
@@ -346,7 +300,7 @@ macro_rules! check_fixture {
 
 #[test]
 fn leg_roles_equal_the_permute_composition() {
-    let _serial = serial();
+    let _serial = counting_alloc::serial();
     let runtime = runtime();
     check_fixture!(runtime, u1_legs(), f64, 1553, "u1 f64");
     check_fixture!(runtime, u1_legs(), Complex64, 1553, "u1 c64");
@@ -359,7 +313,7 @@ fn leg_roles_equal_the_permute_composition() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_leg_roles_equal_the_permute_composition() {
-    let _serial = serial();
+    let _serial = counting_alloc::serial();
     use tenet::sector::SUNFusionRule;
     let runtime = runtime();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -375,7 +329,7 @@ fn checked_generic_leg_roles_equal_the_permute_composition() {
 
 #[test]
 fn lazy_adjoint_leg_roles_equal_the_permute_composition() {
-    let _serial = serial();
+    let _serial = counting_alloc::serial();
     let runtime = runtime();
     let (v, w) = su2_legs();
     let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &w], [&w, &v], 7).unwrap();
@@ -394,7 +348,7 @@ fn lazy_adjoint_leg_roles_equal_the_permute_composition() {
 /// allocations and bytes must agree: the leg roles add exactly one permute.
 #[test]
 fn space_preserving_roles_cost_the_current_split_plus_one_permute() {
-    let _serial = serial();
+    let _serial = counting_alloc::serial();
     let runtime = runtime();
     let (v, w) = su2_legs();
     let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &v], [&w, &w], 9).unwrap();
@@ -438,7 +392,7 @@ fn space_preserving_roles_cost_the_current_split_plus_one_permute() {
 /// and requested bytes as the explicit `permute` followed by the operation.
 #[test]
 fn leg_roles_cost_exactly_the_explicit_composition() {
-    let _serial = serial();
+    let _serial = counting_alloc::serial();
     let runtime = runtime();
     let (v, w) = su2_legs();
     let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &w], [&w, &v], 3).unwrap();
@@ -485,7 +439,7 @@ fn leg_roles_cost_exactly_the_explicit_composition() {
 
 #[test]
 fn solve_roles_cost_the_two_explicit_permutations() {
-    let _serial = serial();
+    let _serial = counting_alloc::serial();
     let runtime = runtime();
     let (v, w) = su2_legs();
     let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v, &w], [&v, &w]).unwrap();
@@ -565,7 +519,7 @@ fn solve_roles_cost_the_two_explicit_permutations() {
 
 #[test]
 fn malformed_roles_are_rejected_before_the_operation() {
-    let _serial = serial();
+    let _serial = counting_alloc::serial();
     let runtime = runtime();
     let (v, w) = u1_legs();
     let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v, &w], [&w, &v], 1).unwrap();
@@ -621,7 +575,7 @@ fn malformed_roles_are_rejected_before_the_operation() {
 /// fermionic signs and dual flips into `exp`, `inv` and `eig_full`.
 #[test]
 fn fermionic_boundary_crossing_square_roles_equal_the_permute_composition() {
-    let _serial = serial();
+    let _serial = counting_alloc::serial();
     let runtime = runtime();
     let (v, w) = fz2_u1_legs();
     let t: TensorMap<_, Complex64> =

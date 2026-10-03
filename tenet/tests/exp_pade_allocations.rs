@@ -7,66 +7,18 @@
 //! These gates therefore separate cumulative bytes, final-live output, and
 //! peak-live scratch.
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{Complex64, Runtime};
 use tenet::typed::{GradedSpace, TensorMap};
 
-struct CountingAllocator;
-
-static ENABLED: AtomicBool = AtomicBool::new(false);
-static ALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
-static DEALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
-static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
-static DEALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
-static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
-static PEAK_LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
-static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
-
-fn add_live(bytes: i64) {
-    let live = LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
-    PEAK_LIVE_BYTES.fetch_max(live, Ordering::Relaxed);
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if ENABLED.load(Ordering::Relaxed) && !pointer.is_null() {
-            ALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
-            ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-            add_live(layout.size() as i64);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if ENABLED.load(Ordering::Relaxed) && !pointer.is_null() {
-            DEALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
-            DEALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-            LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
-        }
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if ENABLED.load(Ordering::Relaxed) && !pointer.is_null() {
-            ALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
-            DEALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
-            ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
-            DEALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-            add_live(new_size as i64 - layout.size() as i64);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 #[derive(Clone, Copy, Debug)]
 struct Sample {
@@ -84,30 +36,24 @@ impl Sample {
     }
 }
 
-fn reset_counters() {
-    ALLOCATION_CALLS.store(0, Ordering::Relaxed);
-    DEALLOCATION_CALLS.store(0, Ordering::Relaxed);
-    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
-    DEALLOCATED_BYTES.store(0, Ordering::Relaxed);
-    LIVE_BYTES.store(0, Ordering::Relaxed);
-    PEAK_LIVE_BYTES.store(0, Ordering::Relaxed);
-}
-
 fn measure<T>(operation: impl FnOnce() -> T) -> Sample {
-    reset_counters();
-    ENABLED.store(true, Ordering::Release);
-    let output = black_box(operation());
-    black_box(&output);
-    ENABLED.store(false, Ordering::Release);
-    let live = LIVE_BYTES.load(Ordering::Relaxed);
-    assert!(live >= 0, "measurement released an untracked allocation");
+    let (output, allocs) = counting_alloc::measure(|| {
+        let output = black_box(operation());
+        black_box(&output);
+        output
+    });
+    drop(output);
+    assert!(
+        allocs.live_bytes >= 0,
+        "measurement released an untracked allocation"
+    );
     Sample {
-        allocation_calls: ALLOCATION_CALLS.load(Ordering::Relaxed),
-        deallocation_calls: DEALLOCATION_CALLS.load(Ordering::Relaxed),
-        allocated_bytes: ALLOCATED_BYTES.load(Ordering::Relaxed),
-        deallocated_bytes: DEALLOCATED_BYTES.load(Ordering::Relaxed),
-        peak_live_bytes: PEAK_LIVE_BYTES.load(Ordering::Relaxed).max(0) as u64,
-        final_live_bytes: live as u64,
+        allocation_calls: allocs.calls,
+        deallocation_calls: allocs.frees,
+        allocated_bytes: allocs.bytes,
+        deallocated_bytes: allocs.freed_bytes,
+        peak_live_bytes: allocs.peak_live_bytes,
+        final_live_bytes: allocs.live_bytes as u64,
     }
 }
 
@@ -205,7 +151,7 @@ fn assert_one_reused_workspace(
 
 #[test]
 fn general_exp_workspace_is_largest_sector_sized_and_reused() {
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let _measurement = counting_alloc::serial();
 
     for (order, scale) in [(48usize, 1.0e-4), (48, 1.0e-2), (96, 1.0e-4)] {
         let two = fixture_f64(2, order, scale);
@@ -232,7 +178,7 @@ fn general_exp_workspace_is_largest_sector_sized_and_reused() {
 
 #[test]
 fn typed_u1_general_exp_matches_the_upper_triangular_oracle() {
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let _measurement = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let space = GradedSpace::try_new(

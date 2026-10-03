@@ -1,32 +1,13 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::Arc;
 
 use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep};
 use tenet_tensors::{reset_global_operation_caches, BoundDynamicFusionMapSpace};
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.with(Cell::get) {
-            ALLOCATIONS.with(|count| count.set(count.get() + 1));
-        }
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 fn homspace(sector_count: i32) -> FusionTreeHomSpace {
     let sectors = (0..sector_count)
@@ -41,37 +22,35 @@ fn homspace(sector_count: i32) -> FusionTreeHomSpace {
 fn cold_lowered_allocations(sector_count: i32) -> usize {
     reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let result = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
         Arc::new(U1FusionRule),
         homspace(sector_count),
     )
     .unwrap();
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
     assert_eq!(
         result.space().structure().block_count(),
         sector_count as usize
     );
-    ALLOCATIONS.get()
+    allocs.calls as usize
 }
 
 fn cold_encoded_allocations(sector_count: i32) -> usize {
     reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
+    counting_alloc::start();
     let result = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
         Arc::new(U1FusionRule),
         homspace(sector_count),
     )
     .unwrap();
-    COUNTING.set(false);
+    let allocs = counting_alloc::stop();
     assert_eq!(
         result.space().structure().block_count(),
         sector_count as usize
     );
-    ALLOCATIONS.get()
+    allocs.calls as usize
 }
 
 #[test]

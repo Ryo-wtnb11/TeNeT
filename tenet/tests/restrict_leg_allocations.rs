@@ -9,10 +9,8 @@
 //! same sector structure and different degeneracies must allocate the same
 //! number of non-payload blocks.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tenet::sector::TypedSectorAdmission;
 use tenet::sector::{U1FusionRule, U1Irrep};
@@ -20,86 +18,27 @@ use tenet::typed::__network::{self, NetworkDegeneracyRestriction};
 use tenet::typed::{GradedSpace, LegSelection, Runtime, TensorMap};
 use tenet::typed::{StackedTensorMap, Svd};
 
-const ZEROED_LOG_CAPACITY: usize = 64;
-
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
-    static ZEROED_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static ZEROED_SIZES: [Cell<usize>; ZEROED_LOG_CAPACITY] =
-        const { [const { Cell::new(0) }; ZEROED_LOG_CAPACITY] };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + layout.size());
-        }
-        pointer
-    }
-
-    // Overridden so a scalar zero fill cannot masquerade as a calloc.
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + layout.size());
-            let index = ZEROED_ALLOCATIONS.get();
-            ZEROED_ALLOCATIONS.set(index + 1);
-            if index < ZEROED_LOG_CAPACITY {
-                ZEROED_SIZES.with(|sizes| sizes[index].set(layout.size()));
-            }
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            // A realloc hands back a buffer of `new_size`, so charge all of
-            // it: a payload-sized temporary grown this way must show up.
-            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
+#[derive(Debug)]
 struct Measurement {
     allocations: usize,
     bytes: usize,
-    zeroed_sizes: Vec<usize>,
+    /// Allocator-zeroed allocations of exactly the `payload_bytes` passed to
+    /// `measure`.
+    zeroed_payloads: u64,
 }
 
-fn measure(operation: impl FnOnce()) -> Measurement {
-    ALLOCATIONS.set(0);
-    ALLOCATED_BYTES.set(0);
-    ZEROED_ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    operation();
-    COUNTING.set(false);
+fn measure(payload_bytes: usize, operation: impl FnOnce()) -> Measurement {
+    let ((), allocs) = counting_alloc::measure_matching(payload_bytes..=payload_bytes, operation);
     Measurement {
-        allocations: ALLOCATIONS.get(),
-        bytes: ALLOCATED_BYTES.get(),
-        zeroed_sizes: ZEROED_SIZES.with(|sizes| {
-            sizes[..ZEROED_ALLOCATIONS.get().min(ZEROED_LOG_CAPACITY)]
-                .iter()
-                .map(Cell::get)
-                .collect()
-        }),
+        allocations: allocs.calls as usize,
+        bytes: allocs.bytes as usize,
+        zeroed_payloads: allocs.matched_zeroed_calls,
     }
 }
 
@@ -139,7 +78,7 @@ fn restrict_measurement(scale: usize) -> (Measurement, usize) {
     let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
 
     let mut output = None;
-    let measurement = measure(|| {
+    let measurement = measure(payload_bytes, || {
         output = Some(black_box(source.restrict_leg(&[(0, &selection)]).unwrap()));
     });
     assert_eq!(
@@ -151,18 +90,15 @@ fn restrict_measurement(scale: usize) -> (Measurement, usize) {
 
 #[test]
 fn restrict_leg_allocates_one_unfilled_payload_and_degeneracy_independent_scratch() {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = counting_alloc::serial();
     let (small, small_bytes) = restrict_measurement(1);
     let (large, large_bytes) = restrict_measurement(8);
     assert!(large_bytes > small_bytes);
 
     for (measurement, bytes) in [(&small, small_bytes), (&large, large_bytes)] {
-        assert!(
-            !measurement.zeroed_sizes.contains(&bytes),
-            "no payload-sized zeroed allocation, got {:?} for {bytes} bytes",
-            measurement.zeroed_sizes
+        assert_eq!(
+            measurement.zeroed_payloads, 0,
+            "no payload-sized zeroed allocation, got {measurement:?} for {bytes} bytes"
         );
     }
     // The block copy's scratch is inline (#1362) and the warm layout lookup
@@ -226,7 +162,7 @@ fn three_axis_measurement(scale: usize, sequential: bool) -> (Measurement, usize
     let warm = restrict();
     let payload_bytes = std::mem::size_of_val(warm.dense_data().unwrap());
     let mut output = None;
-    let measurement = measure(|| {
+    let measurement = measure(payload_bytes, || {
         output = Some(black_box(restrict()));
     });
     assert_eq!(
@@ -238,9 +174,7 @@ fn three_axis_measurement(scale: usize, sequential: bool) -> (Measurement, usize
 
 #[test]
 fn restricting_three_legs_is_one_payload_pass() {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = counting_alloc::serial();
     // What: `k` legs are restricted in one strided pass into one output
     // payload (#1561). Sequential one-leg passes would each allocate an
     // intermediate payload whose size grows with the degeneracies, so the
@@ -249,10 +183,9 @@ fn restricting_three_legs_is_one_payload_pass() {
     let (large, large_bytes) = three_axis_measurement(8, false);
     assert!(large_bytes > small_bytes);
     for (measurement, bytes) in [(&small, small_bytes), (&large, large_bytes)] {
-        assert!(
-            !measurement.zeroed_sizes.contains(&bytes),
-            "no payload-sized zeroed allocation, got {:?} for {bytes} bytes",
-            measurement.zeroed_sizes
+        assert_eq!(
+            measurement.zeroed_payloads, 0,
+            "no payload-sized zeroed allocation, got {measurement:?} for {bytes} bytes"
         );
     }
     assert_eq!(small.allocations, large.allocations);
@@ -278,9 +211,7 @@ fn restricting_three_legs_is_one_payload_pass() {
 
 #[test]
 fn the_network_restriction_of_several_axes_fills_no_payload() {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let zero = U1Irrep::new(0);
@@ -309,7 +240,7 @@ fn the_network_restriction_of_several_axes_fills_no_payload() {
     assert_eq!(warm.dense_data().unwrap().len(), 3 * 4);
 
     let mut output = None;
-    let measurement = measure(|| {
+    let measurement = measure(payload_bytes, || {
         output = Some(black_box(
             __network::network_restrict_degeneracies(&source, false, &restrictions).unwrap(),
         ));
@@ -318,10 +249,9 @@ fn the_network_restriction_of_several_axes_fills_no_payload() {
         output.unwrap().dense_data().unwrap(),
         warm.dense_data().unwrap()
     );
-    assert!(
-        !measurement.zeroed_sizes.contains(&payload_bytes),
-        "two restricted axes write one unfilled payload, got {:?}",
-        measurement.zeroed_sizes
+    assert_eq!(
+        measurement.zeroed_payloads, 0,
+        "two restricted axes write one unfilled payload, got {measurement:?}"
     );
     assert!(measurement.bytes >= payload_bytes);
 }
@@ -346,7 +276,8 @@ fn compact_restrict_measurement(scale: usize) -> Measurement {
     );
 
     let mut output = None;
-    let measurement = measure(|| {
+    // No dense payload to watch: callers compare only calls and bytes.
+    let measurement = measure(0, || {
         output = Some(black_box(
             s.restrict_leg(&[(0, &selection), (1, &selection)]).unwrap(),
         ));
@@ -360,9 +291,7 @@ fn compact_restrict_measurement(scale: usize) -> Measurement {
 
 #[test]
 fn compact_restrict_leg_costs_the_kept_values_and_nothing_per_discarded_one() {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = counting_alloc::serial();
     // The kept prefix is the same in both; only the discarded tail grows. A
     // compact restriction must therefore cost exactly the same, which is the
     // `O(sum_c k'_c)` contract: no dense block is ever materialized.
@@ -374,9 +303,7 @@ fn compact_restrict_leg_costs_the_kept_values_and_nothing_per_discarded_one() {
 
 #[test]
 fn lazy_adjoint_add_and_materialization_fill_no_payload() {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = counting_alloc::serial();
     // What: the owned outputs of a lazy-adjoint `add` and of the first
     // lazy-adjoint `data()` tile their storage, so neither zero-fills its
     // payload before overwriting every block (#1290). For `f64` the base
@@ -394,22 +321,20 @@ fn lazy_adjoint_add_and_materialization_fill_no_payload() {
     assert!(square.subblock_count() > 1);
 
     let mut sum = None;
-    let add = measure(|| {
+    let add = measure(payload_bytes, || {
         sum = Some(black_box(lazy.axpby(0.5, &partner, -2.0).unwrap()));
     });
-    assert!(
-        !add.zeroed_sizes.contains(&payload_bytes),
-        "lazy add zero-filled its payload: {:?}",
-        add.zeroed_sizes
+    assert_eq!(
+        add.zeroed_payloads, 0,
+        "lazy add zero-filled its payload: {add:?}"
     );
 
-    let materialize = measure(|| {
+    let materialize = measure(payload_bytes, || {
         black_box(lazy.materialize().unwrap().dense_data().unwrap().len());
     });
-    assert!(
-        !materialize.zeroed_sizes.contains(&payload_bytes),
-        "lazy materialization zero-filled its payload: {:?}",
-        materialize.zeroed_sizes
+    assert_eq!(
+        materialize.zeroed_payloads, 0,
+        "lazy materialization zero-filled its payload: {materialize:?}"
     );
     // Oracle: the elementwise sum over the materialized adjoint payload,
     // which shares the partner's logical layout.
@@ -460,7 +385,7 @@ fn steady_multi_row_restrict(scale: usize) -> (Measurement, usize) {
     drop(warm);
     drop(black_box(source.restrict_leg(&[(0, &selection)]).unwrap()));
     let mut output = None;
-    let measurement = measure(|| {
+    let measurement = measure(payload_bytes, || {
         output = Some(black_box(source.restrict_leg(&[(0, &selection)]).unwrap()));
     });
     assert_eq!(output.unwrap().dense_data().unwrap(), expected.as_slice());
@@ -469,16 +394,13 @@ fn steady_multi_row_restrict(scale: usize) -> (Measurement, usize) {
 
 #[test]
 fn steady_state_restrict_leg_with_several_row_trees_pays_no_layout_proof() {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = counting_alloc::serial();
     let (small, small_bytes) = steady_multi_row_restrict(1);
     let (large, large_bytes) = steady_multi_row_restrict(4);
     for (measurement, bytes) in [(&small, small_bytes), (&large, large_bytes)] {
-        assert!(
-            !measurement.zeroed_sizes.contains(&bytes),
-            "no payload-sized zeroed allocation, got {:?} for {bytes} bytes",
-            measurement.zeroed_sizes
+        assert_eq!(
+            measurement.zeroed_payloads, 0,
+            "no payload-sized zeroed allocation, got {measurement:?} for {bytes} bytes"
         );
     }
     // origin/main (zero-filled output) measures 11 here. Proving the tiling
@@ -515,7 +437,7 @@ fn stacked_restrict_measurement(members: usize) -> (Measurement, usize) {
         members * std::mem::size_of_val(warm.member(0).unwrap().dense_data().unwrap());
     drop(warm);
     let mut output = None;
-    let measurement = measure(|| {
+    let measurement = measure(payload_bytes, || {
         output = Some(black_box(stack.restrict_leg(&[(0, &selection)]).unwrap()));
     });
     let output = output.unwrap();
@@ -534,16 +456,13 @@ fn stacked_restrict_measurement(members: usize) -> (Measurement, usize) {
 
 #[test]
 fn stacked_restrict_leg_allocates_one_unfilled_payload_independent_of_the_member_count() {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = counting_alloc::serial();
     let (small, small_bytes) = stacked_restrict_measurement(2);
     let (large, large_bytes) = stacked_restrict_measurement(16);
     for (measurement, bytes) in [(&small, small_bytes), (&large, large_bytes)] {
-        assert!(
-            !measurement.zeroed_sizes.contains(&bytes),
-            "no payload-sized zeroed allocation, got {:?} for {bytes} bytes",
-            measurement.zeroed_sizes
+        assert_eq!(
+            measurement.zeroed_payloads, 0,
+            "no payload-sized zeroed allocation, got {measurement:?} for {bytes} bytes"
         );
     }
     // One output buffer of `B L'` elements; everything else is the result's

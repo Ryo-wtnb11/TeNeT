@@ -4,10 +4,8 @@
 //! same allocations as the serial path, with no allocator-zeroed payload (the
 //! `vec![zero; P]` fallback that the thread-count gate used to force).
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use num_complex::Complex64;
 use tenet::sector::{
@@ -16,56 +14,13 @@ use tenet::sector::{
 use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, TensorMap};
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static BYTES: Cell<usize> = const { Cell::new(0) };
-    static ZEROED_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            BYTES.set(BYTES.get() + layout.size());
-        }
-        pointer
-    }
-
-    // Why override: `vec![0.0; P]` lowers to `alloc_zeroed`, which the default
-    // implementation would report as a plain `alloc`.
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            BYTES.set(BYTES.get() + layout.size());
-            ZEROED_ALLOCATIONS.set(ZEROED_ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            BYTES.set(BYTES.get() + new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
-/// Re-executes exactly one test, alone, in a child process. `MEASUREMENT_LOCK`
+/// Re-executes exactly one test, alone, in a child process. `counting_alloc::serial()`
 /// only serializes this file's own three tests against each other; it does
 /// not stop a preceding test's dropped `Runtime`/pool from leaving
 /// process-global structural-cache work (tenet-core's fusion-tree-layout and
@@ -102,17 +57,12 @@ fn run_isolated_or_return(isolated_env: &str, test_path: &str) -> bool {
 
 /// (allocations, bytes, zeroed allocations) on the caller thread.
 fn measure<T>(f: impl FnOnce() -> T) -> (T, usize, usize, usize) {
-    ALLOCATIONS.set(0);
-    BYTES.set(0);
-    ZEROED_ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    let output = f();
-    COUNTING.set(false);
+    let (output, allocs) = counting_alloc::measure(f);
     (
         output,
-        ALLOCATIONS.get(),
-        BYTES.get(),
-        ZEROED_ALLOCATIONS.get(),
+        allocs.calls as usize,
+        allocs.bytes as usize,
+        allocs.zeroed_calls as usize,
     )
 }
 
@@ -210,7 +160,7 @@ macro_rules! assert_bit_identical {
 
 #[test]
 fn u1_su2_owned_transforms_are_bit_identical_across_thread_counts() {
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _measurement = counting_alloc::serial();
     let (serial, parallel) = runtimes();
     let provider = Arc::new(U1FusionRule.product(SU2FusionRule));
     let space = u1_su2_space(&provider);
@@ -240,7 +190,7 @@ fn u1_su2_owned_transforms_are_bit_identical_across_thread_counts() {
 
 #[test]
 fn u1_owned_transforms_are_bit_identical_across_thread_counts() {
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _measurement = counting_alloc::serial();
     let (serial, parallel) = runtimes();
     let provider = Arc::new(U1FusionRule);
     let space = u1_space(&provider);
@@ -275,7 +225,7 @@ fn parallel_owned_permute_allocates_like_the_serial_owned_path() {
     ) {
         return;
     }
-    let _measurement = MEASUREMENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _measurement = counting_alloc::serial();
     // What: with `recoupling_threads > 1` a warmed owned permute makes the
     // same caller-thread allocations as the serial owned path and none of them
     // is allocator-zeroed. Before #1217 the multi-threaded backend returned

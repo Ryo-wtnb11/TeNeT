@@ -1,42 +1,14 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::sync::Arc;
 
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::Error;
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = unsafe { System.alloc(layout) };
-        if !ptr.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        ptr
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) };
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        let out = unsafe { System.realloc(ptr, layout, size) };
-        if !out.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        out
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 fn tensor(runtime: &Runtime, n: usize, value: f64) -> TensorMap<U1FusionRule, f64> {
     let rule = Arc::new(U1FusionRule);
@@ -96,15 +68,10 @@ fn unique_dense_destinations_are_allocation_free() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let mut destination = tensor(&runtime, 64, 2.0);
     let x = tensor(&runtime, 64, 3.0);
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    x.axpby_into(&mut destination, -1.0, 2.0).unwrap();
-    COUNTING.set(false);
-    assert_eq!(ALLOCATIONS.get(), 0);
+    let ((), allocs) =
+        counting_alloc::measure(|| x.axpby_into(&mut destination, -1.0, 2.0).unwrap());
+    assert_eq!(allocs.calls, 0);
     let mut scaled = tensor(&runtime, 64, 2.0);
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    scaled.scale_assign(3.0).unwrap();
-    COUNTING.set(false);
-    assert_eq!(ALLOCATIONS.get(), 0);
+    let ((), allocs) = counting_alloc::measure(|| scaled.scale_assign(3.0).unwrap());
+    assert_eq!(allocs.calls, 0);
 }

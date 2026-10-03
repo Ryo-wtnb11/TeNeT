@@ -5,66 +5,22 @@ mod contract_cases;
 mod braiding_probe;
 
 use braiding_probe::{ProbeSector, RealBraidingProbe};
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-struct CountingAllocator;
-thread_local! {
-    static MEASURING: Cell<bool> = const { Cell::new(false) };
-    static CALLS: Cell<usize> = const { Cell::new(0) };
-    static BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        MEASURING.with(|enabled| {
-            if enabled.get() {
-                CALLS.set(CALLS.get() + 1);
-                BYTES.set(BYTES.get() + layout.size());
-            }
-        });
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        MEASURING.with(|enabled| {
-            if enabled.get() {
-                CALLS.set(CALLS.get() + 1);
-                BYTES.set(BYTES.get() + layout.size());
-            }
-        });
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        MEASURING.with(|enabled| {
-            if enabled.get() {
-                CALLS.set(CALLS.get() + 1);
-                BYTES.set(BYTES.get() + size);
-            }
-        });
-        unsafe { System.realloc(ptr, layout, size) }
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 fn measure<T>(f: impl FnOnce() -> T) -> (T, Duration, usize, usize) {
-    CALLS.set(0);
-    BYTES.set(0);
-    MEASURING.set(true);
-    let start = Instant::now();
-    let value = f();
-    let elapsed = start.elapsed();
-    MEASURING.set(false);
-    (value, elapsed, CALLS.get(), BYTES.get())
+    let ((value, elapsed), allocs) = counting_alloc::measure(|| {
+        let start = Instant::now();
+        let value = f();
+        (value, start.elapsed())
+    });
+    (value, elapsed, allocs.calls as usize, allocs.bytes as usize)
 }
 use contract_cases::{
     assert_close, blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_su2,

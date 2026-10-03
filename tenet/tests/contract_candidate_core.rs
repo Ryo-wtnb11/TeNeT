@@ -21,10 +21,7 @@ mod common;
 #[allow(unused_macros)]
 mod contract_cases;
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
-use std::sync::Mutex;
 use tenet::typed::ContractSpec;
 use tenet::typed::Direction;
 
@@ -37,48 +34,11 @@ use num_complex::{Complex32, Complex64};
 use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
-struct CountingAllocator;
-
-thread_local! {
-    static ENABLED: Cell<bool> = const { Cell::new(false) };
-    static CALLS: Cell<u64> = const { Cell::new(0) };
-    static BYTES: Cell<u64> = const { Cell::new(0) };
-}
-
-fn record(bytes: usize) {
-    if ENABLED.get() {
-        CALLS.set(CALLS.get() + 1);
-        BYTES.set(BYTES.get() + bytes as u64);
-    }
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() {
-            record(layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() {
-            record(new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-// Why serialize: process-global layout caches are shared across test threads,
-// so a concurrent test's evictions would move this thread's warm counts.
-static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 /// Values against `oracle`, then the warm route evidence on `f64`.
 fn check<R, D>(
@@ -118,22 +78,16 @@ where
         info.hits() + info.misses()
     };
     let before = lookups();
-    CALLS.set(0);
-    BYTES.set(0);
-    ENABLED.set(true);
-    let result = call();
-    ENABLED.set(false);
+    let (result, allocs) = counting_alloc::measure(call);
     drop(result);
-    (CALLS.get(), BYTES.get(), lookups() - before)
+    (allocs.calls, allocs.bytes, lookups() - before)
 }
 
 fn assert_warm_zero_copy<R>(v: &GradedSpace<R>, symmetry: &str)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let probes = probes::<R, f64>(&runtime, v);
     let measured: Vec<_> = probes
@@ -353,9 +307,7 @@ fn assert_mixed_zero_copy<R>(v: &GradedSpace<R>, w: &GradedSpace<R>, symmetry: &
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for case in mixed_cases::<R, f64>(&runtime, v, w) {
         let (_, _, lookups) = warm(&runtime, &case);
@@ -516,21 +468,16 @@ fn assert_output_permute_budget<R>(v: &GradedSpace<R>, symmetry: &str)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for (case, swapped) in output_permute_probes::<R, f64>(&runtime, v) {
         let (calls, bytes, lookups) = warm(&runtime, &case);
         contract_then_permute(&case, swapped);
         let before = transform_lookups(&runtime);
-        CALLS.set(0);
-        BYTES.set(0);
-        ENABLED.set(true);
-        let two_step = contract_then_permute(black_box(&case), swapped);
-        ENABLED.set(false);
+        let (two_step, allocs) =
+            counting_alloc::measure(|| contract_then_permute(black_box(&case), swapped));
         drop(two_step);
-        let (budget_calls, budget_bytes) = (CALLS.get(), BYTES.get());
+        let (budget_calls, budget_bytes) = (allocs.calls, allocs.bytes);
         let permute_lookups = transform_lookups(&runtime) - before;
         let name = case.name;
         eprintln!(
@@ -666,9 +613,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: Payload + PartialEq,
 {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let cases = output_permute_probes::<R, D>(&runtime, v)
         .into_iter()
@@ -747,9 +692,7 @@ fn zero_copy_candidates_with_an_output_permute_equal_contract_then_permute_bitwi
 
 #[test]
 fn uneven_swapped_candidate_with_an_output_permute_runs_one_transform() {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let case = uneven_swap::<_, f64>(&runtime, &u1_non_self_dual(), &u1_second());
     let (_, _, lookups) = warm(&runtime, &case);
@@ -911,9 +854,7 @@ fn inactive_output_cases(runtime: &Runtime) -> Vec<Case<tenet::sector::U1FusionR
 
 #[test]
 fn large_output_from_small_operands_copies_the_operands_not_c() {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for case in large_output_cases(&runtime)
         .into_iter()
@@ -946,9 +887,7 @@ fn large_output_from_small_operands_copies_the_operands_not_c() {
 /// and a run of inactive sectors one scale layout.
 #[test]
 fn dynamic_tree_with_a_fresh_destination_allocates_per_region_not_per_tree() {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for case in inactive_output_cases(&runtime) {
         let (calls, bytes, _) = warm(&runtime, &case);
@@ -971,9 +910,7 @@ fn dynamic_tree_with_a_fresh_destination_allocates_per_region_not_per_tree() {
 /// Debug builds also check the shortcut against full candidate scoring.
 #[test]
 fn small_output_takes_copy_c_without_scoring() {
-    let _guard = MEASUREMENT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let v = u1(&[(-1, 8), (0, 8), (1, 8)]);
     let c = u1(&[(0, 2), (1, 1)]);

@@ -1,5 +1,3 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::Arc;
 
@@ -7,44 +5,15 @@ use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::Runtime;
 use tenet::typed::{Eigh, GradedSpace, Qr, Svd, TensorMap};
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
-fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize) {
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    let value = operation();
-    COUNTING.set(false);
-    (value, ALLOCATIONS.get())
+fn measured<T>(operation: impl FnOnce() -> T) -> (T, u64) {
+    let (value, allocs) = counting_alloc::measure(operation);
+    (value, allocs.calls)
 }
 
 /// Rank-4 U(1) tensor with five coupled sectors (charges -2..=2) and
