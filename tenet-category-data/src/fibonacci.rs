@@ -151,6 +151,17 @@ impl CategoryDataFibonacci {
             .then_some(sector.id())
             .ok_or(FusionAlgebraError::InvalidSector { sector })
     }
+
+    /// The infallible symbol methods' single domain check: the same
+    /// [`Self::index`] the checked twins use, panicking with its typed error.
+    /// Why panic rather than return `0`: the flat tables cannot tell an
+    /// out-of-range id from another entry, and the closed-form provider
+    /// panics on the same input through `nsymbol_or_panic` (issue #1737).
+    #[inline]
+    fn symbol_index(method: &str, sector: SectorId) -> usize {
+        Self::index(sector)
+            .unwrap_or_else(|error| panic!("{method} precondition violated: {error}"))
+    }
 }
 
 impl FusionRule for CategoryDataFibonacci {
@@ -269,44 +280,56 @@ impl MultiplicityFreeFusionSymbols for CategoryDataFibonacci {
         left_coupled: SectorId,
         right_coupled: SectorId,
     ) -> Self::Scalar {
+        let index = |sector| Self::symbol_index("f_symbol_scalar", sector);
         self.table.fsymbol(
-            left.id(),
-            middle.id(),
-            right.id(),
-            coupled.id(),
-            left_coupled.id(),
-            right_coupled.id(),
+            index(left),
+            index(middle),
+            index(right),
+            index(coupled),
+            index(left_coupled),
+            index(right_coupled),
         )
     }
 
     fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
-        self.table.rsymbol(left.id(), right.id(), coupled.id())
+        let index = |sector| Self::symbol_index("r_symbol_scalar", sector);
+        self.table
+            .rsymbol(index(left), index(right), index(coupled))
     }
 }
 
 impl MultiplicityFreeRigidSymbols for CategoryDataFibonacci {
     fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        Complex64::new(self.dims[sector.id()], 0.0)
+        Complex64::new(self.dims[Self::symbol_index("dim_scalar", sector)], 0.0)
     }
 
     fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        Complex64::new(1.0 / self.dims[sector.id()], 0.0)
+        Complex64::new(
+            1.0 / self.dims[Self::symbol_index("inv_dim_scalar", sector)],
+            0.0,
+        )
     }
 
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        Complex64::new(self.dims[sector.id()].sqrt(), 0.0)
+        Complex64::new(
+            self.dims[Self::symbol_index("sqrt_dim_scalar", sector)].sqrt(),
+            0.0,
+        )
     }
 
     fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        Complex64::new(1.0 / self.dims[sector.id()].sqrt(), 0.0)
+        Complex64::new(
+            1.0 / self.dims[Self::symbol_index("inv_sqrt_dim_scalar", sector)].sqrt(),
+            0.0,
+        )
     }
 
     fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
-        self.twists[sector.id()]
+        self.twists[Self::symbol_index("twist_scalar", sector)]
     }
 
     fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
-        self.frobenius_schur[sector.id()]
+        self.frobenius_schur[Self::symbol_index("frobenius_schur_phase_scalar", sector)]
     }
 }
 

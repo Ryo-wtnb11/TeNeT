@@ -340,13 +340,15 @@ impl MultiplicityFreeTable {
         self.rank
     }
 
-    /// `N^{ab}_c`, or `0` outside the table.
+    /// `N^{ab}_c`; `0` for an absent in-range entry. Every label must be `< rank`:
+    /// the flat index cannot tell an out-of-range label from another entry.
     #[inline]
     pub(crate) fn nsymbol(&self, a: usize, b: usize, c: usize) -> u32 {
         self.nsym[(a * self.rank + b) * self.rank + c]
     }
 
-    /// `F^{abc}_d[e, f]`, or `0` outside the table.
+    /// `F^{abc}_d[e, f]`; `0` for an absent in-range entry. Every label must be `< rank`:
+    /// the flat index cannot tell an out-of-range label from another entry.
     #[inline]
     pub(crate) fn fsymbol(
         &self,
@@ -363,7 +365,8 @@ impl MultiplicityFreeTable {
         self.fsym[index]
     }
 
-    /// `R^{ab}_c`, or `0` outside the table.
+    /// `R^{ab}_c`; `0` for an absent in-range entry. Every label must be `< rank`:
+    /// the flat index cannot tell an out-of-range label from another entry.
     #[inline]
     pub(crate) fn rsymbol(&self, a: usize, b: usize, c: usize) -> Complex64 {
         self.rsym[(a * self.rank + b) * self.rank + c]
