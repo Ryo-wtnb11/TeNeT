@@ -321,17 +321,11 @@ fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
         (Some(2), None, 2, 0),
         (None, Some(2), 2, 2),
     ] {
-        let svd_calls = Arc::new(AtomicUsize::new(0));
-        let gemm_calls = Arc::new(AtomicUsize::new(0));
+        let svd_calls = Arc::new(SpyCounts::default());
+        let gemm_calls = Arc::clone(&svd_calls);
         let runtime = Runtime::builder()
             .dense_threads(1)
-            .with_dense_executor(Box::new(PinvFaultExecutor {
-                inner: DefaultDenseExecutor::new(),
-                svd_calls: Arc::clone(&svd_calls),
-                gemm_calls: Arc::clone(&gemm_calls),
-                fail_svd,
-                fail_gemm,
-            }))
+            .with_dense_executor(Box::new(pinv_spy(&svd_calls, fail_svd, fail_gemm)))
             .build()
             .unwrap();
         let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -358,8 +352,8 @@ fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
         } else {
             assert!(result.is_ok());
         }
-        assert_eq!(svd_calls.load(Ordering::Relaxed), expected_svd);
-        assert_eq!(gemm_calls.load(Ordering::Relaxed), expected_gemm);
+        assert_eq!(svd_calls.of(PINV_SVD), expected_svd);
+        assert_eq!(gemm_calls.of(Kernel::GEMM), expected_gemm);
         assert_eq!(source.dense_data().unwrap(), before.as_slice());
     }
 }
@@ -428,17 +422,11 @@ fn checked_generic_pinv_uses_a_strict_global_cutoff() {
 
 #[test]
 fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
-    let svd_calls = Arc::new(AtomicUsize::new(0));
-    let gemm_calls = Arc::new(AtomicUsize::new(0));
+    let svd_calls = Arc::new(SpyCounts::default());
+    let gemm_calls = Arc::clone(&svd_calls);
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(PinvFaultExecutor {
-            inner: DefaultDenseExecutor::new(),
-            svd_calls: Arc::clone(&svd_calls),
-            gemm_calls: Arc::clone(&gemm_calls),
-            fail_svd: None,
-            fail_gemm: None,
-        }))
+        .with_dense_executor(Box::new(pinv_spy(&svd_calls, None, None)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
@@ -479,8 +467,8 @@ fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
     );
     assert_eq!(input.diagview().unwrap(), before);
     assert!(result.dense_data().is_err());
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
 
     provider.invalid_style.store(true, Ordering::Relaxed);
     assert!(matches!(
@@ -494,8 +482,8 @@ fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
         Err(GenericTensorError::Structure(_))
     ));
     provider.invalid_style.store(false, Ordering::Relaxed);
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
 
     let complex: TensorMap<_, Complex64> = TensorMap::diagonal(
         &runtime,
@@ -535,8 +523,8 @@ fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
         ]
     );
     assert!(complex_result.dense_data().is_err());
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
 
     let dual_bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)])
         .unwrap()
@@ -557,8 +545,8 @@ fn checked_compact_diagonal_pinv_keeps_a_checked_compact_output() {
     assert_eq!(dual_result.domain(), dual.codomain());
     assert_eq!(dual_result.diagview().unwrap()[0].values, [-0.5, 0.0]);
     assert!(dual_result.dense_data().is_err());
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
 }
 
 #[test]
@@ -770,17 +758,11 @@ fn checked_compact_diagonal_pinv_precision_limits_match_dense_oracle() {
 
 #[test]
 fn checked_generic_pinv_normalized_empty_skips_dense_execution() {
-    let svd_calls = Arc::new(AtomicUsize::new(0));
-    let gemm_calls = Arc::new(AtomicUsize::new(0));
+    let svd_calls = Arc::new(SpyCounts::default());
+    let gemm_calls = Arc::clone(&svd_calls);
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(PinvFaultExecutor {
-            inner: DefaultDenseExecutor::new(),
-            svd_calls: Arc::clone(&svd_calls),
-            gemm_calls: Arc::clone(&gemm_calls),
-            fail_svd: None,
-            fail_gemm: None,
-        }))
+        .with_dense_executor(Box::new(pinv_spy(&svd_calls, None, None)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -793,8 +775,8 @@ fn checked_generic_pinv_normalized_empty_skips_dense_execution() {
     assert_eq!(pseudo.codomain(), source.domain());
     assert_eq!(pseudo.domain(), source.codomain());
     assert!(std::ptr::eq(pseudo.provider(), provider.as_ref()));
-    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
+    assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
 }
 
 #[cfg(feature = "racah-generated")]

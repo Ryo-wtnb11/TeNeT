@@ -3,12 +3,11 @@
 //! checks the runtime actually drives the injected executor and that doing so
 //! is numerically identical to the unset built-in provider.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tenet::expert::{
-    DefaultDenseExecutor, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
-    DenseScalar, DenseTensor, DenseWrite, MatrixOp,
+    DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor,
+    DenseGemmBatchJob, DenseRead, DenseScalar, DenseTensor, DenseWrite, MatrixOp,
 };
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::OperationError;
@@ -21,10 +20,7 @@ use tenet::typed::{
 fn compact_diagonal_svd_submits_no_dense_svd() {
     let counts = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(SpyExecutor {
-            inner: DefaultDenseExecutor::default(),
-            counts: Arc::clone(&counts),
-        }))
+        .with_dense_executor(Box::new(SpyExecutor::counting(&counts)))
         .build()
         .unwrap();
     let leg = u1_space([(-1, 2), (0, 3), (1, 1)]);
@@ -48,7 +44,7 @@ fn compact_diagonal_svd_submits_no_dense_svd() {
     )
     .unwrap();
     let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
-    assert_eq!(counts.read(), (0, 0, 0, 0));
+    assert_eq!(read(&counts), (0, 0, 0, 0));
     let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
     for (actual, expected) in rebuilt
         .dense_data()
@@ -68,143 +64,24 @@ fn u1_space(entries: [(i32, usize); 3]) -> GradedSpace<U1FusionRule> {
     .unwrap()
 }
 
-/// Per-kernel call counts, so a test can prove both that the injected backend
-/// is the one the runtime drives and that a storage-local route never reaches
-/// it. Every entry point is counted where it enters the executor, not where it
-/// bottoms out: the default `DenseExecutor` funnels some of the GEMM family
-/// into `dot_general_into`, but a backend is free to override each one.
-#[derive(Default)]
-struct SpyCounts {
-    svd: AtomicUsize,
-    eigh: AtomicUsize,
-    gemm: AtomicUsize,
-    solve: AtomicUsize,
-}
+include!("common/spy_executor.rs");
 
-impl SpyCounts {
-    fn read(&self) -> (usize, usize, usize, usize) {
-        (
-            self.svd.load(Ordering::Relaxed),
-            self.eigh.load(Ordering::Relaxed),
-            self.gemm.load(Ordering::Relaxed),
-            self.solve.load(Ordering::Relaxed),
-        )
-    }
-}
-
-/// Delegates every dense op to the built-in compiled default, counting the
-/// calls so the tests can see which kernels a public operation drives.
-struct SpyExecutor {
-    inner: DefaultDenseExecutor,
-    counts: Arc<SpyCounts>,
-}
-
-impl DenseExecutor for SpyExecutor {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.counts.svd.fetch_add(1, Ordering::Relaxed);
-        self.inner.svd(input)
-    }
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.counts.eigh.fetch_add(1, Ordering::Relaxed);
-        self.inner.eigh(input)
-    }
-    fn eigh_into(
-        &mut self,
-        input: DenseRead<'_>,
-        values: DenseWrite<'_>,
-        vectors: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.counts.eigh.fetch_add(1, Ordering::Relaxed);
-        self.inner.eigh_into(input, values, vectors)
-    }
-    fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        self.counts.eigh.fetch_add(1, Ordering::Relaxed);
-        self.inner.eigh_vals(input)
-    }
-    fn solve_into(
-        &mut self,
-        a: DenseRead<'_>,
-        b: DenseRead<'_>,
-        x: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.counts.solve.fetch_add(1, Ordering::Relaxed);
-        self.inner.solve_into(a, b, x)
-    }
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.counts.gemm.fetch_add(1, Ordering::Relaxed);
-        self.inner.dot_general_into(output, lhs, rhs, config)
-    }
-    fn matmul_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-    ) -> Result<(), DenseError> {
-        self.counts.gemm.fetch_add(1, Ordering::Relaxed);
-        self.inner.matmul_into(output, lhs, rhs)
-    }
-    fn matmul_axpby_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        alpha: DenseScalar,
-        beta: DenseScalar,
-    ) -> Result<(), DenseError> {
-        self.counts.gemm.fetch_add(1, Ordering::Relaxed);
-        self.inner.matmul_axpby_into(output, lhs, rhs, alpha, beta)
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn matmul_batch_axpby_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        jobs: &[DenseGemmBatchJob],
-        runs: &[usize],
-        alpha: DenseScalar,
-        beta: DenseScalar,
-    ) -> Result<(), DenseError> {
-        self.counts.gemm.fetch_add(1, Ordering::Relaxed);
-        self.inner
-            .matmul_batch_axpby_into(output, lhs, rhs, jobs, runs, alpha, beta)
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn matmul_batch_axpby_with_ops_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        jobs: &[DenseGemmBatchJob],
-        runs: &[usize],
-        lhs_op: MatrixOp,
-        rhs_op: MatrixOp,
-        alpha: DenseScalar,
-        beta: DenseScalar,
-    ) -> Result<(), DenseError> {
-        self.counts.gemm.fetch_add(1, Ordering::Relaxed);
-        self.inner.matmul_batch_axpby_with_ops_into(
-            output, lhs, rhs, jobs, runs, lhs_op, rhs_op, alpha, beta,
-        )
-    }
+/// `(svd, eigh, gemm, solve)` entries the spy saw, so a test can prove both
+/// that the injected backend is the one the runtime drives and that a
+/// storage-local route never reaches it.
+fn read(counts: &SpyCounts) -> (usize, usize, usize, usize) {
+    (
+        counts.of(Kernel::SVD) + counts.get(Kernel::SvdVals),
+        counts.of(Kernel::EIGH) + counts.get(Kernel::EighVals),
+        counts.of(Kernel::GEMM),
+        counts.get(Kernel::Solve),
+    )
 }
 
 #[test]
 fn injected_dense_executor_is_used_and_preserves_results() {
     let counts = Arc::new(SpyCounts::default());
-    let spy = SpyExecutor {
-        inner: DefaultDenseExecutor::default(),
-        counts: Arc::clone(&counts),
-    };
+    let spy = SpyExecutor::counting(&counts);
     let rt = Runtime::builder()
         .with_dense_executor(Box::new(spy))
         .build()
@@ -215,7 +92,7 @@ fn injected_dense_executor_is_used_and_preserves_results() {
     let Svd { s, .. } = t.svd_compact(&[0, 1], &[2, 3]).unwrap();
 
     assert!(
-        counts.svd.load(Ordering::Relaxed) > 0,
+        counts.of(Kernel::SVD) > 0,
         "the injected executor's svd was never called — the runtime is not \
          driving the injected backend"
     );
@@ -255,22 +132,19 @@ fn compact_diagonal_exp_drives_no_dense_kernel() {
     // observation of that; the allocation gates only see its cost.
     let counts = Arc::new(SpyCounts::default());
     let rt = Runtime::builder()
-        .with_dense_executor(Box::new(SpyExecutor {
-            inner: DefaultDenseExecutor::default(),
-            counts: Arc::clone(&counts),
-        }))
+        .with_dense_executor(Box::new(SpyExecutor::counting(&counts)))
         .build()
         .unwrap();
 
     let v = u1_space([(-1, 3), (0, 4), (1, 3)]);
     let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 578).unwrap();
     let s = t.svd_compact(&[0], &[1]).unwrap().s;
-    let (svd, ..) = counts.read();
+    let (svd, ..) = read(&counts);
     assert!(svd > 0, "the fixture never reached the injected backend");
 
-    let before = counts.read();
+    let before = read(&counts);
     let image = s.exp(&[0], &[1]).unwrap();
-    let (_, eigh, gemm, solve) = counts.read();
+    let (_, eigh, gemm, solve) = read(&counts);
     assert_eq!(
         (eigh, gemm, solve),
         (before.1, before.2, before.3),
@@ -298,14 +172,14 @@ fn compact_diagonal_exp_drives_no_dense_kernel() {
 
 #[test]
 fn injected_executor_without_eig_reports_unsupported() {
-    // `SpyExecutor` implements the required methods but leaves `eig` at the
-    // trait default, which is exactly the missing-capability case: the error
+    // The spy reports `eig` as Unsupported, as an executor that leaves it at
+    // the trait default does: the missing-capability case. The error
     // must name the injected executor's gap, not a Tenferro backend failure.
     let rt = Runtime::builder()
-        .with_dense_executor(Box::new(SpyExecutor {
-            inner: DefaultDenseExecutor::default(),
-            counts: Arc::new(SpyCounts::default()),
-        }))
+        .with_dense_executor(Box::new(SpyExecutor::default().without(
+            &[Kernel::Eig],
+            "executor does not implement the general eigendecomposition",
+        )))
         .build()
         .unwrap();
 

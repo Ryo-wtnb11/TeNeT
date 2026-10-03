@@ -5,12 +5,9 @@ use super::*;
 fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
     use tenet_core::SUNFusionRule;
 
-    let solver_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let solver_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(FailSecondSvd {
-            record: Some(Arc::clone(&solver_calls)),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(fail_second_svd(&solver_calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -46,7 +43,7 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
         ]
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(solver_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(solver_calls.total(), 0);
 
     let stored = real.spectrum().unwrap();
     let mut missing = stored.to_vec();
@@ -101,7 +98,7 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
     assert!((got[1].values[1] - 2.0_f64.sqrt()).abs() < 1e-12);
     assert_eq!(got[1].values[2], 0.0);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(solver_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(solver_calls.total(), 0);
 
     let dual_leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 0], 2)])
         .unwrap()
@@ -126,19 +123,19 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
         }]
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(solver_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(solver_calls.total(), 0);
 }
 
 /// #1729: an admitted checked-Generic dual diagonal (non-self-dual SU(3)
 /// labels) runs all four QR/LQ methods on `W = V` without materializing the
-/// input or calling the dense QR kernel (`CountPolarKernels::qr` panics).
+/// input or calling the dense QR kernel (the polar spy panics on QR).
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_dual_diagonal_qr_lq_skips_materialization_and_dense_qr() {
     use tenet_core::SUNFusionRule;
 
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::<CountPolarKernels>::default())
+        .with_dense_executor(Box::new(polar_spy(&Arc::default())))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -183,13 +180,9 @@ fn checked_dual_diagonal_qr_lq_skips_materialization_and_dense_qr() {
 fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
     use tenet_core::SUNFusionRule;
 
-    let svd_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountPolarKernels {
-            inner: DefaultDenseExecutor::default(),
-            svd_calls: Arc::clone(&svd_calls),
-            gemm_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }))
+        .with_dense_executor(Box::new(polar_spy(&svd_calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -220,7 +213,7 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
     DIAGONAL_MATERIALIZATIONS.set(0);
     let Svd { u, s, vh } = input.svd_compact(&[0], &[1]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(POLAR_SVD), 0);
     assert!(std::ptr::eq(u.provider(), provider.as_ref()));
     assert!(std::ptr::eq(s.provider(), provider.as_ref()));
     assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
@@ -229,10 +222,10 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
     assert!(vh.dense_data().is_ok());
 
     DIAGONAL_MATERIALIZATIONS.set(0);
-    svd_calls.store(0, std::sync::atomic::Ordering::Relaxed);
+    svd_calls.reset();
     let Svd { u, s, vh } = input.svd_full(&[0], &[1]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(POLAR_SVD), 0);
     assert!(std::ptr::eq(u.provider(), provider.as_ref()));
     assert!(std::ptr::eq(s.provider(), provider.as_ref()));
     assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
@@ -369,14 +362,10 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
 fn checked_compact_diagonal_polar_returns_compact_hand_oracle_without_dense_work() {
     use tenet_core::SUNFusionRule;
 
-    let svd_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let gemm_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let svd_calls = Arc::new(SpyCounts::default());
+    let gemm_calls = Arc::clone(&svd_calls);
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountPolarKernels {
-            inner: DefaultDenseExecutor::default(),
-            svd_calls: Arc::clone(&svd_calls),
-            gemm_calls: Arc::clone(&gemm_calls),
-        }))
+        .with_dense_executor(Box::new(polar_spy(&svd_calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -412,8 +401,8 @@ fn checked_compact_diagonal_polar_returns_compact_hand_oracle_without_dense_work
             (wh, p)
         };
         DIAGONAL_MATERIALIZATIONS.set(0);
-        svd_calls.store(0, std::sync::atomic::Ordering::Relaxed);
-        gemm_calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        svd_calls.reset();
+        gemm_calls.reset();
         let (w, p) = if left {
             let LeftPolar { w, p } = input.left_polar(&[0], &[1]).unwrap();
             (w, p)
@@ -422,8 +411,8 @@ fn checked_compact_diagonal_polar_returns_compact_hand_oracle_without_dense_work
             (wh, p)
         };
         assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-        assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
-        assert_eq!(gemm_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(svd_calls.of(POLAR_SVD), 0);
+        assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
         assert!(std::ptr::eq(w.provider(), provider.as_ref()));
         assert!(std::ptr::eq(p.provider(), provider.as_ref()));
         assert_eq!(w.logical_space().space(), dense_w.logical_space().space());
@@ -476,13 +465,9 @@ fn checked_compact_diagonal_null_uses_coordinate_factors_without_dense_work() {
 
     macro_rules! check {
         ($dtype:ty) => {{
-            let svd_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let svd_calls = Arc::new(SpyCounts::default());
             let runtime = Runtime::builder()
-                .with_dense_executor(Box::new(CountPolarKernels {
-                    inner: DefaultDenseExecutor::default(),
-                    svd_calls: Arc::clone(&svd_calls),
-                    gemm_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                }))
+                .with_dense_executor(Box::new(polar_spy(&svd_calls)))
                 .build()
                 .unwrap();
             let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -513,7 +498,7 @@ fn checked_compact_diagonal_null_uses_coordinate_factors_without_dense_work() {
             let left = input.left_null(&[0], &[1]).unwrap();
             let right = input.right_null(&[0], &[1]).unwrap();
             assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-            assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(svd_calls.of(POLAR_SVD), 0);
             assert!(std::ptr::eq(left.provider(), provider.as_ref()));
             assert!(std::ptr::eq(right.provider(), provider.as_ref()));
             assert_eq!(left.domain()[0].degeneracies(), &[1, 2]);

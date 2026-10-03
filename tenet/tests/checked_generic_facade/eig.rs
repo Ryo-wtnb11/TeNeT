@@ -504,10 +504,25 @@ fn checked_generic_eigh_rejects_invalid_inputs_before_publication() {
     assert!(nonfinite.eigh_full(&[0], &[1]).is_err());
 }
 
-struct EighFaultExecutor {
-    inner: DefaultDenseExecutor,
-    calls: Arc<AtomicUsize>,
-    fail_at: Option<usize>,
+/// Owned EIGH entries; the destination form is refused, so a checked
+/// Generic EIGH must use owned output.
+const EIGH_OWNED: &[Kernel] = &[Kernel::Eigh, Kernel::EighVals];
+
+/// Counts owned EIGH calls; the `fail_at`-th fails.
+fn eigh_fault_spy(counts: &Arc<SpyCounts>, fail_at: Option<usize>) -> SpyExecutor {
+    let spy = SpyExecutor::counting(counts).failing(
+        &[Kernel::EighInto],
+        None,
+        "checked Generic EIGH must use owned output",
+    );
+    match fail_at {
+        Some(nth) => spy.failing(
+            EIGH_OWNED,
+            Some(nth),
+            "injected checked Generic EIGH failure",
+        ),
+        None => spy,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -516,112 +531,28 @@ enum EigFault {
     Svd,
 }
 
-struct EigFaultExecutor {
-    inner: DefaultDenseExecutor,
-    fault: EigFault,
-}
-
-impl DenseExecutor for EigFaultExecutor {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.svd(input)
-    }
-
-    fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        if matches!(self.fault, EigFault::Svd) {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "svd_vals",
-                message: "injected checked Generic EIG rank-check failure".to_string(),
-            });
-        }
-        self.inner.svd_vals(input)
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.eigh(input)
-    }
-
-    fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        if matches!(self.fault, EigFault::Eig) {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "eig",
-                message: "injected checked Generic EIG failure".to_string(),
-            });
-        }
-        self.inner.eig(input)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.inner.dot_general_into(output, lhs, rhs, config)
-    }
-}
-
-impl DenseExecutor for EighFaultExecutor {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.svd(input)
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
-        if self.fail_at == Some(call) {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "eigh",
-                message: "injected checked Generic EIGH failure".to_string(),
-            });
-        }
-        self.inner.eigh(input)
-    }
-
-    fn eigh_into(
-        &mut self,
-        _: DenseRead<'_>,
-        _: DenseWrite<'_>,
-        _: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "eigh_into",
-            message: "checked Generic EIGH must use owned output".to_string(),
-        })
-    }
-
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.inner.dot_general_into(output, lhs, rhs, config)
+/// Fails every dense EIG call, or every values-only SVD rank check.
+fn eig_fault_spy(fault: EigFault) -> SpyExecutor {
+    match fault {
+        EigFault::Eig => SpyExecutor::default().failing(
+            &[Kernel::Eig, Kernel::EigVals],
+            None,
+            "injected checked Generic EIG failure",
+        ),
+        EigFault::Svd => SpyExecutor::default().failing(
+            &[Kernel::SvdVals],
+            None,
+            "injected checked Generic EIG rank-check failure",
+        ),
     }
 }
 
 #[test]
 fn checked_generic_eigh_preflights_all_sectors_and_runs_once_per_sector() {
-    let calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(EighFaultExecutor {
-            inner: DefaultDenseExecutor::new(),
-            calls: Arc::clone(&calls),
-            fail_at: None,
-        }))
+        .with_dense_executor(Box::new(eigh_fault_spy(&calls, None)))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -641,9 +572,9 @@ fn checked_generic_eigh_preflights_all_sectors_and_runs_once_per_sector() {
         })
         .unwrap();
     hermitian.eigh_full(&[0], &[1]).unwrap();
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(calls.of(EIGH_OWNED), 2);
 
-    calls.store(0, Ordering::Relaxed);
+    calls.reset();
     let nonhermitian: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |trees, index| {
             if trees.coupled() == &Label::X && index == [0, 1] {
@@ -654,19 +585,15 @@ fn checked_generic_eigh_preflights_all_sectors_and_runs_once_per_sector() {
         })
         .unwrap();
     assert!(nonhermitian.eigh_full(&[0], &[1]).is_err());
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(calls.of(EIGH_OWNED), 0);
 }
 
 #[test]
 fn checked_generic_eigh_dense_failure_preserves_the_source() {
-    let calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(EighFaultExecutor {
-            inner: DefaultDenseExecutor::new(),
-            calls: Arc::clone(&calls),
-            fail_at: Some(1),
-        }))
+        .with_dense_executor(Box::new(eigh_fault_spy(&calls, Some(1))))
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -678,7 +605,7 @@ fn checked_generic_eigh_dense_failure_preserves_the_source() {
         .unwrap();
     let before = source.dense_data().unwrap().to_vec();
     assert!(source.eigh_full(&[0], &[1]).is_err());
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(calls.of(EIGH_OWNED), 1);
     assert_eq!(source.dense_data().unwrap(), before);
     assert!(std::ptr::eq(source.provider(), provider.as_ref()));
 }
@@ -688,10 +615,7 @@ fn checked_generic_eig_dense_and_rank_check_failures_preserve_the_source() {
     for fault in [EigFault::Eig, EigFault::Svd] {
         let runtime = Runtime::builder()
             .dense_threads(1)
-            .with_dense_executor(Box::new(EigFaultExecutor {
-                inner: DefaultDenseExecutor::new(),
-                fault,
-            }))
+            .with_dense_executor(Box::new(eig_fault_spy(fault)))
             .build()
             .unwrap();
         let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -1010,10 +934,7 @@ fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
     assert_checked_generic_eig_reconstruction(&dense, &d, &v);
     let fault_runtime = Runtime::builder()
         .dense_threads(1)
-        .with_dense_executor(Box::new(EigFaultExecutor {
-            inner: DefaultDenseExecutor::new(),
-            fault: EigFault::Eig,
-        }))
+        .with_dense_executor(Box::new(eig_fault_spy(EigFault::Eig)))
         .build()
         .unwrap();
     let fault_provider = Arc::new(CheckedOnlyToy::new(1));

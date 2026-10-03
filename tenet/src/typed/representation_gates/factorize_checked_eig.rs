@@ -5,12 +5,9 @@ use super::*;
 fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
     use tenet_core::SUNFusionRule;
 
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEighVals {
-            calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(eigh_vals_spy(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -51,10 +48,10 @@ fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
         ]
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.total(), 0);
 
     let swapped = input.eigh_vals(&[1], &[0]).unwrap();
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(calls.total(), 2);
     let swapped_dense = input.permute(&[1], &[0]).unwrap().materialize().unwrap();
     assert_eq!(swapped, swapped_dense.eigh_vals(&[0], &[1]).unwrap());
     let dense = input.materialize().unwrap();
@@ -112,7 +109,7 @@ fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
         dense_narrow.eigh_vals(&[0], &[1]).unwrap()
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    calls.store(0, std::sync::atomic::Ordering::Relaxed);
+    calls.reset();
 
     let dual_leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 0], 2)])
         .unwrap()
@@ -137,7 +134,7 @@ fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
         }]
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.total(), 0);
 }
 
 #[cfg(feature = "racah-generated")]
@@ -185,12 +182,9 @@ fn checked_compact_diagonal_eigh_vals_rejects_inconsistent_spectrum_admission() 
 fn checked_compact_diagonal_eigh_vals_keeps_dense_hermiticity_boundary() {
     use tenet_core::SUNFusionRule;
 
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEighVals {
-            calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(eigh_vals_spy(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -207,7 +201,7 @@ fn checked_compact_diagonal_eigh_vals_keeps_dense_hermiticity_boundary() {
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert_eq!(near.eigh_vals(&[0], &[1]).unwrap()[0].values, [1.0]);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(calls.total(), 1);
 
     let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
@@ -260,12 +254,9 @@ fn assert_same_complex_multisets<S: PartialEq + std::fmt::Debug>(
 fn checked_compact_diagonal_eig_vals_reads_stored_complex_spectrum() {
     use tenet_core::SUNFusionRule;
 
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEigVals {
-            calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(eig_vals_spy(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -311,15 +302,15 @@ fn checked_compact_diagonal_eig_vals_reads_stored_complex_spectrum() {
         ]
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.total(), 0);
     assert_eq!(input.diagview().unwrap(), saved);
 
     let dense = input.materialize().unwrap();
     assert_same_complex_multisets(&got, &dense.eig_vals(&[0], &[1]).unwrap(), 1e-12);
-    calls.store(0, std::sync::atomic::Ordering::Relaxed);
+    calls.reset();
 
     let swapped = input.eig_vals(&[1], &[0]).unwrap();
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(calls.total(), 2);
     let swapped_dense = input.permute(&[1], &[0]).unwrap().materialize().unwrap();
     assert_same_complex_multisets(
         &swapped,
@@ -327,7 +318,7 @@ fn checked_compact_diagonal_eig_vals_reads_stored_complex_spectrum() {
         1e-12,
     );
 
-    calls.store(0, std::sync::atomic::Ordering::Relaxed);
+    calls.reset();
     let lazy = dense.adjoint().unwrap();
     assert!(matches!(lazy.repr, TypedTensorRepr::Adjoint(_)));
     assert!(matches!(
@@ -335,7 +326,7 @@ fn checked_compact_diagonal_eig_vals_reads_stored_complex_spectrum() {
         Err(GenericTensorError::Facade(Error::InvalidArgument(message)))
             if message.contains("lazy adjoints")
     ));
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.total(), 0);
 }
 
 #[cfg(feature = "racah-generated")]
@@ -343,12 +334,9 @@ fn checked_compact_diagonal_eig_vals_reads_stored_complex_spectrum() {
 fn checked_compact_diagonal_eig_vals_widens_after_payload_rounding() {
     use tenet_core::SUNFusionRule;
 
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEigVals {
-            calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(eig_vals_spy(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -454,7 +442,7 @@ fn checked_compact_diagonal_eig_vals_widens_after_payload_rounding() {
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     let dense = narrow.materialize().unwrap().eig_vals(&[0], &[1]).unwrap();
     assert_same_complex_multisets(&got, &dense, 1e-6);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 6);
+    assert_eq!(calls.total(), 6);
 }
 
 #[cfg(feature = "racah-generated")]
@@ -462,12 +450,9 @@ fn checked_compact_diagonal_eig_vals_widens_after_payload_rounding() {
 fn checked_compact_diagonal_eig_vals_keeps_ties_and_dual_bond() {
     use tenet_core::SUNFusionRule;
 
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEigVals {
-            calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(eig_vals_spy(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -485,7 +470,7 @@ fn checked_compact_diagonal_eig_vals_keeps_ties_and_dual_bond() {
     DIAGONAL_MATERIALIZATIONS.set(0);
     let got = ties.eig_vals(&[0], &[1]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.total(), 0);
     assert_same_complex_multisets(
         &got,
         &[SectorSpectrum {
@@ -499,7 +484,7 @@ fn checked_compact_diagonal_eig_vals_keeps_ties_and_dual_bond() {
         &ties.materialize().unwrap().eig_vals(&[0], &[1]).unwrap(),
         1e-12,
     );
-    calls.store(0, std::sync::atomic::Ordering::Relaxed);
+    calls.reset();
 
     let dual_leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 0], 2)])
         .unwrap()
@@ -525,7 +510,7 @@ fn checked_compact_diagonal_eig_vals_keeps_ties_and_dual_bond() {
         }]
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.total(), 0);
     assert_same_complex_multisets(
         &got,
         &dual.materialize().unwrap().eig_vals(&[0], &[1]).unwrap(),
@@ -578,12 +563,9 @@ fn checked_compact_diagonal_eig_vals_rejects_inconsistent_spectrum_admission() {
 fn checked_compact_diagonal_eig_vals_keeps_dense_nonfinite_boundary() {
     use tenet_core::SUNFusionRule;
 
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEigVals {
-            calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(eig_vals_spy(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -608,11 +590,11 @@ fn checked_compact_diagonal_eig_vals_keeps_dense_nonfinite_boundary() {
             ],
         )
         .unwrap();
-        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        calls.reset();
         DIAGONAL_MATERIALIZATIONS.set(0);
         let compact_error = input.eig_vals(&[0], &[1]).unwrap_err();
         assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+        assert!(calls.total() >= 1);
         let dense_error = input
             .materialize()
             .unwrap()
@@ -627,12 +609,9 @@ fn checked_compact_diagonal_eig_vals_keeps_dense_nonfinite_boundary() {
 fn checked_compact_diagonal_eigh_full_avoids_input_materialization_and_solver() {
     use tenet_core::SUNFusionRule;
 
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEighFull {
-            calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(eigh_full_spy(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -657,10 +636,10 @@ fn checked_compact_diagonal_eigh_full_avoids_input_materialization_and_solver() 
             )
             .unwrap();
             DIAGONAL_MATERIALIZATIONS.set(0);
-            calls.store(0, std::sync::atomic::Ordering::Relaxed);
+            calls.reset();
             let Eigh { d, v } = input.eigh_full(&[0], &[1]).unwrap();
             assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-            assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(calls.total(), 0);
             assert!(std::ptr::eq(d.provider(), provider.as_ref()));
             assert!(std::ptr::eq(v.provider(), provider.as_ref()));
             assert!(d.dense_data().is_err());
@@ -890,14 +869,10 @@ fn checked_compact_diagonal_eigh_full_matches_independent_dense_oracle() {
 fn checked_compact_diagonal_eig_full_avoids_input_materialization_and_solver() {
     use tenet_core::SUNFusionRule;
 
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let svd_vals_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
+    let svd_vals_calls = Arc::clone(&calls);
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEigFull {
-            calls: Arc::clone(&calls),
-            svd_vals_calls: Arc::clone(&svd_vals_calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(eig_full_spy(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -923,12 +898,12 @@ fn checked_compact_diagonal_eig_full_avoids_input_materialization_and_solver() {
             )
             .unwrap();
             DIAGONAL_MATERIALIZATIONS.set(0);
-            calls.store(0, std::sync::atomic::Ordering::Relaxed);
-            svd_vals_calls.store(0, std::sync::atomic::Ordering::Relaxed);
+            calls.reset();
+            svd_vals_calls.reset();
             let Eig { d, v } = input.eig_full(&[0], &[1]).unwrap();
             assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-            assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
-            assert_eq!(svd_vals_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(calls.of(EIG_FULL), 0);
+            assert_eq!(svd_vals_calls.get(Kernel::SvdVals), 0);
             assert!(std::ptr::eq(d.provider(), provider.as_ref()));
             assert!(std::ptr::eq(v.provider(), provider.as_ref()));
             assert!(d.dense_data().is_err());
@@ -969,8 +944,8 @@ fn checked_compact_diagonal_eig_full_avoids_input_materialization_and_solver() {
             // materialize and run one EIG and one rank gate per sector.
             DIAGONAL_MATERIALIZATIONS.set(0);
             input.eig_full(&[1], &[0]).unwrap();
-            assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
-            assert_eq!(svd_vals_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+            assert_eq!(calls.of(EIG_FULL), 2);
+            assert_eq!(svd_vals_calls.get(Kernel::SvdVals), 2);
         }};
     }
     // Magnitudes: sector (0,0) 4 > 0.25; sector (1,0) 5 > |-2+0.5i| > |1+i|.
@@ -1221,12 +1196,9 @@ fn checked_compact_diagonal_eig_full_matches_independent_dense_oracle() {
 fn checked_compact_diagonal_eig_full_keeps_dense_fallback_errors() {
     use tenet_core::SUNFusionRule;
 
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEigFull {
-            calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(eig_full_spy(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -1256,7 +1228,7 @@ fn checked_compact_diagonal_eig_full_keeps_dense_fallback_errors() {
             .unwrap()
             .eig_full(&[0], &[1])
             .unwrap_err();
-        calls.store(0, std::sync::atomic::Ordering::Relaxed);
+        calls.reset();
         DIAGONAL_MATERIALIZATIONS.set(0);
         let compact_error = input.eig_full(&[0], &[1]).unwrap_err();
         assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
@@ -1349,12 +1321,9 @@ fn checked_compact_diagonal_eig_full_rejects_inconsistent_spectrum_admission() {
 fn checked_compact_diagonal_eigh_full_keeps_dense_fallback_errors() {
     use tenet_core::SUNFusionRule;
 
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEighFull {
-            calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(eigh_full_spy(&calls)))
         .build()
         .unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
@@ -1381,7 +1350,7 @@ fn checked_compact_diagonal_eigh_full_keeps_dense_fallback_errors() {
     DIAGONAL_MATERIALIZATIONS.set(0);
     let Eigh { d, .. } = near.eigh_full(&[0], &[1]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(calls.total(), 2);
     assert_eq!(d.diagview().unwrap()[0].values, [Complex64::new(1.0, 0.0)]);
 
     let non_hermitian = complex([Complex64::new(1.0, 0.0), Complex64::new(-1.0, 0.5)]);

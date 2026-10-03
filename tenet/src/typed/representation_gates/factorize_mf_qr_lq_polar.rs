@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn compact_diagonal_qr_lq_preserves_compact_factors_without_dense_kernels() {
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::<CountPolarKernels>::default())
+        .with_dense_executor(Box::new(polar_spy(&Arc::default())))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(1), 3)])
@@ -97,14 +97,10 @@ fn compact_diagonal_qr_lq_rejects_inconsistent_spectra_and_nonbond_spaces() {
 
 #[test]
 fn compact_diagonal_polar_skips_input_materialization_svd_and_gemm() {
-    let svd_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let gemm_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let svd_calls = Arc::new(SpyCounts::default());
+    let gemm_calls = Arc::clone(&svd_calls);
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountPolarKernels {
-            inner: DefaultDenseExecutor::default(),
-            svd_calls: Arc::clone(&svd_calls),
-            gemm_calls: Arc::clone(&gemm_calls),
-        }))
+        .with_dense_executor(Box::new(polar_spy(&svd_calls)))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
@@ -128,8 +124,8 @@ fn compact_diagonal_polar_skips_input_materialization_svd_and_gemm() {
     assert!(left.w.dense_data().is_err());
     assert!(left.p.dense_data().is_err());
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
-    assert_eq!(gemm_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(POLAR_SVD), 0);
+    assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
     // Hand oracle: phase and magnitude of -2, 0 and 3i, with unit phase at 0.
     let zero = Complex64::new(0.0, 0.0);
     let phase = [
@@ -159,8 +155,8 @@ fn compact_diagonal_polar_skips_input_materialization_svd_and_gemm() {
     assert!(right.wh.dense_data().is_err());
     assert!(right.p.dense_data().is_err());
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
-    assert_eq!(gemm_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(POLAR_SVD), 0);
+    assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
 }
 
 #[test]

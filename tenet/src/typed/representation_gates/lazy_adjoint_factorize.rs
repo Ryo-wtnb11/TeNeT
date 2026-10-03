@@ -1,50 +1,10 @@
 use super::*;
 
-#[derive(Default)]
-struct FailSecondQr {
-    inner: DefaultDenseExecutor,
-    calls: usize,
-}
-
-impl DenseExecutor for FailSecondQr {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises QR")
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("QR must use the destination API")
-    }
-
-    fn qr_into(
-        &mut self,
-        input: DenseRead<'_>,
-        q: DenseWrite<'_>,
-        r: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.calls += 1;
-        if self.calls == 2 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "qr_into",
-                message: "injected second-sector failure".to_string(),
-            });
-        }
-        self.inner.qr_into(input, q, r)
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises QR")
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises QR")
-    }
+/// Destination QR only (`qr` must not be reached); the second call fails.
+fn fail_second_qr() -> SpyExecutor {
+    SpyExecutor::default()
+        .only(&[Kernel::QrInto], "QR must use the destination API")
+        .failing(&[Kernel::QrInto], Some(2), "injected second-sector failure")
 }
 
 #[test]
@@ -255,7 +215,7 @@ fn full_svd_adjoint_multitree_matches_materialized_oracle() {
 #[test]
 fn full_svd_late_failure_does_not_publish_the_adjoint_cache() {
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(FailSecondSvd::default()))
+        .with_dense_executor(Box::new(fail_second_svd(&Arc::default())))
         .build()
         .unwrap();
     let provider = Arc::new(U1FusionRule);
@@ -367,7 +327,7 @@ fn null_spaces_redirect_through_the_parent_without_materializing_the_adjoint() {
 
 fn assert_null_late_failure(left: bool) {
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(FailSecondSvd::default()))
+        .with_dense_executor(Box::new(fail_second_svd(&Arc::default())))
         .build()
         .unwrap();
     let provider = Arc::new(U1FusionRule);
@@ -590,7 +550,7 @@ fn polar_redirect_wrong_direction_keeps_requested_name_and_receiver_cold() {
 fn polar_redirect_late_failure_leaves_parent_and_receiver_unchanged() {
     for left in [true, false] {
         let runtime = Runtime::builder()
-            .with_dense_executor(Box::new(FailSecondSvd::default()))
+            .with_dense_executor(Box::new(fail_second_svd(&Arc::default())))
             .build()
             .unwrap();
         let provider = Arc::new(U1FusionRule);
@@ -828,7 +788,7 @@ fn qr_lq_uncached_owned_outputs_repeat_clone_and_run_concurrently() {
 
 fn assert_full_qr_lq_late_failure(qr: bool) {
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(FailSecondQr::default()))
+        .with_dense_executor(Box::new(fail_second_qr()))
         .build()
         .unwrap();
     let provider = Arc::new(U1FusionRule);

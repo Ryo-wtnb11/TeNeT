@@ -11,8 +11,8 @@ use tenet::typed::Side;
 
 use tenet::expert::DenseBackend;
 use tenet::expert::{
-    DefaultDenseExecutor, DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor,
-    DenseWrite,
+    DefaultDenseExecutor, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
+    DenseScalar, DenseTensor, DenseWrite, MatrixOp,
 };
 use tenet::sector::SectorId;
 use tenet::sector::{
@@ -581,70 +581,26 @@ fn assert_same_checked_generic_layout_and_close<R, D>(
     }
 }
 
-struct PinvFaultExecutor {
-    inner: DefaultDenseExecutor,
-    svd_calls: Arc<AtomicUsize>,
-    gemm_calls: Arc<AtomicUsize>,
+include!("../common/spy_executor.rs");
+
+/// The full and values-only SVD entries a pinv/polar call may reach.
+const PINV_SVD: &[Kernel] = &[Kernel::Svd, Kernel::SvdInto, Kernel::SvdVals];
+
+/// Counts SVD (`PINV_SVD`) and GEMM (`Kernel::GEMM`) calls; the `fail_svd`-th
+/// SVD or the `fail_gemm`-th GEMM call fails.
+fn pinv_spy(
+    counts: &Arc<SpyCounts>,
     fail_svd: Option<usize>,
     fail_gemm: Option<usize>,
-}
-
-impl PinvFaultExecutor {
-    fn observe_svd(&self, op: &'static str) -> Result<(), DenseError> {
-        let call = self.svd_calls.fetch_add(1, Ordering::Relaxed) + 1;
-        if self.fail_svd == Some(call) {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op,
-                message: "injected pinv SVD failure".to_string(),
-            });
-        }
-        Ok(())
+) -> SpyExecutor {
+    let mut spy = SpyExecutor::counting(counts);
+    if let Some(nth) = fail_svd {
+        spy = spy.failing(PINV_SVD, Some(nth), "injected pinv SVD failure");
     }
-}
-
-impl DenseExecutor for PinvFaultExecutor {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.observe_svd("svd")?;
-        self.inner.svd(input)
+    if let Some(nth) = fail_gemm {
+        spy = spy.failing(Kernel::GEMM, Some(nth), "injected pinv GEMM failure");
     }
-
-    fn svd_into(
-        &mut self,
-        input: DenseRead<'_>,
-        u: DenseWrite<'_>,
-        s: DenseWrite<'_>,
-        vt: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.observe_svd("svd_into")?;
-        self.inner.svd_into(input, u, s, vt)
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.eigh(input)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        let call = self.gemm_calls.fetch_add(1, Ordering::Relaxed) + 1;
-        if self.fail_gemm == Some(call) {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "dot_general_into",
-                message: "injected pinv GEMM failure".to_string(),
-            });
-        }
-        self.inner.dot_general_into(output, lhs, rhs, config)
-    }
+    spy
 }
 
 // ---------------------------------------------------------------------------

@@ -58,196 +58,55 @@ use tenet_core::{
     Z2Irrep, ZNFusionRule,
 };
 use tenet_dense::{
-    DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead,
-    DenseTensor, DenseWrite,
+    DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor,
+    DenseGemmBatchJob, DenseRead, DenseScalar, DenseTensor, DenseWrite, MatrixOp,
 };
 
-#[derive(Default)]
-struct CountPolarKernels {
-    inner: DefaultDenseExecutor,
-    svd_calls: Arc<std::sync::atomic::AtomicUsize>,
-    gemm_calls: Arc<std::sync::atomic::AtomicUsize>,
+include!("../../tests/common/spy_executor.rs");
+
+// The kernel sets the factorization gates allow; any other dense entry panics.
+const POLAR_SVD: &[Kernel] = &[Kernel::Svd, Kernel::SvdInto, Kernel::SvdVals];
+const POLAR: &[Kernel] = &[
+    Kernel::Svd,
+    Kernel::SvdInto,
+    Kernel::SvdVals,
+    Kernel::DotGeneral,
+    Kernel::Matmul,
+    Kernel::MatmulAxpby,
+    Kernel::MatmulBatch,
+    Kernel::MatmulBatchOps,
+];
+const EIGH_FULL: &[Kernel] = &[Kernel::Eigh, Kernel::EighInto, Kernel::EighVals];
+const EIG_FULL: &[Kernel] = &[Kernel::Eig, Kernel::EigVals];
+const EIG_FULL_AND_SVD_VALS: &[Kernel] = &[Kernel::Eig, Kernel::EigVals, Kernel::SvdVals];
+
+/// SVD (`POLAR_SVD`) and GEMM (`Kernel::GEMM`) only.
+fn polar_spy(counts: &Arc<SpyCounts>) -> SpyExecutor {
+    SpyExecutor::counting(counts).only(POLAR, "test only exercises polar")
 }
 
-impl DenseExecutor for CountPolarKernels {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.svd_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.svd(input)
-    }
-    fn svd_into(
-        &mut self,
-        input: DenseRead<'_>,
-        u: DenseWrite<'_>,
-        s: DenseWrite<'_>,
-        vt: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.svd_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.svd_into(input, u, s, vt)
-    }
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises polar")
-    }
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises polar")
-    }
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.gemm_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.dot_general_into(output, lhs, rhs, config)
-    }
+fn eigh_vals_spy(counts: &Arc<SpyCounts>) -> SpyExecutor {
+    SpyExecutor::counting(counts).only(&[Kernel::EighVals], "test only exercises eigh_vals")
 }
 
-#[derive(Default)]
-struct CountEighVals {
-    inner: DefaultDenseExecutor,
-    calls: Arc<std::sync::atomic::AtomicUsize>,
+fn eigh_full_spy(counts: &Arc<SpyCounts>) -> SpyExecutor {
+    SpyExecutor::counting(counts).only(EIGH_FULL, "test only exercises eigh_full")
 }
 
-impl DenseExecutor for CountEighVals {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises eigh_vals")
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises eigh_vals")
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises eigh_vals")
-    }
-
-    fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        self.calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.eigh_vals(input)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises eigh_vals")
-    }
+/// EIG (`EIG_FULL`) and the values-only SVD rank check.
+fn eig_full_spy(counts: &Arc<SpyCounts>) -> SpyExecutor {
+    SpyExecutor::counting(counts).only(EIG_FULL_AND_SVD_VALS, "test only exercises eig_full")
 }
 
-#[derive(Default)]
-struct CountEighFull {
-    inner: DefaultDenseExecutor,
-    calls: Arc<std::sync::atomic::AtomicUsize>,
+fn eig_vals_spy(counts: &Arc<SpyCounts>) -> SpyExecutor {
+    SpyExecutor::counting(counts).only(&[Kernel::EigVals], "test only exercises eig_vals")
 }
 
-impl DenseExecutor for CountEighFull {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises eigh_full")
-    }
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises eigh_full")
-    }
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.eigh(input)
-    }
-    fn eigh_into(
-        &mut self,
-        input: DenseRead<'_>,
-        values: DenseWrite<'_>,
-        vectors: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.eigh_into(input, values, vectors)
-    }
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises eigh_full")
-    }
-}
-
-#[derive(Default)]
-struct CountEigFull {
-    inner: DefaultDenseExecutor,
-    calls: Arc<std::sync::atomic::AtomicUsize>,
-    svd_vals_calls: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl DenseExecutor for CountEigFull {
-    fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        self.svd_vals_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.svd_vals(input)
-    }
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises eig_full")
-    }
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises eig_full")
-    }
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises eig_full")
-    }
-    fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.eig(input)
-    }
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises eig_full")
-    }
-}
-
-#[derive(Default)]
-struct CountEigVals {
-    inner: DefaultDenseExecutor,
-    calls: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl DenseExecutor for CountEigVals {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises eig_vals")
-    }
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises eig_vals")
-    }
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises eig_vals")
-    }
-    fn eig_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        self.calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.eig_vals(input)
-    }
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises eig_vals")
-    }
+/// SVD only; the second SVD call fails.
+fn fail_second_svd(counts: &Arc<SpyCounts>) -> SpyExecutor {
+    SpyExecutor::counting(counts)
+        .only(POLAR_SVD, "test only exercises SVD")
+        .failing(POLAR_SVD, Some(2), "injected second-sector failure")
 }
 
 struct NonCloneHost(Vec<f64>);
@@ -265,69 +124,6 @@ impl TensorStorage<f64> for NonCloneHost {
 impl HostReadableStorage<f64> for NonCloneHost {
     fn as_slice(&self) -> &[f64] {
         &self.0
-    }
-}
-
-#[derive(Default)]
-struct FailSecondSvd {
-    inner: DefaultDenseExecutor,
-    calls: usize,
-    record: Option<Arc<std::sync::atomic::AtomicUsize>>,
-}
-
-impl DenseExecutor for FailSecondSvd {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.calls += 1;
-        if let Some(record) = &self.record {
-            record.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        if self.calls == 2 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "svd_into",
-                message: "injected second-sector failure".to_string(),
-            });
-        }
-        self.inner.svd(input)
-    }
-
-    fn svd_into(
-        &mut self,
-        input: DenseRead<'_>,
-        u: DenseWrite<'_>,
-        s: DenseWrite<'_>,
-        vt: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.calls += 1;
-        if let Some(record) = &self.record {
-            record.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        if self.calls == 2 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "svd_into",
-                message: "injected second-sector failure".to_string(),
-            });
-        }
-        self.inner.svd_into(input, u, s, vt)
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises SVD")
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises SVD")
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises SVD")
     }
 }
 

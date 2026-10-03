@@ -2,12 +2,9 @@ use super::*;
 
 #[test]
 fn compact_diagonal_eigh_full_skips_dense_input_and_solver() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEighFull {
-            inner: DefaultDenseExecutor::default(),
-            calls: Arc::clone(&calls),
-        }))
+        .with_dense_executor(Box::new(eigh_full_spy(&calls)))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
@@ -36,11 +33,11 @@ fn compact_diagonal_eigh_full_skips_dense_input_and_solver() {
     );
     assert_eq!(v.dense_data().unwrap().len(), 9);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.total(), 0);
     DIAGONAL_MATERIALIZATIONS.set(0);
     let _ = input.eigh_full(&[1], &[0]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.total(), 0);
 }
 
 #[test]
@@ -352,12 +349,9 @@ fn compact_diagonal_eigh_full_preserves_sector_spaces_and_zero_regions() {
 
 #[test]
 fn compact_diagonal_eigh_full_retains_near_hermitian_and_nonfinite_routes() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEighFull {
-            inner: DefaultDenseExecutor::default(),
-            calls: Arc::clone(&calls),
-        }))
+        .with_dense_executor(Box::new(eigh_full_spy(&calls)))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
@@ -374,7 +368,7 @@ fn compact_diagonal_eigh_full_retains_near_hermitian_and_nonfinite_routes() {
     let Eigh { d, .. } = near.eigh_full(&[0], &[1]).unwrap();
     assert_eq!(d.diagview().unwrap()[0].values, [Complex64::new(1.0, 0.0)]);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(calls.total(), 1);
 
     for value in [f64::NAN, f64::INFINITY] {
         let input: TensorMap<_, f64> = TensorMap::diagonal(
@@ -401,17 +395,14 @@ fn compact_diagonal_eigh_full_retains_near_hermitian_and_nonfinite_routes() {
         }],
     )
     .unwrap();
-    let calls_before = calls.load(std::sync::atomic::Ordering::Relaxed);
+    let calls_before = calls.total();
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert_eq!(
         extreme.eigh_full(&[0], &[1]).unwrap().d.diagview().unwrap()[0].values,
         [f32::MAX]
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(
-        calls.load(std::sync::atomic::Ordering::Relaxed),
-        calls_before
-    );
+    assert_eq!(calls.total(), calls_before);
     let input: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
         &leg,
@@ -496,12 +487,9 @@ fn compact_diagonal_eigh_full_changed_roles_match_explicit_dense_permute() {
 
 #[test]
 fn compact_diagonal_eig_full_skips_dense_input_and_solver() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEigFull {
-            calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(eig_full_spy(&calls)))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
@@ -530,11 +518,11 @@ fn compact_diagonal_eig_full_skips_dense_input_and_solver() {
     );
     assert_eq!(v.dense_data().unwrap().len(), 9);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.of(EIG_FULL), 0);
     DIAGONAL_MATERIALIZATIONS.set(0);
     let _ = input.eig_full(&[1], &[0]).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.of(EIG_FULL), 0);
 }
 
 #[test]
@@ -910,12 +898,9 @@ fn compact_diagonal_eig_full_ties_and_signed_zeros_are_valid() {
 
 #[test]
 fn compact_diagonal_eig_full_retains_nonfinite_and_widened_norm_fallbacks() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEigFull {
-            calls: Arc::clone(&calls),
-            ..Default::default()
-        }))
+        .with_dense_executor(Box::new(eig_full_spy(&calls)))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
@@ -933,11 +918,11 @@ fn compact_diagonal_eig_full_retains_nonfinite_and_widened_norm_fallbacks() {
             }],
         )
         .unwrap();
-        let before = calls.load(std::sync::atomic::Ordering::Relaxed);
+        let before = calls.of(EIG_FULL);
         DIAGONAL_MATERIALIZATIONS.set(0);
         let _ = input.eig_full(&[0], &[1]);
         assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), before + 1);
+        assert_eq!(calls.of(EIG_FULL), before + 1);
     }
     let input: TensorMap<_, f32> = TensorMap::diagonal(
         &runtime,
@@ -948,14 +933,14 @@ fn compact_diagonal_eig_full_retains_nonfinite_and_widened_norm_fallbacks() {
         }],
     )
     .unwrap();
-    let before = calls.load(std::sync::atomic::Ordering::Relaxed);
+    let before = calls.of(EIG_FULL);
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert_eq!(
         input.eig_full(&[0], &[1]).unwrap().d.diagview().unwrap()[0].values,
         [num_complex::Complex32::new(f32::MAX, 0.0)]
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), before);
+    assert_eq!(calls.of(EIG_FULL), before);
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert!(matches!(
         input.eig_full(&[0, 1], &[]),
@@ -969,12 +954,9 @@ fn compact_diagonal_eig_full_retains_nonfinite_and_widened_norm_fallbacks() {
 
 #[test]
 fn compact_diagonal_eig_vals_skips_dense_input_and_solver() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEigVals {
-            inner: DefaultDenseExecutor::default(),
-            calls: Arc::clone(&calls),
-        }))
+        .with_dense_executor(Box::new(eig_vals_spy(&calls)))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(
@@ -1021,7 +1003,7 @@ fn compact_diagonal_eig_vals_skips_dense_input_and_solver() {
         vec![2.0, 2.0]
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.total(), 0);
     assert_eq!(input.diagview().unwrap(), saved);
 }
 
@@ -1219,12 +1201,9 @@ fn compact_diagonal_eig_vals_match_hand_spectra_across_scalars_and_sectors() {
 
 #[test]
 fn compact_diagonal_eig_vals_retains_dense_fallback() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEigVals {
-            inner: DefaultDenseExecutor::default(),
-            calls: Arc::clone(&calls),
-        }))
+        .with_dense_executor(Box::new(eig_vals_spy(&calls)))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
@@ -1246,7 +1225,7 @@ fn compact_diagonal_eig_vals_retains_dense_fallback() {
         let _ = input.eig_vals(&[0], &[1]);
         assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
     }
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 3);
+    assert_eq!(calls.total(), 3);
     let input: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
         &leg,
@@ -1273,12 +1252,9 @@ fn compact_diagonal_eig_vals_retains_dense_fallback() {
 
 #[test]
 fn compact_diagonal_eigh_vals_skips_dense_input_and_solver() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEighVals {
-            inner: DefaultDenseExecutor::default(),
-            calls: Arc::clone(&calls),
-        }))
+        .with_dense_executor(Box::new(eigh_vals_spy(&calls)))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(
@@ -1306,7 +1282,7 @@ fn compact_diagonal_eigh_vals_skips_dense_input_and_solver() {
     assert_eq!(result[0].values, vec![-4.0, 1.0, 0.0]);
     assert_eq!(result[1].values, vec![-2.0, 2.0]);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(calls.total(), 0);
 }
 
 #[test]
@@ -1465,12 +1441,9 @@ fn compact_diagonal_eigh_vals_match_hand_spectra_across_scalars_and_sectors() {
 
 #[test]
 fn compact_diagonal_eigh_vals_preserves_complex_dense_fallback() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
-        .with_dense_executor(Box::new(CountEighVals {
-            inner: DefaultDenseExecutor::default(),
-            calls: Arc::clone(&calls),
-        }))
+        .with_dense_executor(Box::new(eigh_vals_spy(&calls)))
         .build()
         .unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
@@ -1486,7 +1459,7 @@ fn compact_diagonal_eigh_vals_preserves_complex_dense_fallback() {
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert_eq!(near.eigh_vals(&[0], &[1]).unwrap()[0].values, [1.0]);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(calls.total(), 1);
 
     let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
