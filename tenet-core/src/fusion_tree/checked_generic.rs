@@ -278,108 +278,6 @@ impl<P: CheckedGenericRigidSymbols> GenericFRAccess for P {
     }
 }
 
-pub(super) struct InfallibleGenericRigid<'a, R>(pub(super) &'a R);
-
-impl<R> GenericFRAccess for InfallibleGenericRigid<'_, R>
-where
-    R: GenericRigidSymbols,
-    R::Scalar: CategoricalScalar,
-{
-    type Scalar = R::Scalar;
-    type Error = std::convert::Infallible;
-    fn fusion_style(&self) -> FusionStyleKind {
-        self.0.fusion_style()
-    }
-    fn braiding_style(&self) -> BraidingStyleKind {
-        self.0.braiding_style()
-    }
-    fn vacuum(&self) -> SectorId {
-        self.0.vacuum()
-    }
-    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
-        Ok(self.0.dual(sector))
-    }
-    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> {
-        Ok(self.0.nsymbol(a, b, c))
-    }
-    fn try_fusion_channels_in_table(
-        &self,
-        a: SectorId,
-        b: SectorId,
-    ) -> Result<SectorVec, Self::Error> {
-        Ok(self.0.fusion_channels(a, b))
-    }
-    fn try_f_symbol_generic(
-        &self,
-        a: SectorId,
-        b: SectorId,
-        c: SectorId,
-        d: SectorId,
-        e: SectorId,
-        f: SectorId,
-    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
-        Ok(self.0.f_symbol_generic(a, b, c, d, e, f))
-    }
-    fn try_validated_f_symbol_generic(
-        &self,
-        a: SectorId,
-        b: SectorId,
-        c: SectorId,
-        d: SectorId,
-        e: SectorId,
-        f: SectorId,
-    ) -> Result<GenericFArray<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> {
-        Ok(self.0.f_symbol_generic(a, b, c, d, e, f))
-    }
-    fn try_r_symbol_generic(
-        &self,
-        a: SectorId,
-        b: SectorId,
-        c: SectorId,
-    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
-        Ok(self.0.r_symbol_generic(a, b, c))
-    }
-}
-
-impl<R> GenericRigidAccess for InfallibleGenericRigid<'_, R>
-where
-    R: GenericRigidSymbols,
-    R::Scalar: CategoricalScalar,
-{
-    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
-        Ok(self.0.sqrt_dim_scalar(sector))
-    }
-
-    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
-        Ok(self.0.inv_sqrt_dim_scalar(sector))
-    }
-
-    fn try_frobenius_schur_phase_scalar(
-        &self,
-        sector: SectorId,
-    ) -> Result<Self::Scalar, Self::Error> {
-        Ok(self.0.frobenius_schur_phase_scalar(sector))
-    }
-
-    fn try_b_symbol_generic(
-        &self,
-        a: SectorId,
-        b: SectorId,
-        c: SectorId,
-    ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> {
-        Ok(self.0.b_symbol_generic(a, b, c))
-    }
-
-    fn try_a_symbol_generic(
-        &self,
-        a: SectorId,
-        b: SectorId,
-        c: SectorId,
-    ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> {
-        Ok(self.0.a_symbol_generic(a, b, c))
-    }
-}
-
 impl<P: CheckedGenericRigidSymbols> GenericRigidAccess for P {
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         CheckedGenericRigidSymbols::try_sqrt_dim_scalar(self, sector)
@@ -472,25 +370,23 @@ pub(super) fn checked_generic_f_symbol<C>(
 where
     C: GenericFRAccess,
 {
+    let provider = CheckedGenericSymbolError::Provider;
     let expected = [
-        rule.try_nsymbol(a, b, e),
-        rule.try_nsymbol(e, c, d),
-        rule.try_nsymbol(b, c, f),
-        rule.try_nsymbol(a, f, d),
-    ]
-    .into_iter()
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(CheckedGenericSymbolError::Provider)?;
+        rule.try_nsymbol(a, b, e).map_err(provider)?,
+        rule.try_nsymbol(e, c, d).map_err(provider)?,
+        rule.try_nsymbol(b, c, f).map_err(provider)?,
+        rule.try_nsymbol(a, f, d).map_err(provider)?,
+    ];
     let symbol = rule
         .try_f_symbol_generic(a, b, c, d, e, f)
-        .map_err(CheckedGenericSymbolError::Provider)?;
+        .map_err(provider)?;
     let (mu, nu, kappa, lambda) = symbol.shape();
-    let actual = vec![mu, nu, kappa, lambda];
+    let actual = [mu, nu, kappa, lambda];
     if actual != expected {
         return Err(CheckedGenericSymbolError::Shape {
             symbol: "F",
-            expected,
-            actual,
+            expected: expected.to_vec(),
+            actual: actual.to_vec(),
         });
     }
     Ok(symbol)
@@ -524,6 +420,10 @@ where
     Ok(symbol)
 }
 
+/// `B^{ab}_c[μ,ν] = √d_a·√d_b/√d_c · F(a,b,b̄,a,c,1)[μ,ν,0,0]`, the only
+/// Generic B authority: TensorKitSectors `Bsymbol_from_Fsymbol`
+/// (`sectors.jl:543-552`, v0.3.6). The reshape drops the trailing `F` axes
+/// because `N(b,b̄,1) = N(a,1,a) = 1`; F is shape-validated first.
 fn checked_generic_b_symbol<C>(
     rule: &C,
     a: SectorId,
@@ -562,6 +462,9 @@ where
     Ok(GenericRMatrix::new(data, rows, cols))
 }
 
+/// `A^{ab}_c[κ,λ] = √d_a·√d_b/√d_c · conj(κ_a · F(ā,a,b,b,1,c)[0,0,κ,λ])`,
+/// the only Generic A authority: TensorKitSectors `Asymbol_from_Fsymbol`
+/// (`sectors.jl:501-511`, v0.3.6). Here the leading `F` axes are singletons.
 fn checked_generic_a_symbol<C>(
     rule: &C,
     a: SectorId,

@@ -2300,7 +2300,7 @@ impl GenericRigidSymbols for TransposeProbeRule {
 }
 
 // Independent from-scratch TK evaluation of the reshape formula — explicit
-// index loops, NO call into b_symbol_generic / a_symbol_generic.
+// index loops, NO call into the core A/B derivation.
 pub(super) fn tp_expected_b() -> [[f64; 2]; 2] {
     let factor = 2.0 * 2.0 * 0.5; // √dim(1)·√dim(1)·invsqrtdim(1) = 2
     let mut b = [[0.0; 2]; 2];
@@ -2497,13 +2497,13 @@ pub(super) fn a4f_rank3(inner: usize, v1: usize, v2: usize) -> FusionTreeKey {
 // ===================== Residual (b): complex conj path =====================
 //
 // The B2a complex path (`CategoricalScalar for Complex64`, the fold's
-// `coeff₂.conj()`, and `a_symbol_generic`'s inner `conj`) was only
+// `coeff₂.conj()`, and the A derivation's inner `conj`) was only
 // verified by source-matching. This closes it numerically: a synthetic
 // Complex64 Generic rule whose A-move / B-move are a genuinely complex 2×2
 // UNITARY U (non-Hermitian, non-real). Self-dual sector 1, N(1,1,1)=2,
 // dim=1 (all coeff factors = 1). U = (1/√2)[[1, i],[i, 1]].
 //
-// From `a_symbol_generic`: A[κ,λ] = conj(κ_a · F(1,1,1,1,0,1)[0,0,κ,λ]) with
+// From the A derivation: A[κ,λ] = conj(κ_a · F(1,1,1,1,0,1)[0,0,κ,λ]) with
 // κ_a=1, so setting the F block to conj(U) gives A = U. Likewise B = U from
 // the F(1,1,1,1,1,0) block. A wrong conj (missing/extra) or a μ↔ν transpose
 // flips the sign of the imaginary parts and fails both the direct check and
@@ -2615,8 +2615,8 @@ impl GenericRigidSymbols for ComplexUnitaryRule {
 // not just the F→B reshape (which TransposeProbeRule already pins).
 //
 // dim((4,2,0))=27, dim((3,1,0))=dim((3,2,0))=15, all FS phases +1.
-// b_symbol_generic is overridden directly (the full SU(3) F-table is not
-// transcribed), so the bend surgery, coeff₀ = √dim(c)/√dim(a), μ→ν row
+// Only the two bend F-blocks are transcribed, as B/(√d_a·√d_b/√d_c) (the full
+// SU(3) F-table is not), so the bend surgery, coeff₀ = √dim(c)/√dim(a), μ→ν row
 // distribution and round-trip are all exercised against real categorical B.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Su3BendRule;
@@ -2642,13 +2642,13 @@ impl FusionRule for Su3BendRule {
             _ => sector, // 0, 1 self-dual
         }
     }
-    // bendright/bendleft never consult these (they use only dual, dims, fs,
-    // and b_symbol_generic); provide honest N(a,b,c)=2 for the bent triples.
+    // Honest N(a,b,c)=2 for the bent triples, and the vacuum channel of
+    // (3,1,0)⊗(3,2,0) that sizes the bend F-blocks.
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
         match (left.id(), right.id()) {
             (0, x) | (x, 0) => smallvec![SectorId::new(x)],
             (1, 2) | (2, 1) => smallvec![SectorId::new(2)],
-            (2, 3) | (3, 2) => smallvec![SectorId::new(1)],
+            (2, 3) | (3, 2) => smallvec![SectorId::new(0), SectorId::new(1)],
             _ => smallvec![SectorId::new(0)],
         }
     }
@@ -2664,14 +2664,23 @@ impl GenericFusionSymbols for Su3BendRule {
     type Scalar = f64;
     fn f_symbol_generic(
         &self,
-        _a: SectorId,
-        _b: SectorId,
-        _c: SectorId,
-        _d: SectorId,
-        _e: SectorId,
-        _f: SectorId,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
     ) -> GenericFArray<Self::Scalar> {
-        unreachable!("b_symbol_generic is overridden; F is never read")
+        // Bend block F(a, b, b̄, a, c, 1): B = √d_a·√d_b/√d_c · F[μ,ν,0,0].
+        assert_eq!(
+            (c, d, f),
+            (self.dual(b), a, self.vacuum()),
+            "Su3BendRule: unmodelled F"
+        );
+        let factor =
+            self.sqrt_dim_scalar(a) * self.sqrt_dim_scalar(b) * self.inv_sqrt_dim_scalar(e);
+        let b_matrix = su3_bend_b(a, b, e);
+        GenericFArray::new(b_matrix.iter().map(|x| x / factor).collect(), (2, 2, 1, 1))
     }
     fn r_symbol_generic(
         &self,
@@ -2697,19 +2706,15 @@ impl GenericRigidSymbols for Su3BendRule {
     fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
         1.0
     }
-    fn b_symbol_generic(
-        &self,
-        a: SectorId,
-        b: SectorId,
-        c: SectorId,
-    ) -> GenericRMatrix<Self::Scalar> {
-        let e = -1.0 / (2.0 * 2.0_f64.sqrt()); // -1/(2√2) = -0.35355339
-        let g = (7.0_f64 / 8.0).sqrt(); //  √(7/8)  =  0.93541435
-        match (a.id(), b.id(), c.id()) {
-            (1, 2, 2) => GenericRMatrix::new(vec![e, -g, g, e], 2, 2), // B_fwd
-            (2, 3, 1) => GenericRMatrix::new(vec![e, g, -g, e], 2, 2), // B_ret
-            other => panic!("Su3BendRule: unmodelled B{other:?}"),
-        }
+}
+
+fn su3_bend_b(a: SectorId, b: SectorId, c: SectorId) -> [f64; 4] {
+    let e = -1.0 / (2.0 * 2.0_f64.sqrt()); // -1/(2√2) = -0.35355339
+    let g = (7.0_f64 / 8.0).sqrt(); //  √(7/8)  =  0.93541435
+    match (a.id(), b.id(), c.id()) {
+        (1, 2, 2) => [e, -g, g, e], // B_fwd
+        (2, 3, 1) => [e, g, -g, e], // B_ret
+        other => panic!("Su3BendRule: unmodelled B{other:?}"),
     }
 }
 

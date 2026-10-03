@@ -736,15 +736,15 @@ fn b2a_generic_repartition_round_trip_identity() {
     }
 }
 
-// Oracle: b_symbol_generic / a_symbol_generic match TK's Bsymbol / Asymbol.
+// Oracle: the core A/B derivation matches TK's Bsymbol / Asymbol.
 #[test]
 fn b2a_a4_b_and_a_symbol_match_tensorkit() {
     let rule = A4BendRule;
     let t = a4_three();
     // TK: Bsymbol(3,3,3) == I₂, Asymbol(3,3,3) == I₂ (TKS v0.3.6).
-    let b = rule.b_symbol_generic(t, t, t);
+    let b = b_symbol(&rule, t, t, t);
     assert_eq!(b.shape(), (2, 2));
-    let a = rule.a_symbol_generic(t, t, t);
+    let a = a_symbol(&rule, t, t, t);
     assert_eq!(a.shape(), (2, 2));
     for i in 0..2 {
         for j in 0..2 {
@@ -767,8 +767,10 @@ fn b2a_a4_b_and_a_symbol_match_tensorkit() {
 // block assignment `U[row, col] = coeff` (duality_manipulations.jl:110),
 // where every ν collapses onto the same output key (no vertex to store) and
 // the LAST non-zero ν wins. A4's Bsymbol is diagonal so it never puts two
-// non-zeros in one row — this needs a synthetic non-diagonal B. b_symbol is
-// overridden directly (default-method override), so no F is consulted.
+// non-zeros in one row — this needs a synthetic non-diagonal B, and with an
+// empty domain c = 1, so a consistent rule has N(1, b̄, a) <= 1 columns. The
+// probe therefore declares N(0,1,1) = 2 and supplies the 2×2×2×1 bend
+// F-block whose row 0 is [0.3, 0.7] (all dims 1, so B = F[:, :, 0, 0]).
 #[derive(Clone, Copy, Debug)]
 struct OverwriteProbeRule;
 
@@ -793,7 +795,7 @@ impl FusionRule for OverwriteProbeRule {
         }
     }
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
-        if (left.id(), right.id(), coupled.id()) == (1, 1, 0) {
+        if matches!((left.id(), right.id(), coupled.id()), (1, 1, 0) | (0, 1, 1)) {
             2
         } else {
             usize::from(self.fusion_channels(left, right).contains(&coupled))
@@ -812,7 +814,12 @@ impl GenericFusionSymbols for OverwriteProbeRule {
         _e: SectorId,
         _f: SectorId,
     ) -> GenericFArray<Self::Scalar> {
-        unreachable!("b_symbol_generic is overridden; F is never read")
+        // Row 0 = [0.3, 0.7]: two non-zeros, distinct, so keep-last is
+        // distinguishable from keep-first (0.3) and from sum (1.0).
+        let mut data = vec![0.0; 8];
+        data[0] = 0.3; // F[0,0,0,0]
+        data[2] = 0.7; // F[0,1,0,0]
+        GenericFArray::new(data, (2, 2, 2, 1))
     }
     fn r_symbol_generic(
         &self,
@@ -833,16 +840,6 @@ impl GenericRigidSymbols for OverwriteProbeRule {
     }
     fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
         1.0
-    }
-    fn b_symbol_generic(
-        &self,
-        _a: SectorId,
-        _b: SectorId,
-        _c: SectorId,
-    ) -> GenericRMatrix<Self::Scalar> {
-        // Row 0 = [0.3, 0.7]: two non-zeros, distinct, so keep-last is
-        // distinguishable from keep-first (0.3) and from sum (1.0).
-        GenericRMatrix::new(vec![0.3, 0.7, 0.0, 0.0], 2, 2)
     }
 }
 
@@ -946,7 +943,7 @@ fn tp_expected_a() -> [[f64; 2]; 2] {
 fn refute_b2a_b_symbol_is_not_transposed() {
     let rule = TransposeProbeRule;
     let s = SectorId::new(1);
-    let b = rule.b_symbol_generic(s, s, s);
+    let b = b_symbol(&rule, s, s, s);
     assert_eq!(b.shape(), (2, 2));
     let want = tp_expected_b();
     // Sanity: the oracle itself must be non-symmetric, else no discrimination.
@@ -968,11 +965,11 @@ fn refute_b2a_b_symbol_is_not_transposed() {
 
 #[test]
 fn refute_b2a_a_symbol_is_not_transposed() {
-    // a_symbol_generic is UNUSED by any other B2a test (fold is B2b), so this
+    // The A derivation is UNUSED by any other B2a test (fold is B2b), so this
     // is the ONLY thing exercising its κ↔λ index order today.
     let rule = TransposeProbeRule;
     let s = SectorId::new(1);
-    let a = rule.a_symbol_generic(s, s, s);
+    let a = a_symbol(&rule, s, s, s);
     assert_eq!(a.shape(), (2, 2));
     let want = tp_expected_a();
     assert!(
@@ -989,4 +986,22 @@ fn refute_b2a_a_symbol_is_not_transposed() {
             );
         }
     }
+}
+
+fn b_symbol<R: GenericRigidSymbols>(
+    rule: &R,
+    a: SectorId,
+    b: SectorId,
+    c: SectorId,
+) -> GenericRMatrix<R::Scalar> {
+    GenericRigidAccess::try_b_symbol_generic(&InfallibleGeneric::new(rule), a, b, c).unwrap()
+}
+
+fn a_symbol<R: GenericRigidSymbols>(
+    rule: &R,
+    a: SectorId,
+    b: SectorId,
+    c: SectorId,
+) -> GenericRMatrix<R::Scalar> {
+    GenericRigidAccess::try_a_symbol_generic(&InfallibleGeneric::new(rule), a, b, c).unwrap()
 }

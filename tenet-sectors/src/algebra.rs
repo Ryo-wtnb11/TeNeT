@@ -1272,26 +1272,20 @@ impl CategoricalScalar for Complex64 {
 
 /// Outer-multiplicity ("Generic" fusion) sibling of
 /// [`MultiplicityFreeRigidSymbols`]: the rigidity/pivotal data (quantum
-/// dimensions, Frobenius–Schur phase, A/B moves) for a rule whose `nsymbol`
-/// can exceed 1. Where the multiplicity-free trait's `a_symbol_scalar` /
-/// `b_symbol_scalar` return a bare `Scalar`, here the A/B symbols are
-/// `N × N` matrices ([`GenericRMatrix`]), mirroring TensorKitSectors'
-/// `Asymbol` / `Bsymbol` for `GenericFusion` (`sectors.jl` v0.3.6).
+/// dimensions and Frobenius–Schur phase) for a rule whose `nsymbol` can
+/// exceed 1.
 ///
-/// Bend/repartition only ever multiply, conjugate and zero-test these
-/// coefficients, so the associated scalar carries only the
-/// [`CategoricalScalar`] capability (the same bound the Generic Artin braid
-/// uses) — no separate `scalar_one`/`scalar_conj` on the rule.
+/// The Generic A/B matrices are deliberately not provider methods: TeNeT
+/// derives them once from these primitives and the validated F-symbol, as
+/// TensorKitSectors `Asymbol_from_Fsymbol` / `Bsymbol_from_Fsymbol` do
+/// (`sectors.jl:501-552`, v0.3.6), so every engine reads the same
+/// coefficients (see [`CheckedGenericRigidSymbols`]).
 ///
 /// `frobenius_schur_phase_scalar` stays a bare `Scalar` (not a matrix): the
 /// FS phase is `sign(F^{a ā a}_a[1])` and for *any* fusion style the relevant
 /// `F` block has all its `N`-labels forced to 1 by the pivotal axioms, so it
 /// is a single number even in the Generic case
 /// (TensorKitSectors `sectors.jl:463-468`, `frobenius_schur_phase_from_Fsymbol`).
-///
-/// `a_symbol_generic` is unused by Stage B2a (bend/repartition need only `B`);
-/// it is defined here as the natural sibling that the A-move layer (fold /
-/// cycle, Stage B2b) will consume, and is kept honest by a TK oracle test.
 pub trait GenericRigidSymbols: GenericFusionSymbols
 where
     Self::Scalar: CategoricalScalar,
@@ -1304,76 +1298,6 @@ where
 
     /// Frobenius–Schur phase `κ_sector` — bare scalar (`sectors.jl:463-468`).
     fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar;
-
-    /// `B^{ab}_c` as an `N(a,b,c) × N(c, dual(b), a)` matrix, row = input
-    /// splitting vertex `μ`, column = output fusion vertex `ν`.
-    ///
-    /// Verbatim mirror of TensorKitSectors `Bsymbol_from_Fsymbol`
-    /// (`sectors.jl:543-551`):
-    /// `reshape(√dim(a)·√dim(b)·(1/√dim(c)) · F(a,b,dual(b),a,c,unit),
-    ///  (N(a,b,c), N(c,dual(b),a)))`.
-    /// The reshape drops the trailing two `F` axes because
-    /// `N(b, dual(b), unit) == N(a, unit, a) == 1` (rigidity + unit axioms),
-    /// so `B[μ,ν] = F[μ,ν,0,0]`.
-    fn b_symbol_generic(
-        &self,
-        a: SectorId,
-        b: SectorId,
-        c: SectorId,
-    ) -> GenericRMatrix<Self::Scalar>
-    where
-        Self::Scalar: CategoricalScalar,
-    {
-        let rows = self.nsymbol(a, b, c);
-        let cols = self.nsymbol(c, self.dual(b), a);
-        // F(a, b, dual(b), a, c, rightunit(a)); `vacuum()` is the (right)unit.
-        let f = self.f_symbol_generic(a, b, self.dual(b), a, c, self.vacuum());
-        let factor =
-            self.sqrt_dim_scalar(a) * self.sqrt_dim_scalar(b) * self.inv_sqrt_dim_scalar(c);
-        let mut data = Vec::with_capacity(rows * cols);
-        for mu in 0..rows {
-            for nu in 0..cols {
-                data.push(factor.clone() * f.get(mu, nu, 0, 0).clone());
-            }
-        }
-        GenericRMatrix::new(data, rows, cols)
-    }
-
-    /// `A^{ab}_c` as an `N(a,b,c) × N(dual(a), c, b)` matrix.
-    ///
-    /// Verbatim mirror of TensorKitSectors `Asymbol_from_Fsymbol`
-    /// (`sectors.jl:501-511`):
-    /// `reshape(√dim(a)·√dim(b)·(1/√dim(c)) ·
-    ///  conj(κ_a · F(dual(a),a,b,b,unit,c)), (N(a,b,c), N(dual(a),c,b)))`.
-    /// Here the *leading* two `F` axes are the singletons
-    /// (`N(dual(a),a,unit) == N(unit,b,b) == 1`), so `A[κ,λ] = F[0,0,κ,λ]`.
-    /// The `conj` wraps the whole `κ_a · F` product exactly as TK writes it.
-    fn a_symbol_generic(
-        &self,
-        a: SectorId,
-        b: SectorId,
-        c: SectorId,
-    ) -> GenericRMatrix<Self::Scalar>
-    where
-        Self::Scalar: CategoricalScalar,
-    {
-        let rows = self.nsymbol(a, b, c);
-        let cols = self.nsymbol(self.dual(a), c, b);
-        // F(dual(a), a, b, b, rightunit(a), c); `vacuum()` is the (right)unit.
-        let f = self.f_symbol_generic(self.dual(a), a, b, b, self.vacuum(), c);
-        let factor =
-            self.sqrt_dim_scalar(a) * self.sqrt_dim_scalar(b) * self.inv_sqrt_dim_scalar(c);
-        let fs = self.frobenius_schur_phase_scalar(a);
-        let mut data = Vec::with_capacity(rows * cols);
-        for kappa in 0..rows {
-            for lambda in 0..cols {
-                // conj(κ_a · F[0,0,κ,λ]), then scale by the (real) dim factor.
-                let symbol = fs.clone() * f.get(0, 0, kappa, lambda).clone();
-                data.push(factor.clone() * symbol.conj());
-            }
-        }
-        GenericRMatrix::new(data, rows, cols)
-    }
 }
 
 /// Label of a product sector, ordered lexicographically as `(left, right)`.

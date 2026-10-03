@@ -368,7 +368,7 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let checked = InfallibleGenericRigid(rule);
+    let checked = InfallibleGeneric::new(rule);
     generic_bendright_tree_pair_result(&checked, tree_pair)
         .map_err(map_infallible_generic_symbol_error)
 }
@@ -571,7 +571,7 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let checked = InfallibleGenericRigid(rule);
+    let checked = InfallibleGeneric::new(rule);
     generic_bendleft_tree_pair_result(&checked, tree_pair)
         .map_err(map_infallible_generic_symbol_error)
 }
@@ -691,7 +691,7 @@ where
     R::Scalar: CategoricalScalar,
 {
     let rule = tree_pair.rule;
-    let checked = InfallibleGenericRigid(rule);
+    let checked = InfallibleGeneric::new(rule);
     generic_repartition_tree_pair_result(&checked, tree_pair.key, target_codomain_rank)
         .map_err(map_infallible_generic_symbol_error)
 }
@@ -705,7 +705,7 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let checked = InfallibleGenericRigid(rule);
+    let checked = InfallibleGeneric::new(rule);
     generic_repartition_tree_pair_result(&checked, tree_pair, target_codomain_rank)
         .map_err(map_infallible_generic_symbol_error)
 }
