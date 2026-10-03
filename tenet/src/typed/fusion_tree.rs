@@ -569,6 +569,59 @@ pub(super) fn map_spectrum<D: Copy>(
         .collect()
 }
 
+/// TensorKit `exp(::DiagonalTensorMap)`, `exp.(d.data)`: the one compact
+/// `exp` value map every fusion mode publishes. Nonfinite entries map through
+/// `exp` like any other value; nothing is rejected.
+pub(super) fn exp_spectrum<D: TensorScalar>(
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+) -> Result<Vec<tenet_matrixalgebra::SectorSpectrum<D>>, Error> {
+    map_spectrum(spectrum, |value| Ok(value.exp_value()))
+}
+
+/// TensorKit `inv(::DiagonalTensorMap)`, `inv.(d.data)`: the one compact
+/// `inv` value map every fusion mode publishes.
+///
+/// Why `== 0` and not a tolerance: the dense arm has none either (the solve
+/// either fails or it does not), and a compact arm that refused near-zero
+/// entries would let storage change the answer. Exact zero is singular and
+/// reported as [`Error::InvalidArgument`]; NaN and infinity map through the
+/// reciprocal without an error.
+pub(super) fn inv_spectrum<D: TensorScalar>(
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+) -> Result<Vec<tenet_matrixalgebra::SectorSpectrum<D>>, Error> {
+    map_spectrum(spectrum, |value| {
+        if value.abs_value() == 0.0 {
+            Err(Error::InvalidArgument(
+                "inv of a singular diagonal (zero entry)".to_string(),
+            ))
+        } else {
+            Ok(value.recip_value())
+        }
+    })
+}
+
+/// The compact `solve` divisor's singularity check, shared by every fusion
+/// mode: an exact zero is reported as the dense solve's singular-block
+/// failure, so a compact and a dense divisor agree on the error variant.
+pub(super) fn reject_singular_compact_divisor<D: TensorScalar>(
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+) -> Result<(), Error> {
+    if spectrum
+        .iter()
+        .flat_map(|entry| &entry.values)
+        .any(|value| value.abs_value() == 0.0)
+    {
+        return Err(Error::from(tenet_tensors::OperationError::Dense(
+            tenet_dense::DenseError::NumericalFailure {
+                backend: tenet_dense::DenseBackend::Tenferro,
+                op: "solve_into",
+                message: "singular compact diagonal divisor".to_string(),
+            },
+        )));
+    }
+    Ok(())
+}
+
 /// Two compact spectra that live on one bond space must agree sector for
 /// sector and length for length; when they do not, the space and the payload
 /// have gone out of step, which is an engine invariant break rather than

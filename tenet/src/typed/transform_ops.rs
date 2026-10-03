@@ -2802,7 +2802,7 @@ where
             // (spectral or Padé), not a domain, and a diagonal is already in its
             // eigenbasis so neither answer would change what happens here.
             // TensorKit splits the same way (#576, #578).
-            return Ok(self.with_spectrum(map_spectrum(spectrum, |value| Ok(value.exp_value()))?));
+            return Ok(self.with_spectrum(exp_spectrum(spectrum)?));
         }
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
@@ -2827,19 +2827,7 @@ where
         D: AdvancedLinalgScalar,
     {
         if let Some(spectrum) = self.spectrum() {
-            // Why `== 0` and not a tolerance: the dense arm has none either
-            // (the solve either fails or it does not), and a compact arm that
-            // refused near-zero entries would let storage change the answer.
-            // Match the dense arm: exact zero is singular.
-            return Ok(self.with_spectrum(map_spectrum(spectrum, |value| {
-                if value.abs_value() == 0.0 {
-                    Err(Error::InvalidArgument(
-                        "inv of a singular diagonal (zero entry)".to_string(),
-                    ))
-                } else {
-                    Ok(value.recip_value())
-                }
-            })?));
+            return Ok(self.with_spectrum(inv_spectrum(spectrum)?));
         }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             // (A†)^-1 = (A^-1)†. Avoid materializing the receiver by
@@ -2898,19 +2886,7 @@ where
         }
 
         if let Some(spectrum) = self.spectrum() {
-            if spectrum
-                .iter()
-                .flat_map(|entry| &entry.values)
-                .any(|value| value.abs_value() == 0.0)
-            {
-                return Err(Error::from(tenet_tensors::OperationError::Dense(
-                    tenet_dense::DenseError::NumericalFailure {
-                        backend: tenet_dense::DenseBackend::Tenferro,
-                        op: "solve_into",
-                        message: "singular compact diagonal divisor".to_string(),
-                    },
-                )));
-            }
+            reject_singular_compact_divisor(spectrum)?;
             let solved = self.inv_multiplicity_free()?.compose(rhs)?;
             let TypedTensorRepr::Owned(body) = solved.repr else {
                 return Err(internal_layout_error(

@@ -492,6 +492,15 @@ where
                 .materialized_tensor_uncached()
                 .map_err(GenericTensorError::from);
         }
+        if let Some(spectrum) = tensor.spectrum() {
+            // A proven bond is its own swapped space, so, as in
+            // multiplicity-free mode, the compact arm needs neither the
+            // isomorphism preflight nor a separately admitted output root.
+            let space = tensor.logical_space();
+            if checked_compact_spectrum_layout(space, space, spectrum) {
+                return Ok(tensor.with_spectrum(inv_spectrum(spectrum)?));
+            }
+        }
         let source = tensor.logical_space();
         let codomain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
             source.space().homspace().codomain(),
@@ -589,9 +598,88 @@ where
                 rhs.logical_space().space().homspace().domain().clone(),
             ),
         )?;
+        if let Some(solved) = checked_compact_divisor_solve(tensor, rhs, &output)? {
+            return Ok(solved);
+        }
         let factor =
             checked_generic_solve_into(tensor, rhs, tensor.logical_space().clone(), output)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
+    }
+}
+
+/// TensorKit `D \ t` on a `DiagonalTensorMap` divisor: `D \ D'` divides the
+/// spectra and stays compact, and `D \ t` scales each block's leading
+/// (bond) axis by the reciprocal spectrum, `O(Σ_c k_c m_c)` with no LU and no
+/// `Σ_c k_c²` divisor buffer. `None` leaves every other layout to the dense
+/// route, which owns its validation order.
+fn checked_compact_divisor_solve<R, D>(
+    tensor: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+    output: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Option<TensorMap<R, D>>, Error>
+where
+    D: TensorScalar,
+{
+    let Some(spectrum) = tensor.spectrum() else {
+        return Ok(None);
+    };
+    let divisor = &tensor.owned_body().expect("compact divisor is owned").space;
+    if !checked_compact_spectrum_layout(divisor, divisor, spectrum) {
+        return Ok(None);
+    }
+    reject_singular_compact_divisor(spectrum)?;
+    let inverse = inv_spectrum(spectrum)?;
+    let local = matches!(&rhs.repr, TypedTensorRepr::Adjoint(_))
+        .then(|| rhs.materialized_tensor_uncached())
+        .transpose()?;
+    let rhs_body = local
+        .as_ref()
+        .and_then(TensorMap::owned_body)
+        .unwrap_or_else(|| rhs.owned_body().expect("solve rhs is owned after refusal"));
+    // The destination `domain(D) <- domain(rhs)` is `rhs`'s own space,
+    // because `D` is a bond (`domain == codomain == codomain(rhs)`); the
+    // equality check proves it rather than trusting the provider `Arc`s.
+    if output.space() != rhs_body.space.space() {
+        return Ok(None);
+    }
+    match rhs_body.data.as_ref() {
+        TypedData::Diagonal(values) => {
+            if values.len() != inverse.len()
+                || values.iter().zip(&inverse).any(|(value, inverse)| {
+                    value.sector != inverse.sector || value.values.len() != inverse.values.len()
+                })
+            {
+                return Ok(None);
+            }
+            let quotient = values
+                .iter()
+                .zip(&inverse)
+                .map(|(value, inverse)| tenet_matrixalgebra::SectorSpectrum {
+                    sector: value.sector,
+                    values: value
+                        .values
+                        .iter()
+                        .zip(&inverse.values)
+                        .map(|(&value, &inverse)| inverse * value)
+                        .collect(),
+                })
+                .collect();
+            Ok(Some(tensor.with_spectrum_on(output.clone(), quotient)))
+        }
+        TypedData::Dense(values) => {
+            let mut data = values.clone();
+            tenet_matrixalgebra::scale_axis_by_spectrum_mapped(
+                output.space(),
+                &mut data,
+                Some(0),
+                &inverse,
+                |value| value,
+            )?;
+            Ok(Some(TensorMap {
+                runtime: tensor.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(output.clone(), data)),
+            }))
+        }
     }
 }
 
@@ -635,7 +723,7 @@ where
     .map_err(GenericTensorError::from)
 }
 
-pub(super) fn checked_compact_pinv_layout<R, D>(
+pub(super) fn checked_compact_spectrum_layout<R, D>(
     source: &BoundDynamicFusionMapSpace<R>,
     output: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
@@ -729,7 +817,7 @@ where
             .owned_body()
             .expect("checked Generic pinv input is owned after lazy dispatch");
         if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if checked_compact_pinv_layout(&body.space, &output, spectrum) {
+            if checked_compact_spectrum_layout(&body.space, &output, spectrum) {
                 let sigma_max = spectrum.iter().flat_map(|entry| &entry.values).try_fold(
                     0.0_f64,
                     |largest, &value| {
@@ -1022,6 +1110,13 @@ where
             .as_ref()
             .and_then(TensorMap::owned_body)
             .unwrap_or_else(|| tensor.owned_body().expect("owned representation"));
+        if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
+            // An endomorphism's swapped space is its own, so the inverse
+            // layout proof also certifies `body.space` as the destination.
+            if checked_compact_spectrum_layout(&body.space, &body.space, spectrum) {
+                return Ok(tensor.with_spectrum(exp_spectrum(spectrum)?));
+            }
+        }
         let mut dense = tensor.runtime.lease_dense();
         let factor = tenet_matrixalgebra::exp_pade13_direct_into_dyn(
             dense.dense(),

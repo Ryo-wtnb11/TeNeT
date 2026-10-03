@@ -97,6 +97,8 @@ upstream location (the note says why).
 | `typed::TensorMap::from_subblock_fn` | TensorKit | 0.17.0 | `tensors/tensor.jl` | divergence: no TK counterpart (name-only row — no single defensible range); TK's constructor surface is `undef`/`zeros`/`ones` (283-318) and the rand family (320-408) |
 | `typed::TensorMap::inner` | TensorKit | 0.17.0 | `tensors/vectorinterface.jl:114-123` | `VectorInterface.inner`, quantum-dimension weighted; TK `dot` alias at `tensors/linalg.jl:255` |
 | `typed::TensorMap::inv` | TensorKit | 0.17.0 | `tensors/linalg.jl:375-387` | typed facade |
+| `typed::TensorMap::inv` | TensorKit | 0.17.0 | `tensors/diagonal.jl:357` | compact arm, every fusion mode: `inv(::DiagonalTensorMap)` is `inv.(d.data)` on the same bond (#1735) |
+| `typed::TensorMap::solve` | TensorKit | 0.17.0 | `tensors/diagonal.jl:358-361`, `tensors/linalg.jl:397-407` | compact divisor, every fusion mode: `D1 \ D2` stays diagonal; `D \ t` is blockwise `Diagonal \ Matrix` (bond-axis scaling) (#1735) |
 | `typed::TensorMap::isometry` | TensorKit | 0.17.0 | `tensors/linalg.jl:149-158` | |
 | `typed::TensorMap::isomorphism` | TensorKit | 0.17.0 | `tensors/linalg.jl:102-109` | also TK `id(V)` (75-82) as `isomorphism(V, V)` and `unitary` (129-132), whose extra Euclidean check every TeNeT provider satisfies |
 | `typed::TensorMap::left_null` | MatrixAlgebraKit | 0.6.9 | `interface/orthnull.jl:167-244` | typed facade |
