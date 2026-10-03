@@ -13,7 +13,7 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
         FusionProductSpace::new([leg()]),
         FusionProductSpace::new([leg()]),
     );
-    let canonical_typed = FusionTensorMapSpace::from_degeneracy_shapes(
+    let canonical_typed = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
         homspace.clone(),
         &rule,

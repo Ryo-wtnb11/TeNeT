@@ -150,7 +150,7 @@ fn checked_revalidation_preserves_complete_admission() {
     where
         R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
     {
-        let space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             FusionTreeHomSpace::from_sectors([(sector, 1)], [(sector, 1)]),
             rule,
@@ -452,9 +452,13 @@ fn fusion_tensor_space_rejects_homspace_rank_mismatch() {
     let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
     let hom = FusionTreeHomSpace::from_sector_ids([(0, 1), (1, 1)], [(0, 1)]);
 
-    let err =
-        FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, [vec![1, 1], vec![1, 1]])
-            .unwrap_err();
+    let err = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        dense,
+        hom,
+        &rule,
+        [vec![1, 1], vec![1, 1]],
+    )
+    .unwrap_err();
 
     assert_eq!(
         err,

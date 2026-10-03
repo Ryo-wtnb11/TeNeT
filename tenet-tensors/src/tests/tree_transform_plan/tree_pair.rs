@@ -1123,14 +1123,14 @@ fn product_tree_transform_rebuilds_after_global_cache_reset_with_old_values_live
     let expected = dst.data().to_vec();
 
     reset_global_operation_caches();
-    let rebuilt_src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rebuilt_src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
         src_hom,
         &rule,
         [vec![1, 1, 1], vec![1, 1, 1]],
     )
     .unwrap();
-    let rebuilt_dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rebuilt_dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
         dst_hom,
         &rule,

@@ -386,23 +386,6 @@ where
         .collect()
 }
 
-/// Infallible-provider entry point for the checked Generic merge path.
-pub fn merge_fusion_trees_generic<R>(
-    rule: &R,
-    lhs: &FusionTreeKey,
-    rhs: &FusionTreeKey,
-    coupled: SectorId,
-    root_vertex: MultiplicityIndex,
-) -> Result<GenericTreeTerms<R::Scalar>, CoreError>
-where
-    R: GenericRigidSymbols,
-    R::Scalar: CategoricalScalar + Send + Sync,
-{
-    let checked = InfallibleGeneric::new(rule);
-    merge_fusion_trees_generic_checked(&checked, lhs, rhs, coupled, root_vertex)
-        .map_err(map_infallible_generic_symbol_error)
-}
-
 fn join_fusion_tree_front_generic_checked<C>(
     rule: &C,
     front: &FusionTreeKey,

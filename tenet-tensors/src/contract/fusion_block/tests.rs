@@ -79,7 +79,7 @@ fn incomplete_su2_grid_is_nonborrowed_and_keeps_sparse_group_clear() {
     // charged as RHS materialization and its packed matrix remains marked
     // for clearing before replay.
     let rule = SU2FusionRule;
-    let scalar = FusionTensorMapSpace::from_degeneracy_shapes(
+    let scalar = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([], []),
         &rule,
@@ -112,7 +112,7 @@ fn incomplete_su2_grid_is_nonborrowed_and_keeps_sparse_group_clear() {
     .unwrap()
     .try_bind_rule(&rule)
     .unwrap();
-    let complete = FusionTensorMapSpace::from_degeneracy_shapes(
+    let complete = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<4, 4>::from_dims([1, 1, 1, 1], [1, 1, 1, 1]).unwrap(),
         homspace,
         &rule,
@@ -540,7 +540,7 @@ fn storage_direct_replay_runs_without_host_slice_contract() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
     let fusion_space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([leg()]),
@@ -646,7 +646,7 @@ fn storage_direct_replay_matches_host_execute_raw() {
 fn z2_adjoint_mapping_spaces() -> (DynamicFusionMapSpace, DynamicFusionMapSpace) {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 2), (SectorId::new(1), 2)], false);
-    let storage = FusionTensorMapSpace::from_degeneracy_shapes(
+    let storage = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([4], [4]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg()]),
@@ -672,7 +672,7 @@ fn nonselfdual_u1_adjoint_projects_logical_order_to_parent_blocks() {
         FusionProductSpace::new([codomain]),
         FusionProductSpace::new([domain]),
     );
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
         homspace.clone(),
         &rule,

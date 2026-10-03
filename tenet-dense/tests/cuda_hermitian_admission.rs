@@ -15,9 +15,19 @@
 
 use num_complex::{Complex32, Complex64};
 use tenet_dense::{
-    cuda_hermitian_regions, cuda_is_hermitian_region, cuda_transfer_stats, CudaDenseContext,
-    CudaDenseStorage, CudaScalar,
+    cuda_hermitian_regions, cuda_transfer_stats, CudaDenseContext, CudaDenseStorage, CudaScalar,
 };
+
+/// The one-region case of [`cuda_hermitian_regions`]; test support since no
+/// production caller decides a single region (#1805).
+fn cuda_is_hermitian_region<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    offset: usize,
+    n: usize,
+) -> Result<bool, tenet_dense::DenseError> {
+    Ok(cuda_hermitian_regions::<D>(ctx, src, &[(offset, n)])?[0])
+}
 
 trait Payload: CudaScalar + Copy {
     const EPSILON: f64;

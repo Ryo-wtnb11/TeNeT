@@ -654,14 +654,14 @@ fn tensoradd_structure_rejects_invalid_permutation_at_compile_time() {
 #[test]
 fn plain_tensoradd_rejects_fusion_tree_permutation_without_rule() {
     let rule = Z2FusionRule;
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(0, 1), (0, 1)], []),
         &rule,
         [vec![1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(0, 1), (0, 1)], []),
         &rule,
@@ -695,14 +695,14 @@ fn plain_tensoradd_rejects_fusion_tree_permutation_without_rule() {
 #[test]
 fn plain_tensoradd_rejects_fusion_tree_conjugation_without_categorical_adjoint() {
     let rule = Z2FusionRule;
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 0>::from_dims([1], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(0, 1)], []),
         &rule,
         [vec![1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 0>::from_dims([1], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(0, 1)], []),
         &rule,
@@ -743,7 +743,7 @@ fn z2_tensoradd_adjoint_fixture() -> (
     let rule = SU2FusionRule;
     let even = SU2Irrep::from_twice_spin(0).sector_id();
     let odd = SU2Irrep::from_twice_spin(0).sector_id();
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 1>::from_dims([2, 3], [5]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([
@@ -756,7 +756,7 @@ fn z2_tensoradd_adjoint_fixture() -> (
         [vec![2, 3, 5]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 2>::from_dims([5], [2, 3]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(odd, 5)], false)]),
@@ -965,14 +965,14 @@ fn tensoradd_source_adjoint_braid_lowering_rejects_bad_axis_and_level_inputs() {
 #[test]
 fn tensoradd_fusion_source_adjoint_explicit_braid_requires_unitary_dagger_rule() {
     let rule = UniqueAnyonicRule;
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(1, 1)], [(1, 1)]),
         &rule,
         [vec![1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(1, 1)], [(1, 1)]),
         &rule,
@@ -1015,14 +1015,14 @@ fn tensoradd_fusion_source_adjoint_explicit_braid_requires_unitary_dagger_rule()
 #[test]
 fn tensoradd_fusion_source_adjoint_explicit_braid_matches_manual_inverse_braid_reference() {
     let rule = UnitaryPhaseAnyonicRule;
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(1, 1), (3, 1)], []),
         &rule,
         [vec![1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 2>::from_dims([], [1, 1]).unwrap(),
         FusionTreeHomSpace::from_sector_ids([], [(3, 1), (1, 1)]),
         &rule,
@@ -1079,14 +1079,14 @@ fn tensoradd_fusion_source_adjoint_explicit_braid_matches_manual_inverse_braid_r
 #[test]
 fn tensoradd_fusion_source_adjoint_domain_only_braid_matches_manual_inverse_braid_reference() {
     let rule = UnitaryPhaseAnyonicRule;
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 2>::from_dims([], [1, 1]).unwrap(),
         FusionTreeHomSpace::from_sector_ids([], [(1, 1), (3, 1)]),
         &rule,
         [vec![1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(3, 1), (1, 1)], []),
         &rule,
@@ -1143,14 +1143,14 @@ fn tensoradd_fusion_source_adjoint_domain_only_braid_matches_manual_inverse_brai
 #[test]
 fn tensoradd_fusion_source_adjoint_mixed_braid_matches_manual_inverse_braid_reference() {
     let rule = UnitaryPhaseAnyonicRule;
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(1, 1)], [(1, 1)]),
         &rule,
         [vec![1, 1]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], true)]),

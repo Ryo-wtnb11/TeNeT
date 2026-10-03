@@ -759,7 +759,7 @@ mod tests {
             FusionProductSpace::new([SectorLeg::new([(vacuum, 2)], false)]),
             FusionProductSpace::new([SectorLeg::new([(vacuum, 3)], false)]),
         );
-        let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+        let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([2], [3]).unwrap(),
             homspace.clone(),
             &rule,
@@ -811,7 +811,7 @@ mod tests {
             FusionProductSpace::new([SectorLeg::new([(even, 3), (odd, 3)], false)]),
             FusionProductSpace::new([SectorLeg::new([(even, 2), (odd, 2)], false)]),
         );
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([6], [4]).unwrap(),
             homspace,
             &rule,

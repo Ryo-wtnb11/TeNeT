@@ -653,7 +653,8 @@ where
 /// [`multiplicity_free_repartition_tree_pair`] :794-827.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
-pub fn generic_repartition_tree_pair<R>(
+#[cfg(test)]
+pub(crate) fn generic_repartition_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,
@@ -680,6 +681,7 @@ where
     generic_repartition_tree_pair_validated(validated, target_codomain_rank)
 }
 
+#[cfg(test)]
 fn generic_repartition_tree_pair_validated<R>(
     tree_pair: ValidatedFusionTreePair<'_, R>,
     target_codomain_rank: usize,
@@ -716,7 +718,8 @@ where
     clippy::type_complexity,
     reason = "the public checked API exposes destination tree-pair coefficient rows directly"
 )]
-pub fn generic_repartition_tree_pair_checked<C>(
+#[cfg(test)]
+pub(crate) fn generic_repartition_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,

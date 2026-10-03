@@ -344,7 +344,7 @@ impl From<FusionAlgebraError> for CheckedFusionSpaceError {
     }
 }
 
-pub fn validate_layout(layout: BlockLayout<'_>) -> Result<(), CoreError> {
+pub(crate) fn validate_layout(layout: BlockLayout<'_>) -> Result<(), CoreError> {
     if layout.shape.len() != layout.strides.len() {
         return Err(CoreError::RankMismatch {
             shape: layout.shape.len(),

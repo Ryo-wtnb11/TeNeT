@@ -75,7 +75,7 @@ fn canonical_and_factor_bridge_storage_skip_exact_enumeration() {
     let rule = SU2FusionRule;
     let homspace = FusionTreeHomSpace::from_sectors([(su2(1), 2)], [(su2(1), 3)]);
     reset_exact_storage_fallback_count();
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([2], [3]).unwrap(),
         homspace.clone(),
         &rule,

@@ -55,6 +55,9 @@ mod tensor_map;
 pub use tensor_map::*;
 mod error;
 pub use error::*;
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod testing;
 
 #[cfg(test)]
 mod tests;

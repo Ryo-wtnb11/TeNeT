@@ -70,17 +70,6 @@ fn magnitudes_for_sum_squares<D: CudaScalar>(
         .map(Some)
         .map_err(|err| cuda_error(op, err))
 }
-/// Tests one packed CUDA matrix region with the host EIGH rule; the
-/// one-region case of [`cuda_hermitian_regions`].
-#[doc(hidden)]
-pub fn cuda_is_hermitian_region<D: CudaScalar>(
-    ctx: &mut CudaDenseContext,
-    src: &CudaDenseStorage,
-    offset: usize,
-    n: usize,
-) -> Result<bool, DenseError> {
-    Ok(cuda_hermitian_regions::<D>(ctx, src, &[(offset, n)])?[0])
-}
 /// Tests packed square CUDA regions `(offset, n)` of `src` with the host EIGH
 /// rule `||(A - A^H)/2||_F <= 64 eps(real(D)) ||A||_F`, returning one decision
 /// per region. The residual uses the *conjugate* transpose, so a

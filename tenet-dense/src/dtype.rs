@@ -16,8 +16,3 @@ pub enum DenseBackend {
     /// CUDA device dense boundary (tenferro-gpu / cuSOLVER / cuBLAS).
     Cuda,
 }
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DensePlacement {
-    Host,
-}

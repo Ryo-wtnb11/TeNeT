@@ -15,7 +15,7 @@ where
         FusionProductSpace::new([leg()]),
     );
     let block_count = homspace.fusion_tree_keys(rule).len();
-    FusionTensorMapSpace::from_degeneracy_shapes(
+    FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
         homspace,
         rule,

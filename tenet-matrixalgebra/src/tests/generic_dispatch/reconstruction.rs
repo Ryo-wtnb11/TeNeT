@@ -38,7 +38,7 @@ fn scale_vt_rows_by_singular_values<const NIN: usize>(
     }
 }
 
-fn run_tsvd_reconstruction_case<R>(rule: &R, sectors: &[SectorId], coupled_layout: bool)
+fn run_tsvd_reconstruction_case<R>(rule: &R, sectors: &[SectorId])
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey + Clone,
 {
@@ -52,11 +52,8 @@ where
     let key_count = homspace.fusion_tree_keys(rule).len();
     let dense = TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap();
     let shapes = vec![vec![degeneracy; 4]; key_count];
-    let space = if coupled_layout {
-        FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, homspace, rule, shapes).unwrap()
-    } else {
-        FusionTensorMapSpace::from_degeneracy_shapes(dense, homspace, rule, shapes).unwrap()
-    };
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, homspace, rule, shapes)
+        .unwrap();
     let len = space.required_len().unwrap();
     let tensor = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
         (0..len)
@@ -112,13 +109,8 @@ where
 }
 
 #[test]
-fn tsvd_fusion_reconstructs_z2_tensor_packed_layout() {
-    run_tsvd_reconstruction_case(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)], false);
-}
-
-#[test]
 fn tsvd_fusion_reconstructs_z2_tensor_coupled_layout() {
-    run_tsvd_reconstruction_case(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)], true);
+    run_tsvd_reconstruction_case(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
 }
 
 #[test]
@@ -129,7 +121,6 @@ fn tsvd_fusion_reconstructs_su2_tensor() {
             SU2Irrep::from_twice_spin(0).sector_id(),
             SU2Irrep::from_twice_spin(1).sector_id(),
         ],
-        true,
     );
 }
 
@@ -142,7 +133,6 @@ fn tsvd_fusion_reconstructs_u1_tensor() {
             U1Irrep::new(0).sector_id(),
             U1Irrep::new(1).sector_id(),
         ],
-        false,
     );
 }
 
@@ -152,7 +142,6 @@ fn tsvd_fusion_reconstructs_fermion_parity_tensor() {
     run_tsvd_reconstruction_case(
         &FermionParityFusionRule,
         &[SectorId::new(0), SectorId::new(1)],
-        true,
     );
 }
 
@@ -164,7 +153,7 @@ fn tsvd_fusion_reconstructs_product_rule_tensor() {
         rule.encode_sector(SectorId::new(0), U1Irrep::new(0).sector_id()),
         rule.encode_sector(SectorId::new(1), U1Irrep::new(1).sector_id()),
     ];
-    run_tsvd_reconstruction_case(&rule, &sectors, true);
+    run_tsvd_reconstruction_case(&rule, &sectors);
 }
 
 fn u1_lowest_label_matrix(rows: usize, cols: usize) -> TensorMap<f64, 1, 1> {

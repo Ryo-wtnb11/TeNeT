@@ -1225,7 +1225,7 @@ pub(super) fn adversarial_fusion_host_tensor(
     FusionTreePairKey,
 ) {
     let rule = Z2FusionRule;
-    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::from_sectors([(Z2Irrep::EVEN, 1)], [(Z2Irrep::EVEN, 1)]),
         &rule,

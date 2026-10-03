@@ -1765,7 +1765,7 @@ mod tests {
             [(0, dimensions[0]), (0, dimensions[1])],
             [(0, dimensions[2]), (0, dimensions[3])],
         );
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<2, 2>::from_dims(
                 [dimensions[0], dimensions[1]],
                 [dimensions[2], dimensions[3]],
@@ -2020,7 +2020,7 @@ mod tests {
         let rule = FermionParityFusionRule;
         let odd = SectorId::new(1);
         let space = |codomain_dual: bool, domain_dual: bool| {
-            FusionTensorMapSpace::from_degeneracy_shapes(
+            FusionTensorMapSpace::from_degeneracy_shapes_coupled(
                 TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
                 FusionTreeHomSpace::new(
                     FusionProductSpace::new([SectorLeg::new([(odd, 1)], codomain_dual)]),
@@ -2184,7 +2184,7 @@ mod tests {
         let rule = U1FusionRule;
         let sector = tenet_core::U1Irrep::new(0).sector_id();
         let vector_space = || {
-            FusionTensorMapSpace::from_degeneracy_shapes(
+            FusionTensorMapSpace::from_degeneracy_shapes_coupled(
                 TensorMapSpace::<1, 0>::from_dims([1], []).unwrap(),
                 FusionTreeHomSpace::new(
                     FusionProductSpace::new([SectorLeg::new([(sector, 1)], false)]),
@@ -2197,7 +2197,7 @@ mod tests {
         };
         let lhs_typed = vector_space();
         let rhs_typed = vector_space();
-        let dst_typed = FusionTensorMapSpace::from_degeneracy_shapes(
+        let dst_typed = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([SectorLeg::new([(sector, 1)], true)]),
@@ -2266,7 +2266,7 @@ mod tests {
         // What: an identity-axis operand with an incomplete SU2 tree grid is
         // charged for the complete core layout instead of treated as borrowed.
         let rule = SU2FusionRule;
-        let lhs_typed = FusionTensorMapSpace::from_degeneracy_shapes(
+        let lhs_typed = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
             FusionTreeHomSpace::from_sector_ids([], []),
             &rule,

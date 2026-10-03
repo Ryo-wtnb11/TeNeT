@@ -8,6 +8,7 @@ pub(super) struct ValidatedFusionTreeBlockGroup<'a, R> {
     pub(super) projection: MultiplicityFreeTreeProjection<'a>,
 }
 
+#[cfg(any(test, feature = "testing"))]
 fn validate_fusion_tree_block_group_for_rule<'a, R>(
     rule: &'a R,
     src_keys: &'a [FusionTreeKey],
@@ -92,7 +93,8 @@ where
 /// Every source follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
 /// precondition.
 #[allow(clippy::type_complexity)]
-pub fn multiplicity_free_braid_tree_block<R>(
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn multiplicity_free_braid_tree_block<R>(
     rule: &R,
     src_keys: &[FusionTreeKey],
     permutation: &[usize],
@@ -162,7 +164,8 @@ where
 /// Every source follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
 /// precondition.
 #[allow(clippy::type_complexity)]
-pub fn multiplicity_free_permute_tree_block<R>(
+#[cfg(test)]
+pub(crate) fn multiplicity_free_permute_tree_block<R>(
     rule: &R,
     src_keys: &[FusionTreeKey],
     permutation: &[usize],
@@ -200,6 +203,7 @@ pub(crate) struct ValidatedTreePairBlockGroup<'a, R> {
 
 pub(crate) const TREE_PAIR_BLOCK_GROUP_ERROR: &str = "fusion-tree block keys must share one group";
 
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn validate_tree_pair_block_group_for_rule<'a, R>(
     rule: &'a R,
     src_keys: &'a [FusionTreePairKey],
@@ -373,7 +377,8 @@ where
     clippy::type_complexity,
     reason = "the public block transform API exposes source-major coefficient rows directly"
 )]
-pub fn multiplicity_free_braid_tree_pair_block<R>(
+#[cfg(test)]
+pub(crate) fn multiplicity_free_braid_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
     codomain_permutation: &[usize],
@@ -551,7 +556,8 @@ where
     clippy::type_complexity,
     reason = "the public block transform API exposes source-major coefficient rows directly"
 )]
-pub fn multiplicity_free_permute_tree_pair_block<R>(
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn multiplicity_free_permute_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
     codomain_permutation: &[usize],
@@ -712,7 +718,8 @@ where
     clippy::type_complexity,
     reason = "the public block transform API exposes source-major coefficient rows directly"
 )]
-pub fn multiplicity_free_transpose_tree_pair_block<R>(
+#[cfg(test)]
+pub(crate) fn multiplicity_free_transpose_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
     codomain_permutation: &[usize],

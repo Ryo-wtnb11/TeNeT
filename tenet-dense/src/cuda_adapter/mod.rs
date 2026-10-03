@@ -63,9 +63,7 @@ pub use gemm::{
     cuda_gemm_region_batched_into, cuda_gemm_region_batched_scaled_into, cuda_gemm_region_into,
     cuda_gemm_region_with_ops_into, cuda_matmul_region_into,
 };
-pub use hermitian::{
-    cuda_hermitian_regions, cuda_hermitian_regions_batched, cuda_is_hermitian_region,
-};
+pub use hermitian::{cuda_hermitian_regions, cuda_hermitian_regions_batched};
 pub use storage::CudaDenseStorage;
 
 // `context::warm_up` submits an axpby the same way every region call does.

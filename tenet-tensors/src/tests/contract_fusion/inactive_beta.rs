@@ -171,7 +171,7 @@ fn self_dual_conjugate_structure_scales_inactive_block_like_eager_adjoint_oracle
     let lhs_space = source_space();
     let rhs_space = source_space();
     let oracle_source_space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             source_homspace.clone(),
             &rule,

@@ -10,7 +10,8 @@ use super::*;
 /// through the A-move matrix (which connects the two topmost `λ` vertices).
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
-pub fn generic_foldright_tree_pair<R>(
+#[cfg(test)]
+pub(crate) fn generic_foldright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -35,6 +36,7 @@ where
     generic_foldright_tree_pair_validated(validated)
 }
 
+#[cfg(test)]
 fn generic_foldright_tree_pair_validated<R>(
     tree_pair: ValidatedFusionTreePair<'_, R>,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -72,7 +74,8 @@ where
 /// Structural twin of `multiplicity_free_foldleft_tree_pair`.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
-pub fn generic_foldleft_tree_pair<R>(
+#[cfg(test)]
+pub(crate) fn generic_foldleft_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -95,6 +98,7 @@ where
     generic_foldleft_tree_pair_validated(validated)
 }
 
+#[cfg(test)]
 fn generic_foldleft_tree_pair_validated<R>(
     tree_pair: ValidatedFusionTreePair<'_, R>,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -125,7 +129,8 @@ where
 /// structural twin of `multiplicity_free_cycle_clockwise_tree_pair`.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
-pub fn generic_cycle_clockwise_tree_pair<R>(
+#[cfg(test)]
+pub(crate) fn generic_cycle_clockwise_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -143,6 +148,7 @@ where
     generic_cycle_clockwise_tree_pair_validated(validated)
 }
 
+#[cfg(test)]
 fn generic_cycle_clockwise_tree_pair_validated<R>(
     tree_pair: ValidatedFusionTreePair<'_, R>,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -175,7 +181,8 @@ where
 /// twin of `multiplicity_free_cycle_anticlockwise_tree_pair`.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
-pub fn generic_cycle_anticlockwise_tree_pair<R>(
+#[cfg(test)]
+pub(crate) fn generic_cycle_anticlockwise_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -193,6 +200,7 @@ where
     generic_cycle_anticlockwise_tree_pair_validated(validated)
 }
 
+#[cfg(test)]
 fn generic_cycle_anticlockwise_tree_pair_validated<R>(
     tree_pair: ValidatedFusionTreePair<'_, R>,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
@@ -427,7 +435,8 @@ where
 /// no new recoupling formula is introduced.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
-pub fn generic_braid_tree_pair<R>(
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn generic_braid_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
     codomain_permutation: &[usize],
@@ -662,7 +671,8 @@ where
 /// [`multiplicity_free_permute_tree_pair`] (:886).
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
-pub fn generic_permute_tree_pair<R>(
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn generic_permute_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
     codomain_permutation: &[usize],
@@ -776,7 +786,7 @@ where
 
 /// Generic-fusion `transpose` (planar cyclic permutation): bend into the target
 /// partition, then cycle the coupled tree into place via fold/bend. Structural
-/// twin of [`multiplicity_free_transpose_tree_pair`] (:916); braid-free, so it
+/// twin of `multiplicity_free_transpose_tree_pair` (:916); braid-free, so it
 /// runs on planar (non-symmetric) Generic rules too.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.

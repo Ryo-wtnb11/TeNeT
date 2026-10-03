@@ -1343,7 +1343,7 @@ fn plain_tensorcontract_rejects_one_block_fusion_tensor_instead_of_dense_contrac
         )
     };
     let space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             hom(),
             &rule,

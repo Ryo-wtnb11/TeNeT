@@ -6,7 +6,7 @@
 /// Entries of a cuTENSOR contraction plan cost about this much retained state
 /// (`g2-design.md` §4). Used only to bound how far the plan entry cap is
 /// raised.
-pub const CUTENSOR_PLAN_BYTES: usize = 14 * 1024;
+pub(crate) const CUTENSOR_PLAN_BYTES: usize = 14 * 1024;
 
 /// Default ceiling on reserved cuTENSOR plan entries: 8 MiB at an estimated
 /// 14 KB per plan, about 585 distinct operand signatures. Tenferro's own

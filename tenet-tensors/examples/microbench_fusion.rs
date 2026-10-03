@@ -132,7 +132,7 @@ where
         let dense =
             TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap();
         let shapes = vec![vec![degeneracy; 4]; key_count];
-        FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, rule, shapes).unwrap()
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, hom, rule, shapes).unwrap()
     };
 
     let lhs_space = space(homspace());

@@ -225,7 +225,7 @@ fn direct_prelowered_source_reuses_ordinary_transform_entry() {
         FusionProductSpace::new([codomain]),
         FusionProductSpace::new([domain]),
     );
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
         homspace.clone(),
         &rule,
@@ -580,7 +580,7 @@ fn borrowable_core_layout_accepts_equal_structure_across_intern_reset() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = Z2FusionRule;
     let build = || {
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]),
             &rule,
@@ -613,7 +613,7 @@ fn borrowable_core_layout_defers_homspace_identity_until_after_cheap_gates() {
     // What: nonidentity and conjugating sources skip HomSpace identity,
     // while an otherwise borrowable identity layout performs one comparison.
     let rule = Z2FusionRule;
-    let typed = FusionTensorMapSpace::from_degeneracy_shapes(
+    let typed = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]),
         &rule,

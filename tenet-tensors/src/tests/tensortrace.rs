@@ -396,7 +396,7 @@ fn strided_fz2_identity_trace_spaces() -> (FusionTensorMapSpace<1, 1>, FusionTen
         FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
     );
     let dense_space = TensorMapSpace::<1, 1>::from_dims([4], [2]).unwrap();
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         dense_space.clone(),
         homspace.clone(),
         &rule,
@@ -586,7 +586,7 @@ fn typed_fz2_multiple_trace_terms_and_inactive_block_scale_beta_once() {
         FusionProductSpace::new([leg(), leg()]),
     );
     let src_key_count = src_homspace.fusion_tree_keys(&rule).len();
-    let canonical_src = FusionTensorMapSpace::from_degeneracy_shapes(
+    let canonical_src = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
         src_homspace.clone(),
         &rule,
@@ -595,7 +595,7 @@ fn typed_fz2_multiple_trace_terms_and_inactive_block_scale_beta_once() {
     .unwrap();
     let dst_homspace = src_homspace.select(&rule, &[0], &[2]).unwrap();
     let dst_key_count = dst_homspace.fusion_tree_keys(&rule).len();
-    let canonical_dst = FusionTensorMapSpace::from_degeneracy_shapes(
+    let canonical_dst = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
         dst_homspace.clone(),
         &rule,
@@ -738,7 +738,7 @@ fn typed_fz2_trace_admits_only_injective_destination_spaces() {
     let self_overlapping_dst = relayout_fz2_destination(&canonical_dst, [[0, 4], [2, 4]], [0, 4]);
     let interleaved_dst =
         relayout_fz2_destination(&canonical_dst, [[2, 4], [2, 4]], [0, 1]).unwrap();
-    let full_src = FusionTensorMapSpace::from_degeneracy_shapes(
+    let full_src = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         canonical_dst.dense_space().clone(),
         canonical_dst.homspace().clone(),
         &rule,
@@ -1428,7 +1428,7 @@ fn tensortrace_fusion_fermion_parity_matches_tensorkit_supertrace() {
         FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
         FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
     );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         src_hom,
         &rule,
@@ -1442,7 +1442,7 @@ fn tensortrace_fusion_fermion_parity_matches_tensorkit_supertrace() {
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
     );
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         dst_hom,
         &rule,
@@ -1487,7 +1487,7 @@ fn tensortrace_fusion_default_host_api_accepts_custom_host_storage() {
         FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
         FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
     );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         src_hom,
         &rule,
@@ -1499,7 +1499,7 @@ fn tensortrace_fusion_default_host_api_accepts_custom_host_storage() {
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
     );
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         dst_hom,
         &rule,
@@ -1530,7 +1530,7 @@ fn tensortrace_fusion_fermion_supertrace_uses_degeneracy_diagonals() {
         FusionProductSpace::new([SectorLeg::new([(even, 2), (odd, 2)], false)]),
         FusionProductSpace::new([SectorLeg::new([(even, 2), (odd, 2)], false)]),
     );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         src_hom,
         &rule,
@@ -1550,7 +1550,7 @@ fn tensortrace_fusion_fermion_supertrace_uses_degeneracy_diagonals() {
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
     );
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         dst_hom,
         &rule,
@@ -1582,7 +1582,7 @@ fn tensortrace_fusion_with_conjugation_lowers_lazy_adjoint_supertrace() {
         FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
         FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
     );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         src_hom,
         &rule,
@@ -1598,7 +1598,7 @@ fn tensortrace_fusion_with_conjugation_lowers_lazy_adjoint_supertrace() {
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
     );
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         dst_hom,
         &rule,
@@ -1633,7 +1633,7 @@ fn tensortrace_fusion_rank_zero_adjoint_keeps_parent_structure() {
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
     );
     let space = || {
-        FusionTensorMapSpace::from_degeneracy_shapes(
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
             homspace.clone(),
             &rule,
@@ -1674,7 +1674,7 @@ fn dynamic_u1_conjugating_trace_matches_hand_indexed_logical_adjoint() {
         FusionProductSpace::new([charged_leg(), neutral_leg()]),
         FusionProductSpace::new([charged_leg()]),
     );
-    let src_fusion = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_fusion = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 1>::from_dims([2, 3], [2]).unwrap(),
         src_hom.clone(),
         &rule,
@@ -1691,7 +1691,7 @@ fn dynamic_u1_conjugating_trace_matches_hand_indexed_logical_adjoint() {
         FusionProductSpace::new([]),
         FusionProductSpace::new([neutral_leg()]),
     );
-    let dst_fusion = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_fusion = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 1>::from_dims([], [3]).unwrap(),
         dst_hom.clone(),
         &rule,
@@ -1890,7 +1890,7 @@ fn dynamic_u1_adjoint_trace_replays_two_pairs_from_padded_storage() {
         FusionProductSpace::new([leg(1, 2), leg(-1, 2)]),
     );
     let dense = TensorMapSpace::<4, 2>::from_dims([2, 2, 2, 3], [2, 2]).unwrap();
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         dense.clone(),
         src_hom.clone(),
         &rule,
@@ -1994,7 +1994,7 @@ fn owned_trace_reuses_initialized_fallback_for_padded_destination() {
 
     let dst_hom = FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
     let dense = TensorMapSpace::<0, 0>::from_dims([], []).unwrap();
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         dense.clone(),
         dst_hom.clone(),
         &rule,
@@ -2043,7 +2043,7 @@ fn tensortrace_fusion_scales_destination_once_for_multiple_source_terms() {
         FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
         FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
     );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         src_hom,
         &rule,
@@ -2057,7 +2057,7 @@ fn tensortrace_fusion_scales_destination_once_for_multiple_source_terms() {
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
     );
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         dst_hom,
         &rule,
@@ -2090,7 +2090,7 @@ fn tensortrace_fusion_fermion_open_output_matches_tensorkit_oracle() {
         FusionProductSpace::new([leg(), leg()]),
         FusionProductSpace::new([leg(), leg()]),
     );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap(),
         src_hom,
         &rule,
@@ -2107,7 +2107,7 @@ fn tensortrace_fusion_fermion_open_output_matches_tensorkit_oracle() {
         FusionProductSpace::new([leg()]),
         FusionProductSpace::new([leg()]),
     );
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         dst_hom,
         &rule,
@@ -2141,7 +2141,7 @@ fn tensortrace_fusion_fermion_two_trace_pairs_match_tensorkit_oracle() {
         FusionProductSpace::new([leg(), leg()]),
         FusionProductSpace::new([leg(), leg()]),
     );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap(),
         src_hom,
         &rule,
@@ -2158,7 +2158,7 @@ fn tensortrace_fusion_fermion_two_trace_pairs_match_tensorkit_oracle() {
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
     );
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         dst_hom,
         &rule,
@@ -2185,7 +2185,7 @@ fn tensortrace_fusion_fermion_two_trace_pairs_match_tensorkit_oracle() {
 #[test]
 fn tensortrace_fusion_rejects_nonsymmetric_braiding_like_tensorkit_tensortrace() {
     let rule = UniqueAnyonicRule;
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(1, 1)], [(1, 1)]),
         &rule,
@@ -2194,7 +2194,7 @@ fn tensortrace_fusion_rejects_nonsymmetric_braiding_like_tensorkit_tensortrace()
     .unwrap();
     let src: TensorMap<f64, 1, 1> =
         TensorMap::from_vec_with_fusion_space(vec![2.0], src_space).unwrap();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([], []),
         &rule,
@@ -2224,7 +2224,7 @@ fn tensortrace_fusion_su2_includes_quantum_dimension_factor() {
         FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]),
         FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]),
     );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         src_hom,
         &rule,
@@ -2238,7 +2238,7 @@ fn tensortrace_fusion_su2_includes_quantum_dimension_factor() {
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
     );
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         dst_hom,
         &rule,
@@ -2386,7 +2386,7 @@ fn tensortrace_fusion_recouples_once_per_simple_fusion_group() {
         FusionProductSpace::new([leg(), leg()]),
     );
     let src_key_count = src_hom.fusion_tree_keys(&rule).len();
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap(),
         src_hom.clone(),
         &rule,
@@ -2401,7 +2401,7 @@ fn tensortrace_fusion_recouples_once_per_simple_fusion_group() {
 
     let dst_hom = src_hom.select(&rule, &[1], &[3]).unwrap();
     let dst_key_count = dst_hom.fusion_tree_keys(&rule).len();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         dst_hom,
         &rule,
@@ -2479,7 +2479,7 @@ fn tensortrace_fusion_recouples_once_per_simple_fusion_group() {
         )
         .unwrap();
     let conjugate_dst_key_count = conjugate_dst_hom.fusion_tree_keys(&rule).len();
-    let conjugate_dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let conjugate_dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         conjugate_dst_hom,
         &rule,
@@ -2532,7 +2532,7 @@ fn tensortrace_fusion_product_block_matches_scalar_trace_terms() {
         ]),
     );
     let src_key_count = src_hom.fusion_tree_keys(&rule).len();
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap(),
         src_hom.clone(),
         &rule,
@@ -2546,7 +2546,7 @@ fn tensortrace_fusion_product_block_matches_scalar_trace_terms() {
     .unwrap();
     let dst_hom = src_hom.select(&rule, &[1], &[2]).unwrap();
     let dst_key_count = dst_hom.fusion_tree_keys(&rule).len();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         dst_hom,
         &rule,
@@ -2592,7 +2592,7 @@ fn tensortrace_fusion_product_block_matches_scalar_trace_terms() {
         )
         .unwrap();
     let conjugate_dst_key_count = conjugate_dst_hom.fusion_tree_keys(&rule).len();
-    let conjugate_dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let conjugate_dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         conjugate_dst_hom,
         &rule,
@@ -2656,7 +2656,7 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
         FusionProductSpace::new([leg(), leg()]),
     );
     let key_count = src_hom.fusion_tree_keys(&rule).len();
-    let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
         src_hom.clone(),
         &rule,
@@ -2717,7 +2717,7 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
 
     let dst_hom = src_hom.select(&rule, &[0], &[3]).unwrap();
     let dst_key_count = dst_hom.fusion_tree_keys(&rule).len();
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
         dst_hom,
         &rule,
@@ -2878,7 +2878,7 @@ fn plain_tensortrace_rejects_one_block_fusion_tensor_instead_of_dense_trace() {
         FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]),
         FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]),
     );
-    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         src_hom,
         &rule,
@@ -2892,7 +2892,7 @@ fn plain_tensortrace_rejects_one_block_fusion_tensor_instead_of_dense_trace() {
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
     );
-    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         dst_hom,
         &rule,

@@ -96,7 +96,7 @@ fn bound_scalar_space<R>(rule: &R) -> FusionTensorMapSpace<0, 0>
 where
     R: MultiplicityFreeFusionRule,
 {
-    FusionTensorMapSpace::from_degeneracy_shapes(
+    FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([], []),
         rule,
@@ -323,7 +323,7 @@ fn dynamic_trace_rejects_same_type_rule_when_only_symbols_differ() {
 fn typed_eager_adjoint_rejects_same_type_rule_when_only_symbols_differ() {
     let first = SymbolOnlyRule::new(1.0);
     let second = SymbolOnlyRule::new(-1.0);
-    let space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 0>::from_dims([1], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(0, 1)], []),
         &first,

@@ -110,47 +110,6 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         }
     }
 
-    /// Expert compatibility constructor for caller-supplied fusion-tree
-    /// subblock shapes.
-    ///
-    /// The shapes are given per fusion-tree **subblock** (one entry per
-    /// fusion-tree key, in key order), not per coupled-sector matrix block.
-    /// This mirrors TensorKit's block/subblock distinction: a coupled-sector
-    /// matrix block is assembled from these tree-resolved degeneracy shapes.
-    /// Ordinary TeNeT operation outputs instead derive their layout from the
-    /// final hom space that already owns the leg degeneracies.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tenet_core::{
-    ///     FusionTensorMapSpace, FusionTreeHomSpace, TensorMapSpace, Z2FusionRule, Z2Irrep,
-    /// };
-    ///
-    /// let rule = Z2FusionRule;
-    /// let space = FusionTensorMapSpace::from_degeneracy_shapes(
-    ///     TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-    ///     FusionTreeHomSpace::from_sectors([(Z2Irrep::EVEN, 1)], [(Z2Irrep::EVEN, 1)]),
-    ///     &rule,
-    ///     [vec![1, 1]],
-    /// )
-    /// .unwrap();
-    /// assert_eq!(space.required_len().unwrap(), 1);
-    /// ```
-    pub fn from_degeneracy_shapes<R, Shapes>(
-        dense_space: TensorMapSpace<NOUT, NIN>,
-        homspace: FusionTreeHomSpace,
-        rule: &R,
-        shapes: Shapes,
-    ) -> Result<Self, CoreError>
-    where
-        R: MultiplicityFreeFusionRule,
-        Shapes: IntoIterator,
-        Shapes::Item: Into<Vec<usize>>,
-    {
-        Self::from_degeneracy_shapes_coupled(dense_space, homspace, rule, shapes)
-    }
-
     /// Expert compatibility constructor for a TensorKit-style coupled-sector
     /// matrix layout from caller-supplied subblock shapes.
     ///
@@ -158,9 +117,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// rows enumerate (codomain fusion tree × codomain degeneracies) and whose
     /// columns enumerate (domain fusion tree × domain degeneracies). Fusion
     /// tree subblocks are strided views into that matrix, so the canonical
-    /// (codomain | domain) matricization needs no packing. Block keys and
-    /// their order are identical to [`Self::from_degeneracy_shapes`]; only
-    /// strides and offsets differ. This explicit shape list is an
+    /// (codomain | domain) matricization needs no packing. This explicit shape list is an
     /// import/compatibility boundary, not the ordinary final-hom-space output
     /// path.
     ///

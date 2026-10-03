@@ -1,5 +1,17 @@
 use super::*;
 
+/// Tests one packed CUDA matrix region with the host EIGH rule; the
+/// one-region case of [`cuda_hermitian_regions`]. Test support only: no
+/// production caller decides a single region (#1805).
+fn cuda_is_hermitian_region<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    offset: usize,
+    n: usize,
+) -> Result<bool, DenseError> {
+    Ok(cuda_hermitian_regions::<D>(ctx, src, &[(offset, n)])?[0])
+}
+
 #[test]
 fn rectangular_operand_views_use_parent_native_strides() {
     assert_eq!(cuda_operand_view(MatrixOp::Identity, 2, 3), ([1, 2], false));

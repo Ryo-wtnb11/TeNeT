@@ -87,7 +87,7 @@ fn charges(charge_count: usize) -> Vec<i32> {
 
 fn fusion_space(rule: &U1FusionRule, charges: &[i32]) -> FusionTensorMapSpace<1, 1> {
     let dense = TensorMapSpace::<1, 1>::from_dims([charges.len()], [charges.len()]).unwrap();
-    FusionTensorMapSpace::from_degeneracy_shapes(
+    FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         dense,
         homspace(charges),
         rule,
