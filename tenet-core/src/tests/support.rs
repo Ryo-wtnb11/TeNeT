@@ -1097,14 +1097,16 @@ pub(super) fn assert_compact_transpose_matches_full_key_oracle<R>(
 
     assert_eq!(compact.len(), full_key.len());
     for (compact_rows, full_key_rows) in compact.iter().zip(&full_key) {
-        // What: compact execution preserves the legacy per-source
-        // destination order and every categorical label.
-        assert_eq!(
-            compact_rows.iter().map(|(key, _)| key).collect::<Vec<_>>(),
-            full_key_rows.iter().map(|(key, _)| key).collect::<Vec<_>>()
-        );
+        // What: compact execution reaches every legacy destination label of
+        // each source with the same coefficient. Row order within a source is
+        // unspecified, so rows are matched by key.
         assert_eq!(compact_rows.len(), full_key_rows.len());
-        for ((_, actual), (_, expected)) in compact_rows.iter().zip(full_key_rows) {
+        for (key, expected) in full_key_rows {
+            let actual = compact_rows
+                .iter()
+                .find(|(candidate, _)| candidate == key)
+                .map(|(_, coefficient)| coefficient)
+                .unwrap_or_else(|| panic!("compact rows omit destination {key:?}"));
             assert!(
                 actual.oracle_distance(expected) <= 1.0e-12 * (1.0 + expected.oracle_magnitude()),
                 "coefficient mismatch {expected:?} vs {actual:?}"

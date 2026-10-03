@@ -820,8 +820,15 @@ pub(crate) fn compact_block_dimensions() -> Option<CompactBlockDimensions> {
     COMPACT_BLOCK_DIMENSIONS.with(std::cell::Cell::get)
 }
 
+/// Test-only invariant of a compact transpose output basis: its keys are
+/// distinct and all lie in the destination frame's HomSpace.
+///
+/// Why not compare with the HomSpace key order: bend steps keep the
+/// first-appearance order of the previous basis while changing the coupled
+/// sector, and caller-selected cohorts may be partial, so no row order or
+/// completeness is promised. Consumers resolve destinations by key.
 #[cfg(test)]
-pub(super) fn assert_compact_tree_pair_basis_matches_homspace<R>(
+pub(super) fn assert_compact_tree_pair_basis_in_homspace<R>(
     rule: &R,
     basis: &CompactMultiplicityFreeTreePairBasis,
 ) where
@@ -841,14 +848,19 @@ pub(super) fn assert_compact_tree_pair_basis_matches_homspace<R>(
         product_space(&basis.frame.codomain),
         product_space(&basis.frame.domain),
     );
-    let expected = hom_space.fusion_tree_keys(rule);
-    let actual = basis
-        .locals
+    let homspace_keys = hom_space.fusion_tree_keys(rule);
+    let homspace_keys = homspace_keys
         .iter()
-        .cloned()
-        .map(|local| basis.frame.materialize(local))
-        .collect::<Vec<_>>();
-    assert_eq!(actual.as_slice(), expected.as_ref());
+        .collect::<std::collections::HashSet<_>>();
+    let mut seen = std::collections::HashSet::new();
+    for local in &basis.locals {
+        let key = basis.frame.materialize(local.clone());
+        assert!(
+            homspace_keys.contains(&key),
+            "compact basis key {key:?} is outside the destination HomSpace"
+        );
+        assert!(seen.insert(key), "compact basis repeats a destination key");
+    }
 }
 
 fn preflight_compact_repartition_source_major<R>(
