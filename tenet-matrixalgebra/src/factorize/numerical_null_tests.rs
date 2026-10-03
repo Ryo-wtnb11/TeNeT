@@ -1,63 +1,40 @@
 use super::null_space::numerical_rank_and_compact_basis;
 use super::*;
-use tenet_dense::{DefaultDenseExecutor, DenseRead, DenseWrite};
+use crate::tests::scripted_executor::{Action, Observer, Op, Script, ScriptedExecutor};
 
+/// Owned SVD only (`svd_into` fails); records the returned `U` buffer.
 #[derive(Default)]
 struct OwnedSvdSpy {
-    inner: DefaultDenseExecutor,
     u_pointer: Option<usize>,
-    svd_into_calls: usize,
 }
 
-impl DenseExecutor for OwnedSvdSpy {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        let outputs = self.inner.svd(input)?;
-        self.u_pointer = Some(
-            outputs[0]
-                .as_f64_slice()
-                .expect("f64 null fixture must return f64 U")
-                .as_ptr() as usize,
-        );
-        Ok(outputs)
+impl Observer for OwnedSvdSpy {
+    fn script(script: &mut Script) {
+        script
+            .set_all(&[Op::Svd, Op::Qr, Op::Eigh], Action::Forward)
+            .fail(
+                &[Op::SvdInto],
+                None,
+                "svd_into",
+                "numerical null must consume owned SVD factors",
+            );
     }
 
-    fn svd_into(
-        &mut self,
-        _: DenseRead<'_>,
-        _: DenseWrite<'_>,
-        _: DenseWrite<'_>,
-        _: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.svd_into_calls += 1;
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "svd_into",
-            message: "numerical null must consume owned SVD factors".to_string(),
-        })
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.eigh(input)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.inner.dot_general_into(output, lhs, rhs, config)
+    fn outputs(&mut self, op: Op, outputs: &mut Vec<DenseTensor>) {
+        if op == Op::Svd {
+            self.u_pointer = Some(
+                outputs[0]
+                    .as_f64_slice()
+                    .expect("f64 null fixture must return f64 U")
+                    .as_ptr() as usize,
+            );
+        }
     }
 }
 
 #[test]
 fn numerical_null_left_basis_keeps_owned_svd_u() {
-    let mut dense = OwnedSvdSpy::default();
+    let mut dense = ScriptedExecutor::<OwnedSvdSpy>::default();
     let (rank, u) = numerical_rank_and_compact_basis(
         &mut dense,
         &[1.0_f64, 0.0, 0.0, 0.0, 2.0, 0.0],
@@ -69,6 +46,6 @@ fn numerical_null_left_basis_keeps_owned_svd_u() {
 
     assert_eq!(rank, 2);
     assert_eq!(u.len(), 6);
-    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.counts().svd_into, 0);
     assert_eq!(u.as_ptr() as usize, dense.u_pointer.unwrap());
 }

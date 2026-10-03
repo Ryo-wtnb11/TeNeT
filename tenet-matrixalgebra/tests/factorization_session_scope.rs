@@ -494,39 +494,8 @@ fn streaming_factorization_sites_admit_once_per_call_at_default_threads() {
     assert_streaming_sites_admit_once(DefaultDenseExecutor::new());
 }
 
-/// Forwards the dense calls to a [`DefaultDenseExecutor`] but keeps the
-/// trait's default, inline `with_linalg_scope`.
-struct UnscopedExecutor(DefaultDenseExecutor);
-
-impl tenet_dense::DenseExecutor for UnscopedExecutor {
-    fn svd(
-        &mut self,
-        input: tenet_dense::DenseRead<'_>,
-    ) -> Result<Vec<tenet_dense::DenseTensor>, tenet_dense::DenseError> {
-        self.0.svd(input)
-    }
-    fn qr(
-        &mut self,
-        input: tenet_dense::DenseRead<'_>,
-    ) -> Result<Vec<tenet_dense::DenseTensor>, tenet_dense::DenseError> {
-        self.0.qr(input)
-    }
-    fn eigh(
-        &mut self,
-        input: tenet_dense::DenseRead<'_>,
-    ) -> Result<Vec<tenet_dense::DenseTensor>, tenet_dense::DenseError> {
-        self.0.eigh(input)
-    }
-    fn dot_general_into(
-        &mut self,
-        output: tenet_dense::DenseWrite<'_>,
-        lhs: tenet_dense::DenseRead<'_>,
-        rhs: tenet_dense::DenseRead<'_>,
-        config: &tenet_dense::DenseDotConfig,
-    ) -> Result<(), tenet_dense::DenseError> {
-        self.0.dot_general_into(output, lhs, rhs, config)
-    }
-}
+#[path = "../src/tests/scripted_executor.rs"]
+mod scripted_executor;
 
 /// Negative control for the admission gate: without the executor's scope the
 /// same streaming site pays one admission per session.
@@ -539,7 +508,9 @@ fn streaming_site_without_the_executor_scope_admits_per_session() {
         DefaultDenseExecutor::new(),
         DefaultDenseExecutor::with_threads(1).unwrap(),
     ] {
-        let mut dense = UnscopedExecutor(inner);
+        // Forwards the dense calls to `inner` but keeps the trait's default,
+        // inline `with_linalg_scope`.
+        let mut dense = scripted_executor::ScriptedExecutor::with_inner(inner, ());
         let (sessions, admissions) = admissions_during(|| {
             tenet_matrixalgebra::seam::lq_compact_dyn(&mut dense, &direct).unwrap()
         });

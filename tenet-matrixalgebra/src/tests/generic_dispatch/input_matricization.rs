@@ -7,72 +7,69 @@ enum ValuesOperation {
     Eig,
 }
 
-struct FailSecondValues {
-    inner: tenet_dense::DefaultDenseExecutor,
-    operation: ValuesOperation,
-    calls: usize,
-}
-
-impl FailSecondValues {
-    fn new(operation: ValuesOperation) -> Self {
-        Self {
-            inner: tenet_dense::DefaultDenseExecutor::new(),
-            operation,
-            calls: 0,
-        }
-    }
-
-    fn fail(&mut self, operation: ValuesOperation) -> Result<(), DenseError> {
-        assert_eq!(self.operation, operation);
-        self.calls += 1;
-        if self.calls == 2 {
-            Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "values",
-                message: "injected second-sector failure".to_string(),
-            })
-        } else {
-            Ok(())
+impl ValuesOperation {
+    fn op(self) -> Op {
+        match self {
+            ValuesOperation::Svd => Op::SvdVals,
+            ValuesOperation::Eigh => Op::EighVals,
+            ValuesOperation::Eig => Op::EigVals,
         }
     }
 }
 
-impl DenseExecutor for FailSecondValues {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises values-only operations")
-    }
+const VALUES_OPS: [Op; 3] = [Op::SvdVals, Op::EighVals, Op::EigVals];
+const NOT_VALUES: &str = "test only exercises values-only operations";
 
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises values-only operations")
-    }
+/// Values-only entries only.
+fn script_values_only(script: &mut Script) {
+    script
+        .set_all(
+            &[Op::Svd, Op::Qr, Op::Eigh, Op::DotGeneral],
+            Action::Panic(NOT_VALUES),
+        )
+        .set_all(&VALUES_OPS, Action::Forward);
+}
 
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises values-only operations")
+/// `operation`'s values-only entry only; its second call fails.
+fn fail_second_values(operation: ValuesOperation) -> ScriptedExecutor {
+    let mut dense = ScriptedExecutor::new(());
+    script_values_only(&mut dense.script);
+    for op in VALUES_OPS {
+        if op != operation.op() {
+            dense
+                .script
+                .set(op, Action::Panic("unexpected values-only operation"));
+        }
     }
+    let op: &'static [Op] = match operation {
+        ValuesOperation::Svd => &[Op::SvdVals],
+        ValuesOperation::Eigh => &[Op::EighVals],
+        ValuesOperation::Eig => &[Op::EigVals],
+    };
+    dense
+        .script
+        .fail(op, Some(2), "values", "injected second-sector failure");
+    dense
+}
 
-    fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        self.fail(ValuesOperation::Svd)?;
-        self.inner.svd_vals(input)
-    }
-
-    fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        self.fail(ValuesOperation::Eigh)?;
-        self.inner.eigh_vals(input)
-    }
-
-    fn eig_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        self.fail(ValuesOperation::Eig)?;
-        self.inner.eig_vals(input)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises values-only operations")
+fn observed_input(input: &DenseRead<'_>, what: &str) -> (usize, Vec<usize>, usize, Vec<Complex64>) {
+    match input {
+        DenseRead::F64(view) => (
+            view.data().as_ptr() as usize,
+            view.strides().to_vec(),
+            view.offset(),
+            view.data()
+                .iter()
+                .map(|&value| Complex64::new(value, 0.0))
+                .collect(),
+        ),
+        DenseRead::C64(view) => (
+            view.data().as_ptr() as usize,
+            view.strides().to_vec(),
+            view.offset(),
+            view.data().to_vec(),
+        ),
+        _ => panic!("checked Generic {what} fixture must be f64 or c64"),
     }
 }
 
@@ -86,9 +83,37 @@ struct ValuesInputObservation {
     values: Vec<Complex64>,
 }
 
+#[derive(Default)]
 struct ValuesInputSpy {
-    inner: tenet_dense::DefaultDenseExecutor,
     observations: Vec<ValuesInputObservation>,
+}
+
+impl Observer for ValuesInputSpy {
+    fn script(script: &mut Script) {
+        script_values_only(script);
+    }
+
+    fn call(&mut self, call: Call<'_, '_>) -> Option<Reply> {
+        let Call::Read(op, input) = call else {
+            return None;
+        };
+        let operation = match op {
+            Op::SvdVals => ValuesOperation::Svd,
+            Op::EighVals => ValuesOperation::Eigh,
+            Op::EigVals => ValuesOperation::Eig,
+            _ => return None,
+        };
+        let (pointer, strides, offset, values) = observed_input(input, "values");
+        self.observations.push(ValuesInputObservation {
+            operation,
+            pointer,
+            shape: input.shape().to_vec(),
+            strides,
+            offset,
+            values,
+        });
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -101,39 +126,41 @@ struct CompactInputObservation {
 }
 
 struct CompactInputSpy {
-    inner: tenet_dense::DefaultDenseExecutor,
     operation: crate::factorize::CheckedCompactOperation,
     observations: Vec<CompactInputObservation>,
 }
 
-impl CompactInputSpy {
-    fn new(operation: crate::factorize::CheckedCompactOperation) -> Self {
-        Self {
-            inner: tenet_dense::DefaultDenseExecutor::new(),
-            operation,
-            observations: Vec::new(),
-        }
+const NOT_COMPACT: &str = "test only exercises compact QR/SVD/LQ";
+
+impl Observer for CompactInputSpy {
+    fn script(script: &mut Script) {
+        script
+            .set_all(&[Op::Svd, Op::Qr], Action::Forward)
+            .set(
+                Op::SvdInto,
+                Action::Panic("checked compact SVD must use the owned API"),
+            )
+            .set(
+                Op::QrInto,
+                Action::Panic("compact QR/LQ must not use qr_into"),
+            )
+            .set_all(&[Op::Eigh, Op::DotGeneral], Action::Panic(NOT_COMPACT));
     }
 
-    fn observe(&mut self, input: DenseRead<'_>) {
-        let (pointer, strides, offset, values) = match input {
-            DenseRead::F64(view) => (
-                view.data().as_ptr() as usize,
-                view.strides().to_vec(),
-                view.offset(),
-                view.data()
-                    .iter()
-                    .map(|&value| Complex64::new(value, 0.0))
-                    .collect(),
-            ),
-            DenseRead::C64(view) => (
-                view.data().as_ptr() as usize,
-                view.strides().to_vec(),
-                view.offset(),
-                view.data().to_vec(),
-            ),
-            _ => panic!("checked Generic compact fixture must be f64 or c64"),
+    fn call(&mut self, call: Call<'_, '_>) -> Option<Reply> {
+        use crate::factorize::CheckedCompactOperation;
+        let Call::Read(op @ (Op::Svd | Op::Qr), input) = call else {
+            return None;
         };
+        if op == Op::Svd {
+            assert_eq!(self.operation, CheckedCompactOperation::Svd);
+        } else {
+            assert!(matches!(
+                self.operation,
+                CheckedCompactOperation::Qr | CheckedCompactOperation::Lq
+            ));
+        }
+        let (pointer, strides, offset, values) = observed_input(input, "compact");
         self.observations.push(CompactInputObservation {
             pointer,
             shape: input.shape().to_vec(),
@@ -141,141 +168,16 @@ impl CompactInputSpy {
             offset,
             values,
         });
+        None
     }
 }
 
-impl DenseExecutor for CompactInputSpy {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        assert_eq!(
-            self.operation,
-            crate::factorize::CheckedCompactOperation::Svd
-        );
-        self.observe(input);
-        self.inner.svd(input)
-    }
-
-    fn svd_into(
-        &mut self,
-        input: DenseRead<'_>,
-        u: DenseWrite<'_>,
-        s: DenseWrite<'_>,
-        vt: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        let _ = (input, u, s, vt);
-        panic!("checked compact SVD must use the owned API")
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        assert!(matches!(
-            self.operation,
-            crate::factorize::CheckedCompactOperation::Qr
-                | crate::factorize::CheckedCompactOperation::Lq
-        ));
-        self.observe(input);
-        self.inner.qr(input)
-    }
-
-    fn qr_into(
-        &mut self,
-        input: DenseRead<'_>,
-        q: DenseWrite<'_>,
-        r: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        let _ = (input, q, r);
-        panic!("compact QR/LQ must not use qr_into")
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises compact QR/SVD/LQ")
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises compact QR/SVD/LQ")
-    }
-}
-
-impl Default for ValuesInputSpy {
-    fn default() -> Self {
-        Self {
-            inner: tenet_dense::DefaultDenseExecutor::new(),
-            observations: Vec::new(),
-        }
-    }
-}
-
-impl ValuesInputSpy {
-    fn observe(&mut self, operation: ValuesOperation, input: DenseRead<'_>) {
-        let (pointer, strides, offset, values) = match input {
-            DenseRead::F64(view) => (
-                view.data().as_ptr() as usize,
-                view.strides().to_vec(),
-                view.offset(),
-                view.data()
-                    .iter()
-                    .map(|&value| Complex64::new(value, 0.0))
-                    .collect(),
-            ),
-            DenseRead::C64(view) => (
-                view.data().as_ptr() as usize,
-                view.strides().to_vec(),
-                view.offset(),
-                view.data().to_vec(),
-            ),
-            _ => panic!("checked Generic values fixture must be f64 or c64"),
-        };
-        self.observations.push(ValuesInputObservation {
+impl CompactInputSpy {
+    fn new(operation: crate::factorize::CheckedCompactOperation) -> ScriptedExecutor<Self> {
+        ScriptedExecutor::new(Self {
             operation,
-            pointer,
-            shape: input.shape().to_vec(),
-            strides,
-            offset,
-            values,
-        });
-    }
-}
-
-impl DenseExecutor for ValuesInputSpy {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises values-only operations")
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises values-only operations")
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises values-only operations")
-    }
-
-    fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        self.observe(ValuesOperation::Svd, input);
-        self.inner.svd_vals(input)
-    }
-
-    fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        self.observe(ValuesOperation::Eigh, input);
-        self.inner.eigh_vals(input)
-    }
-
-    fn eig_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        self.observe(ValuesOperation::Eig, input);
-        self.inner.eig_vals(input)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises values-only operations")
+            observations: Vec::new(),
+        })
     }
 }
 
@@ -680,7 +582,7 @@ fn checked_only_generic_values_borrow_canonical_input_regions() {
         .coupled_sector_regions(1)
         .unwrap()
         .unwrap();
-    let mut spy = ValuesInputSpy::default();
+    let mut spy = ScriptedExecutor::<ValuesInputSpy>::default();
     crate::factorize::reset_values_matricization_fallbacks();
     let spectra = svd_vals_dyn_checked_generic(
         &mut spy,
@@ -823,7 +725,7 @@ fn checked_generic_values_keep_padded_reordered_fallback() {
 
     let general_before = padded_general.clone();
     let hermitian_before = padded_hermitian.clone();
-    let mut spy = ValuesInputSpy::default();
+    let mut spy = ScriptedExecutor::<ValuesInputSpy>::default();
     crate::factorize::reset_values_matricization_fallbacks();
     let actual_svd = svd_vals_dyn_checked_generic(&mut spy, &padded_general_input).unwrap();
     let actual_eigh = eigh_vals_dyn_checked_generic(&mut spy, &padded_hermitian_input).unwrap();
@@ -873,7 +775,7 @@ fn checked_only_generic_values_preserve_empty_scalar_and_shape_boundaries() {
     let empty_calls = empty_provider.calls.get();
     let empty_data: [f64; 0] = [];
     let empty = BoundDynamicTensorRef::try_new(&empty_space, &empty_data).unwrap();
-    let mut reject = RejectExecutorCalls;
+    let mut reject = ScriptedExecutor::new(RejectExecutorCalls);
     assert!(svd_vals_dyn_checked_generic(&mut reject, &empty)
         .unwrap()
         .is_empty());
@@ -982,7 +884,7 @@ fn values_only_public_boundaries_distinguish_empty_sectors_from_a_scalar() {
     let empty = rectangular_svd_tensor(0, 0);
     assert_eq!(empty.structure().block_count(), 0);
     assert!(empty.data().is_empty());
-    let mut reject = RejectExecutorCalls;
+    let mut reject = ScriptedExecutor::new(RejectExecutorCalls);
     crate::factorize::reset_values_matricization_fallbacks();
     assert!(svd_vals(
         &mut reject,
@@ -1047,7 +949,7 @@ fn values_only_second_sector_failures_publish_no_partial_spectrum() {
         };
         let input = bound_tensor(Arc::new(Z2FusionRule), tensor);
         let before = input.data().to_vec();
-        let mut dense = FailSecondValues::new(operation);
+        let mut dense = fail_second_values(operation);
         let result = match operation {
             ValuesOperation::Svd => svd_vals(&mut dense, &input.as_ref()).map(|_| ()),
             ValuesOperation::Eigh => eigh_vals(&mut dense, &input.as_ref()).map(|_| ()),
@@ -1055,7 +957,7 @@ fn values_only_second_sector_failures_publish_no_partial_spectrum() {
         };
 
         assert!(matches!(result, Err(OperationError::Dense(_))));
-        assert_eq!(dense.calls, 2);
+        assert_eq!(dense.counts().of(&VALUES_OPS), 2);
         assert_eq!(input.data(), before);
     }
 }

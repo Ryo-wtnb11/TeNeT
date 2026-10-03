@@ -43,10 +43,10 @@ fn compact_qr_lq_noncanonical_layout_does_not_call_qr_into() {
     let bound = bound_tensor(Arc::new(rule), &tensor);
     let adjoint_space = bound.space().adjoint_view().unwrap();
     let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
-    let mut dense = FailAfterObservingQrInput {
+    let mut dense = ScriptedExecutor::new(FailAfterObservingQrInput {
         qr_succeeds: true,
         ..Default::default()
-    };
+    });
 
     qr_compact_dyn(&mut dense, &input).unwrap();
     lq_compact_dyn(&mut dense, &input).unwrap();
@@ -156,18 +156,18 @@ fn generic_compact_qr_lq_paths_do_not_call_qr_into() {
         expert_generic_factorization_input(&canonical_space, &canonical_data, true);
     let fallback = BoundDynamicTensorRef::try_new(&fallback_space, &fallback_data).unwrap();
 
-    let mut direct_dense = FailAfterObservingQrInput {
+    let mut direct_dense = ScriptedExecutor::new(FailAfterObservingQrInput {
         qr_succeeds: true,
         ..Default::default()
-    };
+    });
     qr_compact_dyn_generic(&mut direct_dense, &canonical).unwrap();
     lq_compact_dyn_generic(&mut direct_dense, &canonical).unwrap();
     assert!(!direct_dense.observed.is_empty());
 
-    let mut fallback_dense = FailAfterObservingQrInput {
+    let mut fallback_dense = ScriptedExecutor::new(FailAfterObservingQrInput {
         qr_succeeds: true,
         ..Default::default()
-    };
+    });
     qr_compact_dyn_generic(&mut fallback_dense, &fallback).unwrap();
     lq_compact_dyn_generic(&mut fallback_dense, &fallback).unwrap();
     assert!(!fallback_dense.observed.is_empty());
@@ -200,7 +200,7 @@ fn compact_qr_error_preserves_borrowed_input_and_publishes_no_factors() {
     let rule = Z2FusionRule;
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let before = tensor.data().to_vec();
-    let mut dense = FailAfterObservingQrInput::default();
+    let mut dense = ScriptedExecutor::<FailAfterObservingQrInput>::default();
 
     let result = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor));
 
@@ -217,10 +217,10 @@ fn compact_qr_error_preserves_borrowed_input_and_publishes_no_factors() {
 fn compact_qr_uses_owned_executor_outputs_not_qr_into() {
     let rule = Z2FusionRule;
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
-    let mut dense = FailAfterObservingQrInput {
+    let mut dense = ScriptedExecutor::new(FailAfterObservingQrInput {
         qr_succeeds: true,
         ..Default::default()
-    };
+    });
     let input = bound_tensor(Arc::new(rule), &tensor);
 
     let Qr { q, r } = qr_compact(&mut dense, &input.as_ref()).unwrap();
@@ -236,10 +236,10 @@ fn compact_owned_qr_preserves_qr_into_output_precedence() {
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
     let input = bound.as_ref();
     let check = |outputs: Vec<DenseTensor>, expected: &str| {
-        let mut dense = FailAfterObservingQrInput {
+        let mut dense = ScriptedExecutor::new(FailAfterObservingQrInput {
             outputs: Some(outputs),
             ..Default::default()
-        };
+        });
         let error = qr_compact(&mut dense, &input).unwrap_err();
         assert!(format!("{error}").contains(expected), "{error:?}");
     };
@@ -257,10 +257,10 @@ fn compact_owned_qr_preserves_qr_into_output_precedence() {
     );
     let outputs = c64_qr_outputs(2, 2);
     let expected = outputs[0].as_f64_slice().unwrap_err();
-    let mut dense = FailAfterObservingQrInput {
+    let mut dense = ScriptedExecutor::new(FailAfterObservingQrInput {
         outputs: Some(outputs),
         ..Default::default()
-    };
+    });
     let error = qr_compact(&mut dense, &input).unwrap_err();
     assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
 }
@@ -298,7 +298,7 @@ fn compact_lq_error_preserves_borrowed_input_and_publishes_no_factors() {
     let rule = Z2FusionRule;
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let before = tensor.data().to_vec();
-    let mut dense = FailAfterObservingQrInput::default();
+    let mut dense = ScriptedExecutor::<FailAfterObservingQrInput>::default();
 
     let result = lq_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor));
 
@@ -841,7 +841,7 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
     let input_ref = input.as_ref();
     let input = input_ref.dynamic();
 
-    let mut qr_dense = FullQrInputSpy::default();
+    let mut qr_dense = ScriptedExecutor::<FullQrInputSpy>::default();
     let Qr { q, r } = qr_full_dyn(&mut qr_dense, &input).unwrap();
     assert_eq!(qr_dense.observations.len(), matrices.len());
     for (observation, (_, rows, cols, matrix)) in qr_dense.observations.iter().zip(matrices.iter())
@@ -856,7 +856,7 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
     assert_nonnegative_diagonal(&bound_factor_matrices(&r));
     assert_compact_factors_reconstruct_input(&input, &q, None, &r);
 
-    let mut lq_dense = FullQrInputSpy::default();
+    let mut lq_dense = ScriptedExecutor::<FullQrInputSpy>::default();
     let Lq { l, q } = lq_full_dyn(&mut lq_dense, &input).unwrap();
     assert_eq!(lq_dense.observations.len(), matrices.len());
     for (observation, (_, rows, cols, matrix)) in lq_dense.observations.iter().zip(matrices.iter())
@@ -901,7 +901,7 @@ fn assert_checked_full_qr_lq_inputs(
     let matrices = checked_fixture_matrices(&space, &data);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
 
-    let mut qr_dense = FullQrInputSpy::default();
+    let mut qr_dense = ScriptedExecutor::<FullQrInputSpy>::default();
     let Qr { q, r } = qr_full_dyn_checked_generic(&mut qr_dense, &input).unwrap();
     assert_eq!(qr_dense.observations.len(), matrices.len());
     for (observation, (rows, cols, matrix)) in qr_dense.observations.iter().zip(matrices.iter()) {
@@ -911,7 +911,7 @@ fn assert_checked_full_qr_lq_inputs(
     assert!(Arc::ptr_eq(q.space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(r.space().provider_arc(), &provider));
 
-    let mut lq_dense = FullQrInputSpy::default();
+    let mut lq_dense = ScriptedExecutor::<FullQrInputSpy>::default();
     let Lq { l, q } = lq_full_dyn_checked_generic(&mut lq_dense, &input).unwrap();
     assert_eq!(lq_dense.observations.len(), matrices.len());
     for (observation, (rows, cols, matrix)) in lq_dense.observations.iter().zip(matrices.iter()) {
@@ -1022,7 +1022,7 @@ fn null_completion_qr_failure_preserves_input_and_builds_no_factor() {
             one_sector_rectangular_matrix(vec![1.0_f64, 0.0, 0.0, 0.0, 0.0, 0.0], rows, cols);
         let before = tensor.data().to_vec();
         let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-        let mut dense = FailAfterSvdQr::default();
+        let mut dense = ScriptedExecutor::<FailAfterSvdQr>::default();
 
         crate::factorize::reset_factor_buffer_build_counts_for_test();
         let result = if left {
@@ -1032,7 +1032,7 @@ fn null_completion_qr_failure_preserves_input_and_builds_no_factor() {
         };
 
         assert!(matches!(result, Err(OperationError::Dense(_))));
-        assert_eq!((dense.svd_calls, dense.qr_calls), (1, 1));
+        assert_eq!((dense.counts().svd, dense.counts().qr), (1, 1));
         assert_eq!(
             crate::factorize::factor_buffer_build_counts_for_test(),
             (0, 0)

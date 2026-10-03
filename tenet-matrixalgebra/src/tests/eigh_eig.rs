@@ -32,7 +32,7 @@ fn checked_only_generic_eigh_validates_every_region_before_dense_work() {
     hermitian[later.range().start + 1] += Complex64::new(1.0, 0.0);
     let before = hermitian.clone();
     let provider_calls = provider.calls.get();
-    let mut dense = EighCallSpy::default();
+    let mut dense = ScriptedExecutor::<EighCallSpy>::default();
     crate::factorize::reset_values_matricization_fallbacks();
 
     let error = eigh_vals_dyn_checked_generic(
@@ -47,7 +47,7 @@ fn checked_only_generic_eigh_validates_every_region_before_dense_work() {
             message: "eigh requires Hermitian coupled-sector blocks",
         })
     ));
-    assert_eq!(dense.calls, 0);
+    assert_eq!(dense.counts().of(EIGH_ENTRIES), 0);
     assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
     assert_eq!(provider.calls.get(), provider_calls);
     assert_eq!(hermitian, before);
@@ -80,12 +80,12 @@ fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), failing).unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = CountingDense::default();
+    let mut dense = ScriptedExecutor::<CountingDense>::default();
     assert!(matches!(
         eigh_full_dyn_checked_generic(&mut dense, &input),
         Err(CheckedGenericFactorPlanError::Provider(LateGenericError(1)))
     ));
-    assert_eq!(dense.eigh_calls, 2);
+    assert_eq!(dense.counts().of(&[Op::Eigh, Op::EighInto]), 2);
     assert_eq!(input.data(), data);
 
     let complete = Arc::new(LateGenericSpy {
@@ -97,9 +97,9 @@ fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&complete))
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = CountingDense::default();
+    let mut dense = ScriptedExecutor::<CountingDense>::default();
     let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
-    assert_eq!(dense.eigh_calls, 2);
+    assert_eq!(dense.counts().of(&[Op::Eigh, Op::EighInto]), 2);
     assert!(Arc::ptr_eq(full.v().space().provider_arc(), &complete));
     assert!(full
         .eigenvalues()
@@ -136,10 +136,10 @@ fn checked_generic_eigh_late_dense_failure_publishes_no_factors() {
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     provider.calls.set(0);
-    let mut dense = FailAfterObservingEighInput {
+    let mut dense = ScriptedExecutor::new(FailAfterObservingEighInput {
         outputs: Some(f64_eigh_outputs(1)),
         ..Default::default()
-    };
+    });
     crate::factorize::reset_one_sided_publication_probe();
 
     let result = eigh_full_dyn_checked_generic(&mut dense, &input);
@@ -186,12 +186,12 @@ fn checked_generic_eigh_uses_owned_dense_output() {
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = RejectEighInto::default();
+    let mut dense = ScriptedExecutor::<RejectEighInto>::default();
 
     let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
 
-    assert_eq!(dense.eigh_calls, 2);
-    assert_eq!(dense.eigh_into_calls, 0);
+    assert_eq!(dense.counts().eigh, 2);
+    assert_eq!(dense.counts().eigh_into, 0);
     assert!(Arc::ptr_eq(full.v().space().provider_arc(), &provider));
 }
 
@@ -222,13 +222,13 @@ fn checked_generic_eigh_keeps_owned_vectors_in_live_pairs_before_publication() {
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = RejectEighInto::default();
+    let mut dense = ScriptedExecutor::<RejectEighInto>::default();
     crate::factorize::reset_checked_eigh_pair_pointers();
 
     let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
     let before_publication = crate::factorize::checked_eigh_pair_pointers();
 
-    assert_eq!(dense.eigh_into_calls, 0);
+    assert_eq!(dense.counts().eigh_into, 0);
     assert_eq!(dense.vector_ptrs, before_publication);
     assert_eq!(dense.vector_ptrs.len(), 2);
     assert_eq!(dense.vector_ptrs.len(), full.eigenvalues().len());
@@ -260,12 +260,12 @@ fn assert_checked_generic_eigh_live_pair_owners<D: crate::factorize::FactorScala
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = RejectEighInto::default();
+    let mut dense = ScriptedExecutor::<RejectEighInto>::default();
     crate::factorize::reset_checked_eigh_pair_pointers();
 
     let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
 
-    assert_eq!(dense.eigh_into_calls, 0);
+    assert_eq!(dense.counts().eigh_into, 0);
     assert_eq!(
         dense.vector_ptrs,
         crate::factorize::checked_eigh_pair_pointers()
@@ -421,7 +421,7 @@ fn checked_generic_eigh_stably_keeps_raw_exact_signed_ties() {
     }
     let (_, checked) = bind_checked_only(&source);
     let input = BoundDynamicTensorRef::try_new(&checked, &hermitian).unwrap();
-    let mut dense = RecordingEigh::default();
+    let mut dense = ScriptedExecutor::<RecordingEigh>::default();
 
     let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
 
@@ -485,13 +485,13 @@ fn checked_generic_eig_stages_dense_work_before_checked_factor_admission() {
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), failing).unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = CountingDense::default();
+    let mut dense = ScriptedExecutor::<CountingDense>::default();
     assert!(matches!(
         eig_full_dyn_checked_generic(&mut dense, &input),
         Err(CheckedGenericFactorPlanError::Provider(LateGenericError(1)))
     ));
-    assert_eq!(dense.eig_calls, 2);
-    assert_eq!(dense.svd_vals_calls, 2);
+    assert_eq!(dense.counts().eig, 2);
+    assert_eq!(dense.counts().svd_vals, 2);
     assert_eq!(input.data(), data);
 }
 
@@ -531,7 +531,7 @@ fn eigh_direct_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
         tensor.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut dense = EighCallSpy::default();
+    let mut dense = ScriptedExecutor::<EighCallSpy>::default();
 
     crate::factorize::reset_eigh_copy_probe();
     let error = eigh_full(
@@ -546,7 +546,7 @@ fn eigh_direct_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
             message: "eigh requires Hermitian coupled-sector blocks",
         }
     );
-    assert_eq!(dense.calls, 0);
+    assert_eq!(dense.counts().of(EIGH_ENTRIES), 0);
     assert_eq!(
         crate::factorize::eigh_copy_probe(),
         crate::factorize::EighCopyProbe::default()
@@ -574,7 +574,7 @@ fn eigh_fallback_rejects_nonhermitian_complex_input_before_dense_execution() {
     let bound = bound_tensor(Arc::new(rule), &tensor);
     let adjoint_space = bound.space().adjoint_view().unwrap();
     let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
-    let mut dense = EighCallSpy::default();
+    let mut dense = ScriptedExecutor::<EighCallSpy>::default();
 
     crate::factorize::reset_eigh_copy_probe();
     let error = eigh_full_dyn(&mut dense, &input).unwrap_err();
@@ -585,7 +585,7 @@ fn eigh_fallback_rejects_nonhermitian_complex_input_before_dense_execution() {
             message: "eigh requires Hermitian coupled-sector blocks",
         }
     );
-    assert_eq!(dense.calls, 0);
+    assert_eq!(dense.counts().of(EIGH_ENTRIES), 0);
     assert!(crate::factorize::eigh_copy_probe().input_pack_bytes > 0);
 }
 
@@ -608,7 +608,7 @@ fn eigh_vals_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
     )
     .unwrap();
     let before = nonhermitian.data().to_vec();
-    let mut dense = EighCallSpy::default();
+    let mut dense = ScriptedExecutor::<EighCallSpy>::default();
 
     let error = eigh_vals(
         &mut dense,
@@ -622,7 +622,7 @@ fn eigh_vals_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
             message: "eigh requires Hermitian coupled-sector blocks",
         }
     );
-    assert_eq!(dense.calls, 0);
+    assert_eq!(dense.counts().of(EIGH_ENTRIES), 0);
     assert_eq!(nonhermitian.data(), before);
 }
 
@@ -791,7 +791,7 @@ fn eigh_rejects_a_nonreal_complex_diagonal_before_dense_execution() {
         Complex64::new(0.0, 0.0),
         Complex64::new(2.0, 0.0),
     ]);
-    let mut dense = EighCallSpy::default();
+    let mut dense = ScriptedExecutor::<EighCallSpy>::default();
 
     let error = eigh_full(
         &mut dense,
@@ -800,7 +800,7 @@ fn eigh_rejects_a_nonreal_complex_diagonal_before_dense_execution() {
     .unwrap_err();
 
     assert!(matches!(error, OperationError::InvalidArgument { .. }));
-    assert_eq!(dense.calls, 0);
+    assert_eq!(dense.counts().of(EIGH_ENTRIES), 0);
 }
 
 #[test]
@@ -808,14 +808,14 @@ fn eigh_rejects_nonfinite_input_before_dense_execution() {
     // What: NaN and infinity cannot satisfy the Hermitian EIGH input contract.
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let tensor = one_sector_matrix(vec![value, 0.0, 0.0, 2.0]);
-        let mut dense = EighCallSpy::default();
+        let mut dense = ScriptedExecutor::<EighCallSpy>::default();
         let error = eigh_full(
             &mut dense,
             &bound_tensor_ref!(Arc::new(Z2FusionRule), &tensor),
         )
         .unwrap_err();
         assert!(matches!(error, OperationError::InvalidArgument { .. }));
-        assert_eq!(dense.calls, 0);
+        assert_eq!(dense.counts().of(EIGH_ENTRIES), 0);
     }
 }
 
@@ -823,7 +823,7 @@ fn eigh_rejects_nonfinite_input_before_dense_execution() {
 fn eigh_preserves_endomorphism_error_precedence() {
     // What: a non-endomorphism retains its structural error before numeric Hermitian inspection.
     let tensor = one_sector_rectangular_matrix(vec![f64::NAN; 6], 2, 3);
-    let mut dense = EighCallSpy::default();
+    let mut dense = ScriptedExecutor::<EighCallSpy>::default();
 
     let error = eigh_full(
         &mut dense,
@@ -837,7 +837,7 @@ fn eigh_preserves_endomorphism_error_precedence() {
             message: "eigh requires an endomorphism (codomain == domain)",
         }
     );
-    assert_eq!(dense.calls, 0);
+    assert_eq!(dense.counts().of(EIGH_ENTRIES), 0);
 }
 
 #[test]
@@ -848,7 +848,7 @@ fn eigh_error_preserves_borrowed_input_and_publishes_no_output() {
     let padded = padded_copy(rule.as_ref(), &canonical);
     for (tensor, is_fallback) in [(&canonical, false), (&padded, true)] {
         let before = tensor.data().to_vec();
-        let mut dense = FailAfterObservingEighInput::default();
+        let mut dense = ScriptedExecutor::<FailAfterObservingEighInput>::default();
 
         crate::factorize::reset_eigh_copy_probe();
         let result = eigh_full(&mut dense, &bound_tensor_ref!(Arc::clone(&rule), tensor));
@@ -933,7 +933,7 @@ fn eigh_fallback_stably_orders_equal_magnitudes() {
         .coupled_sector_regions(1)
         .unwrap()
         .is_none());
-    let mut dense = RecordingEigh::default();
+    let mut dense = ScriptedExecutor::<RecordingEigh>::default();
 
     let eigh = eigh_full(&mut dense, &bound_tensor_ref!(Arc::clone(&rule), &padded)).unwrap();
 
@@ -1088,14 +1088,14 @@ fn eigh_vectors_retain_each_callers_exact_provider_arc() {
 fn eigh_direct_outputs_keep_executor_vector_owner() {
     // What: a one-region direct EIGH publishes the executor-returned V buffer.
     fn check<D: crate::factorize::FactorScalar>(tensor: &TensorMap<D, 1, 1>) {
-        let mut dense = RejectEighInto::default();
+        let mut dense = ScriptedExecutor::<RejectEighInto>::default();
         let eigh = eigh_full(
             &mut dense,
             &bound_tensor_ref!(Arc::new(Z2FusionRule), tensor),
         )
         .unwrap();
-        assert_eq!(dense.eigh_calls, 1);
-        assert_eq!(dense.eigh_into_calls, 0);
+        assert_eq!(dense.counts().eigh, 1);
+        assert_eq!(dense.counts().eigh_into, 0);
         assert_eq!(dense.vector_ptrs, vec![eigh.v.data().as_ptr() as usize]);
     }
 
@@ -1145,16 +1145,16 @@ fn eigh_fallback_keeps_owned_vectors_until_the_final_scatter_for_every_dtype() {
             .unwrap()
             .is_none());
         let input = BoundDynamicTensorRef::try_new(&adjoint, bound.data()).unwrap();
-        let mut dense = RejectEighInto::default();
+        let mut dense = ScriptedExecutor::<RejectEighInto>::default();
         crate::factorize::reset_eigh_owned_vector_pointers();
 
         let eigh = eigh_full_dyn(&mut dense, &input).unwrap();
         let before_scatter = crate::factorize::eigh_owned_vector_pointers();
 
         assert!(!before_scatter.is_empty());
-        assert_eq!(dense.eigh_into_calls, 0);
+        assert_eq!(dense.counts().eigh_into, 0);
         assert_eq!(dense.vector_ptrs, before_scatter);
-        assert_eq!(dense.eigh_calls, before_scatter.len());
+        assert_eq!(dense.counts().eigh, before_scatter.len());
         assert!(Arc::ptr_eq(
             input.space().provider_arc(),
             eigh.v().space().provider_arc()
@@ -1193,7 +1193,7 @@ fn eigh_zero_only_input_normalizes_to_an_empty_factorization_result() {
     // What: a zero-only endomorphism has no phantom output sector or spectrum
     // entry and does not invoke the dense executor.
     let tensor = rectangular_svd_tensor(0, 0);
-    let mut dense = RejectExecutorCalls;
+    let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
 
     let eigh = eigh_full(
         &mut dense,
@@ -1218,10 +1218,10 @@ fn compact_owned_eigh_preserves_eigh_into_output_precedence() {
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
     let input = bound.as_ref();
     let check = |outputs: Vec<DenseTensor>, expected: &str| {
-        let mut dense = FailAfterObservingEighInput {
+        let mut dense = ScriptedExecutor::new(FailAfterObservingEighInput {
             outputs: Some(outputs),
             ..Default::default()
-        };
+        });
         let error = eigh_full(&mut dense, &input).unwrap_err();
         assert!(format!("{error}").contains(expected), "{error:?}");
     };
@@ -1243,20 +1243,20 @@ fn compact_owned_eigh_preserves_eigh_into_output_precedence() {
     let mut outputs = f64_eigh_outputs(2);
     outputs[0] = c64_eigh_outputs(2).remove(1);
     let expected = outputs[0].as_f64_slice().unwrap_err();
-    let mut dense = FailAfterObservingEighInput {
+    let mut dense = ScriptedExecutor::new(FailAfterObservingEighInput {
         outputs: Some(outputs),
         ..Default::default()
-    };
+    });
     let error = eigh_full(&mut dense, &input).unwrap_err();
     assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
 
     let mut outputs = f64_eigh_outputs(2);
     outputs[1] = c64_eigh_outputs(2).remove(1);
     let expected = outputs[1].as_f64_slice().unwrap_err();
-    let mut dense = FailAfterObservingEighInput {
+    let mut dense = ScriptedExecutor::new(FailAfterObservingEighInput {
         outputs: Some(outputs),
         ..Default::default()
-    };
+    });
     let error = eigh_full(&mut dense, &input).unwrap_err();
     assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
 }
@@ -1641,7 +1641,7 @@ fn exp_of_a_general_endomorphism_runs_one_solve_per_sector_and_no_eigh() {
     // What: the general arm's per-sector budget — six GEMMs and one solve for a
     // block that needs no squaring, and never an eigendecomposition.
     let tensor = exp_oracle_tensor::<f64>(1.0);
-    let mut spy = MatrixFunctionCallSpy::default();
+    let mut spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
     let mut context = default_context();
 
     exp(
@@ -1651,9 +1651,21 @@ fn exp_of_a_general_endomorphism_runs_one_solve_per_sector_and_no_eigh() {
     )
     .unwrap();
 
-    assert_eq!(spy.eigh_calls, 0, "the general arm must not eigendecompose");
-    assert_eq!(spy.solve_calls, 2, "one solve per nonempty coupled sector");
-    assert_eq!(spy.matmul_calls, 12, "six GEMMs per sector at s = 0");
+    assert_eq!(
+        spy.counts().of(MATRIX_FUNCTION_EIGH),
+        0,
+        "the general arm must not eigendecompose"
+    );
+    assert_eq!(
+        spy.counts().solve,
+        2,
+        "one solve per nonempty coupled sector"
+    );
+    assert_eq!(
+        spy.counts().dot_general,
+        12,
+        "six GEMMs per sector at s = 0"
+    );
 }
 
 #[test]

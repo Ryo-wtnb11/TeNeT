@@ -372,14 +372,14 @@ fn checked_generic_compact_pair_builder_failure_preserves_provider_context() {
             BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
                 .unwrap();
         let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-        let mut dense = CountingDense::default();
+        let mut dense = ScriptedExecutor::<CountingDense>::default();
         let result = qr_compact_dyn_checked_generic(&mut dense, &input);
         assert!(matches!(
             result,
             Err(CheckedGenericFactorPlanError::Provider(LateGenericError(call))) if call == fail_at
         ));
         assert_eq!(provider.calls.get(), fail_at);
-        assert_eq!(dense.qr_calls, 2);
+        assert_eq!(dense.counts().qr, 2);
         assert_eq!(input.data(), data);
     }
 
@@ -393,7 +393,8 @@ fn checked_generic_compact_pair_builder_failure_preserves_provider_context() {
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let Qr { q, r } =
-        qr_compact_dyn_checked_generic(&mut CountingDense::default(), &input).unwrap();
+        qr_compact_dyn_checked_generic(&mut ScriptedExecutor::<CountingDense>::default(), &input)
+            .unwrap();
     assert_eq!(provider.calls.get(), COMPACT_PAIR_RIGHT_LAST_CALL);
     assert_eq!(checked_enumeration_calls(&q), COMPACT_PAIR_LEFT_LAST_CALL);
     assert_eq!(

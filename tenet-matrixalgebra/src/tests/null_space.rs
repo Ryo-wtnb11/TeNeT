@@ -36,7 +36,7 @@ fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authori
         )
         .unwrap();
         let complete_input = BoundDynamicTensorRef::try_new(&complete_space, &data).unwrap();
-        let mut complete_dense = CountingDense::default();
+        let mut complete_dense = ScriptedExecutor::<CountingDense>::default();
         let factor = checked_spy_null(left, &mut complete_dense, &complete_input).unwrap();
         assert!(Arc::ptr_eq(
             factor.space().provider_arc(),
@@ -44,7 +44,7 @@ fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authori
         ));
         let final_call = complete_provider.calls.get();
         assert!(final_call > 1);
-        assert!(complete_dense.svd_calls > 1);
+        assert!(complete_dense.counts().of(&[Op::Svd, Op::SvdInto]) > 1);
 
         let failing_provider = Arc::new(LateGenericSpy {
             rule: FactorGenericRule,
@@ -58,14 +58,17 @@ fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authori
         .unwrap();
         let failing_input = BoundDynamicTensorRef::try_new(&failing_space, &data).unwrap();
         let before = failing_input.data().to_vec();
-        let mut failing_dense = CountingDense::default();
+        let mut failing_dense = ScriptedExecutor::<CountingDense>::default();
         assert!(matches!(
             checked_spy_null(left, &mut failing_dense, &failing_input),
             Err(CheckedGenericFactorPlanError::Provider(LateGenericError(call)))
                 if call == final_call
         ));
-        assert_eq!(failing_dense.svd_calls, complete_dense.svd_calls);
-        assert_eq!(failing_dense.qr_calls, complete_dense.qr_calls);
+        assert_eq!(
+            failing_dense.counts().of(&[Op::Svd, Op::SvdInto]),
+            complete_dense.counts().of(&[Op::Svd, Op::SvdInto])
+        );
+        assert_eq!(failing_dense.counts().qr, complete_dense.counts().qr);
         assert_eq!(failing_input.data(), before);
         assert!(Arc::ptr_eq(
             failing_input.space().provider_arc(),
@@ -110,7 +113,11 @@ fn checked_generic_null_dense_failure_never_reaches_output_admission() {
             probe.calls.get()
         };
         assert!(matches!(
-            checked_spy_null(left, &mut FailSecondSvd::default(), &input),
+            checked_spy_null(
+                left,
+                &mut ScriptedExecutor::<FailSecondSvd>::default(),
+                &input
+            ),
             Err(CheckedGenericFactorPlanError::Operation(
                 OperationError::Dense(_)
             ))
@@ -149,8 +156,12 @@ fn checked_generic_disjoint_null_is_identity_without_dense_calls() {
             .unwrap();
     let data = vec![0.0; checked.space().required_len().unwrap()];
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let left = left_null_dyn_checked_generic(&mut RejectExecutorCalls, &input).unwrap();
-    let right = right_null_dyn_checked_generic(&mut RejectExecutorCalls, &input).unwrap();
+    let left =
+        left_null_dyn_checked_generic(&mut ScriptedExecutor::new(RejectExecutorCalls), &input)
+            .unwrap();
+    let right =
+        right_null_dyn_checked_generic(&mut ScriptedExecutor::new(RejectExecutorCalls), &input)
+            .unwrap();
     assert_eq!(left.data(), &[1.0, 0.0, 0.0, 1.0]);
     assert_eq!(right.data().len(), 9);
     for column in 0..3 {
@@ -527,7 +538,11 @@ fn assert_disjoint_null_spaces_keep_structural_directions<D: FactorScalar>() {
     let input = bound_tensor(Arc::clone(&provider), &tensor);
 
     crate::factorize::reset_factor_buffer_build_counts_for_test();
-    let left = left_null(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
+    let left = left_null(
+        &mut ScriptedExecutor::new(RejectExecutorCalls),
+        &input.as_ref(),
+    )
+    .unwrap();
     assert_eq!(
         crate::factorize::factor_buffer_build_counts_for_test(),
         (1, 0)
@@ -539,7 +554,11 @@ fn assert_disjoint_null_spaces_keep_structural_directions<D: FactorScalar>() {
     assert!(Arc::ptr_eq(left.space().provider_arc(), &provider));
 
     crate::factorize::reset_factor_buffer_build_counts_for_test();
-    let right = right_null(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
+    let right = right_null(
+        &mut ScriptedExecutor::new(RejectExecutorCalls),
+        &input.as_ref(),
+    )
+    .unwrap();
     assert_eq!(
         crate::factorize::factor_buffer_build_counts_for_test(),
         (0, 1)
@@ -563,7 +582,7 @@ fn disjoint_null_spaces_keep_all_structural_directions_without_dense_work() {
 fn null_zero_only_input_normalizes_to_empty_without_dense_work() {
     let tensor = rectangular_svd_tensor(0, 0);
     let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-    let mut dense = RejectExecutorCalls;
+    let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
 
     let left = left_null(&mut dense, &input.as_ref()).unwrap();
     let right = right_null(&mut dense, &input.as_ref()).unwrap();
@@ -582,15 +601,15 @@ fn unmatched_null_sectors_coexist_with_a_full_rank_matched_sector() {
     let tensor = u1_cross_space_map::<f64>(&[(0, 1), (1, 2)], &[(0, 1), (2, 3)]);
     let input = bound_tensor(Arc::clone(&provider), &tensor);
 
-    let mut dense = SvdCallSpy::default();
+    let mut dense = ScriptedExecutor::<SvdCallSpy>::default();
     let left = left_null(&mut dense, &input.as_ref()).unwrap();
-    assert_eq!(dense.svd_calls, 1);
+    assert_eq!(dense.counts().svd, 1);
     assert_eq!(left.structure().block_count(), 1);
     assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 2]);
 
-    let mut dense = SvdCallSpy::default();
+    let mut dense = ScriptedExecutor::<SvdCallSpy>::default();
     let right = right_null(&mut dense, &input.as_ref()).unwrap();
-    assert_eq!(dense.svd_calls, 1);
+    assert_eq!(dense.counts().svd, 1);
     assert_eq!(right.structure().block_count(), 1);
     assert_eq!(right.structure().block(0).unwrap().shape(), &[3, 3]);
 }
@@ -605,7 +624,10 @@ fn null_space_second_sector_failure_builds_no_factor() {
 
     crate::factorize::reset_factor_buffer_build_counts_for_test();
     assert!(matches!(
-        left_null(&mut FailSecondSvd::default(), &input.as_ref()),
+        left_null(
+            &mut ScriptedExecutor::<FailSecondSvd>::default(),
+            &input.as_ref()
+        ),
         Err(OperationError::Dense(_))
     ));
     assert_eq!(
@@ -615,7 +637,10 @@ fn null_space_second_sector_failure_builds_no_factor() {
 
     crate::factorize::reset_factor_buffer_build_counts_for_test();
     assert!(matches!(
-        right_null(&mut FailSecondSvd::default(), &input.as_ref()),
+        right_null(
+            &mut ScriptedExecutor::<FailSecondSvd>::default(),
+            &input.as_ref()
+        ),
         Err(OperationError::Dense(_))
     ));
     assert_eq!(

@@ -29,8 +29,7 @@ use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
 use std::{cell::Cell, convert::Infallible, fmt, sync::Arc};
 use tenet_dense::{
-    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseOwned, DenseRead, DenseTensor,
-    DenseWrite,
+    DenseBackend, DenseError, DenseExecutor, DenseOwned, DenseRead, DenseTensor, DenseWrite,
 };
 
 macro_rules! bound_tensor_ref {
@@ -41,6 +40,7 @@ macro_rules! bound_tensor_ref {
 
 mod fixtures;
 mod generic_fixtures;
+pub(crate) mod scripted_executor;
 mod spies;
 use fixtures::*;
 use generic_fixtures::*;

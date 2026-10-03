@@ -7,12 +7,12 @@ where
     let kept = 2;
     let (provider, space, data) = checked_svd_truncation_input::<D>(complex);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
-    let mut dense = CountingDense::default();
+    let mut dense = ScriptedExecutor::<CountingDense>::default();
     let Svd { u, s, vh } = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
 
-    assert_eq!(dense.svd_calls, 2);
-    assert_eq!(dense.svd_into_calls, 0);
-    assert_eq!(dense.svd_vals_calls, 0);
+    assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 2);
+    assert_eq!(dense.counts().svd_into, 0);
+    assert_eq!(dense.counts().svd_vals, 0);
     assert!(Arc::ptr_eq(u.space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(vh.space().provider_arc(), &provider));
 
@@ -140,12 +140,12 @@ fn checked_generic_svd_compact_empty_input_skips_dense_execution() {
             .unwrap();
     let data = Vec::<f64>::new();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = CountingDense::default();
+    let mut dense = ScriptedExecutor::<CountingDense>::default();
     let Svd { u, s, vh } = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
 
-    assert_eq!(dense.svd_calls, 0);
-    assert_eq!(dense.svd_into_calls, 0);
-    assert_eq!(dense.svd_vals_calls, 0);
+    assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 0);
+    assert_eq!(dense.counts().svd_into, 0);
+    assert_eq!(dense.counts().svd_vals, 0);
     assert!(s.data().is_empty());
     assert!(u.data().is_empty());
     assert!(vh.data().is_empty());
@@ -158,7 +158,7 @@ fn checked_generic_svd_compact_dense_failure_precedes_output_provider_admission(
     let (provider, space, data) = checked_svd_truncation_input::<f64>(false);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let before = input.data().to_vec();
-    let mut dense = FailAfterObservingSvdInput::default();
+    let mut dense = ScriptedExecutor::<FailAfterObservingSvdInput>::default();
     let result = svd_compact_dyn_checked_generic(&mut dense, &input);
 
     assert!(matches!(
@@ -205,9 +205,9 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
     ));
     assert_eq!(checked_provider.calls.get(), 0);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = CountingDense::default();
+    let mut dense = ScriptedExecutor::<CountingDense>::default();
     let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
-    assert_eq!(dense.svd_calls, 1);
+    assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 1);
     assert!(Arc::ptr_eq(
         full.u().space().provider_arc(),
         &checked_provider
@@ -307,14 +307,14 @@ fn checked_generic_full_svd_failure_publishes_no_factors() {
 fn assert_checked_compact_svd_live_stage_owners<D: crate::factorize::FactorScalar>() {
     let (_, space, data) = checked_svd_truncation_input::<D>(true);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
-    let mut dense = RejectSvdInto::default();
+    let mut dense = ScriptedExecutor::<RejectSvdInto>::default();
     crate::factorize::reset_checked_compact_svd_stage_pointers();
 
     svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
     let stage = crate::factorize::checked_compact_svd_stage_pointers();
 
-    assert_eq!(dense.svd_into_calls, 0);
-    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.counts().svd_into, 0);
+    assert_eq!(dense.counts().svd, 2);
     assert_eq!(stage.len(), 2);
     assert_eq!(dense.output_ptrs, stage);
     assert!(stage.iter().all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
@@ -330,7 +330,7 @@ fn checked_generic_compact_svd_keeps_live_stage_owners_for_every_dtype() {
 
 #[test]
 fn checked_compact_svd_zero_rank_skips_backend_and_post_gauge_stage() {
-    let mut dense = RejectSvdInto::default();
+    let mut dense = ScriptedExecutor::<RejectSvdInto>::default();
     crate::factorize::reset_checked_compact_svd_stage_pointers();
 
     for (rows, cols) in [(0, 3), (3, 0)] {
@@ -345,8 +345,8 @@ fn checked_compact_svd_zero_rank_skips_backend_and_post_gauge_stage() {
             (0, 0, 0)
         );
     }
-    assert_eq!(dense.svd_calls, 0);
-    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.counts().svd, 0);
+    assert_eq!(dense.counts().svd_into, 0);
     assert!(crate::factorize::checked_compact_svd_stage_pointers().is_empty());
 }
 
@@ -423,7 +423,7 @@ fn assert_checked_full_svd_builder_failure(fail_at: usize) {
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let before = input.data().to_vec();
-    let mut dense = CountingDense::default();
+    let mut dense = ScriptedExecutor::<CountingDense>::default();
     let result = svd_full_dyn_checked_generic(&mut dense, &input);
 
     assert!(matches!(
@@ -433,8 +433,8 @@ fn assert_checked_full_svd_builder_failure(fail_at: usize) {
     ));
     assert_eq!(input.data(), before);
     assert!(Arc::ptr_eq(input.space().provider_arc(), &provider));
-    assert_eq!(dense.svd_calls, 2);
-    assert_eq!(dense.qr_calls, 2);
+    assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 2);
+    assert_eq!(dense.counts().qr, 2);
 }
 
 // Checked full-SVD provider sequence for `generic_factorization_input`: ten
@@ -488,7 +488,7 @@ fn checked_generic_full_svd_enumerates_each_output_layout_once() {
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = CountingDense::default();
+    let mut dense = ScriptedExecutor::<CountingDense>::default();
     let output = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
     assert_eq!(provider.calls.get(), FULL_SVD_VH_LAST_CALL);
 
@@ -550,7 +550,7 @@ fn checked_native_full_svd_stages_before_unchanged_provider_admission() {
 
     let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
 
-    assert_eq!(dense.full_calls, 2);
+    assert_eq!(dense.counts().svd_full, 2);
     assert_eq!(provider.calls.get(), FULL_SVD_VH_LAST_CALL);
     assert!(Arc::ptr_eq(full.u().space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(full.s().space().provider_arc(), &provider));
@@ -611,7 +611,7 @@ fn checked_native_full_svd_reconstructs_complex_interleaved_square_trees() {
 
     let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
 
-    assert_eq!(dense.full_calls, 2);
+    assert_eq!(dense.counts().svd_full, 2);
     assert_compact_factors_reconstruct_input(&input, full.u(), Some(full.s()), full.vh());
     assert!(Arc::ptr_eq(full.u().space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(full.s().space().provider_arc(), &provider));
@@ -631,12 +631,12 @@ fn assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm<D: crate::factorize:
         ),
     )
     .unwrap();
-    let mut dense = RejectSvdInto::default();
+    let mut dense = ScriptedExecutor::<RejectSvdInto>::default();
 
     let result = pinv_direct_into_dyn(&mut dense, &input, output, 0.0).unwrap();
 
-    assert_eq!(dense.svd_into_calls, 0);
-    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.counts().svd_into, 0);
+    assert_eq!(dense.counts().svd, 2);
     assert_eq!(dense.output_ptrs.len(), 2);
     assert_eq!(dense.gemm_ptrs.len(), 2);
     assert_eq!(
@@ -827,7 +827,7 @@ fn checked_generic_svd_compact_preserves_a_diagonal_s_fold_failure() {
     .unwrap();
     let input = BoundDynamicTensorRef::try_new(&failing_space, &data).unwrap();
     let before = input.data().to_vec();
-    let mut dense = CountingDense::default();
+    let mut dense = ScriptedExecutor::<CountingDense>::default();
     let result = svd_compact_dyn_checked_generic(&mut dense, &input);
 
     assert!(matches!(
@@ -836,9 +836,9 @@ fn checked_generic_svd_compact_preserves_a_diagonal_s_fold_failure() {
             if call == FIRST_S_FOLD
     ));
     assert_eq!(failing_provider.single_leg_folds.get(), FIRST_S_FOLD);
-    assert_eq!(dense.svd_calls, 2);
-    assert_eq!(dense.svd_into_calls, 0);
-    assert_eq!(dense.svd_vals_calls, 0);
+    assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 2);
+    assert_eq!(dense.counts().svd_into, 0);
+    assert_eq!(dense.counts().svd_vals, 0);
     assert_eq!(input.data(), before);
 }
 
@@ -862,7 +862,7 @@ fn checked_generic_svd_compact_enumerates_each_factor_layout_once() {
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = CountingDense::default();
+    let mut dense = ScriptedExecutor::<CountingDense>::default();
     let Svd { u, s, vh } = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
     let compact_calls = provider.calls.get();
     assert!(s.data().len() > 1);

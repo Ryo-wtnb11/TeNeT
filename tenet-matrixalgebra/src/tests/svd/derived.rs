@@ -5,7 +5,7 @@ fn inv_propagates_unsupported_solve_without_svd_fallback() {
     // What: a dense executor without solve support returns its typed capability
     // error instead of silently changing inverse algorithms.
     let tensor = u1_block_endomorphism(&[(0, 1, vec![2.0_f64])]);
-    let mut dense = RejectExecutorCalls;
+    let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
 
     let error = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap_err();
@@ -29,13 +29,13 @@ fn pinv_adjoint_parent_uses_one_parent_svd_and_the_shared_global_cutoff() {
     let tensor = padded_copy(&U1FusionRule, &canonical);
     let provider = Arc::new(U1FusionRule);
     let bound = bound_tensor(Arc::clone(&provider), &tensor);
-    let mut dense = SvdCallSpy::default();
+    let mut dense = ScriptedExecutor::<SvdCallSpy>::default();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     crate::factorize::reset_compact_svd_copy_probe();
 
     let output =
         pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), 0.5).unwrap();
-    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.counts().svd, 2);
     assert!(Arc::ptr_eq(output.space().provider_arc(), &provider));
     let output: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(output).unwrap();
     assert_eq!(scalar_u1_block(output.tensor(), 0), 0.0);
@@ -52,7 +52,7 @@ fn pinv_adjoint_parent_rejects_invalid_rcond_before_svd() {
     let tensor = u1_block_endomorphism(&[(0, 1, vec![1.0_f64])]);
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
     for rcond in [-1.0, f64::NAN, f64::INFINITY] {
-        let mut dense = RejectExecutorCalls;
+        let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         assert!(matches!(
             pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), rcond,),
@@ -69,7 +69,7 @@ fn pinv_adjoint_parent_discards_unpublished_factors_on_late_svd_failure() {
     let tensor = padded_copy(&U1FusionRule, &canonical);
     let before = tensor.data().to_vec();
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
-    let mut dense = FailSecondSvd::default();
+    let mut dense = ScriptedExecutor::<FailSecondSvd>::default();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     crate::factorize::reset_compact_svd_copy_probe();
 
@@ -80,7 +80,7 @@ fn pinv_adjoint_parent_discards_unpublished_factors_on_late_svd_failure() {
             ..
         }))
     ));
-    assert_eq!(dense.calls, 2);
+    assert_eq!(dense.counts().of(&[Op::Svd, Op::SvdInto]), 2);
     assert_eq!(tensor.data(), before);
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
@@ -98,7 +98,7 @@ fn polar_validates_every_sector_before_direct_or_fallback_svd_execution() {
             .unwrap()
             .is_some()
     );
-    let mut dense = SvdCallSpy::default();
+    let mut dense = ScriptedExecutor::<SvdCallSpy>::default();
     let mut context = default_context();
     let direct_error = left_polar(&mut dense, &mut context, &direct_bound.as_ref()).unwrap_err();
     assert!(matches!(
@@ -107,7 +107,7 @@ fn polar_validates_every_sector_before_direct_or_fallback_svd_execution() {
             if message.contains("left_polar")
                 && message.contains("coupled-sector")
     ));
-    assert_eq!(dense.svd_calls, 0);
+    assert_eq!(dense.counts().svd, 0);
 
     let fallback_source = mixed_rectangular_tensor((2, 4), (3, 1));
     let fallback_bound = bound_tensor(Arc::new(rule), &fallback_source);
@@ -119,7 +119,7 @@ fn polar_validates_every_sector_before_direct_or_fallback_svd_execution() {
     );
     let fallback_input =
         BoundDynamicTensorRef::try_new(&fallback_space, fallback_bound.data()).unwrap();
-    let mut dense = SvdCallSpy::default();
+    let mut dense = ScriptedExecutor::<SvdCallSpy>::default();
     let mut context = default_context();
     let fallback_error = left_polar_dyn(&mut dense, &mut context, &fallback_input).unwrap_err();
     assert!(matches!(
@@ -128,7 +128,7 @@ fn polar_validates_every_sector_before_direct_or_fallback_svd_execution() {
             if message.contains("left_polar")
                 && message.contains("coupled-sector")
     ));
-    assert_eq!(dense.svd_calls, 0);
+    assert_eq!(dense.counts().svd, 0);
 }
 
 #[test]

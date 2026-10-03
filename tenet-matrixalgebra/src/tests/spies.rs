@@ -1,23 +1,138 @@
+pub(super) use super::scripted_executor::{
+    Action, Call, Observer, Op, Reply, Script, ScriptedExecutor,
+};
 use super::*;
 
-pub(super) struct RejectExecutorCalls;
+// The doubles of this suite, as observers of the one `ScriptedExecutor`
+// (#1826): `script` sets what each entry does, the hooks record what a test
+// inspects. Entries left at `Action::Default` run the trait's default body,
+// as the hand-written doubles did for every method they did not override.
 
-pub(super) struct FailComposition;
+const SVD_AND_INTO: &[Op] = &[Op::Svd, Op::SvdInto];
+const REQUIRED_EXCEPT_EIGH: &[Op] = &[Op::Svd, Op::Qr, Op::DotGeneral];
 
-#[derive(Default)]
-pub(super) struct SvdCallSpy {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
-    pub(super) svd_calls: usize,
+fn injected(label: &'static str, message: &'static str) -> Reply {
+    Err(DenseError::Backend {
+        backend: DenseBackend::Tenferro,
+        op: label,
+        message: message.to_string(),
+    })
 }
 
+fn f64_input(input: &DenseRead<'_>) -> Vec<f64> {
+    let DenseRead::F64(input) = input else {
+        panic!("test input must be f64")
+    };
+    input.data().to_vec()
+}
+
+fn assert_zeroed_f64(write: &DenseWrite<'_>, what: &str) {
+    let DenseWrite::F64(view) = write else {
+        panic!("test {what} must be f64")
+    };
+    assert!(view.data().iter().all(|&value| value == 0.0));
+}
+
+/// Validation must reject the input before any dense work.
+#[derive(Default)]
+pub(super) struct RejectExecutorCalls;
+
+impl Observer for RejectExecutorCalls {
+    fn script(script: &mut Script) {
+        script
+            .set(
+                Op::Svd,
+                Action::Panic("validation must reject the input before SVD execution"),
+            )
+            .set(
+                Op::Qr,
+                Action::Panic("validation must reject the input before QR execution"),
+            )
+            .set(
+                Op::Eigh,
+                Action::Panic("validation must reject the input before EIGH execution"),
+            )
+            .set(
+                Op::DotGeneral,
+                Action::Panic("validation must reject the input before dense execution"),
+            );
+    }
+}
+
+/// Factorizations panic; every recomposition GEMM fails.
+#[derive(Default)]
+pub(super) struct FailComposition;
+
+impl Observer for FailComposition {
+    fn script(script: &mut Script) {
+        script
+            .set(
+                Op::Svd,
+                Action::Panic("composition backend must not run SVD"),
+            )
+            .set(Op::Qr, Action::Panic("composition backend must not run QR"))
+            .set(
+                Op::Eigh,
+                Action::Panic("composition backend must not run EIGH"),
+            )
+            .fail(
+                &[Op::DotGeneral],
+                None,
+                "dot_general_into",
+                "injected recomposition failure",
+            );
+    }
+}
+
+/// Forwards; tests read `counts().svd`.
+#[derive(Default)]
+pub(super) struct SvdCallSpy;
+
+impl Observer for SvdCallSpy {}
+
+/// Owned compact SVD only: `svd_into` fails; records the owned `U`/`Vh`
+/// buffers and every GEMM operand.
 #[derive(Default)]
 pub(super) struct RejectSvdInto {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
-    pub(super) svd_calls: usize,
-    pub(super) svd_into_calls: usize,
     pub(super) output_ptrs: Vec<(usize, usize)>,
     pub(super) gemm_ptrs: Vec<(usize, usize)>,
     pub(super) gemm_views: Vec<(DenseReadView, DenseReadView, bool, bool)>,
+}
+
+impl Observer for RejectSvdInto {
+    fn script(script: &mut Script) {
+        script
+            .set_all(&[Op::Svd, Op::Qr, Op::Eigh], Action::Forward)
+            .fail(
+                &[Op::SvdInto],
+                None,
+                "svd_into",
+                "direct compact SVD must not use svd_into",
+            );
+    }
+
+    fn call(&mut self, call: Call<'_, '_>) -> Option<Reply> {
+        if let Call::Gemm { lhs, rhs, config } = call {
+            self.gemm_ptrs
+                .push((dense_read_pointer(lhs), dense_read_pointer(rhs)));
+            self.gemm_views.push((
+                dense_read_view(lhs),
+                dense_read_view(rhs),
+                config.lhs_conj(),
+                config.rhs_conj(),
+            ));
+        }
+        None
+    }
+
+    fn outputs(&mut self, op: Op, outputs: &mut Vec<DenseTensor>) {
+        if op == Op::Svd {
+            self.output_ptrs.push((
+                dense_tensor_pointer(&outputs[0]),
+                dense_tensor_pointer(&outputs[2]),
+            ));
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -27,12 +142,29 @@ pub(super) struct DenseReadView {
     pub(super) offset: usize,
 }
 
+/// Owned compact EIGH only: `eigh_into` fails; records the owned vectors.
 #[derive(Default)]
 pub(super) struct RejectEighInto {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
-    pub(super) eigh_calls: usize,
-    pub(super) eigh_into_calls: usize,
     pub(super) vector_ptrs: Vec<usize>,
+}
+
+impl Observer for RejectEighInto {
+    fn script(script: &mut Script) {
+        script
+            .set_all(&[Op::Svd, Op::Qr, Op::Eigh], Action::Forward)
+            .fail(
+                &[Op::EighInto],
+                None,
+                "eigh_into",
+                "direct compact EIGH must not use eigh_into",
+            );
+    }
+
+    fn outputs(&mut self, op: Op, outputs: &mut Vec<DenseTensor>) {
+        if op == Op::Eigh {
+            self.vector_ptrs.push(dense_tensor_pointer(&outputs[1]));
+        }
+    }
 }
 
 fn dense_tensor_pointer(tensor: &DenseTensor) -> usize {
@@ -63,6 +195,18 @@ fn dense_read_pointer(read: &DenseRead<'_>) -> usize {
     }
 }
 
+fn dense_write_pointer(write: &DenseWrite<'_>) -> usize {
+    match write {
+        DenseWrite::F32(view) => view.data().as_ptr() as usize,
+        DenseWrite::F64(view) => view.data().as_ptr() as usize,
+        DenseWrite::I32(view) => view.data().as_ptr() as usize,
+        DenseWrite::I64(view) => view.data().as_ptr() as usize,
+        DenseWrite::Bool(view) => view.data().as_ptr() as usize,
+        DenseWrite::C32(view) => view.data().as_ptr() as usize,
+        DenseWrite::C64(view) => view.data().as_ptr() as usize,
+    }
+}
+
 fn dense_read_view(read: &DenseRead<'_>) -> DenseReadView {
     let (shape, strides, offset) = match read {
         DenseRead::F32(view) => (view.shape(), view.strides(), view.offset()),
@@ -80,65 +224,218 @@ fn dense_read_view(read: &DenseRead<'_>) -> DenseReadView {
     }
 }
 
+/// An inverse: no SVD, no recomposition GEMM. Records solve destinations.
 #[derive(Default)]
 pub(super) struct SolveCallSpy {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
-    pub(super) solve_calls: usize,
     pub(super) destination_ptrs: Vec<usize>,
 }
 
-#[derive(Default)]
-pub(super) struct FailSecondSolve {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
-    pub(super) solve_calls: usize,
+fn script_inverse(script: &mut Script) {
+    script
+        .set(Op::Svd, Action::Panic("inverse must not execute an SVD"))
+        .set(
+            Op::DotGeneral,
+            Action::Panic("inverse must not recompose factors"),
+        )
+        .set_all(&[Op::Qr, Op::Eigh, Op::Solve], Action::Forward);
 }
 
-#[derive(Default)]
-pub(super) struct FailSecondSvd {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
-    pub(super) calls: usize,
+impl Observer for SolveCallSpy {
+    fn script(script: &mut Script) {
+        script_inverse(script);
+    }
+
+    fn call(&mut self, call: Call<'_, '_>) -> Option<Reply> {
+        if let Call::Solve { x, .. } = call {
+            self.destination_ptrs.push(dense_write_pointer(x));
+        }
+        None
+    }
 }
 
+/// [`SolveCallSpy`]'s inverse whose second solve fails.
+#[derive(Default)]
+pub(super) struct FailSecondSolve;
+
+impl Observer for FailSecondSolve {
+    fn script(script: &mut Script) {
+        script_inverse(script);
+        script.fail(
+            &[Op::Solve],
+            Some(2),
+            "solve_into",
+            "injected second-sector failure",
+        );
+    }
+}
+
+/// SVD whose second call (owned or destination) fails; no EIGH or GEMM.
+#[derive(Default)]
+pub(super) struct FailSecondSvd;
+
+impl Observer for FailSecondSvd {
+    fn script(script: &mut Script) {
+        script
+            .set_all(&[Op::Svd, Op::SvdInto, Op::Qr], Action::Forward)
+            .set(Op::Eigh, Action::Panic("test only exercises SVD"))
+            .set(Op::DotGeneral, Action::Panic("test only exercises SVD"))
+            .fail(
+                SVD_AND_INTO,
+                Some(2),
+                "svd_into",
+                "injected second-sector failure",
+            );
+    }
+}
+
+/// Records each SVD input and fails it, unless `outputs` holds a reply.
 #[derive(Default)]
 pub(super) struct FailAfterObservingSvdInput {
     pub(super) observed: Vec<Vec<f64>>,
     pub(super) outputs: Option<Vec<DenseTensor>>,
 }
 
+impl Observer for FailAfterObservingSvdInput {
+    fn script(script: &mut Script) {
+        script
+            .set(Op::Qr, Action::Panic("test only exercises SVD"))
+            .set(Op::Eigh, Action::Panic("test only exercises SVD"))
+            .set(Op::DotGeneral, Action::Panic("test only exercises SVD"));
+    }
+
+    fn call(&mut self, call: Call<'_, '_>) -> Option<Reply> {
+        match call {
+            Call::Read(Op::Svd, input) => {
+                if let Some(outputs) = self.outputs.take() {
+                    return Some(Ok(outputs));
+                }
+                self.observed.push(f64_input(input));
+                Some(injected("svd_into", "injected failure"))
+            }
+            Call::Into(Op::SvdInto, input, writes) => {
+                self.observed.push(f64_input(input));
+                for (write, what) in writes.iter().zip(["U", "singular values", "Vh"]) {
+                    assert_zeroed_f64(write, what);
+                }
+                Some(injected("svd_into", "injected failure"))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Records each owned QR input; it succeeds only with `qr_succeeds`, unless
+/// `outputs` holds a reply. `qr_into` always fails.
 #[derive(Default)]
 pub(super) struct FailAfterObservingQrInput {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
     pub(super) observed: Vec<Vec<f64>>,
     pub(super) qr_succeeds: bool,
     pub(super) outputs: Option<Vec<DenseTensor>>,
 }
 
-#[derive(Default)]
-pub(super) struct FailAfterSvdQr {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
-    pub(super) svd_calls: usize,
-    pub(super) qr_calls: usize,
+impl Observer for FailAfterObservingQrInput {
+    fn script(script: &mut Script) {
+        script
+            .set(Op::Svd, Action::Panic("test only exercises QR"))
+            .set(Op::Eigh, Action::Panic("test only exercises QR"))
+            .set(Op::DotGeneral, Action::Panic("test only exercises QR"))
+            .set(Op::Qr, Action::Forward)
+            .fail(&[Op::QrInto], None, "qr_into", "injected failure");
+    }
+
+    fn call(&mut self, call: Call<'_, '_>) -> Option<Reply> {
+        let Call::Read(Op::Qr, input) = call else {
+            return None;
+        };
+        if let Some(outputs) = self.outputs.take() {
+            return Some(Ok(outputs));
+        }
+        self.observed.push(f64_input(input));
+        (!self.qr_succeeds).then(|| injected("qr", "injected failure"))
+    }
 }
 
+/// Numerical null completion: owned SVD forwards, every QR fails.
+#[derive(Default)]
+pub(super) struct FailAfterSvdQr;
+
+impl Observer for FailAfterSvdQr {
+    fn script(script: &mut Script) {
+        script
+            .set(Op::Svd, Action::Forward)
+            .set(
+                Op::SvdInto,
+                Action::Panic("numerical null completion must use owned SVD outputs"),
+            )
+            .set(
+                Op::Eigh,
+                Action::Panic("test only exercises numerical null completion"),
+            )
+            .set(
+                Op::DotGeneral,
+                Action::Panic("test only exercises numerical null completion"),
+            )
+            .fail(&[Op::Qr], None, "qr", "injected completion failure");
+    }
+}
+
+/// Records each EIGH input and fails it, unless `outputs` holds a reply.
 #[derive(Default)]
 pub(super) struct FailAfterObservingEighInput {
     pub(super) observed: Vec<Vec<f64>>,
     pub(super) outputs: Option<Vec<DenseTensor>>,
 }
 
+impl Observer for FailAfterObservingEighInput {
+    fn script(script: &mut Script) {
+        script.set_all(
+            REQUIRED_EXCEPT_EIGH,
+            Action::Panic("test only exercises EIGH"),
+        );
+    }
+
+    fn call(&mut self, call: Call<'_, '_>) -> Option<Reply> {
+        match call {
+            Call::Read(Op::Eigh, input) => {
+                self.observed.push(f64_input(input));
+                if let Some(outputs) = self.outputs.take() {
+                    return Some(Ok(outputs));
+                }
+                Some(injected("eigh_into", "injected failure"))
+            }
+            Call::Into(Op::EighInto, input, writes) => {
+                self.observed.push(f64_input(input));
+                for (write, what) in writes.iter().zip(["eigenvalues", "eigenvectors"]) {
+                    assert_zeroed_f64(write, what);
+                }
+                Some(injected("eigh_into", "injected failure"))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Every EIGH entry fails; tests read `counts().of(EIGH_ENTRIES)`.
 #[derive(Default)]
-pub(super) struct EighCallSpy {
-    pub(super) calls: usize,
-}
+pub(super) struct EighCallSpy;
 
-pub(super) struct NativeFullSvdSpy {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
-    pub(super) full_calls: usize,
-}
+pub(super) const EIGH_ENTRIES: &[Op] = &[Op::Eigh, Op::EighInto, Op::EighVals];
 
-pub(super) struct FailSecondOwnedFullSvd {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
-    pub(super) calls: usize,
+impl Observer for EighCallSpy {
+    fn script(script: &mut Script) {
+        script
+            .set_all(
+                REQUIRED_EXCEPT_EIGH,
+                Action::Panic("test only exercises EIGH"),
+            )
+            .fail(
+                &[Op::Eigh, Op::EighInto],
+                None,
+                "eigh_into",
+                "injected failure",
+            )
+            .fail(&[Op::EighVals], None, "eigh_vals", "injected failure");
+    }
 }
 
 /// The compiled default provider, so every feature set exercises the direct
@@ -158,706 +455,84 @@ fn native_full_svd_executor() -> Option<tenet_dense::DefaultDenseExecutor> {
     None
 }
 
+/// Native full SVD only: no legacy SVD, completion QR, EIGH or GEMM.
+pub(super) struct NativeFullSvdSpy;
+
+fn script_native_full_svd(script: &mut Script, svd: &'static str, qr: &'static str) {
+    script.supports_svd_full = true;
+    script
+        .set(Op::SvdFullOwned, Action::Forward)
+        .set(Op::Svd, Action::Panic(svd))
+        .set(Op::Qr, Action::Panic(qr))
+        .set(Op::Eigh, Action::Panic("test only exercises full SVD"))
+        .set(
+            Op::DotGeneral,
+            Action::Panic("test only exercises full SVD"),
+        );
+}
+
+impl Observer for NativeFullSvdSpy {
+    fn script(script: &mut Script) {
+        script_native_full_svd(
+            script,
+            "native full SVD must not use the legacy SVD route",
+            "native full SVD must not use orthonormal completion",
+        );
+    }
+}
+
 impl NativeFullSvdSpy {
-    pub(super) fn new() -> Option<Self> {
-        native_full_svd_executor().map(|inner| Self {
-            inner,
-            full_calls: 0,
-        })
+    pub(super) fn new() -> Option<ScriptedExecutor<Self>> {
+        native_full_svd_executor().map(|inner| ScriptedExecutor::with_inner(inner, Self))
+    }
+}
+
+/// [`NativeFullSvdSpy`] whose second full SVD fails.
+pub(super) struct FailSecondOwnedFullSvd;
+
+impl Observer for FailSecondOwnedFullSvd {
+    fn script(script: &mut Script) {
+        script_native_full_svd(
+            script,
+            "claimed native full SVD must not retry the legacy route",
+            "claimed native full SVD must not use completion",
+        );
+        script.fail(
+            &[Op::SvdFullOwned],
+            Some(2),
+            "svd_full_owned",
+            "injected second-sector failure",
+        );
     }
 }
 
 impl FailSecondOwnedFullSvd {
-    pub(super) fn new() -> Option<Self> {
-        native_full_svd_executor().map(|inner| Self { inner, calls: 0 })
+    pub(super) fn new() -> Option<ScriptedExecutor<Self>> {
+        native_full_svd_executor().map(|inner| ScriptedExecutor::with_inner(inner, Self))
     }
 }
 
+/// EIGH only; records the raw eigenvalues it returns.
 #[derive(Default)]
 pub(super) struct RecordingEigh {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
     pub(super) raw_values: Vec<Vec<f64>>,
 }
 
-impl DenseExecutor for RejectExecutorCalls {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("validation must reject the input before SVD execution")
+impl Observer for RecordingEigh {
+    fn script(script: &mut Script) {
+        script
+            .set_all(
+                REQUIRED_EXCEPT_EIGH,
+                Action::Panic("test only exercises EIGH"),
+            )
+            .set(Op::Eigh, Action::Forward);
     }
 
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("validation must reject the input before QR execution")
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("validation must reject the input before EIGH execution")
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("validation must reject the input before dense execution")
-    }
-}
-
-impl DenseExecutor for FailComposition {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("composition backend must not run SVD")
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("composition backend must not run QR")
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("composition backend must not run EIGH")
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "dot_general_into",
-            message: "injected recomposition failure".to_string(),
-        })
-    }
-}
-
-impl DenseExecutor for SvdCallSpy {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.svd_calls += 1;
-        self.inner.svd(input)
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.eigh(input)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.inner.dot_general_into(output, lhs, rhs, config)
-    }
-}
-
-impl DenseExecutor for NativeFullSvdSpy {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("native full SVD must not use the legacy SVD route")
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("native full SVD must not use orthonormal completion")
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises full SVD")
-    }
-
-    fn supports_svd_full(&self) -> bool {
-        true
-    }
-
-    fn svd_full_owned(
-        &mut self,
-        input: DenseOwned,
-        rows: usize,
-        cols: usize,
-    ) -> Result<Vec<DenseTensor>, DenseError> {
-        self.full_calls += 1;
-        self.inner.svd_full_owned(input, rows, cols)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises full SVD")
-    }
-}
-
-impl DenseExecutor for FailSecondOwnedFullSvd {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("claimed native full SVD must not retry the legacy route")
-    }
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("claimed native full SVD must not use completion")
-    }
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises full SVD")
-    }
-    fn supports_svd_full(&self) -> bool {
-        true
-    }
-    fn svd_full_owned(
-        &mut self,
-        input: DenseOwned,
-        rows: usize,
-        cols: usize,
-    ) -> Result<Vec<DenseTensor>, DenseError> {
-        self.calls += 1;
-        if self.calls == 2 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "svd_full_owned",
-                message: "injected second-sector failure".to_string(),
-            });
+    fn outputs(&mut self, op: Op, outputs: &mut Vec<DenseTensor>) {
+        if op == Op::Eigh {
+            self.raw_values
+                .push(outputs[0].as_f64_slice().unwrap().to_vec());
         }
-        self.inner.svd_full_owned(input, rows, cols)
-    }
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises full SVD")
-    }
-}
-
-impl DenseExecutor for RejectSvdInto {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.svd_calls += 1;
-        let outputs = self.inner.svd(input)?;
-        self.output_ptrs.push((
-            dense_tensor_pointer(&outputs[0]),
-            dense_tensor_pointer(&outputs[2]),
-        ));
-        Ok(outputs)
-    }
-
-    fn svd_into(
-        &mut self,
-        _: DenseRead<'_>,
-        _: DenseWrite<'_>,
-        _: DenseWrite<'_>,
-        _: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.svd_into_calls += 1;
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "svd_into",
-            message: "direct compact SVD must not use svd_into".to_string(),
-        })
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.eigh(input)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.gemm_ptrs
-            .push((dense_read_pointer(&lhs), dense_read_pointer(&rhs)));
-        self.gemm_views.push((
-            dense_read_view(&lhs),
-            dense_read_view(&rhs),
-            config.lhs_conj(),
-            config.rhs_conj(),
-        ));
-        self.inner.dot_general_into(output, lhs, rhs, config)
-    }
-}
-
-impl DenseExecutor for RejectEighInto {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.svd(input)
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.eigh_calls += 1;
-        let outputs = self.inner.eigh(input)?;
-        self.vector_ptrs.push(dense_tensor_pointer(&outputs[1]));
-        Ok(outputs)
-    }
-
-    fn eigh_into(
-        &mut self,
-        _: DenseRead<'_>,
-        _: DenseWrite<'_>,
-        _: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.eigh_into_calls += 1;
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "eigh_into",
-            message: "direct compact EIGH must not use eigh_into".to_string(),
-        })
-    }
-
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.inner.dot_general_into(output, lhs, rhs, config)
-    }
-}
-
-impl DenseExecutor for SolveCallSpy {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("inverse must not execute an SVD")
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.eigh(input)
-    }
-
-    fn solve_into(
-        &mut self,
-        a: DenseRead<'_>,
-        b: DenseRead<'_>,
-        x: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.solve_calls += 1;
-        self.destination_ptrs.push(match &x {
-            DenseWrite::F32(view) => view.data().as_ptr() as usize,
-            DenseWrite::F64(view) => view.data().as_ptr() as usize,
-            DenseWrite::I32(view) => view.data().as_ptr() as usize,
-            DenseWrite::I64(view) => view.data().as_ptr() as usize,
-            DenseWrite::Bool(view) => view.data().as_ptr() as usize,
-            DenseWrite::C32(view) => view.data().as_ptr() as usize,
-            DenseWrite::C64(view) => view.data().as_ptr() as usize,
-        });
-        self.inner.solve_into(a, b, x)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("inverse must not recompose factors")
-    }
-}
-
-impl DenseExecutor for FailSecondSolve {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("inverse must not execute an SVD")
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.eigh(input)
-    }
-
-    fn solve_into(
-        &mut self,
-        a: DenseRead<'_>,
-        b: DenseRead<'_>,
-        x: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.solve_calls += 1;
-        if self.solve_calls == 2 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "solve_into",
-                message: "injected second-sector failure".to_string(),
-            });
-        }
-        self.inner.solve_into(a, b, x)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("inverse must not recompose factors")
-    }
-}
-
-impl DenseExecutor for FailAfterObservingSvdInput {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        if let Some(outputs) = self.outputs.take() {
-            return Ok(outputs);
-        }
-        let DenseRead::F64(input) = input else {
-            panic!("test input must be f64")
-        };
-        self.observed.push(input.data().to_vec());
-        if let Some(outputs) = self.outputs.take() {
-            return Ok(outputs);
-        }
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "svd_into",
-            message: "injected failure".to_string(),
-        })
-    }
-
-    fn svd_into(
-        &mut self,
-        input: DenseRead<'_>,
-        u: DenseWrite<'_>,
-        s: DenseWrite<'_>,
-        vt: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        let DenseRead::F64(input) = input else {
-            panic!("test input must be f64")
-        };
-        self.observed.push(input.data().to_vec());
-        let DenseWrite::F64(u) = u else {
-            panic!("test U must be f64")
-        };
-        let DenseWrite::F64(s) = s else {
-            panic!("test singular values must be f64")
-        };
-        let DenseWrite::F64(vt) = vt else {
-            panic!("test Vh must be f64")
-        };
-        assert!(u.data().iter().all(|&value| value == 0.0));
-        assert!(s.data().iter().all(|&value| value == 0.0));
-        assert!(vt.data().iter().all(|&value| value == 0.0));
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "svd_into",
-            message: "injected failure".to_string(),
-        })
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises SVD")
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises SVD")
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises SVD")
-    }
-}
-
-impl DenseExecutor for FailSecondSvd {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.calls += 1;
-        if self.calls == 2 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "svd_into",
-                message: "injected second-sector failure".to_string(),
-            });
-        }
-        self.inner.svd(input)
-    }
-
-    fn svd_into(
-        &mut self,
-        input: DenseRead<'_>,
-        u: DenseWrite<'_>,
-        s: DenseWrite<'_>,
-        vt: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.calls += 1;
-        if self.calls == 2 {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "svd_into",
-                message: "injected second-sector failure".to_string(),
-            });
-        }
-        self.inner.svd_into(input, u, s, vt)
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises SVD")
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises SVD")
-    }
-}
-
-impl DenseExecutor for FailAfterObservingQrInput {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises QR")
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        if let Some(outputs) = self.outputs.take() {
-            return Ok(outputs);
-        }
-        let DenseRead::F64(input) = input else {
-            panic!("test input must be f64")
-        };
-        self.observed.push(input.data().to_vec());
-        if self.qr_succeeds {
-            self.inner.qr(DenseRead::F64(input))
-        } else {
-            Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "qr",
-                message: "injected failure".to_string(),
-            })
-        }
-    }
-
-    fn qr_into(
-        &mut self,
-        input: DenseRead<'_>,
-        q: DenseWrite<'_>,
-        r: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        let _ = (input, q, r);
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "qr_into",
-            message: "injected failure".to_string(),
-        })
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises QR")
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises QR")
-    }
-}
-
-impl DenseExecutor for FailAfterSvdQr {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.svd_calls += 1;
-        self.inner.svd(input)
-    }
-
-    fn svd_into(
-        &mut self,
-        _: DenseRead<'_>,
-        _: DenseWrite<'_>,
-        _: DenseWrite<'_>,
-        _: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        panic!("numerical null completion must use owned SVD outputs")
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.qr_calls += 1;
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "qr",
-            message: "injected completion failure".to_string(),
-        })
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises numerical null completion")
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises numerical null completion")
-    }
-}
-
-impl DenseExecutor for FailAfterObservingEighInput {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises EIGH")
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises EIGH")
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        let DenseRead::F64(input) = input else {
-            panic!("test input must be f64")
-        };
-        self.observed.push(input.data().to_vec());
-        if let Some(outputs) = self.outputs.take() {
-            return Ok(outputs);
-        }
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "eigh_into",
-            message: "injected failure".to_string(),
-        })
-    }
-
-    fn eigh_into(
-        &mut self,
-        input: DenseRead<'_>,
-        values: DenseWrite<'_>,
-        vectors: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        let DenseRead::F64(input) = input else {
-            panic!("test input must be f64")
-        };
-        self.observed.push(input.data().to_vec());
-        let DenseWrite::F64(values) = values else {
-            panic!("test eigenvalues must be f64")
-        };
-        let DenseWrite::F64(vectors) = vectors else {
-            panic!("test eigenvectors must be f64")
-        };
-        assert!(values.data().iter().all(|&value| value == 0.0));
-        assert!(vectors.data().iter().all(|&value| value == 0.0));
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "eigh_into",
-            message: "injected failure".to_string(),
-        })
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises EIGH")
-    }
-}
-
-impl DenseExecutor for EighCallSpy {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises EIGH")
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises EIGH")
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.calls += 1;
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "eigh_into",
-            message: "injected failure".to_string(),
-        })
-    }
-
-    fn eigh_into(
-        &mut self,
-        _: DenseRead<'_>,
-        _: DenseWrite<'_>,
-        _: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.calls += 1;
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "eigh_into",
-            message: "injected failure".to_string(),
-        })
-    }
-
-    fn eigh_vals(&mut self, _: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        self.calls += 1;
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
-            op: "eigh_vals",
-            message: "injected failure".to_string(),
-        })
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises EIGH")
-    }
-}
-
-impl DenseExecutor for RecordingEigh {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises EIGH")
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises EIGH")
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        let outputs = self.inner.eigh(input)?;
-        self.raw_values.push(outputs[0].as_f64_slice()?.to_vec());
-        Ok(outputs)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises EIGH")
     }
 }
 
@@ -882,14 +557,26 @@ pub(super) struct LateGenericSpy {
     pub(super) calls: Cell<usize>,
 }
 
-pub(super) struct CountingDense {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
-    pub(super) svd_calls: usize,
-    pub(super) svd_into_calls: usize,
-    pub(super) svd_vals_calls: usize,
-    pub(super) qr_calls: usize,
-    pub(super) eig_calls: usize,
-    pub(super) eigh_calls: usize,
+/// Forwards the factorization entries and counts them; see [`CountingDense`]
+/// readers for which counts each old field summed.
+#[derive(Default)]
+pub(super) struct CountingDense;
+
+impl Observer for CountingDense {
+    fn script(script: &mut Script) {
+        script.set_all(
+            &[
+                Op::Svd,
+                Op::SvdVals,
+                Op::SvdInto,
+                Op::Qr,
+                Op::Eigh,
+                Op::Eig,
+                Op::EighInto,
+            ],
+            Action::Forward,
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -900,35 +587,33 @@ pub(super) struct FullQrObservation {
     pub(super) values: Vec<Complex64>,
 }
 
+/// Full QR/LQ through the destination API only; checks and records each
+/// input's layout and the destination shapes.
+#[derive(Default)]
 pub(super) struct FullQrInputSpy {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
     pub(super) observations: Vec<FullQrObservation>,
 }
 
-impl Default for FullQrInputSpy {
-    fn default() -> Self {
-        Self {
-            inner: tenet_dense::DefaultDenseExecutor::new(),
-            observations: Vec::new(),
-        }
-    }
-}
-
-impl DenseExecutor for FullQrInputSpy {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises full QR/LQ")
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("full QR/LQ must use the destination API")
+impl Observer for FullQrInputSpy {
+    fn script(script: &mut Script) {
+        script
+            .set(Op::Svd, Action::Panic("test only exercises full QR/LQ"))
+            .set(
+                Op::Qr,
+                Action::Panic("full QR/LQ must use the destination API"),
+            )
+            .set(Op::Eigh, Action::Panic("test only exercises full QR/LQ"))
+            .set(
+                Op::DotGeneral,
+                Action::Panic("test only exercises full QR/LQ"),
+            )
+            .set(Op::QrInto, Action::Forward);
     }
 
-    fn qr_into(
-        &mut self,
-        input: DenseRead<'_>,
-        q: DenseWrite<'_>,
-        r: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
+    fn call(&mut self, call: Call<'_, '_>) -> Option<Reply> {
+        let Call::Into(Op::QrInto, input, writes) = call else {
+            return None;
+        };
         let input_shape = input.shape().to_vec();
         let (strides, offset, data_len, values) = match input {
             DenseRead::F64(view) => (
@@ -953,98 +638,11 @@ impl DenseExecutor for FullQrInputSpy {
         assert_eq!(data_len, input_shape.iter().product::<usize>());
         self.observations.push(FullQrObservation {
             input_shape,
-            q_shape: q.shape().to_vec(),
-            r_shape: r.shape().to_vec(),
+            q_shape: writes[0].shape().to_vec(),
+            r_shape: writes[1].shape().to_vec(),
             values,
         });
-        self.inner.qr_into(input, q, r)
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises full QR/LQ")
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises full QR/LQ")
-    }
-}
-
-impl Default for CountingDense {
-    fn default() -> Self {
-        Self {
-            inner: tenet_dense::DefaultDenseExecutor::new(),
-            svd_calls: 0,
-            svd_into_calls: 0,
-            svd_vals_calls: 0,
-            qr_calls: 0,
-            eig_calls: 0,
-            eigh_calls: 0,
-        }
-    }
-}
-
-impl DenseExecutor for CountingDense {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.svd_calls += 1;
-        self.inner.svd(input)
-    }
-
-    fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        self.svd_vals_calls += 1;
-        self.inner.svd_vals(input)
-    }
-
-    fn svd_into(
-        &mut self,
-        input: DenseRead<'_>,
-        u: DenseWrite<'_>,
-        s: DenseWrite<'_>,
-        vt: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.svd_into_calls += 1;
-        self.svd_calls += 1;
-        self.inner.svd_into(input, u, s, vt)
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.qr_calls += 1;
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.eigh_calls += 1;
-        self.inner.eigh(input)
-    }
-
-    fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.eig_calls += 1;
-        self.inner.eig(input)
-    }
-
-    fn eigh_into(
-        &mut self,
-        input: DenseRead<'_>,
-        values: DenseWrite<'_>,
-        vectors: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.eigh_calls += 1;
-        self.inner.eigh_into(input, values, vectors)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.inner.dot_general_into(output, lhs, rhs, config)
+        None
     }
 }
 
@@ -1183,65 +781,34 @@ pub(super) fn late_spy_calls(run: &dyn Fn(&LateGenericSpy)) -> usize {
     probe.calls.get()
 }
 
+/// Matrix functions: forwards and counts EIGH, solves and GEMMs; the
+/// `fail_solve_number`-th solve fails when set (see [`matrix_function_spy`]).
 #[derive(Default)]
-pub(super) struct MatrixFunctionCallSpy {
-    pub(super) inner: tenet_dense::DefaultDenseExecutor,
-    pub(super) eigh_calls: usize,
-    pub(super) solve_calls: usize,
-    pub(super) matmul_calls: usize,
-    /// Ordinal of a solve that must fail, for the failure-atomicity gate.
-    pub(super) fail_solve_number: Option<usize>,
+pub(super) struct MatrixFunctionCallSpy;
+
+pub(super) const MATRIX_FUNCTION_EIGH: &[Op] = &[Op::Eigh, Op::EighInto];
+
+impl Observer for MatrixFunctionCallSpy {
+    fn script(script: &mut Script) {
+        script.set_all(
+            &[Op::Svd, Op::Qr, Op::Eigh, Op::EighInto, Op::Solve],
+            Action::Forward,
+        );
+    }
 }
 
-impl DenseExecutor for MatrixFunctionCallSpy {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.svd(input)
+/// A [`MatrixFunctionCallSpy`] whose `fail_solve_number`-th solve fails.
+pub(super) fn matrix_function_spy(
+    fail_solve_number: Option<usize>,
+) -> ScriptedExecutor<MatrixFunctionCallSpy> {
+    let mut spy = ScriptedExecutor::new(MatrixFunctionCallSpy);
+    if let Some(nth) = fail_solve_number {
+        spy.script.fail(
+            &[Op::Solve],
+            Some(nth),
+            "solve_into",
+            "injected sector failure",
+        );
     }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.eigh_calls += 1;
-        self.inner.eigh(input)
-    }
-
-    fn eigh_into(
-        &mut self,
-        input: DenseRead<'_>,
-        values: DenseWrite<'_>,
-        vectors: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.eigh_calls += 1;
-        self.inner.eigh_into(input, values, vectors)
-    }
-
-    fn solve_into(
-        &mut self,
-        a: DenseRead<'_>,
-        b: DenseRead<'_>,
-        x: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        self.solve_calls += 1;
-        if self.fail_solve_number == Some(self.solve_calls) {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "solve_into",
-                message: "injected sector failure".to_string(),
-            });
-        }
-        self.inner.solve_into(a, b, x)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.matmul_calls += 1;
-        self.inner.dot_general_into(output, lhs, rhs, config)
-    }
+    spy
 }

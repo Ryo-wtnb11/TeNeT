@@ -58,7 +58,7 @@ fn pinv_rejects_invalid_rcond_before_dense_execution() {
     let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let input = bound_tensor(Arc::new(rule), &tensor);
     for rcond in [-1.0, f64::NAN, f64::INFINITY] {
-        let mut dense = RejectExecutorCalls;
+        let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
         let mut context = default_context();
         let error = pinv(&mut dense, &mut context, &input.as_ref(), rcond).unwrap_err();
         assert!(matches!(error, OperationError::InvalidArgument { .. }));
@@ -161,7 +161,7 @@ fn inv_composes_to_the_identity() {
         .unwrap()
         .is_some());
     let expected_sectors = dense_sector_matrices(2, &tensor).len();
-    let mut dense_executor = SolveCallSpy::default();
+    let mut dense_executor = ScriptedExecutor::<SolveCallSpy>::default();
     let mut context = default_context();
     let inverse = inv(
         &mut dense_executor,
@@ -169,7 +169,7 @@ fn inv_composes_to_the_identity() {
         &bound_tensor_ref!(Arc::new(rule), &tensor),
     )
     .unwrap();
-    assert_eq!(dense_executor.solve_calls, expected_sectors);
+    assert_eq!(dense_executor.counts().solve, expected_sectors);
     let identity = crate::compose::compose(&mut context, &rule, &tensor, &inverse).unwrap();
     assert_identity_matrices(&dense_sector_matrices(2, &identity));
 }
@@ -186,7 +186,7 @@ fn solve_left_uses_one_direct_solve_per_sector_for_rectangular_rhs() {
     let rhs_provider = Arc::new(U1FusionRule);
     let divisor = bound_tensor(Arc::clone(&divisor_provider), &divisor);
     let rhs = bound_tensor(Arc::clone(&rhs_provider), &rhs);
-    let mut dense = SolveCallSpy::default();
+    let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
 
     let solved = solve_left_direct_dyn(
         &mut dense,
@@ -216,7 +216,7 @@ fn solve_left_uses_one_direct_solve_per_sector_for_rectangular_rhs() {
     numerics::assert_slices_close("even", &even.3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2);
     assert_eq!((odd.1, odd.2), (1, 2));
     numerics::assert_slices_close("odd", &odd.3, &[7.0, 8.0], 1);
-    assert_eq!(dense.solve_calls, 2);
+    assert_eq!(dense.counts().solve, 2);
     // What: the backend wrote the first final sector in the returned payload;
     // no owned solution twin followed by a full-result copy can satisfy this
     // pointer identity.
@@ -249,7 +249,7 @@ fn solve_left_preserves_complex_values_without_adjointing() {
     let rhs = u1_block_map(&[(0, 2, 2, rhs_data)]);
     let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
     let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
-    let mut dense = SolveCallSpy::default();
+    let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
 
     let solved = solve_left_direct_dyn(
         &mut dense,
@@ -261,7 +261,7 @@ fn solve_left_preserves_complex_values_without_adjointing() {
     for (&actual, expected) in solved.data().iter().zip(expected) {
         assert!((actual - expected).norm() < 1.0e-12);
     }
-    assert_eq!(dense.solve_calls, 1);
+    assert_eq!(dense.counts().solve, 1);
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn solve_left_discards_an_output_when_a_later_sector_fails() {
     let rhs = u1_block_map(&[(0, 1, 1, vec![4.0_f64]), (1, 1, 1, vec![9.0_f64])]);
     let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
     let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
-    let mut dense = FailSecondSolve::default();
+    let mut dense = ScriptedExecutor::<FailSecondSolve>::default();
 
     let error = solve_left_direct_dyn(
         &mut dense,
@@ -287,7 +287,7 @@ fn solve_left_discards_an_output_when_a_later_sector_fails() {
             ..
         })
     ));
-    assert_eq!(dense.solve_calls, 2);
+    assert_eq!(dense.counts().solve, 2);
 }
 
 #[test]
@@ -298,7 +298,7 @@ fn solve_left_validates_spaces_before_backend_execution() {
     let wrong_codomain = u1_cross_space_map::<f64>(&[(0, 3)], &[(0, 1)]);
     let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
     let wrong_codomain = bound_tensor(Arc::new(U1FusionRule), &wrong_codomain);
-    let mut dense = RejectExecutorCalls;
+    let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
     let error = solve_left_direct_dyn(
         &mut dense,
         &divisor.as_ref().dynamic(),
@@ -374,7 +374,7 @@ fn solve_left_preserves_dense_singularity_and_capability_errors() {
     let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
     let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
     let error = solve_left_direct_dyn(
-        &mut RejectExecutorCalls,
+        &mut ScriptedExecutor::new(RejectExecutorCalls),
         &divisor.as_ref().dynamic(),
         &rhs.as_ref().dynamic(),
     )
@@ -407,7 +407,7 @@ fn solve_left_direct_into_rejects_foreign_authority_and_wrong_output_before_exec
     )
     .unwrap();
     let error = solve_left_direct_into_dyn(
-        &mut RejectExecutorCalls,
+        &mut ScriptedExecutor::new(RejectExecutorCalls),
         &divisor.as_ref().dynamic(),
         &rhs.as_ref().dynamic(),
         foreign,
@@ -427,7 +427,7 @@ fn solve_left_direct_into_rejects_foreign_authority_and_wrong_output_before_exec
     )
     .unwrap();
     let error = solve_left_direct_into_dyn(
-        &mut RejectExecutorCalls,
+        &mut ScriptedExecutor::new(RejectExecutorCalls),
         &divisor.as_ref().dynamic(),
         &rhs.as_ref().dynamic(),
         wrong,
@@ -468,7 +468,13 @@ fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution(
         expected.clone(),
     )
     .unwrap();
-    let error = pinv_direct_into_dyn(&mut RejectExecutorCalls, &input, foreign, 0.0).unwrap_err();
+    let error = pinv_direct_into_dyn(
+        &mut ScriptedExecutor::new(RejectExecutorCalls),
+        &input,
+        foreign,
+        0.0,
+    )
+    .unwrap_err();
     assert!(matches!(error, OperationError::StructureMismatch { .. }));
 
     let wrong = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
@@ -482,7 +488,13 @@ fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution(
         ),
     )
     .unwrap();
-    let error = pinv_direct_into_dyn(&mut RejectExecutorCalls, &input, wrong, 0.0).unwrap_err();
+    let error = pinv_direct_into_dyn(
+        &mut ScriptedExecutor::new(RejectExecutorCalls),
+        &input,
+        wrong,
+        0.0,
+    )
+    .unwrap_err();
     assert!(matches!(error, OperationError::StructureMismatch { .. }));
 }
 
@@ -500,7 +512,7 @@ fn solve_left_direct_into_rejects_late_tree_route_before_execution() {
         Arc::clone(&provider),
     )
     .unwrap();
-    let mut dense = SolveCallSpy::default();
+    let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
 
     let error = solve_left_direct_into_dyn(
         &mut dense,
@@ -519,7 +531,7 @@ fn solve_left_direct_into_rejects_late_tree_route_before_execution() {
         ),
         "{error:?}"
     );
-    assert_eq!(dense.solve_calls, 0);
+    assert_eq!(dense.counts().solve, 0);
 }
 
 #[test]
@@ -536,7 +548,7 @@ fn inv_rejects_nonisomorphic_spaces_before_dense_execution() {
     ];
     for &(codomain, domain) in cases {
         let tensor = u1_cross_space_map::<f64>(codomain, domain);
-        let mut dense = RejectExecutorCalls;
+        let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         let error = inv(
             &mut dense,
@@ -750,7 +762,7 @@ fn inv_solves_padded_u1_sectors_and_matches_the_dense_oracle() {
         .coupled_sector_regions(1)
         .unwrap()
         .is_none());
-    let mut dense = SolveCallSpy::default();
+    let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
     let mut context = default_context();
 
     let inverse = inv(
@@ -776,7 +788,7 @@ fn inv_solves_padded_u1_sectors_and_matches_the_dense_oracle() {
             assert!((actual - expected).abs() < 1.0e-12);
         }
     }
-    assert_eq!(dense.solve_calls, 2);
+    assert_eq!(dense.counts().solve, 2);
 }
 
 #[test]
@@ -828,7 +840,7 @@ fn inv_reorders_a_complete_expert_tree_grid_by_key() {
         .coupled_sector_regions(2)
         .unwrap()
         .is_none());
-    let mut dense = SolveCallSpy::default();
+    let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
     let mut context = default_context();
 
     let inverse = inv(
@@ -867,7 +879,7 @@ fn inv_reorders_a_complete_expert_tree_grid_by_key() {
             }
         }
     }
-    assert_eq!(dense.solve_calls, 2);
+    assert_eq!(dense.counts().solve, 2);
 }
 
 #[test]
@@ -878,7 +890,7 @@ fn inv_preserves_genuinely_complex_nonhermitian_sector_values() {
     let c = Complex64::new(1.0, 4.0);
     let d = Complex64::new(5.0, -1.0);
     let tensor = u1_block_endomorphism(&[(0, 2, vec![a, b, c, d])]);
-    let mut dense = SolveCallSpy::default();
+    let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
 
     let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
@@ -893,7 +905,7 @@ fn inv_preserves_genuinely_complex_nonhermitian_sector_values() {
     for (&actual, expected) in inverse.data().iter().zip(oracle) {
         assert!((actual - expected).norm() < 1.0e-12);
     }
-    assert_eq!(dense.solve_calls, 1);
+    assert_eq!(dense.counts().solve, 1);
 }
 
 #[test]
@@ -921,7 +933,7 @@ fn inv_dyn_reverses_isomorphic_spaces_with_different_tree_ranks() {
     }
     let tensor = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(data, space).unwrap();
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
-    let mut dense = SolveCallSpy::default();
+    let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
 
     let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
     let inverse: BoundTensorMap<_, _, 1, 2> = typed_from_bound_factor(inverse).unwrap();
@@ -949,7 +961,7 @@ fn inv_dyn_reverses_isomorphic_spaces_with_different_tree_ranks() {
             assert!((inverse.data()[row + 6 * col] - expected).abs() < 1.0e-12);
         }
     }
-    assert_eq!(dense.solve_calls, 1);
+    assert_eq!(dense.counts().solve, 1);
 }
 
 #[test]
@@ -1059,7 +1071,7 @@ fn inv_discards_unpublished_output_when_a_later_sector_fails() {
     // a later backend solve fails.
     let tensor = u1_block_endomorphism(&[(0, 1, vec![2.0_f64]), (1, 1, vec![3.0])]);
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
-    let mut dense = FailSecondSolve::default();
+    let mut dense = ScriptedExecutor::<FailSecondSolve>::default();
 
     let error = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap_err();
 
@@ -1070,14 +1082,14 @@ fn inv_discards_unpublished_output_when_a_later_sector_fails() {
             ..
         })
     ));
-    assert_eq!(dense.solve_calls, 2);
+    assert_eq!(dense.counts().solve, 2);
 }
 
 #[test]
 fn inv_accepts_a_zero_dimensional_endomorphism_without_dense_execution() {
     // What: the inverse of the legal empty endomorphism is the empty endomorphism.
     let tensor = rectangular_svd_tensor(0, 0);
-    let mut dense = RejectExecutorCalls;
+    let mut dense = ScriptedExecutor::new(RejectExecutorCalls);
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
     let inverse = inv(
@@ -1106,7 +1118,7 @@ fn inv_solves_the_rank_zero_scalar_sector() {
     )
     .unwrap();
     let scalar = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![-4.0], space).unwrap();
-    let mut dense = SolveCallSpy::default();
+    let mut dense = ScriptedExecutor::<SolveCallSpy>::default();
     let mut context = default_context();
 
     let inverse = inv(
@@ -1117,7 +1129,7 @@ fn inv_solves_the_rank_zero_scalar_sector() {
     .unwrap();
 
     assert_eq!(inverse.data(), &[-0.25]);
-    assert_eq!(dense.solve_calls, 1);
+    assert_eq!(dense.counts().solve, 1);
 }
 
 #[test]
@@ -1197,10 +1209,10 @@ fn pinv_adjoint_parent_discards_unpublished_output_on_recomposition_failure() {
         f64,
         RuleIdentity,
         DenseTreeTransformOperations,
-        DenseTreeTransformOperations<FailComposition>,
+        DenseTreeTransformOperations<ScriptedExecutor<FailComposition>>,
     > = TensorContractFusionExecutionContext::new(
         DenseTreeTransformOperations::default(),
-        DenseTreeTransformOperations::new(FailComposition),
+        DenseTreeTransformOperations::new(ScriptedExecutor::new(FailComposition)),
     );
 
     assert!(matches!(
@@ -1304,33 +1316,9 @@ fn assert_sector_matrix_matches<D: FactorScalar>(
 /// An executor whose selected backend supplies GEMM but no dense solve — the
 /// trait default for `solve_into` is what must reach the caller.
 #[derive(Default)]
-struct SolvelessExecutor {
-    inner: tenet_dense::DefaultDenseExecutor,
-}
+struct SolvelessExecutor;
 
-impl DenseExecutor for SolvelessExecutor {
-    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.svd(input)
-    }
-
-    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.qr(input)
-    }
-
-    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        self.inner.eigh(input)
-    }
-
-    fn dot_general_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-        config: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        self.inner.dot_general_into(output, lhs, rhs, config)
-    }
-}
+impl Observer for SolvelessExecutor {}
 
 #[test]
 fn exp_fixture_blocks_reproduce_the_oracle_input() {
@@ -1783,7 +1771,7 @@ fn exp_of_a_multi_tree_sector_matches_the_series_entrywise() {
         "fixture 1-norm {widest} is outside the scaling-and-squaring window"
     );
 
-    let mut spy = MatrixFunctionCallSpy::default();
+    let mut spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
     let mut context = default_context();
     let exponential = exp(
         &mut spy,
@@ -1791,8 +1779,12 @@ fn exp_of_a_multi_tree_sector_matches_the_series_entrywise() {
         &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
     )
     .unwrap();
-    assert_eq!(spy.eigh_calls, 0, "the fixture must reach the general arm");
-    assert_eq!(spy.solve_calls, sources.len(), "one solve per sector");
+    assert_eq!(
+        spy.counts().of(MATRIX_FUNCTION_EIGH),
+        0,
+        "the fixture must reach the general arm"
+    );
+    assert_eq!(spy.counts().solve, sources.len(), "one solve per sector");
 
     assert_multitree_exp_matches_the_series(exponential.tensor(), &sources, "direct regions");
 }
@@ -1896,7 +1888,7 @@ fn exp_of_a_hermitian_endomorphism_is_the_spectral_route() {
     // were never the point. The spy counters above are what catch a reroute onto
     // Pade; the values check that the route publishes `v exp(d) v^H`.
     let tensor = hermitian_exp_fixture();
-    let mut spy = MatrixFunctionCallSpy::default();
+    let mut spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
     let mut context = default_context();
 
     let exponential = exp(
@@ -1907,11 +1899,16 @@ fn exp_of_a_hermitian_endomorphism_is_the_spectral_route() {
     .unwrap();
 
     assert_eq!(
-        spy.eigh_calls, 2,
+        spy.counts().of(MATRIX_FUNCTION_EIGH),
+        2,
         "one eigendecomposition per coupled sector"
     );
-    assert_eq!(spy.solve_calls, 0, "the Hermitian route must not solve");
-    assert_eq!(spy.matmul_calls, 0, "the Hermitian route must not GEMM");
+    assert_eq!(spy.counts().solve, 0, "the Hermitian route must not solve");
+    assert_eq!(
+        spy.counts().dot_general,
+        0,
+        "the Hermitian route must not GEMM"
+    );
 
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
@@ -1956,7 +1953,7 @@ fn exp_of_a_hermitian_c64_endomorphism_takes_the_spectral_route() {
         Complex64::new(-0.75, 0.0),
     ];
     let tensor = u1_block_endomorphism(&[(0, 3, charge_zero), (1, 2, charge_one)]);
-    let mut spy = MatrixFunctionCallSpy::default();
+    let mut spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
     let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
 
     exp(
@@ -1967,11 +1964,13 @@ fn exp_of_a_hermitian_c64_endomorphism_takes_the_spectral_route() {
     .unwrap();
 
     assert_eq!(
-        spy.eigh_calls, 2,
+        spy.counts().of(MATRIX_FUNCTION_EIGH),
+        2,
         "one eigendecomposition per coupled sector"
     );
     assert_eq!(
-        spy.solve_calls, 0,
+        spy.counts().solve,
+        0,
         "a Hermitian c64 input must not reach the Pade solve"
     );
 }
@@ -2000,7 +1999,7 @@ fn exp_of_a_hermitian_su2_endomorphism_takes_the_spectral_route() {
         ),
     ];
     let tensor = block_endomorphism(&rule, &blocks);
-    let mut spy = MatrixFunctionCallSpy::default();
+    let mut spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
     let mut context = default_context();
 
     exp(
@@ -2011,11 +2010,13 @@ fn exp_of_a_hermitian_su2_endomorphism_takes_the_spectral_route() {
     .unwrap();
 
     assert_eq!(
-        spy.eigh_calls, 3,
+        spy.counts().of(MATRIX_FUNCTION_EIGH),
+        3,
         "one eigendecomposition per coupled sector"
     );
     assert_eq!(
-        spy.solve_calls, 0,
+        spy.counts().solve,
+        0,
         "a Hermitian SU(2) input must not reach the Pade solve"
     );
 }
@@ -2035,14 +2036,14 @@ fn exp_sector_work_scales_with_the_sector_count_and_the_scaling_count() {
     ]);
     let mut context = default_context();
 
-    let mut two_spy = MatrixFunctionCallSpy::default();
+    let mut two_spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
     exp(
         &mut two_spy,
         &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &two),
     )
     .unwrap();
-    let mut four_spy = MatrixFunctionCallSpy::default();
+    let mut four_spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
     exp(
         &mut four_spy,
         &mut context,
@@ -2050,21 +2051,24 @@ fn exp_sector_work_scales_with_the_sector_count_and_the_scaling_count() {
     )
     .unwrap();
 
-    assert_eq!(four_spy.solve_calls, 2 * two_spy.solve_calls);
-    assert_eq!(four_spy.matmul_calls, 2 * two_spy.matmul_calls);
+    assert_eq!(four_spy.counts().solve, 2 * two_spy.counts().solve);
+    assert_eq!(
+        four_spy.counts().dot_general,
+        2 * two_spy.counts().dot_general
+    );
 
     // ||A||_1 = 36 for this block, so s = ceil(log2(36 / theta_13)) = 3 and the
     // squaring loop adds exactly three GEMMs on top of the six.
     let scaled = u1_block_endomorphism(&[(0, 3, exp_oracle_block::<f64>(0, 3, 16.0))]);
-    let mut scaled_spy = MatrixFunctionCallSpy::default();
+    let mut scaled_spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
     exp(
         &mut scaled_spy,
         &mut context,
         &bound_tensor_ref!(Arc::new(U1FusionRule), &scaled),
     )
     .unwrap();
-    assert_eq!(scaled_spy.matmul_calls, 9);
-    assert_eq!(scaled_spy.solve_calls, 1);
+    assert_eq!(scaled_spy.counts().dot_general, 9);
+    assert_eq!(scaled_spy.counts().solve, 1);
 }
 
 #[test]
@@ -2078,7 +2082,7 @@ fn exp_balances_a_badly_scaled_block_before_the_pade_evaluation() {
     // ~1.11, below theta_13, so the *dispatch* — six GEMMs and no squaring —
     // is the sharpest observable there is.
     let tensor = u1_block_endomorphism(&[(0, 2, vec![0.0_f64, 1e-16, 1e16, 0.0])]);
-    let mut spy = MatrixFunctionCallSpy::default();
+    let mut spy = ScriptedExecutor::<MatrixFunctionCallSpy>::default();
     let mut context = default_context();
 
     let exponential = exp(
@@ -2089,7 +2093,8 @@ fn exp_balances_a_badly_scaled_block_before_the_pade_evaluation() {
     .unwrap();
 
     assert_eq!(
-        spy.matmul_calls, 6,
+        spy.counts().dot_general,
+        6,
         "the balanced block is below theta_13: six GEMMs, no squaring"
     );
     let cosh = 1.0_f64.cosh();
@@ -2405,7 +2410,7 @@ fn exp_reports_unsupported_when_the_executor_cannot_solve() {
     // What: device storage whose backend supplies GEMM but no solve is refused
     // in the backend's own words, not silently routed onto the host.
     let tensor = exp_oracle_tensor::<f64>(1.0);
-    let mut dense = SolvelessExecutor::default();
+    let mut dense = ScriptedExecutor::<SolvelessExecutor>::default();
     let mut context = default_context();
 
     let error = exp(
@@ -2545,10 +2550,7 @@ fn exp_publishes_nothing_when_a_later_sector_fails() {
     // tensor and does not touch the input's storage.
     let tensor = exp_oracle_tensor::<f64>(1.0);
     let before = tensor.data().to_vec();
-    let mut spy = MatrixFunctionCallSpy {
-        fail_solve_number: Some(2),
-        ..MatrixFunctionCallSpy::default()
-    };
+    let mut spy = matrix_function_spy(Some(2));
     let mut context = default_context();
 
     let error = exp(
@@ -2569,7 +2571,8 @@ fn exp_publishes_nothing_when_a_later_sector_fails() {
         "unexpected error {error:?}"
     );
     assert_eq!(
-        spy.solve_calls, 2,
+        spy.counts().solve,
+        2,
         "the failing sector must have been tried"
     );
     assert_eq!(tensor.data(), &before[..], "input storage was mutated");
