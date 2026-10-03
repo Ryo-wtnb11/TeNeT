@@ -1112,7 +1112,7 @@ where
 {
     let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
     let src_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
-    let dst_structure = BlockStructure::packed_column_major(2, [vec![4, 1], vec![4, 1]]).unwrap();
+    let dst_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
     let src = TensorMap::<T, 2, 0>::from_vec_with_structure(
         vec![
             T::one(),
@@ -1209,7 +1209,7 @@ fn assert_tree_multi_mixed_dtype<D, C>(
 {
     let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
     let src_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
-    let dst_structure = BlockStructure::packed_column_major(2, [vec![4, 1], vec![4, 1]]).unwrap();
+    let dst_structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
     let src =
         TensorMap::<D, 2, 0>::from_vec_with_structure(src_values, space.clone(), src_structure)
             .unwrap();

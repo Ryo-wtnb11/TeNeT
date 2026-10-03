@@ -7592,6 +7592,62 @@ fn tree_transform_rejects_mismatched_multi_tree_element_count() {
     );
 }
 
+/// Issue #1739: a Multi group packs each source in its own shape order and
+/// scatters each column in the destination's, so equal element counts are
+/// not enough; every layout must share one shape.
+fn compile_multi_pair_shapes(
+    dst_shapes: [Vec<usize>; 2],
+    src_shapes: [Vec<usize>; 2],
+) -> Result<TreeTransformStructure<f64>, OperationError> {
+    let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+    let src_structure = BlockStructure::packed_column_major(2, src_shapes).unwrap();
+    let dst_structure = BlockStructure::packed_column_major(2, dst_shapes).unwrap();
+    let src =
+        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0; 8], space.clone(), src_structure)
+            .unwrap();
+    let dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 8], space, dst_structure)
+        .unwrap();
+    TreeTransformStructure::compile(
+        &dst,
+        &src,
+        &[TreeTransformBlockSpec::multi(
+            vec![0, 1],
+            vec![0, 1],
+            vec![1.0, 0.0, 0.0, 1.0],
+        )],
+    )
+}
+
+#[test]
+fn tree_transform_rejects_incompatible_multi_tree_shapes() {
+    assert_eq!(
+        compile_multi_pair_shapes([vec![4, 1], vec![4, 1]], [vec![2, 2], vec![2, 2]]).unwrap_err(),
+        OperationError::ShapeMismatch {
+            dst: vec![4, 1],
+            src: vec![2, 2],
+        }
+    );
+}
+
+#[test]
+fn tree_transform_rejects_mixed_shape_multi_tree_group() {
+    assert_eq!(
+        compile_multi_pair_shapes([vec![2, 2], vec![2, 2]], [vec![2, 2], vec![4, 1]]).unwrap_err(),
+        OperationError::ShapeMismatch {
+            dst: vec![2, 2],
+            src: vec![4, 1],
+        }
+    );
+    assert_eq!(
+        compile_multi_pair_shapes([vec![2, 2], vec![4, 1]], [vec![2, 2], vec![2, 2]]).unwrap_err(),
+        OperationError::ShapeMismatch {
+            dst: vec![2, 2],
+            src: vec![4, 1],
+        }
+    );
+    assert!(compile_multi_pair_shapes([vec![2, 2], vec![2, 2]], [vec![2, 2], vec![2, 2]]).is_ok());
+}
+
 #[derive(Debug, Default)]
 struct RecordingKernelAdapter {
     add_calls: usize,
