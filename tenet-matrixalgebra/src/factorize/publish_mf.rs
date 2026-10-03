@@ -257,7 +257,7 @@ where
     let mut missing_offsets = FxHashMap::<SectorId, usize>::default();
     let placements = validated_placements
         .unwrap_or_else(|| PlacementIndex::new(matricizations, &[source_trees]));
-    let structure = Arc::clone(space.space().structure());
+    let structure = space.space().structure();
     for index in 0..structure.block_count() {
         let block = structure
             .block(index)

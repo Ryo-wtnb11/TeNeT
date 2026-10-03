@@ -1175,15 +1175,16 @@ fn checked_generic_full_null_ops_keep_packing_padded_input() {
 }
 
 #[test]
-fn mf_null_factor_space_is_one_cached_derive_per_side() {
-    // What: the multiplicity-free authority builds each null factor's space
-    // with exactly one derive, and a repeated call reuses the cached layout.
+fn mf_null_factor_space_is_staged_once_per_side_and_cached() {
+    // What: the multiplicity-free authority stages each null factor's space
+    // exactly once, and a repeated call reuses the cached layout (the same
+    // structure `Arc`).
     let tensor = rectangular_svd_tensor(5, 2);
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
     let typed = bound.as_ref();
     let input = typed.dynamic();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let derives = || crate::factorize::MF_FACTOR_SPACE_DERIVES.get();
+    let stages = || crate::factorize::MF_FACTOR_SPACE_STAGES.get();
     for left in [true, false] {
         let null = |dense: &mut tenet_dense::DefaultDenseExecutor| {
             if left {
@@ -1192,11 +1193,11 @@ fn mf_null_factor_space_is_one_cached_derive_per_side() {
                 right_null_dyn(dense, &input).unwrap()
             }
         };
-        let before = derives();
+        let before = stages();
         let first = null(&mut dense);
-        assert_eq!(derives() - before, 1);
+        assert_eq!(stages() - before, 1);
         let second = null(&mut dense);
-        assert_eq!(derives() - before, 2);
+        assert_eq!(stages() - before, 2);
         assert!(Arc::ptr_eq(
             first.space().space().structure(),
             second.space().space().structure()

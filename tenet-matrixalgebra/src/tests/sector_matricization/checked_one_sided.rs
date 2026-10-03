@@ -358,10 +358,11 @@ fn checked_one_sided_canonical_transfer_across_sectors_and_extra_pairs() {
             assert_eq!(opposite_of(pair, side), &opposite[index]);
         }
 
-        // An extra pair is rejected before any publication decision, as in
-        // the multiplicity-free mode (approval A1: mode divergences take MF
-        // semantics). Unreachable from the public API: pairs come from the
-        // same matricization.
+        // An extra pair is rejected as in the multiplicity-free mode
+        // (approval A1: mode divergences take MF semantics). The bound space
+        // is already enumerated and committed when the error fires, but no
+        // factor data is published. Unreachable from the public API: pairs
+        // come from the same matricization.
         let mut pairs = staged_one_sided_pairs(&matrices, &dimensions, side, side, &values);
         pairs.push(FactorPair {
             sector: SectorId::new(7),
