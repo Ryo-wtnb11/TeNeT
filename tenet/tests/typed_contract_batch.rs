@@ -486,7 +486,7 @@ fn public_copy_c_small_output_winners() {
 /// Run with `cargo test --release --test typed_contract_batch -- --ignored --nocapture`.
 /// Timings and caller-thread allocations are measurements, not pass/fail gates.
 #[test]
-#[ignore]
+#[ignore = "benchmark: run via benchmarks.yml"]
 fn public_copy_c_batch_measurement() {
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -1259,7 +1259,7 @@ fn reject_braiding<const ANYONIC: bool>(runtime: &Runtime) -> bool {
 /// Run explicitly with `--release -- --ignored --nocapture`; timing is evidence,
 /// never a pass/fail gate. Allocations count the calling thread only.
 #[test]
-#[ignore]
+#[ignore = "benchmark: run via benchmarks.yml"]
 fn public_host_batch_cold_warm_measurement() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let case = su2_reordered::<f64>(&runtime);
@@ -1304,7 +1304,7 @@ fn public_host_batch_cold_warm_measurement() {
 
 /// Release-only observation of the direct Core/SwappedCore stack path.
 #[test]
-#[ignore]
+#[ignore = "benchmark: run via benchmarks.yml"]
 fn public_host_swapped_core_release_measurement() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let case = candidate_core_probes::<_, f64>(&runtime, &su2())
@@ -1355,7 +1355,7 @@ fn public_host_swapped_core_release_measurement() {
 
 /// A one-run observation with explicit faer and one dense thread. No timing assertion.
 #[test]
-#[ignore]
+#[ignore = "benchmark: run via benchmarks.yml"]
 fn public_signed_direct_release_measurement() {
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -1430,7 +1430,7 @@ fn public_signed_direct_release_measurement() {
 
 /// Run explicitly in release mode. This records one pinned Host sweep, not a CI timing gate.
 #[test]
-#[ignore]
+#[ignore = "benchmark: run via benchmarks.yml"]
 fn public_dynamic_source_twist_release_measurement() {
     let runtime = Runtime::builder()
         .dense_threads(1)
