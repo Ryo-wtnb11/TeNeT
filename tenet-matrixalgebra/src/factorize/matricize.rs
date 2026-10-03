@@ -490,10 +490,12 @@ where
             CheckedGenericStructureError::Provider(error) => {
                 CheckedGenericFactorPlanError::Provider(error)
             }
-            // The fold reports only arithmetic overflow from core.
-            CheckedGenericStructureError::Core(_) => {
+            CheckedGenericStructureError::Core(CoreError::ElementCountOverflow) => {
                 CheckedGenericFactorPlanError::Operation(OperationError::ElementCountOverflow)
             }
+            CheckedGenericStructureError::Core(error) => CheckedGenericFactorPlanError::Operation(
+                OperationError::from_core_preserving_context(error),
+            ),
         })
 }
 
