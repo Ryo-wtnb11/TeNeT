@@ -331,6 +331,19 @@ where
     Ok(total)
 }
 
+/// `dim(c)` of a multiplicity-free rule through its coefficient algebra
+/// (#1855), the one place the facade reads a multiplicity-free quantum
+/// dimension.
+pub(crate) fn multiplicity_free_dim<R>(rule: &R, sector: SectorId) -> Result<f64, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    <tenet_core::MultiplicityFreeAdmissionMode as tenet_tensors::RigidCoefficientAlgebra<R>>::dim(
+        rule, sector,
+    )
+    .map_err(Error::from)
+}
+
 /// Quantum-dimension-weighted Frobenius inner product over the stored
 /// blocks: `sum_c dim(c) * <a_c, b_c>` with the first argument conjugated,
 /// matching TensorKit's `dot` (which conjugates its first argument). Real
@@ -360,13 +373,9 @@ where
         }
         return Ok(total.widen_complex());
     }
-    coupled_region_inner(
-        structure,
-        nout,
-        a,
-        b,
-        |coupled| Ok(rule.dim_scalar(coupled)),
-    )
+    coupled_region_inner(structure, nout, a, b, |coupled| {
+        multiplicity_free_dim(rule, coupled)
+    })
 }
 
 /// Quantum-dimension-weighted block trace of an endomorphism:

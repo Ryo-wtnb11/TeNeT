@@ -1249,10 +1249,11 @@ where
                 // provider's real scalar, so the result is a plain `D`.
                 let mut total: num_complex::Complex64 = num_complex::Complex64::new(0.0, 0.0);
                 for entry in spectrum {
+                    let dim = multiplicity_free_dim(provider, entry.sector)?;
                     let coefficient: f64 = if traced_leg_is_dual {
-                        provider.dim_scalar(entry.sector)
+                        dim
                     } else {
-                        provider.dim_scalar(entry.sector) * provider.twist_scalar(entry.sector)
+                        dim * provider.twist_scalar(entry.sector)
                     };
                     let mut partial = D::Wide::from_real(0.0);
                     for &value in &entry.values {
