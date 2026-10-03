@@ -306,7 +306,10 @@ fn checked_compact_diagonal_qr_densifies_nonfinite_and_skips_the_provider_when_f
     failing_provider.fail_algebra.store(true, Ordering::Relaxed);
     reset_provider_queries(&failing_provider);
     let Qr { q, r } = finite.qr_full(&[0], &[1]).unwrap();
-    assert_eq!(failing_provider.algebra_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        failing_provider.queries_since_reset.load(Ordering::Relaxed),
+        0
+    );
     for factor in [&q, &r] {
         assert!(
             tenet::typed::__network::network_reuse_class(factor, false)
@@ -748,8 +751,7 @@ fn checked_dual_diagonal_qr_lq_publish_on_the_input_bond_without_provider_querie
             l: full_l,
             q: full_lq_q,
         } = finite.lq_full(&[0], &[1]).unwrap();
-        assert_eq!(provider.algebra_queries.load(Ordering::Relaxed), 0);
-        assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 0);
         for factor in [&q, &r, &l, &lq_q, &full_q, &full_r, &full_l, &full_lq_q] {
             assert!(
                 tenet::typed::__network::network_reuse_class(factor, false)

@@ -22,8 +22,8 @@ where
                 tenet_matrixalgebra::seam::qr_diagonal_dyn_checked_generic(&body.space, spectrum)
             {
                 return Ok(Qr {
-                    q: self.with_spectrum_on(body.space.clone(), q),
-                    r: self.with_spectrum_on(body.space.clone(), r),
+                    q: self.with_spectrum(q),
+                    r: self.with_spectrum(r),
                 });
             }
         }
@@ -62,8 +62,8 @@ where
                 tenet_matrixalgebra::seam::lq_diagonal_dyn_checked_generic(&body.space, spectrum)
             {
                 return Ok(Lq {
-                    l: self.with_spectrum_on(body.space.clone(), l),
-                    q: self.with_spectrum_on(body.space.clone(), q),
+                    l: self.with_spectrum(l),
+                    q: self.with_spectrum(q),
                 });
             }
         }
@@ -105,8 +105,8 @@ where
                 tenet_matrixalgebra::seam::qr_diagonal_dyn_checked_generic(&body.space, spectrum)
             {
                 return Ok(Qr {
-                    q: self.with_spectrum_on(body.space.clone(), q),
-                    r: self.with_spectrum_on(body.space.clone(), r),
+                    q: self.with_spectrum(q),
+                    r: self.with_spectrum(r),
                 });
             }
         }
@@ -426,8 +426,8 @@ where
                 tenet_matrixalgebra::seam::lq_diagonal_dyn_checked_generic(&body.space, spectrum)
             {
                 return Ok(Lq {
-                    l: tensor.with_spectrum_on(body.space.clone(), l),
-                    q: tensor.with_spectrum_on(body.space.clone(), q),
+                    l: tensor.with_spectrum(l),
+                    q: tensor.with_spectrum(q),
                 });
             }
         }
