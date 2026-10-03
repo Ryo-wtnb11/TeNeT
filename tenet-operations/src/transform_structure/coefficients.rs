@@ -102,16 +102,12 @@ pub(super) fn shared_payload_mismatch() -> OperationError {
 /// Upper bound of [`TreeTransformCoefficients`]' own heap bytes for `specs`
 /// (matrices excluded: their `Arc`s belong to the specs), for a cache that
 /// charges a plan before its first binding builds the payload.
-pub(crate) fn charged_shared_coefficient_bytes<T>(
-    spec_shapes: impl Iterator<Item = (usize, usize)>,
-) -> usize {
+pub(crate) fn charged_shared_coefficient_bytes<T>(spec_count: usize) -> usize {
     const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
-    spec_shapes.fold(
-        ARC_CONTROL_BYTES.saturating_add(core::mem::size_of::<TreeTransformCoefficients<T>>()),
-        |bytes, _| {
-            bytes.saturating_add(core::mem::size_of::<T>().max(core::mem::size_of::<Arc<[T]>>()))
-        },
-    )
+    let per_spec = core::mem::size_of::<T>().max(core::mem::size_of::<Arc<[T]>>());
+    ARC_CONTROL_BYTES
+        .saturating_add(core::mem::size_of::<TreeTransformCoefficients<T>>())
+        .saturating_add(spec_count.saturating_mul(per_spec))
 }
 
 #[cfg(test)]

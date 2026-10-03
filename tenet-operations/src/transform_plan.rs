@@ -712,11 +712,7 @@ impl<T> TreeTransformGroupPlan<T> {
     /// matrices belong to the specs and are excluded.
     #[doc(hidden)]
     pub fn charged_coefficient_payload_bytes(&self) -> usize {
-        charged_shared_coefficient_bytes::<T>(
-            self.specs
-                .iter()
-                .map(|spec| (spec.dst_keys().len(), spec.src_keys().len())),
-        )
+        charged_shared_coefficient_bytes::<T>(self.specs.len())
     }
 
     pub fn from_specs<I>(specs: I) -> Self
