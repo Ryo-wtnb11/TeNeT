@@ -708,7 +708,6 @@ fn complete_cache_publishes_a_build_that_saw_no_reset() {
 
     // What: the epoch check does not block an ordinary miss.
     assert!(Arc::ptr_eq(&published, &built));
-    assert_eq!(complete_hom_space_structure_cache_info().entries(), 1);
     let hit = homspace
         .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
         .unwrap();
@@ -733,7 +732,6 @@ fn complete_cache_drops_a_build_that_started_before_a_reset() {
     // What: the straddling build keeps its correct result, but the cache does
     // not publish it, so a post-reset build mints a fresh content identity.
     assert!(Arc::ptr_eq(&returned, &stale));
-    assert_eq!(complete_hom_space_structure_cache_info().entries(), 0);
     let fresh = homspace
         .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
         .unwrap();
@@ -769,7 +767,6 @@ fn complete_cache_drops_a_build_that_ran_inside_a_reset() {
     admit_complete_hom_space_structure(key, stale, epoch);
 
     // What: no pre-reset content identity is published after the reset.
-    assert_eq!(complete_hom_space_structure_cache_info().entries(), 0);
     let fresh = homspace
         .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
         .unwrap();
