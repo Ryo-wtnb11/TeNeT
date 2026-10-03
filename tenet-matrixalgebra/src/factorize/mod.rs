@@ -22,9 +22,11 @@ use tenet_dense::{
     DenseTensor, DenseView, DenseViewMut,
 };
 
+use tenet_core::{CheckedGenericAdmissionMode, MultiplicityFreeAdmissionMode};
 pub use tenet_tensors::BoundDynamicTensorRef;
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, DenseBlockScalar, DenseRecouplingScalar, DynamicFusionMapSpace,
+    BoundDynamicFusionMapSpace, CheckedGenericPlanError, CoefficientAlgebra, DenseBlockScalar,
+    DenseRecouplingScalar, DynamicFusionMapSpace, RigidCoefficientAlgebra,
     ValidatedDynamicFusionLayout,
 };
 
