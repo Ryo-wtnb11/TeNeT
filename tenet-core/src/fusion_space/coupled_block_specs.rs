@@ -13,20 +13,21 @@ struct CoupledSectorMatrix<'a> {
 }
 
 impl<'a> CoupledSectorMatrix<'a> {
+    /// `rows` (`cols`) is the side's extent, as the placement produced it.
     fn new(
         base: usize,
         row_offsets: &'a [usize],
-        row_dims: &[usize],
+        rows: usize,
         col_offsets: &'a [usize],
-        col_dims: &[usize],
-    ) -> Result<Self, CoreError> {
-        Ok(Self {
+        cols: usize,
+    ) -> Self {
+        Self {
             base,
-            rows: matrix_extent(row_offsets, row_dims)?,
-            cols: matrix_extent(col_offsets, col_dims)?,
+            rows,
+            cols,
             row_offsets,
             col_offsets,
-        })
+        }
     }
 
     /// Pushes the strides of block `(row, col)` with degeneracy `shape`
@@ -65,15 +66,6 @@ impl<'a> CoupledSectorMatrix<'a> {
             .checked_mul(self.cols)
             .and_then(|len| self.base.checked_add(len))
             .ok_or(CoreError::ElementCountOverflow)
-    }
-}
-
-fn matrix_extent(offsets: &[usize], dims: &[usize]) -> Result<usize, CoreError> {
-    match offsets.last().zip(dims.last()) {
-        Some((&offset, &dim)) => offset
-            .checked_add(dim)
-            .ok_or(CoreError::ElementCountOverflow),
-        None => Ok(0),
     }
 }
 
@@ -192,15 +184,10 @@ where
             col_dims.push(dim);
         }
 
-        prefix_offsets_into(&row_dims, &mut row_offsets)?;
-        prefix_offsets_into(&col_dims, &mut col_offsets)?;
-        let matrix = CoupledSectorMatrix::new(
-            sector_offset,
-            &row_offsets,
-            &row_dims,
-            &col_offsets,
-            &col_dims,
-        )?;
+        let rows = prefix_offsets_into(&row_dims, &mut row_offsets)?;
+        let cols = prefix_offsets_into(&col_dims, &mut col_offsets)?;
+        let matrix =
+            CoupledSectorMatrix::new(sector_offset, &row_offsets, rows, &col_offsets, cols);
 
         for col in 0..sector.col_count {
             for row in 0..sector.row_count {
@@ -339,10 +326,10 @@ where
         let matrix = CoupledSectorMatrix::new(
             sector_offset,
             &row_offsets,
-            &row_dims,
+            row_side.extent(),
             &col_offsets,
-            &col_dims,
-        )?;
+            col_side.extent(),
+        );
 
         for index in run_start..run_end {
             let key = keys[index].borrow();
@@ -399,7 +386,8 @@ fn register_first_seen_block<'k>(
     Ok(())
 }
 
-fn prefix_offsets_into(dims: &[usize], offsets: &mut DimVec) -> Result<(), CoreError> {
+/// Fills `offsets` with the running sums of `dims` and returns their total.
+fn prefix_offsets_into(dims: &[usize], offsets: &mut DimVec) -> Result<usize, CoreError> {
     offsets.clear();
     offsets.reserve(dims.len());
     let mut offset = 0usize;
@@ -409,5 +397,5 @@ fn prefix_offsets_into(dims: &[usize], offsets: &mut DimVec) -> Result<(), CoreE
             .checked_add(dim)
             .ok_or(CoreError::ElementCountOverflow)?;
     }
-    Ok(())
+    Ok(offset)
 }
