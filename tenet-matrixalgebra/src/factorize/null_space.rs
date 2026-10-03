@@ -46,13 +46,94 @@ fn compact_null_sector<D: FactorScalar>(values: &[D], side: FactorSide) -> Optio
     Some((nullity, coordinates))
 }
 
+/// Outcome of the compact-diagonal null kernel; each mode's public entry maps
+/// the declines onto its own fallback contract.
+enum DiagonalNull<R, D, E> {
+    Direct(BoundDynFactor<R, D>),
+    /// The spectrum does not cover the aligned regions.
+    NotDiagonal,
+    /// A sector declined the closed form after the coupled dimensions were
+    /// queried; the query result is handed to the solver path.
+    Declined(Result<BTreeMap<SectorId, usize>, E>),
+}
+
 /// Coordinate kernels of an admitted compact diagonal. A sector with any
 /// positive magnitude near the rank cutoff stays on the solver path; the
 /// margin is conservative, not a provider-specific singular-value bound.
+fn null_diagonal<A, R, D>(
+    authority: &A,
+    space: &DynamicFusionMapSpace,
+    regions: &[CoupledSectorRegion],
+    spectrum: &[SectorSpectrum<D>],
+    side: FactorSide,
+) -> Result<DiagonalNull<R, D, A::Error>, A::Error>
+where
+    A: FactorSpaceAuthority<R>,
+    D: FactorScalar,
+{
+    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    if by_sector.len() != regions.len() || spectrum.len() != regions.len() {
+        return Ok(DiagonalNull::NotDiagonal);
+    }
+    let mut null_dimensions = match authority.coupled_dimensions(match side {
+        FactorSide::Left => space.homspace().codomain(),
+        FactorSide::Right => space.homspace().domain(),
+    }) {
+        Ok(dimensions) => dimensions,
+        Err(error) => return Ok(DiagonalNull::Declined(Err(error))),
+    };
+    let mut pairs = Vec::new();
+    for region in regions {
+        let k = region.rows();
+        let Some(entry) = by_sector.get(&region.coupled()) else {
+            return Ok(DiagonalNull::Declined(Ok(null_dimensions)));
+        };
+        if !region.has_aligned_diagonal() || k != region.cols() || entry.values.len() != k {
+            return Ok(DiagonalNull::Declined(Ok(null_dimensions)));
+        }
+        let Some((nullity, coordinates)) = compact_null_sector(&entry.values, side) else {
+            return Ok(DiagonalNull::Declined(Ok(null_dimensions)));
+        };
+        if nullity == 0 {
+            continue;
+        }
+        let (left_data, right_data) = match side {
+            FactorSide::Left => (coordinates, Vec::new()),
+            FactorSide::Right => (Vec::new(), coordinates),
+        };
+        pairs.push(FactorPair {
+            sector: region.coupled(),
+            kept: nullity,
+            left: left_data,
+            left_rows: k,
+            right: right_data,
+            right_leading: nullity,
+        });
+    }
+    // The dimensions change only once every sector is admitted: a decline
+    // hands the solver path the queried dimensions unmodified.
+    let mut kept = pairs.iter().peekable();
+    for region in regions {
+        match kept.next_if(|pair| pair.sector == region.coupled()) {
+            Some(pair) => null_dimensions.insert(pair.sector, pair.kept),
+            None => null_dimensions.remove(&region.coupled()),
+        };
+    }
+    Ok(DiagonalNull::Direct(publish_one_sided_factor(
+        authority,
+        space.homspace(),
+        regions,
+        &mut pairs,
+        &null_dimensions,
+        side,
+        FactorPlacement::Direct,
+    )?))
+}
+
 fn null_diagonal_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-    left: bool,
+    side: FactorSide,
 ) -> Result<Option<BoundDynFactor<R, D>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -62,65 +143,17 @@ where
     let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
         return Ok(None);
     };
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != regions.len() || spectrum.len() != regions.len() {
-        return Ok(None);
-    }
-    let mut null_dimensions = if left {
-        space
-            .homspace()
-            .codomain()
-            .coupled_sector_block_dimensions(authority.provider())?
-    } else {
-        space
-            .homspace()
-            .domain()
-            .coupled_sector_block_dimensions(authority.provider())?
-    };
-    let side = if left {
-        FactorSide::Left
-    } else {
-        FactorSide::Right
-    };
-    let mut pairs = Vec::new();
-    for region in regions.iter() {
-        let k = region.rows();
-        let Some(entry) = by_sector.get(&region.coupled()) else {
-            return Ok(None);
-        };
-        if !region.has_aligned_diagonal() || k != region.cols() || entry.values.len() != k {
-            return Ok(None);
-        }
-        let Some((q, coordinates)) = compact_null_sector(&entry.values, side) else {
-            return Ok(None);
-        };
-        if q == 0 {
-            null_dimensions.remove(&region.coupled());
-            continue;
-        }
-        null_dimensions.insert(region.coupled(), q);
-        let (left_data, right_data) = if left {
-            (coordinates, Vec::new())
-        } else {
-            (Vec::new(), coordinates)
-        };
-        pairs.push(FactorPair {
-            sector: region.coupled(),
-            kept: q,
-            left: left_data,
-            left_rows: k,
-            right: right_data,
-            right_leading: q,
-        });
-    }
-    Ok(Some(build_bound_factor(
-        authority,
-        space.homspace(),
+    match null_diagonal(
+        &MfAuthority(authority),
+        space,
         regions.as_ref(),
-        &mut pairs,
-        &null_dimensions,
+        spectrum,
         side,
-    )?))
+    )? {
+        DiagonalNull::Direct(factor) => Ok(Some(factor)),
+        DiagonalNull::NotDiagonal | DiagonalNull::Declined(Ok(_)) => Ok(None),
+        DiagonalNull::Declined(Err(error)) => Err(error),
+    }
 }
 
 pub type CheckedNullDimensions<E> =
@@ -145,71 +178,16 @@ where
     let Ok(Some(regions)) = checked_sector_regions(space.structure(), space.nout()) else {
         return Ok(CheckedDiagonalNullFactor::Fallback(None));
     };
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != regions.len() || spectrum.len() != regions.len() {
-        return Ok(CheckedDiagonalNullFactor::Fallback(None));
-    }
-    let dimensions = coupled_sector_block_dimensions_generic_checked(
-        match side {
-            FactorSide::Left => space.homspace().codomain(),
-            FactorSide::Right => space.homspace().domain(),
+    let checked = CheckedAuthority(authority.provider_arc());
+    Ok(
+        match null_diagonal(&checked, space, regions.as_ref(), spectrum, side)? {
+            DiagonalNull::Direct(factor) => CheckedDiagonalNullFactor::Direct(factor),
+            DiagonalNull::NotDiagonal => CheckedDiagonalNullFactor::Fallback(None),
+            DiagonalNull::Declined(dimensions) => {
+                CheckedDiagonalNullFactor::Fallback(Some(dimensions))
+            }
         },
-        authority.provider(),
-    );
-    let mut null_dimensions = match dimensions {
-        Ok(dimensions) => dimensions,
-        Err(error) => return Ok(CheckedDiagonalNullFactor::Fallback(Some(Err(error)))),
-    };
-    let mut pairs = Vec::new();
-    for region in regions.iter() {
-        let k = region.rows();
-        let Some(entry) = by_sector.get(&region.coupled()) else {
-            return Ok(CheckedDiagonalNullFactor::Fallback(Some(Ok(
-                null_dimensions,
-            ))));
-        };
-        if !region.has_aligned_diagonal() || k != region.cols() || entry.values.len() != k {
-            return Ok(CheckedDiagonalNullFactor::Fallback(Some(Ok(
-                null_dimensions,
-            ))));
-        }
-        let Some((nullity, coordinates)) = compact_null_sector(&entry.values, side) else {
-            return Ok(CheckedDiagonalNullFactor::Fallback(Some(Ok(
-                null_dimensions,
-            ))));
-        };
-        let (left_data, right_data) = match side {
-            FactorSide::Left => (coordinates, Vec::new()),
-            FactorSide::Right => (Vec::new(), coordinates),
-        };
-        pairs.push(FactorPair {
-            sector: region.coupled(),
-            kept: nullity,
-            left: left_data,
-            left_rows: k,
-            right: right_data,
-            right_leading: nullity,
-        });
-    }
-    pairs.retain(|pair| {
-        if pair.kept == 0 {
-            null_dimensions.remove(&pair.sector);
-            false
-        } else {
-            null_dimensions.insert(pair.sector, pair.kept);
-            true
-        }
-    });
-    Ok(CheckedDiagonalNullFactor::Direct(
-        build_bound_factor_generic_checked(
-            authority.provider_arc(),
-            space.homspace(),
-            regions.as_ref(),
-            &mut pairs,
-            &null_dimensions,
-            side,
-        )?,
-    ))
+    )
 }
 
 #[doc(hidden)]
@@ -245,7 +223,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    null_diagonal_dyn(authority, spectrum, true)
+    null_diagonal_dyn(authority, spectrum, FactorSide::Left)
 }
 
 #[doc(hidden)]
@@ -257,7 +235,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    null_diagonal_dyn(authority, spectrum, false)
+    null_diagonal_dyn(authority, spectrum, FactorSide::Right)
 }
 
 #[cfg(test)]
@@ -290,49 +268,13 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let space = input.space().space();
-    let matrices =
-        multiplicity_free_input_matricizations(space.structure(), input.data(), space.nout())?;
-    // A codomain-only sector has no tensor block but is entirely left-null.
-    let mut null_dimensions = space
-        .homspace()
-        .codomain()
-        .coupled_sector_block_dimensions(input.space().provider())?;
-    let mut pairs = Vec::new();
-    in_linalg_scope(dense, |dense| {
-        for index in 0..matrices.len() {
-            let matrix = matrices.get(index)?;
-            let (rows, cols) = (matrix.rows, matrix.cols);
-            let (rank, u_compact) =
-                numerical_rank_and_compact_basis(dense, matrix.data, rows, cols, FactorSide::Left)?;
-            if rank == rows {
-                null_dimensions.remove(&matrix.sector);
-                continue;
-            }
-            // Only the left basis is completed: completing V would run an unused
-            // QR for this operation.
-            let u = orthonormal_completion(dense, &u_compact, rows, rows.min(cols))?;
-            let null_dim = rows - rank;
-            null_dimensions.insert(matrix.sector, null_dim);
-            pairs.push(FactorPair {
-                sector: matrix.sector,
-                kept: null_dim,
-                left: u[rows * rank..].to_vec(),
-                left_rows: rows,
-                right: Vec::new(),
-                right_leading: null_dim,
-            });
-        }
-        Ok(())
-    })?;
-    with_input_geometry!(&matrices, |geometry| build_bound_factor(
-        input.space(),
-        space.homspace(),
-        geometry,
-        &mut pairs,
-        &null_dimensions,
+    null_dense(
+        dense,
+        &MfAuthority(input.space()),
+        input,
         FactorSide::Left,
-    ))
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -365,54 +307,13 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let space = input.space().space();
-    let matrices =
-        multiplicity_free_input_matricizations(space.structure(), input.data(), space.nout())?;
-    // A domain-only sector has no tensor block but is entirely right-null.
-    let mut null_dimensions = space
-        .homspace()
-        .domain()
-        .coupled_sector_block_dimensions(input.space().provider())?;
-    let mut pairs = Vec::new();
-    in_linalg_scope(dense, |dense| {
-        for index in 0..matrices.len() {
-            let matrix = matrices.get(index)?;
-            let (rows, cols) = (matrix.rows, matrix.cols);
-            let (rank, v_compact) = numerical_rank_and_compact_basis(
-                dense,
-                matrix.data,
-                rows,
-                cols,
-                FactorSide::Right,
-            )?;
-            if rank == cols {
-                null_dimensions.remove(&matrix.sector);
-                continue;
-            }
-            // Only the right basis is completed: completing U would run an unused
-            // QR for this operation.
-            let v = orthonormal_completion(dense, &v_compact, cols, rows.min(cols))?;
-            let null_dim = cols - rank;
-            null_dimensions.insert(matrix.sector, null_dim);
-            pairs.push(FactorPair {
-                sector: matrix.sector,
-                kept: null_dim,
-                left: Vec::new(),
-                left_rows: rows,
-                right: adjoint_col_major(&v[cols * rank..], cols, null_dim),
-                right_leading: null_dim,
-            });
-        }
-        Ok(())
-    })?;
-    with_input_geometry!(&matrices, |geometry| build_bound_factor(
-        input.space(),
-        space.homspace(),
-        geometry,
-        &mut pairs,
-        &null_dimensions,
+    null_dense(
+        dense,
+        &MfAuthority(input.space()),
+        input,
         FactorSide::Right,
-    ))
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -444,60 +345,13 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    let provider = input.space().provider_arc();
-    let space = input.space().space();
-    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    let mut null_dimensions = match dimensions {
-        Some(dimensions) => dimensions?,
-        None => coupled_sector_block_dimensions_generic_checked(
-            space.homspace().codomain(),
-            provider.as_ref(),
-        )?,
-    };
-    let mut pairs = Vec::new();
-    in_linalg_scope(dense, |dense| {
-        for index in 0..matrices.len() {
-            let matrix = matrices.get(index)?;
-            let (rank, u_compact) = numerical_rank_and_compact_basis(
-                dense,
-                matrix.data,
-                matrix.rows,
-                matrix.cols,
-                FactorSide::Left,
-            )?;
-            if rank == matrix.rows {
-                null_dimensions.remove(&matrix.sector);
-                continue;
-            }
-            let u = orthonormal_completion(
-                dense,
-                &u_compact,
-                matrix.rows,
-                matrix.rows.min(matrix.cols),
-            )?;
-            let null_dim = matrix.rows - rank;
-            null_dimensions.insert(matrix.sector, null_dim);
-            pairs.push(FactorPair {
-                sector: matrix.sector,
-                kept: null_dim,
-                left: u[matrix.rows * rank..].to_vec(),
-                left_rows: matrix.rows,
-                right: Vec::new(),
-                right_leading: null_dim,
-            });
-        }
-        Ok(())
-    })
-    .map_err(CheckedGenericFactorPlanError::from)?;
-    with_input_geometry!(&matrices, |geometry| build_bound_factor_generic_checked(
-        provider,
-        space.homspace(),
-        geometry,
-        &mut pairs,
-        &null_dimensions,
+    null_dense(
+        dense,
+        &CheckedAuthority(input.space().provider_arc()),
+        input,
         FactorSide::Left,
-    ))
+        dimensions,
+    )
 }
 
 #[cfg(test)]
@@ -526,59 +380,86 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    let provider = input.space().provider_arc();
+    null_dense(
+        dense,
+        &CheckedAuthority(input.space().provider_arc()),
+        input,
+        FactorSide::Right,
+        dimensions,
+    )
+}
+
+/// Numerical null space of every coupled sector of `input`, published through
+/// `authority`. `dimensions` is a coupled-dimension query the caller already
+/// ran (the checked compact-diagonal decline); `None` queries here.
+fn null_dense<A, E, R, D>(
+    dense: &mut E,
+    authority: &A,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    side: FactorSide,
+    dimensions: Option<Result<BTreeMap<SectorId, usize>, A::Error>>,
+) -> Result<BoundDynFactor<R, D>, A::Error>
+where
+    A: FactorSpaceAuthority<R>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
     let space = input.space().space();
-    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
-        .map_err(CheckedGenericFactorPlanError::from)?;
+    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())?;
+    // A sector only on the null side has no tensor block but is entirely null.
     let mut null_dimensions = match dimensions {
         Some(dimensions) => dimensions?,
-        None => coupled_sector_block_dimensions_generic_checked(
-            space.homspace().domain(),
-            provider.as_ref(),
-        )?,
+        None => authority.coupled_dimensions(match side {
+            FactorSide::Left => space.homspace().codomain(),
+            FactorSide::Right => space.homspace().domain(),
+        })?,
     };
     let mut pairs = Vec::new();
     in_linalg_scope(dense, |dense| {
         for index in 0..matrices.len() {
             let matrix = matrices.get(index)?;
-            let (rank, v_compact) = numerical_rank_and_compact_basis(
-                dense,
-                matrix.data,
-                matrix.rows,
-                matrix.cols,
-                FactorSide::Right,
-            )?;
-            if rank == matrix.cols {
+            let (rows, cols) = (matrix.rows, matrix.cols);
+            let (rank, compact) =
+                numerical_rank_and_compact_basis(dense, matrix.data, rows, cols, side)?;
+            let extent = match side {
+                FactorSide::Left => rows,
+                FactorSide::Right => cols,
+            };
+            if rank == extent {
                 null_dimensions.remove(&matrix.sector);
                 continue;
             }
-            let v = orthonormal_completion(
-                dense,
-                &v_compact,
-                matrix.cols,
-                matrix.rows.min(matrix.cols),
-            )?;
-            let null_dim = matrix.cols - rank;
+            // Only the null side's basis is completed: completing the other
+            // one would run an unused QR for this operation.
+            let basis = orthonormal_completion(dense, &compact, extent, rows.min(cols))?;
+            let null_dim = extent - rank;
             null_dimensions.insert(matrix.sector, null_dim);
+            let (left, right) = match side {
+                FactorSide::Left => (basis[rows * rank..].to_vec(), Vec::new()),
+                FactorSide::Right => (
+                    Vec::new(),
+                    adjoint_col_major(&basis[cols * rank..], cols, null_dim),
+                ),
+            };
             pairs.push(FactorPair {
                 sector: matrix.sector,
                 kept: null_dim,
-                left: Vec::new(),
-                left_rows: matrix.rows,
-                right: adjoint_col_major(&v[matrix.cols * rank..], matrix.cols, null_dim),
+                left,
+                left_rows: rows,
+                right,
                 right_leading: null_dim,
             });
         }
         Ok(())
-    })
-    .map_err(CheckedGenericFactorPlanError::from)?;
-    with_input_geometry!(&matrices, |geometry| build_bound_factor_generic_checked(
-        provider,
+    })?;
+    with_input_geometry!(&matrices, |geometry| publish_one_sided_factor(
+        authority,
         space.homspace(),
         geometry,
         &mut pairs,
         &null_dimensions,
-        FactorSide::Right,
+        side,
+        FactorPlacement::Direct,
     ))
 }
 

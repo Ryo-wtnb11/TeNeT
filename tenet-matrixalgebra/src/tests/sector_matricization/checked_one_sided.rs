@@ -358,8 +358,11 @@ fn checked_one_sided_canonical_transfer_across_sectors_and_extra_pairs() {
             assert_eq!(opposite_of(pair, side), &opposite[index]);
         }
 
-        // An extra unused pair is ignored on the scatter path, never an
-        // error, and the output is identical.
+        // An extra pair is rejected as in the multiplicity-free mode
+        // (approval A1: mode divergences take MF semantics). The bound space
+        // is already enumerated and committed when the error fires, but no
+        // factor data is published. Unreachable from the public API: pairs
+        // come from the same matricization.
         let mut pairs = staged_one_sided_pairs(&matrices, &dimensions, side, side, &values);
         pairs.push(FactorPair {
             sector: SectorId::new(7),
@@ -370,7 +373,7 @@ fn checked_one_sided_canonical_transfer_across_sectors_and_extra_pairs() {
             right_leading: 1,
         });
         reset_one_sided_publication_probe();
-        let fallback = build_bound_factor_generic_checked(
+        let error = build_bound_factor_generic_checked(
             &provider,
             &homspace,
             &matrices,
@@ -378,13 +381,20 @@ fn checked_one_sided_canonical_transfer_across_sectors_and_extra_pairs() {
             &dimensions,
             side,
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CheckedGenericFactorPlanError::Operation(
+                OperationError::UnsupportedTensorContractScope {
+                    message: "factor sector absent from the source tensor"
+                }
+            )
+        ));
         let probe = one_sided_publication_probe();
         assert_eq!(
             (probe.canonical_publications, probe.fallback_publications),
-            (0, 1)
+            (0, 0)
         );
-        assert_eq!(fallback.data(), factor.data());
         assert_buffers_intact(&pairs, side);
     }
 }

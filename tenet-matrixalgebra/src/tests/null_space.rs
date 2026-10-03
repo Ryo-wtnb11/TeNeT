@@ -1173,3 +1173,34 @@ fn checked_generic_full_null_ops_keep_packing_padded_input() {
     right_null_dyn_checked_generic(&mut dense, &expert).unwrap();
     assert_eq!(crate::factorize::input_pack_bytes(), 4 * packed_len);
 }
+
+#[test]
+fn mf_null_factor_space_is_staged_once_per_side_and_cached() {
+    // What: the multiplicity-free authority stages each null factor's space
+    // exactly once, and a repeated call reuses the cached layout (the same
+    // structure `Arc`).
+    let tensor = rectangular_svd_tensor(5, 2);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let typed = bound.as_ref();
+    let input = typed.dynamic();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let stages = || crate::factorize::MF_FACTOR_SPACE_STAGES.get();
+    for left in [true, false] {
+        let null = |dense: &mut tenet_dense::DefaultDenseExecutor| {
+            if left {
+                left_null_dyn(dense, &input).unwrap()
+            } else {
+                right_null_dyn(dense, &input).unwrap()
+            }
+        };
+        let before = stages();
+        let first = null(&mut dense);
+        assert_eq!(stages() - before, 1);
+        let second = null(&mut dense);
+        assert_eq!(stages() - before, 2);
+        assert!(Arc::ptr_eq(
+            first.space().space().structure(),
+            second.space().space().structure()
+        ));
+    }
+}
