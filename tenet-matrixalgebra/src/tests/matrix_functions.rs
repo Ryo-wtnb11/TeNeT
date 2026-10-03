@@ -2677,3 +2677,56 @@ fn hermitian_exp_accepts_consistently_reordered_tree_stacking_with_facade_values
         }
     }
 }
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_factor_isomorphism_queries_codomain_then_domain_without_shortcut() {
+    // What: the checked inverse/solve admission compares the coupled
+    // dimensions of both sides, codomain first, even when the two sides are
+    // equal, and reports a provider failure as a plan error.
+    let spy = |fail_at| {
+        Arc::new(LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at,
+            calls: Cell::new(0),
+        })
+    };
+    let (square, _, _) = generic_values_endomorphism_input();
+    let (rectangular, _) = generic_factorization_input();
+    for (source, expected) in [(&square, true), (&rectangular, false)] {
+        let space =
+            BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), spy(usize::MAX))
+                .unwrap();
+        assert_eq!(
+            crate::factorize::factor_isomorphic_checked_generic(&space).unwrap(),
+            expected
+        );
+        let total = space.provider().calls.get();
+        assert!(total > 0);
+
+        let probe = spy(usize::MAX);
+        crate::factorize::coupled_sector_block_dimensions_generic_checked(
+            source.space().homspace().codomain(),
+            probe.as_ref(),
+        )
+        .unwrap();
+        let codomain_calls = probe.calls.get();
+        assert!(codomain_calls < total);
+
+        // The first domain query fails: the codomain was queried in full.
+        let failing = BoundDynamicFusionMapSpace::bind_generic(
+            source.space().clone(),
+            spy(codomain_calls + 1),
+        )
+        .unwrap();
+        assert!(matches!(
+            crate::factorize::factor_isomorphic_checked_generic(&failing),
+            Err(CheckedGenericFactorPlanError::Provider(LateGenericError(call)))
+                if call == codomain_calls + 1
+        ));
+        assert_eq!(failing.provider().calls.get(), codomain_calls + 1);
+    }
+}

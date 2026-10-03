@@ -149,15 +149,7 @@ where
             }
         }
         let source = tensor.logical_space();
-        let codomain = tenet_matrixalgebra::seam::coupled_sector_block_dimensions_generic_checked(
-            source.space().homspace().codomain(),
-            source.provider(),
-        )?;
-        let domain = tenet_matrixalgebra::seam::coupled_sector_block_dimensions_generic_checked(
-            source.space().homspace().domain(),
-            source.provider(),
-        )?;
-        if codomain != domain {
+        if !tenet_matrixalgebra::seam::factor_isomorphic_checked_generic(source)? {
             return Err(Error::from(
                 tenet_tensors::OperationError::UnsupportedTensorContractScope {
                     message: "inv requires isomorphic codomain and domain",
@@ -169,8 +161,8 @@ where
             source.space().homspace().domain().clone(),
             source.space().homspace().codomain().clone(),
         );
-        let output = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
-            Arc::clone(source.provider_arc()),
+        let output = tenet_matrixalgebra::seam::factor_output_space_checked_generic(
+            source.provider_arc(),
             homspace,
         )?;
         let body = tensor
@@ -213,8 +205,8 @@ where
                 .map_err(GenericTensorError::from);
         }
         let source = tensor.logical_space();
-        let output = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
-            Arc::clone(source.provider_arc()),
+        let output = tenet_matrixalgebra::seam::factor_output_space_checked_generic(
+            source.provider_arc(),
             FusionTreeHomSpace::new(
                 source.space().homspace().domain().clone(),
                 source.space().homspace().codomain().clone(),

@@ -90,6 +90,7 @@ mod sector_matricization_tests;
 #[cfg(test)]
 pub(crate) use authority::MF_FACTOR_SPACE_STAGES;
 use authority::*;
+pub use authority::{factor_isomorphic_checked_generic, factor_output_space_checked_generic};
 pub(crate) use bound::*;
 pub(crate) use compact_plan::*;
 // `dense_stage` items are consumed only by sibling factorization modules.
