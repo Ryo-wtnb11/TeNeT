@@ -359,14 +359,8 @@ where
     R::Scalar: CategoricalScalar,
 {
     let checked = InfallibleGenericRigid(rule);
-    match generic_bendright_tree_pair_result(&checked, tree_pair) {
-        Ok(rows) => Ok(rows),
-        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
-        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
-        Err(CheckedGenericSymbolError::Shape { .. }) => {
-            unreachable!("infallible Generic symbols must be categorical")
-        }
-    }
+    generic_bendright_tree_pair_result(&checked, tree_pair)
+        .map_err(map_infallible_generic_symbol_error)
 }
 
 #[cfg(test)]
@@ -570,14 +564,8 @@ where
     R::Scalar: CategoricalScalar,
 {
     let checked = InfallibleGenericRigid(rule);
-    match generic_bendleft_tree_pair_result(&checked, tree_pair) {
-        Ok(rows) => Ok(rows),
-        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
-        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
-        Err(CheckedGenericSymbolError::Shape { .. }) => {
-            unreachable!("infallible Generic symbols must be categorical")
-        }
-    }
+    generic_bendleft_tree_pair_result(&checked, tree_pair)
+        .map_err(map_infallible_generic_symbol_error)
 }
 
 #[cfg(test)]
@@ -694,14 +682,8 @@ where
 {
     let rule = tree_pair.rule;
     let checked = InfallibleGenericRigid(rule);
-    match generic_repartition_tree_pair_result(&checked, tree_pair.key, target_codomain_rank) {
-        Ok(rows) => Ok(rows),
-        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
-        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
-        Err(CheckedGenericSymbolError::Shape { .. }) => {
-            unreachable!("infallible Generic symbols must be categorical")
-        }
-    }
+    generic_repartition_tree_pair_result(&checked, tree_pair.key, target_codomain_rank)
+        .map_err(map_infallible_generic_symbol_error)
 }
 
 fn generic_repartition_tree_pair_unchecked<R>(
@@ -714,14 +696,8 @@ where
     R::Scalar: CategoricalScalar,
 {
     let checked = InfallibleGenericRigid(rule);
-    match generic_repartition_tree_pair_result(&checked, tree_pair, target_codomain_rank) {
-        Ok(rows) => Ok(rows),
-        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
-        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
-        Err(CheckedGenericSymbolError::Shape { .. }) => {
-            unreachable!("infallible Generic symbols must be categorical")
-        }
-    }
+    generic_repartition_tree_pair_result(&checked, tree_pair, target_codomain_rank)
+        .map_err(map_infallible_generic_symbol_error)
 }
 
 /// Checked Generic-fusion repartition for a mutable fallible provider.

@@ -29,12 +29,8 @@ where
     R::Scalar: CategoricalScalar,
 {
     let checked = InfallibleGenericFR(rule);
-    match generic_artin_braid_at_with_inverse_checked(&checked, tree, index, inverse) {
-        Ok(rows) => Ok(rows),
-        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
-        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
-        Err(CheckedGenericSymbolError::Shape { .. }) => unreachable!("infallible Generic symbols must be categorical"),
-    }
+    generic_artin_braid_at_with_inverse_checked(&checked, tree, index, inverse)
+        .map_err(map_infallible_generic_symbol_error)
 }
 
 fn generic_artin_braid_at_with_inverse_checked<C>(
@@ -394,14 +390,8 @@ where
     R::Scalar: CategoricalScalar,
 {
     let checked = InfallibleGenericFR(rule);
-    match generic_braid_tree_result(&checked, tree, permutation, levels, swaps) {
-        Ok(rows) => Ok(rows),
-        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
-        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
-        Err(CheckedGenericSymbolError::Shape { .. }) => {
-            unreachable!("infallible Generic symbols must be categorical")
-        }
-    }
+    generic_braid_tree_result(&checked, tree, permutation, levels, swaps)
+        .map_err(map_infallible_generic_symbol_error)
 }
 
 fn generic_braid_tree_result<C>(
