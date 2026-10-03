@@ -79,12 +79,15 @@ impl ArtinTree for UnhashedFusionTree {
 }
 
 impl ArtinTree for MultiplicityFreeTreeLocal {
+    #[inline(always)]
     fn coupled(&self) -> SectorId {
         self.coupled
     }
+    #[inline(always)]
     fn innerlines(&self) -> &[SectorId] {
         &self.innerlines
     }
+    #[inline(always)]
     fn vertex(&self, _: usize) -> Option<MultiplicityIndex> {
         None
     }
@@ -180,6 +183,7 @@ impl ArtinSite {
         })
     }
 
+    #[inline(always)]
     fn inner_extended<T: ArtinTree>(&self, tree: &T, index: usize) -> Result<SectorId, CoreError> {
         if index == 0 {
             return Ok(self.first);
@@ -201,6 +205,7 @@ impl ArtinSite {
 /// case and read the inner-extended lines; the kernel emits each output into
 /// `out`, which owns its representation (an in-place tree, a compact local,
 /// or a full key).
+#[inline(always)]
 pub(crate) fn artin_surgery<K, T, W>(
     kernel: &K,
     site: &ArtinSite,
@@ -343,6 +348,7 @@ where
         }
         Ok(())
     }
+    #[inline(always)]
     fn artin_first<T: ArtinTree, W: ArtinWriter<R::Scalar, CoreError>>(
         &self,
         left: SectorId,
@@ -356,6 +362,7 @@ where
         let slot = out.begin(None, ArtinVertices::Keep)?;
         out.finish(slot, coefficient)
     }
+    #[inline(always)]
     fn artin_general<T: ArtinTree, W: ArtinWriter<R::Scalar, CoreError>>(
         &self,
         [a, b, c, d, e]: [SectorId; 5],

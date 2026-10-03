@@ -703,6 +703,7 @@ where
 impl PreparedMultiplicityFreeArtin {
     // External frame data stays out of this kernel: the block runner must enumerate
     // locals from this prepared frame rather than rebuilding full tree keys.
+    #[inline]
     pub(super) fn apply<R>(
         &self,
         rule: &R,
@@ -730,6 +731,7 @@ struct LocalArtinTerms<'t, S> {
 impl<S> ArtinWriter<S, CoreError> for LocalArtinTerms<'_, S> {
     type Slot = MultiplicityFreeTreeLocal;
 
+    #[inline(always)]
     fn begin(
         &mut self,
         innerline: Option<(usize, SectorId)>,
@@ -749,6 +751,7 @@ impl<S> ArtinWriter<S, CoreError> for LocalArtinTerms<'_, S> {
         })
     }
 
+    #[inline(always)]
     fn finish(&mut self, local: Self::Slot, coefficient: S) -> Result<(), CoreError> {
         self.terms.push((local, coefficient));
         Ok(())
