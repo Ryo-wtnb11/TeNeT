@@ -468,12 +468,17 @@ pub use transform_ops::TypedTensorUnitDispatch;
 #[cfg(feature = "cuda")]
 use transform_ops::{braid_operation, tree_operation_matches_axes};
 
-/// Representation gates for [`TypedTensorBody`] (#580 PR 0).
+/// In-module gates on the typed facade's private state.
 ///
-/// These live inside the module on purpose: the properties under test are the
-/// private layout — which `Arc` holds what — and asserting them from
-/// `tests/` would mean publishing accessors the facade does not otherwise
-/// need. Public semantic oracles live in `tests/typed_facade.rs`; dense-cache
-/// behavior lives in `tests/typed_diagonal_allocations.rs`.
+/// These live inside the module on purpose: they assert what `tests/` cannot
+/// see without accessors the facade does not otherwise need — which `Arc`
+/// holds what ([`TypedTensorBody`], #580 PR 0), dense-kernel and solver call
+/// counts, cache warmth, and device call counts. The module itself keeps the
+/// representation gates and the shared fixtures; its children group the
+/// remaining gates by operation family: multiplicity-free and checked
+/// factorizations, lazy-adjoint redirects, CUDA, `*_into` overwrite, compact
+/// transforms/cat/absorb, contraction and network restriction. Public semantic
+/// oracles live in `tests/typed_facade.rs`; dense-cache behavior lives in
+/// `tests/typed_diagonal_allocations.rs`.
 #[cfg(test)]
 mod representation_gates;

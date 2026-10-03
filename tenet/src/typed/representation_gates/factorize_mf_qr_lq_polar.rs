@@ -1,0 +1,826 @@
+use super::*;
+
+#[test]
+fn compact_diagonal_qr_lq_preserves_compact_factors_without_dense_kernels() {
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::<CountPolarKernels>::default())
+        .build()
+        .unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(1), 3)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(-1),
+            values: vec![-2.0, 0.0, 3.0],
+        }],
+    )
+    .unwrap();
+    for operation in 0..4 {
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        let (left, right) = match operation {
+            0 => input.qr_compact(&[0], &[1]).unwrap().pair(),
+            1 => input.qr_full(&[0], &[1]).unwrap().pair(),
+            2 => input.lq_compact(&[0], &[1]).unwrap().pair(),
+            _ => input.lq_full(&[0], &[1]).unwrap().pair(),
+        };
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        for factor in [&left, &right] {
+            assert_eq!(factor.codomain(), input.codomain());
+            assert_eq!(factor.domain(), input.domain());
+            assert!(factor.diagview().is_ok());
+            assert!(factor.dense_data().is_err());
+            assert_eq!(
+                factor.map_diagonal(|x| x).unwrap().diagview().unwrap(),
+                factor.diagview().unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn compact_diagonal_qr_lq_rejects_inconsistent_spectra_and_nonbond_spaces() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+    )
+    .unwrap();
+    let input: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(1),
+                values: vec![2.0],
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![-1.0, 0.0],
+            },
+        ],
+    )
+    .unwrap();
+    let spectrum = input.spectrum().unwrap();
+    let admit = |values: &[tenet_matrixalgebra::SectorSpectrum<f64>]| {
+        tenet_matrixalgebra::seam::qr_diagonal_dyn(input.logical_space(), values)
+    };
+    assert!(admit(spectrum).is_some());
+    let mut reversed = spectrum.to_vec();
+    reversed.reverse();
+    assert!(admit(&reversed).is_some());
+    assert!(admit(&spectrum[..1]).is_none());
+    let mut duplicate = spectrum.to_vec();
+    duplicate[1].sector = duplicate[0].sector;
+    assert!(admit(&duplicate).is_none());
+    let mut wrong = spectrum.to_vec();
+    wrong[0].values.push(1.0);
+    assert!(admit(&wrong).is_none());
+    wrong = spectrum.to_vec();
+    wrong[0].values[0] = f64::NAN;
+    assert!(admit(&wrong).is_none());
+    let multileg: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1).unwrap();
+    assert!(
+        tenet_matrixalgebra::seam::qr_diagonal_dyn(multileg.logical_space(), spectrum).is_none()
+    );
+    let dual = leg.try_dual().unwrap();
+    let nonendo: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg], [&dual], 1).unwrap();
+    assert!(
+        tenet_matrixalgebra::seam::qr_diagonal_dyn(nonendo.logical_space(), spectrum).is_none()
+    );
+}
+
+#[test]
+fn compact_diagonal_polar_skips_input_materialization_svd_and_gemm() {
+    let svd_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let gemm_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .with_dense_executor(Box::new(CountPolarKernels {
+            inner: DefaultDenseExecutor::default(),
+            svd_calls: Arc::clone(&svd_calls),
+            gemm_calls: Arc::clone(&gemm_calls),
+        }))
+        .build()
+        .unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
+    let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![
+                Complex64::new(-2.0, 0.0),
+                Complex64::new(0.0, 0.0),
+                Complex64::new(0.0, 3.0),
+            ],
+        }],
+    )
+    .unwrap();
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let left = input.left_polar(&[0], &[1]).unwrap();
+    assert!(left.w.diagview().is_ok());
+    assert!(left.p.diagview().is_ok());
+    assert!(left.w.dense_data().is_err());
+    assert!(left.p.dense_data().is_err());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(gemm_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    // Hand oracle: phase and magnitude of -2, 0 and 3i, with unit phase at 0.
+    let zero = Complex64::new(0.0, 0.0);
+    let phase = [
+        Complex64::new(-1.0, 0.0),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 1.0),
+    ];
+    let magnitude = [2.0, 0.0, 3.0].map(|value| Complex64::new(value, 0.0));
+    let w = left.w.materialize().unwrap();
+    let p = left.p.materialize().unwrap();
+    for (i, (&actual_w, &actual_p)) in w
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(p.dense_data().unwrap())
+        .enumerate()
+    {
+        let (row, col) = (i % 3, i / 3);
+        let on_diagonal = row == col;
+        assert_eq!(actual_w, if on_diagonal { phase[row] } else { zero });
+        assert_eq!(actual_p, if on_diagonal { magnitude[row] } else { zero });
+    }
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let right = input.right_polar(&[0], &[1]).unwrap();
+    assert!(right.wh.diagview().is_ok());
+    assert!(right.p.diagview().is_ok());
+    assert!(right.wh.dense_data().is_err());
+    assert!(right.p.dense_data().is_err());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(gemm_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn compact_diagonal_qr_lq_matches_hand_phase_and_absolute_value_all_scalars() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 4)]).unwrap();
+    macro_rules! check {
+        ($ty:ty, $values:expr, $phase:expr, $magnitude:expr, $tol:expr) => {{
+            let input: TensorMap<_, $ty> = TensorMap::diagonal(
+                &runtime,
+                &leg,
+                [SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: $values,
+                }],
+            )
+            .unwrap();
+            let saved = input.diagview().unwrap();
+            for operation in 0..4 {
+                let (w, p) = match operation {
+                    0 => input.qr_compact(&[0], &[1]).unwrap().pair(),
+                    1 => input.qr_full(&[0], &[1]).unwrap().pair(),
+                    2 => {
+                        let Lq { l, q } = input.lq_compact(&[0], &[1]).unwrap();
+                        (q, l)
+                    }
+                    _ => {
+                        let Lq { l, q } = input.lq_full(&[0], &[1]).unwrap();
+                        (q, l)
+                    }
+                };
+                assert_eq!(w.codomain(), input.codomain());
+                assert_eq!(w.domain(), input.domain());
+                assert_eq!(p.codomain(), input.domain());
+                assert_eq!(p.domain(), p.codomain());
+                assert!(w.dense_data().is_err());
+                assert!(p.dense_data().is_err());
+                assert!(w.diagview().is_ok());
+                assert!(p.diagview().is_ok());
+                let w = w.materialize().unwrap();
+                let p = p.materialize().unwrap();
+                for (i, (&actual_w, &actual_p)) in w
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .zip(p.dense_data().unwrap())
+                    .enumerate()
+                {
+                    let row = i % 4;
+                    let col = i / 4;
+                    let expected_w = if row == col {
+                        $phase[row]
+                    } else {
+                        Complex64::new(0.0, 0.0)
+                    };
+                    let expected_p = if row == col { $magnitude[row] } else { 0.0 };
+                    assert!((actual_w.widen_complex() - expected_w).norm() <= $tol);
+                    assert!((actual_p.widen_complex().re - expected_p).abs() <= $tol);
+                }
+                assert_typed_map_close(
+                    &w.compose(&p).unwrap(),
+                    &input.materialize().unwrap(),
+                    $tol,
+                );
+                let unit = w.adjoint().unwrap().compose(&w).unwrap();
+                for (i, &value) in unit.dense_data().unwrap().iter().enumerate() {
+                    let expected = if i % 4 == i / 4 { 1.0 } else { 0.0 };
+                    assert!((value.widen_complex() - Complex64::new(expected, 0.0)).norm() <= $tol);
+                }
+            }
+            assert_eq!(input.diagview().unwrap(), saved);
+        }};
+    }
+    let phase = [
+        Complex64::new(-1.0, 0.0),
+        Complex64::new(0.6, 0.8),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(1.0, 0.0),
+    ];
+    let magnitude = [2.0, 5.0, 0.0, 1.0];
+    check!(
+        f32,
+        vec![-2.0, 5.0, -0.0, 1.0],
+        [phase[0], Complex64::new(1.0, 0.0), phase[2], phase[3]],
+        magnitude,
+        2e-6
+    );
+    check!(
+        f64,
+        vec![-2.0, 5.0, -0.0, 1.0],
+        [phase[0], Complex64::new(1.0, 0.0), phase[2], phase[3]],
+        magnitude,
+        1e-12
+    );
+    check!(
+        num_complex::Complex32,
+        vec![
+            num_complex::Complex32::new(-2.0, 0.0),
+            num_complex::Complex32::new(3.0, 4.0),
+            num_complex::Complex32::new(-0.0, 0.0),
+            num_complex::Complex32::new(1.0, 0.0)
+        ],
+        phase,
+        magnitude,
+        2e-6
+    );
+    check!(
+        Complex64,
+        vec![
+            Complex64::new(-2.0, 0.0),
+            Complex64::new(3.0, 4.0),
+            Complex64::new(-0.0, 0.0),
+            Complex64::new(1.0, 0.0)
+        ],
+        phase,
+        magnitude,
+        1e-12
+    );
+}
+
+#[test]
+fn compact_diagonal_qr_lq_preserves_sectors_and_changed_roles() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    macro_rules! check {
+        ($leg:expr, $spectra:expr) => {{
+            let input: TensorMap<_, f64> = TensorMap::diagonal(&runtime, &$leg, $spectra).unwrap();
+            for (rows, cols) in [([0], [1]), ([1], [0])] {
+                let permuted = input.permute(&rows, &cols).unwrap();
+                let dense = permuted.materialize().unwrap();
+                for operation in 0..4 {
+                    let (a, b) = match operation {
+                        0 => input.qr_compact(&rows, &cols).unwrap().pair(),
+                        1 => input.qr_full(&rows, &cols).unwrap().pair(),
+                        2 => input.lq_compact(&rows, &cols).unwrap().pair(),
+                        _ => input.lq_full(&rows, &cols).unwrap().pair(),
+                    };
+                    assert_eq!(a.codomain(), permuted.codomain());
+                    assert_eq!(a.domain(), permuted.domain());
+                    assert_eq!(b.codomain(), permuted.codomain());
+                    assert_eq!(b.domain(), permuted.domain());
+                    assert!(a.diagview().is_ok());
+                    assert!(b.diagview().is_ok());
+                    let reconstructed = a.compose(&b).unwrap().materialize().unwrap();
+                    assert_typed_map_close(&reconstructed, &dense, 1e-12);
+                    let q = if operation < 2 { &a } else { &b };
+                    let gram = q.adjoint().unwrap().compose(q).unwrap();
+                    let expected =
+                        TensorMap::isomorphism(&runtime, &q.domain(), &q.domain()).unwrap();
+                    assert_typed_map_close(
+                        &gram.materialize().unwrap(),
+                        &expected.materialize().unwrap(),
+                        1e-12,
+                    );
+                }
+            }
+        }};
+    }
+    let u1 = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    check!(
+        u1,
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(-1),
+                values: vec![-2.0, 0.0]
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![1.0, -3.0, 2.0]
+            },
+        ]
+    );
+    let spin0 = SU2Irrep::from_twice_spin(0);
+    let half = SU2Irrep::from_twice_spin(1);
+    let su2 = GradedSpace::try_new(Arc::new(SU2FusionRule), [(spin0, 2), (half, 1)]).unwrap();
+    check!(
+        su2,
+        [
+            SectorSpectrum {
+                sector: spin0,
+                values: vec![2.0, -2.0]
+            },
+            SectorSpectrum {
+                sector: half,
+                values: vec![0.0]
+            },
+        ]
+    );
+    let even = product_sector(U1Irrep::new(0), Z2Irrep::EVEN);
+    let odd = product_sector(U1Irrep::new(1), Z2Irrep::ODD);
+    let fermion = GradedSpace::try_new(
+        Arc::new(U1FusionRule.product(FermionParityFusionRule)),
+        [(even, 2), (odd, 1)],
+    )
+    .unwrap();
+    check!(
+        fermion,
+        [
+            SectorSpectrum {
+                sector: even,
+                values: vec![-2.0, 0.0]
+            },
+            SectorSpectrum {
+                sector: odd,
+                values: vec![3.0]
+            },
+        ]
+    );
+    let zero = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 0), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+    check!(
+        zero,
+        [SectorSpectrum {
+            sector: U1Irrep::new(1),
+            values: vec![0.0, -3.0],
+        }]
+    );
+    let empty = GradedSpace::try_new(Arc::new(U1FusionRule), []).unwrap();
+    check!(empty, Vec::<SectorSpectrum<_, f64>>::new());
+}
+
+#[test]
+fn compact_diagonal_qr_lq_scales_complex_subnormals_before_normalizing() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
+    macro_rules! check {
+        ($ty:ty, $tiny:expr, $tol:expr) => {{
+            let tiny = $tiny;
+            let input: TensorMap<_, $ty> = TensorMap::diagonal(
+                &runtime,
+                &leg,
+                [SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: vec![<$ty>::new(tiny, tiny)],
+                }],
+            )
+            .unwrap();
+            for operation in 0..4 {
+                let (w, p) = match operation {
+                    0 => input.qr_compact(&[0], &[1]).unwrap().pair(),
+                    1 => input.qr_full(&[0], &[1]).unwrap().pair(),
+                    2 => {
+                        let Lq { l, q } = input.lq_compact(&[0], &[1]).unwrap();
+                        (q, l)
+                    }
+                    _ => {
+                        let Lq { l, q } = input.lq_full(&[0], &[1]).unwrap();
+                        (q, l)
+                    }
+                };
+                let phase = w.diagview().unwrap()[0].values[0].widen_complex();
+                let magnitude = p.diagview().unwrap()[0].values[0].widen_complex().re;
+                assert!((phase.re - std::f64::consts::FRAC_1_SQRT_2).abs() < $tol);
+                assert!((phase.im - std::f64::consts::FRAC_1_SQRT_2).abs() < $tol);
+                assert!(magnitude.is_finite() && magnitude > 0.0);
+                assert!((phase.norm() - 1.0).abs() <= $tol);
+                let rebuilt = phase * magnitude;
+                let original = input.diagview().unwrap()[0].values[0].widen_complex();
+                // The minimum subnormal rounds its magnitude to one ULP.
+                assert!((rebuilt.re - original.re).abs() <= tiny as f64);
+                assert!((rebuilt.im - original.im).abs() <= tiny as f64);
+            }
+        }};
+    }
+    check!(num_complex::Complex32, f32::from_bits(1), 2e-6);
+    check!(Complex64, f64::from_bits(1), 1e-12);
+}
+
+#[test]
+fn compact_diagonal_qr_lq_nonfinite_and_unrepresentable_values_use_existing_route() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
+    for value in [
+        Complex64::new(f64::NAN, 0.0),
+        Complex64::new(f64::INFINITY, 1.0),
+        Complex64::new(f64::MAX, f64::MAX),
+    ] {
+        let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+            &runtime,
+            &leg,
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![value],
+            }],
+        )
+        .unwrap();
+        for operation in 0..4 {
+            DIAGONAL_MATERIALIZATIONS.set(0);
+            match operation {
+                0 => {
+                    let _ = input.qr_compact(&[0], &[1]);
+                }
+                1 => {
+                    let _ = input.qr_full(&[0], &[1]);
+                }
+                2 => {
+                    let _ = input.lq_compact(&[0], &[1]);
+                }
+                _ => {
+                    let _ = input.lq_full(&[0], &[1]);
+                }
+            }
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+        }
+    }
+    let input: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![num_complex::Complex32::new(f32::MAX, f32::MAX)],
+        }],
+    )
+    .unwrap();
+    for operation in 0..4 {
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        match operation {
+            0 => {
+                let _ = input.qr_compact(&[0], &[1]);
+            }
+            1 => {
+                let _ = input.qr_full(&[0], &[1]);
+            }
+            2 => {
+                let _ = input.lq_compact(&[0], &[1]);
+            }
+            _ => {
+                let _ = input.lq_full(&[0], &[1]);
+            }
+        }
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    }
+}
+
+#[test]
+fn compact_diagonal_polar_matches_hand_phase_and_absolute_value_all_scalars() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 4)]).unwrap();
+    macro_rules! check {
+        ($ty:ty, $values:expr, $phase:expr, $magnitude:expr, $tol:expr) => {{
+            let input: TensorMap<_, $ty> = TensorMap::diagonal(
+                &runtime,
+                &leg,
+                [SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: $values,
+                }],
+            )
+            .unwrap();
+            let saved = input.diagview().unwrap();
+            for left in [true, false] {
+                let (w, p) = if left {
+                    let LeftPolar { w, p } = input.left_polar(&[0], &[1]).unwrap();
+                    (w, p)
+                } else {
+                    let RightPolar { p, wh } = input.right_polar(&[0], &[1]).unwrap();
+                    (wh, p)
+                };
+                assert_eq!(w.codomain(), input.codomain());
+                assert_eq!(w.domain(), input.domain());
+                assert_eq!(
+                    p.codomain(),
+                    if left {
+                        input.domain()
+                    } else {
+                        input.codomain()
+                    }
+                );
+                assert_eq!(p.domain(), p.codomain());
+                assert!(w.dense_data().is_err());
+                assert!(p.dense_data().is_err());
+                assert!(w.diagview().is_ok());
+                assert!(p.diagview().is_ok());
+                let w = w.materialize().unwrap();
+                let p = p.materialize().unwrap();
+                for (i, (&actual_w, &actual_p)) in w
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .zip(p.dense_data().unwrap())
+                    .enumerate()
+                {
+                    let row = i % 4;
+                    let col = i / 4;
+                    let expected_w = if row == col {
+                        $phase[row]
+                    } else {
+                        Complex64::new(0.0, 0.0)
+                    };
+                    let expected_p = if row == col { $magnitude[row] } else { 0.0 };
+                    assert!((actual_w.widen_complex() - expected_w).norm() <= $tol);
+                    assert!((actual_p.widen_complex().re - expected_p).abs() <= $tol);
+                }
+                assert_typed_map_close(
+                    &w.compose(&p).unwrap(),
+                    &input.materialize().unwrap(),
+                    $tol,
+                );
+                let unit = w.adjoint().unwrap().compose(&w).unwrap();
+                for (i, &value) in unit
+                    .materialize()
+                    .unwrap()
+                    .dense_data()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                {
+                    let expected = if i % 4 == i / 4 { 1.0 } else { 0.0 };
+                    assert!((value.widen_complex() - Complex64::new(expected, 0.0)).norm() <= $tol);
+                }
+            }
+            assert_eq!(input.diagview().unwrap(), saved);
+        }};
+    }
+    let phase = [
+        Complex64::new(-1.0, 0.0),
+        Complex64::new(0.6, 0.8),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(1.0, 0.0),
+    ];
+    let magnitude = [2.0, 5.0, 0.0, 1.0];
+    check!(
+        f32,
+        vec![-2.0, 5.0, -0.0, 1.0],
+        [phase[0], Complex64::new(1.0, 0.0), phase[2], phase[3]],
+        magnitude,
+        2e-6
+    );
+    check!(
+        f64,
+        vec![-2.0, 5.0, -0.0, 1.0],
+        [phase[0], Complex64::new(1.0, 0.0), phase[2], phase[3]],
+        magnitude,
+        1e-12
+    );
+    check!(
+        num_complex::Complex32,
+        vec![
+            num_complex::Complex32::new(-2.0, 0.0),
+            num_complex::Complex32::new(3.0, 4.0),
+            num_complex::Complex32::new(-0.0, 0.0),
+            num_complex::Complex32::new(1.0, 0.0)
+        ],
+        phase,
+        magnitude,
+        2e-6
+    );
+    check!(
+        Complex64,
+        vec![
+            Complex64::new(-2.0, 0.0),
+            Complex64::new(3.0, 4.0),
+            Complex64::new(-0.0, 0.0),
+            Complex64::new(1.0, 0.0)
+        ],
+        phase,
+        magnitude,
+        1e-12
+    );
+}
+
+#[test]
+fn compact_diagonal_polar_preserves_sectors_and_changed_roles() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    macro_rules! check {
+        ($leg:expr, $spectra:expr) => {{
+            let input: TensorMap<_, f64> = TensorMap::diagonal(&runtime, &$leg, $spectra).unwrap();
+            for (rows, cols) in [([0], [1]), ([1], [0])] {
+                let permuted = input.permute(&rows, &cols).unwrap();
+                let dense = permuted.materialize().unwrap();
+                let expected_left = dense.left_polar(&[0], &[1]).unwrap();
+                let expected_right = dense.right_polar(&[0], &[1]).unwrap();
+                DIAGONAL_MATERIALIZATIONS.set(0);
+                let left = input.left_polar(&rows, &cols).unwrap();
+                let right = input.right_polar(&rows, &cols).unwrap();
+                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+                if permuted.spectrum().is_some() {
+                    for factor in [&left.w, &left.p, &right.p, &right.wh] {
+                        assert!(factor.diagview().is_ok());
+                        assert!(factor.dense_data().is_err());
+                        assert_eq!(factor.codomain(), permuted.codomain());
+                        assert_eq!(factor.domain(), permuted.domain());
+                    }
+                }
+                assert_polar_factors(
+                    &input,
+                    &dense,
+                    &(left.w, left.p),
+                    &(expected_left.w, expected_left.p),
+                    true,
+                );
+                assert_polar_factors(
+                    &input,
+                    &dense,
+                    &(right.p, right.wh),
+                    &(expected_right.p, expected_right.wh),
+                    false,
+                );
+            }
+        }};
+    }
+    let u1 = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    check!(
+        u1,
+        [
+            SectorSpectrum {
+                sector: U1Irrep::new(-1),
+                values: vec![-2.0, 0.0]
+            },
+            SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![1.0, -3.0, 2.0]
+            },
+        ]
+    );
+    let spin0 = SU2Irrep::from_twice_spin(0);
+    let half = SU2Irrep::from_twice_spin(1);
+    let su2 = GradedSpace::try_new(Arc::new(SU2FusionRule), [(spin0, 2), (half, 1)]).unwrap();
+    check!(
+        su2,
+        [
+            SectorSpectrum {
+                sector: spin0,
+                values: vec![2.0, -2.0]
+            },
+            SectorSpectrum {
+                sector: half,
+                values: vec![0.0]
+            },
+        ]
+    );
+    let even = product_sector(U1Irrep::new(0), Z2Irrep::EVEN);
+    let odd = product_sector(U1Irrep::new(1), Z2Irrep::ODD);
+    let fermion = GradedSpace::try_new(
+        Arc::new(U1FusionRule.product(FermionParityFusionRule)),
+        [(even, 2), (odd, 1)],
+    )
+    .unwrap();
+    check!(
+        fermion,
+        [
+            SectorSpectrum {
+                sector: even,
+                values: vec![-2.0, 0.0]
+            },
+            SectorSpectrum {
+                sector: odd,
+                values: vec![3.0]
+            },
+        ]
+    );
+    let zero = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 0), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+    check!(
+        zero,
+        [SectorSpectrum {
+            sector: U1Irrep::new(1),
+            values: vec![0.0, -3.0],
+        }]
+    );
+    let empty = GradedSpace::try_new(Arc::new(U1FusionRule), []).unwrap();
+    check!(empty, Vec::<SectorSpectrum<_, f64>>::new());
+}
+
+#[test]
+fn compact_diagonal_polar_scales_complex_subnormals_before_normalizing() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
+    macro_rules! check {
+        ($ty:ty, $tiny:expr, $tol:expr) => {{
+            let tiny = $tiny;
+            let input: TensorMap<_, $ty> = TensorMap::diagonal(
+                &runtime,
+                &leg,
+                [SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: vec![<$ty>::new(tiny, tiny)],
+                }],
+            )
+            .unwrap();
+            for left in [true, false] {
+                let (w, p) = if left {
+                    let LeftPolar { w, p } = input.left_polar(&[0], &[1]).unwrap();
+                    (w, p)
+                } else {
+                    let RightPolar { p, wh } = input.right_polar(&[0], &[1]).unwrap();
+                    (wh, p)
+                };
+                let phase = w.diagview().unwrap()[0].values[0].widen_complex();
+                let magnitude = p.diagview().unwrap()[0].values[0].widen_complex().re;
+                assert!((phase.re - std::f64::consts::FRAC_1_SQRT_2).abs() < $tol);
+                assert!((phase.im - std::f64::consts::FRAC_1_SQRT_2).abs() < $tol);
+                assert!(magnitude.is_finite() && magnitude > 0.0);
+            }
+        }};
+    }
+    check!(num_complex::Complex32, f32::from_bits(1), 2e-6);
+    check!(Complex64, f64::from_bits(1), 1e-12);
+}
+
+#[test]
+fn compact_diagonal_polar_nonfinite_and_unrepresentable_values_use_existing_route() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
+    for value in [
+        Complex64::new(f64::NAN, 0.0),
+        Complex64::new(f64::INFINITY, 1.0),
+    ] {
+        let input: TensorMap<_, Complex64> = TensorMap::diagonal(
+            &runtime,
+            &leg,
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![value],
+            }],
+        )
+        .unwrap();
+        for left in [true, false] {
+            DIAGONAL_MATERIALIZATIONS.set(0);
+            if left {
+                let _ = input.left_polar(&[0], &[1]);
+            } else {
+                let _ = input.right_polar(&[0], &[1]);
+            }
+            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+        }
+    }
+    let input: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![num_complex::Complex32::new(f32::MAX, f32::MAX)],
+        }],
+    )
+    .unwrap();
+    for left in [true, false] {
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        if left {
+            let _ = input.left_polar(&[0], &[1]);
+        } else {
+            let _ = input.right_polar(&[0], &[1]);
+        }
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    }
+}

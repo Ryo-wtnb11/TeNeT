@@ -289,7 +289,7 @@ jobs:
           test_output="$(mktemp)"
           trap 'rm -f "$test_output"' EXIT
           cargo test -p tenet-rs --lib --no-default-features --features cpu-faer,racah-generated \
-            typed::representation_gates::checked_generic_lazy_transforms_do_not_materialize_uncached_input \
+            typed::representation_gates::lazy_adjoint::checked_generic_lazy_transforms_do_not_materialize_uncached_input \
             -- --exact 2>&1 | tee "$test_output"
           grep -Eq '^test result: ok\. 1 passed;' "$test_output"
         env:
