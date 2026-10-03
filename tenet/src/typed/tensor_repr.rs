@@ -904,11 +904,11 @@ where
             .expect("uncached materialization is owned");
         let mut output = match destination_body.data.as_ref() {
             TypedData::Dense(data) => data.clone(),
-            TypedData::Diagonal(spectrum) => {
-                tenet_matrixalgebra::diagonal_bond_data(destination_space, spectrum, &|value| {
-                    value
-                })?
-            }
+            TypedData::Diagonal(spectrum) => tenet_matrixalgebra::seam::diagonal_bond_data(
+                destination_space,
+                spectrum,
+                &|value| value,
+            )?,
         };
         let source_required_len = source_space.structure().required_len()?;
         if destination_space.structure().required_len()? != output.len()

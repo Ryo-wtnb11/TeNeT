@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 /// Compact (thin, untruncated) fusion-tensor SVD `t = U * S * Vh`
 /// (MatrixAlgebraKit `svd_compact`).
 ///
@@ -8,22 +9,24 @@ use super::*;
 /// Per block the bond is `min(rows, cols)`; the square-`U` variant is
 /// MatrixAlgebraKit `svd_full` (later batch).
 #[derive(Clone, Debug)]
-pub struct SvdCompact<R, D, const NOUT: usize, const NIN: usize> {
+pub(crate) struct SvdCompact<R, D, const NOUT: usize, const NIN: usize> {
     pub u: BoundTensorMap<R, D, NOUT, 1>,
     pub s: BoundTensorMap<R, D, 1, 1>,
     pub vh: BoundTensorMap<R, D, 1, NIN>,
     pub singular_values: Vec<SectorSpectrum>,
 }
 
+#[cfg(test)]
 /// Dynamic-rank [`SvdCompact`].
 #[derive(Clone, Debug)]
-pub struct SvdCompactDyn<R, D> {
+pub(crate) struct SvdCompactDyn<R, D> {
     pub(super) u: BoundDynFactor<R, D>,
     pub(super) s: BoundDynFactor<R, D>,
     pub(super) vh: BoundDynFactor<R, D>,
     pub(super) singular_values: Vec<SectorSpectrum>,
 }
 
+#[cfg(test)]
 impl<R, D> SvdCompactDyn<R, D> {
     pub fn u(&self) -> &BoundDynFactor<R, D> {
         &self.u
@@ -40,23 +43,9 @@ impl<R, D> SvdCompactDyn<R, D> {
     pub fn singular_values(&self) -> &[SectorSpectrum] {
         &self.singular_values
     }
-
-    #[expect(
-        clippy::type_complexity,
-        reason = "the public decomposition accessor returns its named components in documented order"
-    )]
-    pub fn into_parts(
-        self,
-    ) -> (
-        BoundDynFactor<R, D>,
-        BoundDynFactor<R, D>,
-        BoundDynFactor<R, D>,
-        Vec<SectorSpectrum>,
-    ) {
-        (self.u, self.s, self.vh, self.singular_values)
-    }
 }
 
+#[cfg(test)]
 pub(super) fn diagonal_bond_svd_factor<R, D, V>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<V>],
@@ -93,26 +82,6 @@ where
         FusionProductSpace::new([new_leg]),
     );
     authority.derive_from_final_homspace(homspace)
-}
-
-pub fn diagonal_bond_bound_space<R, V>(
-    provider: Arc<R>,
-    spectrum: &[SectorSpectrum<V>],
-) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    let new_leg = SectorLeg::new(
-        spectrum
-            .iter()
-            .map(|entry| (entry.sector, entry.values.len())),
-        false,
-    );
-    let homspace = FusionTreeHomSpace::new(
-        FusionProductSpace::new([new_leg.clone()]),
-        FusionProductSpace::new([new_leg]),
-    );
-    BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(provider, homspace)
 }
 
 /// Fills the dense block-diagonal data of `space` from `spectrum`, mapping
@@ -264,10 +233,11 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 /// All singular values per coupled sector, descending (MatrixAlgebraKit
 /// `svd_vals`). Runs the dense SVD per sector through the executor and keeps
 /// only the spectra.
-pub fn svd_vals<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn svd_vals<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<Vec<SectorSpectrum>, OperationError>
@@ -362,8 +332,9 @@ where
     Ok(Some(values))
 }
 
+#[cfg(test)]
 /// Compact (untruncated) fusion-tensor SVD through the device boundary.
-pub fn svd_compact<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn svd_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<SvdCompact<R, D, NOUT, NIN>, OperationError>
@@ -701,6 +672,7 @@ where
         singular_values,
         row_dimensions,
         col_dimensions,
+        #[cfg(test)]
         adjoint_space: None,
     }))
 }
@@ -1268,9 +1240,10 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 /// Dynamic-rank [`svd_compact`]: the [`svd_compact_factors_dyn`] core plus the
 /// diagonal `S` materialized as a `bond <- bond` tensor.
-pub fn svd_compact_dyn<E, R, D>(
+pub(crate) fn svd_compact_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<SvdCompactDyn<R, D>, OperationError>
@@ -1326,20 +1299,21 @@ where
     .map_err(OperationError::from)
 }
 
+#[cfg(test)]
 /// Full fusion-tensor SVD `t = U * S * Vh` (MatrixAlgebraKit `svd_full`):
 /// per sector `U` is the square `m x m` unitary, `S` the rectangular
 /// `m x n` diagonal, and `Vh` the square `n x n` unitary.
 #[derive(Clone, Debug)]
-pub struct SvdFull<R, D, const NOUT: usize, const NIN: usize> {
+pub(crate) struct SvdFull<R, D, const NOUT: usize, const NIN: usize> {
     pub u: BoundTensorMap<R, D, NOUT, 1>,
     pub s: BoundTensorMap<R, D, 1, 1>,
     pub vh: BoundTensorMap<R, D, 1, NIN>,
-    pub singular_values: Vec<SectorSpectrum>,
 }
 
+#[cfg(test)]
 /// Dynamic-rank [`SvdFull`].
 #[derive(Clone, Debug)]
-pub struct SvdFullDyn<R, D> {
+pub(crate) struct SvdFullDyn<R, D> {
     pub(super) u: BoundDynFactor<R, D>,
     pub(super) s: BoundDynFactor<R, D>,
     pub(super) vh: BoundDynFactor<R, D>,
@@ -1354,6 +1328,7 @@ pub struct SvdFullFactorsDyn<R, D> {
     singular_values: Vec<SectorSpectrum>,
     row_dimensions: BTreeMap<SectorId, usize>,
     col_dimensions: BTreeMap<SectorId, usize>,
+    #[cfg(test)]
     adjoint_space: Option<BoundDynamicFusionMapSpace<R>>,
 }
 
@@ -1400,6 +1375,7 @@ impl<R, D> SvdFullFactorsDyn<R, D> {
     }
 }
 
+#[cfg(test)]
 impl<R, D> SvdFullDyn<R, D> {
     pub fn u(&self) -> &BoundDynFactor<R, D> {
         &self.u
@@ -1413,22 +1389,9 @@ impl<R, D> SvdFullDyn<R, D> {
     pub fn singular_values(&self) -> &[SectorSpectrum] {
         &self.singular_values
     }
-    #[expect(
-        clippy::type_complexity,
-        reason = "the public decomposition accessor returns its named components in documented order"
-    )]
-    pub fn into_parts(
-        self,
-    ) -> (
-        BoundDynFactor<R, D>,
-        BoundDynFactor<R, D>,
-        BoundDynFactor<R, D>,
-        Vec<SectorSpectrum>,
-    ) {
-        (self.u, self.s, self.vh, self.singular_values)
-    }
 }
 
+#[cfg(test)]
 /// Full fusion-tensor SVD through the device boundary.
 ///
 /// A provider that advertises [`DenseExecutor::supports_svd_full`] factorizes
@@ -1439,7 +1402,7 @@ impl<R, D> SvdFullDyn<R, D> {
 /// existing dense-executor boundary. The two routes agree on the reconstructed
 /// input, the spectrum and unitarity, but the basis spanning the null space is
 /// not unique and differs between them.
-pub fn svd_full<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn svd_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<SvdFull<R, D, NOUT, NIN>, OperationError>
@@ -1453,12 +1416,12 @@ where
         u: typed_from_bound_factor(out.u)?,
         s: typed_from_bound_factor(out.s)?,
         vh: typed_from_bound_factor(out.vh)?,
-        singular_values: out.singular_values,
     })
 }
 
+#[cfg(test)]
 /// Dynamic-rank [`svd_full`].
-pub fn svd_full_dyn<E, R, D>(
+pub(crate) fn svd_full_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<SvdFullDyn<R, D>, OperationError>
@@ -1497,9 +1460,9 @@ where
     svd_full_oriented_factors_dyn(dense, input, FactorPlacement::Adjoint)
 }
 
+#[cfg(test)]
 /// Full SVD factors for the logical adjoint without constructing its input.
-#[doc(hidden)]
-pub fn svd_full_adjoint_dyn<E, R, D>(
+pub(crate) fn svd_full_adjoint_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<SvdFullDyn<R, D>, OperationError>
@@ -1552,6 +1515,7 @@ where
     Ok(Some((u, singular_values, vh)))
 }
 
+#[cfg(test)]
 pub(super) fn svd_full_oriented_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -1771,6 +1735,7 @@ where
         singular_values,
         row_dimensions,
         col_dimensions,
+        #[cfg(test)]
         adjoint_space,
     })
 }
@@ -2544,11 +2509,11 @@ where
     Ok((u, vh, singular_values))
 }
 
+#[cfg(test)]
 /// Checked-Generic full SVD. Dense work is performed before any output-space
 /// publication; checked factor builders then admit square outer factors and
 /// the rectangular diagonal, including unmatched structural sectors.
-#[doc(hidden)]
-pub fn svd_full_dyn_checked_generic<E, R, D>(
+pub(crate) fn svd_full_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<SvdFullDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
@@ -2758,6 +2723,7 @@ where
         singular_values,
         row_dimensions,
         col_dimensions,
+        #[cfg(test)]
         adjoint_space: None,
     })
 }

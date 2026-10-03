@@ -16,11 +16,13 @@ use crate::factorize::{
     adjoint_bound_factor, eigh_full_dyn, inverse_by_sector_dyn, inverse_by_sector_dyn_into,
     is_hermitian_endomorphism_dyn, map_square_sectors_dyn, map_square_sectors_dyn_into,
     pinv_by_sector_dyn_into, pinv_cutoff, scale_axis_by_spectrum, solve_left_by_sector_dyn,
-    solve_left_by_sector_dyn_into, svd_compact_factors_dyn, typed_from_bound_factor,
-    BoundDynFactor, BoundDynamicTensorRef, BoundTensorMap, BoundTensorMapRef, FactorScalar,
-    SectorSpectrum, SvdFactorsDyn,
+    solve_left_by_sector_dyn_into, svd_compact_factors_dyn, BoundDynFactor, BoundDynamicTensorRef,
+    FactorScalar, SectorSpectrum, SvdFactorsDyn,
 };
+#[cfg(test)]
+use crate::factorize::{typed_from_bound_factor, BoundTensorMap, BoundTensorMapRef};
 
+#[cfg(test)]
 /// Matrix exponential of any endomorphism (TensorKit `exp!`, which checks only
 /// `domain == codomain`). Hermitian input takes the spectral route
 /// `exp(t) = V exp(D) V^H`; everything else takes blockwise scaling-and-squaring
@@ -32,7 +34,7 @@ use crate::factorize::{
 /// coupled-sector block, where `real(D)` is the real component type of `D`.
 /// This machine-precision multiple is not currently user-configurable;
 /// changing it can change whether [`exp`] uses the spectral or Padé algorithm.
-pub fn exp<E, RuleKey, BT, BC, R, D, const N: usize>(
+pub(crate) fn exp<E, RuleKey, BT, BC, R, D, const N: usize>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundTensorMapRef<'_, R, D, N, N>,
@@ -826,13 +828,14 @@ where
     compose_bound_dyn(context, &vd, &vh)
 }
 
+#[cfg(test)]
 /// Thresholded pseudo-inverse via the compact SVD with an
 /// `rcond * sigma_max` cutoff: `t^+ = V S^+ U^H`.
 ///
 /// This is the exact Moore-Penrose inverse of the hard-thresholded
 /// effective-rank tensor. It is the Moore-Penrose inverse of the original
 /// tensor only when the cutoff discards no genuinely nonzero singular value.
-pub fn pinv<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn pinv<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -974,11 +977,12 @@ where
     compose_bound_dyn(context, &v, &uh)
 }
 
+#[cfg(test)]
 /// True inverse of a nonsingular map between isomorphic spaces.
 ///
 /// The context parameter is retained for source compatibility. Inverse itself
 /// is context-free and performs one dense solve per nonempty coupled sector.
-pub fn inv<E, RuleKey, BT, BC, R, D, const N: usize>(
+pub(crate) fn inv<E, RuleKey, BT, BC, R, D, const N: usize>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundTensorMapRef<'_, R, D, N, N>,
@@ -995,8 +999,9 @@ where
     typed_from_bound_factor(out)
 }
 
+#[cfg(test)]
 /// Dynamic-rank [`inv`].
-pub fn inv_dyn<E, RuleKey, BT, BC, R, D>(
+pub(crate) fn inv_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
     _context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundDynamicTensorRef<'_, R, D>,

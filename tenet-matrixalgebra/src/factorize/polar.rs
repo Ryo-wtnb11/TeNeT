@@ -1,70 +1,22 @@
 use super::*;
 
-struct PolarDiagonalAdmission<R, D> {
-    source_regions: Arc<[CoupledSectorRegion]>,
-    w_regions: Arc<[CoupledSectorRegion]>,
-    p_regions: Arc<[CoupledSectorRegion]>,
-    routes: Vec<PolarRegionRoute>,
-    phase: Vec<SectorSpectrum<D>>,
-    magnitude: Vec<SectorSpectrum<D>>,
-    w_space: BoundDynamicFusionMapSpace<R>,
-    p_space: BoundDynamicFusionMapSpace<R>,
-}
-
-impl<R, D: FactorScalar> PolarDiagonalAdmission<R, D> {
-    fn spectra(self) -> (Vec<SectorSpectrum<D>>, Vec<SectorSpectrum<D>>) {
-        (self.phase, self.magnitude)
-    }
-
-    fn dense(self) -> Result<DynamicFactorPair<R, D>, OperationError> {
-        let source = self.w_space.space();
-        let (nout, nin) = (source.nout(), source.nin());
-        let w_len = source
-            .required_len()
-            .map_err(OperationError::from_core_preserving_context)?;
-        let p_len = self
-            .p_space
-            .space()
-            .required_len()
-            .map_err(OperationError::from_core_preserving_context)?;
-        let mut w_data = vec![D::zero(); w_len];
-        let mut p_data = vec![D::zero(); p_len];
-        for route in self.routes {
-            let n = self.source_regions[route.source].rows();
-            let w_start = self.w_regions[route.w].range().start;
-            let p_start = self.p_regions[route.p].range().start;
-            for (index, (&phase, &magnitude)) in self.phase[route.source]
-                .values
-                .iter()
-                .zip(&self.magnitude[route.source].values)
-                .enumerate()
-            {
-                w_data[w_start + index * (n + 1)] = phase;
-                p_data[p_start + index * (n + 1)] = magnitude;
-            }
-        }
-        let w = BoundDynFactor::from_bound(self.w_space, w_data, nout, nin)?;
-        let p_nout = self.p_space.space().nout();
-        let p = BoundDynFactor::from_bound(self.p_space, p_data, p_nout, p_nout)?;
-        Ok((w, p))
-    }
-}
-
-fn polar_diagonal_admission<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
+/// Phase and magnitude spectra of an admitted compact diagonal endomorphism:
+/// `W` is the per-value phase and `P` the magnitude, both on the input's own
+/// coupled sectors, so the caller publishes them on the input space. The
+/// right polar factors are the same spectra (`Wh = W`).
+fn polar_diagonal_spectra<D>(
+    authority: &DynamicFusionMapSpace,
     spectrum: &[SectorSpectrum<D>],
-    direction: PolarDirection,
-) -> Result<Option<PolarDiagonalAdmission<R, D>>, OperationError>
+) -> Option<LeftPolar<Vec<SectorSpectrum<D>>>>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let source = authority.space();
-    if source.homspace().codomain() != source.homspace().domain() {
-        return Ok(None);
+    if authority.homspace().codomain() != authority.homspace().domain() {
+        return None;
     }
-    let Ok(Some(source_regions)) = checked_sector_regions(source.structure(), source.nout()) else {
-        return Ok(None);
+    let Ok(Some(source_regions)) = checked_sector_regions(authority.structure(), authority.nout())
+    else {
+        return None;
     };
     if validate_endomorphism_region_stacking(
         &source_regions,
@@ -72,23 +24,17 @@ where
     )
     .is_err()
     {
-        return Ok(None);
+        return None;
     }
-    let Some(by_sector) = aligned_diagonal_spectrum_by_sector(&source_regions, spectrum) else {
-        return Ok(None);
-    };
+    let by_sector = aligned_diagonal_spectrum_by_sector(&source_regions, spectrum)?;
     let mut phase = Vec::with_capacity(source_regions.len());
     let mut magnitude = Vec::with_capacity(source_regions.len());
     for region in source_regions.iter() {
-        let Some(entry) = by_sector.get(&region.coupled()) else {
-            return Ok(None);
-        };
+        let entry = by_sector.get(&region.coupled())?;
         let mut phases = Vec::with_capacity(entry.values.len());
         let mut magnitudes = Vec::with_capacity(entry.values.len());
         for &value in &entry.values {
-            let Some((value_phase, value_magnitude)) = diagonal_phase_magnitude(value) else {
-                return Ok(None);
-            };
+            let (value_phase, value_magnitude) = diagonal_phase_magnitude(value)?;
             phases.push(value_phase);
             magnitudes.push(value_magnitude);
         }
@@ -101,78 +47,14 @@ where
             values: magnitudes,
         });
     }
-
-    let p_homspace = match direction {
-        PolarDirection::Left => FusionTreeHomSpace::new(
-            source.homspace().domain().clone(),
-            source.homspace().domain().clone(),
-        ),
-        PolarDirection::Right => FusionTreeHomSpace::new(
-            source.homspace().codomain().clone(),
-            source.homspace().codomain().clone(),
-        ),
-    };
-    let p_nout = p_homspace.codomain().len();
-    let Ok(p_space) = authority.derive_from_final_homspace(p_homspace) else {
-        return Ok(None);
-    };
-    let w_space = authority.clone();
-    let Ok(Some(w_regions)) = checked_sector_regions(w_space.space().structure(), source.nout())
-    else {
-        return Ok(None);
-    };
-    let Ok(Some(p_regions)) = checked_sector_regions(p_space.space().structure(), p_nout) else {
-        return Ok(None);
-    };
-    let source_len = source
-        .required_len()
-        .map_err(OperationError::from_core_preserving_context)?;
-    let w_len = w_space
-        .space()
-        .required_len()
-        .map_err(OperationError::from_core_preserving_context)?;
-    let p_len = p_space
-        .space()
-        .required_len()
-        .map_err(OperationError::from_core_preserving_context)?;
-    let Ok(routes) = compile_polar_region_routes(
-        &source_regions,
-        &w_regions,
-        &p_regions,
-        source_len,
-        w_len,
-        p_len,
-        direction,
-    ) else {
-        return Ok(None);
-    };
-    Ok(Some(PolarDiagonalAdmission {
-        source_regions,
-        w_regions,
-        p_regions,
-        routes,
-        phase,
-        magnitude,
-        w_space,
-        p_space,
-    }))
+    Some(LeftPolar {
+        w: phase,
+        p: magnitude,
+    })
 }
 
-fn polar_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-    direction: PolarDirection,
-) -> Result<Option<DynamicFactorPair<R, D>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    polar_diagonal_admission(authority, spectrum, direction)?
-        .map(PolarDiagonalAdmission::dense)
-        .transpose()
-}
-
-/// Compact left polar spectra after the same full-tree route admission as the dense seam.
+/// Compact left polar spectra `W` (phase) and `P` (magnitude) of an owned
+/// compact diagonal endomorphism, or `None` when the input is not admitted.
 #[doc(hidden)]
 pub fn left_polar_diagonal_spectra_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
@@ -182,15 +64,11 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    Ok(
-        polar_diagonal_admission(authority, spectrum, PolarDirection::Left)?.map(|admission| {
-            let (w, p) = admission.spectra();
-            LeftPolar { w, p }
-        }),
-    )
+    Ok(polar_diagonal_spectra(authority.space(), spectrum))
 }
 
-/// Compact right polar spectra after the same full-tree route admission as the dense seam.
+/// Compact right polar spectra `P` (magnitude) and `Wh` (phase) of an owned
+/// compact diagonal endomorphism, or `None` when the input is not admitted.
 #[doc(hidden)]
 pub fn right_polar_diagonal_spectra_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
@@ -200,42 +78,11 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    Ok(
-        polar_diagonal_admission(authority, spectrum, PolarDirection::Right)?.map(|admission| {
-            let (wh, p) = admission.spectra();
-            RightPolar { p, wh }
-        }),
-    )
+    Ok(polar_diagonal_spectra(authority.space(), spectrum)
+        .map(|LeftPolar { w, p }| RightPolar { p, wh: w }))
 }
 
-/// Direct left polar factors of an admitted owned compact diagonal.
-#[doc(hidden)]
-pub fn left_polar_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<LeftPolar<BoundDynFactor<R, D>>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    polar_diagonal_dyn(authority, spectrum, PolarDirection::Left)
-        .map(|result| result.map(|(w, p)| LeftPolar { w, p }))
-}
-
-/// Direct right polar factors of an admitted owned compact diagonal.
-#[doc(hidden)]
-pub fn right_polar_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<RightPolar<BoundDynFactor<R, D>>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    polar_diagonal_dyn(authority, spectrum, PolarDirection::Right)
-        .map(|result| result.map(|(wh, p)| RightPolar { p, wh }))
-}
-
+#[cfg(test)]
 /// Left polar decomposition `t = W * P` (MatrixAlgebraKit `left_polar`):
 /// `W` is the isometry `U * Vh` and `P = V * S * Vh` the positive part on
 /// the domain. Every coupled-sector matrix must have at least as many rows as
@@ -245,7 +92,7 @@ where
     clippy::type_complexity,
     reason = "static-rank factors differ in rank, so the named result spells both factor types"
 )]
-pub fn left_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn left_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -323,6 +170,7 @@ where
     Ok((isometry, positive))
 }
 
+#[cfg(test)]
 /// Right polar decomposition `t = P * W` (MatrixAlgebraKit `right_polar`):
 /// `P = U * S * U^H` is the positive part on the codomain and `W = U * Vh`.
 /// Every coupled-sector matrix must have at least as many columns as rows;
@@ -332,7 +180,7 @@ where
     clippy::type_complexity,
     reason = "static-rank factors differ in rank, so the named result spells both factor types"
 )]
-pub fn right_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn right_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,

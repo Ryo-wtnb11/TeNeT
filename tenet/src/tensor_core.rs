@@ -1967,7 +1967,7 @@ mod tests {
             )
             .unwrap();
 
-        let input: tenet_matrixalgebra::BoundDynamicTensorRef<'_, ExternalZ2<0>, f64> =
+        let input: tenet_matrixalgebra::seam::BoundDynamicTensorRef<'_, ExternalZ2<0>, f64> =
             BoundDynamicTensorRef::try_new(&source, &source_data).unwrap();
         let mut context = Ctx::<f64, RuleIdentity>::default();
         let (actual_destination, actual_data) =

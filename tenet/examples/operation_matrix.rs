@@ -34,11 +34,12 @@ use tenet_core::{
     TensorMapSpace,
 };
 use tenet_dense::strided_batch_runs;
-use tenet_matrixalgebra::{
+use tenet_matrixalgebra::seam::{
     eig_full_dyn_checked_generic, lq_compact_dyn_checked_generic, lq_full_dyn_checked_generic,
     qr_compact_dyn_checked_generic, qr_compact_dyn_generic, qr_full_dyn_checked_generic,
-    svd_compact_dyn_checked_generic, BoundDynFactor, CheckedGenericFactorPlanError,
+    svd_compact_dyn_checked_generic, CheckedGenericFactorPlanError,
 };
+use tenet_matrixalgebra::BoundDynFactor;
 use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace};
 
 struct CountingAllocator;
@@ -1898,7 +1899,7 @@ fn multitree_factor_matrices<D: HarnessScalar>(
 
 fn assert_multitree_eig<D: HarnessScalar<Eig = Complex64>>(
     input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
-    result: &tenet_matrixalgebra::EigFullDyn<LayoutGenericRule, D>,
+    result: &tenet_matrixalgebra::seam::EigFullDyn<LayoutGenericRule, D>,
     degeneracy: usize,
     sector_count: usize,
 ) {
@@ -2038,7 +2039,7 @@ fn assert_eig_block(
 
 fn assert_checked_eig<D: HarnessScalar<Eig = Complex64>>(
     input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
-    result: &tenet_matrixalgebra::EigFullDyn<LayoutGenericRule, D>,
+    result: &tenet_matrixalgebra::seam::EigFullDyn<LayoutGenericRule, D>,
     sector_count: usize,
 ) {
     assert!(Arc::ptr_eq(

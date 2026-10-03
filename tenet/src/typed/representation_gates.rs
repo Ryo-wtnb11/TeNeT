@@ -154,7 +154,7 @@ fn compact_diagonal_qr_lq_rejects_inconsistent_spectra_and_nonbond_spaces() {
     .unwrap();
     let spectrum = input.spectrum().unwrap();
     let admit = |values: &[tenet_matrixalgebra::SectorSpectrum<f64>]| {
-        tenet_matrixalgebra::qr_diagonal_dyn(input.logical_space(), values)
+        tenet_matrixalgebra::seam::qr_diagonal_dyn(input.logical_space(), values)
     };
     assert!(admit(spectrum).is_some());
     let mut reversed = spectrum.to_vec();
@@ -172,11 +172,15 @@ fn compact_diagonal_qr_lq_rejects_inconsistent_spectra_and_nonbond_spaces() {
     assert!(admit(&wrong).is_none());
     let multileg: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1).unwrap();
-    assert!(tenet_matrixalgebra::qr_diagonal_dyn(multileg.logical_space(), spectrum).is_none());
+    assert!(
+        tenet_matrixalgebra::seam::qr_diagonal_dyn(multileg.logical_space(), spectrum).is_none()
+    );
     let dual = leg.try_dual().unwrap();
     let nonendo: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&dual], 1).unwrap();
-    assert!(tenet_matrixalgebra::qr_diagonal_dyn(nonendo.logical_space(), spectrum).is_none());
+    assert!(
+        tenet_matrixalgebra::seam::qr_diagonal_dyn(nonendo.logical_space(), spectrum).is_none()
+    );
 }
 
 #[test]
@@ -214,20 +218,28 @@ fn compact_diagonal_polar_skips_input_materialization_svd_and_gemm() {
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(svd_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     assert_eq!(gemm_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
-    let old_dense = tenet_matrixalgebra::left_polar_diagonal_dyn(
-        input.logical_space(),
-        input.spectrum().unwrap(),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        old_dense.w.data(),
-        left.w.materialize().unwrap().dense_data().unwrap()
-    );
-    assert_eq!(
-        old_dense.p.data(),
-        left.p.materialize().unwrap().dense_data().unwrap()
-    );
+    // Hand oracle: phase and magnitude of -2, 0 and 3i, with unit phase at 0.
+    let zero = Complex64::new(0.0, 0.0);
+    let phase = [
+        Complex64::new(-1.0, 0.0),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 1.0),
+    ];
+    let magnitude = [2.0, 0.0, 3.0].map(|value| Complex64::new(value, 0.0));
+    let w = left.w.materialize().unwrap();
+    let p = left.p.materialize().unwrap();
+    for (i, (&actual_w, &actual_p)) in w
+        .dense_data()
+        .unwrap()
+        .iter()
+        .zip(p.dense_data().unwrap())
+        .enumerate()
+    {
+        let (row, col) = (i % 3, i / 3);
+        let on_diagonal = row == col;
+        assert_eq!(actual_w, if on_diagonal { phase[row] } else { zero });
+        assert_eq!(actual_p, if on_diagonal { magnitude[row] } else { zero });
+    }
     DIAGONAL_MATERIALIZATIONS.set(0);
     let right = input.right_polar(&[0], &[1]).unwrap();
     assert!(right.wh.diagview().is_ok());
@@ -3487,22 +3499,24 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
     let stored = real.spectrum().unwrap();
     let mut missing = stored.to_vec();
     missing.pop();
-    assert!(
-        tenet_matrixalgebra::svd_vals_compact_diagonal_dyn(&owned(&real).space, &missing)
-            .unwrap()
-            .is_none()
-    );
+    assert!(tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(
+        &owned(&real).space,
+        &missing
+    )
+    .unwrap()
+    .is_none());
     let mut duplicate = stored.to_vec();
     duplicate[1].sector = duplicate[0].sector;
-    assert!(
-        tenet_matrixalgebra::svd_vals_compact_diagonal_dyn(&owned(&real).space, &duplicate)
-            .unwrap()
-            .is_none()
-    );
+    assert!(tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(
+        &owned(&real).space,
+        &duplicate
+    )
+    .unwrap()
+    .is_none());
     let mut short = stored.to_vec();
     short[0].values.pop();
     assert!(
-        tenet_matrixalgebra::svd_vals_compact_diagonal_dyn(&owned(&real).space, &short)
+        tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(&owned(&real).space, &short)
             .unwrap()
             .is_none()
     );
@@ -3777,7 +3791,7 @@ fn checked_compact_diagonal_eigh_vals_rejects_inconsistent_spectrum_admission() 
     .unwrap();
     let spectrum = input.spectrum().unwrap();
     let admit = |entries: &[tenet_matrixalgebra::SectorSpectrum<f64>]| {
-        tenet_matrixalgebra::eigh_vals_diagonal_dyn(input.logical_space(), entries).unwrap()
+        tenet_matrixalgebra::seam::eigh_vals_diagonal_dyn(input.logical_space(), entries).unwrap()
     };
     assert!(admit(spectrum).is_some());
     let mut reversed = spectrum.to_vec();
@@ -4170,7 +4184,7 @@ fn checked_compact_diagonal_eig_vals_rejects_inconsistent_spectrum_admission() {
     .unwrap();
     let spectrum = input.spectrum().unwrap();
     let admit = |entries: &[tenet_matrixalgebra::SectorSpectrum<Complex64>]| {
-        tenet_matrixalgebra::eig_vals_diagonal_dyn(input.logical_space(), entries).unwrap()
+        tenet_matrixalgebra::seam::eig_vals_diagonal_dyn(input.logical_space(), entries).unwrap()
     };
     assert!(admit(spectrum).is_some());
     let mut reversed = spectrum.to_vec();
@@ -4404,16 +4418,18 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
     short[0].values.pop();
     for malformed in [&missing, &duplicate, &short] {
         assert!(
-            tenet_matrixalgebra::svd_compact_diagonal_factors_dyn_checked_generic(
+            tenet_matrixalgebra::seam::svd_compact_diagonal_factors_dyn_checked_generic(
                 source, malformed
             )
             .unwrap()
             .is_none()
         );
         assert!(matches!(
-            tenet_matrixalgebra::svd_full_diagonal_factors_dyn_checked_generic(source, malformed)
-                .unwrap(),
-            tenet_matrixalgebra::CheckedDiagonalFullSvdFactors::NotAdmitted
+            tenet_matrixalgebra::seam::svd_full_diagonal_factors_dyn_checked_generic(
+                source, malformed
+            )
+            .unwrap(),
+            tenet_matrixalgebra::seam::CheckedDiagonalFullSvdFactors::NotAdmitted
         ));
     }
 }
@@ -5355,9 +5371,12 @@ fn checked_compact_diagonal_eig_full_rejects_inconsistent_spectrum_admission() {
     .unwrap();
     let spectrum = input.spectrum().unwrap();
     let admit = |entries: &[tenet_matrixalgebra::SectorSpectrum<Complex64>]| {
-        tenet_matrixalgebra::eig_full_diagonal_dyn_checked_generic(input.logical_space(), entries)
-            .unwrap()
-            .is_some()
+        tenet_matrixalgebra::seam::eig_full_diagonal_dyn_checked_generic(
+            input.logical_space(),
+            entries,
+        )
+        .unwrap()
+        .is_some()
     };
     assert!(admit(spectrum));
     let mut reversed = spectrum.to_vec();
@@ -5483,9 +5502,12 @@ fn checked_compact_diagonal_eigh_full_rejects_inconsistent_spectrum_admission() 
     .unwrap();
     let spectrum = input.spectrum().unwrap();
     let admit = |entries: &[tenet_matrixalgebra::SectorSpectrum<f64>]| {
-        tenet_matrixalgebra::eigh_full_diagonal_dyn_checked_generic(input.logical_space(), entries)
-            .unwrap()
-            .is_some()
+        tenet_matrixalgebra::seam::eigh_full_diagonal_dyn_checked_generic(
+            input.logical_space(),
+            entries,
+        )
+        .unwrap()
+        .is_some()
     };
     assert!(admit(spectrum));
     let mut reversed = spectrum.to_vec();
@@ -8686,7 +8708,7 @@ fn missing_cuda_context_precedes_compact_expansion_and_lazy_materialization() {
         entry.values.clear();
     }
     let malformed_expansion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tenet_matrixalgebra::diagonal_bond_data(
+        tenet_matrixalgebra::seam::diagonal_bond_data(
             diagonal.logical_space().space(),
             &malformed_spectrum,
             &|value| value,
@@ -8738,7 +8760,7 @@ fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
     let TypedData::Diagonal(spectrum) = owned(&diagonal).data.as_ref() else {
         unreachable!("SVD factor is compact")
     };
-    let expected_diagonal = tenet_matrixalgebra::diagonal_bond_data(
+    let expected_diagonal = tenet_matrixalgebra::seam::diagonal_bond_data(
         diagonal.logical_space().space(),
         spectrum,
         &|value| value,

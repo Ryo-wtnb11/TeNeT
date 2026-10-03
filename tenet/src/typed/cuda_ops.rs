@@ -42,7 +42,7 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
             let storage = match body.data.as_ref() {
                 TypedData::Dense(data) => CudaStorage::upload(cuda, data)?,
                 TypedData::Diagonal(spectrum) => {
-                    let dense = tenet_matrixalgebra::diagonal_bond_data(
+                    let dense = tenet_matrixalgebra::seam::diagonal_bond_data(
                         body.space.space(),
                         spectrum,
                         &|value| value,
@@ -574,9 +574,9 @@ where
                 "CUDA EIGH source contains a non-square coupled-sector region",
             ));
         }
-        tenet_matrixalgebra::validate_endomorphism_region_stacking(
+        tenet_matrixalgebra::seam::validate_endomorphism_region_stacking(
             &source_regions,
-            tenet_matrixalgebra::EIGH_FULL_STACKING,
+            tenet_matrixalgebra::seam::EIGH_FULL_STACKING,
         )?;
 
         {
@@ -3955,11 +3955,11 @@ where
         };
         let data = match body.data.as_ref() {
             TypedData::Dense(data) => data.clone(),
-            TypedData::Diagonal(spectrum) => {
-                tenet_matrixalgebra::diagonal_bond_data(body.space.space(), spectrum, &|value| {
-                    value
-                })?
-            }
+            TypedData::Diagonal(spectrum) => tenet_matrixalgebra::seam::diagonal_bond_data(
+                body.space.space(),
+                spectrum,
+                &|value| value,
+            )?,
         };
         Ok(self.with_data(data))
     }
@@ -4226,7 +4226,7 @@ where
                 #[cfg(test)]
                 DIAGONAL_MATERIALIZATIONS.set(DIAGONAL_MATERIALIZATIONS.get().saturating_add(1));
                 std::borrow::Cow::Owned(
-                    tenet_matrixalgebra::diagonal_bond_data(
+                    tenet_matrixalgebra::seam::diagonal_bond_data(
                         self.space.space(),
                         spectrum,
                         &|value| value,

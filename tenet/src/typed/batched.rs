@@ -1425,9 +1425,9 @@ where
             }
             .into());
         }
-        tenet_matrixalgebra::validate_endomorphism_region_stacking(
+        tenet_matrixalgebra::seam::validate_endomorphism_region_stacking(
             &regions,
-            tenet_matrixalgebra::EIGH_FULL_STACKING,
+            tenet_matrixalgebra::seam::EIGH_FULL_STACKING,
         )?;
         let provider = source.space.provider();
         let mut labels = regions
@@ -1683,7 +1683,7 @@ where
             .take(members)
             .enumerate()
             .filter_map(|(member, data)| {
-                match tenet_matrixalgebra::validate_hermitian_regions(data, &self.regions) {
+                match tenet_matrixalgebra::seam::validate_hermitian_regions(data, &self.regions) {
                     Ok(()) => None,
                     // Shapes were admitted by `new`, so this is the content
                     // rule, the only other error the check reports.
@@ -1705,7 +1705,7 @@ where
             let data = &source.storage[member * len..(member + 1) * len];
             let input = BoundDynamicTensorRef::try_new(&self.space, data).map_err(Error::from)?;
             let (v, mut eigenvalues) =
-                match tenet_matrixalgebra::eigh_full_dyn(dense.dense(), &input) {
+                match tenet_matrixalgebra::seam::eigh_full_dyn(dense.dense(), &input) {
                     Ok(out) => out.into_parts(),
                     // The eager rejection of a non-finite eigenvalue; every
                     // other member is still solved so all of them are named.
@@ -1722,9 +1722,11 @@ where
             eigenvalues.sort_unstable_by_key(|entry| entry.sector);
             let (v_space, v_data) = v.into_parts();
             if buffers.is_none() {
-                let d_space =
-                    tenet_matrixalgebra::diagonal_bond_bound_space_like(&self.space, &eigenvalues)
-                        .map_err(Error::from)?;
+                let d_space = tenet_matrixalgebra::seam::diagonal_bond_bound_space_like(
+                    &self.space,
+                    &eigenvalues,
+                )
+                .map_err(Error::from)?;
                 let d_len = d_space.space().required_len().map_err(Error::from)?;
                 let v_len = v_data.len();
                 let signature =

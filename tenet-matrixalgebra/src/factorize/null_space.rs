@@ -260,13 +260,14 @@ where
     null_diagonal_dyn(authority, spectrum, false)
 }
 
+#[cfg(test)]
 /// Left null space `N : codomain <- W` (MatrixAlgebraKit `left_null`).
 ///
 /// Each sector uses its compact SVD and treats `sigma` as nonzero exactly when
 /// `sigma > epsilon(dtype) * max(rows, cols) * sigma_max`. The returned columns
 /// are the orthonormal complement after that numerical rank; sectors with no
 /// null directions drop out of `W`.
-pub fn left_null<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn left_null<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<BoundTensorMap<R, D, NOUT, 1>, OperationError>
@@ -334,13 +335,14 @@ where
     ))
 }
 
+#[cfg(test)]
 /// Right null space `N : W <- domain` (MatrixAlgebraKit `right_null`).
 ///
 /// Each sector uses its compact SVD and treats `sigma` as nonzero exactly when
 /// `sigma > epsilon(dtype) * max(rows, cols) * sigma_max`. The returned rows
 /// span the kernel after that numerical rank; sectors with no null directions
 /// drop out of `W`.
-pub fn right_null<E, R, D, const NOUT: usize, const NIN: usize>(
+pub(crate) fn right_null<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
 ) -> Result<BoundTensorMap<R, D, 1, NIN>, OperationError>
@@ -413,13 +415,13 @@ where
     ))
 }
 
+#[cfg(test)]
 /// Checked-Generic numerical left null space.
 ///
 /// Structural dimensions are validated before dense work. All SVDs and
 /// completions are then staged before the exact data-dependent bond is
 /// admitted and scattered by the shared checked factor builder.
-#[doc(hidden)]
-pub fn left_null_dyn_checked_generic<E, R, D>(
+pub(crate) fn left_null_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
@@ -498,10 +500,10 @@ where
     ))
 }
 
+#[cfg(test)]
 /// Checked-Generic numerical right null space; see
 /// [`left_null_dyn_checked_generic`] for the transaction boundary.
-#[doc(hidden)]
-pub fn right_null_dyn_checked_generic<E, R, D>(
+pub(crate) fn right_null_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
