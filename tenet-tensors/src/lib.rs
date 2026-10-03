@@ -118,6 +118,8 @@ pub use physical::{expand_physical_host, project_physical_host, PhysicalConversi
 pub use tenet_operations::cuda;
 #[doc(hidden)]
 pub use tenet_operations::host_pool;
+#[cfg(test)]
+pub(crate) use tenet_operations::storage_scratch;
 pub use tenet_operations::ContractDestinationInit;
 #[cfg(test)]
 pub(crate) use tenet_operations::HostTreeTransformWorkspace;
@@ -128,7 +130,7 @@ pub use tenet_operations::TensorOperationsBackend;
 pub(crate) use tenet_operations::TreeTransformReplayProfile;
 pub use tenet_operations::TreeTransformStructure;
 pub use tenet_operations::TreeTransformWorkspace;
-pub(crate) use tenet_operations::{host_scratch, storage_scratch, strided};
+pub(crate) use tenet_operations::{host_scratch, strided};
 #[doc(hidden)]
 pub use tenet_operations::{try_cat_owned_raw, OwnedCatCopy, OwnedCatSide};
 #[doc(hidden)]
