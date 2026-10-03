@@ -1,0 +1,875 @@
+use super::*;
+
+fn assert_checked_compact_svd<D>(complex: bool)
+where
+    D: FactorScalar,
+{
+    let kept = 2;
+    let (provider, space, data) = checked_svd_truncation_input::<D>(complex);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut dense = CountingDense::default();
+    let Svd { u, s, vh } = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.svd_vals_calls, 0);
+    assert!(Arc::ptr_eq(u.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(vh.space().provider_arc(), &provider));
+
+    let expected_spectra = [
+        (SectorId::new(0), [4.0, 1.0]),
+        (SectorId::new(1), [3.0, 2.0]),
+    ];
+    let mut residual_squared = 0.0;
+    for (sector, expected) in expected_spectra {
+        // The checked compact S is dense: read its diagonal.
+        let s_block = (0..s.space().space().structure().block_count())
+            .map(|index| s.space().space().structure().block(index).unwrap())
+            .find(|block| {
+                matches!(
+                    block.key(),
+                    BlockKey::FusionTree(key) if key.codomain_tree().coupled() == sector
+                )
+            })
+            .unwrap();
+        let spectrum = (0..s_block.shape()[0])
+            .map(|k| {
+                s.data()[s_block.offset() + k * (s_block.strides()[0] + s_block.strides()[1])]
+                    .widen_complex()
+                    .re
+            })
+            .collect::<Vec<f64>>();
+        assert_eq!(spectrum.len(), kept);
+        for (&actual, &expected) in spectrum.iter().zip(&expected[..kept]) {
+            assert!((actual - expected).abs() < 1.0e-10);
+        }
+
+        let u_block = (0..u.space().space().structure().block_count())
+            .map(|index| u.space().space().structure().block(index).unwrap())
+            .find(|block| {
+                matches!(
+                    block.key(),
+                    BlockKey::FusionTree(key) if key.codomain_tree().coupled() == sector
+                )
+            })
+            .unwrap();
+        let vh_block = (0..vh.space().space().structure().block_count())
+            .map(|index| vh.space().space().structure().block(index).unwrap())
+            .find(|block| {
+                matches!(
+                    block.key(),
+                    BlockKey::FusionTree(key) if key.domain_tree().coupled() == sector
+                )
+            })
+            .unwrap();
+        let (rows, cols, matrix) = checked_svd_matrix(sector, complex);
+        assert_eq!(u_block.shape(), [rows, kept]);
+        assert_eq!(vh_block.shape(), [kept, cols]);
+
+        let u_value = |row: usize, col: usize| {
+            u.data()[u_block.offset() + row * u_block.strides()[0] + col * u_block.strides()[1]]
+                .widen_complex()
+        };
+        let vh_value = |row: usize, col: usize| {
+            vh.data()[vh_block.offset() + row * vh_block.strides()[0] + col * vh_block.strides()[1]]
+                .widen_complex()
+        };
+        for left in 0..kept {
+            for right in 0..kept {
+                let u_inner = (0..rows)
+                    .map(|row| u_value(row, left).conj() * u_value(row, right))
+                    .sum::<Complex64>();
+                let vh_inner = (0..cols)
+                    .map(|col| vh_value(left, col) * vh_value(right, col).conj())
+                    .sum::<Complex64>();
+                let expected = if left == right { 1.0 } else { 0.0 };
+                assert!((u_inner - expected).norm() < 1.0e-10);
+                assert!((vh_inner - expected).norm() < 1.0e-10);
+            }
+        }
+        for col in 0..cols {
+            for row in 0..rows {
+                let reconstructed = (0..kept)
+                    .map(|bond| u_value(row, bond) * spectrum[bond] * vh_value(bond, col))
+                    .sum::<Complex64>();
+                residual_squared += if sector == SectorId::new(1) {
+                    (1.0 + 2.0_f64.sqrt()) * (reconstructed - matrix[row + rows * col]).norm_sqr()
+                } else {
+                    (reconstructed - matrix[row + rows * col]).norm_sqr()
+                };
+            }
+        }
+    }
+    assert!(residual_squared.sqrt() < 1.0e-10);
+}
+
+#[test]
+fn checked_generic_svd_compact_uses_each_real_compact_decomposition_once() {
+    assert_checked_compact_svd::<f64>(false);
+}
+
+#[test]
+fn checked_generic_svd_compact_uses_each_complex_compact_decomposition_once() {
+    assert_checked_compact_svd::<Complex64>(true);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_svd_compact_empty_input_skips_dense_execution() {
+    let vacuum = SectorId::new(0);
+    let x = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(x, 1)], false)]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let data = Vec::<f64>::new();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = CountingDense::default();
+    let Svd { u, s, vh } = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    assert_eq!(dense.svd_calls, 0);
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.svd_vals_calls, 0);
+    assert!(s.data().is_empty());
+    assert!(u.data().is_empty());
+    assert!(vh.data().is_empty());
+    assert!(Arc::ptr_eq(u.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(vh.space().provider_arc(), &provider));
+}
+
+#[test]
+fn checked_generic_svd_compact_dense_failure_precedes_output_provider_admission() {
+    let (provider, space, data) = checked_svd_truncation_input::<f64>(false);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let before = input.data().to_vec();
+    let mut dense = FailAfterObservingSvdInput::default();
+    let result = svd_compact_dyn_checked_generic(&mut dense, &input);
+
+    assert!(matches!(
+        result,
+        Err(CheckedGenericFactorPlanError::Operation(
+            OperationError::Dense(DenseError::Backend { op: "svd_into", .. })
+        ))
+    ));
+    assert_eq!(provider.calls.get(), 0);
+    assert_eq!(dense.observed.len(), 1);
+    assert_eq!(input.data(), before);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
+    let rule = FactorGenericRule;
+    let x = SectorId::new(1);
+    let vacuum = SectorId::new(0);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(x, 1), (vacuum, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(x, 1)], false)]),
+    );
+    let source =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::new(rule), homspace).unwrap();
+    let data = vec![1.0; source.space().required_len().unwrap()];
+    let checked_provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::clone(&checked_provider),
+    )
+    .unwrap();
+    checked_provider.calls.set(0);
+    assert!(matches!(
+        svd_full_diagonal_factors_dyn_checked_generic::<_, f64>(&checked, &[]).unwrap(),
+        CheckedDiagonalFullSvdFactors::NotAdmitted
+    ));
+    assert_eq!(checked_provider.calls.get(), 0);
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = CountingDense::default();
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_eq!(dense.svd_calls, 1);
+    assert!(Arc::ptr_eq(
+        full.u().space().provider_arc(),
+        &checked_provider
+    ));
+    assert!(Arc::ptr_eq(
+        full.s().space().provider_arc(),
+        &checked_provider
+    ));
+    assert!(Arc::ptr_eq(
+        full.vh().space().provider_arc(),
+        &checked_provider
+    ));
+    let structure = full.u().space().space().structure();
+    assert!((0..structure.block_count()).any(|index| {
+        matches!(
+            structure.block(index).unwrap().key(),
+            BlockKey::FusionTree(key) if key.codomain_tree().coupled() == vacuum
+        )
+    }));
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_compact_diagonal_full_svd_has_no_post_preflight_provider_query() {
+    let x = SectorId::new(1);
+    let leg = SectorLeg::new([(x, 2)], true);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone()]),
+        FusionProductSpace::new([leg]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let spectrum = [SectorSpectrum {
+        sector: x,
+        values: vec![2.0, 1.0],
+    }];
+
+    let successful_provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let successful = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::clone(&successful_provider),
+    )
+    .unwrap();
+    successful_provider.calls.set(0);
+    coupled_sector_block_dimensions_generic_checked(
+        successful.space().homspace().codomain(),
+        successful_provider.as_ref(),
+    )
+    .unwrap();
+    coupled_sector_block_dimensions_generic_checked(
+        successful.space().homspace().domain(),
+        successful_provider.as_ref(),
+    )
+    .unwrap();
+    let dimension_calls = successful_provider.calls.get();
+    successful_provider.calls.set(0);
+    assert!(matches!(
+        svd_full_diagonal_factors_dyn_checked_generic(&successful, &spectrum).unwrap(),
+        CheckedDiagonalFullSvdFactors::Direct(_)
+    ));
+    assert_eq!(successful_provider.calls.get(), dimension_calls);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_full_svd_failure_publishes_no_factors() {
+    let (source, data) = generic_factorization_input();
+    let failing = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: 2,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), failing).unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let result = svd_full_dyn_checked_generic(&mut dense, &input);
+    assert!(matches!(
+        result,
+        Err(crate::CheckedGenericFactorPlanError::Provider(_))
+    ));
+}
+
+fn assert_checked_compact_svd_live_stage_owners<D: crate::factorize::FactorScalar>() {
+    let (_, space, data) = checked_svd_truncation_input::<D>(true);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut dense = RejectSvdInto::default();
+    crate::factorize::reset_checked_compact_svd_stage_pointers();
+
+    svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    let stage = crate::factorize::checked_compact_svd_stage_pointers();
+
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(stage.len(), 2);
+    assert_eq!(dense.output_ptrs, stage);
+    assert!(stage.iter().all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
+}
+
+#[test]
+fn checked_generic_compact_svd_keeps_live_stage_owners_for_every_dtype() {
+    assert_checked_compact_svd_live_stage_owners::<f64>();
+    assert_checked_compact_svd_live_stage_owners::<f32>();
+    assert_checked_compact_svd_live_stage_owners::<Complex32>();
+    assert_checked_compact_svd_live_stage_owners::<Complex64>();
+}
+
+#[test]
+fn checked_compact_svd_zero_rank_skips_backend_and_post_gauge_stage() {
+    let mut dense = RejectSvdInto::default();
+    crate::factorize::reset_checked_compact_svd_stage_pointers();
+
+    for (rows, cols) in [(0, 3), (3, 0)] {
+        assert_eq!(
+            crate::factorize::compact_svd_numerical_stage_lengths_for_test(
+                &mut dense,
+                &[] as &[f64],
+                rows,
+                cols,
+            )
+            .unwrap(),
+            (0, 0, 0)
+        );
+    }
+    assert_eq!(dense.svd_calls, 0);
+    assert_eq!(dense.svd_into_calls, 0);
+    assert!(crate::factorize::checked_compact_svd_stage_pointers().is_empty());
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_full_svd_completes_unmatched_columns_and_disjoint_space() {
+    let rule = FactorGenericRule;
+    let x = SectorId::new(1);
+    let vacuum = SectorId::new(0);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(x, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(x, 1), (vacuum, 1)], false)]),
+    );
+    let source =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::new(rule), homspace).unwrap();
+    let data = vec![1.0; source.space().required_len().unwrap()];
+    let checked = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::new(LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            calls: Cell::new(0),
+        }),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    let structure = full.vh().space().space().structure();
+    assert!((0..structure.block_count()).any(|index| {
+        matches!(
+            structure.block(index).unwrap().key(),
+            BlockKey::FusionTree(key) if key.domain_tree().coupled() == vacuum
+        )
+    }));
+
+    let disjoint = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(x, 1)], false)]),
+    );
+    let source =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::new(rule), disjoint).unwrap();
+    let checked = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::new(LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            calls: Cell::new(0),
+        }),
+    )
+    .unwrap();
+    let data = vec![1.0; source.space().required_len().unwrap()];
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert!(full.singular_values().is_empty());
+}
+
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn assert_checked_full_svd_builder_failure(fail_at: usize) {
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let before = input.data().to_vec();
+    let mut dense = CountingDense::default();
+    let result = svd_full_dyn_checked_generic(&mut dense, &input);
+
+    assert!(matches!(
+        result,
+        Err(crate::CheckedGenericFactorPlanError::Provider(LateGenericError(call)))
+            if call == fail_at
+    ));
+    assert_eq!(input.data(), before);
+    assert!(Arc::ptr_eq(input.space().provider_arc(), &provider));
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.qr_calls, 2);
+}
+
+// Checked full-SVD provider sequence for `generic_factorization_input`: ten
+// calls of the two multiplicity-aware dimension preflights, then the single
+// U output-layout enumeration (calls 11-13), then the single Vh enumeration
+// (calls 14-16); the diagonal S space issues no provider query. Before the
+// one-sided owner enumerated its layout once, each output enumerated twice
+// (U 11-16, Vh 17-22) and these tests pinned calls 15, 19 and 22.
+const FULL_SVD_DIMENSION_PREFLIGHT_CALLS: usize = 10;
+
+const FULL_SVD_U_FIRST_CALL: usize = FULL_SVD_DIMENSION_PREFLIGHT_CALLS + 1;
+
+const FULL_SVD_U_LAST_CALL: usize = FULL_SVD_DIMENSION_PREFLIGHT_CALLS + 3;
+
+const FULL_SVD_VH_FIRST_CALL: usize = FULL_SVD_U_LAST_CALL + 1;
+
+const FULL_SVD_VH_LAST_CALL: usize = FULL_SVD_U_LAST_CALL + 3;
+
+#[test]
+fn checked_generic_full_svd_u_builder_failure_preserves_provider_context() {
+    // What: the first and last post-dense checked-provider calls of U-space
+    // construction propagate their exact provider error.
+    assert_checked_full_svd_builder_failure(FULL_SVD_U_FIRST_CALL);
+    assert_checked_full_svd_builder_failure(FULL_SVD_U_LAST_CALL);
+}
+
+#[test]
+fn checked_generic_full_svd_vh_builder_failure_preserves_provider_context() {
+    // What: Vh-space construction propagates its exact provider error without
+    // publishing U, from its first call to its last.
+    assert_checked_full_svd_builder_failure(FULL_SVD_VH_FIRST_CALL);
+    assert_checked_full_svd_builder_failure(FULL_SVD_VH_LAST_CALL);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_full_svd_enumerates_each_output_layout_once() {
+    // What: the provider sees the dimension preflights plus exactly one
+    // layout enumeration per one-sided output; the diagonal S publication
+    // adds none. Formerly 22 calls (each output enumerated twice), now 16.
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = CountingDense::default();
+    let output = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_eq!(provider.calls.get(), FULL_SVD_VH_LAST_CALL);
+
+    let probe_calls = |run: &dyn Fn(&LateGenericSpy)| {
+        let probe = LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            calls: Cell::new(0),
+        };
+        run(&probe);
+        probe.calls.get()
+    };
+    let homspace = source.space().homspace();
+    let preflight = probe_calls(&|probe| {
+        coupled_sector_block_dimensions_generic_checked(homspace.codomain(), probe).unwrap();
+        coupled_sector_block_dimensions_generic_checked(homspace.domain(), probe).unwrap();
+    });
+    assert_eq!(preflight, FULL_SVD_DIMENSION_PREFLIGHT_CALLS);
+    let enumeration = |factor: &BoundDynFactor<LateGenericSpy, f64>| {
+        let homspace = factor.space().space().homspace().clone();
+        probe_calls(&|probe| {
+            homspace
+                .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(probe)
+                .unwrap();
+        })
+    };
+    assert_eq!(
+        enumeration(output.u()),
+        FULL_SVD_U_LAST_CALL - FULL_SVD_U_FIRST_CALL + 1
+    );
+    assert_eq!(
+        enumeration(output.vh()),
+        FULL_SVD_VH_LAST_CALL - FULL_SVD_VH_FIRST_CALL + 1
+    );
+    assert_eq!(enumeration(output.s()), 0);
+    assert!(Arc::ptr_eq(output.u().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(output.vh().space().provider_arc(), &provider));
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_native_full_svd_stages_before_unchanged_provider_admission() {
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let Some(mut dense) = NativeFullSvdSpy::new() else {
+        return;
+    };
+
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    assert_eq!(dense.full_calls, 2);
+    assert_eq!(provider.calls.get(), FULL_SVD_VH_LAST_CALL);
+    assert!(Arc::ptr_eq(full.u().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(full.s().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(full.vh().space().provider_arc(), &provider));
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_full_svd_local_shape_error_precedes_provider_query() {
+    // What: checked tensor admission reports the local storage mismatch before
+    // any provider-backed factorization work can run.
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: 1,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let error = match BoundDynamicTensorRef::try_new(&checked, &data[..data.len() - 1]) {
+        Ok(_) => panic!("short storage must be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        OperationError::Core(CoreError::DimensionMismatch { .. })
+    ));
+    assert_eq!(provider.calls.get(), 0);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_native_full_svd_reconstructs_complex_interleaved_square_trees() {
+    let (canonical, _, data) = generic_values_endomorphism_input();
+    let (interleaved_space, interleaved_data) =
+        interleaved_generic_endomorphism_input(&canonical, &data);
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let space = BoundDynamicFusionMapSpace::bind_generic(
+        interleaved_space.space().clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&space, &interleaved_data).unwrap();
+    let Some(mut dense) = NativeFullSvdSpy::new() else {
+        return;
+    };
+
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    assert_eq!(dense.full_calls, 2);
+    assert_compact_factors_reconstruct_input(&input, full.u(), Some(full.s()), full.vh());
+    assert!(Arc::ptr_eq(full.u().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(full.s().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(full.vh().space().provider_arc(), &provider));
+}
+
+fn assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm<D: crate::factorize::FactorScalar>() {
+    let (base, data) = generic_factorization_input();
+    let data = data.into_iter().map(D::from_real).collect::<Vec<_>>();
+    let (provider, source) = bind_checked_only(&base);
+    let input = BoundDynamicTensorRef::try_new(&source, &data).unwrap();
+    let output = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            source.space().homspace().domain().clone(),
+            source.space().homspace().codomain().clone(),
+        ),
+    )
+    .unwrap();
+    let mut dense = RejectSvdInto::default();
+
+    let result = pinv_direct_into_dyn(&mut dense, &input, output, 0.0).unwrap();
+
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.output_ptrs.len(), 2);
+    assert_eq!(dense.gemm_ptrs.len(), 2);
+    assert_eq!(
+        dense.gemm_ptrs,
+        dense
+            .output_ptrs
+            .iter()
+            .map(|&(u, vt)| (vt, u))
+            .collect::<Vec<_>>(),
+    );
+    let regions = source
+        .space()
+        .structure()
+        .coupled_sector_regions(source.space().nout())
+        .unwrap()
+        .unwrap();
+    assert_eq!(dense.gemm_views.len(), regions.len());
+    for ((lhs, rhs, lhs_conj, rhs_conj), region) in dense.gemm_views.iter().zip(regions.iter()) {
+        let rank = region.rows().min(region.cols());
+        assert_eq!(lhs.shape, [region.cols(), rank]);
+        assert_eq!(lhs.strides, [rank, 1]);
+        assert_eq!(lhs.offset, 0);
+        assert_eq!(rhs.shape, [rank, region.rows()]);
+        assert_eq!(rhs.strides, [region.rows(), 1]);
+        assert_eq!(rhs.offset, 0);
+        assert!(*lhs_conj && *rhs_conj);
+    }
+    assert!(std::ptr::eq(
+        result.space().provider_arc().as_ref(),
+        provider.as_ref()
+    ));
+}
+
+#[test]
+fn checked_pinv_uses_owned_svd_outputs_at_final_gemm() {
+    assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm::<f32>();
+    assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm::<f64>();
+    assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm::<Complex32>();
+    assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm::<Complex64>();
+}
+
+struct FailSingleLegFold {
+    rule: FactorGenericRule,
+    fail_at: usize,
+    single_leg_folds: Cell<usize>,
+}
+
+impl FusionRule for FailSingleLegFold {
+    fn rule_identity(&self) -> RuleIdentity {
+        self.rule.rule_identity()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.rule.dual(sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        self.rule.fusion_channels(left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.rule.nsymbol(left, right, coupled)
+    }
+}
+
+impl CheckedGenericFusion for FailSingleLegFold {
+    type Error = LateGenericError;
+
+    fn rule_identity(&self) -> RuleIdentity {
+        self.rule.rule_identity()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        Ok(self.rule.dual(sector))
+    }
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        Ok(self.rule.fusion_channels(left, right))
+    }
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.try_fusion_channels(left, right)
+    }
+    fn try_coupled_sector_fold(
+        &self,
+        effective: &[SectorId],
+    ) -> Result<CoupledSectorFold, Self::Error> {
+        if effective.len() == 1 {
+            let call = self.single_leg_folds.get() + 1;
+            self.single_leg_folds.set(call);
+            if call == self.fail_at {
+                return Err(LateGenericError(call));
+            }
+        }
+        Ok(InfallibleGeneric::new(&self.rule)
+            .try_coupled_sector_fold(effective)
+            .unwrap())
+    }
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, Self::Error> {
+        Ok(self.rule.nsymbol(left, right, coupled))
+    }
+}
+
+impl CheckedGenericRigidSymbols for FailSingleLegFold {
+    type Scalar = f64;
+
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.sqrt_dim_scalar(sector))
+    }
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.inv_sqrt_dim_scalar(sector))
+    }
+    fn try_frobenius_schur_phase_scalar(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.frobenius_schur_phase_scalar(sector))
+    }
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+        Ok(self.rule.f_symbol_generic(a, b, c, d, e, f))
+    }
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        coupled: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+        Ok(self.rule.r_symbol_generic(a, b, coupled))
+    }
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_svd_compact_preserves_a_diagonal_s_fold_failure() {
+    // What: a provider error while laying out checked compact SVD's dense `S`
+    // is returned unchanged as `Provider(e)`, after both dense SVDs and with
+    // the input untouched. (Formerly asserted through the removed
+    // `svd_trunc_factors_dyn_checked_generic`, whose compact call built this
+    // `S`; #1534.) U and Vh each enumerate their layout once and fold both
+    // one-leg bond sectors (U 1-2, Vh 3-4), so S's first fold is the fifth.
+    const FIRST_S_FOLD: usize = 5;
+    let (source, data) = generic_factorization_input();
+    let failing_provider = Arc::new(FailSingleLegFold {
+        rule: FactorGenericRule,
+        fail_at: FIRST_S_FOLD,
+        single_leg_folds: Cell::new(0),
+    });
+    let failing_space = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::clone(&failing_provider),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&failing_space, &data).unwrap();
+    let before = input.data().to_vec();
+    let mut dense = CountingDense::default();
+    let result = svd_compact_dyn_checked_generic(&mut dense, &input);
+
+    assert!(matches!(
+        result,
+        Err(CheckedGenericFactorPlanError::Provider(LateGenericError(call)))
+            if call == FIRST_S_FOLD
+    ));
+    assert_eq!(failing_provider.single_leg_folds.get(), FIRST_S_FOLD);
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.svd_vals_calls, 0);
+    assert_eq!(input.data(), before);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_svd_compact_enumerates_each_factor_layout_once() {
+    // What: checked compact SVD queries the provider for exactly one
+    // enumeration of each of the U, S and Vh spaces. (The truncating half of
+    // the former test went with `svd_trunc_factors_dyn_checked_generic`,
+    // #1534.)
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = CountingDense::default();
+    let Svd { u, s, vh } = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    let compact_calls = provider.calls.get();
+    assert!(s.data().len() > 1);
+    assert_eq!(
+        compact_calls,
+        checked_enumeration_calls(&u)
+            + checked_enumeration_calls(&s)
+            + checked_enumeration_calls(&vh)
+    );
+}

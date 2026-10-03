@@ -71,6 +71,7 @@ mod numerical_null_tests;
 mod hermitian_scale_tests;
 
 #[cfg(test)]
+#[path = "../tests/sector_matricization/mod.rs"]
 mod sector_matricization_tests;
 
 // Blanket re-exports so every existing `crate::factorize::<name>` path

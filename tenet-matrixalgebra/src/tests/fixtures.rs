@@ -1,0 +1,1131 @@
+use super::*;
+
+pub(super) fn bound_tensor<R, D, const NOUT: usize, const NIN: usize>(
+    provider: Arc<R>,
+    tensor: &TensorMap<D, NOUT, NIN>,
+) -> BoundTensorMap<R, D, NOUT, NIN>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: Clone,
+{
+    BoundTensorMap::try_new(provider, tensor.clone()).unwrap()
+}
+
+pub(super) fn assert_svd_blocks_match<const NOUT: usize, const NIN: usize>(
+    lhs: &TensorMap<f64, NOUT, NIN>,
+    rhs: &TensorMap<f64, NOUT, NIN>,
+) {
+    let lhs_structure = std::sync::Arc::clone(lhs.structure());
+    let rhs_structure = std::sync::Arc::clone(rhs.structure());
+    assert_eq!(lhs_structure.block_count(), rhs_structure.block_count());
+    for index in 0..lhs_structure.block_count() {
+        let lhs_block = lhs_structure.block(index).unwrap();
+        let rhs_block = rhs_structure.block(index).unwrap();
+        assert_eq!(lhs_block.key(), rhs_block.key());
+        assert_eq!(lhs_block.shape(), rhs_block.shape());
+        let shape = lhs_block.shape().to_vec();
+        let count = shape.iter().product::<usize>();
+        let mut multi_index = vec![0usize; shape.len()];
+        for _ in 0..count {
+            let lhs_position = lhs_block.offset()
+                + multi_index
+                    .iter()
+                    .zip(lhs_block.strides())
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            let rhs_position = rhs_block.offset()
+                + multi_index
+                    .iter()
+                    .zip(rhs_block.strides())
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            let lhs_value = lhs.data()[lhs_position];
+            let rhs_value = rhs.data()[rhs_position];
+            assert!(
+                (lhs_value - rhs_value).abs() < 1e-10,
+                "block {index} element {multi_index:?}: {lhs_value} != {rhs_value}"
+            );
+            for axis in 0..shape.len() {
+                multi_index[axis] += 1;
+                if multi_index[axis] < shape[axis] {
+                    break;
+                }
+                multi_index[axis] = 0;
+            }
+        }
+    }
+}
+
+pub(super) fn assert_factor_layout_matches_legacy_shapes<R>(actual: &BoundDynamicFusionMapSpace<R>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    // What: canonical factor construction has the exact block layout produced
+    // by the former per-tree shape authority.
+    let provider = Arc::clone(actual.provider_arc());
+    let homspace = actual.space().homspace().clone();
+    let shapes = homspace
+        .fusion_tree_keys(provider.as_ref())
+        .iter()
+        .map(|key| {
+            homspace
+                .codomain()
+                .legs()
+                .iter()
+                .zip(key.codomain_tree().uncoupled())
+                .chain(
+                    homspace
+                        .domain()
+                        .legs()
+                        .iter()
+                        .zip(key.domain_tree().uncoupled()),
+                )
+                .map(|(leg, &sector)| {
+                    leg.degeneracy(sector)
+                        .expect("factor tree sector must belong to its final leg")
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let legacy =
+        BoundDynamicFusionMapSpace::from_degeneracy_shapes(provider, homspace, shapes).unwrap();
+    let actual_space = actual.space();
+    let legacy_space = legacy.space();
+    assert_eq!(actual_space.nout(), legacy_space.nout());
+    assert_eq!(actual_space.nin(), legacy_space.nin());
+    assert_eq!(
+        actual_space.required_len().unwrap(),
+        legacy_space.required_len().unwrap()
+    );
+    assert_eq!(
+        actual_space.structure().block_count(),
+        legacy_space.structure().block_count()
+    );
+    for index in 0..actual_space.structure().block_count() {
+        let actual_block = actual_space.structure().block(index).unwrap();
+        let legacy_block = legacy_space.structure().block(index).unwrap();
+        assert_eq!(actual_block.key(), legacy_block.key());
+        assert_eq!(actual_block.shape(), legacy_block.shape());
+        assert_eq!(actual_block.strides(), legacy_block.strides());
+        assert_eq!(actual_block.offset(), legacy_block.offset());
+    }
+}
+
+pub(super) fn assert_compact_factors_reconstruct_input<R, D>(
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    left: &BoundDynFactor<R, D>,
+    diagonal: Option<&BoundDynFactor<R, D>>,
+    right: &BoundDynFactor<R, D>,
+) where
+    D: FactorScalar,
+{
+    let source_structure = input.space().space().structure();
+    let left_structure = left.space().space().structure();
+    let right_structure = right.space().space().structure();
+    for source_index in 0..source_structure.block_count() {
+        let source = source_structure.block(source_index).unwrap();
+        let BlockKey::FusionTree(source_key) = source.key() else {
+            panic!("factorization fixture must use fusion-tree blocks")
+        };
+        let left_block = (0..left_structure.block_count())
+            .map(|index| left_structure.block(index).unwrap())
+            .find(|block| {
+                block
+                    .key()
+                    .as_fusion_tree_pair()
+                    .is_some_and(|key| key.codomain_tree() == source_key.codomain_tree())
+            })
+            .unwrap();
+        let right_block = (0..right_structure.block_count())
+            .map(|index| right_structure.block(index).unwrap())
+            .find(|block| {
+                block
+                    .key()
+                    .as_fusion_tree_pair()
+                    .is_some_and(|key| key.domain_tree() == source_key.domain_tree())
+            })
+            .unwrap();
+        let rows = source.shape()[..input.space().space().nout()]
+            .iter()
+            .product::<usize>();
+        let cols = source.shape()[input.space().space().nout()..]
+            .iter()
+            .product::<usize>();
+        let rank = left_block.shape()[left_block.shape().len() - 1];
+        assert_eq!(right_block.shape()[0], rank);
+        let diagonal_block = diagonal.map(|factor| {
+            let structure = factor.space().space().structure();
+            (0..structure.block_count())
+                .map(|index| structure.block(index).unwrap())
+                .find(|block| {
+                    block
+                        .key()
+                        .as_fusion_tree_pair()
+                        .is_some_and(|key| key.coupled() == source_key.coupled())
+                })
+                .unwrap()
+        });
+        for column in 0..cols {
+            for row in 0..rows {
+                let mut reconstructed = D::zero();
+                for bond in 0..rank {
+                    let (left_offset, _) = flattened_block_value(
+                        left.data(),
+                        left_block,
+                        0..left_block.shape().len() - 1,
+                        row,
+                    );
+                    let left_value = left.data()
+                        [left_offset + bond * left_block.strides()[left_block.shape().len() - 1]];
+                    let (right_offset, _) = flattened_block_value(
+                        right.data(),
+                        right_block,
+                        1..right_block.shape().len(),
+                        column,
+                    );
+                    let right_value = right.data()[right_offset + bond * right_block.strides()[0]];
+                    let scale = diagonal_block.map_or_else(D::one, |block| {
+                        diagonal.unwrap().data()
+                            [block.offset() + bond * block.strides()[0] + bond * block.strides()[1]]
+                    });
+                    reconstructed = reconstructed + left_value * scale * right_value;
+                }
+                let (_, expected) = flattened_block_value(
+                    input.data(),
+                    source,
+                    0..source.shape().len(),
+                    row + rows * column,
+                );
+                assert!(
+                    (reconstructed.widen_complex() - expected.widen_complex()).norm() < 1.0e-10
+                );
+            }
+        }
+    }
+}
+
+pub(super) fn f64_qr_outputs(rows: usize, cols: usize) -> Vec<DenseTensor> {
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let data = vec![1.0; rows * cols];
+    dense
+        .qr(DenseRead::F64(
+            tenet_dense::DenseView::new(&data, &[rows, cols], &[1, rows], 0).unwrap(),
+        ))
+        .unwrap()
+}
+
+pub(super) fn c64_qr_outputs(rows: usize, cols: usize) -> Vec<DenseTensor> {
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let data = vec![Complex64::new(1.0, 1.0); rows * cols];
+    dense
+        .qr(DenseRead::C64(
+            tenet_dense::DenseView::new(&data, &[rows, cols], &[1, rows], 0).unwrap(),
+        ))
+        .unwrap()
+}
+
+pub(super) fn f64_eigh_outputs(order: usize) -> Vec<DenseTensor> {
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let data = vec![1.0; order * order];
+    let shape = [order, order];
+    let strides = [1, order];
+    dense
+        .eigh(DenseRead::F64(
+            tenet_dense::DenseView::new(&data, &shape, &strides, 0).unwrap(),
+        ))
+        .unwrap()
+}
+
+pub(super) fn c64_eigh_outputs(order: usize) -> Vec<DenseTensor> {
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let data = vec![Complex64::new(1.0, 1.0); order * order];
+    let shape = [order, order];
+    let strides = [1, order];
+    dense
+        .eigh(DenseRead::C64(
+            tenet_dense::DenseView::new(&data, &shape, &strides, 0).unwrap(),
+        ))
+        .unwrap()
+}
+
+pub(super) fn rectangular_svd_tensor(rows: usize, cols: usize) -> TensorMap<f64, 1, 1> {
+    let rule = Z2FusionRule;
+    let even = SectorId::new(0);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(even, rows)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, cols)], false)]),
+    );
+    let shapes = homspace
+        .fusion_tree_keys(&rule)
+        .iter()
+        .map(|_| vec![rows, cols])
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([rows], [cols]).unwrap(),
+        homspace,
+        &rule,
+        shapes,
+    )
+    .unwrap();
+    TensorMap::from_vec_with_fusion_space(
+        (0..rows * cols)
+            .map(|index| ((index * 11 + 2) % 19) as f64 - 7.0)
+            .collect(),
+        space,
+    )
+    .unwrap()
+}
+
+pub(super) fn mixed_rectangular_tensor(
+    even_shape: (usize, usize),
+    odd_shape: (usize, usize),
+) -> TensorMap<f64, 1, 1> {
+    let rule = Z2FusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new(
+            [(even, even_shape.0), (odd, odd_shape.0)],
+            false,
+        )]),
+        FusionProductSpace::new([SectorLeg::new(
+            [(even, even_shape.1), (odd, odd_shape.1)],
+            false,
+        )]),
+    );
+    let shapes = homspace
+        .fusion_tree_keys(&rule)
+        .iter()
+        .map(|key| match key.codomain_tree().coupled() {
+            sector if sector == even => vec![even_shape.0, even_shape.1],
+            sector if sector == odd => vec![odd_shape.0, odd_shape.1],
+            sector => panic!("unexpected Z2 sector {sector:?}"),
+        })
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims(
+            [even_shape.0 + odd_shape.0],
+            [even_shape.1 + odd_shape.1],
+        )
+        .unwrap(),
+        homspace,
+        &rule,
+        shapes,
+    )
+    .unwrap();
+    TensorMap::from_vec_with_fusion_space(
+        (0..space.required_len().unwrap())
+            .map(|index| ((index * 7 + 3) % 17) as f64 - 6.0)
+            .collect(),
+        space,
+    )
+    .unwrap()
+}
+
+pub(super) fn transposed_rectangular_tensor(
+    tensor: &TensorMap<f64, 1, 1>,
+    rows: usize,
+    cols: usize,
+) -> TensorMap<f64, 1, 1> {
+    let mut data = vec![0.0; rows * cols];
+    for col in 0..cols {
+        for row in 0..rows {
+            data[col + cols * row] = tensor.data()[row + rows * col];
+        }
+    }
+    TensorMap::from_vec_with_fusion_space(
+        data,
+        rectangular_svd_tensor(cols, rows)
+            .fusion_space()
+            .unwrap()
+            .as_ref()
+            .clone(),
+    )
+    .unwrap()
+}
+
+pub(super) fn mixed_rectangular_c32_tensor() -> TensorMap<Complex32, 1, 1> {
+    let rule = Z2FusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(even, 5), (odd, 2)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 3), (odd, 4)], false)]),
+    );
+    let shapes = homspace
+        .fusion_tree_keys(&rule)
+        .iter()
+        .map(|key| match key.codomain_tree().coupled() {
+            sector if sector == even => vec![5, 3],
+            sector if sector == odd => vec![2, 4],
+            sector => panic!("unexpected Z2 sector {sector:?}"),
+        })
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([7], [7]).unwrap(),
+        homspace,
+        &rule,
+        shapes,
+    )
+    .unwrap();
+    TensorMap::from_vec_with_fusion_space(
+        (0..space.required_len().unwrap())
+            .map(|index| {
+                Complex32::new(
+                    ((index * 7 + 2) % 17) as f32 - 6.0,
+                    ((index * 5 + 3) % 13) as f32 * 0.25 - 1.0,
+                )
+            })
+            .collect(),
+        space,
+    )
+    .unwrap()
+}
+
+pub(super) fn tsvd_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 2>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let degeneracy = 2usize;
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
+    let leg_dim = sectors.len() * degeneracy;
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let key_count = homspace.fusion_tree_keys(rule).len();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
+        homspace,
+        rule,
+        vec![vec![degeneracy; 4]; key_count],
+    )
+    .unwrap();
+    let len = space.required_len().unwrap();
+    TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        (0..len)
+            .map(|index| ((index * 11 + 5) % 29) as f64 * 0.25 - 3.0)
+            .collect(),
+        space,
+    )
+    .unwrap()
+}
+
+pub(super) fn contract_pair<R>(
+    rule: &R,
+    template: &TensorMap<f64, 2, 2>,
+    left: &TensorMap<f64, 2, 1>,
+    right: &TensorMap<f64, 1, 2>,
+) -> TensorMap<f64, 2, 2>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+{
+    let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        vec![0.0; template.data().len()],
+        template.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
+    context
+        .tensorcontract_fusion_into(
+            rule,
+            &mut reconstructed,
+            left,
+            right,
+            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    reconstructed
+}
+
+pub(super) fn hermitian_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 2>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let degeneracy = 2usize;
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
+    let leg_dim = sectors.len() * degeneracy;
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let key_count = homspace.fusion_tree_keys(rule).len();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
+        homspace,
+        rule,
+        vec![vec![degeneracy; 4]; key_count],
+    )
+    .unwrap();
+    // Symmetric under swapping the (codomain tree, row indices) and
+    // (domain tree, column indices) labels, so every coupled sector matrix is
+    // symmetric (real Hermitian).
+    let side_label = |tree: &FusionTreeKey, indices: &[usize]| -> u64 {
+        let mut label = 17u64;
+        for &sector in tree.uncoupled() {
+            label = label.wrapping_mul(31).wrapping_add(sector.id() as u64 + 1);
+        }
+        for &index in indices {
+            label = label.wrapping_mul(37).wrapping_add(index as u64 + 1);
+        }
+        label
+    };
+    TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
+        let BlockKey::FusionTree(tree) = key else {
+            return 0.0;
+        };
+        let row = side_label(tree.codomain_tree(), &indices[..2]);
+        let col = side_label(tree.domain_tree(), &indices[2..]);
+        let (low, high) = if row <= col { (row, col) } else { (col, row) };
+        let hash = low
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(high.wrapping_mul(1442695040888963407));
+        ((hash >> 33) % 19) as f64 * 0.5 - 4.0
+    })
+    .unwrap()
+}
+
+pub(super) fn assert_eigen_equation<R>(
+    rule: &R,
+    tensor: &TensorMap<f64, 2, 2>,
+    v: &TensorMap<f64, 2, 1>,
+    d: &TensorMap<f64, 1, 1>,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+{
+    let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
+    // t . V
+    let mut tv = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        vec![0.0; v.data().len()],
+        v.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    context
+        .tensorcontract_fusion_into(
+            rule,
+            &mut tv,
+            tensor,
+            v,
+            TensorContractSpec::new(&[2, 3], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2])),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    // V . D
+    let mut vd = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        vec![0.0; v.data().len()],
+        v.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    context
+        .tensorcontract_fusion_into(
+            rule,
+            &mut vd,
+            v,
+            d,
+            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+    for (index, (lhs, rhs)) in tv.data().iter().zip(vd.data()).enumerate() {
+        assert!(
+            (lhs - rhs).abs() < 1e-9,
+            "eigen equation violated at raw position {index}: {lhs} != {rhs}"
+        );
+    }
+}
+
+pub(super) fn dense_sector_matrices<const A: usize, const B: usize>(
+    tensor_nout: usize,
+    t: &TensorMap<f64, A, B>,
+) -> Vec<(SectorId, usize, usize, Vec<f64>)> {
+    // Matricize per coupled sector (rows = codomain trees x degeneracy,
+    // cols = domain trees x degeneracy) for dense checks in tests.
+    struct SectorAccumulator {
+        sector: SectorId,
+        rows: usize,
+        cols: usize,
+        row_trees: Vec<(FusionTreeKey, usize)>,
+        col_trees: Vec<(FusionTreeKey, usize)>,
+        entries: Vec<(usize, usize, f64)>,
+    }
+    let structure = std::sync::Arc::clone(t.structure());
+    let mut sectors: Vec<SectorAccumulator> = Vec::new();
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        let sector = key.codomain_tree().coupled();
+        let entry = match sectors.iter_mut().find(|entry| entry.sector == sector) {
+            Some(entry) => entry,
+            None => {
+                sectors.push(SectorAccumulator {
+                    sector,
+                    rows: 0,
+                    cols: 0,
+                    row_trees: Vec::new(),
+                    col_trees: Vec::new(),
+                    entries: Vec::new(),
+                });
+                sectors.last_mut().unwrap()
+            }
+        };
+        let shape = block.shape().to_vec();
+        let row_dim: usize = shape[..tensor_nout].iter().product();
+        let col_dim: usize = shape[tensor_nout..].iter().product();
+        let row_offset = match entry
+            .row_trees
+            .iter()
+            .find(|(tree, _)| tree == key.codomain_tree())
+        {
+            Some((_, offset)) => *offset,
+            None => {
+                let offset = entry.rows;
+                entry.row_trees.push((key.codomain_tree().clone(), offset));
+                entry.rows += row_dim;
+                offset
+            }
+        };
+        let col_offset = match entry
+            .col_trees
+            .iter()
+            .find(|(tree, _)| tree == key.domain_tree())
+        {
+            Some((_, offset)) => *offset,
+            None => {
+                let offset = entry.cols;
+                entry.col_trees.push((key.domain_tree().clone(), offset));
+                entry.cols += col_dim;
+                offset
+            }
+        };
+        let strides = block.strides().to_vec();
+        let offset = block.offset();
+        let mut indices = vec![0usize; shape.len()];
+        for _ in 0..shape.iter().product::<usize>() {
+            let position = offset
+                + indices
+                    .iter()
+                    .zip(&strides)
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            let mut row = 0;
+            let mut stride = 1;
+            for axis in 0..tensor_nout {
+                row += indices[axis] * stride;
+                stride *= shape[axis];
+            }
+            let mut col = 0;
+            let mut col_stride = 1;
+            for axis in tensor_nout..shape.len() {
+                col += indices[axis] * col_stride;
+                col_stride *= shape[axis];
+            }
+            entry
+                .entries
+                .push((row_offset + row, col_offset + col, t.data()[position]));
+            for axis in 0..shape.len() {
+                indices[axis] += 1;
+                if indices[axis] < shape[axis] {
+                    break;
+                }
+                indices[axis] = 0;
+            }
+        }
+    }
+    sectors
+        .into_iter()
+        .map(|entry| {
+            let mut matrix = vec![0.0; entry.rows * entry.cols];
+            for (row, col, value) in entry.entries {
+                matrix[row + entry.rows * col] = value;
+            }
+            (entry.sector, entry.rows, entry.cols, matrix)
+        })
+        .collect()
+}
+
+pub(super) fn assert_orthonormal_columns(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
+    for (sector, rows, cols, matrix) in matrices {
+        for left in 0..*cols {
+            for right in 0..*cols {
+                let mut dot = 0.0;
+                for row in 0..*rows {
+                    dot += matrix[row + rows * left] * matrix[row + rows * right];
+                }
+                let expected = if left == right { 1.0 } else { 0.0 };
+                assert!(
+                    (dot - expected).abs() < 1e-9,
+                    "sector {sector:?}: column dot ({left},{right}) = {dot}"
+                );
+            }
+        }
+    }
+}
+
+pub(super) fn one_sector_matrix<D: Clone>(data: Vec<D>) -> TensorMap<D, 1, 1> {
+    one_sector_rectangular_matrix(data, 2, 2)
+}
+
+pub(super) fn assert_eigh_preflight<D: FactorScalar + std::fmt::Debug>(
+    tensor: &TensorMap<D, 1, 1>,
+    accepted: bool,
+) {
+    let mut dense = EighCallSpy::default();
+    let error = eigh_full(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), tensor),
+    )
+    .unwrap_err();
+
+    if accepted {
+        assert!(matches!(error, OperationError::Dense(_)));
+        assert_eq!(dense.calls, 1);
+    } else {
+        assert!(matches!(error, OperationError::InvalidArgument { .. }));
+        assert_eq!(dense.calls, 0);
+    }
+}
+
+pub(super) fn one_sector_rectangular_matrix<D: Clone>(
+    data: Vec<D>,
+    rows: usize,
+    cols: usize,
+) -> TensorMap<D, 1, 1> {
+    let rule = Z2FusionRule;
+    let codomain = SectorLeg::new([(SectorId::new(0), rows)], false);
+    let domain = SectorLeg::new([(SectorId::new(0), cols)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([codomain]),
+        FusionProductSpace::new([domain]),
+    );
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([rows], [cols]).unwrap(),
+        homspace,
+        &rule,
+        vec![vec![rows, cols]],
+    )
+    .unwrap();
+    TensorMap::from_vec_with_fusion_space(data, space).unwrap()
+}
+
+/// Path agreement of two spectra: sectors and kept counts exact, values under
+/// the workspace rule with the sector's value count as `terms`.
+pub(super) fn assert_spectra_agree(what: &str, lhs: &[SectorSpectrum], rhs: &[SectorSpectrum]) {
+    assert_eq!(lhs.len(), rhs.len(), "{what}");
+    for (lhs, rhs) in lhs.iter().zip(rhs) {
+        assert_eq!(lhs.sector, rhs.sector, "{what}");
+        numerics::assert_slices_close(what, &lhs.values, &rhs.values, lhs.values.len());
+    }
+}
+
+pub(super) fn assert_real_spectra_close(lhs: &[SectorSpectrum], rhs: &[SectorSpectrum]) {
+    assert_eq!(lhs.len(), rhs.len());
+    for (lhs, rhs) in lhs.iter().zip(rhs) {
+        assert_eq!(lhs.sector, rhs.sector);
+        assert_eq!(lhs.values.len(), rhs.values.len());
+        for (&lhs, &rhs) in lhs.values.iter().zip(&rhs.values) {
+            assert!((lhs - rhs).abs() <= 1e-10, "{lhs} vs {rhs}");
+        }
+    }
+}
+
+pub(super) fn padded_copy<R, D, const NOUT: usize, const NIN: usize>(
+    rule: &R,
+    source: &TensorMap<D, NOUT, NIN>,
+) -> TensorMap<D, NOUT, NIN>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let mut offset = 1usize;
+    let mut blocks = Vec::with_capacity(source.structure().block_count());
+    for index in 0..source.structure().block_count() {
+        let block = source.structure().block(index).unwrap();
+        blocks.push(
+            BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
+                .unwrap(),
+        );
+        offset += block.shape().iter().product::<usize>() + 1;
+    }
+    let source_space = source.fusion_space().unwrap();
+    let structure = BlockStructure::from_blocks_with_rank(NOUT + NIN, blocks).unwrap();
+    let padded_space = FusionTensorMapSpace::new_unbound(
+        source_space.dense_space().clone(),
+        source_space.homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(rule)
+    .unwrap();
+    TensorMap::from_block_fn_with_fusion_space(padded_space, D::zero(), |key, indices| {
+        let block = source.block_by_key(key).unwrap();
+        let position = block.offset()
+            + indices
+                .iter()
+                .zip(block.strides())
+                .map(|(&index, &stride)| index * stride)
+                .sum::<usize>();
+        block.data()[position]
+    })
+    .unwrap()
+}
+
+pub(super) fn reversed_complete_grid_copy<R, D, const NOUT: usize, const NIN: usize>(
+    rule: &R,
+    source: &TensorMap<D, NOUT, NIN>,
+) -> TensorMap<D, NOUT, NIN>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let mut offset = 0usize;
+    let mut blocks = Vec::with_capacity(source.structure().block_count());
+    for index in (0..source.structure().block_count()).rev() {
+        let block = source.structure().block(index).unwrap();
+        blocks.push(
+            BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
+                .unwrap(),
+        );
+        offset += block.shape().iter().product::<usize>();
+    }
+    let source_space = source.fusion_space().unwrap();
+    let structure = BlockStructure::from_blocks_with_rank(NOUT + NIN, blocks).unwrap();
+    let reordered_space = FusionTensorMapSpace::new_unbound(
+        source_space.dense_space().clone(),
+        source_space.homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(rule)
+    .unwrap();
+    TensorMap::from_block_fn_with_fusion_space(reordered_space, D::zero(), |key, indices| {
+        let block = source.block_by_key(key).unwrap();
+        let position = block.offset()
+            + indices
+                .iter()
+                .zip(block.strides())
+                .map(|(&index, &stride)| index * stride)
+                .sum::<usize>();
+        block.data()[position]
+    })
+    .unwrap()
+}
+
+pub(super) fn reversed_coupled_tree_basis_copy<R, D, const NOUT: usize, const NIN: usize>(
+    rule: &R,
+    source: &TensorMap<D, NOUT, NIN>,
+) -> TensorMap<D, NOUT, NIN>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let blocks = (0..source.structure().block_count())
+        .rev()
+        .map(|index| {
+            let block = source.structure().block(index).unwrap();
+            let BlockKey::FusionTree(key) = block.key() else {
+                unreachable!("source has fusion-tree blocks")
+            };
+            (key.clone(), block.shape().to_vec())
+        })
+        .collect();
+    let structure =
+        BlockStructure::coupled_sector_matrix_with_keys(rule, NOUT, NOUT + NIN, blocks).unwrap();
+    let source_space = source.fusion_space().unwrap();
+    let space = FusionTensorMapSpace::new_unbound(
+        source_space.dense_space().clone(),
+        source_space.homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(rule)
+    .unwrap();
+    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
+        let block = source.block_by_key(key).unwrap();
+        block.data()[block.offset()
+            + indices
+                .iter()
+                .zip(block.strides())
+                .map(|(&index, &stride)| index * stride)
+                .sum::<usize>()]
+    })
+    .unwrap()
+}
+
+pub(super) fn assert_identity_matrices(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
+    assert!(!matrices.is_empty());
+    for (sector, rows, cols, matrix) in matrices {
+        assert_eq!(rows, cols, "identity block must be square in {sector:?}");
+        for col in 0..*cols {
+            for row in 0..*rows {
+                let expected = if row == col { 1.0 } else { 0.0 };
+                let value = matrix[row + rows * col];
+                assert!(
+                    (value - expected).abs() < 1e-9,
+                    "sector {sector:?} ({row},{col}): {value}"
+                );
+            }
+        }
+    }
+}
+
+pub(super) fn default_context() -> TensorContractFusionExecutionContext<f64, RuleIdentity> {
+    TensorContractFusionExecutionContext::<f64, RuleIdentity>::default()
+}
+
+pub(super) fn u1_cross_space_map<D: FactorScalar>(
+    codomain: &[(i32, usize)],
+    domain: &[(i32, usize)],
+) -> TensorMap<D, 1, 1> {
+    let codomain_leg = SectorLeg::new(
+        codomain
+            .iter()
+            .map(|&(charge, degeneracy)| (U1Irrep::new(charge).sector_id(), degeneracy)),
+        false,
+    );
+    let domain_leg = SectorLeg::new(
+        domain
+            .iter()
+            .map(|&(charge, degeneracy)| (U1Irrep::new(charge).sector_id(), degeneracy)),
+        false,
+    );
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([codomain_leg.clone()]),
+        FusionProductSpace::new([domain_leg.clone()]),
+    );
+    let shapes = homspace
+        .fusion_tree_keys(&U1FusionRule)
+        .iter()
+        .map(|key| {
+            let coupled = key.codomain_tree().coupled();
+            vec![
+                codomain_leg.degeneracy(coupled).unwrap(),
+                domain_leg.degeneracy(coupled).unwrap(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims(
+            [codomain.iter().map(|(_, degeneracy)| degeneracy).sum()],
+            [domain.iter().map(|(_, degeneracy)| degeneracy).sum()],
+        )
+        .unwrap(),
+        homspace,
+        &U1FusionRule,
+        shapes,
+    )
+    .unwrap();
+    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |_, indices| {
+        if indices[0] == indices[1] {
+            D::one()
+        } else {
+            D::zero()
+        }
+    })
+    .unwrap()
+}
+
+pub(super) fn u1_block_endomorphism<D>(blocks: &[(i32, usize, Vec<D>)]) -> TensorMap<D, 1, 1>
+where
+    D: Copy + Zero,
+{
+    let blocks = blocks
+        .iter()
+        .map(|(charge, dimension, data)| {
+            (U1Irrep::new(*charge).sector_id(), *dimension, data.clone())
+        })
+        .collect::<Vec<_>>();
+    block_endomorphism(&U1FusionRule, &blocks)
+}
+
+/// `1 <- 1` endomorphism with one fusion tree per coupled sector, on any rule.
+pub(super) fn block_endomorphism<R, D>(
+    rule: &R,
+    blocks: &[(SectorId, usize, Vec<D>)],
+) -> TensorMap<D, 1, 1>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: Copy + Zero,
+{
+    let sectors = blocks
+        .iter()
+        .map(|(sector, dimension, _)| (*sector, *dimension))
+        .collect::<Vec<_>>();
+    let leg = SectorLeg::new(sectors.iter().copied(), false);
+    let total_dimension = sectors.iter().map(|(_, dimension)| dimension).sum();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone()]),
+        FusionProductSpace::new([leg]),
+    );
+    let shapes = homspace
+        .fusion_tree_keys(rule)
+        .iter()
+        .map(|key| {
+            let coupled = key.codomain_tree().coupled();
+            let (_, dimension, data) = blocks
+                .iter()
+                .find(|(sector, _, _)| *sector == coupled)
+                .unwrap();
+            assert_eq!(data.len(), dimension * dimension);
+            vec![*dimension, *dimension]
+        })
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([total_dimension], [total_dimension]).unwrap(),
+        homspace,
+        rule,
+        shapes,
+    )
+    .unwrap();
+    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
+        let BlockKey::FusionTree(tree) = key else {
+            return D::zero();
+        };
+        let coupled = tree.codomain_tree().coupled();
+        let (_, dimension, data) = blocks
+            .iter()
+            .find(|(sector, _, _)| *sector == coupled)
+            .unwrap();
+        data[indices[0] + dimension * indices[1]]
+    })
+    .unwrap()
+}
+
+pub(super) fn scalar_u1_block<D: Copy>(tensor: &TensorMap<D, 1, 1>, charge: i32) -> D {
+    scalar_block(tensor, U1Irrep::new(charge).sector_id())
+}
+
+pub(super) fn scalar_block<D: Copy>(tensor: &TensorMap<D, 1, 1>, sector: SectorId) -> D {
+    let structure = tensor.structure();
+    let block = (0..structure.block_count())
+        .map(|index| structure.block(index).unwrap())
+        .find(|block| {
+            let BlockKey::FusionTree(key) = block.key() else {
+                return false;
+            };
+            key.codomain_tree().coupled() == sector
+        })
+        .unwrap();
+    assert_eq!(block.shape(), &[1, 1]);
+    tensor.data()[block.offset()]
+}
+
+pub(super) fn assert_identity_sector_matrices(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
+    for (sector, rows, cols, matrix) in matrices {
+        assert_eq!(rows, cols, "sector {sector:?}: expected square factor");
+        for col in 0..*cols {
+            for row in 0..*rows {
+                let expected = if row == col { 1.0 } else { 0.0 };
+                let value = matrix[row + rows * col];
+                assert!(
+                    (value - expected).abs() < 1e-9,
+                    "sector {sector:?}: entry ({row},{col}) = {value}"
+                );
+            }
+        }
+    }
+}
+
+/// The `V = U1Space(0=>3, 1=>2)` oracle fill, in 0-based degeneracy indices.
+pub(super) fn exp_oracle_fill(charge: i32, row: usize, column: usize, scale: f64) -> f64 {
+    scale * (0.5 + 0.25 * row as f64 - 0.75 * column as f64 + 0.125 * charge as f64)
+}
+
+fn exp_oracle_fill_imaginary(row: usize, column: usize, scale: f64) -> f64 {
+    scale * (0.125 * row as f64 + 0.375 * column as f64 - 0.25)
+}
+
+pub(super) fn exp_oracle_block<D: FactorScalar>(charge: i32, order: usize, scale: f64) -> Vec<D> {
+    let mut data = vec![D::zero(); order * order];
+    for column in 0..order {
+        for row in 0..order {
+            let real = exp_oracle_fill(charge, row, column, scale);
+            let imaginary = if D::epsilon() == f64::EPSILON && size_of::<D>() == size_of::<f64>() {
+                0.0
+            } else {
+                exp_oracle_fill_imaginary(row, column, scale)
+            };
+            data[row + order * column] = D::from_complex64(Complex64::new(real, imaginary));
+        }
+    }
+    data
+}
+
+pub(super) fn exp_oracle_tensor<D: FactorScalar>(scale: f64) -> TensorMap<D, 1, 1> {
+    u1_block_endomorphism(&[
+        (0, 3, exp_oracle_block::<D>(0, 3, scale)),
+        (1, 2, exp_oracle_block::<D>(1, 2, scale)),
+    ])
+}
+
+/// Copy of `source` whose coupled sectors stack rows by ascending codomain
+/// tree and columns by descending domain tree: the same operator, but row `i`
+/// and column `i` of a multi-tree sector name different tree states.
+pub(super) fn mis_stacked_endomorphism_copy<R, D>(
+    rule: &R,
+    source: &TensorMap<D, 2, 2>,
+) -> TensorMap<D, 2, 2>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let mut blocks: Vec<(tenet_core::FusionTreePairKey, Vec<usize>)> =
+        (0..source.structure().block_count())
+            .map(|index| {
+                let block = source.structure().block(index).unwrap();
+                let BlockKey::FusionTree(key) = block.key() else {
+                    unreachable!("source has fusion-tree blocks")
+                };
+                (key.clone(), block.shape().to_vec())
+            })
+            .collect();
+    blocks.sort_by(|(a, _), (b, _)| {
+        a.codomain_tree()
+            .cmp(b.codomain_tree())
+            .then(b.domain_tree().cmp(a.domain_tree()))
+    });
+    let structure = BlockStructure::coupled_sector_matrix_with_keys(rule, 2, 4, blocks).unwrap();
+    let regions = structure.coupled_sector_regions(2).unwrap().unwrap();
+    assert!(
+        regions
+            .iter()
+            .any(|region| region.row_trees() != region.col_trees()),
+        "the fixture must mis-stack at least one coupled sector"
+    );
+    let source_space = source.fusion_space().unwrap();
+    let space = FusionTensorMapSpace::new_unbound(
+        source_space.dense_space().clone(),
+        source_space.homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(rule)
+    .unwrap();
+    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
+        let block = source.block_by_key(key).unwrap();
+        block.data()[block.offset()
+            + indices
+                .iter()
+                .zip(block.strides())
+                .map(|(&index, &stride)| index * stride)
+                .sum::<usize>()]
+    })
+    .unwrap()
+}
+
+pub(super) fn assert_stacking_refusal<T: fmt::Debug>(
+    result: Result<T, OperationError>,
+    operation: &str,
+) {
+    match result {
+        Err(OperationError::UnsupportedTensorContractScope { message })
+            if message.starts_with(operation) && message.contains("stacking") => {}
+        other => panic!("{operation}: expected a stacking refusal, got {other:?}"),
+    }
+}
