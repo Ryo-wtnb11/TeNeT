@@ -148,10 +148,11 @@ fn tree_transform_compile_keyed_rejects_missing_tree_block_key() {
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure)
             .unwrap();
 
-    let err = TreeTransformStructure::compile_keyed(
-        &dst,
-        &src,
+    let err = TreeTransformStructure::compile_keyed_structures_with_storage_conjugation(
+        dst.structure(),
+        src.structure(),
         &[TreeTransformKeyBlockSpec::single(key2.clone(), key1, 1.0)],
+        false,
     )
     .unwrap_err();
 
@@ -6720,10 +6721,11 @@ fn explicit_keyed_replay_accepts_dense_and_opaque_namespaces() {
         .unwrap();
         let mut dst =
             TensorMap::<f64, 1, 0>::from_vec_with_structure(vec![0.0], space, structure).unwrap();
-        let replay = TreeTransformStructure::compile_keyed(
-            &dst,
-            &src,
+        let replay = TreeTransformStructure::compile_keyed_structures_with_storage_conjugation(
+            dst.structure(),
+            src.structure(),
             &[TreeTransformKeyBlockSpec::single(key.clone(), key, 2.0)],
+            false,
         )
         .unwrap();
         let mut backend = HostTensorOperations;
@@ -6778,16 +6780,13 @@ fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
     let mut dst =
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure)
             .unwrap();
-    let structure = TreeTransformStructure::compile_grouped(
-        &dst,
-        &src,
-        &[TreeTransformGroupBlockSpec::try_multi(
-            [key10, key20],
-            [key100, key200, key300],
-            vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
-        )
-        .unwrap()],
+    let structure = TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::try_multi(
+        [key10, key20],
+        [key100, key200, key300],
+        vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
     )
+    .unwrap()])
+    .compile(&dst, &src)
     .unwrap();
     let mut backend = HostTensorOperations;
     let mut workspace = TreeTransformWorkspace::default();
@@ -6820,12 +6819,9 @@ fn keyed_and_grouped_compile_resolve_every_key_before_structural_validation() {
             .unwrap();
     let missing_later = TreeTransformGroupBlockSpec::single(missing.clone(), present.clone(), 1.0);
 
-    let err = TreeTransformStructure::compile_grouped_structures(
-        &dst_structure,
-        &src_structure,
-        &[structurally_invalid.clone(), missing_later],
-    )
-    .unwrap_err();
+    let err = TreeTransformGroupPlan::new(vec![structurally_invalid.clone(), missing_later])
+        .compile_structures(&dst_structure, &src_structure)
+        .unwrap_err();
     assert_eq!(
         err,
         OperationError::MissingBlockKey {
@@ -6833,12 +6829,9 @@ fn keyed_and_grouped_compile_resolve_every_key_before_structural_validation() {
         }
     );
 
-    let err = TreeTransformStructure::compile_grouped_structures(
-        &dst_structure,
-        &src_structure,
-        &[structurally_invalid],
-    )
-    .unwrap_err();
+    let err = TreeTransformGroupPlan::new(vec![structurally_invalid])
+        .compile_structures(&dst_structure, &src_structure)
+        .unwrap_err();
     assert_eq!(
         err,
         OperationError::StructureRankMismatch {
@@ -6850,10 +6843,11 @@ fn keyed_and_grouped_compile_resolve_every_key_before_structural_validation() {
     let coefficient_mismatch =
         TreeTransformKeyBlockSpec::multi([present.clone()], [present.clone()], Vec::<f64>::new());
     let missing_later = TreeTransformKeyBlockSpec::single(BlockKey::opaque([2]), present, 1.0);
-    let err = TreeTransformStructure::compile_keyed_structures(
+    let err = TreeTransformStructure::compile_keyed_structures_with_storage_conjugation(
         &dst_structure,
         &src_structure,
         &[coefficient_mismatch, missing_later],
+        false,
     )
     .unwrap_err();
     assert_eq!(
@@ -7201,16 +7195,13 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
             dst_structure,
         )
         .unwrap();
-    let structure = TreeTransformStructure::compile_grouped(
-        &dst,
-        &src,
-        &[TreeTransformGroupBlockSpec::try_multi(
-            [key10, key20],
-            [key100, key200, key300],
-            vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
-        )
-        .unwrap()],
+    let structure = TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::try_multi(
+        [key10, key20],
+        [key100, key200, key300],
+        vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
     )
+    .unwrap()])
+    .compile(&dst, &src)
     .unwrap();
     let mut workspace = crate::storage_scratch::StorageTreeTransformWorkspace::<
         TrackingScratch<f64>,
@@ -7316,15 +7307,12 @@ fn tree_transform_compile_grouped_rejects_missing_tree_block_key() {
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure)
             .unwrap();
 
-    let err = TreeTransformStructure::compile_grouped(
-        &dst,
-        &src,
-        &[TreeTransformGroupBlockSpec::single(
-            missing_key.clone(),
-            present_key,
-            1.0,
-        )],
-    )
+    let err = TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::single(
+        missing_key.clone(),
+        present_key,
+        1.0,
+    )])
+    .compile(&dst, &src)
     .unwrap_err();
 
     assert_eq!(
@@ -7817,16 +7805,13 @@ fn tree_transform_replay_dispatches_through_kernel_adapter() {
     let mut dst =
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure)
             .unwrap();
-    let structure = TreeTransformStructure::compile_grouped(
-        &dst,
-        &src,
-        &[TreeTransformGroupBlockSpec::try_multi(
-            [key10, key20],
-            [key100, key200, key300],
-            vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
-        )
-        .unwrap()],
+    let structure = TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::try_multi(
+        [key10, key20],
+        [key100, key200, key300],
+        vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
     )
+    .unwrap()])
+    .compile(&dst, &src)
     .unwrap();
     let dst_block_structure = std::sync::Arc::clone(dst.structure());
     let src_block_structure = std::sync::Arc::clone(src.structure());

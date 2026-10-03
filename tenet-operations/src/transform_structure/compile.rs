@@ -147,47 +147,6 @@ impl<T: Copy> TreeTransformStructure<T> {
         )
     }
 
-    pub fn compile_keyed<
-        TDst,
-        TSrc,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        specs: &[TreeTransformKeyBlockSpec<T>],
-    ) -> Result<Self, OperationError>
-    where
-        DDst: TensorStorage<TDst>,
-        DSrc: TensorStorage<TSrc>,
-    {
-        Self::compile_keyed_shared_structures(
-            Arc::clone(dst.structure()),
-            Arc::clone(src.structure()),
-            specs,
-            false,
-        )
-    }
-
-    pub fn compile_keyed_structures(
-        dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
-        specs: &[TreeTransformKeyBlockSpec<T>],
-    ) -> Result<Self, OperationError> {
-        Self::compile_keyed_structures_with_storage_conjugation(
-            dst_structure,
-            src_structure,
-            specs,
-            false,
-        )
-    }
-
     pub fn compile_keyed_structures_with_storage_conjugation(
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
@@ -198,81 +157,6 @@ impl<T: Copy> TreeTransformStructure<T> {
             Arc::new(dst_structure.clone()),
             Arc::new(src_structure.clone()),
             specs,
-            storage_conjugate,
-        )
-    }
-
-    pub fn compile_grouped<
-        TDst,
-        TSrc,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        specs: &[TreeTransformGroupBlockSpec<T>],
-    ) -> Result<Self, OperationError>
-    where
-        DDst: TensorStorage<TDst>,
-        DSrc: TensorStorage<TSrc>,
-    {
-        Self::compile_grouped_shared_structures(
-            Arc::clone(dst.structure()),
-            Arc::clone(src.structure()),
-            specs,
-            false,
-        )
-    }
-
-    pub fn compile_grouped_structures(
-        dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
-        specs: &[TreeTransformGroupBlockSpec<T>],
-    ) -> Result<Self, OperationError> {
-        Self::compile_grouped_structures_with_storage_conjugation(
-            dst_structure,
-            src_structure,
-            specs,
-            false,
-        )
-    }
-
-    pub fn compile_grouped_structures_with_storage_conjugation(
-        dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
-        specs: &[TreeTransformGroupBlockSpec<T>],
-        storage_conjugate: bool,
-    ) -> Result<Self, OperationError> {
-        Self::compile_grouped_shared_structures(
-            Arc::new(dst_structure.clone()),
-            Arc::new(src_structure.clone()),
-            specs,
-            storage_conjugate,
-        )
-    }
-
-    pub fn compile_grouped_shared_structures(
-        dst_structure: Arc<BlockStructure>,
-        src_structure: Arc<BlockStructure>,
-        specs: &[TreeTransformGroupBlockSpec<T>],
-        storage_conjugate: bool,
-    ) -> Result<Self, OperationError> {
-        let mut resolved_specs = Vec::with_capacity(specs.len());
-        // Why not compile spec-by-spec: grouped and keyed entry points must
-        // resolve every key before rank/count/layout validation.
-        for spec in specs {
-            resolved_specs.push(spec.resolve(&dst_structure, &src_structure)?);
-        }
-        Self::compile_shared_structures(
-            dst_structure,
-            src_structure,
-            &resolved_specs,
             storage_conjugate,
         )
     }

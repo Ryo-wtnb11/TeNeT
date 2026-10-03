@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn tensoradd_structure_with_strided_kernel<
+pub(crate) fn tensoradd_structure_with_strided_kernel<
     T,
     const NOUT: usize,
     const NIN: usize,
@@ -59,7 +59,7 @@ where
     Ok(())
 }
 
-pub fn tree_transform_structure_with_strided_kernel<
+pub(crate) fn tree_transform_structure_with_strided_kernel<
     A,
     D,
     C,
@@ -159,7 +159,8 @@ where
     )
 }
 
-pub fn tree_transform_structure_overwrite_with_storage_workspace_strided_kernel<
+#[cfg(test)]
+pub(crate) fn tree_transform_structure_overwrite_with_storage_workspace_strided_kernel<
     A,
     D,
     C,
@@ -277,7 +278,7 @@ where
                     structure.layouts(),
                     dst_layout,
                     src_layout,
-                    structure.coefficient(coefficient),
+                    structure.single_coefficients()[coefficient],
                     structure.storage_conjugate(),
                     dst.data_mut(),
                     src_data,
@@ -462,7 +463,7 @@ where
                 structure.layouts(),
                 dst_layout,
                 src_layout,
-                structure.coefficient(coefficient),
+                structure.single_coefficients()[coefficient],
                 structure.storage_conjugate(),
                 dst_data,
                 src_data,
@@ -499,7 +500,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn tree_transform_structure_with_structural_recoupling<
+pub(crate) fn tree_transform_structure_with_structural_recoupling<
     A,
     E,
     D,
@@ -549,7 +550,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn tree_transform_structure_overwrite_with_structural_recoupling<
+#[cfg(test)]
+pub(crate) fn tree_transform_structure_overwrite_with_structural_recoupling<
     A,
     E,
     D,
@@ -605,7 +607,7 @@ where
 /// `threads` work-stealing workers. Multi blocks submit bounded grouped
 /// recoupling batches between their pack and scatter phases.
 #[allow(clippy::too_many_arguments)]
-pub fn tree_transform_structure_with_structural_recoupling_raw<A, E, D, C>(
+pub(crate) fn tree_transform_structure_with_structural_recoupling_raw<A, E, D, C>(
     kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
@@ -743,7 +745,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn tree_transform_structure_with_structural_recoupling_raw_profiled<A, E, D, C>(
+pub(crate) fn tree_transform_structure_with_structural_recoupling_raw_profiled<A, E, D, C>(
     kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
@@ -780,7 +782,12 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn tree_transform_structure_overwrite_with_structural_recoupling_raw_profiled<A, E, D, C>(
+pub(crate) fn tree_transform_structure_overwrite_with_structural_recoupling_raw_profiled<
+    A,
+    E,
+    D,
+    C,
+>(
     kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,

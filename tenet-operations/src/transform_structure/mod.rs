@@ -11,8 +11,7 @@ use crate::kernel_adapter::{normalize_fused_layout, BakedFusedLayout, FusedLayou
 use crate::strided::offset_to_isize;
 use crate::structure_identity::validate_structure_identity;
 use crate::transform_plan::{
-    ResolvedTreeTransformBlockSpec, TreeTransformBlockSpec, TreeTransformGroupBlockSpec,
-    TreeTransformKeyBlockSpec,
+    ResolvedTreeTransformBlockSpec, TreeTransformBlockSpec, TreeTransformKeyBlockSpec,
 };
 use crate::OperationError;
 
@@ -325,26 +324,12 @@ impl<T: Copy> TreeTransformStructure<T> {
         self.storage_conjugate
     }
 
-    /// Element `index` of the logical coefficient payload.
-    ///
-    /// O(1) for a Single block's `coefficient`; an index inside a Multi matrix
-    /// scans the matrices, which only diagnostics do.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `index >= self.coefficient_len()`.
-    pub fn coefficient(&self, index: usize) -> T {
-        if let Some(&coefficient) = self.coefficients.singles.get(index) {
-            return coefficient;
-        }
-        let mut offset = index - self.coefficients.singles.len();
-        for matrix in &self.coefficients.matrices {
-            match matrix.get(offset) {
-                Some(&coefficient) => return coefficient,
-                None => offset -= matrix.len(),
-            }
-        }
-        panic!("coefficient index out of bounds")
+    /// Scalar of a [`TreeTransformBlock::Single`] block: `index` is that
+    /// block's `coefficient`. `None` when `index` is not a Single scalar
+    /// (Multi matrices are read with [`Self::block_coefficients`]).
+    #[inline]
+    pub fn single_coefficient(&self, index: usize) -> Option<T> {
+        self.coefficients.singles.get(index).copied()
     }
 
     #[inline]

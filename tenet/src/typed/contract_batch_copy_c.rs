@@ -537,7 +537,7 @@ mod tests {
                 .iter()
                 .map(|block| match *block {
                     tenet_operations::TreeTransformBlock::Single { coefficient, .. } => {
-                        transform.coefficient(coefficient)
+                        transform.single_coefficient(coefficient).unwrap()
                     }
                     tenet_operations::TreeTransformBlock::Multi { .. } => {
                         panic!("reached SU2 CopyC route must contain only Single moves")
@@ -581,7 +581,7 @@ mod tests {
             assert!(
                 copy.transform.blocks().iter().any(|block| match *block {
                     tenet_operations::TreeTransformBlock::Single { coefficient, .. } =>
-                        copy.transform.coefficient(coefficient) != 1.0,
+                        copy.transform.single_coefficient(coefficient).unwrap() != 1.0,
                     tenet_operations::TreeTransformBlock::Multi { .. } => true,
                 }),
                 "this selected SU2 CopyC route must contain a scaled Single move"

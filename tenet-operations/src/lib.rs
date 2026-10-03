@@ -49,7 +49,7 @@ pub mod strided;
 pub mod structure_identity;
 mod task_view;
 pub mod tensoradd;
-pub mod transform_helpers;
+mod transform_helpers;
 mod transform_key;
 pub mod transform_plan;
 pub mod transform_replay;
@@ -69,22 +69,23 @@ pub use cuda_transform::{
 };
 pub use error::OperationError;
 pub use fusion_replay::{
-    direct_group_matrix_offset, fusion_scale_block_layouts_excluding, ContractDestinationInit,
-    FusionBlockContractGroupPlan, FusionBlockContractPlan, FusionBlockContractWorkspace,
-    FusionBlockMatrixGroup, FusionScaleBlockLayout, FusionStridedBlockLayout,
-    FusionSubblockMatrixLayout, HostFusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
+    fusion_scale_block_layouts_excluding, ContractDestinationInit, FusionBlockContractGroupPlan,
+    FusionBlockContractPlan, FusionBlockContractWorkspace, FusionBlockMatrixGroup,
+    FusionScaleBlockLayout, FusionStridedBlockLayout, FusionSubblockMatrixLayout,
+    HostFusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
 };
 pub use host_scalar_kernels::{
-    axpby_raw_strided_kernel, axpby_raw_strided_kernel_trusted, copy_block_with_strided_kernel,
-    scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel,
-    tensoradd_raw_strided_kernel_trusted, tensortrace_raw_strided_kernel,
-    tensortrace_raw_strided_kernel_add_with_coefficient,
+    axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted,
+    tensoradd_raw_strided_kernel,
 };
 #[doc(hidden)]
 pub use host_scalar_kernels::{
     bilinear_raw_strided_kernel_mapped,
     tensortrace_raw_strided_kernel_add_with_coefficient_trusted,
     tensortrace_raw_strided_kernel_trusted,
+};
+pub(crate) use host_scalar_kernels::{
+    copy_block_with_strided_kernel, tensoradd_raw_strided_kernel_trusted,
 };
 pub use kernel_adapter::{BakedFusedLayout, HostKernelAdapter, StridedHostKernelAdapter};
 pub use placement::ReportsPlacement;
