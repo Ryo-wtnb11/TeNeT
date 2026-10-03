@@ -4,7 +4,7 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, CategoricalScalar, FusionRule, FusionTreeHomSpace, FusionTreeKey,
+    BlockKey, CategoricalScalar, CoupledMatrixSide, FusionRule, FusionTreeHomSpace, FusionTreeKey,
     FusionTreePairOrientation, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, SectorId,
 };
 #[cfg(test)]
