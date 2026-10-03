@@ -5,7 +5,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let provider = source.provider() as *const R;
-    let runtime = source.runtime().identity();
+    let runtime = tenet::typed::__network::runtime_identity(source.runtime());
     let structure = structural_snapshot(&source);
     let expected = source.dense_data().unwrap().to_vec();
 
@@ -87,7 +87,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let provider = source.provider() as *const R;
-    let runtime = source.runtime().identity();
+    let runtime = tenet::typed::__network::runtime_identity(source.runtime());
     let structure = structural_snapshot(&source);
     let expected = source.dense_data().unwrap().to_vec();
     assert!(

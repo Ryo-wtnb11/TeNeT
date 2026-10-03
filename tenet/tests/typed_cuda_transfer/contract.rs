@@ -17,7 +17,7 @@ where
     let expected_contract = lhs.contract(rhs, &spec).unwrap();
     let expected_compose = lhs.compose(rhs).unwrap();
     let provider = lhs.provider() as *const R;
-    let runtime = lhs.runtime().identity();
+    let runtime = tenet::typed::__network::runtime_identity(lhs.runtime());
     let lhs_device = lhs.to_cuda().unwrap();
     let rhs_device = rhs.to_cuda().unwrap();
 
@@ -282,7 +282,7 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
     let lazy = lazy_host.to_cuda().unwrap();
     let lazy_compose = lazy.compose(&device).unwrap().to_host().unwrap();
     assert!(std::ptr::eq(lazy_compose.provider(), host.provider()));
-    assert!(runtime.identity().matches(lazy_compose.runtime()));
+    assert!(tenet::typed::__network::runtime_identity(&runtime).matches(lazy_compose.runtime()));
     assert_eq!(
         lazy_compose.dense_data().unwrap(),
         expected_lazy_compose.dense_data().unwrap()

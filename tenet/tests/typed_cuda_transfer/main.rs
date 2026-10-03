@@ -153,7 +153,10 @@ impl MultiplicityFreeFusionSymbols for ReentrantDimensionRule {
 
 impl MultiplicityFreeRigidSymbols for ReentrantDimensionRule {
     fn dim_scalar(&self, _: SectorId) -> f64 {
-        assert_eq!(self.runtime.cuda_device_ordinal(), Some(0));
+        assert_eq!(
+            tenet::typed::__network::cuda_device_ordinal(&self.runtime),
+            Some(0)
+        );
         device_lease_probe(&self.runtime);
         self.calls.fetch_add(1, Ordering::SeqCst);
         1.0
@@ -291,7 +294,7 @@ fn assert_cuda_svd_result<R>(
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let provider = source.provider() as *const R;
-    let runtime = source.runtime().identity();
+    let runtime = tenet::typed::__network::runtime_identity(source.runtime());
     for factor in [&factors.u, &factors.s, &factors.vh] {
         assert!(std::ptr::eq(factor.provider(), provider));
         assert!(runtime.matches(factor.runtime()));
@@ -394,7 +397,7 @@ fn assert_device_factor_handles<R, const N: usize>(
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let provider = source.provider() as *const R;
-    let runtime = source.runtime().identity();
+    let runtime = tenet::typed::__network::runtime_identity(source.runtime());
     for factor in factors {
         assert!(std::ptr::eq(factor.provider(), provider));
         assert!(runtime.matches(factor.runtime()));

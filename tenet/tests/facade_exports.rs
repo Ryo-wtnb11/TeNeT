@@ -203,6 +203,28 @@ fn facade_exports_are_exactly_the_reviewed_names() {
         &module_exports("plancache.rs").0,
         PLANCACHE,
     );
+    assert_exports(
+        "tenet::typed::__network",
+        &module_exports("typed/__network.rs").0,
+        NETWORK,
+    );
+}
+
+#[test]
+fn network_seam_pin_rejects_an_added_or_a_missing_item() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/typed/__network.rs");
+    let source = std::fs::read_to_string(path).unwrap();
+    let pinned = |source: &str| {
+        let names = exports(&strip(source)).0;
+        std::panic::catch_unwind(|| assert_exports("tenet::typed::__network", &names, NETWORK))
+            .is_ok()
+    };
+    assert!(pinned(&source), "control: the real seam matches its pin");
+    let added = format!("{source}\npub fn smuggled() {{}}\n");
+    assert!(!pinned(&added), "an added seam item went unnoticed");
+    let removed = source.replacen("pub fn runtime_identity", "fn runtime_identity", 1);
+    assert_ne!(removed, source, "control: the edit applies");
+    assert!(!pinned(&removed), "a removed seam item went unnoticed");
 }
 
 #[test]
@@ -213,6 +235,7 @@ fn each_name_has_one_path() {
         ("sector", SECTOR),
         ("expert", EXPERT),
         ("plancache", PLANCACHE),
+        ("typed::__network", NETWORK),
     ];
     for (index, (left, left_names)) in modules.iter().enumerate() {
         for (right, right_names) in &modules[index + 1..] {
@@ -247,14 +270,7 @@ fn scanner_reads_nested_groups_renames_and_inline_modules() {
     );
 }
 
-const ROOT: &[&str] = &[
-    "RuntimeIdentity",
-    "expert",
-    "mathematics",
-    "plancache",
-    "sector",
-    "typed",
-];
+const ROOT: &[&str] = &["expert", "mathematics", "plancache", "sector", "typed"];
 const TYPED: &[&str] = &[
     "AdvancedLinalgScalar",
     "Alternative",
@@ -278,7 +294,6 @@ const TYPED: &[&str] = &[
     "CudaRealScalar",
     "CudaScalar",
     "CudaStorage",
-    "CudaTracePairs",
     "CudaTreeTransformStats",
     "DecodeError",
     "DecodeLimits",
@@ -311,9 +326,6 @@ const TYPED: &[&str] = &[
     "ContractWorkspace",
     "MultiplicityIndex",
     "NON_SYMMETRIC_CONTRACTION_UNSUPPORTED",
-    "NetworkDegeneracyRestriction",
-    "NetworkPayloadStorage",
-    "NetworkReuseClass",
     "OpaqueBlockKey",
     "OperationError",
     "PayloadConversion",
@@ -328,7 +340,6 @@ const TYPED: &[&str] = &[
     "Runtime",
     "RuntimeBuilder",
     "RuntimeConfigError",
-    "RuntimeDetachedTensorMap",
     "RuntimeTreeTransformCacheInfo",
     "SectorSpectrum",
     "Side",
@@ -377,7 +388,35 @@ const TYPED: &[&str] = &[
     "TypedTensorTwistDispatch",
     "TypedTensorUnitDispatch",
     "TypedTruncationDispatch",
+    "__network",
     "reject_non_symmetric_contraction",
+];
+/// `tenet::typed::__network`: the hidden seam `tenet-network` drives. It is
+/// pinned like a public module so a new seam item is reviewed, not slipped in.
+const NETWORK: &[&str] = &[
+    "CudaTracePairs",
+    "ExtensionSlot",
+    "NetworkDegeneracyRestriction",
+    "NetworkPayloadStorage",
+    "NetworkReuseClass",
+    "RuntimeDetachedTensorMap",
+    "RuntimeIdentity",
+    "cuda_device_ordinal",
+    "detach_runtime",
+    "network_has_compact_payload",
+    "network_input_metadata_matches",
+    "network_owned_payload",
+    "network_restrict_degeneracies",
+    "network_reuse_class",
+    "network_scatter_add_assign",
+    "network_sector_leg",
+    "network_source_leg",
+    "network_zeros_from_effective_legs",
+    "prepare_trace_pairs",
+    "replace_plan_cache_config",
+    "runtime_identity",
+    "with_extension_slot",
+    "with_plan_cache",
 ];
 const SECTOR: &[&str] = &[
     "BraidingStyleKind",

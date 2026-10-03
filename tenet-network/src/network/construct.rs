@@ -169,7 +169,7 @@ impl Network {
             .map(|spaces| {
                 spaces
                     .iter()
-                    .map(|space| space.network_sector_leg().clone())
+                    .map(|space| __network::network_sector_leg(space).clone())
                     .collect()
             })
             .collect::<Vec<_>>();
@@ -225,7 +225,7 @@ impl Network {
                 .spaces
                 .get(authority.tensor().index())
                 .and_then(|spaces| spaces.get(authority.axis()))
-                .map(|space| space.network_sector_leg().clone())
+                .map(|space| __network::network_sector_leg(space).clone())
                 .ok_or_else(|| SymmetricSliceLowerError::MissingAuthority {
                     label: index.label().clone(),
                     authority,
@@ -325,7 +325,7 @@ impl Network {
         // once per execution.
         if tensors
             .iter()
-            .any(|tensor| tensor.network_has_compact_payload())
+            .any(|tensor| __network::network_has_compact_payload(tensor))
         {
             return Err(SymmetricSliceExecutionError::Tensor(
                 invalid("symmetric sliced execution requires dense Host payloads").into(),
@@ -347,9 +347,12 @@ impl Network {
             .steps
             .last()
             .map_or(0, |step| step.authority_input_slot);
-        let mut accumulator = tensors[authority_input_slot]
-            .network_zeros_from_effective_legs(codomain, domain)
-            .map_err(SymmetricSliceExecutionError::Tensor)?;
+        let mut accumulator = __network::network_zeros_from_effective_legs(
+            tensors[authority_input_slot],
+            codomain,
+            domain,
+        )
+        .map_err(SymmetricSliceExecutionError::Tensor)?;
         let mut meter =
             PayloadMeter::new(measured_payload_ceiling, &accumulator).map_err(map_payload_error)?;
         if bound.plan.slices().nslices() == 0 {
@@ -395,9 +398,12 @@ impl Network {
                     })
                     .collect::<Vec<_>>();
                 owned.push(
-                    tensor
-                        .network_restrict_degeneracies(self.conj[operand], &restrictions)
-                        .map_err(SymmetricSliceExecutionError::Tensor)?,
+                    __network::network_restrict_degeneracies(
+                        tensor,
+                        self.conj[operand],
+                        &restrictions,
+                    )
+                    .map_err(SymmetricSliceExecutionError::Tensor)?,
                 );
             }
             let compact_inputs = owned
@@ -427,8 +433,7 @@ impl Network {
                 .observe(&workspace.slots, &workspace.producers, &payloads)
                 .map_err(map_payload_error)?;
 
-            accumulator
-                .network_scatter_add_assign(&partial, &scatter_ranges)
+            __network::network_scatter_add_assign(&mut accumulator, &partial, &scatter_ranges)
                 .map_err(|error| {
                     SymmetricSliceExecutionError::Tensor(HostNetworkError::<R>::from(error))
                 })?;

@@ -90,8 +90,7 @@ impl PayloadMeter {
         limit: usize,
         destination: &TensorMap<R, D, S>,
     ) -> std::result::Result<Self, PayloadMeterError> {
-        let destination = destination
-            .network_owned_payload()
+        let destination = __network::network_owned_payload(destination)
             .ok_or(PayloadMeterError::ArithmeticOverflow)?;
         Ok(Self {
             limit,
@@ -118,7 +117,7 @@ impl PayloadMeter {
         self.base.extend(
             tensors
                 .into_iter()
-                .filter_map(TensorMap::network_owned_payload),
+                .filter_map(__network::network_owned_payload),
         );
     }
 
@@ -146,7 +145,7 @@ impl PayloadMeter {
         }
         for (slot, producer) in slots.iter().zip(producers) {
             if producer.is_some() {
-                charge(slot.as_ref().and_then(TensorMap::network_owned_payload))?;
+                charge(slot.as_ref().and_then(__network::network_owned_payload))?;
             }
         }
         for &payload in extra {
@@ -181,7 +180,7 @@ pub(super) fn intermediate_payloads<R, D: TensorScalar, S: NetworkPayloadStorage
     intermediates
         .iter()
         .filter_map(|buffers| buffers.output.as_ref())
-        .map(TensorMap::network_owned_payload)
+        .map(__network::network_owned_payload)
         .collect()
 }
 
@@ -333,7 +332,7 @@ where
     {
         for buffers in &mut self.intermediates {
             debug_assert!(buffers.parked.is_none());
-            buffers.parked = buffers.output.take().and_then(TensorMap::detach_runtime);
+            buffers.parked = buffers.output.take().and_then(__network::detach_runtime);
         }
     }
 
@@ -465,9 +464,8 @@ where
 {
     let device = tensors
         .first()
-        .ok_or_else(|| invalid("network execution requires at least one operand"))?
-        .runtime()
-        .cuda_device_ordinal()
+        .ok_or_else(|| invalid("network execution requires at least one operand"))
+        .map(|tensor| __network::cuda_device_ordinal(tensor.runtime()))?
         .ok_or_else(|| {
             invalid(
                 "this runtime was built without a CUDA device; use Runtime::builder().cuda(device)",
@@ -483,7 +481,7 @@ where
         tensors[0].provider().braiding_style(),
         tensors
             .iter()
-            .map(|tensor| tensor.network_reuse_class(false)),
+            .map(|tensor| __network::network_reuse_class(tensor, false)),
     )
 }
 
@@ -571,7 +569,7 @@ impl PlannedNetwork {
                     ))
                 })?
                 .runtime();
-            let runtime_identity = runtime.identity();
+            let runtime_identity = __network::runtime_identity(runtime);
             let rule_identity = TypedSectorAdmission::typed_rule_identity(tensors[0].provider());
             for (index, &tensor) in tensors.iter().enumerate() {
                 if !runtime_identity.matches(tensor.runtime()) {
@@ -601,7 +599,8 @@ impl PlannedNetwork {
                 && workspace.rule_identity == Some(rule_identity.clone())
                 && workspace.input_snapshot.len() == tensors.len()
                 && tensors.iter().enumerate().all(|(index, tensor)| {
-                    tensor.network_input_metadata_matches(
+                    __network::network_input_metadata_matches(
+                        tensor,
                         self.conj[index],
                         &workspace.input_snapshot[index].spaces,
                         workspace.input_snapshot[index].reuse_class,
@@ -630,11 +629,11 @@ impl PlannedNetwork {
                                 .codomain()
                                 .into_iter()
                                 .chain(tensor.domain())
-                                .map(|space| space.network_sector_leg().clone())
+                                .map(|space| __network::network_sector_leg(&space).clone())
                                 .collect();
                             TypedInputSnapshot {
                                 spaces,
-                                reuse_class: tensor.network_reuse_class(false),
+                                reuse_class: __network::network_reuse_class(tensor, false),
                             }
                         })
                         .collect::<Vec<_>>(),
@@ -734,7 +733,7 @@ impl PlannedNetwork {
             if let Some(meter) = meter.as_deref_mut() {
                 let mut payloads =
                     retained_payloads.expect("meter requires retained payload snapshot");
-                payloads.push(contracted.get(buffer).network_owned_payload());
+                payloads.push(__network::network_owned_payload(contracted.get(buffer)));
                 meter
                     .observe(slots, producers, &payloads)
                     .map_err(MeteredNetworkError::Payload)?;
@@ -768,7 +767,7 @@ impl PlannedNetwork {
             )?;
             if let Some(meter) = meter {
                 let mut payloads = intermediate_payloads(intermediates);
-                payloads.push(output.network_owned_payload());
+                payloads.push(__network::network_owned_payload(&output));
                 meter
                     .observe(slots, producers, &payloads)
                     .map_err(MeteredNetworkError::Payload)?;

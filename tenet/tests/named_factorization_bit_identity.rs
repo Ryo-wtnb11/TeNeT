@@ -16,9 +16,9 @@ use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRule, ProductFusionRuleExt,
     SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
+use tenet::typed::__network::NetworkReuseClass;
 use tenet::typed::{
-    Eig, Eigh, GradedSpace, LeftPolar, Lq, NetworkReuseClass, Qr, RightPolar, Runtime, Svd,
-    TensorMap,
+    Eig, Eigh, GradedSpace, LeftPolar, Lq, Qr, RightPolar, Runtime, Svd, TensorMap,
 };
 
 // The old tuple order of every result.
@@ -65,7 +65,10 @@ macro_rules! factor {
             .map(|i| format!("{:?}", t.subblock_fusion_trees(i).unwrap().coupled()))
             .collect::<Vec<_>>();
         let (codomain, domain) = (legs(t.codomain()), legs(t.domain()));
-        let compact = matches!(t.network_reuse_class(false), NetworkReuseClass::Compact);
+        let compact = matches!(
+            tenet::typed::__network::network_reuse_class(&t, false),
+            NetworkReuseClass::Compact
+        );
         let data_materialized = t.materialize().unwrap();
         let data = data_materialized.dense_data().unwrap();
         (

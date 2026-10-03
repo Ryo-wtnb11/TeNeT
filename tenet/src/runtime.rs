@@ -606,12 +606,52 @@ struct PlanCacheHome {
     /// Contraction-plan cache configuration (the cache state itself lives
     /// in `slot`).
     config: PlanCacheConfig,
-    /// Type-erased downstream extension slot. Currently holds the
+    /// Type-keyed downstream extensions. Currently holds the
     /// contraction-plan cache: the cache and plan types live in
     /// `tenet-network`, which depends on this crate, so the runtime can only
-    /// hold them behind `dyn Any`; `tenet-network` claims and downcasts the
-    /// slot on first use.
-    slot: Option<Box<dyn Any + Send>>,
+    /// hold them behind `dyn Any`; `tenet-network` claims its entry on first
+    /// use.
+    slot: ExtensionSlot,
+}
+
+/// Type-keyed storage for state a downstream crate keeps on a [`Runtime`].
+///
+/// Each value lives under its own type, so a lookup returns the value of the
+/// requested type or nothing. Why not one `Option<Box<dyn Any>>`: a value of
+/// another type in that single slot left its owner a choice between a panic
+/// and silently dropping someone else's state.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct ExtensionSlot {
+    values: Vec<Box<dyn Any + Send>>,
+}
+
+impl ExtensionSlot {
+    /// The stored value of type `T`, if one was inserted.
+    pub fn get_mut<T: Any + Send>(&mut self) -> Option<&mut T> {
+        self.values
+            .iter_mut()
+            .find_map(|value| value.as_mut().downcast_mut::<T>())
+    }
+
+    /// The stored value of type `T`, inserting `init()` first if there is none.
+    pub fn get_or_insert_with<T: Any + Send>(&mut self, init: impl FnOnce() -> T) -> &mut T {
+        let index = match self
+            .values
+            .iter()
+            .position(|value| value.as_ref().is::<T>())
+        {
+            Some(index) => index,
+            None => {
+                self.values.push(Box::new(init()));
+                self.values.len() - 1
+            }
+        };
+        self.values[index]
+            .as_mut()
+            .downcast_mut::<T>()
+            .expect("the value at `index` was found or inserted as a `T`")
+    }
 }
 
 struct RuntimeTreeTransformStores {
@@ -1118,12 +1158,6 @@ impl Runtime {
         RuntimeBuilder::default()
     }
 
-    /// Identity of this runtime's CPU pool, for host-pool observation tests.
-    #[doc(hidden)]
-    pub fn host_pool_identity(&self) -> usize {
-        self.inner.execution_config.shared_ctx.identity()
-    }
-
     pub(crate) fn lock(&self) -> MutexGuard<'_, RuntimeState> {
         // ponytail: poisoning treated as fatal; no operation leaves the
         // caches half-written in a way worth recovering from.
@@ -1137,13 +1171,7 @@ impl Runtime {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    #[doc(hidden)]
-    pub fn shares_state_with(&self, other: &Runtime) -> bool {
-        self.same_runtime(other)
-    }
-
-    #[doc(hidden)]
-    pub fn identity(&self) -> RuntimeIdentity {
+    pub(crate) fn identity(&self) -> RuntimeIdentity {
         RuntimeIdentity {
             inner: Arc::downgrade(&self.inner),
         }
@@ -1335,11 +1363,10 @@ impl Runtime {
     /// `tenet_network::configure_plan_cache` is the one public setter and the
     /// only caller of this seam: the cache type lives in `tenet-network`, so
     /// only it can retain eligible plans across a configuration change.
-    #[doc(hidden)]
-    pub fn replace_plan_cache_config<R>(
+    pub(crate) fn replace_plan_cache_config<R>(
         &self,
         config: PlanCacheConfig,
-        f: impl FnOnce(&PlanCacheConfig, &PlanCacheConfig, &mut Option<Box<dyn Any + Send>>) -> R,
+        f: impl FnOnce(&PlanCacheConfig, &PlanCacheConfig, &mut ExtensionSlot) -> R,
     ) -> R {
         let mut home = self.lock_plan_cache();
         let previous = home.config.clone();
@@ -1353,21 +1380,16 @@ impl Runtime {
     /// `tenet-network`, which claims and downcasts the slot on first use).
     /// Expert seam for `tenet-network`; do not hold tensors' operations
     /// inside `f` (the plan-cache mutex is held for its duration).
-    #[doc(hidden)]
-    pub fn with_extension_slot<R>(
-        &self,
-        f: impl FnOnce(&mut Option<Box<dyn Any + Send>>) -> R,
-    ) -> R {
+    pub(crate) fn with_extension_slot<R>(&self, f: impl FnOnce(&mut ExtensionSlot) -> R) -> R {
         f(&mut self.lock_plan_cache().slot)
     }
 
     /// Reads the plan-cache config AND accesses the slot under ONE plan-cache
     /// lock (#155): the network hot path resolves enable/replan policy and the
     /// cache lookup in a single acquisition instead of two.
-    #[doc(hidden)]
-    pub fn with_plan_cache<R>(
+    pub(crate) fn with_plan_cache<R>(
         &self,
-        f: impl FnOnce(&PlanCacheConfig, &mut Option<Box<dyn Any + Send>>) -> R,
+        f: impl FnOnce(&PlanCacheConfig, &mut ExtensionSlot) -> R,
     ) -> R {
         let mut home = self.lock_plan_cache();
         let home = &mut *home;
@@ -1377,8 +1399,7 @@ impl Runtime {
     /// CUDA device ordinal fixed when this runtime was built. Lock-free: the
     /// ordinal is immutable, so placement preflight needs no device lock.
     #[cfg(feature = "cuda")]
-    #[doc(hidden)]
-    pub fn cuda_device_ordinal(&self) -> Option<usize> {
+    pub(crate) fn cuda_device_ordinal(&self) -> Option<usize> {
         self.inner.cuda_device
     }
 
@@ -1815,7 +1836,7 @@ impl RuntimeBuilder {
         )?;
         let plan_cache = PlanCacheHome {
             config: self.plan_cache,
-            slot: None,
+            slot: ExtensionSlot::default(),
         };
         if let Some(threads) = self.recoupling_threads {
             state.set_recoupling_threads(threads);

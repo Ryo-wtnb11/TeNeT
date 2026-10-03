@@ -313,7 +313,7 @@ where
         let prepared = sources
             .iter()
             .map(|source| match source {
-                Some((value, pairs)) => value.prepare_trace_pairs(pairs),
+                Some((value, pairs)) => __network::prepare_trace_pairs(value, pairs),
                 None => Ok(None),
             })
             .collect::<Result<Vec<_>, Error>>()?;

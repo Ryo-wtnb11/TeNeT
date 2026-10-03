@@ -533,8 +533,7 @@ impl<R> GradedSpace<R> {
     }
 
     /// Raw logical leg snapshot used by typed network replay admission.
-    #[doc(hidden)]
-    pub fn network_sector_leg(&self) -> &SectorLeg {
+    pub(crate) fn network_sector_leg(&self) -> &SectorLeg {
         &self.leg
     }
 

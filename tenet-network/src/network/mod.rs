@@ -19,19 +19,21 @@ use tenet::sector::{
     CheckedGenericRigidSymbols, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols,
     RuleIdentity, SectorCodec, TypedSectorAdmission,
 };
+use tenet::typed::__network::{
+    self, NetworkDegeneracyRestriction, NetworkPayloadStorage, NetworkReuseClass,
+    RuntimeDetachedTensorMap, RuntimeIdentity,
+};
 use tenet::typed::FusionAlgebraError;
 #[cfg(test)]
 use tenet::typed::OperationError;
 use tenet::typed::{
-    ContractSpec, GradedSpace, NetworkDegeneracyRestriction, NetworkPayloadStorage,
-    NetworkReuseClass, RuntimeDetachedTensorMap, TensorMap, TypedSpaceModeDispatch,
-    TypedTensorAdjointDispatch, TypedTensorContractDispatch, TypedTensorModeDispatch,
-    TypedTensorRootDispatch, TypedTensorTraceDispatch, TypedTensorTransformDispatch,
+    ContractSpec, GradedSpace, TensorMap, TypedSpaceModeDispatch, TypedTensorAdjointDispatch,
+    TypedTensorContractDispatch, TypedTensorModeDispatch, TypedTensorRootDispatch,
+    TypedTensorTraceDispatch, TypedTensorTransformDispatch,
 };
 #[cfg(feature = "cuda")]
 use tenet::typed::{CudaPayload, CudaStorage};
 use tenet::typed::{Error, Runtime, TensorScalar};
-use tenet::RuntimeIdentity;
 
 use crate::cost::{DenseCostModel, DenseTensorInfo};
 use crate::error::{SliceError, SymmetricSliceExecutionError, SymmetricSliceLowerError};

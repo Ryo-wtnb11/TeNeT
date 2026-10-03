@@ -527,9 +527,33 @@ fn enabled_reconfiguration_retains_plans_and_workspaces() {
 }
 
 #[test]
+fn a_foreign_extension_value_coexists_with_the_plan_cache() {
+    // Another crate's value in the runtime's extension slot used to make the
+    // first contraction panic ("runtime plan-cache slot claimed by another
+    // type"). Each type now has its own entry: the plan cache works and the
+    // foreign value is neither read as a cache nor dropped.
+    use tenet::typed::__network::with_extension_slot;
+    let runtime = Runtime::builder().build().unwrap();
+    with_extension_slot(&runtime, |slot| {
+        slot.get_or_insert_with(|| 7u8);
+    });
+    let space = space(Arc::new(U1FusionRule), 2);
+    let (a, b) = pair(&runtime, &space, 130);
+    let first = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let second = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!((stats.misses, stats.hits, stats.entries), (1, 1, 1));
+    assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
+    assert_eq!(
+        with_extension_slot(&runtime, |slot| slot.get_mut::<u8>().copied()),
+        Some(7)
+    );
+}
+
+#[test]
 fn dropping_warm_runtime_breaks_the_cache_workspace_cycle() {
     let runtime = Runtime::builder().build().unwrap();
-    let identity = runtime.identity();
+    let identity = tenet::typed::__network::runtime_identity(&runtime);
     let space = space(Arc::new(U1FusionRule), 2);
     let (a, b) = pair(&runtime, &space, 120);
     let output = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();

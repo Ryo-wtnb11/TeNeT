@@ -127,7 +127,10 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
                 assert!(std::ptr::eq(factor.provider(), provider.as_ref()));
                 assert_eq!(factor.codomain(), input.codomain());
                 assert_eq!(factor.domain(), input.domain());
-                assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+                assert!(
+                    tenet::typed::__network::network_reuse_class(factor, false)
+                        == NetworkReuseClass::Compact
+                );
                 assert!(factor.dense_data().is_err());
             }
             for (actual, expected) in phase.diagview().unwrap().iter().zip(&expected_phase) {
@@ -170,7 +173,10 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
         narrow.lq_compact(&[0], &[1]).unwrap().l,
         narrow.lq_full(&[0], &[1]).unwrap().l,
     ] {
-        assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+        assert!(
+            tenet::typed::__network::network_reuse_class(&factor, false)
+                == NetworkReuseClass::Compact
+        );
     }
     let Qr { q, r } = narrow.qr_compact(&[0], &[1]).unwrap();
     numerics::assert_slices_close(
@@ -200,7 +206,10 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
         real.lq_compact(&[0], &[1]).unwrap().l,
         real.lq_full(&[0], &[1]).unwrap().l,
     ] {
-        assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+        assert!(
+            tenet::typed::__network::network_reuse_class(&factor, false)
+                == NetworkReuseClass::Compact
+        );
     }
     let Lq { l, q } = real.lq_compact(&[0], &[1]).unwrap();
     numerics::assert_slices_close(
@@ -216,7 +225,10 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
         narrow_real.lq_compact(&[0], &[1]).unwrap().l,
         narrow_real.lq_full(&[0], &[1]).unwrap().l,
     ] {
-        assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+        assert!(
+            tenet::typed::__network::network_reuse_class(&factor, false)
+                == NetworkReuseClass::Compact
+        );
     }
     let Qr { q, r } = narrow_real.qr_compact(&[0], &[1]).unwrap();
     numerics::assert_slices_close(
@@ -249,7 +261,10 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
         dual.lq_compact(&[0], &[1]).unwrap().l,
         dual.lq_full(&[0], &[1]).unwrap().l,
     ] {
-        assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+        assert!(
+            tenet::typed::__network::network_reuse_class(&factor, false)
+                == NetworkReuseClass::Compact
+        );
         assert!(factor.codomain()[0].is_dual());
         assert!(factor.domain()[0].is_dual());
         assert_eq!(factor.codomain(), dual.codomain());
@@ -263,14 +278,20 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
         dense_dual.qr_compact(&[0], &[1]).unwrap().r,
         dense_dual.qr_full(&[0], &[1]).unwrap().r,
     ] {
-        assert!(factor.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
+        assert!(
+            tenet::typed::__network::network_reuse_class(&factor, false)
+                == NetworkReuseClass::OwnedDense
+        );
         assert!(!factor.codomain()[0].is_dual());
     }
     for factor in [
         dense_dual.lq_compact(&[0], &[1]).unwrap().l,
         dense_dual.lq_full(&[0], &[1]).unwrap().l,
     ] {
-        assert!(factor.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
+        assert!(
+            tenet::typed::__network::network_reuse_class(&factor, false)
+                == NetworkReuseClass::OwnedDense
+        );
         assert!(!factor.domain()[0].is_dual());
     }
     assert_eq!(calls.load(Ordering::Relaxed), 8);
@@ -485,7 +506,10 @@ macro_rules! assert_dual_diagonal_qr_lq {
                 assert!(std::ptr::eq(factor.provider(), input.provider()));
                 assert_eq!(factor.codomain(), input.codomain());
                 assert_eq!(factor.domain(), input.domain());
-                assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+                assert!(
+                    tenet::typed::__network::network_reuse_class(&factor, false)
+                        == NetworkReuseClass::Compact
+                );
                 assert!(factor.dense_data().is_err());
             }
             let phases = phase.diagview().unwrap();
@@ -634,11 +658,16 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
     )
     .unwrap();
     let swapped = nondual.permute(&[1], &[0]).unwrap();
-    assert!(swapped.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&swapped, false)
+            == NetworkReuseClass::OwnedDense
+    );
     let Qr { q, r } = nondual.qr_compact(&[1], &[0]).unwrap();
     let Lq { l, q: lq_q } = nondual.lq_compact(&[1], &[0]).unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 4);
-    assert!(r.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&r, false) == NetworkReuseClass::OwnedDense
+    );
     assert!(!r.codomain()[0].is_dual());
     assert!(!l.domain()[0].is_dual());
     for rebuilt in [q.compose(&r).unwrap(), l.compose(&lq_q).unwrap()] {
@@ -681,7 +710,10 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
             assert_eq!(bond.degeneracy(&U1Irrep::new(-2)).unwrap(), 3);
         }
         for factor in [&r, &full_r, &l, &full_l] {
-            assert!(factor.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
+            assert!(
+                tenet::typed::__network::network_reuse_class(factor, false)
+                    == NetworkReuseClass::OwnedDense
+            );
         }
     }
 
@@ -752,7 +784,10 @@ fn checked_dual_diagonal_qr_lq_propagates_output_provider_errors() {
         let Qr { q, r } = finite.qr_compact(&[0], &[1]).unwrap();
         let Lq { l, q: lq_q } = finite.lq_compact(&[0], &[1]).unwrap();
         for factor in [&q, &r, &l, &lq_q] {
-            assert!(factor.network_reuse_class(false) == NetworkReuseClass::Compact);
+            assert!(
+                tenet::typed::__network::network_reuse_class(factor, false)
+                    == NetworkReuseClass::Compact
+            );
             assert_eq!(factor.codomain(), finite.codomain());
             assert_eq!(factor.codomain()[0].is_dual(), dual);
         }

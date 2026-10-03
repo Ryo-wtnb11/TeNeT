@@ -20,7 +20,8 @@ use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::typed::{GradedSpace, NetworkReuseClass, TensorMap};
+use tenet::typed::__network::NetworkReuseClass;
+use tenet::typed::{GradedSpace, TensorMap};
 use tenet::typed::{Runtime, TensorScalar};
 
 /// Value classes compared exactly: each real or imaginary part is its bit
@@ -97,7 +98,10 @@ where
     let host_lazy = host.adjoint().unwrap();
     let device = host.to_cuda().unwrap();
     let lazy = device.adjoint().unwrap();
-    assert!(lazy.network_reuse_class(false) == NetworkReuseClass::LazyAdjoint);
+    assert!(
+        tenet::typed::__network::network_reuse_class(&lazy, false)
+            == NetworkReuseClass::LazyAdjoint
+    );
 
     let len = host.dense_data().unwrap().len() as u64;
     // A chained input: an owned device copy (a `[len, 1]` gather output, not
@@ -146,7 +150,10 @@ where
             "{what} {case}: no download"
         );
 
-        assert!(owned.network_reuse_class(false) == NetworkReuseClass::OwnedDense);
+        assert!(
+            tenet::typed::__network::network_reuse_class(&owned, false)
+                == NetworkReuseClass::OwnedDense
+        );
         assert_eq!(owned.placement(), input.placement(), "{what} {case}");
         assert!(std::ptr::eq(owned.provider(), input.provider()));
         let back = owned.to_host().unwrap();

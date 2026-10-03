@@ -743,12 +743,10 @@ fn mixed_symmetric_slice_legal_empty_returns_unsliced_zero_layout() {
     let ir = NetworkIR::from_labels(inputs, output).unwrap();
     let effective = typed_effective_spaces(&a, false).unwrap();
     let output_authority = ir.edge(&label("a")).unwrap().occurrences()[0];
-    let output_leg = effective[output_authority.axis()]
-        .network_sector_leg()
-        .clone();
+    let output_leg = __network::network_sector_leg(&effective[output_authority.axis()]).clone();
     let output_sector = output_leg.sectors()[0];
     let authority = ir.edge(&label("x")).unwrap().occurrences()[0];
-    let leg = effective[authority.axis()].network_sector_leg().clone();
+    let leg = __network::network_sector_leg(&effective[authority.axis()]).clone();
     let slices = SymmetricSlicePlan::try_new(
         &ir,
         U1FusionRule.rule_identity(),
@@ -784,7 +782,7 @@ fn mixed_symmetric_slice_legal_empty_returns_unsliced_zero_layout() {
     assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
     assert_eq!(
         stats.destination_bytes(),
-        actual.network_owned_payload().unwrap().1
+        __network::network_owned_payload(&actual).unwrap().1
     );
     assert_eq!(stats.peak_workspace_bytes(), 0);
     assert_eq!(stats.peak_total_bytes(), stats.destination_bytes());
@@ -948,7 +946,7 @@ fn compact_input_preflight_applies_to_output_slices() {
         }],
     )
     .unwrap();
-    assert!(compact.network_has_compact_payload());
+    assert!(__network::network_has_compact_payload(&compact));
     let labels = vec![label("a"), label("b")];
     let network = Network::new(
         vec![labels.clone()],
@@ -962,7 +960,7 @@ fn compact_input_preflight_applies_to_output_slices() {
     let plan = ContractionPlan::from_steps(&ir, Vec::new()).unwrap();
     let authority = ir.edge(&label("a")).unwrap().occurrences()[0];
     let effective = typed_effective_spaces(&compact, false).unwrap();
-    let authority_leg = effective[authority.axis()].network_sector_leg().clone();
+    let authority_leg = __network::network_sector_leg(&effective[authority.axis()]).clone();
     let sector = authority_leg.sectors()[0];
     let slices = SymmetricSlicePlan::try_new(
         &ir,
@@ -1297,8 +1295,8 @@ fn host_diagonal_operands_classify_as_compact_for_device_admission() {
         true,
         tenet::sector::FusionRule::braiding_style(dense.provider()),
         [
-            dense.network_reuse_class(false),
-            dense.network_reuse_class(true)
+            __network::network_reuse_class(&dense, false),
+            __network::network_reuse_class(&dense, true)
         ],
     )
     .is_ok());
@@ -1306,7 +1304,7 @@ fn host_diagonal_operands_classify_as_compact_for_device_admission() {
         device_operand_admission(
             true,
             tenet::sector::FusionRule::braiding_style(compact.provider()),
-            [compact.network_reuse_class(false)],
+            [__network::network_reuse_class(&compact, false)],
         ),
         Err(Error::UnsupportedOnDevice(_))
     ));

@@ -2,8 +2,8 @@
 //! [`Runtime`](crate::typed::Runtime).
 //!
 //! The cache itself (keys and plan entries) lives in `tenet-network`, which
-//! depends on this crate; the runtime stores it behind a type-erased slot
-//! (see `Runtime::with_extension_slot`) and owns only the configuration
+//! depends on this crate; the runtime stores it in a type-keyed extension
+//! slot (see `typed::__network::with_extension_slot`) and owns only the configuration
 //! value types defined here. Set the configuration on
 //! [`RuntimeBuilder`](crate::typed::RuntimeBuilder) via
 //! `plan_cache`/`optimizer`, or later through `tenet-network`'s

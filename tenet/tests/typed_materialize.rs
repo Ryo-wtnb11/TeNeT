@@ -16,8 +16,9 @@ use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
+use tenet::typed::__network::NetworkReuseClass;
 use tenet::typed::Runtime;
-use tenet::typed::{GradedSpace, NetworkReuseClass, SectorSpectrum, TensorMap};
+use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
 trait Scalar: Copy + std::fmt::Debug + PartialEq {
     fn conjugate(self) -> Self;
@@ -92,7 +93,8 @@ macro_rules! assert_independent_owned_copy {
     ($input:expr, $result:expr, $what:expr) => {{
         let (input, result, what) = (&$input, $result, $what);
         assert!(
-            result.network_reuse_class(false) == NetworkReuseClass::OwnedDense,
+            tenet::typed::__network::network_reuse_class(&result, false)
+                == NetworkReuseClass::OwnedDense,
             "{what}: not lazy, not compact"
         );
         assert_eq!(result.codomain(), input.codomain(), "{what}: codomain");
@@ -102,12 +104,13 @@ macro_rules! assert_independent_owned_copy {
             "{what}: provider allocation"
         );
         assert!(
-            result.runtime().identity() == input.runtime().identity(),
+            tenet::typed::__network::runtime_identity(result.runtime())
+                == tenet::typed::__network::runtime_identity(input.runtime()),
             "{what}: runtime"
         );
         assert_eq!(result.placement(), input.placement(), "{what}: placement");
-        let (payload, _) = result.network_owned_payload().unwrap();
-        if let Some((input_payload, _)) = input.network_owned_payload() {
+        let (payload, _) = tenet::typed::__network::network_owned_payload(&result).unwrap();
+        if let Some((input_payload, _)) = tenet::typed::__network::network_owned_payload(&input) {
             assert_ne!(payload, input_payload, "{what}: fresh payload");
         }
 
@@ -189,7 +192,10 @@ macro_rules! physical_case {
 
         // Lazy adjoint input.
         let lazy = tensor.adjoint().unwrap();
-        assert!(lazy.network_reuse_class(false) == NetworkReuseClass::LazyAdjoint);
+        assert!(
+            tenet::typed::__network::network_reuse_class(&lazy, false)
+                == NetworkReuseClass::LazyAdjoint
+        );
         let owned = lazy.materialize().unwrap();
         let parent = tensor.to_physical_dense().unwrap();
         let adjoint = owned.to_physical_dense().unwrap();
@@ -430,7 +436,10 @@ macro_rules! diagonal_case {
         let bond = $bond;
         let diagonal: TensorMap<_, $dtype> =
             TensorMap::diagonal(&runtime, &bond, $spectra).unwrap();
-        assert!(diagonal.network_reuse_class(false) == NetworkReuseClass::Compact);
+        assert!(
+            tenet::typed::__network::network_reuse_class(&diagonal, false)
+                == NetworkReuseClass::Compact
+        );
         let dense = diagonal.materialize().unwrap();
         let physical = dense.to_physical_dense().unwrap();
         let (n, expected) = expected_diagonal::<$dtype>(&$expected);
@@ -440,7 +449,10 @@ macro_rules! diagonal_case {
         }
         assert_independent_owned_copy!(diagonal, dense, what);
         // The input stays compact.
-        assert!(diagonal.network_reuse_class(false) == NetworkReuseClass::Compact);
+        assert!(
+            tenet::typed::__network::network_reuse_class(&diagonal, false)
+                == NetworkReuseClass::Compact
+        );
     }};
 }
 
@@ -571,7 +583,10 @@ mod checked_generic {
             assert_independent_owned_copy!(tensor, copy, what);
 
             let lazy = tensor.adjoint().unwrap();
-            assert!(lazy.network_reuse_class(false) == NetworkReuseClass::LazyAdjoint);
+            assert!(
+                tenet::typed::__network::network_reuse_class(&lazy, false)
+                    == NetworkReuseClass::LazyAdjoint
+            );
             // The #1545 consumer: checked-Generic factorizations reject a lazy
             // adjoint, and materialize is the remedy.
             assert!(lazy.qr_compact(&[0], &[1, 2]).is_err());

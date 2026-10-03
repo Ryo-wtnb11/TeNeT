@@ -664,8 +664,7 @@ where
     /// with the compiled structure kept for [`CudaTracePairs::execute`];
     /// `None` for an empty pair list. Lets `tensor!` decide every trace of a
     /// network before the first one allocates, at no second compile.
-    #[doc(hidden)]
-    pub fn prepare_trace_pairs(
+    pub(crate) fn prepare_trace_pairs(
         &self,
         pairs: &[(usize, usize)],
     ) -> Result<Option<CudaTracePairs<'_, R, D>>, Error> {

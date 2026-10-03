@@ -77,9 +77,15 @@ fn observe(rt: &Runtime, salt: usize) -> Vec<HostPoolObservation> {
     take_host_pool_observations()
 }
 
-fn assert_on_own_pool(rt: &Runtime, threads: usize, salt: usize) {
+/// Returns the identity of the pool `rt`'s work entered, so the caller can
+/// check that each runtime has its own and keeps it.
+fn assert_on_own_pool(rt: &Runtime, threads: usize, salt: usize) -> usize {
     let observations = observe(rt, salt);
-    let id = rt.host_pool_identity();
+    let id = observations
+        .iter()
+        .filter(|o| o.site != HostPoolSite::Dense)
+        .find_map(|o| o.entered)
+        .expect("no host region entered a pool");
     for site in [
         HostPoolSite::Replay,
         HostPoolSite::PlanCompile,
@@ -129,6 +135,7 @@ fn assert_on_own_pool(rt: &Runtime, threads: usize, salt: usize) {
             );
         }
     }
+    id
 }
 
 #[test]
@@ -140,12 +147,18 @@ fn each_runtime_runs_host_work_on_its_own_pool_in_either_build_order() {
 
     // The issue's order: a serial runtime first no longer caps a later one.
     let (serial, wide) = (runtime(1), runtime(4));
-    assert_on_own_pool(&wide, 4, 0);
-    assert_on_own_pool(&serial, 1, 1);
+    let wide_pool = assert_on_own_pool(&wide, 4, 0);
+    let serial_pool = assert_on_own_pool(&serial, 1, 1);
 
     // Reverse order, two parallel counts, interleaved use.
     let (three, two) = (runtime(3), runtime(2));
-    assert_on_own_pool(&two, 2, 2);
-    assert_on_own_pool(&three, 3, 3);
-    assert_on_own_pool(&wide, 4, 4);
+    let two_pool = assert_on_own_pool(&two, 2, 2);
+    let three_pool = assert_on_own_pool(&three, 3, 3);
+    assert_eq!(
+        assert_on_own_pool(&wide, 4, 4),
+        wide_pool,
+        "wide changed pools"
+    );
+    let pools = std::collections::BTreeSet::from([wide_pool, serial_pool, two_pool, three_pool]);
+    assert_eq!(pools.len(), 4, "runtimes share a pool: {pools:?}");
 }
