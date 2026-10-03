@@ -121,13 +121,19 @@ where
 {
     // Why not freeze a key after every step: this state is private to one
     // execution, while only the final categorical identity can escape.
-    let mut current = UnhashedFusionTree::from(tree.clone());
-    let mut coefficient = R::Scalar::one();
-    for step in steps {
-        let step_coefficient =
-            apply_unique_artin_braid_at_with_inverse(rule, &mut current, step.index, step.inverse)?;
-        coefficient = coefficient * step_coefficient;
-    }
+    let (current, coefficient) = run_artin_steps(
+        (UnhashedFusionTree::from(tree.clone()), R::Scalar::one()),
+        steps,
+        |(mut current, coefficient), step| {
+            let step_coefficient = apply_unique_artin_braid_at_with_inverse(
+                rule,
+                &mut current,
+                step.index,
+                step.inverse,
+            )?;
+            Ok::<_, CoreError>((current, coefficient * step_coefficient))
+        },
+    )?;
     Ok((current.freeze(), coefficient))
 }
 

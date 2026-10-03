@@ -248,8 +248,23 @@ pub(super) fn run_cycles<T, E>(
     Ok(current)
 }
 
-/// The adjacent-swap braid of one tree (`braiding_manipulations.jl` `braid`
-/// via `permutation2swaps` and `artin_braid`), with `one` as the seed.
+/// Apply a prepared Artin schedule one adjacent swap at a time
+/// (`braiding_manipulations.jl` `braid`: `for s in permutation2swaps(p)`).
+/// The one step runner for term lists, single unique-fusion states and
+/// column-batched blocks.
+#[inline]
+pub(super) fn run_artin_steps<T, E>(
+    mut state: T,
+    steps: impl IntoIterator<Item = PreparedArtinStep>,
+    mut step: impl FnMut(T, PreparedArtinStep) -> Result<T, E>,
+) -> Result<T, E> {
+    for artin in steps {
+        state = step(state, artin)?;
+    }
+    Ok(state)
+}
+
+/// The adjacent-swap braid of one tree as a term list, with `one` as the seed.
 pub(super) fn braid_tree_steps<S, E, I, F, J>(
     tree: &FusionTreeKey,
     steps: I,
@@ -261,42 +276,71 @@ where
     F: FnMut(&FusionTreeKey, PreparedArtinStep) -> Result<J, E>,
     J: IntoIterator<Item = (FusionTreeKey, S)>,
 {
-    let mut current = vec![(tree.clone(), S::one())];
-    for step in steps {
+    run_artin_steps(vec![(tree.clone(), S::one())], steps, |current, step| {
         let mut next_terms = FusionTermAccumulator::new();
         for (tree, coefficient) in current {
             for (next_tree, step_coefficient) in artin(&tree, step)? {
                 next_terms.push(next_tree, coefficient.clone() * step_coefficient);
             }
         }
-        current = next_terms.into_vec();
-    }
-    Ok(current)
+        Ok(next_terms.into_vec())
+    })
 }
 
-/// Braid the codomain tree of every all-codomain term (the middle step of
-/// `fsbraid`, `braiding_manipulations.jl:302-309`).
-pub(super) fn braid_codomain_terms<S, E, C>(
-    terms: Vec<(FusionTreePairKey, S)>,
-    mut braid_codomain: C,
-) -> Result<Vec<(FusionTreePairKey, S)>, E>
+/// Rotate a running transform `count` times in `direction`, applying the
+/// clockwise or anticlockwise cycle move to every term.
+pub(super) fn run_cycle_terms<T, S, E, CW, CCW, I>(
+    current: T,
+    cycles: Option<(PreparedCycleDirection, usize)>,
+    mut clockwise: CW,
+    mut anticlockwise: CCW,
+) -> Result<T, E>
 where
-    S: CategoricalScalar,
-    C: FnMut(&FusionTreeKey) -> Result<Vec<(FusionTreeKey, S)>, E>,
+    T: TreePairTerms<S>,
+    E: From<CoreError>,
+    CW: FnMut(&FusionTreePairKey) -> Result<I, E>,
+    CCW: FnMut(&FusionTreePairKey) -> Result<I, E>,
+    I: StepTerms<S>,
 {
-    compose_terms(terms, |key| {
-        braid_codomain(key.codomain_tree()).map(|terms| {
-            terms
-                .into_iter()
-                .map(|(codomain_tree, coefficient)| {
-                    (
-                        FusionTreePairKey::pair(codomain_tree, key.domain_tree().clone()),
-                        coefficient,
-                    )
-                })
-                .collect::<Vec<_>>()
+    run_cycles(current, cycles, |terms, direction| {
+        terms.then(|key| match direction {
+            PreparedCycleDirection::Clockwise => clockwise(key),
+            PreparedCycleDirection::Anticlockwise => anticlockwise(key),
         })
     })
+}
+
+/// The middle and last steps of `fsbraid` (`braiding_manipulations.jl:302-309`)
+/// on an all-codomain transform: braid every term's codomain tree, then
+/// repartition back with `back`.
+pub(super) fn braid_via_codomain<T, S, E, B, I>(
+    all_codomain: T,
+    braid: B,
+    back: impl FnOnce(T) -> Result<T, E>,
+) -> Result<T, E>
+where
+    T: TreePairTerms<S>,
+    E: From<CoreError>,
+    B: FnMut(&FusionTreePairKey) -> Result<I, E>,
+    I: StepTerms<S>,
+{
+    back(all_codomain.then(braid)?)
+}
+
+/// Attach each braided codomain tree to the term's unchanged domain tree.
+pub(super) fn with_domain<S>(
+    key: &FusionTreePairKey,
+    codomain_terms: Vec<(FusionTreeKey, S)>,
+) -> Vec<(FusionTreePairKey, S)> {
+    codomain_terms
+        .into_iter()
+        .map(|(codomain_tree, coefficient)| {
+            (
+                FusionTreePairKey::pair(codomain_tree, key.domain_tree().clone()),
+                coefficient,
+            )
+        })
+        .collect()
 }
 
 /// Braid a tree-pair term list the way `fsbraid` does
@@ -308,16 +352,20 @@ pub(super) fn braid_terms_via_codomain<S, E, B, C>(
     all_rank: usize,
     target_codomain_rank: usize,
     mut bend: B,
-    braid_codomain: C,
+    mut braid_codomain: C,
 ) -> Result<Vec<(FusionTreePairKey, S)>, E>
 where
     S: CategoricalScalar,
+    E: From<CoreError>,
     B: FnMut(Vec<(FusionTreePairKey, S)>, Bend) -> Result<Vec<(FusionTreePairKey, S)>, E>,
     C: FnMut(&FusionTreeKey) -> Result<Vec<(FusionTreeKey, S)>, E>,
 {
     let all_codomain = repartition_loop(terms, codomain_rank, all_rank, &mut bend)?;
-    let braided = braid_codomain_terms(all_codomain, braid_codomain)?;
-    repartition_loop(braided, all_rank, target_codomain_rank, bend)
+    braid_via_codomain(
+        all_codomain,
+        |key| braid_codomain(key.codomain_tree()).map(|terms| with_domain(key, terms)),
+        |braided| repartition_loop(braided, all_rank, target_codomain_rank, bend),
+    )
 }
 
 /// One step of a column-batched block schedule. The multiplicity-free compact
@@ -327,7 +375,6 @@ pub(super) trait BlockDriver {
     type State;
     type Error;
     fn bend(&mut self, state: Self::State, bend: Bend) -> Result<Self::State, Self::Error>;
-    fn braid_codomain(&mut self, state: Self::State) -> Result<Self::State, Self::Error>;
     fn cycle(
         &mut self,
         state: Self::State,
@@ -335,18 +382,20 @@ pub(super) trait BlockDriver {
     ) -> Result<Self::State, Self::Error>;
 }
 
-/// Block `fsbraid` (`braiding_manipulations.jl:317-331`).
+/// Block `fsbraid` (`braiding_manipulations.jl:317-331`): repartition into
+/// the codomain, apply `braid_codomain`, repartition to the target split.
 pub(super) fn block_braid<D: BlockDriver>(
     driver: &mut D,
     state: D::State,
     codomain_rank: usize,
     all_rank: usize,
     target_codomain_rank: usize,
+    braid_codomain: impl FnOnce(&mut D, D::State) -> Result<D::State, D::Error>,
 ) -> Result<D::State, D::Error> {
     let state = repartition_loop(state, codomain_rank, all_rank, |state, bend| {
         driver.bend(state, bend)
     })?;
-    let state = driver.braid_codomain(state)?;
+    let state = braid_codomain(driver, state)?;
     repartition_loop(state, all_rank, target_codomain_rank, |state, bend| {
         driver.bend(state, bend)
     })

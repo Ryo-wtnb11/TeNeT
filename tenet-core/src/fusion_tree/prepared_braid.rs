@@ -1039,16 +1039,12 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                     validated,
                     self.target_codomain_rank,
                 )?;
-                run_cycles(current, Some((*direction, *count)), |terms, direction| {
-                    terms.then(|key| match direction {
-                        PreparedCycleDirection::Clockwise => {
-                            multiplicity_free_cycle_clockwise_tree_pair(rule, key)
-                        }
-                        PreparedCycleDirection::Anticlockwise => {
-                            multiplicity_free_cycle_anticlockwise_tree_pair(rule, key)
-                        }
-                    })
-                })
+                run_cycle_terms(
+                    current,
+                    Some((*direction, *count)),
+                    |key| multiplicity_free_cycle_clockwise_tree_pair(rule, key),
+                    |key| multiplicity_free_cycle_anticlockwise_tree_pair(rule, key),
+                )
             }
         }
     }
@@ -1132,24 +1128,29 @@ impl<'operation> PreparedTreePairOperation<'operation> {
     where
         R: MultiplicityFreeRigidSymbols,
         R::Scalar: Clone + Mul<Output = R::Scalar>,
-        F: FnOnce(&R, &FusionTreeKey) -> Result<(FusionTreeKey, R::Scalar), CoreError>,
+        F: FnMut(&R, &FusionTreeKey) -> Result<(FusionTreeKey, R::Scalar), CoreError>,
     {
+        let mut braid_codomain = braid_codomain;
         let rule = validated.rule;
         let all_rank = self.source_codomain_rank + self.source_domain_rank;
-        let (all_codomain, repartition_to_all) =
-            unique_rigid_repartition_tree_pair_validated(validated, all_rank)?;
-        let (braided_tree, braid_coefficient) = braid_codomain(rule, all_codomain.codomain_tree())?;
-        let braided_pair =
-            FusionTreePairKey::pair(braided_tree, all_codomain.domain_tree().clone());
-        let (destination, repartition_back) = unique_rigid_repartition_tree_pair_unchecked(
-            rule,
-            &braided_pair,
-            self.target_codomain_rank,
-        )?;
-        Ok((
-            destination,
-            repartition_to_all * braid_coefficient * repartition_back,
-        ))
+        braid_via_codomain(
+            unique_rigid_repartition_tree_pair_validated(validated, all_rank)?,
+            |key| {
+                let (braided_tree, coefficient) = braid_codomain(rule, key.codomain_tree())?;
+                Ok::<_, CoreError>((
+                    FusionTreePairKey::pair(braided_tree, key.domain_tree().clone()),
+                    coefficient,
+                ))
+            },
+            |(braided, coefficient)| {
+                let (destination, repartition_back) = unique_rigid_repartition_tree_pair_unchecked(
+                    rule,
+                    &braided,
+                    self.target_codomain_rank,
+                )?;
+                Ok((destination, coefficient * repartition_back))
+            },
+        )
     }
 
     fn execute_unique_rigid_validated<R>(
@@ -1183,16 +1184,12 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                     validated,
                     self.target_codomain_rank,
                 )?;
-                run_cycles(current, Some((*direction, *count)), |term, direction| {
-                    term.then(|key| match direction {
-                        PreparedCycleDirection::Clockwise => {
-                            unique_rigid_cycle_clockwise_tree_pair(rule, key)
-                        }
-                        PreparedCycleDirection::Anticlockwise => {
-                            unique_rigid_cycle_anticlockwise_tree_pair(rule, key)
-                        }
-                    })
-                })
+                run_cycle_terms(
+                    current,
+                    Some((*direction, *count)),
+                    |key| unique_rigid_cycle_clockwise_tree_pair(rule, key),
+                    |key| unique_rigid_cycle_anticlockwise_tree_pair(rule, key),
+                )
             }
         }
     }

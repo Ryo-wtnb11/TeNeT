@@ -139,14 +139,15 @@ where
             .collect());
     }
 
-    let mut basis = CompactMultiplicityFreeTreeBasis::from_group(group)?;
-    let mut columns = None;
-    for step in &prepared.artin_steps {
-        let (next_basis, next_columns) =
-            compact_artin_tree_block(rule, basis, columns.as_ref(), step.index, step.inverse)?;
-        basis = next_basis;
-        columns = Some(next_columns);
-    }
+    let (basis, columns) = run_artin_steps(
+        (CompactMultiplicityFreeTreeBasis::from_group(group)?, None),
+        prepared.artin_steps.iter().copied(),
+        |(basis, columns), step| {
+            let (basis, columns) =
+                compact_artin_tree_block(rule, basis, columns.as_ref(), step.index, step.inverse)?;
+            Ok::<_, CoreError>((basis, Some(columns)))
+        },
+    )?;
 
     // A validated non-identity permutation always contains at least one swap.
     let columns = columns.expect("non-identity permutation produces an Artin step");
@@ -478,15 +479,30 @@ where
     // each batched across the whole block — the TensorKit 0.17
     // `artin_braid`-on-a-block scheme.
     let basis = CompactMultiplicityFreeTreePairBasis::from_group(group)?;
+    let steps = prepared
+        .plan
+        .artin_steps()
+        .ok_or(CoreError::MalformedFusionTree {
+            message: "a block braid requires an Artin schedule",
+        })?;
     let (basis, columns) = block_braid(
-        &mut CompactTreePairDriver {
-            rule,
-            plan: &prepared.plan,
-        },
+        &mut CompactTreePairDriver { rule },
         (basis, None),
         codomain_rank,
         all_rank,
         prepared.target_codomain_rank,
+        |_, state| {
+            run_artin_steps(state, steps, |(basis, columns), step| {
+                let (basis, columns) = compact_codomain_artin_block(
+                    rule,
+                    basis,
+                    columns.as_ref(),
+                    step.index,
+                    step.inverse,
+                )?;
+                Ok((basis, Some(columns)))
+            })
+        },
     )?;
 
     // Why not materialize after each braid: both block runners keep the
@@ -767,10 +783,7 @@ where
 
     let basis = CompactMultiplicityFreeTreePairBasis::from_group(group)?;
     let (basis, columns) = block_transpose(
-        &mut CompactTreePairDriver {
-            rule,
-            plan: &prepared.plan,
-        },
+        &mut CompactTreePairDriver { rule },
         (basis, None),
         codomain_rank,
         prepared.target_codomain_rank,
@@ -973,13 +986,13 @@ where
     let target_codomain_rank = prepared.target_codomain_rank;
     let mut current_codomain_rank = group.codomain_rank;
     while current_codomain_rank < target_codomain_rank {
-        (basis, columns) = compose_block_terms(rule, &basis, &columns, |rule, key| {
+        (basis, columns) = compose_block_terms(&basis, &columns, |key| {
             multiplicity_free_bendleft_tree_pair(rule, key)
         })?;
         current_codomain_rank += 1;
     }
     while current_codomain_rank > target_codomain_rank {
-        (basis, columns) = compose_block_terms(rule, &basis, &columns, |rule, key| {
+        (basis, columns) = compose_block_terms(&basis, &columns, |key| {
             multiplicity_free_bendright_tree_pair(rule, key)
         })?;
         current_codomain_rank -= 1;
@@ -989,12 +1002,12 @@ where
         for _ in 0..count {
             (basis, columns) = match direction {
                 PreparedCycleDirection::Clockwise => {
-                    compose_block_terms(rule, &basis, &columns, |rule, key| {
+                    compose_block_terms(&basis, &columns, |key| {
                         multiplicity_free_cycle_clockwise_tree_pair_legacy_oracle(rule, key)
                     })?
                 }
                 PreparedCycleDirection::Anticlockwise => {
-                    compose_block_terms(rule, &basis, &columns, |rule, key| {
+                    compose_block_terms(&basis, &columns, |key| {
                         multiplicity_free_cycle_anticlockwise_tree_pair_legacy_oracle(rule, key)
                     })?
                 }
@@ -1016,7 +1029,6 @@ where
 /// The multiplicity-free column-batched driver of the shared block schedule.
 struct CompactTreePairDriver<'a, R> {
     rule: &'a R,
-    plan: &'a PreparedTreePairPlan<'a>,
 }
 
 impl<R> BlockDriver for CompactTreePairDriver<'_, R>
@@ -1040,30 +1052,6 @@ where
             Bend::Right => compact_bendright_block(self.rule, basis, columns.as_ref())?,
         };
         Ok((basis, Some(columns)))
-    }
-
-    fn braid_codomain(
-        &mut self,
-        (mut basis, mut columns): Self::State,
-    ) -> Result<Self::State, CoreError> {
-        let steps = self
-            .plan
-            .artin_steps()
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "a block braid requires an Artin schedule",
-            })?;
-        for step in steps {
-            let (next_basis, next_columns) = compact_codomain_artin_block(
-                self.rule,
-                basis,
-                columns.as_ref(),
-                step.index,
-                step.inverse,
-            )?;
-            basis = next_basis;
-            columns = Some(next_columns);
-        }
-        Ok((basis, columns))
     }
 
     fn cycle(
