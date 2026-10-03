@@ -60,6 +60,10 @@ where
     }
 }
 
+// Why not one Artin move generic over a tree or pair basis (with the
+// pair's domain as a rider): that form measured ~1% slower on the cold braid
+// plan build, insensitive to codegen units and LTO, while the two dedicated
+// moves below share all surgery through `PreparedMultiplicityFreeArtin`.
 pub(super) fn compact_artin_tree_block<R>(
     rule: &R,
     basis: CompactMultiplicityFreeTreeBasis,
@@ -460,7 +464,7 @@ pub(crate) fn scatter_compact_block<S: Clone>(
 
 pub(crate) fn order_compact_block<S: Clone>(
     basis: CompactMultiplicityFreeTreePairBasis,
-    mut columns: DenseColumns<S>,
+    columns: DenseColumns<S>,
 ) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
     #[cfg(test)]
     COMPACT_BLOCK_DIMENSIONS.with(|dimensions| {
@@ -475,8 +479,27 @@ pub(crate) fn order_compact_block<S: Clone>(
         }));
     });
 
+    let CompactMultiplicityFreeTreePairBasis { frame, locals } = basis;
+    let mut local_slots = locals.into_iter().map(Some).collect::<Vec<_>>();
+    order_block_columns(local_slots.len(), columns, |basis_row| {
+        frame.materialize(
+            local_slots[basis_row]
+                .take()
+                .expect("ordered compact rows contain each basis row once"),
+        )
+    })
+}
+
+/// Order a column-batched block result source-major by first appearance
+/// (the [`OrderedBlockLinearMap`] contract), moving each coefficient out of
+/// `columns`. `destination(basis_row)` materializes a basis row's key; it is
+/// called once per present row, in output order.
+pub(super) fn order_block_columns<S>(
+    basis_row_count: usize,
+    mut columns: DenseColumns<S>,
+    mut destination: impl FnMut(usize) -> FusionTreePairKey,
+) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
     let source_count = columns.num_src;
-    let basis_row_count = basis.locals.len();
     let mut ordered_basis_rows = Vec::with_capacity(basis_row_count);
     let mut ordered_row_for_basis = vec![usize::MAX; basis_row_count];
     let mut singleton_basis_rows = Vec::with_capacity(source_count);
@@ -505,17 +528,9 @@ pub(crate) fn order_compact_block<S: Clone>(
         }
     }
 
-    let CompactMultiplicityFreeTreePairBasis { frame, locals } = basis;
-    let mut local_slots = locals.into_iter().map(Some).collect::<Vec<_>>();
     let destinations = ordered_basis_rows
         .iter()
-        .map(|&basis_row| {
-            frame.materialize(
-                local_slots[basis_row]
-                    .take()
-                    .expect("ordered compact rows contain each basis row once"),
-            )
-        })
+        .map(|&basis_row| destination(basis_row))
         .collect();
 
     let storage = if is_singleton {

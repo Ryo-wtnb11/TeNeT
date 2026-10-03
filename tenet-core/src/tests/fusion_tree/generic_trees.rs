@@ -735,3 +735,129 @@ fn checked_generic_cyclic_transpose_preserves_provider_and_shape_errors() {
         Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })
     ));
 }
+
+// What: the Generic ordered block (keyed driver, `braid_codomain`, and the
+// shared ordered-map builder) equals the per-pair Generic transform for every
+// source, and the fixtures reach both ordered storages: one destination per
+// source (singleton columns) and fan-out (dense destination × source).
+#[test]
+fn generic_ordered_blocks_match_per_pair_in_both_storages() {
+    use std::collections::BTreeMap;
+    // HomSpace enumeration below builds coupled grids, which tests that count
+    // those builds observe globally.
+    let _guard = test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let rule = A4FoldRule;
+    let sectors = [SectorId::new(3)];
+    let leg = |dual: bool| SectorLeg::new(sectors.iter().map(|&s| (s, 1)), dual);
+    let (mut singleton, mut dense, mut braided) = (0, 0, 0);
+    for (nc, nd) in [(2usize, 1usize), (1, 2), (2, 2)] {
+        let n = nc + nd;
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new((0..nc).map(|i| leg(i % 2 == 1)).collect::<Vec<_>>()),
+            FusionProductSpace::new((0..nd).map(|i| leg(i % 2 == 0)).collect::<Vec<_>>()),
+        );
+        let mut blocks: BTreeMap<String, Vec<FusionTreePairKey>> = BTreeMap::new();
+        for key in hom.fusion_tree_keys_generic(&rule).unwrap() {
+            blocks
+                .entry(format!(
+                    "{:?}{:?}{:?}{:?}",
+                    key.codomain_tree().uncoupled(),
+                    key.domain_tree().uncoupled(),
+                    key.codomain_tree().is_dual(),
+                    key.domain_tree().is_dual()
+                ))
+                .or_default()
+                .push(key);
+        }
+        let reversed = (0..n).rev().collect::<Vec<_>>();
+        let rotated = (1..n).chain([0]).collect::<Vec<_>>();
+        let (codomain_levels, domain_levels) = reversed.split_at(nc);
+        for sources in blocks.values() {
+            for permutation in [&reversed, &rotated] {
+                for split in 0..=n {
+                    let (cp, dp) = permutation.split_at(split);
+                    let cases = [
+                        (
+                            generic_braid_tree_pair_block_ordered(
+                                &rule,
+                                sources,
+                                cp,
+                                dp,
+                                codomain_levels,
+                                domain_levels,
+                            ),
+                            sources
+                                .iter()
+                                .map(|source| {
+                                    generic_braid_tree_pair(
+                                        &rule,
+                                        source,
+                                        cp,
+                                        dp,
+                                        codomain_levels,
+                                        domain_levels,
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
+                        (
+                            generic_transpose_tree_pair_block_ordered(&rule, sources, cp, dp),
+                            sources
+                                .iter()
+                                .map(|source| generic_transpose_tree_pair(&rule, source, cp, dp))
+                                .collect::<Vec<_>>(),
+                        ),
+                    ];
+                    for (case, (block, per_pair)) in cases.into_iter().enumerate() {
+                        let Ok(block) = block else {
+                            assert!(per_pair.iter().any(Result::is_err));
+                            continue;
+                        };
+                        braided += usize::from(case == 0);
+                        let coefficient = |destination: usize, source: usize| match block.storage()
+                        {
+                            OrderedBlockLinearStorage::SingletonColumns {
+                                destination_rows,
+                                coefficients,
+                            } => (destination_rows[source] == destination)
+                                .then(|| coefficients[source]),
+                            OrderedBlockLinearStorage::DenseDstSrc(coefficients) => {
+                                coefficients[destination * sources.len() + source]
+                            }
+                        };
+                        match block.storage() {
+                            OrderedBlockLinearStorage::SingletonColumns { .. } => singleton += 1,
+                            OrderedBlockLinearStorage::DenseDstSrc(_) => dense += 1,
+                        }
+                        for (source, rows) in per_pair.into_iter().enumerate() {
+                            let rows = rows.unwrap();
+                            for (destination, key) in block.destinations().iter().enumerate() {
+                                let expected = rows
+                                    .iter()
+                                    .filter(|(candidate, _)| candidate == key)
+                                    .map(|(_, value)| *value)
+                                    .sum::<f64>();
+                                let actual = coefficient(destination, source).unwrap_or(0.0);
+                                assert!(
+                                    (actual - expected).abs() <= 1.0e-12 * (1.0 + expected.abs()),
+                                    "{key:?}: block {actual} vs per-pair {expected}"
+                                );
+                            }
+                            for (key, value) in &rows {
+                                if value.abs() > 1.0e-12 {
+                                    assert!(block.destinations().contains(key), "missing {key:?}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        singleton > 0 && dense > 0 && braided > 0,
+        "singleton {singleton} dense {dense} braided {braided}"
+    );
+}

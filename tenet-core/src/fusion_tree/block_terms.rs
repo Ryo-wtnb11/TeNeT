@@ -171,7 +171,7 @@ impl<K, S> OrderedBlockLinearMap<K, S> {
     }
 }
 
-impl<S: Clone> DenseColumns<S> {
+impl<S> DenseColumns<S> {
     pub(crate) fn with_capacity(num_src: usize, rows_hint: usize) -> Self {
         Self {
             data: Vec::with_capacity(rows_hint.saturating_mul(num_src)),
@@ -369,77 +369,16 @@ where
     Ok((basis, columns))
 }
 
-fn order_generic_tree_pair_block<S: Clone>(
+fn order_generic_tree_pair_block<S>(
     basis: Vec<FusionTreePairKey>,
     columns: DenseColumns<S>,
 ) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
-    let source_count = columns.num_src;
-    let mut ordered_basis_rows = Vec::with_capacity(basis.len());
-    let mut ordered_row_for_basis = vec![usize::MAX; basis.len()];
-    let mut singleton_basis_rows = Vec::with_capacity(source_count);
-    let mut is_singleton = true;
-
-    for source in 0..source_count {
-        let mut only_basis_row = None;
-        for (basis_row, ordered_row) in ordered_row_for_basis.iter_mut().enumerate() {
-            if columns.row(basis_row)[source].is_none() {
-                continue;
-            }
-            if *ordered_row == usize::MAX {
-                *ordered_row = ordered_basis_rows.len();
-                ordered_basis_rows.push(basis_row);
-            }
-            if only_basis_row.replace(basis_row).is_some() {
-                is_singleton = false;
-            }
-        }
-        match only_basis_row {
-            Some(basis_row) => singleton_basis_rows.push(basis_row),
-            None => {
-                is_singleton = false;
-                singleton_basis_rows.push(usize::MAX);
-            }
-        }
-    }
-
-    let destinations = ordered_basis_rows
-        .iter()
-        .map(|&basis_row| basis[basis_row].clone())
-        .collect::<Vec<_>>();
-    let storage = if is_singleton {
-        let mut destination_rows = Vec::with_capacity(source_count);
-        let mut coefficients = Vec::with_capacity(source_count);
-        for (source, basis_row) in singleton_basis_rows.into_iter().enumerate() {
-            destination_rows.push(ordered_row_for_basis[basis_row]);
-            coefficients.push(
-                columns.data[basis_row * source_count + source]
-                    .clone()
-                    .expect("singleton source has one present coefficient"),
-            );
-        }
-        OrderedBlockLinearStorage::SingletonColumns {
-            destination_rows,
-            coefficients,
-        }
-    } else {
-        let mut coefficients =
-            Vec::with_capacity(ordered_basis_rows.len().saturating_mul(source_count));
-        for basis_row in ordered_basis_rows {
-            let row_start = basis_row * source_count;
-            coefficients.extend(
-                columns.data[row_start..row_start + source_count]
-                    .iter()
-                    .cloned(),
-            );
-        }
-        OrderedBlockLinearStorage::DenseDstSrc(coefficients)
-    };
-
-    OrderedBlockLinearMap {
-        destinations,
-        source_count: columns.num_src,
-        storage,
-    }
+    let mut slots = basis.into_iter().map(Some).collect::<Vec<_>>();
+    order_block_columns(slots.len(), columns, |basis_row| {
+        slots[basis_row]
+            .take()
+            .expect("ordered block rows contain each basis row once")
+    })
 }
 
 /// The Generic keyed-block driver of the shared block schedule.
@@ -454,6 +393,7 @@ where
 {
     type State = (Vec<FusionTreePairKey>, DenseColumns<R::Scalar>);
     type Error = CoreError;
+    type BraidSchedule<'s> = (&'s [usize], &'s [PreparedArtinStep]);
 
     fn bend(
         &mut self,
@@ -464,6 +404,18 @@ where
         compose_block_terms(&basis, &columns, |key| match bend {
             Bend::Left => generic_bendleft_tree_pair(rule, key),
             Bend::Right => generic_bendright_tree_pair(rule, key),
+        })
+    }
+
+    fn braid_codomain(
+        &mut self,
+        (basis, columns): Self::State,
+        (permutation, steps): (&[usize], &[PreparedArtinStep]),
+    ) -> Result<Self::State, CoreError> {
+        let rule = self.rule;
+        compose_block_terms(&basis, &columns, |key| {
+            generic_braid_tree_unchecked(rule, key.codomain_tree(), permutation, steps)
+                .map(|terms| with_domain(key, terms))
         })
     }
 
@@ -552,12 +504,7 @@ where
         codomain_rank,
         permutation.len(),
         codomain_permutation.len(),
-        |_, (basis, columns)| {
-            compose_block_terms(&basis, &columns, |key| {
-                generic_braid_tree_unchecked(rule, key.codomain_tree(), &permutation, &steps)
-                    .map(|terms| with_domain(key, terms))
-            })
-        },
+        (&permutation, &steps),
     )?;
     Ok(order_generic_tree_pair_block(basis, columns))
 }
