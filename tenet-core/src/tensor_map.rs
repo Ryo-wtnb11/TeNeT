@@ -1,3 +1,5 @@
+use super::*;
+
 #[derive(Clone, Debug)]
 pub struct TensorMap<T, const NOUT: usize, const NIN: usize, S = Trivial, D = Vec<T>> {
     storage: D,
@@ -689,10 +691,10 @@ fn validate_exact_storage_extent(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockLayout<'a> {
-    len: usize,
-    offset: usize,
-    shape: &'a [usize],
-    strides: &'a [usize],
+    pub(crate) len: usize,
+    pub(crate) offset: usize,
+    pub(crate) shape: &'a [usize],
+    pub(crate) strides: &'a [usize],
 }
 
 impl<'a> BlockLayout<'a> {

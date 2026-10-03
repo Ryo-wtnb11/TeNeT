@@ -1,9 +1,11 @@
+use super::*;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockSpec {
-    key: BlockKey,
-    shape: DimVec,
-    strides: DimVec,
-    offset: usize,
+    pub(crate) key: BlockKey,
+    pub(crate) shape: DimVec,
+    pub(crate) strides: DimVec,
+    pub(crate) offset: usize,
 }
 
 impl BlockSpec {
@@ -98,8 +100,8 @@ impl SectorBlock {
 /// owner and uses this value only as a grouped execution view.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FusionTreeBlockGroup {
-    group_key: FusionTreeGroupKey,
-    block_indices: DimVec,
+    pub(super) group_key: FusionTreeGroupKey,
+    pub(crate) block_indices: DimVec,
 }
 
 impl FusionTreeBlockGroup {
@@ -134,10 +136,10 @@ impl FusionTreeBlockGroup {
 pub struct SectorStructure {
     rank: usize,
     key_kind: Option<BlockKeyKind>,
-    blocks: Vec<SectorBlock>,
-    fusion_tree_groups: Vec<FusionTreeBlockGroup>,
-    sorted_indices: DimVec,
-    compact_lookup: Option<CompactBlockLookup>,
+    pub(super) blocks: Vec<SectorBlock>,
+    pub(super) fusion_tree_groups: Vec<FusionTreeBlockGroup>,
+    pub(super) sorted_indices: DimVec,
+    pub(super) compact_lookup: Option<CompactBlockLookup>,
 }
 
 impl SectorStructure {
@@ -418,8 +420,8 @@ impl SectorStructure {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct CompactBlockLookup {
-    indices: DimVec,
+pub(super) struct CompactBlockLookup {
+    pub(super) indices: DimVec,
 }
 
 impl CompactBlockLookup {

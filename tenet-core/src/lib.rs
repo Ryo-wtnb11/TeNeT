@@ -39,18 +39,30 @@ pub use tenet_sectors::{
 #[cfg(feature = "racah-generated")]
 pub use tenet_sectors::{SUNFusionRule, SUNFusionRuleError};
 
-include!("storage.rs");
-include!("space.rs");
-include!("sector.rs");
+#[rustfmt::skip] // #1817 formats the former include! fragments in a separate formatting-only PR.
+mod storage;
+pub use storage::*;
+#[rustfmt::skip] // #1817 formats the former include! fragments in a separate formatting-only PR.
+mod space;
+pub use space::*;
+#[rustfmt::skip] // #1817 formats the former include! fragments in a separate formatting-only PR.
+mod sector;
+pub use sector::*;
 #[rustfmt::skip] // #1817 formats the former include! fragments in a separate formatting-only PR.
 mod fusion_space;
 pub use fusion_space::*;
 #[rustfmt::skip] // #1817 formats the former include! fragments in a separate formatting-only PR.
 mod fusion_tree;
 pub use fusion_tree::*;
-include!("block_structure.rs");
-include!("tensor_map.rs");
-include!("error.rs");
+#[rustfmt::skip] // #1817 formats the former include! fragments in a separate formatting-only PR.
+mod block_structure;
+pub use block_structure::*;
+#[rustfmt::skip] // #1817 formats the former include! fragments in a separate formatting-only PR.
+mod tensor_map;
+pub use tensor_map::*;
+#[rustfmt::skip] // #1817 formats the former include! fragments in a separate formatting-only PR.
+mod error;
+pub use error::*;
 
 #[cfg(test)]
 include!("tests.rs");

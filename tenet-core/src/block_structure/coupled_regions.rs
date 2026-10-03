@@ -1,11 +1,13 @@
-fn new_coupled_region_cache(rank: usize) -> CoupledRegionCache {
+use super::*;
+
+pub(super) fn new_coupled_region_cache(rank: usize) -> CoupledRegionCache {
     (0..=rank)
         .map(|_| OnceLock::new())
         .collect::<Vec<_>>()
         .into()
 }
 
-fn compile_coupled_sector_regions(
+pub(super) fn compile_coupled_sector_regions(
     structure: &BlockStructure,
     nout: usize,
 ) -> Result<Option<Vec<CoupledSectorRegion>>, CoreError> {
@@ -167,7 +169,7 @@ fn insert_coupled_tree_extent<'a>(
     Ok(Some(index))
 }
 
-fn checked_element_count(shape: &[usize]) -> Result<usize, CoreError> {
+pub(super) fn checked_element_count(shape: &[usize]) -> Result<usize, CoreError> {
     shape.iter().try_fold(1usize, |count, &extent| {
         count
             .checked_mul(extent)

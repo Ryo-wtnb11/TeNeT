@@ -1,9 +1,21 @@
-include!("block_structure/block_key.rs");
-include!("block_structure/sector_structure.rs");
-include!("block_structure/degeneracy.rs");
-include!("block_structure/content.rs");
-include!("block_structure/structure.rs");
-include!("block_structure/intern.rs");
-include!("block_structure/validated.rs");
-include!("block_structure/storage_injective.rs");
-include!("block_structure/coupled_regions.rs");
+use super::*;
+
+mod block_key;
+mod content;
+mod coupled_regions;
+mod degeneracy;
+mod intern;
+mod sector_structure;
+mod storage_injective;
+mod structure;
+mod validated;
+
+pub use block_key::*;
+pub use content::*;
+use coupled_regions::*;
+pub use degeneracy::*;
+pub use intern::*;
+pub use sector_structure::*;
+pub use storage_injective::*;
+pub use structure::*;
+pub use validated::*;

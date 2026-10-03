@@ -1,3 +1,5 @@
+use super::*;
+
 /// Inline storage for one-based outer-multiplicity vertex labels.
 pub type MultiplicityVec = SmallVec<[MultiplicityIndex; 8]>;
 /// Inline storage for `usize` metadata (dims, strides, indices, permutations).

@@ -1,3 +1,5 @@
+use super::*;
+
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CoreError {
@@ -378,7 +380,7 @@ fn max_offset_delta(shape: &[usize], strides: &[usize]) -> Result<usize, CoreErr
         })
 }
 
-fn storage_end_exclusive(
+pub(crate) fn storage_end_exclusive(
     shape: &[usize],
     strides: &[usize],
     offset: usize,
@@ -399,13 +401,13 @@ fn storage_end_exclusive(
         .ok_or_else(|| CoreError::OffsetOverflow { value: offset })
 }
 
-fn checked_product(dims: &[usize]) -> Result<usize, CoreError> {
+pub(crate) fn checked_product(dims: &[usize]) -> Result<usize, CoreError> {
     dims.iter().try_fold(1usize, |acc, &dim| {
         acc.checked_mul(dim).ok_or_else(|| CoreError::ElementCountOverflow)
     })
 }
 
-fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
+pub(crate) fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
     let mut strides = vec![1usize; shape.len()];
     for index in 1..shape.len() {
         strides[index] = strides[index - 1]
