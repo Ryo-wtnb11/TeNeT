@@ -327,7 +327,7 @@ pub use serialization::{
 
 // --- split leaf #1587: generated module wiring below ---
 mod scalar;
-use linear_ops::{host_add_impl, host_axpby_into, host_scale_impl};
+use linear_ops::{host_add_impl, host_axpby_into, host_scale_impl, unique_dense_destination};
 pub(crate) use scalar::ScalarOps;
 pub use scalar::{AdvancedLinalgScalar, FactorizationScalar, TensorScalar};
 #[cfg(feature = "cuda")]
@@ -400,7 +400,7 @@ pub use factorize::{
 mod checked_generic_contract;
 mod mode_dispatch;
 pub(crate) use checked_generic_contract::TypedFacadeError;
-use checked_generic_contract::{trace_pair_axes, write_identity_blocks_generic, TracePairAxes};
+use checked_generic_contract::{trace_source, write_identity_blocks_generic};
 use mode_dispatch::checked_compact_spectrum_layout;
 #[doc(hidden)]
 pub use tenet_tensors::{reject_non_symmetric_contraction, NON_SYMMETRIC_CONTRACTION_UNSUPPORTED};
@@ -438,6 +438,9 @@ mod cat;
 mod construction;
 mod contract_ops;
 pub use contract_ops::ContractSpec;
+/// The seam `tenet-network` drives; not part of the facade.
+#[doc(hidden)]
+pub mod __network;
 #[cfg(feature = "cuda")]
 mod cuda_contract;
 #[cfg(feature = "cuda")]
@@ -446,11 +449,6 @@ mod cuda_ops;
 mod cuda_scalar;
 #[cfg(feature = "cuda")]
 mod cuda_transfer;
-#[cfg(feature = "cuda")]
-use cuda_transfer::unique_cuda_destination;
-/// The seam `tenet-network` drives; not part of the facade.
-#[doc(hidden)]
-pub mod __network;
 #[cfg(feature = "cuda")]
 mod cuda_transform;
 mod inspection;

@@ -48,7 +48,7 @@ pub(super) struct TracePairAxes {
 /// check, it is the derivation of `output_axes` — the seam cannot supply it,
 /// and a malformed list would otherwise produce a silently wrong output order
 /// rather than an error. Same precedent as `braid`'s levels pre-check.
-pub(super) fn trace_pair_axes(
+fn trace_pair_axes(
     rank: usize,
     codomain_rank: usize,
     pairs: &[(usize, usize)],
@@ -78,6 +78,61 @@ pub(super) fn trace_pair_axes(
     }))
 }
 
+/// A trace's source in storage orientation: an owned body as it is, or a
+/// lazy adjoint's parent with the pair axes mapped onto the parent's legs
+/// and the source conjugated. Shared by every trace entry point and
+/// placement, so they lower an adjoint identically.
+pub(super) struct TraceSource<'t, R, D, S> {
+    pub(super) body: &'t Arc<TypedTensorBody<R, D, S>>,
+    pub(super) axes: TracePairAxes,
+    pub(super) conjugate: bool,
+}
+
+impl<R, D, S> TraceSource<'_, R, D, S> {
+    pub(super) fn spec(&self) -> tenet_tensors::TensorTraceAxisSpec<'_> {
+        tenet_tensors::TensorTraceAxisSpec::new_with_conjugation(
+            &self.axes.output_axes,
+            &self.axes.trace_lhs,
+            &self.axes.trace_rhs,
+            self.conjugate,
+        )
+    }
+}
+
+/// Validates `pairs` and lowers `tensor` to its trace source; `None` for an
+/// empty list.
+pub(super) fn trace_source<'t, R, D, S>(
+    tensor: &'t TensorMap<R, D, S>,
+    pairs: &[(usize, usize)],
+) -> Result<Option<TraceSource<'t, R, D, S>>, Error> {
+    let Some(mut axes) = trace_pair_axes(tensor.rank(), tensor.codomain_rank(), pairs)? else {
+        return Ok(None);
+    };
+    Ok(Some(match &tensor.repr {
+        TypedTensorRepr::Owned(body) => TraceSource {
+            body,
+            axes,
+            conjugate: false,
+        },
+        TypedTensorRepr::Adjoint(view) => {
+            let parent = view.parent.space.space();
+            let (nout, nin) = (parent.nout(), parent.nin());
+            for list in [
+                &mut axes.output_axes,
+                &mut axes.trace_lhs,
+                &mut axes.trace_rhs,
+            ] {
+                *list = logical_adjoint_axes_to_parent(nout, nin, list);
+            }
+            TraceSource {
+                body: &view.parent,
+                axes,
+                conjugate: true,
+            }
+        }
+    }))
+}
+
 pub(super) fn trace_pairs_checked_generic<R, D>(
     tensor: &TensorMap<R, D>,
     pairs: &[(usize, usize)],
@@ -89,48 +144,14 @@ where
         > + CheckedGenericPivotal<Scalar = f64>,
     D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    let Some(TracePairAxes {
-        output_axes,
-        destination_codomain_rank,
-        trace_lhs,
-        trace_rhs,
-    }) = trace_pair_axes(tensor.rank(), tensor.codomain_rank(), pairs)?
-    else {
+    let Some(source) = trace_source(tensor, pairs)? else {
         return Ok(tensor.clone());
     };
-    let mapped_output_axes;
-    let mapped_trace_lhs;
-    let mapped_trace_rhs;
-    let payload;
-    let (source_space, source_data, axes) = match &tensor.repr {
-        TypedTensorRepr::Owned(body) => {
-            payload = body.materialized_dense_data();
-            (
-                &body.space,
-                &*payload,
-                tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs),
-            )
-        }
-        TypedTensorRepr::Adjoint(view) => {
-            let parent = view.parent.space.space();
-            mapped_output_axes =
-                logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &output_axes);
-            mapped_trace_lhs =
-                logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_lhs);
-            mapped_trace_rhs =
-                logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_rhs);
-            (
-                &view.parent.space,
-                view.parent_data(),
-                tenet_tensors::TensorTraceAxisSpec::new_with_conjugation(
-                    &mapped_output_axes,
-                    &mapped_trace_lhs,
-                    &mapped_trace_rhs,
-                    true,
-                ),
-            )
-        }
-    };
+    let destination_codomain_rank = source.axes.destination_codomain_rank;
+    let source_space = &source.body.space;
+    let payload = source.body.materialized_dense_data();
+    let source_data = &*payload;
+    let axes = source.spec();
     let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_generic_checked(
         source_space,
         axes,

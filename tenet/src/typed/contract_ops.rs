@@ -82,80 +82,25 @@ where
         {
             return Err(Error::RuleMismatch);
         }
-        let Some(TracePairAxes {
-            output_axes,
-            destination_codomain_rank,
-            trace_lhs,
-            trace_rhs,
-        }) = trace_pair_axes(self.rank(), self.codomain_rank(), pairs)?
-        else {
+        let Some(source) = trace_source(self, pairs)? else {
             return host_axpby_into(self, destination, alpha, beta);
         };
-        let mapped_output_axes;
-        let mapped_trace_lhs;
-        let mapped_trace_rhs;
-        let (source_space, axes) = match &self.repr {
-            TypedTensorRepr::Owned(body) => (
-                &body.space,
-                tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs),
-            ),
-            TypedTensorRepr::Adjoint(view) => {
-                let parent = view.parent.space.space();
-                mapped_output_axes =
-                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &output_axes);
-                mapped_trace_lhs =
-                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_lhs);
-                mapped_trace_rhs =
-                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_rhs);
-                (
-                    &view.parent.space,
-                    tenet_tensors::TensorTraceAxisSpec::new_with_conjugation(
-                        &mapped_output_axes,
-                        &mapped_trace_lhs,
-                        &mapped_trace_rhs,
-                        true,
-                    ),
-                )
-            }
-        };
-        let TypedData::Dense(source_data) = self.storage_body().data.as_ref() else {
-            return Err(Error::Unsupported {
-                operation: "trace_pairs_into",
-                alternative: Alternative::Materialize,
-            });
-        };
+        let destination_codomain_rank = source.axes.destination_codomain_rank;
+        let source_space = &source.body.space;
+        let axes = source.spec();
         let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
             source_space,
             axes,
             destination_codomain_rank,
         )?;
         let space = source_space.derive_from_final_homspace(homspace)?;
-        let destination_body = match &destination.repr {
-            TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Dense(_)) => {
-                body
-            }
-            _ => {
-                return Err(Error::InvalidArgument(
-                    "destination must use ordinary dense host storage".to_string(),
-                ))
-            }
+        let TypedData::Dense(source_data) = source.body.data.as_ref() else {
+            return Err(Error::Unsupported {
+                operation: "trace_pairs_into",
+                alternative: Alternative::Materialize,
+            });
         };
-        if Arc::ptr_eq(&destination_body.data, &self.storage_body().data) {
-            return Err(Error::InvalidArgument(
-                "destination storage must not alias an input".to_string(),
-            ));
-        }
-        if destination_body.space.space() != space.space() {
-            return Err(Error::InvalidArgument(
-                "destination fusion space or block layout does not match the trace result"
-                    .to_string(),
-            ));
-        }
-        if Arc::strong_count(destination_body) != 1
-            || Arc::strong_count(&destination_body.data) != 1
-        {
-            return Err(Error::DestinationShared);
-        }
+        unique_dense_destination(destination, &source.body.data, space.space(), "host")?;
         let _host_pool = self.runtime.enter_host_pool();
         let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
             return Err(internal_layout_error("ordinary destination checked above"));
@@ -1156,47 +1101,18 @@ where
     ) -> Result<Self, Error> {
         let _host_pool = self.runtime.enter_host_pool();
         let rank = self.rank();
-        let Some(TracePairAxes {
-            output_axes,
-            destination_codomain_rank,
-            trace_lhs,
-            trace_rhs,
-        }) = trace_pair_axes(rank, self.codomain_rank(), pairs)?
-        else {
+        let Some(source) = trace_source(self, pairs)? else {
             return Ok(self.clone());
         };
-        let mapped_output_axes;
-        let mapped_trace_lhs;
-        let mapped_trace_rhs;
-        let (source_space, source_data, axes) = match &self.repr {
-            TypedTensorRepr::Owned(body) => (
-                &body.space,
-                match &*body.data {
-                    TypedData::Dense(data) => Some(data.as_slice()),
-                    TypedData::Diagonal(_) => None,
-                },
-                tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs),
-            ),
-            TypedTensorRepr::Adjoint(view) => {
-                let parent = view.parent.space.space();
-                mapped_output_axes =
-                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &output_axes);
-                mapped_trace_lhs =
-                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_lhs);
-                mapped_trace_rhs =
-                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_rhs);
-                (
-                    &view.parent.space,
-                    Some(view.parent_data()),
-                    tenet_tensors::TensorTraceAxisSpec::new_with_conjugation(
-                        &mapped_output_axes,
-                        &mapped_trace_lhs,
-                        &mapped_trace_rhs,
-                        true,
-                    ),
-                )
-            }
+        let destination_codomain_rank = source.axes.destination_codomain_rank;
+        let source_space = &source.body.space;
+        // A lazy adjoint's parent is always dense, so `None` is an owned
+        // compact payload.
+        let source_data = match source.body.data.as_ref() {
+            TypedData::Dense(data) => Some(data.as_slice()),
+            TypedData::Diagonal(_) => None,
         };
+        let axes = source.spec();
         // Preflight first: the checked homspace selection must fail before any
         // destination layout is derived, so a rejected trace publishes no state.
         let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
