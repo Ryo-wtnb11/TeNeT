@@ -216,10 +216,8 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              left_null_checked_generic left_null_diagonal_dyn left_null_dyn \
              left_polar_adjoint_parent_dyn left_polar_adjoint_parent_dyn_checked_generic \
              left_polar_checked_generic left_polar_diagonal_spectra_dyn left_polar_dyn \
-             lq_compact_checked_generic lq_compact_dyn lq_diagonal_dyn lq_full_checked_generic \
-             lq_full_dyn \
-             qr_compact_checked_generic qr_compact_dyn qr_diagonal_dyn qr_full_checked_generic \
-             qr_full_dyn rectangular_diagonal_bond_tensor \
+             lq_compact_from_source lq_full_from_source \
+             qr_compact_from_source qr_full_from_source rectangular_diagonal_bond_tensor \
              rectangular_diagonal_bond_tensor_generic_checked right_null_checked_generic \
              right_null_diagonal_dyn right_null_dyn right_polar_adjoint_parent_dyn \
              right_polar_adjoint_parent_dyn_checked_generic right_polar_checked_generic \

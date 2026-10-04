@@ -164,9 +164,7 @@ pub use polar::{
 };
 use polar::{validate_polar_direction, PolarDirection};
 pub use qr_lq::{
-    lq_compact_checked_generic, lq_compact_dyn, lq_diagonal_dyn, lq_full_checked_generic,
-    lq_full_dyn, qr_compact_checked_generic, qr_compact_dyn, qr_diagonal_dyn,
-    qr_full_checked_generic, qr_full_dyn,
+    lq_compact_from_source, lq_full_from_source, qr_compact_from_source, qr_full_from_source,
 };
 pub(crate) use scalar::{require_finite_factor_input, FactorFamily};
 pub use scalar::{FactorScalar, SectorSpectrum, SpectrumMagnitude};

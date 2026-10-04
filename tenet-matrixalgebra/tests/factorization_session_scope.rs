@@ -26,8 +26,10 @@ use tenet_core::{
 };
 use tenet_dense::{cpu_session_stats, DefaultDenseExecutor};
 use tenet_matrixalgebra::seam::{
-    qr_compact_checked_generic, qr_compact_dyn, BoundDynamicTensorRef, FactorSource,
+    lq_compact_from_source, qr_compact_from_source, BoundDynamicTensorRef, ExecutorLease,
+    FactorMode, FactorSource,
 };
+use tenet_matrixalgebra::{Lq, Qr};
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 
 /// A typed U(1) tensor bound to its provider, built the way the facade binds
@@ -335,9 +337,8 @@ fn assert_one_admission(label: &str, (sessions, admissions): (u64, u64)) {
 fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     use tenet_matrixalgebra::seam::{
         eigh_full_checked_generic, eigh_full_dyn, left_null_checked_generic, left_null_dyn,
-        left_polar_checked_generic, lq_compact_checked_generic, lq_compact_dyn,
-        pinv_direct_into_dyn, right_null_checked_generic, right_null_dyn,
-        svd_compact_dyn_checked_generic, svd_compact_factors_dyn,
+        left_polar_checked_generic, pinv_direct_into_dyn, right_null_checked_generic,
+        right_null_dyn, svd_compact_dyn_checked_generic, svd_compact_factors_dyn,
     };
     let _guard = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let dense = &mut dense;
@@ -512,9 +513,8 @@ fn streaming_site_without_the_executor_scope_admits_per_session() {
         // Forwards the dense calls to `inner` but keeps the trait's default,
         // inline `with_linalg_scope`.
         let mut dense = scripted_executor::ScriptedExecutor::with_inner(inner, ());
-        let (sessions, admissions) = admissions_during(|| {
-            tenet_matrixalgebra::seam::lq_compact_dyn(&mut dense, &direct).unwrap()
-        });
+        let (sessions, admissions) =
+            admissions_during(|| lq_compact_dyn(&mut dense, &direct).unwrap());
         assert!(sessions > 1);
         assert_eq!(admissions, sessions);
     }
@@ -523,4 +523,65 @@ fn streaming_site_without_the_executor_scope_admits_per_session() {
 /// `input` as the dense source of a checked entry.
 fn dense_source<'a, R, D>(input: &'a BoundDynamicTensorRef<'_, R, D>) -> FactorSource<'a, R, D> {
     FactorSource::Dense(BoundDynamicTensorRef::try_new(input.space(), input.data()).unwrap())
+}
+
+// The QR/LQ entries under their pre-#1862 names, as the single entry runs
+// them in each mode.
+type QrOut<R, D> = Qr<tenet_matrixalgebra::seam::FactorOutput<R, D>>;
+type LqOut<R, D> = Lq<tenet_matrixalgebra::seam::FactorOutput<R, D>>;
+
+fn qr_compact_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<QrOut<R, D>, tenet_tensors::OperationError>
+where
+    E: tenet_dense::DenseExecutor + ?Sized,
+    tenet_core::MultiplicityFreeAdmissionMode: FactorMode<R, Error = tenet_tensors::OperationError>,
+    D: tenet_matrixalgebra::FactorScalar,
+{
+    qr_compact_from_source::<tenet_core::MultiplicityFreeAdmissionMode, _, _, _, _>(
+        dense,
+        dense_source(input),
+    )
+}
+
+fn lq_compact_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<LqOut<R, D>, tenet_tensors::OperationError>
+where
+    E: tenet_dense::DenseExecutor + ?Sized,
+    tenet_core::MultiplicityFreeAdmissionMode: FactorMode<R, Error = tenet_tensors::OperationError>,
+    D: tenet_matrixalgebra::FactorScalar,
+{
+    lq_compact_from_source::<tenet_core::MultiplicityFreeAdmissionMode, _, _, _, _>(
+        dense,
+        dense_source(input),
+    )
+}
+
+fn qr_compact_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<QrOut<R, D>, <tenet_core::CheckedGenericAdmissionMode as FactorMode<R>>::Error>
+where
+    L: ExecutorLease<Executor = E>,
+    E: tenet_dense::DenseExecutor + ?Sized,
+    tenet_core::CheckedGenericAdmissionMode: FactorMode<R>,
+    D: tenet_matrixalgebra::FactorScalar,
+{
+    qr_compact_from_source::<tenet_core::CheckedGenericAdmissionMode, _, _, _, _>(lease, source)
+}
+
+fn lq_compact_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<LqOut<R, D>, <tenet_core::CheckedGenericAdmissionMode as FactorMode<R>>::Error>
+where
+    L: ExecutorLease<Executor = E>,
+    E: tenet_dense::DenseExecutor + ?Sized,
+    tenet_core::CheckedGenericAdmissionMode: FactorMode<R>,
+    D: tenet_matrixalgebra::FactorScalar,
+{
+    lq_compact_from_source::<tenet_core::CheckedGenericAdmissionMode, _, _, _, _>(lease, source)
 }

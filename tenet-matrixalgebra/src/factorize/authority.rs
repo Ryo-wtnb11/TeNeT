@@ -75,6 +75,42 @@ pub trait FactorMode<R>: sealed::Sealed {
     fn authority(
         space: &BoundDynamicFusionMapSpace<R>,
     ) -> impl FactorSpaceAuthority<R, Error = Self::Error> + '_;
+
+    // The dense QR/LQ stages publish through this mode's own factor-space
+    // builders. Why not one builder generic over the authority: #1830
+    // measured it and kept publication mode-specific (the multiplicity-free
+    // one-sided pair is cheaper; checked has no direct-region plan, #1960).
+    fn qr_compact_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<Qr<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar;
+
+    fn qr_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<Qr<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar;
+
+    fn lq_compact_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<Lq<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar;
+
+    fn lq_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<Lq<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar;
 }
 
 impl sealed::Sealed for MultiplicityFreeAdmissionMode {}
@@ -91,6 +127,50 @@ where
     ) -> impl FactorSpaceAuthority<R, Error = Self::Error> + '_ {
         MfAuthority(space)
     }
+
+    fn qr_compact_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<Qr<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        qr_compact_dyn(dense, input)
+    }
+
+    fn qr_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<Qr<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        qr_full_dyn(dense, input)
+    }
+
+    fn lq_compact_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<Lq<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        lq_compact_dyn(dense, input)
+    }
+
+    fn lq_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<Lq<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        lq_full_dyn(dense, input)
+    }
 }
 
 impl<R> FactorMode<R> for CheckedGenericAdmissionMode
@@ -103,6 +183,50 @@ where
         space: &BoundDynamicFusionMapSpace<R>,
     ) -> impl FactorSpaceAuthority<R, Error = Self::Error> + '_ {
         CheckedAuthority(space.provider_arc())
+    }
+
+    fn qr_compact_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<Qr<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        qr_compact_dyn_checked_generic(dense, input)
+    }
+
+    fn qr_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<Qr<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        qr_full_dyn_checked_generic(dense, input)
+    }
+
+    fn lq_compact_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<Lq<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        lq_compact_dyn_checked_generic(dense, input)
+    }
+
+    fn lq_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<Lq<BoundDynFactor<R, D>>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        lq_full_dyn_checked_generic(dense, input)
     }
 }
 

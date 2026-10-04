@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tenet_core::{
-    FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, SU2Irrep,
-    SectorId, SectorLeg, TensorMap, TensorMapSpace,
+    FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeAdmissionMode,
+    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, TensorMap, TensorMapSpace,
 };
 use tenet_matrixalgebra::seam::{
-    eigh_full_dyn, qr_compact_dyn, sector_matricization_diagnostic, svd_compact_factors_dyn,
-    validate_hermitian_regions, BoundDynamicTensorRef,
+    eigh_full_dyn, qr_compact_from_source, sector_matricization_diagnostic,
+    svd_compact_factors_dyn, validate_hermitian_regions, BoundDynamicTensorRef, FactorSource,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 
@@ -128,11 +128,11 @@ fn main() {
         allocation_calls as f64 / svd_iters as f64
     );
 
-    black_box(qr_compact_dyn(&mut dense, &general_input).unwrap());
+    black_box(qr_compact(&mut dense, &general_input).unwrap());
     ALLOCATIONS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..qr_iters {
-        black_box(qr_compact_dyn(&mut dense, &general_input).unwrap());
+        black_box(qr_compact(&mut dense, &general_input).unwrap());
     }
     let elapsed = start.elapsed();
     let allocation_calls = ALLOCATIONS.load(Ordering::Relaxed);
@@ -255,4 +255,19 @@ fn synthetic_hermitian_su2_tensor() -> TensorMap<f64, 2, 2> {
         }
     }
     TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(data, space).unwrap()
+}
+
+/// Multiplicity-free compact QR of dense `input` through the single entry.
+fn qr_compact<E: tenet_dense::DenseExecutor + ?Sized>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, SU2FusionRule, f64>,
+) -> Result<
+    tenet_matrixalgebra::Qr<tenet_matrixalgebra::seam::FactorOutput<SU2FusionRule, f64>>,
+    tenet_tensors::OperationError,
+> {
+    let source = BoundDynamicTensorRef::try_new(input.space(), input.data())?;
+    qr_compact_from_source::<MultiplicityFreeAdmissionMode, _, _, _, _>(
+        dense,
+        FactorSource::Dense(source),
+    )
 }
