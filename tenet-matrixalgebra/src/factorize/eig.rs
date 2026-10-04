@@ -163,9 +163,7 @@ where
         .map_err(OperationError::from_core_preserving_context)?;
     let mut v_data = vec![D::zero(); v_len];
     let max_n = geometry.iter().map(SectorGeometry::rows).max().unwrap_or(0);
-    let mut order = Vec::with_capacity(max_n);
-    let mut visited = vec![false; max_n];
-    let mut column_scratch = vec![D::zero(); max_n];
+    let mut scratch = EighScratch::for_order(max_n);
     let mut eigenvalues = Vec::with_capacity(geometry.len());
     let index = PlacementIndex::new(geometry, &[FactorSide::Left]);
     let v_groups = SectorBlockGroups::new(v_space.space().structure(), FactorSide::Left)?;
@@ -174,21 +172,7 @@ where
         for (position, sector_geometry) in geometry.iter().enumerate() {
             let matrix = matricizations.get(position)?;
             let n = matrix.rows;
-            let (real_values, mut vectors) = compact_eigh_owned(dense, matrix.data, n)?;
-            validate_real_eigenvalues(&real_values)?;
-
-            order.clear();
-            order.extend(0..n);
-            // Reorder bond states descending by |eigenvalue| (stable on ties).
-            order.sort_by(|&a, &b| {
-                real_values[b]
-                    .abs()
-                    .total_cmp(&real_values[a].abs())
-                    .then(a.cmp(&b))
-            });
-            let sorted_values: Vec<f64> = order.iter().map(|&index| real_values[index]).collect();
-            reorder_columns_in_place(&mut vectors, n, &order, &mut visited, &mut column_scratch);
-            eigenvector_gauge(&mut vectors, n, n, n);
+            let (sorted_values, vectors) = eigh_sector_stage(dense, matrix.data, n, &mut scratch)?;
             eigenvalues.push(SectorSpectrum {
                 sector: matrix.sector,
                 values: sorted_values,
@@ -239,9 +223,7 @@ where
         .map(CoupledSectorRegion::rows)
         .max()
         .unwrap_or(0);
-    let mut order = Vec::with_capacity(max_n);
-    let mut visited = vec![false; max_n];
-    let mut column_scratch = vec![D::zero(); max_n];
+    let mut scratch = EighScratch::for_order(max_n);
     let mut eigenvalues = Vec::with_capacity(plan.routes.len());
     let mut regions = vec![None; plan.left_regions.len()];
     let mut next_left_region = 0;
@@ -259,20 +241,8 @@ where
                 });
                 continue;
             }
-            let (real_values, mut vectors) = compact_eigh_owned(dense, &data[source.range()], n)?;
-            validate_real_eigenvalues(&real_values)?;
-
-            order.clear();
-            order.extend(0..n);
-            order.sort_by(|&a, &b| {
-                real_values[b]
-                    .abs()
-                    .total_cmp(&real_values[a].abs())
-                    .then(a.cmp(&b))
-            });
-            let sorted_values = order.iter().map(|&index| real_values[index]).collect();
-            reorder_columns_in_place(&mut vectors, n, &order, &mut visited, &mut column_scratch);
-            eigenvector_gauge(&mut vectors, n, n, n);
+            let (sorted_values, vectors) =
+                eigh_sector_stage(dense, &data[source.range()], n, &mut scratch)?;
             regions[route.left_region.expect("nonzero route has left region")] = Some(vectors);
             while next_left_region < plan.left_regions.len() {
                 if plan.left_regions[next_left_region].range().is_empty() {
@@ -528,44 +498,9 @@ where
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
     for index in 0..matricizations.len() {
         let matrix = matricizations.get(index)?;
-        let shape = [matrix.rows, matrix.cols];
-        let strides = [1usize, matrix.rows];
-        let view =
-            DenseView::new(matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
-        let outputs = dense
-            .eig(D::dense_read(view))
-            .map_err(OperationError::Dense)?;
-        if outputs.len() != 2 {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "dense eig must return exactly (values, vectors)",
-            });
-        }
         let n = matrix.rows;
-        validate_dense_shape(outputs[0].shape(), &[n])?;
-        validate_dense_shape(outputs[1].shape(), &[n, n])?;
-        let values =
-            <D::Eig as FactorScalar>::dense_slice(&outputs[0]).map_err(OperationError::Dense)?;
-        let vectors =
-            <D::Eig as FactorScalar>::dense_slice(&outputs[1]).map_err(OperationError::Dense)?;
-
-        let complex_values: Vec<Complex64> =
-            values.iter().map(|&value| value.widen_complex()).collect();
-        validate_complex_eigenvalues(&complex_values)?;
-        let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by(|&a, &b| {
-            complex_values[b]
-                .norm()
-                .total_cmp(&complex_values[a].norm())
-                .then(a.cmp(&b))
-        });
-        let sorted_values: Vec<Complex64> =
-            order.iter().map(|&index| complex_values[index]).collect();
-        let mut sorted_vectors = vec![<D::Eig as num_traits::Zero>::zero(); n * n];
-        for (position, &index) in order.iter().enumerate() {
-            sorted_vectors[position * n..(position + 1) * n]
-                .copy_from_slice(&vectors[index * n..(index + 1) * n]);
-        }
-        eigenvector_gauge(&mut sorted_vectors, n, n, n);
+        let (sorted_values, sorted_vectors) =
+            eig_sector_stage(dense, matrix.data, n, |_, _| Ok(()))?;
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
             values: sorted_values,
@@ -910,27 +845,7 @@ where
         "eigh_vals requires identical endomorphism row/column fusion-tree stacking",
     )?;
     matricizations.validate_hermitian()?;
-    let mut eigenvalues = Vec::with_capacity(matricizations.len());
-    for index in 0..matricizations.len() {
-        let matrix = matricizations.get(index)?;
-        let n = matrix.rows;
-        let shape = [matrix.rows, matrix.cols];
-        let strides = [1usize, matrix.rows];
-        let view =
-            DenseView::new(matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
-        let values_tensor = dense
-            .eigh_vals(D::dense_read(view))
-            .map_err(OperationError::Dense)?;
-        let mut sorted = D::real_spectrum(&values_tensor).map_err(OperationError::Dense)?;
-        sorted.truncate(n);
-        validate_real_eigenvalues(&sorted)?;
-        sorted.sort_by(|a, b| b.abs().total_cmp(&a.abs()));
-        eigenvalues.push(SectorSpectrum {
-            sector: matrix.sector,
-            values: sorted,
-        });
-    }
-    Ok(eigenvalues)
+    eigh_vals_spectra(dense, &matricizations)
 }
 
 #[cfg(test)]
@@ -974,9 +889,161 @@ where
     matricizations.validate_endomorphism_stacking(
         "eig_vals requires identical endomorphism row/column fusion-tree stacking",
     )?;
-    let mut eigenvalues = Vec::with_capacity(matricizations.len());
-    for index in 0..matricizations.len() {
-        let matrix = matricizations.get(index)?;
+    eig_vals_spectra(dense, &matricizations)
+}
+
+/// Reorder scratch for [`eigh_sector_stage`], sized for the largest sector.
+struct EighScratch<D> {
+    order: Vec<usize>,
+    visited: Vec<bool>,
+    column: Vec<D>,
+}
+
+impl<D: FactorScalar> EighScratch<D> {
+    fn for_order(max_n: usize) -> Self {
+        Self {
+            order: Vec::with_capacity(max_n),
+            visited: vec![false; max_n],
+            column: vec![D::zero(); max_n],
+        }
+    }
+}
+
+/// Hermitian eigendecomposition of one `n x n` coupled-sector matrix: values
+/// descending by magnitude (stable on ties), eigenvectors reordered to match
+/// and phase-gauged.
+#[inline]
+fn eigh_sector_stage<E, D>(
+    dense: &mut E,
+    matrix: &[D],
+    n: usize,
+    scratch: &mut EighScratch<D>,
+) -> Result<(Vec<f64>, Vec<D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let (real_values, mut vectors) = compact_eigh_owned(dense, matrix, n)?;
+    validate_real_eigenvalues(&real_values)?;
+    let EighScratch {
+        order,
+        visited,
+        column,
+    } = scratch;
+    order.clear();
+    order.extend(0..n);
+    // Reorder bond states descending by |eigenvalue| (stable on ties).
+    order.sort_by(|&a, &b| {
+        real_values[b]
+            .abs()
+            .total_cmp(&real_values[a].abs())
+            .then(a.cmp(&b))
+    });
+    let sorted_values = order.iter().map(|&index| real_values[index]).collect();
+    reorder_columns_in_place(&mut vectors, n, order, visited, column);
+    eigenvector_gauge(&mut vectors, n, n, n);
+    Ok((sorted_values, vectors))
+}
+
+/// General eigendecomposition of one `n x n` endomorphism sector:
+/// values descending by magnitude (stable on ties), eigenvectors reordered
+/// to match and phase-gauged. `rank_gate` runs on the raw eigenvectors after
+/// the eigenvalue check; the checked mode passes its diagonalizability gate
+/// there until #1798 decides it, the multiplicity-free mode a no-op.
+fn eig_sector_stage<E, D>(
+    dense: &mut E,
+    matrix: &[D],
+    n: usize,
+    rank_gate: impl FnOnce(&mut E, &[D::Eig]) -> Result<(), OperationError>,
+) -> Result<(Vec<Complex64>, Vec<D::Eig>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let shape = [n, n];
+    let strides = [1usize, n];
+    let view = DenseView::new(matrix, &shape, &strides, 0).map_err(OperationError::Dense)?;
+    let outputs = dense
+        .eig(D::dense_read(view))
+        .map_err(OperationError::Dense)?;
+    if outputs.len() != 2 {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "dense eig must return exactly (values, vectors)",
+        });
+    }
+    validate_dense_shape(outputs[0].shape(), &[n])?;
+    validate_dense_shape(outputs[1].shape(), &[n, n])?;
+    let values =
+        <D::Eig as FactorScalar>::dense_slice(&outputs[0]).map_err(OperationError::Dense)?;
+    let vectors =
+        <D::Eig as FactorScalar>::dense_slice(&outputs[1]).map_err(OperationError::Dense)?;
+    let complex_values: Vec<Complex64> =
+        values.iter().map(|&value| value.widen_complex()).collect();
+    validate_complex_eigenvalues(&complex_values)?;
+    rank_gate(dense, vectors)?;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        complex_values[b]
+            .norm()
+            .total_cmp(&complex_values[a].norm())
+            .then(a.cmp(&b))
+    });
+    let sorted_values: Vec<Complex64> = order.iter().map(|&index| complex_values[index]).collect();
+    let mut sorted_vectors = vec![<D::Eig as num_traits::Zero>::zero(); n * n];
+    for (position, &index) in order.iter().enumerate() {
+        sorted_vectors[position * n..(position + 1) * n]
+            .copy_from_slice(&vectors[index * n..(index + 1) * n]);
+    }
+    eigenvector_gauge(&mut sorted_vectors, n, n, n);
+    Ok((sorted_values, sorted_vectors))
+}
+
+/// Hermitian eigenvalues of every sector through the no-vector solver,
+/// descending by magnitude (stable on ties, so LAPACK order breaks them).
+fn eigh_vals_spectra<E, D>(
+    dense: &mut E,
+    matrices: &(impl SectorMatrices<D> + ?Sized),
+) -> Result<Vec<SectorSpectrum>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let mut eigenvalues = Vec::with_capacity(matrices.len());
+    for index in 0..matrices.len() {
+        let matrix = matrices.get(index)?;
+        let n = matrix.rows;
+        let shape = [matrix.rows, matrix.cols];
+        let strides = [1usize, matrix.rows];
+        let view =
+            DenseView::new(matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
+        let values_tensor = dense
+            .eigh_vals(D::dense_read(view))
+            .map_err(OperationError::Dense)?;
+        let mut sorted = D::real_spectrum(&values_tensor).map_err(OperationError::Dense)?;
+        sorted.truncate(n);
+        validate_real_eigenvalues(&sorted)?;
+        sorted.sort_by(|a, b| b.abs().total_cmp(&a.abs()));
+        eigenvalues.push(SectorSpectrum {
+            sector: matrix.sector,
+            values: sorted,
+        });
+    }
+    Ok(eigenvalues)
+}
+
+/// General eigenvalues of every sector through the no-vector solver,
+/// descending by magnitude (stable on ties).
+fn eig_vals_spectra<E, D>(
+    dense: &mut E,
+    matrices: &(impl SectorMatrices<D> + ?Sized),
+) -> Result<Vec<SectorSpectrum<Complex64>>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let mut eigenvalues = Vec::with_capacity(matrices.len());
+    for index in 0..matrices.len() {
+        let matrix = matrices.get(index)?;
         let n = matrix.rows;
         let shape = [matrix.rows, matrix.cols];
         let strides = [1usize, matrix.rows];
@@ -1369,28 +1436,14 @@ where
         .map(SectorGeometry::rows)
         .max()
         .unwrap_or(0));
-    let mut order = Vec::with_capacity(max_n);
-    let mut visited = vec![false; max_n];
-    let mut column_scratch = vec![D::zero(); max_n];
+    let mut scratch = EighScratch::for_order(max_n);
     let mut eigenvalues = Vec::with_capacity(matrices.len());
     let mut pairs = Vec::with_capacity(matrices.len());
     in_linalg_scope(dense, |dense| {
         for index in 0..matrices.len() {
             let matrix = matrices.get(index)?;
             let n = matrix.rows;
-            let (real_values, mut vectors) = compact_eigh_owned(dense, matrix.data, n)?;
-            validate_real_eigenvalues(&real_values)?;
-            order.clear();
-            order.extend(0..n);
-            order.sort_by(|&a, &b| {
-                real_values[b]
-                    .abs()
-                    .total_cmp(&real_values[a].abs())
-                    .then(a.cmp(&b))
-            });
-            let sorted_values = order.iter().map(|&index| real_values[index]).collect();
-            reorder_columns_in_place(&mut vectors, n, &order, &mut visited, &mut column_scratch);
-            eigenvector_gauge(&mut vectors, n, n, n);
+            let (sorted_values, vectors) = eigh_sector_stage(dense, matrix.data, n, &mut scratch)?;
             eigenvalues.push(SectorSpectrum {
                 sector: matrix.sector,
                 values: sorted_values,
@@ -1422,6 +1475,32 @@ where
         FactorSide::Left,
     ))?;
     Ok(EighFullDyn { v, eigenvalues })
+}
+
+/// Checked-mode diagonalizability gate on raw eigenvectors; stays an explicit
+/// call until #1798 decides whether it belongs to every mode.
+fn eig_rank_gate<E, D>(dense: &mut E, vectors: &[D::Eig], n: usize) -> Result<(), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    if vectors.iter().any(|&value| {
+        let value = value.widen_complex();
+        !value.re.is_finite() || !value.im.is_finite()
+    }) {
+        return Err(eig_not_numerically_diagonalizable());
+    }
+    let shape = [n, n];
+    let strides = [1usize, n];
+    let vector_view =
+        DenseView::new(vectors, &shape, &strides, 0).map_err(OperationError::Dense)?;
+    let singular_values = dense
+        .svd_vals(<D::Eig as DenseBlockScalar>::dense_read(vector_view))
+        .map_err(OperationError::Dense)?;
+    validate_dense_shape(singular_values.shape(), &[n])?;
+    let singular_values =
+        <D::Eig as FactorScalar>::real_spectrum(&singular_values).map_err(OperationError::Dense)?;
+    validate_eigenvector_singular_values(&singular_values, n, <D::Eig as FactorScalar>::epsilon())
 }
 
 pub(super) fn eig_not_numerically_diagonalizable() -> OperationError {
@@ -1501,81 +1580,11 @@ where
             .get(index)
             .map_err(CheckedGenericFactorPlanError::from)?;
         let n = matrix.rows;
-        let shape = [n, n];
-        let strides = [1usize, n];
-        let view = DenseView::new(matrix.data, &shape, &strides, 0).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        let outputs = dense.eig(D::dense_read(view)).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        if outputs.len() != 2 {
-            return Err(CheckedGenericFactorPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope {
-                    message: "dense eig must return exactly (values, vectors)",
-                },
-            ));
-        }
-        validate_dense_shape(outputs[0].shape(), &[n])
+        let (sorted_values, sorted_vectors) =
+            eig_sector_stage(dense, matrix.data, n, |dense, vectors| {
+                eig_rank_gate::<E, D>(dense, vectors, n)
+            })
             .map_err(CheckedGenericFactorPlanError::from)?;
-        validate_dense_shape(outputs[1].shape(), &[n, n])
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        let values = <D::Eig as FactorScalar>::dense_slice(&outputs[0]).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        let vectors = <D::Eig as FactorScalar>::dense_slice(&outputs[1]).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        let complex_values = values
-            .iter()
-            .map(|&value| value.widen_complex())
-            .collect::<Vec<_>>();
-        validate_complex_eigenvalues(&complex_values)
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        if vectors.iter().any(|&value| {
-            let value = value.widen_complex();
-            !value.re.is_finite() || !value.im.is_finite()
-        }) {
-            return Err(CheckedGenericFactorPlanError::Operation(
-                eig_not_numerically_diagonalizable(),
-            ));
-        }
-
-        let vector_view = DenseView::new(vectors, &shape, &strides, 0).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        let singular_values = dense
-            .svd_vals(<D::Eig as DenseBlockScalar>::dense_read(vector_view))
-            .map_err(|error| {
-                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-            })?;
-        validate_dense_shape(singular_values.shape(), &[n])
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        let singular_values =
-            <D::Eig as FactorScalar>::real_spectrum(&singular_values).map_err(|error| {
-                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-            })?;
-        validate_eigenvector_singular_values(
-            &singular_values,
-            n,
-            <D::Eig as FactorScalar>::epsilon(),
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
-
-        let mut order = (0..n).collect::<Vec<_>>();
-        order.sort_by(|&a, &b| {
-            complex_values[b]
-                .norm()
-                .total_cmp(&complex_values[a].norm())
-                .then(a.cmp(&b))
-        });
-        let sorted_values = order.iter().map(|&index| complex_values[index]).collect();
-        let mut sorted_vectors = vec![D::Eig::zero(); n * n];
-        for (position, &index) in order.iter().enumerate() {
-            sorted_vectors[position * n..(position + 1) * n]
-                .copy_from_slice(&vectors[index * n..(index + 1) * n]);
-        }
-        eigenvector_gauge(&mut sorted_vectors, n, n, n);
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
             values: sorted_values,
@@ -1638,32 +1647,7 @@ where
     matricizations
         .validate_hermitian()
         .map_err(CheckedGenericFactorPlanError::from)?;
-    let mut eigenvalues = Vec::with_capacity(matricizations.len());
-    for index in 0..matricizations.len() {
-        let matrix = matricizations
-            .get(index)
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        let n = matrix.rows;
-        let shape = [matrix.rows, matrix.cols];
-        let strides = [1usize, matrix.rows];
-        let view = DenseView::new(matrix.data, &shape, &strides, 0).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        let values_tensor = dense.eigh_vals(D::dense_read(view)).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        let mut values = D::real_spectrum(&values_tensor).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        values.truncate(n);
-        validate_real_eigenvalues(&values).map_err(CheckedGenericFactorPlanError::from)?;
-        values.sort_by(|a, b| b.abs().total_cmp(&a.abs()));
-        eigenvalues.push(SectorSpectrum {
-            sector: matrix.sector,
-            values,
-        });
-    }
-    Ok(eigenvalues)
+    eigh_vals_spectra(dense, &matricizations).map_err(CheckedGenericFactorPlanError::from)
 }
 
 /// Checked-Generic general eigenvalues only. No eigenvector or factor-space
@@ -1694,35 +1678,5 @@ where
             "eig_vals requires identical endomorphism row/column fusion-tree stacking",
         )
         .map_err(CheckedGenericFactorPlanError::from)?;
-    let mut eigenvalues = Vec::with_capacity(matricizations.len());
-    for index in 0..matricizations.len() {
-        let matrix = matricizations
-            .get(index)
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        let n = matrix.rows;
-        let shape = [matrix.rows, matrix.cols];
-        let strides = [1usize, matrix.rows];
-        let view = DenseView::new(matrix.data, &shape, &strides, 0).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        let values_tensor = dense.eig_vals(D::dense_read(view)).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        validate_dense_shape(values_tensor.shape(), &[n])
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        let values = <D::Eig as FactorScalar>::dense_slice(&values_tensor).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        let mut values: Vec<Complex64> = values[..n]
-            .iter()
-            .map(|&value| value.widen_complex())
-            .collect();
-        validate_complex_eigenvalues(&values).map_err(CheckedGenericFactorPlanError::from)?;
-        values.sort_by(|a, b| b.norm().total_cmp(&a.norm()));
-        eigenvalues.push(SectorSpectrum {
-            sector: matrix.sector,
-            values,
-        });
-    }
-    Ok(eigenvalues)
+    eig_vals_spectra(dense, &matricizations).map_err(CheckedGenericFactorPlanError::from)
 }
