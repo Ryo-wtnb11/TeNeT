@@ -77,22 +77,11 @@ where
     structure.validate_replay_structures(dst_structure, src_structure)?;
     validate_trace_data_extents(dst_structure, dst.0.len(), src_structure, src.0.len())?;
     let descriptor = structure.descriptor();
-    if descriptor.terms().len() != structure.terms().len() {
-        return Err(OperationError::CoefficientCountMismatch {
-            expected: descriptor.terms().len(),
-            actual: structure.terms().len(),
-        });
-    }
 
     let mut moves = Vec::with_capacity(descriptor.terms().len());
     let mut largest_unit = 0usize;
     let mut largest_scaled = 0usize;
-    for (term, fusion_term) in descriptor.terms().iter().zip(structure.terms()) {
-        if term.dst_block != fusion_term.dst_block() || term.src_block != fusion_term.src_block() {
-            return Err(OperationError::StructureMismatch {
-                tensor: "trace term",
-            });
-        }
+    for (term, fusion_term) in structure.paired_terms() {
         let output_shape = descriptor.output_shape(term);
         let trace_shape = descriptor.trace_shape(term);
         let mut src_dims = Vec::with_capacity(output_shape.len() + trace_shape.len());

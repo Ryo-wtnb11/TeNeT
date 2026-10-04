@@ -498,6 +498,19 @@ impl<C> TensorTraceFusionStructure<C> {
         )?;
         let terms =
             build_fusion_trace_terms(rule, &dst_structure, src, &axis_plan, dst_codomain_rank)?;
+        Self::assemble(axis_plan, terms, dst_structure, src)
+    }
+
+    /// The only constructor. The descriptor is compiled here from `terms`
+    /// (one descriptor term per fusion term, in order, or an error), so
+    /// `descriptor.terms()[i]` addresses `terms[i]`'s block pair for every
+    /// `i`; the fields are private, so replay can pair them without checking.
+    fn assemble(
+        axis_plan: TensorTraceAxisPlan,
+        terms: Vec<TensorTraceFusionStructureTerm<C>>,
+        dst_structure: Arc<BlockStructure>,
+        src: OrientedTraceSource<'_>,
+    ) -> Result<Self, OperationError> {
         let descriptor = TensorTraceDescriptor::compile_oriented(
             &axis_plan,
             terms.iter().map(|term| (term.dst_block, term.src_block)),
@@ -520,6 +533,29 @@ impl<C> TensorTraceFusionStructure<C> {
             dst_structure,
             src_structure: Arc::clone(src.structure),
         })
+    }
+
+    /// Each descriptor term with the fusion term it was compiled from.
+    pub(crate) fn paired_terms(
+        &self,
+    ) -> impl ExactSizeIterator<
+        Item = (
+            &TensorTraceDescriptorTerm,
+            &TensorTraceFusionStructureTerm<C>,
+        ),
+    > {
+        self.descriptor.terms().iter().zip(&self.terms)
+    }
+
+    /// The `index`-th pair of [`Self::paired_terms`].
+    pub(crate) fn paired_term(
+        &self,
+        index: usize,
+    ) -> (
+        &TensorTraceDescriptorTerm,
+        &TensorTraceFusionStructureTerm<C>,
+    ) {
+        (&self.descriptor.terms()[index], &self.terms[index])
     }
 
     #[inline]
@@ -1531,30 +1567,13 @@ where
         &axis_plan,
         dst_space.space().nout(),
     )?;
-    let descriptor = TensorTraceDescriptor::compile_oriented(
-        &axis_plan,
-        terms.iter().map(|term| (term.dst_block, term.src_block)),
-        dst_space.space().structure(),
+    TensorTraceFusionStructure::assemble(
+        axis_plan,
+        terms,
+        Arc::clone(dst_space.space().structure()),
         source,
     )
-    .map_err(CheckedGenericPlanError::Operation)?;
-    validate_destination_layouts_injective(
-        dst_space.space().structure(),
-        "tensor trace destination layouts overlap",
-    )
-    .map_err(CheckedGenericPlanError::Operation)?;
-    let structure = TensorTraceFusionStructure {
-        dst_rank: dst_space.space().structure().rank(),
-        src_rank: src_space.space().structure().rank(),
-        output_axes: axis_plan.output_axes,
-        trace_lhs_axes: axis_plan.trace_lhs_axes,
-        trace_rhs_axes: axis_plan.trace_rhs_axes,
-        terms,
-        descriptor,
-        dst_structure: Arc::clone(dst_space.space().structure()),
-        src_structure: Arc::clone(src_space.space().structure()),
-    };
-    Ok(structure)
+    .map_err(CheckedGenericPlanError::Operation)
 }
 
 /// Checked Generic trace lowering through the existing strided executor.
@@ -1962,16 +1981,49 @@ where
     DSrc: HostReadableStorage<T>,
 {
     let dst_structure = Arc::clone(dst.structure());
-    let src_structure = Arc::clone(src.structure());
-    structure.validate_replay_structures(&dst_structure, &src_structure)?;
-    let dst_len = dst.data_mut().len();
-    validate_trace_data_extents(&dst_structure, dst_len, &src_structure, src.data().len())?;
+    replay_fusion_trace_host(
+        structure,
+        &dst_structure,
+        dst.data_mut(),
+        src.structure(),
+        src.data(),
+        alpha,
+        beta,
+    )
+}
+
+/// The one Host replay of a compiled fusion trace: structure identity and
+/// data extents, the `beta` pass over every destination layout, then one
+/// strided add per term.
+fn replay_fusion_trace_host<C, T>(
+    structure: &TensorTraceFusionStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    dst_data: &mut [T],
+    src_structure: &Arc<BlockStructure>,
+    src_data: &[T],
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    C: Copy,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<C>
+        + strided_kernel::MaybeSendSync,
+{
+    structure.validate_replay_structures(dst_structure, src_structure)?;
+    validate_trace_data_extents(dst_structure, dst_data.len(), src_structure, src_data.len())?;
     let descriptor = structure.descriptor();
-    scale_trace_destination_layouts(descriptor, dst.data_mut(), beta)?;
-    for (term, fusion_term) in descriptor.terms().iter().zip(structure.terms()) {
+    scale_trace_destination_layouts(descriptor, dst_data, beta)?;
+    for (term, fusion_term) in structure.paired_terms() {
         tensortrace_raw_strided_kernel_add_with_coefficient_trusted(
-            dst.data_mut(),
-            src.data(),
+            dst_data,
+            src_data,
             descriptor.output_shape(term),
             descriptor.trace_shape(term),
             descriptor.dst_strides(term),
@@ -2210,19 +2262,6 @@ where
     // the pointer-equality fast path keeps compiled-in-place callers free.
     structure.validate_replay_structures(dst_space.structure(), src_space.structure())?;
     let descriptor = structure.descriptor();
-    if descriptor.terms().len() != structure.terms().len() {
-        return Err(OperationError::CoefficientCountMismatch {
-            expected: descriptor.terms().len(),
-            actual: structure.terms().len(),
-        });
-    }
-    for (term, fusion_term) in descriptor.terms().iter().zip(structure.terms()) {
-        if term.dst_block != fusion_term.dst_block() || term.src_block != fusion_term.src_block() {
-            return Err(OperationError::StructureMismatch {
-                tensor: "trace term",
-            });
-        }
-    }
 
     if let Some(data) = try_tensortrace_owned_raw(
         dst_space.structure(),
@@ -2234,8 +2273,7 @@ where
         descriptor.destination_producer_indices(),
         descriptor.destination_producer_offsets(),
         |term_index| {
-            let term = &descriptor.terms()[term_index];
-            let fusion_term = &structure.terms()[term_index];
+            let (term, fusion_term) = structure.paired_term(term_index);
             OwnedTraceTerm::new(
                 term.dst_block,
                 term.src_block,
@@ -2295,32 +2333,15 @@ where
 {
     // Why: a public executor must not replay terms compiled for other spaces;
     // the pointer-equality fast path keeps compiled-in-place callers free.
-    structure.validate_replay_structures(dst_space.structure(), src_space.structure())?;
-    validate_trace_data_extents(
+    replay_fusion_trace_host(
+        structure,
         dst_space.structure(),
-        dst_data.len(),
+        dst_data,
         src_space.structure(),
-        src_data.len(),
-    )?;
-    let descriptor = structure.descriptor();
-    scale_trace_destination_layouts(descriptor, dst_data, beta)?;
-    for (term, fusion_term) in descriptor.terms().iter().zip(structure.terms()) {
-        tensortrace_raw_strided_kernel_add_with_coefficient_trusted(
-            dst_data,
-            src_data,
-            descriptor.output_shape(term),
-            descriptor.trace_shape(term),
-            descriptor.dst_strides(term),
-            descriptor.src_output_strides(term),
-            descriptor.src_trace_strides(term),
-            term.dst_offset,
-            term.src_offset,
-            descriptor.source_conjugate(),
-            alpha,
-            fusion_term.coefficient,
-        )?;
-    }
-    Ok(())
+        src_data,
+        alpha,
+        beta,
+    )
 }
 
 /// Preflights finite-label trace metadata and returns the selected result HomSpace.
