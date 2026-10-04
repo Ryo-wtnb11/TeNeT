@@ -17,7 +17,7 @@ use tenet_operations::cuda::{CudaStackedStorageGemm, CudaStorage};
 use tenet_operations::cuda_transform::CudaSingleMemberRegions;
 use tenet_operations::stacked::{StackedStorageView, StackedStorageViewMut};
 
-use super::{DynamicTreeExecutionArtifact, FusionContractOrientation};
+use super::DynamicTreeExecutionArtifact;
 use crate::contract::resolution::{StorageContractResolution, StorageContractRoute};
 use crate::{OperationError, RecouplingCoefficientAction};
 
@@ -66,12 +66,7 @@ fn artifact(
 
 /// `(borrowed, scales)` of the lhs and rhs source stages.
 fn source_scales(artifact: &DynamicTreeExecutionArtifact<f64>) -> [(bool, &[(usize, f64)]); 2] {
-    let scales = artifact.source_twist_destination_scales();
-    let (lhs, rhs) = if artifact.twists_lhs() {
-        (scales, &[][..])
-    } else {
-        (&[][..], scales)
-    };
+    let [lhs, rhs] = artifact.stage_scales();
     [(artifact.lhs_borrowed, lhs), (artifact.rhs_borrowed, rhs)]
 }
 
@@ -95,11 +90,6 @@ impl StorageContractResolution<f64> {
         let transforms = [&artifact.lhs_transform, &artifact.rhs_transform];
         for ((borrowed, scales), transform) in source_scales(artifact).into_iter().zip(transforms) {
             if borrowed {
-                if !scales.is_empty() {
-                    return Err(OperationError::UnsupportedTensorContractScope {
-                        message: "member source twist requires transformed owned scratch",
-                    });
-                }
                 continue;
             }
             entries +=
@@ -235,11 +225,7 @@ where
             lens(&artifact.rhs_transform)?,
         );
         let ((left, left_len), (right, right_len)) =
-            if artifact.orientation == FusionContractOrientation::RhsLhs {
-                ((physical_rhs, rhs_len), (physical_lhs, lhs_len))
-            } else {
-                ((physical_lhs, lhs_len), (physical_rhs, rhs_len))
-            };
+            artifact.core_order((physical_lhs, lhs_len), (physical_rhs, rhs_len));
         let core_buffer_len = artifact
             .core_dst
             .as_ref()
@@ -293,16 +279,9 @@ where
             });
         }
         let dst_len = dst_structure.required_len()?;
-        let core_dst_structure = artifact
-            .core_dst
-            .as_ref()
-            .map_or(dst_structure, |output| output.space.structure());
+        let core_dst_structure = artifact.core_dst_structure(dst_structure);
         let core_len = core_dst_structure.required_len()?;
-        let (left, right) = if artifact.orientation == FusionContractOrientation::RhsLhs {
-            (&artifact.rhs_transform, &artifact.lhs_transform)
-        } else {
-            (&artifact.lhs_transform, &artifact.rhs_transform)
-        };
+        let (left, right) = artifact.core_order(&artifact.lhs_transform, &artifact.rhs_transform);
         artifact.block_plan.validate_replay_structures(
             core_dst_structure,
             left.space.structure(),
@@ -317,11 +296,6 @@ where
             .enumerate()
         {
             if borrowed {
-                if !scales.is_empty() {
-                    return Err(OperationError::UnsupportedTensorContractScope {
-                        message: "member source twist requires transformed owned scratch",
-                    });
-                }
                 continue;
             }
             let core = transform.space.required_len()?;
