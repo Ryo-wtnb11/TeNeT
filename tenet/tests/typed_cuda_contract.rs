@@ -211,9 +211,9 @@ fn zero_copy_candidates_match_the_host_at_every_dtype() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn core_form_lazy_contractions_take_copy_c_and_match_the_host_at_every_dtype() {
-    // Host and device both take TensorKit's `copyC` for this class (#1857):
-    // the zero-copy core into a temporary, then one permute.
+fn core_form_lazy_contractions_match_the_host_at_every_dtype() {
+    // Values only. The planner's `copyC` route for this geometry is pinned by
+    // the route-parity test in tenet-tensors (`storage_contract_tests.rs`).
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     fn at<D: DevicePayload>(runtime: &Runtime) {
         for case in su2_core_form_lazy_cases::<D>(runtime) {
