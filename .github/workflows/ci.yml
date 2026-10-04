@@ -62,12 +62,12 @@ jobs:
       - name: clippy
         if: ${{ !cancelled() }}
         run: |
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo clippy --workspace -- -D warnings
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo clippy --locked --workspace -- -D warnings
         working-directory: tenet
       - name: cargo check (Rust 1.96)
         if: ${{ !cancelled() }}
-        run: cargo check --workspace
+        run: cargo check --locked --workspace
         working-directory: tenet
         env:
           RUSTUP_TOOLCHAIN: 1.96.0
@@ -93,15 +93,15 @@ jobs:
       # feature's signal in one run.
       - name: check cpu-blas-core
         if: ${{ !cancelled() }}
-        run: cargo check --workspace --all-targets --no-default-features --features "cpu-blas"
+        run: cargo check --locked --workspace --all-targets --no-default-features --features "cpu-blas"
         working-directory: tenet
       - name: check mkl
         if: ${{ !cancelled() }}
-        run: cargo check --workspace --all-targets --no-default-features --features "blas-mkl"
+        run: cargo check --locked --workspace --all-targets --no-default-features --features "blas-mkl"
         working-directory: tenet
       - name: check provider-inject
         if: ${{ !cancelled() }}
-        run: cargo check --workspace --all-targets --no-default-features --features "provider-inject"
+        run: cargo check --locked --workspace --all-targets --no-default-features --features "provider-inject"
         working-directory: tenet
 
   backend-contract-accelerate:
@@ -123,7 +123,7 @@ jobs:
           workspaces: tenet
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: backend-accelerate
-      - run: cargo check --workspace --all-targets --no-default-features --features "blas-accelerate"
+      - run: cargo check --locked --workspace --all-targets --no-default-features --features "blas-accelerate"
         working-directory: tenet
       # The compile-only checks never execute the direct full-SVD path a BLAS
       # provider takes (#1163). `accelerate` carries the runtime gate because
@@ -134,8 +134,8 @@ jobs:
       - name: Run the BLAS full-SVD suites
         working-directory: tenet
         run: |
-          cargo test -p tenet-dense -p tenet-matrixalgebra --no-default-features --features blas-accelerate --tests
-          cargo test -p tenet-dense -p tenet-matrixalgebra --no-default-features --features blas-accelerate --doc
+          cargo test --locked -p tenet-dense -p tenet-matrixalgebra --no-default-features --features blas-accelerate --tests
+          cargo test --locked -p tenet-dense -p tenet-matrixalgebra --no-default-features --features blas-accelerate --doc
 
   # opt-path (wraps opt-einsum-path) and cotengra-python (shells out to an
   # installed Python `cotengra`) have real code but, unlike the backend rows
@@ -179,25 +179,25 @@ jobs:
       # a test step may filter to fewer targets.
       - name: clippy tenet-network (opt-path)
         if: ${{ !cancelled() }}
-        run: cargo clippy -p tenet-network --no-default-features --features "opt-path,cpu-faer" --all-targets -- -D warnings
+        run: cargo clippy --locked -p tenet-network --no-default-features --features "opt-path,cpu-faer" --all-targets -- -D warnings
         working-directory: tenet
       - name: test tenet-network (opt-path)
         if: ${{ !cancelled() }}
         run: |
-          cargo test -p tenet-network --no-default-features --features "opt-path,cpu-faer" --tests
-          cargo test -p tenet-network --no-default-features --features "opt-path,cpu-faer" --doc
+          cargo test --locked -p tenet-network --no-default-features --features "opt-path,cpu-faer" --tests
+          cargo test --locked -p tenet-network --no-default-features --features "opt-path,cpu-faer" --doc
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
       - name: clippy tenet-network (cotengra-python)
         if: ${{ !cancelled() }}
-        run: cargo clippy -p tenet-network --no-default-features --features "cotengra-python,cpu-faer" --all-targets -- -D warnings
+        run: cargo clippy --locked -p tenet-network --no-default-features --features "cotengra-python,cpu-faer" --all-targets -- -D warnings
         working-directory: tenet
       - name: test tenet-network (cotengra-python)
         if: ${{ !cancelled() }}
         run: |
-          cargo test -p tenet-network --no-default-features --features "cotengra-python,cpu-faer" --tests
-          cargo test -p tenet-network --no-default-features --features "cotengra-python,cpu-faer" --doc
+          cargo test --locked -p tenet-network --no-default-features --features "cotengra-python,cpu-faer" --tests
+          cargo test --locked -p tenet-network --no-default-features --features "cotengra-python,cpu-faer" --doc
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
@@ -231,43 +231,43 @@ jobs:
       # a test step may filter to fewer targets.
       - name: clippy tenet-sectors (racah-generated)
         if: ${{ !cancelled() }}
-        run: cargo clippy -p tenet-sectors --no-default-features --features "racah-generated" --all-targets -- -D warnings
+        run: cargo clippy --locked -p tenet-sectors --no-default-features --features "racah-generated" --all-targets -- -D warnings
         working-directory: tenet
       - name: clippy tenet-tensors (racah-generated)
         if: ${{ !cancelled() }}
-        run: cargo clippy -p tenet-tensors --no-default-features --features "racah-generated,cpu-faer" --all-targets -- -D warnings
+        run: cargo clippy --locked -p tenet-tensors --no-default-features --features "racah-generated,cpu-faer" --all-targets -- -D warnings
         working-directory: tenet
       - name: clippy tenet-matrixalgebra (racah-generated)
         if: ${{ !cancelled() }}
-        run: cargo clippy -p tenet-matrixalgebra --no-default-features --features "racah-generated,cpu-faer" --all-targets -- -D warnings
+        run: cargo clippy --locked -p tenet-matrixalgebra --no-default-features --features "racah-generated,cpu-faer" --all-targets -- -D warnings
         working-directory: tenet
       - name: clippy tenet-rs (racah-generated)
         if: ${{ !cancelled() }}
-        run: cargo clippy -p tenet-rs --no-default-features --features "racah-generated,cpu-faer" --all-targets -- -D warnings
+        run: cargo clippy --locked -p tenet-rs --no-default-features --features "racah-generated,cpu-faer" --all-targets -- -D warnings
         working-directory: tenet
       - name: clippy tenet-network (racah-generated)
         if: ${{ !cancelled() }}
-        run: cargo clippy -p tenet-network --no-default-features --features "racah-generated,cpu-faer" --all-targets -- -D warnings
+        run: cargo clippy --locked -p tenet-network --no-default-features --features "racah-generated,cpu-faer" --all-targets -- -D warnings
         working-directory: tenet
       - name: test tenet-sectors (racah-generated)
         if: ${{ !cancelled() }}
-        run: cargo test -p tenet-sectors --no-default-features --features "racah-generated"
+        run: cargo test --locked -p tenet-sectors --no-default-features --features "racah-generated"
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
       - name: test tenet-tensors (racah-generated)
         if: ${{ !cancelled() }}
         run: |
-          cargo test -p tenet-tensors --no-default-features --features "racah-generated,cpu-faer" --tests
-          cargo test -p tenet-tensors --no-default-features --features "racah-generated,cpu-faer" --doc
+          cargo test --locked -p tenet-tensors --no-default-features --features "racah-generated,cpu-faer" --tests
+          cargo test --locked -p tenet-tensors --no-default-features --features "racah-generated,cpu-faer" --doc
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
       - name: test tenet-matrixalgebra (racah-generated)
         if: ${{ !cancelled() }}
         run: |
-          cargo test -p tenet-matrixalgebra --no-default-features --features "racah-generated,cpu-faer" --tests
-          cargo test -p tenet-matrixalgebra --no-default-features --features "racah-generated,cpu-faer" --doc
+          cargo test --locked -p tenet-matrixalgebra --no-default-features --features "racah-generated,cpu-faer" --tests
+          cargo test --locked -p tenet-matrixalgebra --no-default-features --features "racah-generated,cpu-faer" --doc
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
@@ -277,13 +277,13 @@ jobs:
       # not doctests.
       - name: test tenet-rs --tests (racah-generated)
         if: ${{ !cancelled() }}
-        run: cargo test -p tenet-rs --no-default-features --features "racah-generated,cpu-faer" --tests
+        run: cargo test --locked -p tenet-rs --no-default-features --features "racah-generated,cpu-faer" --tests
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
       - name: test tenet-network --test checked_generic_network (racah-generated)
         if: ${{ !cancelled() }}
-        run: cargo test -p tenet-network --no-default-features --features "racah-generated,cpu-faer" --test checked_generic_network
+        run: cargo test --locked -p tenet-network --no-default-features --features "racah-generated,cpu-faer" --test checked_generic_network
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
@@ -293,7 +293,7 @@ jobs:
         run: |
           test_output="$(mktemp)"
           trap 'rm -f "$test_output"' EXIT
-          cargo test -p tenet-rs --lib --no-default-features --features cpu-faer,racah-generated \
+          cargo test --locked -p tenet-rs --lib --no-default-features --features cpu-faer,racah-generated \
             typed::representation_gates::lazy_adjoint::checked_generic_lazy_transforms_do_not_materialize_uncached_input \
             -- --exact 2>&1 | tee "$test_output"
           grep -Eq '^test result: ok\. 1 passed;' "$test_output"
@@ -328,8 +328,8 @@ jobs:
         with:
           key: host-pool-audit
       - run: |
-          cargo test -p tenet-rs -p tenet-network -p tenet-krylov --tests
-          cargo test -p tenet-rs -p tenet-network -p tenet-krylov --doc
+          cargo test --locked -p tenet-rs -p tenet-network -p tenet-krylov --tests
+          cargo test --locked -p tenet-rs -p tenet-network -p tenet-krylov --doc
         working-directory: tenet
         env:
           RUSTFLAGS: --cfg tenet_scope_audit
@@ -381,11 +381,11 @@ jobs:
           workspaces: tenet
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: backend-cuda
-      - run: cargo check --workspace --all-targets --no-default-features --features cuda,cpu-faer
+      - run: cargo check --locked --workspace --all-targets --no-default-features --features cuda,cpu-faer
         working-directory: tenet
       # GPU-free: the single-stream configuration (#1391) is set and checked
       # before any device access.
-      - run: cargo test -p tenet-dense --no-default-features --features cuda,cpu-faer --test cuda_stream_config_conflict --test cuda_stream_config_single
+      - run: cargo test --locked -p tenet-dense --no-default-features --features cuda,cpu-faer --test cuda_stream_config_conflict --test cuda_stream_config_single
         working-directory: tenet
 
   test-linux:
@@ -410,12 +410,12 @@ jobs:
       # Unit and integration tests execute in the coverage job (#1742); it
       # cannot run doctests on stable, so they stay here.
       - name: Run workspace doctests
-        run: cargo test --workspace --doc
+        run: cargo test --locked --workspace --doc
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
       - name: Run quickstart example
-        run: cargo run -p tenet-network --example quickstart
+        run: cargo run --locked -p tenet-network --example quickstart
         working-directory: tenet
         env:
           CARGO_PROFILE_DEV_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
@@ -424,7 +424,7 @@ jobs:
       # intra-doc links or malformed doc markup fail the build here rather
       # than rotting silently. Doctests themselves run in the step above.
       - name: Build tenet docs with warnings denied
-        run: cargo doc -p tenet-rs --no-deps
+        run: cargo doc --locked -p tenet-rs --no-deps
         working-directory: tenet
         env:
           CARGO_PROFILE_DEV_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
@@ -432,7 +432,7 @@ jobs:
       - name: Check the backend-selection diagnostic
         run: |
           set -euo pipefail
-          if cargo check --workspace --no-default-features 2>no-backend.log; then
+          if cargo check --locked --workspace --no-default-features 2>no-backend.log; then
             echo "no-default-features unexpectedly compiled" >&2
             exit 1
           fi
@@ -464,17 +464,17 @@ jobs:
       # Why not serialize every test job: only tenet-tensors unit tests observe
       # process-global cache snapshots, so keep the rest of the workspace parallel.
       - name: Run tenet-tensors tests with isolated cache snapshots
-        run: cargo test -p tenet-tensors --tests -- --test-threads=1
+        run: cargo test --locked -p tenet-tensors --tests -- --test-threads=1
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
       - name: Run remaining workspace tests
-        run: cargo test --workspace --exclude tenet-tensors --tests
+        run: cargo test --locked --workspace --exclude tenet-tensors --tests
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
       - name: Run workspace doctests
-        run: cargo test --workspace --doc
+        run: cargo test --locked --workspace --doc
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
@@ -505,12 +505,12 @@ jobs:
       # serialize every test: only tenet-tensors unit tests observe
       # process-global cache snapshots, so keep the rest of the workspace parallel.
       - name: Run tenet-tensors tests with isolated cache snapshots
-        run: cargo llvm-cov --no-report -p tenet-tensors --tests -- --test-threads=1
+        run: cargo llvm-cov --locked --no-report -p tenet-tensors --tests -- --test-threads=1
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
       - name: Run remaining workspace tests
-        run: cargo llvm-cov --no-report --workspace --exclude tenet-tensors --tests
+        run: cargo llvm-cov --locked --no-report --workspace --exclude tenet-tensors --tests
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}

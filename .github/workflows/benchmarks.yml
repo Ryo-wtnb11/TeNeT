@@ -31,13 +31,13 @@ jobs:
       # Why not PR CI: hosted-runner timing noise makes these diagnostic
       # measurements unsuitable as correctness gates.
       - name: FusionTreeKey hash/eq microbench
-        run: cargo bench -p tenet-core --bench fusion_tree_key
+        run: cargo bench --locked -p tenet-core --bench fusion_tree_key
         working-directory: tenet
       - name: strided-combine microbench
-        run: cargo bench -p tenet-operations --bench strided_combine
+        run: cargo bench --locked -p tenet-operations --bench strided_combine
         working-directory: tenet
       - name: permute U(1) many-charge microbench
-        run: cargo bench -p tenet-operations --bench permute_u1_many
+        run: cargo bench --locked -p tenet-operations --bench permute_u1_many
         working-directory: tenet
 
   # Measurement-only tests reach private phases or a counting global
@@ -63,11 +63,11 @@ jobs:
           key: benchmarks-ignored-measurements
       - name: typed contract batch measurements
         if: ${{ !cancelled() }}
-        run: cargo test --release -p tenet-rs --test typed_contract_batch -- --ignored --test-threads=1 --nocapture
+        run: cargo test --locked --release -p tenet-rs --test typed_contract_batch -- --ignored --test-threads=1 --nocapture
         working-directory: tenet
       - name: transform-replay member batch measurement
         if: ${{ !cancelled() }}
-        run: cargo test --release -p tenet-operations --lib -- --ignored --exact transform_replay::member::tests::member_batch_measurement --nocapture
+        run: cargo test --locked --release -p tenet-operations --lib -- --ignored --exact transform_replay::member::tests::member_batch_measurement --nocapture
         working-directory: tenet
         # Why not plain release: sibling unit tests call the debug-only
         # `take_checked_block_passes` probe, so the lib test target only
@@ -76,9 +76,9 @@ jobs:
           CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: 'true'
       - name: checked-Generic public transform measurement (racah-generated)
         if: ${{ !cancelled() }}
-        run: cargo test --release -p tenet-rs --no-default-features --features racah-generated,cpu-faer --test permute_overwrite_allocations -- --ignored --exact checked_generic_public_transform_measurement --nocapture
+        run: cargo test --locked --release -p tenet-rs --no-default-features --features racah-generated,cpu-faer --test permute_overwrite_allocations -- --ignored --exact checked_generic_public_transform_measurement --nocapture
         working-directory: tenet
       - name: checked-Generic transform phase measurement (racah-generated)
         if: ${{ !cancelled() }}
-        run: cargo test --release -p tenet-tensors --no-default-features --features racah-generated,cpu-faer --lib -- --ignored --exact tests::tree_transform_plan::generic::measure_checked_generic_transform_phases --nocapture
+        run: cargo test --locked --release -p tenet-tensors --no-default-features --features racah-generated,cpu-faer --lib -- --ignored --exact tests::tree_transform_plan::generic::measure_checked_generic_transform_phases --nocapture
         working-directory: tenet
