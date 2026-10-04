@@ -655,11 +655,12 @@ fn explicit_shape_coupled_structure_reuses_the_bounded_leg_cache() {
         .collect::<Vec<_>>();
 
     reset_coupled_grid_build_observations();
+    let misses = complete_hom_space_miss_observations();
     let first = hom
         .coupled_subblock_structure(&U1FusionRule, 2, shapes.clone())
         .unwrap();
     assert_eq!(coupled_grid_build_observations().1, grid_sides);
-    let misses = complete_hom_space_structure_cache_info().misses();
+    assert_eq!(complete_hom_space_miss_observations(), misses + 1);
 
     reset_coupled_grid_build_observations();
     let second = hom
@@ -669,7 +670,7 @@ fn explicit_shape_coupled_structure_reuses_the_bounded_leg_cache() {
         .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
         .unwrap();
     assert_eq!(coupled_grid_build_observations(), (0, 0));
-    assert_eq!(complete_hom_space_structure_cache_info().misses(), misses);
+    assert_eq!(complete_hom_space_miss_observations(), misses + 1);
     assert!(Arc::ptr_eq(&first, &second));
     assert!(Arc::ptr_eq(&first, &from_legs));
     assert!(first.storage_tiling_proven());

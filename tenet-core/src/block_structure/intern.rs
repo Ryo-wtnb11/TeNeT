@@ -393,7 +393,7 @@ pub(super) fn canonicalize_block_structure_arc(
 /// construction, because each mints its identity inside the write-locked
 /// insert, so whatever lands in a cleared table is new. The complete-HomSpace
 /// cache publishes a structure built earlier, so its admission checks
-/// [`may_publish_since`] under its write lock, and its hit-path refresh only
+/// `may_publish_since` under its write lock, and its hit-path refresh only
 /// repoints an entry that still holds the content it looked up.
 ///
 /// Why not the arc dedup table or the fusion-tree layout cache: an arc-table

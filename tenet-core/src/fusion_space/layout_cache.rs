@@ -403,6 +403,20 @@ pub(crate) struct CompleteHomSpaceStructureCache {
     bypasses: AtomicUsize,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// This thread's complete-HomSpace misses. Why not the global `misses`
+    /// counter: concurrent tests that build structures without
+    /// `CACHE_TEST_LOCK` advance it between a test's two readings.
+    static COMPLETE_HOM_SPACE_MISS_OBSERVATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn complete_hom_space_miss_observations() -> usize {
+    COMPLETE_HOM_SPACE_MISS_OBSERVATIONS.get()
+}
+
 pub(crate) const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP: usize = 1024;
 pub(crate) const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET: usize = 4 * 1024 * 1024;
 pub(crate) const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES: usize = 1_650_641;
@@ -487,6 +501,8 @@ impl CompleteHomSpaceStructureCache {
         charged_bytes: usize,
     ) -> Arc<BlockStructure> {
         self.misses.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        COMPLETE_HOM_SPACE_MISS_OBSERVATIONS.set(COMPLETE_HOM_SPACE_MISS_OBSERVATIONS.get() + 1);
         self.admit(key, structure, charged_bytes)
     }
 
