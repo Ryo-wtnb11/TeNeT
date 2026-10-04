@@ -163,11 +163,10 @@ pub use tensortrace::tensortrace_fusion_structure_into_on_cuda;
 pub(crate) use tensortrace::{tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_owned};
 pub use tensortrace::{
     tensortrace_fusion_dyn_into_checked, tensortrace_fusion_dyn_owned_checked,
-    tensortrace_fusion_dyn_owned_generic_checked, tensortrace_fusion_dyn_selected_homspace_checked,
-    tensortrace_fusion_dyn_selected_homspace_generic_checked,
-    tensortrace_fusion_dyn_structure_into_raw, tensortrace_fusion_dyn_structure_owned,
-    TensorTraceFusionStructure, TensorTraceFusionStructureTerm, TensorTraceStructure,
-    TensorTraceStructureTerm,
+    tensortrace_fusion_dyn_owned_generic_checked, tensortrace_fusion_dyn_preflight_checked,
+    tensortrace_fusion_dyn_preflight_generic_checked, tensortrace_fusion_dyn_structure_into_raw,
+    tensortrace_fusion_dyn_structure_owned, TensorTraceFusionStructure,
+    TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm, TracePreflight,
 };
 pub use tensortrace::{tensortrace_fusion_structure, tensortrace_structure};
 #[cfg(test)]

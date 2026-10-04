@@ -47,18 +47,24 @@ where
     /// reads the destination; nothing for `beta = 1`), then every trace term
     /// adds `alpha * coefficient * trace(block)`. That `beta` pass is the
     /// reference's own: several source blocks feed one destination block, so
-    /// no single term's write can carry it. An empty `pairs` is exactly
-    /// [`Self::axpby_into`], with its rules and errors — including its
-    /// acceptance of a compact diagonal source. A lazy-adjoint source is read
-    /// through its parent.
+    /// no single term's write can carry it. Past the braiding gate, an empty
+    /// `pairs` is exactly [`Self::axpby_into`], with its rules and errors —
+    /// including its acceptance of a compact diagonal source. A lazy-adjoint
+    /// source is read through its parent.
     ///
     /// # Errors
     ///
-    /// [`Error::RuntimeMismatch`], [`Error::RuleMismatch`], the pair-list and
-    /// duality errors of [`Self::trace_pairs`], [`Error::Unsupported`] for a
-    /// compact (diagonal) source with a non-empty `pairs`, [`Error::InvalidArgument`] for a destination
-    /// that is not owned dense host storage, aliases the source, or has the
-    /// wrong space, layout or length, and [`Error::DestinationShared`].
+    /// In TensorKit `trace_permute!`'s order — braiding, indices,
+    /// `space(tdst)`, pair duality — then TeNeT's representation and storage
+    /// checks: [`Error::RuntimeMismatch`], [`Error::RuleMismatch`];
+    /// [`crate::typed::OperationError::UnsupportedTensorContractScope`] for a
+    /// non-symmetric braiding, even with an empty `pairs`; the pair-list errors
+    /// of [`Self::trace_pairs`]; [`Error::InvalidArgument`] for a destination
+    /// whose space or layout is not the result's; the duality error of
+    /// [`Self::trace_pairs`]; [`Error::Unsupported`] for a compact (diagonal)
+    /// source with a non-empty `pairs`; [`Error::InvalidArgument`] for a
+    /// destination that is not owned dense host storage, aliases the source,
+    /// or has the wrong length; and [`Error::DestinationShared`].
     ///
     /// # Failure
     ///
@@ -82,18 +88,24 @@ where
         {
             return Err(Error::RuleMismatch);
         }
-        let Some(source) = trace_source(self, pairs)? else {
+        let braiding = self.provider().braiding_style();
+        let Some(source) = trace_source(self, braiding, pairs)? else {
             return host_axpby_into(self, destination, alpha, beta);
         };
         let destination_codomain_rank = source.axes.destination_codomain_rank;
         let source_space = &source.body.space;
         let axes = source.spec();
-        let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
+        let preflight = tenet_tensors::tensortrace_fusion_dyn_preflight_checked(
             source_space,
             axes,
             destination_codomain_rank,
         )?;
-        let space = source_space.derive_from_final_homspace(homspace)?;
+        let dual_pairs = preflight.require_dual_pairs();
+        let space = source_space.derive_from_final_homspace(preflight.into_selected_homspace())?;
+        // TensorKit `trace_permute!`'s order: the destination space, then the
+        // pair duality; the representation and storage checks are TeNeT's own.
+        require_destination_space(destination.logical_space().space(), space.space())?;
+        dual_pairs?;
         let TypedData::Dense(source_data) = source.body.data.as_ref() else {
             return Err(Error::Unsupported {
                 operation: "trace_pairs_into",
@@ -1090,18 +1102,21 @@ where
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] when the pair list is malformed — an axis out
-    /// of range, or one named twice.
-    /// Otherwise [`Error::Operation`] / [`Error::Core`] /
-    /// [`Error::FusionAlgebra`] from the seam, which owns the rest of the
-    /// validation (legs that are not mutually dual, above all).
+    /// In TensorKit `trace_permute!`'s order: [`Error::Operation`] with
+    /// `UnsupportedTensorContractScope` for a non-symmetric braiding, even with
+    /// an empty `pairs`; [`Error::InvalidArgument`] when the pair list is
+    /// malformed — an axis out of range, or one named twice; then
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] from
+    /// the seam, whose last check is `StructureMismatch { "trace axes" }` for
+    /// legs that are not mutually dual.
     pub(super) fn trace_pairs_multiplicity_free(
         &self,
         pairs: &[(usize, usize)],
     ) -> Result<Self, Error> {
         let _host_pool = self.runtime.enter_host_pool();
         let rank = self.rank();
-        let Some(source) = trace_source(self, pairs)? else {
+        let braiding = self.provider().braiding_style();
+        let Some(source) = trace_source(self, braiding, pairs)? else {
             return Ok(self.clone());
         };
         let destination_codomain_rank = source.axes.destination_codomain_rank;
@@ -1115,12 +1130,15 @@ where
         let axes = source.spec();
         // Preflight first: the checked homspace selection must fail before any
         // destination layout is derived, so a rejected trace publishes no state.
-        let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
+        // With no destination, the pair duality follows at once (TensorKit
+        // `trace_permute!`).
+        let preflight = tenet_tensors::tensortrace_fusion_dyn_preflight_checked(
             source_space,
             axes,
             destination_codomain_rank,
         )?;
-        let space = source_space.derive_from_final_homspace(homspace)?;
+        preflight.require_dual_pairs()?;
+        let space = source_space.derive_from_final_homspace(preflight.into_selected_homspace())?;
         // Compact arm (#604): the full trace of a rank-(1,1) spectrum factor
         // over its only pair is a reduction of the stored spectrum, so there
         // is nothing to materialize. This is
@@ -1144,13 +1162,6 @@ where
         // `tests/typed_facade.rs`.
         if let Some(spectrum) = self.spectrum() {
             if rank == 2 && self.codomain_rank() == 1 && pairs.len() == 1 {
-                // The dense arm's compile rejects these; a spectrum reduction
-                // must not answer where the categorical trace is undefined
-                // (TensorKit `trace_permute!` requires symmetric braiding).
-                tenet_tensors::require_symmetric_braiding(
-                    self.provider().braiding_style(),
-                    tenet_tensors::SymmetricBraidingOp::Trace,
-                )?;
                 let traced_leg_is_dual: bool =
                     self.logical_space().space().homspace().codomain().legs()[0].is_dual();
                 let provider: &R = self.logical_space().provider();

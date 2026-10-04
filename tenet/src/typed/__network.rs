@@ -159,5 +159,5 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaPayload,
 {
-    tensor.prepare_trace_pairs(pairs)
+    tensor.prepare_trace_pairs(pairs, None)
 }

@@ -99,12 +99,18 @@ impl<R, D, S> TraceSource<'_, R, D, S> {
     }
 }
 
-/// Validates `pairs` and lowers `tensor` to its trace source; `None` for an
-/// empty list.
+/// Gates the provider's braiding, validates `pairs` and lowers `tensor` to
+/// its trace source; `None` for an empty list.
+///
+/// The braiding gate comes first, as in TensorKit `trace_permute!`, which
+/// rejects a non-symmetric braiding before it looks at the indices, even for
+/// an empty trace.
 pub(super) fn trace_source<'t, R, D, S>(
     tensor: &'t TensorMap<R, D, S>,
+    braiding: tenet_core::BraidingStyleKind,
     pairs: &[(usize, usize)],
 ) -> Result<Option<TraceSource<'t, R, D, S>>, Error> {
+    tenet_tensors::require_symmetric_braiding(braiding, tenet_tensors::SymmetricBraidingOp::Trace)?;
     let Some(mut axes) = trace_pair_axes(tensor.rank(), tensor.codomain_rank(), pairs)? else {
         return Ok(None);
     };
@@ -144,31 +150,40 @@ where
         > + CheckedGenericPivotal<Scalar = f64>,
     D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    let Some(source) = trace_source(tensor, pairs)? else {
+    let braiding = CheckedGenericFusion::braiding_style(tensor.provider());
+    let Some(source) = trace_source(tensor, braiding, pairs)? else {
         return Ok(tensor.clone());
     };
     let destination_codomain_rank = source.axes.destination_codomain_rank;
     let source_space = &source.body.space;
-    let payload = source.body.materialized_dense_data();
-    let source_data = &*payload;
     let axes = source.spec();
-    let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_generic_checked(
+    let preflight = tenet_tensors::tensortrace_fusion_dyn_preflight_generic_checked(
         source_space,
         axes,
         destination_codomain_rank,
     )?;
+    // With no destination, the pair duality follows at once (TensorKit
+    // `trace_permute!`).
+    preflight
+        .require_dual_pairs()
+        .map_err(CheckedGenericPlanError::Operation)?;
     let prepared = source_space
-        .prepare_final_homspace_generic_with_checked(source_space.provider(), homspace)
+        .prepare_final_homspace_generic_with_checked(
+            source_space.provider(),
+            preflight.into_selected_homspace(),
+        )
         .map_err(CheckedGenericPlanError::from)?;
     let space = source_space
         .commit_final_homspace_generic_bound_checked(prepared)
         .map_err(CheckedGenericPlanError::Operation)?;
     let structure = <tenet_core::CheckedGenericAdmissionMode as tenet_tensors::PivotalCoefficientAlgebra<R>>::trace_terms(&space, source_space, axes)?;
+    // Densified only now: a rejected trace allocates nothing (#1872).
+    let payload = source.body.materialized_dense_data();
     let data = tenet_tensors::tensortrace_fusion_dyn_structure_owned(
         &structure,
         space.space(),
         source_space.space(),
-        source_data,
+        &payload,
         D::from_real(1.0),
     )
     .map_err(CheckedGenericPlanError::Operation)?;
@@ -188,8 +203,8 @@ where
     /// legs, preserving their order and codomain/domain side.
     ///
     /// Each pair uses flat zero-based axes with codomain axes first. Every axis
-    /// must be in range and appear at most once; `pairs.is_empty()` returns a
-    /// clone. This is the categorical contraction trace, so provider pivotal
+    /// must be in range and appear at most once; past the braiding gate,
+    /// `pairs.is_empty()` returns a clone. This is the categorical contraction trace, so provider pivotal
     /// coefficients and fermionic twists are included. It can therefore be a
     /// supertrace and need not equal [`Self::tr`].
     ///
@@ -202,9 +217,12 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidArgument`] for an out-of-range or repeated axis.
-    /// Non-dual legs and trace execution failures return their corresponding
-    /// [`Error`] variant. If required pivotal data is unavailable, the original
+    /// In TensorKit `trace_permute!`'s order: `UnsupportedTensorContractScope`
+    /// for a non-symmetric braiding (even with an empty `pairs`), then
+    /// [`Error::InvalidArgument`] for an out-of-range or repeated axis, then
+    /// `StructureMismatch { "trace axes" }` for legs that are not mutually
+    /// dual, in both admission modes. Trace execution failures return their
+    /// corresponding [`Error`] variant. If required pivotal data is unavailable, the original
     /// provider error is available as the source. A failed trace returns no
     /// output tensor.
     ///

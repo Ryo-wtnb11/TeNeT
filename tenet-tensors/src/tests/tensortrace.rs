@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tenet_core::Trivial;
 
 #[derive(Clone, Copy, Debug)]
-struct CheckedTraceToy;
+struct CheckedTraceToy(tenet_core::BraidingStyleKind);
 
 impl tenet_core::CheckedGenericFusion for CheckedTraceToy {
     type Error = std::convert::Infallible;
@@ -14,7 +14,7 @@ impl tenet_core::CheckedGenericFusion for CheckedTraceToy {
         FusionStyleKind::Generic
     }
     fn braiding_style(&self) -> tenet_core::BraidingStyleKind {
-        tenet_core::BraidingStyleKind::Bosonic
+        self.0
     }
     fn vacuum(&self) -> SectorId {
         SectorId::new(0)
@@ -93,7 +93,7 @@ fn checked_generic_trace_owned_path_reuses_strided_executor() {
     );
     let destination_hom =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
-    let provider = Arc::new(CheckedTraceToy);
+    let provider = Arc::new(CheckedTraceToy(tenet_core::BraidingStyleKind::Bosonic));
     let src = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         Arc::clone(&provider),
         source_hom,
@@ -111,6 +111,42 @@ fn checked_generic_trace_owned_path_reuses_strided_executor() {
     )
     .unwrap();
     assert_eq!(output, vec![2.0]);
+}
+
+#[test]
+fn checked_generic_trace_preflight_gates_non_symmetric_braiding_first() {
+    // What: as TensorKit `trace_permute!`, the Generic preflight rejects a
+    // non-symmetric braiding before it looks at the pairs, as the
+    // multiplicity-free compile already did (#1872).
+    let leg = || SectorLeg::new([(SectorId::new(0), 1)], false);
+    let src = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::new(CheckedTraceToy(tenet_core::BraidingStyleKind::Anyonic)),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg()]),
+            FusionProductSpace::new([leg()]),
+        ),
+    )
+    .unwrap();
+    for axes in [
+        TensorTraceAxisSpec::new(&[], &[0], &[1]),
+        // A malformed pair (an axis traced with itself): the braiding still wins.
+        TensorTraceAxisSpec::new(&[1], &[0], &[0]),
+    ] {
+        let error =
+            crate::tensortrace::tensortrace_fusion_dyn_preflight_generic_checked(&src, axes, 0)
+                .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CheckedGenericPlanError::Operation(
+                    OperationError::UnsupportedTensorContractScope {
+                        message: crate::admission::FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING
+                    }
+                )
+            ),
+            "{error:?}"
+        );
+    }
 }
 
 fn assert_owned_trace_matches_initialized_for_real_and_complex<R>(

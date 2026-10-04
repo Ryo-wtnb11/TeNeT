@@ -593,6 +593,22 @@ where
     }
 }
 
+/// The destination's space against the operation result's, as TensorKit
+/// compares `space(tdst)`; the same error as [`unique_dense_destination`]'s
+/// space check, for routes that compare the space before their other checks.
+pub(super) fn require_destination_space(
+    destination: &DynamicFusionMapSpace,
+    expected: &DynamicFusionMapSpace,
+) -> Result<(), Error> {
+    if destination != expected {
+        return Err(Error::InvalidArgument(
+            "destination fusion space or block layout does not match the operation result"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// The destination checks a `*_into` shares on every placement, in one
 /// order: owned dense storage, no alias of the input payload, the result's
 /// space and block layout, the exact length, then unique ownership.
@@ -626,12 +642,7 @@ where
             "destination storage must not alias an input".to_string(),
         ));
     }
-    if body.space.space() != expected {
-        return Err(Error::InvalidArgument(
-            "destination fusion space or block layout does not match the operation result"
-                .to_string(),
-        ));
-    }
+    require_destination_space(body.space.space(), expected)?;
     let required = expected.required_len()?;
     let actual = data.len();
     if actual != required {

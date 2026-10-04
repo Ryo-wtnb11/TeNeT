@@ -10,12 +10,13 @@
 //! `dim(coupled)/dim(first) · Π twist(non-dual)`.
 //!
 //! Why hook traits rather than one generic body: the multiplicity-free and
-//! checked Generic modes keep different error variants, and until #1872
-//! different timing for a non-dual pair; the hooks are the narrowest layer
-//! that owns those differences.
+//! checked Generic modes keep different symbol access and error types; the
+//! hooks are the narrowest layer that owns those differences. Both modes
+//! detect the same misuses in TensorKit's order (#1872): braiding, axes,
+//! selection, destination space (when there is one), pair duality.
 
 use super::*;
-use tenet_core::{CheckedGenericAdmissionMode, MultiplicityFreeAdmissionMode};
+use tenet_core::{BraidingStyleKind, CheckedGenericAdmissionMode, MultiplicityFreeAdmissionMode};
 
 /// What the trace preflight asks of an admission mode.
 pub(super) trait TracePreflightMode<R> {
@@ -39,22 +40,30 @@ pub(super) trait TracePreflightMode<R> {
         rhs_axis: usize,
     ) -> Result<bool, Self::Error>;
 
-    /// `Some` rejects a non-dual pair at once; `None` records it in
-    /// [`CheckedTraceGeometry::trace_pairs_match`] for the compile to reject.
-    fn non_dual_error() -> Option<Self::Error>;
+    fn braiding_style(rule: &R) -> BraidingStyleKind;
 }
 
-/// The one trace preflight: lowers the axes onto the stored orientation,
-/// then selects the output HomSpace and checks the pairs.
+/// The one trace preflight, in TensorKit `trace_permute!`'s order: the
+/// braiding gate, the axes, the selected output HomSpace, then the pair
+/// duality, which the caller raises through
+/// [`TracePreflight::require_dual_pairs`] once any destination space has been
+/// compared.
 pub(super) fn trace_preflight<M, R>(
     src: &BoundDynamicFusionMapSpace<R>,
     axes: TensorTraceAxisSpec<'_>,
     dst_nout: usize,
-) -> Result<CheckedTraceGeometry, M::Error>
+) -> Result<TracePreflight, M::Error>
 where
     M: TracePreflightMode<R>,
 {
     M::validate_source(src)?;
+    // TensorKit `trace_permute!` gates the braiding first: a trace is defined
+    // only for symmetric braiding.
+    crate::admission::require_symmetric_braiding(
+        M::braiding_style(src.provider()),
+        crate::admission::SymmetricBraidingOp::Trace,
+    )
+    .map_err(M::operation)?;
     let orientation = if axes.source_conjugate() {
         FusionTreePairOrientation::Adjoint
     } else {
@@ -85,7 +94,7 @@ pub(super) fn trace_geometry<M, R>(
     src_homspace: OrientedFusionTreeHomSpace<'_>,
     axis_plan: &TensorTraceAxisPlan,
     dst_nout: usize,
-) -> Result<CheckedTraceGeometry, M::Error>
+) -> Result<TracePreflight, M::Error>
 where
     M: TracePreflightMode<R>,
 {
@@ -107,14 +116,9 @@ where
         .iter()
         .zip(axis_plan.trace_rhs_axes.iter())
     {
-        if !M::pair_is_dual(rule, src_homspace, lhs_axis, rhs_axis)? {
-            if let Some(error) = M::non_dual_error() {
-                return Err(error);
-            }
-            trace_pairs_match = false;
-        }
+        trace_pairs_match &= M::pair_is_dual(rule, src_homspace, lhs_axis, rhs_axis)?;
     }
-    Ok(CheckedTraceGeometry {
+    Ok(TracePreflight {
         selected_homspace,
         trace_pairs_match,
     })
@@ -173,8 +177,8 @@ where
         Ok(lhs == rhs_dual)
     }
 
-    fn non_dual_error() -> Option<Self::Error> {
-        None
+    fn braiding_style(rule: &R) -> BraidingStyleKind {
+        FusionRule::braiding_style(rule)
     }
 }
 
@@ -234,12 +238,8 @@ where
         Ok(lhs == rhs_dual)
     }
 
-    fn non_dual_error() -> Option<Self::Error> {
-        Some(CheckedGenericPlanError::Operation(
-            OperationError::UnsupportedTensorContractScope {
-                message: "trace pairs must contain dual sectors",
-            },
-        ))
+    fn braiding_style(rule: &R) -> BraidingStyleKind {
+        CheckedGenericFusion::braiding_style(rule)
     }
 }
 
