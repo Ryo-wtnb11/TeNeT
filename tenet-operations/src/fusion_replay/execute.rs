@@ -410,6 +410,20 @@ where
             .len()
     }
 
+    /// The device plan entries one CUDA direct replay of this plan holds: a
+    /// dense plan per distinct GEMM shape and one per distinct inactive
+    /// zero-fill layout.
+    #[doc(hidden)]
+    pub fn cuda_direct_plan_entries(&self) -> usize {
+        self.distinct_direct_gemm_shapes()
+            + self
+                .inactive_destination_regions()
+                .iter()
+                .map(|layout| (&layout.block.shape, &layout.block.strides))
+                .collect::<HashSet<_>>()
+                .len()
+    }
+
     /// The per-member payload lengths `[dst, lhs, rhs]` this plan's
     /// structures require.
     pub(crate) fn member_lens(&self) -> Result<[usize; 3], OperationError> {

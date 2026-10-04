@@ -517,18 +517,11 @@ where
     }
 
     fn direct_plan_entries(&self) -> Result<usize, Error> {
-        let plan = &self.core().0;
-        let gemms = plan.distinct_direct_gemm_shapes();
-        let fills = plan
-            .inactive_destination_regions()
-            .iter()
-            .map(|layout| (&layout.block.shape, &layout.block.strides))
-            .collect::<std::collections::HashSet<_>>()
-            .len();
+        let core = self.core().0.cuda_direct_plan_entries();
         let copy_fills = self.copy_c.as_ref().map_or(Ok(0), |copy| {
             tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(&copy.transform)
         })?;
-        Ok(gemms + fills + copy_fills)
+        Ok(core + copy_fills)
     }
 
     fn prepare_zero_regions(
@@ -541,52 +534,19 @@ where
             return Ok(());
         }
         workspace.device.copy_regions = None;
-        let mut regions = Vec::with_capacity(self.core().0.inactive_destination_regions().len());
-        let mut largest = 0usize;
         let core_member_len = if let Some(copy) = &self.copy_c {
             copy.temporary_space.space().required_len()?
         } else {
             self.member_len
         };
-        let core_total = self.total_len(core_member_len, members)?;
-        for layout in self.core().0.inactive_destination_regions() {
-            let block = &layout.block;
-            let unsigned = |value: isize| {
-                usize::try_from(value).map_err(|_| {
-                    Error::InvalidArgument(
-                        "inactive destination layout has a negative stride".into(),
-                    )
-                })
-            };
-            let mut dims = block.shape.clone();
-            dims.push(members);
-            let mut strides = block
-                .strides
-                .iter()
-                .map(|&stride| unsigned(stride))
-                .collect::<Result<Vec<_>, _>>()?;
-            strides.push(core_member_len);
-            let region = tenet_dense::CudaRegion::new(dims, strides, unsigned(block.offset)?)
-                .map_err(tenet_operations::OperationError::Dense)?;
-            region
-                .validate_as_destination("prepared contract zero fill")
-                .map_err(tenet_operations::OperationError::Dense)?;
-            region
-                .validate_within(core_total)
-                .map_err(tenet_operations::OperationError::Dense)?;
-            largest = largest.max(block.shape.iter().product::<usize>());
-            regions.push(region);
-        }
-        ctx.reserve_zero_template::<D>(
-            largest
-                .checked_mul(members)
-                .ok_or_else(|| Error::InvalidArgument("zero template length overflows".into()))?,
-        )
-        .map_err(tenet_operations::OperationError::Dense)?;
-        if !regions.is_empty() {
-            ctx.reserve_ones_template::<D>(1)
-                .map_err(tenet_operations::OperationError::Dense)?;
-        }
+        self.total_len(core_member_len, members)?;
+        let zeros = tenet_operations::cuda_transform::CudaMemberZeroRegions::prepare(
+            self.core().0.inactive_destination_regions(),
+            core_member_len,
+            members,
+        )?;
+        zeros.reserve_templates::<D>(ctx, members)?;
+        let regions = zeros.into_regions();
         workspace.device.zero_regions = regions;
         workspace.device.members = members;
         Ok(())

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tenet_core::BlockStructure;
 use tenet_dense::{cuda_region_zero, CudaDenseContext, CudaDenseStorage, CudaRegion, CudaScalar};
 use tenet_operations::cuda::{CudaStackedStorageGemm, CudaStorage};
-use tenet_operations::cuda_transform::CudaSingleMemberRegions;
+use tenet_operations::cuda_transform::{CudaMemberZeroRegions, CudaSingleMemberRegions};
 use tenet_operations::stacked::{StackedStorageView, StackedStorageViewMut};
 
 use super::DynamicTreeExecutionArtifact;
@@ -79,14 +79,7 @@ impl StorageContractResolution<f64> {
     pub fn admit_cuda_dynamic_tree_members(&self) -> Result<usize, OperationError> {
         let artifact = artifact(self)?;
         artifact.block_plan.require_identity_direct_replay()?;
-        let mut entries = artifact.block_plan.distinct_direct_gemm_shapes()
-            + artifact
-                .block_plan
-                .inactive_destination_regions()
-                .iter()
-                .map(|layout| (&layout.block.shape, &layout.block.strides))
-                .collect::<std::collections::HashSet<_>>()
-                .len();
+        let mut entries = artifact.block_plan.cuda_direct_plan_entries();
         let transforms = [&artifact.lhs_transform, &artifact.rhs_transform];
         for ((borrowed, scales), transform) in source_scales(artifact).into_iter().zip(transforms) {
             if borrowed {
@@ -106,35 +99,6 @@ fn stack_len(member_len: usize, members: usize) -> Result<usize, OperationError>
     member_len
         .checked_mul(members)
         .ok_or(OperationError::ElementCountOverflow)
-}
-
-fn member_region(
-    block: &tenet_operations::FusionScaleBlockLayout,
-    member_len: usize,
-    members: usize,
-    total: usize,
-) -> Result<CudaRegion, OperationError> {
-    let unsupported = || OperationError::UnsupportedTensorContractScope {
-        message: "device contraction cannot zero a negatively strided destination block",
-    };
-    let block = &block.block;
-    let mut dims = block.shape.clone();
-    dims.push(members);
-    let mut strides = block
-        .strides
-        .iter()
-        .map(|&stride| usize::try_from(stride).map_err(|_| unsupported()))
-        .collect::<Result<Vec<_>, _>>()?;
-    strides.push(member_len);
-    let offset = usize::try_from(block.offset).map_err(|_| unsupported())?;
-    let region = CudaRegion::new(dims, strides, offset).map_err(OperationError::Dense)?;
-    region
-        .validate_within(total)
-        .map_err(OperationError::Dense)?;
-    region
-        .validate_as_destination("CUDA member contraction zero fill")
-        .map_err(OperationError::Dense)?;
-    Ok(region)
 }
 
 impl<D> CudaDynamicTreeMembersWorkspace<CudaStorage<D>>
@@ -326,11 +290,13 @@ where
         }
         let mut core_zeros = Vec::new();
         if artifact.core_dst.is_none() {
-            let total = stack_len(dst_len, members)?;
-            for layout in artifact.block_plan.inactive_destination_regions() {
-                zero_len = zero_len.max(layout.block.shape.iter().product::<usize>());
-                core_zeros.push(member_region(layout, dst_len, members, total)?);
-            }
+            let zeros = CudaMemberZeroRegions::prepare(
+                artifact.block_plan.inactive_destination_regions(),
+                dst_len,
+                members,
+            )?;
+            zero_len = zero_len.max(zeros.max_zero_len());
+            core_zeros = zeros.into_regions();
         }
         let mut any_zero = !core_zeros.is_empty();
         for stage in stages.iter().flatten() {
