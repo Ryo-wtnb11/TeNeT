@@ -1,9 +1,35 @@
 use super::*;
 
+/// Key of one interned content: its rank and a hash of its block keys and
+/// degeneracy layout.
+///
+/// Why a hash rather than a copy of the blocks (#1998): a copied key doubled
+/// every content's per-block bytes, and at U(1) `V^6 <- V^6` it outgrew the
+/// table's entry limit, so that content was never interned and got a new id
+/// on every derivation. A lookup checks the live content itself before it
+/// hits, so two contents whose hashes collide are never aliased: the later one
+/// is returned uninterned.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct BlockStructureInternKey {
     pub(crate) rank: usize,
-    pub(crate) blocks: Arc<[BlockStructureContentBlock]>,
+    pub(crate) hash: u64,
+}
+
+impl BlockStructureInternKey {
+    pub(crate) fn of(sector: &SectorStructure, degeneracy: &DegeneracyStructure) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        sector.block_count().hash(&mut hasher);
+        for block in sector.blocks() {
+            block.key().hash(&mut hasher);
+        }
+        degeneracy.dims.hash(&mut hasher);
+        degeneracy.offsets.hash(&mut hasher);
+        Self {
+            rank: sector.rank(),
+            hash: hasher.finish(),
+        }
+    }
 }
 
 struct BlockStructureInternEntry {
@@ -33,7 +59,9 @@ pub(crate) struct BlockStructureInternTable {
 /// aliasing-safe despite its ids being consumed as cache keys downstream.
 pub(crate) const BLOCK_STRUCTURE_INTERN_CAP: usize = 8192;
 const BLOCK_STRUCTURE_INTERN_BYTE_BUDGET: usize = 64 * 1024 * 1024;
-const BLOCK_STRUCTURE_INTERN_MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
+/// Why equal to the budget: the same admission policy as the other structure
+/// caches (#1993). Since keys are hashes (#1998) every entry is far below it.
+const BLOCK_STRUCTURE_INTERN_MAX_ENTRY_BYTES: usize = BLOCK_STRUCTURE_INTERN_BYTE_BUDGET;
 // Why-not allocator-exact accounting: allocator headers are not portable.
 // This fixed allowance conservatively covers hash/FIFO nodes, the weak handle,
 // and the surviving Arc control-allocation shell.
@@ -60,15 +88,22 @@ impl BlockStructureInternTable {
         }
     }
 
+    /// The live content under `key` that `matches` accepts.
     pub(crate) fn lookup(
         &self,
         key: &BlockStructureInternKey,
+        matches: impl Fn(&BlockStructureContent) -> bool,
     ) -> Option<Arc<BlockStructureContent>> {
         self.entries
             .peek(key)
             .and_then(|entry| entry.content.upgrade())
+            .filter(|content| matches(content))
     }
 
+    /// Interns `make_content()` under `key`. Callers first [`Self::lookup`]
+    /// under the same lock, so a live content still under `key` is a hash
+    /// collision with different content: it keeps its entry, and the new
+    /// content is returned uninterned.
     pub(crate) fn intern_with<C, F>(
         &mut self,
         key: BlockStructureInternKey,
@@ -80,8 +115,8 @@ impl BlockStructureInternTable {
         F: FnOnce() -> Arc<BlockStructureContent>,
     {
         if let Some(entry) = self.entries.peek_mut(&key) {
-            if let Some(content) = entry.content.upgrade() {
-                return content;
+            if entry.content.strong_count() > 0 {
+                return make_content();
             }
             let content = make_content();
             entry.content = Arc::downgrade(&content);
@@ -218,35 +253,10 @@ where
     }
 }
 
-pub(crate) fn charged_block_structure_intern_key_bytes(key: &BlockStructureInternKey) -> usize {
-    let mut frozen_backings = rustc_hash::FxHashSet::default();
-    key.blocks.iter().fold(
-        std::mem::size_of::<BlockStructureInternKey>()
-            .saturating_add(std::mem::size_of::<BlockStructureInternEntry>())
-            .saturating_add(
-                key.blocks
-                    .len()
-                    .saturating_mul(std::mem::size_of::<BlockStructureContentBlock>()),
-            )
-            .saturating_add(BLOCK_STRUCTURE_INTERN_CONTROL_ALLOWANCE_BYTES),
-        |charged, block| {
-            let key_heap = match &block.key {
-                BlockKey::Dense => 0,
-                BlockKey::Opaque(key) => spilled_smallvec_heap_bytes(&key.words),
-                BlockKey::FusionTree(pair) => {
-                    charge_fusion_tree_key_backings(&mut frozen_backings, pair.codomain_tree())
-                        .saturating_add(charge_fusion_tree_key_backings(
-                            &mut frozen_backings,
-                            pair.domain_tree(),
-                        ))
-                }
-            };
-            charged
-                .saturating_add(key_heap)
-                .saturating_add(spilled_smallvec_heap_bytes(&block.shape))
-                .saturating_add(spilled_smallvec_heap_bytes(&block.strides))
-        },
-    )
+pub(crate) fn charged_block_structure_intern_key_bytes(_key: &BlockStructureInternKey) -> usize {
+    std::mem::size_of::<BlockStructureInternKey>()
+        .saturating_add(std::mem::size_of::<BlockStructureInternEntry>())
+        .saturating_add(BLOCK_STRUCTURE_INTERN_CONTROL_ALLOWANCE_BYTES)
 }
 
 /// Process-global, strictly-monotonic id source for interned block-structure
@@ -291,15 +301,13 @@ pub(super) fn intern_block_structure_content(
 ) -> Arc<BlockStructureContent> {
     #[cfg(test)]
     BLOCK_STRUCTURE_INTERN_CALLS.set(BLOCK_STRUCTURE_INTERN_CALLS.get() + 1);
-    let blocks = block_structure_content_blocks(&sector, &degeneracy);
-    let key = BlockStructureInternKey {
-        rank: sector.rank(),
-        blocks: Arc::clone(&blocks),
-    };
+    let key = BlockStructureInternKey::of(&sector, &degeneracy);
     let table = block_structure_intern_table();
     // Read-lock fast path uses `peek` (does not bump recency; `get` needs `&mut`).
     if let Ok(read) = table.read() {
-        if let Some(content) = read.lookup(&key) {
+        if let Some(content) = read.lookup(&key, |content| {
+            content.sector == sector && content.degeneracy == degeneracy
+        }) {
             return content;
         }
     }
@@ -307,38 +315,20 @@ pub(super) fn intern_block_structure_content(
     let mut write = table
         .write()
         .expect("block structure intern table poisoned");
+    if let Some(content) = write.lookup(&key, |content| {
+        content.sector == sector && content.degeneracy == degeneracy
+    }) {
+        return content;
+    }
     write.intern_with(key, charged_block_structure_intern_key_bytes, || {
         Arc::new(BlockStructureContent {
             id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
             sector,
             degeneracy,
-            blocks,
             required_len,
             storage_tiling: StorageTilingProof::default(),
         })
     })
-}
-
-pub(super) fn block_structure_content_blocks(
-    sector: &SectorStructure,
-    degeneracy: &DegeneracyStructure,
-) -> Arc<[BlockStructureContentBlock]> {
-    let mut blocks = Vec::with_capacity(sector.block_count());
-    for index in 0..sector.block_count() {
-        let sector_key = sector
-            .key(index)
-            .expect("validated block structure sector index");
-        let block = degeneracy
-            .block(index)
-            .expect("validated block structure degeneracy index");
-        blocks.push(BlockStructureContentBlock {
-            key: sector_key.clone(),
-            shape: block.shape().iter().copied().collect(),
-            strides: block.strides().iter().copied().collect(),
-            offset: block.offset(),
-        });
-    }
-    blocks.into()
 }
 
 type BlockStructureArcTable = lru::LruCache<usize, Weak<BlockStructure>, rustc_hash::FxBuildHasher>;

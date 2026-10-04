@@ -114,12 +114,10 @@ impl PreparedBlockStructure {
     #[doc(hidden)]
     pub fn structure(&self) -> &BlockStructure {
         self.preview.get_or_init(|| {
-            let blocks = block_structure_content_blocks(&self.sector, &self.degeneracy);
             let preview = BlockStructure::from_content(Arc::new(BlockStructureContent {
                 id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
                 sector: self.sector.clone(),
                 degeneracy: self.degeneracy.clone(),
-                blocks,
                 required_len: self.required_len,
                 storage_tiling: StorageTilingProof::default(),
             }));
@@ -182,10 +180,7 @@ impl BlockStructure {
 
     pub fn empty(rank: usize) -> Self {
         let sector = SectorStructure::empty(rank);
-        let degeneracy = DegeneracyStructure {
-            rank,
-            blocks: Vec::new(),
-        };
+        let degeneracy = DegeneracyStructure::empty(rank);
         Self::from_content(intern_block_structure_content(sector, degeneracy, 0))
     }
 

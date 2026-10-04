@@ -137,7 +137,11 @@ pub(crate) struct FusionTreeLayoutCache {
 
 pub(crate) const FUSION_TREE_LAYOUT_CACHE_CAP: usize = 8192;
 pub(crate) const FUSION_TREE_LAYOUT_CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
-pub(crate) const FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
+/// Why equal to the budget: the admission policy of every structural cache
+/// since #1993. An 8 MiB entry limit bypassed the U(1) `V^6 <- V^6` layouts,
+/// so each warm call rebuilt them (#1998); the budget alone bounds retention.
+pub(crate) const FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES: usize =
+    FUSION_TREE_LAYOUT_CACHE_BYTE_BUDGET;
 
 impl FusionTreeLayoutCache {
     pub(crate) fn new(entry_capacity: usize, byte_budget: usize, max_entry_bytes: usize) -> Self {
