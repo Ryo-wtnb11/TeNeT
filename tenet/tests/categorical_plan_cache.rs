@@ -7,16 +7,12 @@
 //! result must be bit-identical to a cold Runtime's. A sector change must
 //! still rebuild.
 
-use num_complex::{Complex32, Complex64};
 use std::sync::Arc;
 use tenet::sector::{
     FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
-
-#[path = "../../tests/support/numerics.rs"]
-mod numerics;
 
 fn bits(data: &[f64]) -> Vec<u64> {
     data.iter().map(|value| value.to_bits()).collect()
@@ -34,10 +30,9 @@ macro_rules! tensor {
 
 /// Runs permute, braid and transpose on three spaces over one rule: `a` warms
 /// the plan tier, `b` has the same sectors with other degeneracies, and `c`
-/// adds a sector. `$exact` asks for bit equality with a cold Runtime; it is
-/// false only where two cold Runtimes already disagree in the last bits.
+/// adds a sector. The warm result must be bit-identical to a cold Runtime's.
 macro_rules! check_rule {
-    ($label:literal, $a:expr, $b:expr, $c:expr, exact: $exact:expr) => {{
+    ($label:literal, $a:expr, $b:expr, $c:expr $(,)?) => {{
         let (a, b, c) = ($a, $b, $c);
         let operations: [(&str, &dyn Fn(&TensorMap<_, f64>) -> TensorMap<_, f64>); 4] = [
             ("permute", &|t| t.permute(&[2, 0], &[3, 1]).unwrap()),
@@ -80,22 +75,11 @@ macro_rules! check_rule {
             );
             assert_eq!(degeneracy_only.codomain(), expected.codomain(), "{what}");
             assert_eq!(degeneracy_only.domain(), expected.domain(), "{what}");
-            if $exact {
-                assert_eq!(
-                    bits(degeneracy_only.materialize().unwrap().dense_data().unwrap()),
-                    bits(expected.materialize().unwrap().dense_data().unwrap()),
-                    "{what}: warm plan result differs from a cold Runtime"
-                );
-            } else {
-                // Terms per entry: the recoupled trees of one fusion block,
-                // bounded well below 64 for these rank-4 fixtures.
-                numerics::assert_slices_close(
-                    &what,
-                    degeneracy_only.dense_data().unwrap(),
-                    expected.dense_data().unwrap(),
-                    64,
-                );
-            }
+            assert_eq!(
+                bits(degeneracy_only.materialize().unwrap().dense_data().unwrap()),
+                bits(expected.materialize().unwrap().dense_data().unwrap()),
+                "{what}: warm plan result differs from a cold Runtime"
+            );
 
             let _ = operation(&tensor!(&warm, &c));
             assert!(
@@ -120,7 +104,6 @@ fn u1_degeneracy_change_reuses_the_categorical_plan() {
         leg(&[(-1, 2), (0, 1), (1, 2)]),
         leg(&[(-1, 3), (0, 2), (1, 1)]),
         leg(&[(-1, 2), (0, 1), (1, 2), (2, 1)]),
-        exact: true
     );
 }
 
@@ -140,7 +123,6 @@ fn su2_degeneracy_change_reuses_the_categorical_plan() {
         leg(&[(0, 2), (1, 2), (2, 1)]),
         leg(&[(0, 1), (1, 3), (2, 2)]),
         leg(&[(0, 2), (1, 2), (2, 1), (3, 1)]),
-        exact: true
     );
 }
 
@@ -169,7 +151,6 @@ fn fermion_u1_degeneracy_change_reuses_the_categorical_plan() {
         leg(&[(-1, 2), (0, 1), (1, 2)]),
         leg(&[(-1, 1), (0, 3), (1, 2)]),
         leg(&[(-1, 2), (0, 1), (1, 2), (2, 1)]),
-        exact: true
     );
 }
 
@@ -191,10 +172,6 @@ fn checked_generic_su3_degeneracy_change_reuses_the_categorical_plan() {
         leg(&[([1, 0], 2), ([1, 1], 1)]),
         leg(&[([1, 0], 1), ([1, 1], 2)]),
         leg(&[([0, 0], 1), ([1, 0], 2), ([1, 1], 1)]),
-        // Why not bit equality: the checked-Generic SU(3) coefficients are
-        // summed through racah's randomly seeded hash maps, so two cold
-        // Runtimes on `origin/main` already differ in the last bits.
-        exact: false
     );
 }
 
