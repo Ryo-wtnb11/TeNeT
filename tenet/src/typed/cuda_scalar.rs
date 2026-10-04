@@ -254,10 +254,11 @@ where
             ));
         }
         let source = self.direct_cuda_storage("axpby_into")?;
-        let destination_storage = unique_cuda_destination(
+        let destination_storage = unique_dense_destination(
             destination,
             &self.storage_body().data,
             self.logical_space().space(),
+            "CUDA",
         )?;
         let device = Placement::Cuda(self.runtime.cuda_device_ordinal_checked()?);
         if source.placement() != device || destination_storage.placement() != device {

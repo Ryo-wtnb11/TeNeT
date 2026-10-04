@@ -593,6 +593,58 @@ where
     }
 }
 
+/// The destination checks a `*_into` shares on every placement, in one
+/// order: owned dense storage, no alias of the input payload, the result's
+/// space and block layout, the exact length, then unique ownership.
+/// `storage` names the placement in the messages ("host", "CUDA").
+pub(super) fn unique_dense_destination<'d, R, D, S>(
+    destination: &'d TensorMap<R, D, S>,
+    input: &Arc<TypedData<D, S>>,
+    expected: &DynamicFusionMapSpace,
+    storage: &str,
+) -> Result<&'d S, Error>
+where
+    S: TensorStorage<D>,
+{
+    let (body, data) = match &destination.repr {
+        TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+            TypedData::Dense(data) => (body, data),
+            TypedData::Diagonal(_) => {
+                return Err(Error::InvalidArgument(format!(
+                    "destination must use ordinary dense {storage} storage"
+                )))
+            }
+        },
+        TypedTensorRepr::Adjoint(_) => {
+            return Err(Error::InvalidArgument(format!(
+                "destination must use ordinary dense {storage} storage"
+            )))
+        }
+    };
+    if Arc::ptr_eq(&body.data, input) {
+        return Err(Error::InvalidArgument(
+            "destination storage must not alias an input".to_string(),
+        ));
+    }
+    if body.space.space() != expected {
+        return Err(Error::InvalidArgument(
+            "destination fusion space or block layout does not match the operation result"
+                .to_string(),
+        ));
+    }
+    let required = expected.required_len()?;
+    let actual = data.len();
+    if actual != required {
+        return Err(Error::InvalidArgument(format!(
+            "destination storage length {actual} does not match required length {required}"
+        )));
+    }
+    if Arc::strong_count(body) != 1 || Arc::strong_count(&body.data) != 1 {
+        return Err(Error::DestinationShared);
+    }
+    Ok(data)
+}
+
 /// The host `axpby_into` body, shared with the empty-pair `trace_pairs_into`.
 pub(super) fn host_axpby_into<R, D>(
     x: &TensorMap<R, D>,
@@ -612,22 +664,12 @@ where
             "tensors live on different spaces or block layouts".to_string(),
         ));
     }
-    let destination_body = match &destination.repr {
-        TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Dense(_)) => body,
-        _ => {
-            return Err(Error::InvalidArgument(
-                "destination must use ordinary dense host storage".to_string(),
-            ))
-        }
-    };
-    if Arc::ptr_eq(&destination_body.data, &x.storage_body().data) {
-        return Err(Error::InvalidArgument(
-            "destination storage must not alias an input".to_string(),
-        ));
-    }
-    if Arc::strong_count(destination_body) != 1 || Arc::strong_count(&destination_body.data) != 1 {
-        return Err(Error::DestinationShared);
-    }
+    unique_dense_destination(
+        destination,
+        &x.storage_body().data,
+        x.logical_space().space(),
+        "host",
+    )?;
     let _host_pool = x.runtime.enter_host_pool();
     let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
         return Err(internal_layout_error("ordinary destination checked above"));

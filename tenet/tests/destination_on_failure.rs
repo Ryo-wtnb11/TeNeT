@@ -427,6 +427,24 @@ macro_rules! u1_suite {
             Error::DestinationShared,
             shared!(|d: &mut _| t.trace_pairs_into(&[(0, 2)], d, 1.0, 0.5))
         );
+        // One destination check order and wording on every placement: a
+        // destination both on the wrong space and shared is a space error.
+        rejects!(
+            $snap,
+            format!("{op} wrong space before shared"),
+            wrong(&traced),
+            Error::InvalidArgument(_),
+            shared!(|d: &mut _| {
+                let result = t.trace_pairs_into(&[(0, 2)], d, 1.0, 0.5);
+                if let Err(Error::InvalidArgument(message)) = &result {
+                    assert!(
+                        message.contains("does not match the operation result"),
+                        "{message}"
+                    );
+                }
+                result
+            })
+        );
 
         // contract_into
         let op = "contract_into";

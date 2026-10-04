@@ -625,8 +625,12 @@ where
         let Some(trace) = self.prepare_trace_pairs(pairs)? else {
             return self.axpby_into(destination, alpha, beta);
         };
-        let destination_storage =
-            unique_cuda_destination(destination, &self.storage_body().data, trace.space.space())?;
+        let destination_storage = unique_dense_destination(
+            destination,
+            &self.storage_body().data,
+            trace.space.space(),
+            "CUDA",
+        )?;
         if destination_storage.placement() != trace.source.placement() {
             return Err(Error::PlacementMismatch);
         }
@@ -668,44 +672,14 @@ where
         &self,
         pairs: &[(usize, usize)],
     ) -> Result<Option<CudaTracePairs<'_, R, D>>, Error> {
-        let Some(TracePairAxes {
-            output_axes,
-            destination_codomain_rank,
-            trace_lhs,
-            trace_rhs,
-        }) = trace_pair_axes(self.rank(), self.codomain_rank(), pairs)?
-        else {
+        let Some(axes) = trace_pair_axes(self.rank(), self.codomain_rank(), pairs)? else {
             return Ok(None);
         };
-        let mapped_output_axes;
-        let mapped_trace_lhs;
-        let mapped_trace_rhs;
-        let (source_space, source_data, axes) = match &self.repr {
-            TypedTensorRepr::Owned(body) => (
-                &body.space,
-                body.data.as_ref(),
-                tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs),
-            ),
-            TypedTensorRepr::Adjoint(view) => {
-                let parent = view.parent.space.space();
-                mapped_output_axes =
-                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &output_axes);
-                mapped_trace_lhs =
-                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_lhs);
-                mapped_trace_rhs =
-                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_rhs);
-                (
-                    &view.parent.space,
-                    view.parent.data.as_ref(),
-                    tenet_tensors::TensorTraceAxisSpec::new_with_conjugation(
-                        &mapped_output_axes,
-                        &mapped_trace_lhs,
-                        &mapped_trace_rhs,
-                        true,
-                    ),
-                )
-            }
-        };
+        let destination_codomain_rank = axes.destination_codomain_rank;
+        let traced = trace_source(self, axes);
+        let source_space = &traced.body.space;
+        let source_data = traced.body.data.as_ref();
+        let axes = traced.spec();
         let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
             source_space,
             axes,
