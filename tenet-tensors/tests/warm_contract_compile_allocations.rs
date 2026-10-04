@@ -344,7 +344,8 @@ fn warm_copy_c_planning_is_bounded_and_no_costlier_than_the_dynamic_tree() {
     let _serial = counting_alloc::serial();
     // Rank 6 is left out: its structures (a 111 MB complete HomSpace, a
     // 249 MB transform) exceed the 64 MiB budgets, the documented ceiling
-    // above which a structure is rebuilt per call (#1993).
+    // above which a structure is rebuilt per call (#1993). #1998, slimming
+    // the per-block transform entries, owns that ceiling.
     for rank in [2, 3, 4, 5] {
         let complete_bypasses = tenet_core::complete_hom_space_structure_cache_info().bypasses();
         let [copy_c, dynamic_tree] = copy_c_plan_allocations(rank);
