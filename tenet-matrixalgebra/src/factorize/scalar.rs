@@ -274,3 +274,47 @@ pub struct SectorSpectrum<V = f64> {
     pub sector: SectorId,
     pub values: Vec<V>,
 }
+
+/// The factorization a finite-input check guards; it names the operation in
+/// the error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FactorFamily {
+    Svd,
+    Qr,
+    Lq,
+    Polar,
+    Null,
+    Eig,
+    Eigh,
+}
+
+/// The one finite-input stage of every factorization (#1986): a NaN or an
+/// infinite component is refused before any work, with the same typed error
+/// in both modes.
+///
+/// Why stricter than TensorKit, which accepts nonfinite input: TeNeT's dense
+/// routes already fail on it (in the dense backend), so a route that accepted
+/// it would be more lenient than the dense route for the same operation.
+pub(crate) fn require_finite_factor_input<D: FactorScalar>(
+    values: impl IntoIterator<Item = D>,
+    family: FactorFamily,
+) -> Result<(), OperationError> {
+    let finite = values.into_iter().all(|value| {
+        let value = value.widen_complex();
+        value.re.is_finite() && value.im.is_finite()
+    });
+    if finite {
+        return Ok(());
+    }
+    Err(OperationError::InvalidArgument {
+        message: match family {
+            FactorFamily::Svd => "svd input components must be finite",
+            FactorFamily::Qr => "qr input components must be finite",
+            FactorFamily::Lq => "lq input components must be finite",
+            FactorFamily::Polar => "polar input components must be finite",
+            FactorFamily::Null => "null input components must be finite",
+            FactorFamily::Eig => "eig input components must be finite",
+            FactorFamily::Eigh => "eigh input components must be finite",
+        },
+    })
+}

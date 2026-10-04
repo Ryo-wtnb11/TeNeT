@@ -17,26 +17,10 @@ where
                 "checked Generic eig_vals does not accept lazy adjoints".to_string(),
             )));
         };
-        let direct = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if is_diagonal_bond_space(body.space.space()) {
-                tenet_matrixalgebra::seam::eig_vals_diagonal_dyn(&body.space, spectrum).map_err(
-                    |error| GenericTensorError::Plan(CheckedGenericPlanError::Operation(error)),
-                )?
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let raw = if let Some(raw) = direct {
-            raw
-        } else {
-            let mut dense = self.runtime.lease_dense();
-            let payload = body.materialized_dense_data();
-            let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-                .map_err(|error| GenericTensorError::Facade(error.into()))?;
-            tenet_matrixalgebra::seam::eig_vals_dyn_checked_generic(dense.dense(), &input)?
-        };
+        let raw = tenet_matrixalgebra::seam::eig_vals_checked_generic(
+            RuntimeDense(&self.runtime),
+            owned_factor_source(body).map_err(GenericTensorError::Facade)?,
+        )?;
         let provider = self.logical_space().provider();
         let mut decoded = raw
             .into_iter()
@@ -68,26 +52,10 @@ where
                 "checked Generic eigh_vals does not accept lazy adjoints".to_string(),
             )));
         };
-        let direct = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if is_diagonal_bond_space(body.space.space()) {
-                tenet_matrixalgebra::seam::eigh_vals_diagonal_dyn(&body.space, spectrum).map_err(
-                    |error| GenericTensorError::Plan(CheckedGenericPlanError::Operation(error)),
-                )?
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let raw = if let Some(raw) = direct {
-            raw
-        } else {
-            let mut dense = self.runtime.lease_dense();
-            let payload = body.materialized_dense_data();
-            let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-                .map_err(|error| GenericTensorError::Facade(error.into()))?;
-            tenet_matrixalgebra::seam::eigh_vals_dyn_checked_generic(dense.dense(), &input)?
-        };
+        let raw = tenet_matrixalgebra::seam::eigh_vals_checked_generic(
+            RuntimeDense(&self.runtime),
+            owned_factor_source(body).map_err(GenericTensorError::Facade)?,
+        )?;
         let provider = self.logical_space().provider();
         let mut decoded = raw
             .into_iter()
@@ -122,25 +90,11 @@ where
                 .eigh_full_checked_generic();
         }
         let body = self.owned_body().expect("owned checked Generic EIGH input");
-        let direct = match body.data.as_ref() {
-            TypedData::Diagonal(spectrum) if is_diagonal_bond_space(body.space.space()) => {
-                tenet_matrixalgebra::seam::eigh_full_diagonal_dyn_checked_generic(
-                    &body.space,
-                    spectrum,
-                )?
-            }
-            _ => None,
-        };
-        let on_diagonal = direct.is_some();
-        let out = if let Some(out) = direct {
-            out
-        } else {
-            let mut dense = self.runtime.lease_dense();
-            let payload = body.materialized_dense_data();
-            let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-                .map_err(|error| GenericTensorError::Facade(error.into()))?;
-            tenet_matrixalgebra::seam::eigh_full_dyn_checked_generic(dense.dense(), &input)?
-        };
+        let (out, route) = tenet_matrixalgebra::seam::eigh_full_checked_generic(
+            RuntimeDense(&self.runtime),
+            owned_factor_source(body).map_err(GenericTensorError::Facade)?,
+        )?;
+        let on_diagonal = route == tenet_matrixalgebra::seam::FactorRoute::Diagonal;
         let (v, mut eigenvalues) = out.into_parts();
         let d = if on_diagonal {
             diagonal_factor_on_source_checked(
@@ -190,25 +144,11 @@ where
                 .eig_full_checked_generic();
         }
         let body = self.owned_body().expect("owned checked Generic EIG input");
-        let direct = match body.data.as_ref() {
-            TypedData::Diagonal(spectrum) if is_diagonal_bond_space(body.space.space()) => {
-                tenet_matrixalgebra::seam::eig_full_diagonal_dyn_checked_generic(
-                    &body.space,
-                    spectrum,
-                )?
-            }
-            _ => None,
-        };
-        let on_diagonal = direct.is_some();
-        let out = if let Some(out) = direct {
-            out
-        } else {
-            let mut dense = self.runtime.lease_dense();
-            let payload = body.materialized_dense_data();
-            let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-                .map_err(|error| GenericTensorError::Facade(error.into()))?;
-            tenet_matrixalgebra::seam::eig_full_dyn_checked_generic(dense.dense(), &input)?
-        };
+        let (out, route) = tenet_matrixalgebra::seam::eig_full_checked_generic(
+            RuntimeDense(&self.runtime),
+            owned_factor_source(body).map_err(GenericTensorError::Facade)?,
+        )?;
+        let on_diagonal = route == tenet_matrixalgebra::seam::FactorRoute::Diagonal;
         let (v, mut eigenvalues) = out.into_parts();
         let d = if on_diagonal {
             diagonal_factor_on_source_checked(
@@ -247,7 +187,7 @@ where
     /// eigenvalues are real for both payload dtypes — TensorKit's Hermitian `D`
     /// is real too — but `d` keeps the payload dtype `D` so it composes with
     /// `v` directly.
-    /// An admitted owned compact diagonal builds the sorted spectrum and dense
+    /// An owned compact diagonal builds the sorted spectrum and dense
     /// permutation eigenbasis without materializing a dense input.
     ///
     /// # Errors
@@ -262,15 +202,12 @@ where
     {
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-                if let Some(out) =
-                    tenet_matrixalgebra::seam::eigh_full_diagonal_dyn(&body.space, spectrum)?
-                {
-                    let (v, mut eigenvalues) = out.into_parts();
-                    return Ok(Eigh {
-                        d: self.diagonal_factor(&mut eigenvalues, D::from_real)?,
-                        v: self.wrap_bound_factor(v),
-                    });
-                }
+                let out = tenet_matrixalgebra::seam::eigh_full_diagonal_dyn(&body.space, spectrum)?;
+                let (v, mut eigenvalues) = out.into_parts();
+                return Ok(Eigh {
+                    d: self.diagonal_factor(&mut eigenvalues, D::from_real)?,
+                    v: self.wrap_bound_factor(v),
+                });
             }
         }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
@@ -296,9 +233,9 @@ where
     ///
     /// No factor and no bond space is built, so this is the cheap way to ask
     /// about a spectrum — the [`Self::svd_vals`] of the eigendecompositions.
-    /// An owned compact diagonal with finite, exactly real entries is read
-    /// directly without materializing input blocks or invoking a dense solver.
-    /// Other inputs retain the usual Hermiticity admission and dense path.
+    /// An owned compact diagonal is read directly, after the finite-input and
+    /// Hermiticity checks, without materializing input blocks or invoking a
+    /// dense solver.
     ///
     /// # Errors
     ///
@@ -312,11 +249,8 @@ where
     {
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-                if let Some(raw) =
-                    tenet_matrixalgebra::seam::eigh_vals_diagonal_dyn(&body.space, spectrum)?
-                {
-                    return self.decode_spectrum(raw);
-                }
+                let raw = tenet_matrixalgebra::seam::eigh_vals_diagonal_dyn(&body.space, spectrum)?;
+                return self.decode_spectrum(raw);
             }
         }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
@@ -341,7 +275,7 @@ where
     /// complex in general, and TensorKit's `eigen` likewise returns
     /// `ComplexF64` `D` and `V` for a real argument. `d` carries the spectrum
     /// in compact diagonal storage.
-    /// An admitted owned compact diagonal builds the sorted spectrum and dense
+    /// An owned compact diagonal builds the sorted spectrum and dense
     /// permutation eigenbasis without materializing a dense input.
     ///
     /// # The `D::Eig` bound
@@ -369,20 +303,17 @@ where
     {
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-                if let Some(out) =
-                    tenet_matrixalgebra::seam::eig_full_diagonal_dyn(&body.space, spectrum)?
-                {
-                    let (v, mut eigenvalues) = out.into_parts();
-                    return Ok(Eig {
-                        d: diagonal_factor_on(
-                            &self.runtime,
-                            self.logical_space(),
-                            &mut eigenvalues,
-                            <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
-                        )?,
-                        v: wrap_factor_on(&self.runtime, v),
-                    });
-                }
+                let out = tenet_matrixalgebra::seam::eig_full_diagonal_dyn(&body.space, spectrum)?;
+                let (v, mut eigenvalues) = out.into_parts();
+                return Ok(Eig {
+                    d: diagonal_factor_on(
+                        &self.runtime,
+                        self.logical_space(),
+                        &mut eigenvalues,
+                        <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
+                    )?,
+                    v: wrap_factor_on(&self.runtime, v),
+                });
             }
         }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
@@ -410,7 +341,7 @@ where
 
     /// TensorKit 0.17 / MatrixAlgebraKit `eig_vals`: the general eigenvalues
     /// per coupled sector, and nothing else. `Complex64` for every payload dtype.
-    /// An admitted owned compact diagonal is read without dense materialization.
+    /// An owned compact diagonal is read without dense materialization.
     ///
     /// # Errors
     ///
@@ -428,11 +359,8 @@ where
     {
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-                if let Some(raw) =
-                    tenet_matrixalgebra::seam::eig_vals_diagonal_dyn(&body.space, spectrum)?
-                {
-                    return self.decode_spectrum(raw);
-                }
+                let raw = tenet_matrixalgebra::seam::eig_vals_diagonal_dyn(&body.space, spectrum)?;
+                return self.decode_spectrum(raw);
             }
         }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {

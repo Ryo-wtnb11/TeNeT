@@ -348,7 +348,7 @@ fn compact_diagonal_eigh_full_preserves_sector_spaces_and_zero_regions() {
 }
 
 #[test]
-fn compact_diagonal_eigh_full_retains_near_hermitian_and_nonfinite_routes() {
+fn compact_diagonal_eigh_full_is_direct_for_near_hermitian_and_refuses_nonfinite_input() {
     let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .with_dense_executor(Box::new(eigh_full_spy(&calls)))
@@ -364,12 +364,17 @@ fn compact_diagonal_eigh_full_retains_near_hermitian_and_nonfinite_routes() {
         }],
     )
     .unwrap();
+    // The dense route's relative Hermiticity check passes `1 + 1e-15 i`, and
+    // the eigenvalue is its real part; the diagonal applies the same check
+    // directly, with no materialization and no dense EIGH.
     DIAGONAL_MATERIALIZATIONS.set(0);
     let Eigh { d, .. } = near.eigh_full(&[0], &[1]).unwrap();
     assert_eq!(d.diagview().unwrap()[0].values, [Complex64::new(1.0, 0.0)]);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    assert_eq!(calls.total(), 1);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.total(), 0);
 
+    // A nonfinite diagonal is refused by the shared finite-input stage before
+    // any dense work.
     for value in [f64::NAN, f64::INFINITY] {
         let input: TensorMap<_, f64> = TensorMap::diagonal(
             &runtime,
@@ -381,10 +386,11 @@ fn compact_diagonal_eigh_full_retains_near_hermitian_and_nonfinite_routes() {
         )
         .unwrap();
         DIAGONAL_MATERIALIZATIONS.set(0);
-        let actual = input.eigh_full(&[0], &[1]);
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-        let dense = input.materialize().unwrap().eigh_full(&[0], &[1]);
-        assert_eq!(actual.is_err(), dense.is_err());
+        let actual = input.eigh_full(&[0], &[1]).map(drop).unwrap_err();
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert!(actual
+            .to_string()
+            .contains("eigh input components must be finite"));
     }
     let extreme: TensorMap<_, f32> = TensorMap::diagonal(
         &runtime,
@@ -897,7 +903,7 @@ fn compact_diagonal_eig_full_ties_and_signed_zeros_are_valid() {
 }
 
 #[test]
-fn compact_diagonal_eig_full_retains_nonfinite_and_widened_norm_fallbacks() {
+fn compact_diagonal_eig_full_refuses_nonfinite_and_overflowing_values() {
     let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .with_dense_executor(Box::new(eig_full_spy(&calls)))
@@ -918,11 +924,24 @@ fn compact_diagonal_eig_full_retains_nonfinite_and_widened_norm_fallbacks() {
             }],
         )
         .unwrap();
+        // A nonfinite value is refused by the shared finite-input stage, and
+        // the overflowing `MAX + MAX i` by the dense route's eigenvalue check;
+        // no materialization or dense EIG either way.
         let before = calls.of(EIG_FULL);
         DIAGONAL_MATERIALIZATIONS.set(0);
-        let _ = input.eig_full(&[0], &[1]);
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-        assert_eq!(calls.of(EIG_FULL), before + 1);
+        let error = input
+            .eig_full(&[0], &[1])
+            .map(drop)
+            .unwrap_err()
+            .to_string();
+        let expected = if value.re.is_finite() && value.im.is_finite() {
+            "eigenvalues must be finite"
+        } else {
+            "eig input components must be finite"
+        };
+        assert!(error.contains(expected), "{error}");
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(calls.of(EIG_FULL), before);
     }
     let input: TensorMap<_, f32> = TensorMap::diagonal(
         &runtime,
@@ -1200,7 +1219,7 @@ fn compact_diagonal_eig_vals_match_hand_spectra_across_scalars_and_sectors() {
 }
 
 #[test]
-fn compact_diagonal_eig_vals_retains_dense_fallback() {
+fn compact_diagonal_eig_vals_refuses_nonfinite_and_overflowing_values() {
     let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .with_dense_executor(Box::new(eig_vals_spy(&calls)))
@@ -1221,11 +1240,19 @@ fn compact_diagonal_eig_vals_retains_dense_fallback() {
             }],
         )
         .unwrap();
+        // As `eig_full`: the shared finite-input stage, or the dense route's
+        // eigenvalue check for the overflowing `MAX + MAX i`.
         DIAGONAL_MATERIALIZATIONS.set(0);
-        let _ = input.eig_vals(&[0], &[1]);
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+        let error = input.eig_vals(&[0], &[1]).unwrap_err().to_string();
+        let expected = if value.re.is_finite() && value.im.is_finite() {
+            "eigenvalues must be finite"
+        } else {
+            "eig input components must be finite"
+        };
+        assert!(error.contains(expected), "{error}");
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     }
-    assert_eq!(calls.total(), 3);
+    assert_eq!(calls.total(), 0);
     let input: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
         &leg,
@@ -1440,7 +1467,7 @@ fn compact_diagonal_eigh_vals_match_hand_spectra_across_scalars_and_sectors() {
 }
 
 #[test]
-fn compact_diagonal_eigh_vals_preserves_complex_dense_fallback() {
+fn compact_diagonal_eigh_vals_applies_the_dense_hermiticity_check_directly() {
     let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .with_dense_executor(Box::new(eigh_vals_spy(&calls)))
@@ -1456,10 +1483,12 @@ fn compact_diagonal_eigh_vals_preserves_complex_dense_fallback() {
         }],
     )
     .unwrap();
+    // Within the dense route's relative Hermiticity tolerance the eigenvalue
+    // is the real part, read directly.
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert_eq!(near.eigh_vals(&[0], &[1]).unwrap()[0].values, [1.0]);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    assert_eq!(calls.total(), 1);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.total(), 0);
 
     let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
@@ -1470,9 +1499,14 @@ fn compact_diagonal_eigh_vals_preserves_complex_dense_fallback() {
         }],
     )
     .unwrap();
+    // NaN is refused by the shared finite-input stage.
     DIAGONAL_MATERIALIZATIONS.set(0);
-    assert!(nonfinite.eigh_vals(&[0], &[1]).is_err());
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    let error = nonfinite.eigh_vals(&[0], &[1]).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("eigh input components must be finite"));
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.total(), 0);
 }
 
 #[test]

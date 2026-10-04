@@ -17,25 +17,13 @@ where
                 "checked Generic qr_full does not accept lazy adjoints".to_string(),
             )));
         };
-        if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if let Some(Qr { q, r }) =
-                tenet_matrixalgebra::seam::qr_diagonal_dyn_checked_generic(&body.space, spectrum)
-            {
-                return Ok(Qr {
-                    q: self.with_spectrum(q),
-                    r: self.with_spectrum(r),
-                });
-            }
-        }
-        let mut dense = self.runtime.lease_dense();
-        let payload = body.materialized_dense_data();
-        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let Qr { q, r } =
-            tenet_matrixalgebra::seam::qr_full_dyn_checked_generic(dense.dense(), &input)?;
+        let Qr { q, r } = tenet_matrixalgebra::seam::qr_full_checked_generic(
+            RuntimeDense(&self.runtime),
+            owned_factor_source(body).map_err(GenericTensorError::Facade)?,
+        )?;
         Ok(Qr {
-            q: wrap_factor_on(&self.runtime, q),
-            r: wrap_factor_on(&self.runtime, r),
+            q: self.factor_output(q),
+            r: self.factor_output(r),
         })
     }
 }
@@ -57,25 +45,13 @@ where
                 "checked Generic lq_compact does not accept lazy adjoints".to_string(),
             )));
         };
-        if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if let Some(Lq { l, q }) =
-                tenet_matrixalgebra::seam::lq_diagonal_dyn_checked_generic(&body.space, spectrum)
-            {
-                return Ok(Lq {
-                    l: self.with_spectrum(l),
-                    q: self.with_spectrum(q),
-                });
-            }
-        }
-        let mut dense = self.runtime.lease_dense();
-        let payload = body.materialized_dense_data();
-        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let Lq { l, q } =
-            tenet_matrixalgebra::seam::lq_compact_dyn_checked_generic(dense.dense(), &input)?;
+        let Lq { l, q } = tenet_matrixalgebra::seam::lq_compact_checked_generic(
+            RuntimeDense(&self.runtime),
+            owned_factor_source(body).map_err(GenericTensorError::Facade)?,
+        )?;
         Ok(Lq {
-            l: wrap_factor_on(&self.runtime, l),
-            q: wrap_factor_on(&self.runtime, q),
+            l: self.factor_output(l),
+            q: self.factor_output(q),
         })
     }
 }
@@ -100,25 +76,13 @@ where
                 "checked Generic qr_compact does not accept lazy adjoints".to_string(),
             )));
         };
-        if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if let Some(Qr { q, r }) =
-                tenet_matrixalgebra::seam::qr_diagonal_dyn_checked_generic(&body.space, spectrum)
-            {
-                return Ok(Qr {
-                    q: self.with_spectrum(q),
-                    r: self.with_spectrum(r),
-                });
-            }
-        }
-        let mut dense = self.runtime.lease_dense();
-        let payload = body.materialized_dense_data();
-        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let Qr { q, r } =
-            tenet_matrixalgebra::seam::qr_compact_dyn_checked_generic(dense.dense(), &input)?;
+        let Qr { q, r } = tenet_matrixalgebra::seam::qr_compact_checked_generic(
+            RuntimeDense(&self.runtime),
+            owned_factor_source(body).map_err(GenericTensorError::Facade)?,
+        )?;
         Ok(Qr {
-            q: wrap_factor_on(&self.runtime, q),
-            r: wrap_factor_on(&self.runtime, r),
+            q: self.factor_output(q),
+            r: self.factor_output(r),
         })
     }
 }
@@ -128,25 +92,50 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    fn try_qr_diagonal(&self) -> Option<Qr<Self>>
+    /// The direct QR of an owned compact diagonal, or `None` for any other
+    /// storage.
+    fn try_qr_diagonal(&self) -> Result<Option<Qr<Self>>, Error>
     where
         D: FactorizationScalar,
     {
         let TypedTensorRepr::Owned(body) = &self.repr else {
-            return None;
+            return Ok(None);
         };
         let TypedData::Diagonal(spectrum) = body.data.as_ref() else {
-            return None;
+            return Ok(None);
         };
         let Qr { q, r } = tenet_matrixalgebra::seam::qr_diagonal_dyn(&body.space, spectrum)?;
         let wrap = |values| Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::diagonal(body.space.clone(), values)),
         };
-        Some(Qr {
+        Ok(Some(Qr {
             q: wrap(q),
             r: wrap(r),
-        })
+        }))
+    }
+
+    /// The direct LQ of an owned compact diagonal, or `None` for any other
+    /// storage.
+    fn try_lq_diagonal(&self) -> Result<Option<Lq<Self>>, Error>
+    where
+        D: FactorizationScalar,
+    {
+        let TypedTensorRepr::Owned(body) = &self.repr else {
+            return Ok(None);
+        };
+        let TypedData::Diagonal(spectrum) = body.data.as_ref() else {
+            return Ok(None);
+        };
+        let Lq { l, q } = tenet_matrixalgebra::seam::lq_diagonal_dyn(&body.space, spectrum)?;
+        let wrap = |values| Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::diagonal(body.space.clone(), values)),
+        };
+        Ok(Some(Lq {
+            l: wrap(l),
+            q: wrap(q),
+        }))
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `qr_compact`: `t = q * r` with `q`
@@ -161,14 +150,14 @@ where
     /// `O(Σ_c n_c³)` — sectorwise cubic; the seam runs one dense QR per
     /// coupled-sector matrix. A lazy adjoint first allocates its whole logical
     /// dense payload as an operation-local owned tensor, released with the
-    /// operation, and the returned factors are owned. An admitted owned compact
+    /// operation, and the returned factors are owned. An owned compact
     /// diagonal uses O(Σ_c k_c) spectrum work/storage and no dense QR. Both
     /// factors preserve the input bond, including dual orientation.
     pub(super) fn qr_compact_multiplicity_free(&self) -> Result<Qr<Self>, Error>
     where
         D: FactorizationScalar,
     {
-        if let Some(factors) = self.try_qr_diagonal() {
+        if let Some(factors) = self.try_qr_diagonal()? {
             return Ok(factors);
         }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
@@ -206,7 +195,7 @@ where
     where
         D: FactorizationScalar,
     {
-        if let Some(factors) = self.try_qr_diagonal() {
+        if let Some(factors) = self.try_qr_diagonal()? {
             return Ok(factors);
         }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
@@ -244,8 +233,8 @@ where
     where
         D: FactorizationScalar,
     {
-        if let Some(Qr { q, r }) = self.try_qr_diagonal() {
-            return Ok(Lq { l: r, q });
+        if let Some(factors) = self.try_lq_diagonal()? {
+            return Ok(factors);
         }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             let Qr { q, r } = self.adjoint()?.qr_compact_multiplicity_free()?;
@@ -279,14 +268,14 @@ where
     /// `n_c <= m_c`, and `O(n_c²(m_c + n_c))` when completion is required.
     /// Source packing, the sectorwise adjoint, and owned factor publication are
     /// additional costs. A lazy adjoint uses the parent full-QR route and two
-    /// detached owned output payloads. An admitted owned compact diagonal uses
+    /// detached owned output payloads. An owned compact diagonal uses
     /// the same O(Σ_c k_c) spectrum route as compact LQ.
     pub(super) fn lq_full_multiplicity_free(&self) -> Result<Lq<Self>, Error>
     where
         D: FactorizationScalar,
     {
-        if let Some(Qr { q, r }) = self.try_qr_diagonal() {
-            return Ok(Lq { l: r, q });
+        if let Some(factors) = self.try_lq_diagonal()? {
+            return Ok(factors);
         }
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             let Qr { q, r } = self.adjoint()?.qr_full_multiplicity_free()?;
@@ -421,25 +410,13 @@ where
                 "checked Generic lq_full does not accept lazy adjoints".to_string(),
             )));
         };
-        if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if let Some(Lq { l, q }) =
-                tenet_matrixalgebra::seam::lq_diagonal_dyn_checked_generic(&body.space, spectrum)
-            {
-                return Ok(Lq {
-                    l: tensor.with_spectrum(l),
-                    q: tensor.with_spectrum(q),
-                });
-            }
-        }
-        let mut dense = tensor.runtime.lease_dense();
-        let payload = body.materialized_dense_data();
-        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let Lq { l, q } =
-            tenet_matrixalgebra::seam::lq_full_dyn_checked_generic(dense.dense(), &input)?;
+        let Lq { l, q } = tenet_matrixalgebra::seam::lq_full_checked_generic(
+            RuntimeDense(&tensor.runtime),
+            owned_factor_source(body).map_err(GenericTensorError::Facade)?,
+        )?;
         Ok(Lq {
-            l: wrap_factor_on(&tensor.runtime, l),
-            q: wrap_factor_on(&tensor.runtime, q),
+            l: tensor.factor_output(l),
+            q: tensor.factor_output(q),
         })
     }
 }

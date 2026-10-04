@@ -317,7 +317,7 @@ fn checked_compact_diagonal_svd_matches_hand_permutation_and_phase() {
 }
 
 #[test]
-fn checked_compact_diagonal_svd_densifies_nonfinite_and_skips_the_provider_when_finite() {
+fn checked_compact_diagonal_svd_rejects_nonfinite_and_skips_the_provider_when_finite() {
     let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -335,18 +335,22 @@ fn checked_compact_diagonal_svd_densifies_nonfinite_and_skips_the_provider_when_
         }],
     )
     .unwrap();
+    // The shared finite-input stage refuses a nonfinite diagonal with the
+    // typed error, before any provider query or dense SVD.
     provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = nonfinite.svd_compact(&[0], &[1]).unwrap_err();
     assert!(
         matches!(
             &error,
             GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Operation(
-                tenet::typed::OperationError::Dense(DenseError::Backend { op: "svd", .. })
+                tenet::typed::OperationError::InvalidArgument {
+                    message: "svd input components must be finite"
+                }
             ))
         ),
         "{error:?}"
     );
-    assert_eq!(svd_calls.of(PINV_SVD), 1);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
 
     provider.fail_algebra.store(false, Ordering::Relaxed);
     let finite: TensorMap<_, f64> = TensorMap::diagonal(
@@ -385,7 +389,7 @@ fn checked_compact_diagonal_svd_densifies_nonfinite_and_skips_the_provider_when_
 }
 
 #[test]
-fn checked_compact_diagonal_svd_numeric_admission_matches_dense() {
+fn checked_compact_diagonal_svd_is_direct_for_subnormal_and_overflowing_values() {
     let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -395,12 +399,13 @@ fn checked_compact_diagonal_svd_numeric_admission_matches_dense() {
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
 
-    macro_rules! compare_real {
+    // Hand-computed MAK `svd_full!(::DiagonalAlgorithm)`: `S = abs(a)`
+    // exactly, with no dense solver, for a subnormal and the smallest normal.
+    // Why not compare with the dense route: LAPACK may flush a subnormal
+    // singular value to zero (f32), which is a solver limit, not the result.
+    macro_rules! assert_real_magnitude {
         ($dtype:ty, $subnormal:expr, $minimum:expr) => {
-            for (name, value, direct) in [
-                ("subnormal", $subnormal, false),
-                ("minimum normal", $minimum, true),
-            ] {
+            for (name, value) in [("subnormal", $subnormal), ("minimum normal", $minimum)] {
                 let input: TensorMap<_, $dtype> = TensorMap::diagonal(
                     &runtime,
                     &bond,
@@ -410,53 +415,31 @@ fn checked_compact_diagonal_svd_numeric_admission_matches_dense() {
                     }],
                 )
                 .unwrap();
-                let dense = input.materialize().unwrap();
-                svd_calls.reset();
                 for full in [false, true] {
                     svd_calls.reset();
-                    let got = if full {
-                        input.svd_full(&[0], &[1])
+                    let Svd { s, .. } = if full {
+                        input.svd_full(&[0], &[1]).unwrap()
                     } else {
-                        input.svd_compact(&[0], &[1])
+                        input.svd_compact(&[0], &[1]).unwrap()
                     };
+                    assert_eq!(svd_calls.of(PINV_SVD), 0, "{name}, full={full}");
                     assert_eq!(
-                        svd_calls.of(PINV_SVD),
-                        usize::from(!direct),
+                        s.diagview().unwrap()[0].values,
+                        [value],
                         "{name}, full={full}"
                     );
-                    let expected = if full {
-                        dense.svd_full(&[0], &[1])
-                    } else {
-                        dense.svd_compact(&[0], &[1])
-                    };
-                    match (got, expected) {
-                        (Ok(got), Ok(expected)) => {
-                            assert_eq!(
-                                got.s.diagview().unwrap(),
-                                expected.s.diagview().unwrap(),
-                                "{name}, full={full}"
-                            );
-                        }
-                        (Err(got), Err(expected)) => {
-                            assert_eq!(
-                                format!("{got:?}"),
-                                format!("{expected:?}"),
-                                "{name}, full={full}"
-                            );
-                        }
-                        (got, expected) => {
-                            panic!("{name}, full={full}: {got:?} versus {expected:?}")
-                        }
-                    }
                 }
             }
         };
     }
-    compare_real!(f32, f32::from_bits(1), f32::MIN_POSITIVE);
-    compare_real!(f64, f64::from_bits(1), f64::MIN_POSITIVE);
+    assert_real_magnitude!(f32, f32::from_bits(1), f32::MIN_POSITIVE);
+    assert_real_magnitude!(f64, f64::from_bits(1), f64::MIN_POSITIVE);
 
-    macro_rules! compare_complex_overflow {
-        ($dtype:ty, $value:expr) => {
+    // Complex overflow goes direct as well: MAK's `abs` overflows to `Inf`
+    // (hand-computed: |MAX + MAX i| = sqrt(2) MAX exceeds MAX), with no
+    // dense solver.
+    macro_rules! assert_complex_overflow {
+        ($dtype:ty, $value:expr, $infinite:expr) => {
             let overflow: TensorMap<_, $dtype> = TensorMap::diagonal(
                 &runtime,
                 &bond,
@@ -466,35 +449,28 @@ fn checked_compact_diagonal_svd_numeric_admission_matches_dense() {
                 }],
             )
             .unwrap();
-            let dense = overflow.materialize().unwrap();
-            svd_calls.reset();
             for full in [false, true] {
                 svd_calls.reset();
-                let got = if full {
-                    overflow.svd_full(&[0], &[1])
+                let Svd { s, .. } = if full {
+                    overflow.svd_full(&[0], &[1]).unwrap()
                 } else {
-                    overflow.svd_compact(&[0], &[1])
+                    overflow.svd_compact(&[0], &[1]).unwrap()
                 };
-                assert_eq!(svd_calls.of(PINV_SVD), 1);
-                let expected = if full {
-                    dense.svd_full(&[0], &[1])
-                } else {
-                    dense.svd_compact(&[0], &[1])
-                };
-                match (got, expected) {
-                    (Ok(got), Ok(expected)) => {
-                        assert_eq!(got.s.diagview().unwrap(), expected.s.diagview().unwrap());
-                    }
-                    (Err(got), Err(expected)) => {
-                        assert_eq!(format!("{got:?}"), format!("{expected:?}"));
-                    }
-                    (got, expected) => panic!("full={full}: {got:?} versus {expected:?}"),
-                }
+                assert_eq!(svd_calls.of(PINV_SVD), 0, "full={full}");
+                assert_eq!(s.diagview().unwrap()[0].values, [$infinite], "full={full}");
             }
         };
     }
-    compare_complex_overflow!(Complex32, Complex32::new(f32::MAX, f32::MAX));
-    compare_complex_overflow!(Complex64, Complex64::new(f64::MAX, f64::MAX));
+    assert_complex_overflow!(
+        Complex32,
+        Complex32::new(f32::MAX, f32::MAX),
+        Complex32::new(f32::INFINITY, 0.0)
+    );
+    assert_complex_overflow!(
+        Complex64,
+        Complex64::new(f64::MAX, f64::MAX),
+        Complex64::new(f64::INFINITY, 0.0)
+    );
 }
 
 #[test]
@@ -582,7 +558,7 @@ fn checked_generic_full_svd_keeps_dense_s_for_equal_total_but_unequal_sector_bon
 }
 
 #[test]
-fn checked_compact_diagonal_svd_full_falls_back_for_a_complete_bond_mismatch() {
+fn checked_compact_diagonal_svd_full_refuses_a_provider_bond_mismatch() {
     let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -617,15 +593,21 @@ fn checked_compact_diagonal_svd_full_falls_back_for_a_complete_bond_mismatch() {
         assert_eq!(factor.codomain(), nondual.codomain());
     }
 
-    // A dual bond needs the fresh nondual `fuse(V)`; when the provider's
-    // coupled dimensions disagree with the diagonal, the dense route decides.
-    let Svd { u, s, vh } = dual.svd_full(&[0], &[1]).unwrap();
-    assert_eq!(svd_calls.of(PINV_SVD), 1);
-    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
-    assert_eq!(
-        rebuilt.dense_data().unwrap(),
-        dual.materialize().unwrap().dense_data().unwrap()
+    // A dual bond needs the fresh nondual `fuse(V)`. A provider whose coupled
+    // dimensions disagree with the diagonal's own bond is inconsistent, so
+    // the diagonal route refuses it with a typed error before computing, as
+    // MAK checks output sizes (`@check_size`); no dense SVD runs.
+    let error = dual.svd_full(&[0], &[1]).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Operation(
+                tenet::typed::OperationError::InvalidArgument { .. }
+            ))
+        ),
+        "{error:?}"
     );
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
 }
 
 #[cfg(feature = "racah-generated")]

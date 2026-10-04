@@ -161,25 +161,32 @@ fn checked_compact_diagonal_eigh_vals_rejects_inconsistent_spectrum_admission() 
     )
     .unwrap();
     let spectrum = input.spectrum().unwrap();
+    // A spectrum that does not cover the bond is misuse: a typed error.
     let admit = |entries: &[tenet_matrixalgebra::SectorSpectrum<f64>]| {
-        tenet_matrixalgebra::seam::eigh_vals_diagonal_dyn(input.logical_space(), entries).unwrap()
+        tenet_matrixalgebra::seam::eigh_vals_checked_generic(
+            &mut tenet_dense::DefaultDenseExecutor::new(),
+            tenet_matrixalgebra::seam::FactorSource::Diagonal {
+                space: input.logical_space(),
+                spectrum: entries,
+            },
+        )
     };
-    assert!(admit(spectrum).is_some());
+    assert!(admit(spectrum).is_ok());
     let mut reversed = spectrum.to_vec();
     reversed.reverse();
-    assert!(admit(&reversed).is_some());
-    assert!(admit(&spectrum[..1]).is_none());
+    assert!(admit(&reversed).is_ok());
+    assert!(admit(&spectrum[..1]).is_err());
     let mut duplicate = spectrum.to_vec();
     duplicate[1].sector = duplicate[0].sector;
-    assert!(admit(&duplicate).is_none());
+    assert!(admit(&duplicate).is_err());
     let mut wrong_size = spectrum.to_vec();
     wrong_size[0].values.push(0.0);
-    assert!(admit(&wrong_size).is_none());
+    assert!(admit(&wrong_size).is_err());
 }
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn checked_compact_diagonal_eigh_vals_keeps_dense_hermiticity_boundary() {
+fn checked_compact_diagonal_eigh_vals_applies_the_dense_hermiticity_check_directly() {
     use tenet_core::SUNFusionRule;
 
     let calls = Arc::new(SpyCounts::default());
@@ -198,10 +205,12 @@ fn checked_compact_diagonal_eigh_vals_keeps_dense_hermiticity_boundary() {
         }],
     )
     .unwrap();
+    // The dense route's relative Hermiticity check, applied to the diagonal
+    // directly: within tolerance the eigenvalue is the real part.
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert_eq!(near.eigh_vals(&[0], &[1]).unwrap()[0].values, [1.0]);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    assert_eq!(calls.total(), 1);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.total(), 0);
 
     let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
@@ -212,15 +221,13 @@ fn checked_compact_diagonal_eigh_vals_keeps_dense_hermiticity_boundary() {
         }],
     )
     .unwrap();
+    // NaN is refused first by the shared finite-input stage (#1986).
     DIAGONAL_MATERIALIZATIONS.set(0);
     let compact_error = nonfinite.eigh_vals(&[0], &[1]).unwrap_err();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    let dense_error = nonfinite
-        .materialize()
-        .unwrap()
-        .eigh_vals(&[0], &[1])
-        .unwrap_err();
-    assert_eq!(compact_error.to_string(), dense_error.to_string());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert!(compact_error
+        .to_string()
+        .contains("eigh input components must be finite"));
 }
 
 #[cfg(feature = "racah-generated")]
@@ -542,25 +549,32 @@ fn checked_compact_diagonal_eig_vals_rejects_inconsistent_spectrum_admission() {
     )
     .unwrap();
     let spectrum = input.spectrum().unwrap();
+    // A spectrum that does not cover the bond is misuse: a typed error.
     let admit = |entries: &[tenet_matrixalgebra::SectorSpectrum<Complex64>]| {
-        tenet_matrixalgebra::seam::eig_vals_diagonal_dyn(input.logical_space(), entries).unwrap()
+        tenet_matrixalgebra::seam::eig_vals_checked_generic(
+            &mut tenet_dense::DefaultDenseExecutor::new(),
+            tenet_matrixalgebra::seam::FactorSource::Diagonal {
+                space: input.logical_space(),
+                spectrum: entries,
+            },
+        )
     };
-    assert!(admit(spectrum).is_some());
+    assert!(admit(spectrum).is_ok());
     let mut reversed = spectrum.to_vec();
     reversed.reverse();
-    assert!(admit(&reversed).is_some());
-    assert!(admit(&spectrum[..1]).is_none());
+    assert!(admit(&reversed).is_ok());
+    assert!(admit(&spectrum[..1]).is_err());
     let mut duplicate = spectrum.to_vec();
     duplicate[1].sector = duplicate[0].sector;
-    assert!(admit(&duplicate).is_none());
+    assert!(admit(&duplicate).is_err());
     let mut wrong_size = spectrum.to_vec();
     wrong_size[0].values.push(Complex64::new(0.0, 0.0));
-    assert!(admit(&wrong_size).is_none());
+    assert!(admit(&wrong_size).is_err());
 }
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn checked_compact_diagonal_eig_vals_keeps_dense_nonfinite_boundary() {
+fn checked_compact_diagonal_eig_vals_refuses_nonfinite_values() {
     use tenet_core::SUNFusionRule;
 
     let calls = Arc::new(SpyCounts::default());
@@ -590,17 +604,20 @@ fn checked_compact_diagonal_eig_vals_keeps_dense_nonfinite_boundary() {
             ],
         )
         .unwrap();
+        // A nonfinite value is refused by the shared finite-input stage, and
+        // the overflowing `MAX + MAX i` by the dense route's eigenvalue check;
+        // no dense solver either way.
         calls.reset();
         DIAGONAL_MATERIALIZATIONS.set(0);
-        let compact_error = input.eig_vals(&[0], &[1]).unwrap_err();
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-        assert!(calls.total() >= 1);
-        let dense_error = input
-            .materialize()
-            .unwrap()
-            .eig_vals(&[0], &[1])
-            .unwrap_err();
-        assert_eq!(compact_error.to_string(), dense_error.to_string());
+        let error = input.eig_vals(&[0], &[1]).unwrap_err().to_string();
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(calls.total(), 0);
+        let expected = if bad.re.is_finite() && bad.im.is_finite() {
+            "eigenvalues must be finite"
+        } else {
+            "eig input components must be finite"
+        };
+        assert!(error.contains(expected), "{error}");
     }
 }
 
@@ -1193,7 +1210,7 @@ fn checked_compact_diagonal_eig_full_matches_independent_dense_oracle() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn checked_compact_diagonal_eig_full_keeps_dense_fallback_errors() {
+fn checked_compact_diagonal_eig_full_refuses_nonfinite_values() {
     use tenet_core::SUNFusionRule;
 
     let calls = Arc::new(SpyCounts::default());
@@ -1223,16 +1240,20 @@ fn checked_compact_diagonal_eig_full_keeps_dense_fallback_errors() {
             ],
         )
         .unwrap();
+        // The shared finite-input stage (the dense route's own checked
+        // pre-check, same error), or the dense eigenvalue check for the
+        // overflowing `MAX + MAX i`; no dense solver either way.
         let dense_error = input
             .materialize()
             .unwrap()
             .eig_full(&[0], &[1])
+            .map(drop)
             .unwrap_err();
         calls.reset();
         DIAGONAL_MATERIALIZATIONS.set(0);
-        let compact_error = input.eig_full(&[0], &[1]).unwrap_err();
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-        assert_eq!(compact_error.to_string(), dense_error.to_string());
+        let compact_error = input.eig_full(&[0], &[1]).map(drop).unwrap_err();
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        assert_eq!(calls.total(), 0);
         assert_eq!(format!("{compact_error:?}"), format!("{dense_error:?}"));
     }
 
@@ -1255,11 +1276,11 @@ fn checked_compact_diagonal_eig_full_keeps_dense_fallback_errors() {
         .materialize()
         .unwrap()
         .eig_full(&[0], &[1])
+        .map(drop)
         .unwrap_err();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let compact_error = nonfinite.eig_full(&[0], &[1]).unwrap_err();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    assert_eq!(compact_error.to_string(), dense_error.to_string());
+    let compact_error = nonfinite.eig_full(&[0], &[1]).map(drop).unwrap_err();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(format!("{compact_error:?}"), format!("{dense_error:?}"));
 }
 
@@ -1287,13 +1308,17 @@ fn checked_compact_diagonal_eig_full_rejects_inconsistent_spectrum_admission() {
     )
     .unwrap();
     let spectrum = input.spectrum().unwrap();
+    // A spectrum that does not cover the bond is misuse, refused with a typed
+    // error; no dense executor is used.
     let admit = |entries: &[tenet_matrixalgebra::SectorSpectrum<Complex64>]| {
-        tenet_matrixalgebra::seam::eig_full_diagonal_dyn_checked_generic(
-            input.logical_space(),
-            entries,
+        tenet_matrixalgebra::seam::eig_full_checked_generic(
+            &mut tenet_dense::DefaultDenseExecutor::new(),
+            tenet_matrixalgebra::seam::FactorSource::Diagonal {
+                space: input.logical_space(),
+                spectrum: entries,
+            },
         )
-        .unwrap()
-        .is_some()
+        .is_ok()
     };
     assert!(admit(spectrum));
     let mut reversed = spectrum.to_vec();
@@ -1310,6 +1335,8 @@ fn checked_compact_diagonal_eig_full_rejects_inconsistent_spectrum_admission() {
         Complex64::new(f64::INFINITY, 0.0),
         Complex64::new(f64::MAX, f64::MAX),
     ] {
+        // A nonfinite value is refused by the shared finite-input stage, and
+        // an overflowing magnitude by the dense route's eigenvalue check.
         let mut nonfinite = spectrum.to_vec();
         nonfinite[0].values[0] = bad;
         assert!(!admit(&nonfinite));
@@ -1318,7 +1345,7 @@ fn checked_compact_diagonal_eig_full_rejects_inconsistent_spectrum_admission() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn checked_compact_diagonal_eigh_full_keeps_dense_fallback_errors() {
+fn checked_compact_diagonal_eigh_full_applies_the_dense_hermiticity_check_directly() {
     use tenet_core::SUNFusionRule;
 
     let calls = Arc::new(SpyCounts::default());
@@ -1345,12 +1372,13 @@ fn checked_compact_diagonal_eigh_full_keeps_dense_fallback_errors() {
         )
         .unwrap()
     };
-    // A nonzero imaginary part is left to the dense Hermiticity tolerance.
+    // A nonzero imaginary part meets the dense route's Hermiticity check,
+    // applied to the diagonal directly.
     let near = complex([Complex64::new(1.0, 1e-15), Complex64::new(-1.0, 0.0)]);
     DIAGONAL_MATERIALIZATIONS.set(0);
     let Eigh { d, .. } = near.eigh_full(&[0], &[1]).unwrap();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    assert_eq!(calls.total(), 2);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert_eq!(calls.total(), 0);
     assert_eq!(d.diagview().unwrap()[0].values, [Complex64::new(1.0, 0.0)]);
 
     let non_hermitian = complex([Complex64::new(1.0, 0.0), Complex64::new(-1.0, 0.5)]);
@@ -1361,7 +1389,7 @@ fn checked_compact_diagonal_eigh_full_keeps_dense_fallback_errors() {
         .unwrap_err();
     DIAGONAL_MATERIALIZATIONS.set(0);
     let compact_error = non_hermitian.eigh_full(&[0], &[1]).unwrap_err();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(compact_error.to_string(), dense_error.to_string());
 
     let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
@@ -1379,16 +1407,12 @@ fn checked_compact_diagonal_eigh_full_keeps_dense_fallback_errors() {
         ],
     )
     .unwrap();
-    let dense_error = nonfinite
-        .materialize()
-        .unwrap()
-        .eigh_full(&[0], &[1])
-        .unwrap_err();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let compact_error = nonfinite.eigh_full(&[0], &[1]).unwrap_err();
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    assert_eq!(compact_error.to_string(), dense_error.to_string());
-    assert_eq!(format!("{compact_error:?}"), format!("{dense_error:?}"));
+    let compact_error = nonfinite.eigh_full(&[0], &[1]).map(drop).unwrap_err();
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+    assert!(compact_error
+        .to_string()
+        .contains("eigh input components must be finite"));
 }
 
 #[cfg(feature = "racah-generated")]
@@ -1415,13 +1439,17 @@ fn checked_compact_diagonal_eigh_full_rejects_inconsistent_spectrum_admission() 
     )
     .unwrap();
     let spectrum = input.spectrum().unwrap();
+    // A spectrum that does not cover the bond is misuse, refused with a typed
+    // error; no dense executor is used.
     let admit = |entries: &[tenet_matrixalgebra::SectorSpectrum<f64>]| {
-        tenet_matrixalgebra::seam::eigh_full_diagonal_dyn_checked_generic(
-            input.logical_space(),
-            entries,
+        tenet_matrixalgebra::seam::eigh_full_checked_generic(
+            &mut tenet_dense::DefaultDenseExecutor::new(),
+            tenet_matrixalgebra::seam::FactorSource::Diagonal {
+                space: input.logical_space(),
+                spectrum: entries,
+            },
         )
-        .unwrap()
-        .is_some()
+        .is_ok()
     };
     assert!(admit(spectrum));
     let mut reversed = spectrum.to_vec();
@@ -1434,6 +1462,7 @@ fn checked_compact_diagonal_eigh_full_rejects_inconsistent_spectrum_admission() 
     let mut wrong_size = spectrum.to_vec();
     wrong_size[0].values.push(0.0);
     assert!(!admit(&wrong_size));
+    // A nonfinite value is refused by the shared finite-input stage.
     let mut complex = spectrum.to_vec();
     complex[0].values[0] = f64::INFINITY;
     assert!(!admit(&complex));

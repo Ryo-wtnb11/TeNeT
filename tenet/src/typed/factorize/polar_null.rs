@@ -29,14 +29,12 @@ where
     /// # Complexity
     ///
     /// Sectorwise cubic for dense input: one compact SVD per coupled sector
-    /// plus an orthonormal completion where needed. An admitted owned Host
-    /// compact diagonal with exact zero and well-separated nonzero entries
-    /// reads its spectrum directly and writes rectangular coordinate factors
-    /// in O(Σ k_c + Σ k_c q_c) work and storage, where q_c is nullity.
-    /// Positive magnitudes at or below
-    /// `max(ε k_c, sqrt(ε)) σ_max,c` conservatively use the existing SVD
-    /// route, as do nonfinite, subnormal-scaled, or unsupported layouts. This margin is an
-    /// optimization gate, not a promise of bitwise provider-rank agreement.
+    /// plus an orthonormal completion where needed. An owned Host compact
+    /// diagonal reads its spectrum directly and writes rectangular coordinate
+    /// factors in O(Σ k_c + Σ k_c q_c) work and storage, where q_c is nullity:
+    /// the dense route's rank cutoff `ε max(rows, cols) σ_max,c` is applied to
+    /// the magnitudes directly, and a nonfinite entry is rejected before any
+    /// work.
     /// A lazy adjoint runs the owned parent's
     /// [`Self::right_null`] and returns its detached adjoint, without
     /// materializing the receiver.
@@ -53,11 +51,8 @@ where
         }
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-                if let Some(out) =
-                    tenet_matrixalgebra::seam::left_null_diagonal_dyn(&body.space, spectrum)?
-                {
-                    return Ok(self.wrap_bound_factor(out));
-                }
+                let out = tenet_matrixalgebra::seam::left_null_diagonal_dyn(&body.space, spectrum)?;
+                return Ok(self.wrap_bound_factor(out));
             }
         }
         let mut dense = self.runtime.lease_dense();
@@ -86,8 +81,8 @@ where
     ///
     /// # Complexity
     ///
-    /// As [`Self::left_null`], including its direct compact-diagonal route
-    /// and conservative SVD fallback. A lazy adjoint mirrors the parent
+    /// As [`Self::left_null`], including its direct compact-diagonal route.
+    /// A lazy adjoint mirrors the parent
     /// redirect described there.
     pub(super) fn right_null_multiplicity_free(&self) -> Result<Self, Error>
     where
@@ -102,11 +97,9 @@ where
         }
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-                if let Some(out) =
-                    tenet_matrixalgebra::seam::right_null_diagonal_dyn(&body.space, spectrum)?
-                {
-                    return Ok(self.wrap_bound_factor(out));
-                }
+                let out =
+                    tenet_matrixalgebra::seam::right_null_diagonal_dyn(&body.space, spectrum)?;
+                return Ok(self.wrap_bound_factor(out));
             }
         }
         let mut dense = self.runtime.lease_dense();
@@ -139,7 +132,7 @@ where
     ///
     /// # Complexity
     ///
-    /// Dense input costs `O(Σ_c n_c³)` sectorwise. An admitted owned compact
+    /// Dense input costs `O(Σ_c n_c³)` sectorwise. An owned compact
     /// diagonal uses `O(Σ_c n_c)` compact factor values and no dense SVD.
     pub(super) fn left_polar_multiplicity_free(&self) -> Result<LeftPolar<Self>, Error>
     where
@@ -147,17 +140,15 @@ where
     {
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-                if let Some(LeftPolar { w, p }) =
+                let LeftPolar { w, p } =
                     tenet_matrixalgebra::seam::left_polar_diagonal_spectra_dyn(
                         &body.space,
                         spectrum,
-                    )?
-                {
-                    return Ok(LeftPolar {
-                        w: self.with_spectrum(w),
-                        p: self.with_spectrum(p),
-                    });
-                }
+                    )?;
+                return Ok(LeftPolar {
+                    w: self.with_spectrum(w),
+                    p: self.with_spectrum(p),
+                });
             }
         }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
@@ -208,25 +199,23 @@ where
     ///
     /// # Complexity
     ///
-    /// As [`Self::left_polar`], with compact factor values for an admitted
-    /// owned compact diagonal.
+    /// As [`Self::left_polar`], with compact factor values for an owned
+    /// compact diagonal.
     pub(super) fn right_polar_multiplicity_free(&self) -> Result<RightPolar<Self>, Error>
     where
         D: FactorizationScalar,
     {
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-                if let Some(RightPolar { p, wh }) =
+                let RightPolar { p, wh } =
                     tenet_matrixalgebra::seam::right_polar_diagonal_spectra_dyn(
                         &body.space,
                         spectrum,
-                    )?
-                {
-                    return Ok(RightPolar {
-                        p: self.with_spectrum(p),
-                        wh: self.with_spectrum(wh),
-                    });
-                }
+                    )?;
+                return Ok(RightPolar {
+                    p: self.with_spectrum(p),
+                    wh: self.with_spectrum(wh),
+                });
             }
         }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
@@ -313,32 +302,9 @@ where
         let body = tensor
             .owned_body()
             .expect("checked Generic left-null input is owned after lazy dispatch");
-        let dimensions = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if is_diagonal_bond_space(body.space.space()) {
-                match tenet_matrixalgebra::seam::left_null_diagonal_dyn_checked_generic(
-                    &body.space,
-                    spectrum,
-                )? {
-                    tenet_matrixalgebra::seam::CheckedDiagonalNullFactor::Direct(factor) => {
-                        return Ok(wrap_factor_on(&tensor.runtime, factor));
-                    }
-                    tenet_matrixalgebra::seam::CheckedDiagonalNullFactor::Fallback(dimensions) => {
-                        dimensions
-                    }
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let payload = body.materialized_dense_data();
-        let input = BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
-        let mut dense = tensor.runtime.lease_dense();
-        let factor = tenet_matrixalgebra::seam::left_null_dyn_checked_generic_with_dimensions(
-            dense.dense(),
-            &input,
-            dimensions,
+        let factor = tenet_matrixalgebra::seam::left_null_checked_generic(
+            RuntimeDense(&tensor.runtime),
+            owned_factor_source(body)?,
         )?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
     }
@@ -355,32 +321,9 @@ where
         let body = tensor
             .owned_body()
             .expect("checked Generic right-null input is owned after lazy dispatch");
-        let dimensions = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if is_diagonal_bond_space(body.space.space()) {
-                match tenet_matrixalgebra::seam::right_null_diagonal_dyn_checked_generic(
-                    &body.space,
-                    spectrum,
-                )? {
-                    tenet_matrixalgebra::seam::CheckedDiagonalNullFactor::Direct(factor) => {
-                        return Ok(wrap_factor_on(&tensor.runtime, factor));
-                    }
-                    tenet_matrixalgebra::seam::CheckedDiagonalNullFactor::Fallback(dimensions) => {
-                        dimensions
-                    }
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let payload = body.materialized_dense_data();
-        let input = BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
-        let mut dense = tensor.runtime.lease_dense();
-        let factor = tenet_matrixalgebra::seam::right_null_dyn_checked_generic_with_dimensions(
-            dense.dense(),
-            &input,
-            dimensions,
+        let factor = tenet_matrixalgebra::seam::right_null_checked_generic(
+            RuntimeDense(&tensor.runtime),
+            owned_factor_source(body)?,
         )?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
     }
@@ -400,37 +343,13 @@ where
     {
         match &tensor.repr {
             TypedTensorRepr::Owned(body) => {
-                if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-                    if is_diagonal_bond_space(body.space.space()) {
-                        if let Some(tenet_matrixalgebra::seam::CheckedCompactPolarFactors {
-                            w_space,
-                            p_space,
-                            phase,
-                            magnitude,
-                        }) =
-                            tenet_matrixalgebra::seam::left_polar_diagonal_spectra_dyn_checked_generic(
-                                &body.space,
-                                spectrum,
-                            )?
-                        {
-                            return Ok(LeftPolar {
-                                w: tensor.with_spectrum_on(w_space, phase),
-                                p: tensor.with_spectrum_on(p_space, magnitude),
-                            });
-                        }
-                    }
-                }
-                let payload = body.materialized_dense_data();
-                let input =
-                    BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
-                let mut dense = tensor.runtime.lease_dense();
-                let LeftPolar { w, p } = tenet_matrixalgebra::seam::left_polar_dyn_checked_generic(
-                    dense.dense(),
-                    &input,
+                let LeftPolar { w, p } = tenet_matrixalgebra::seam::left_polar_checked_generic(
+                    RuntimeDense(&tensor.runtime),
+                    owned_factor_source(body)?,
                 )?;
                 Ok(LeftPolar {
-                    w: wrap_factor_on(&tensor.runtime, w),
-                    p: wrap_factor_on(&tensor.runtime, p),
+                    w: tensor.factor_output(w),
+                    p: tensor.factor_output(p),
                 })
             }
             TypedTensorRepr::Adjoint(view) => {
@@ -460,38 +379,13 @@ where
     {
         match &tensor.repr {
             TypedTensorRepr::Owned(body) => {
-                if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-                    if is_diagonal_bond_space(body.space.space()) {
-                        if let Some(tenet_matrixalgebra::seam::CheckedCompactPolarFactors {
-                            w_space,
-                            p_space,
-                            phase,
-                            magnitude,
-                        }) =
-                            tenet_matrixalgebra::seam::right_polar_diagonal_spectra_dyn_checked_generic(
-                                &body.space,
-                                spectrum,
-                            )?
-                        {
-                            return Ok(RightPolar {
-                                p: tensor.with_spectrum_on(p_space, magnitude),
-                                wh: tensor.with_spectrum_on(w_space, phase),
-                            });
-                        }
-                    }
-                }
-                let payload = body.materialized_dense_data();
-                let input =
-                    BoundDynamicTensorRef::try_new(&body.space, &payload).map_err(Error::from)?;
-                let mut dense = tensor.runtime.lease_dense();
-                let RightPolar { p, wh: w } =
-                    tenet_matrixalgebra::seam::right_polar_dyn_checked_generic(
-                        dense.dense(),
-                        &input,
-                    )?;
+                let RightPolar { p, wh } = tenet_matrixalgebra::seam::right_polar_checked_generic(
+                    RuntimeDense(&tensor.runtime),
+                    owned_factor_source(body)?,
+                )?;
                 Ok(RightPolar {
-                    p: wrap_factor_on(&tensor.runtime, p),
-                    wh: wrap_factor_on(&tensor.runtime, w),
+                    p: tensor.factor_output(p),
+                    wh: tensor.factor_output(wh),
                 })
             }
             TypedTensorRepr::Adjoint(view) => {

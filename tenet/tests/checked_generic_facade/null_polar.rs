@@ -314,7 +314,7 @@ fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
 }
 
 #[test]
-fn checked_only_compact_diagonal_polar_is_direct_and_keeps_dense_fallback() {
+fn checked_only_compact_diagonal_polar_is_direct_and_refuses_nonfinite_values() {
     let svd_calls = Arc::new(SpyCounts::default());
     let gemm_calls = Arc::clone(&svd_calls);
     let runtime = Runtime::builder()
@@ -453,6 +453,9 @@ fn checked_only_compact_diagonal_polar_is_direct_and_keeps_dense_fallback() {
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
     assert_eq!(gemm_calls.total(), 0);
 
+    // A NaN is refused by the shared finite-input stage; `MAX + MAX i` is
+    // finite and direct: MAK's diagonal polar `W = sign_safe(a)`,
+    // `P = abs(a)` gives the phase `(1 + i) / sqrt(2)` and `abs = Inf`.
     for bad_value in [
         Complex64::new(f64::NAN, 0.0),
         Complex64::new(f64::MAX, f64::MAX),
@@ -473,18 +476,29 @@ fn checked_only_compact_diagonal_polar_is_direct_and_keeps_dense_fallback() {
         )
         .unwrap();
         svd_calls.reset();
-        reset_provider_queries(&provider);
-        let compact_error = bad.left_polar(&[0], &[1]).unwrap_err();
-        let compact_queries = provider.queries_since_reset.load(Ordering::Relaxed);
-        assert!(svd_calls.of(PINV_SVD) > 0);
-        let dense = bad.materialize().unwrap();
-        reset_provider_queries(&provider);
-        let dense_error = dense.left_polar(&[0], &[1]).unwrap_err();
-        assert_eq!(
-            provider.queries_since_reset.load(Ordering::Relaxed),
-            compact_queries
-        );
-        assert_eq!(compact_error.to_string(), dense_error.to_string());
+        if bad_value.re.is_nan() {
+            let error = bad.left_polar(&[0], &[1]).map(drop).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("polar input components must be finite"),
+                "{error}"
+            );
+            assert_eq!(svd_calls.total(), 0);
+            continue;
+        }
+        let LeftPolar { w, p } = bad.left_polar(&[0], &[1]).unwrap();
+        assert_eq!(svd_calls.total(), 0);
+        let (w, p) = (w.diagview().unwrap(), p.diagview().unwrap());
+        assert_eq!(w[0].sector, Label::Vacuum);
+        assert_eq!(&w[0].values[1..], [Complex64::new(1.0, 0.0)]);
+        assert_eq!(&p[0].values[1..], [Complex64::new(1.0, 0.0)]);
+        assert_eq!(w[1].values, [Complex64::new(1.0, 0.0)]);
+        assert_eq!(p[1].values, [Complex64::new(2.0, 0.0)]);
+        let (phase, magnitude) = (w[0].values[0], p[0].values[0]);
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        assert!((phase - Complex64::new(half, half)).norm() <= 4.0 * f64::EPSILON);
+        assert_eq!(magnitude, Complex64::new(f64::INFINITY, 0.0));
     }
 }
 
@@ -566,10 +580,17 @@ fn checked_generic_polar_provider_error_precedes_dense_work() {
     assert_eq!(gemm_calls.of(Kernel::GEMM), 0);
     assert_eq!(gemm_calls.total(), 0);
     assert_eq!(source.dense_data().unwrap(), before);
+    // A nonfinite compact diagonal is refused by the shared finite-input
+    // stage before any provider query, so the failing provider is never
+    // reached.
     assert!(matches!(
         refused_compact.left_polar(&[0], &[1]),
         Err(GenericTensorError::Plan(
-            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
+            tenet::typed::CheckedGenericPlanError::Operation(
+                tenet::typed::OperationError::InvalidArgument {
+                    message: "polar input components must be finite"
+                }
+            )
         ))
     ));
     assert_eq!(svd_calls.of(PINV_SVD), 0);
@@ -691,7 +712,7 @@ fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
 }
 
 #[test]
-fn checked_compact_null_fallback_reuses_the_admission_dimension_query() {
+fn checked_compact_null_near_the_cutoff_is_direct_and_agrees_with_dense() {
     let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -711,19 +732,29 @@ fn checked_compact_null_fallback_reuses_the_admission_dimension_query() {
     .unwrap();
     let dense = source.materialize().unwrap();
 
+    // The dense route's rank cutoff, `eps * max(rows, cols) * sigma_max =
+    // 2 eps`, applied to `|a_i|` directly: `4 eps` is above it, so the sector
+    // has full rank and an empty null space, with no dense SVD and the same
+    // single coupled-dimension query as the dense route.
     reset_provider_queries(&provider);
-    source.left_null(&[0], &[1]).unwrap();
+    let compact = source.left_null(&[0], &[1]).unwrap();
     let compact_queries = provider.queries_since_reset.load(Ordering::Relaxed);
-    assert_eq!(svd_calls.of(PINV_SVD), 1);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
 
     reset_provider_queries(&provider);
     svd_calls.reset();
-    dense.left_null(&[0], &[1]).unwrap();
+    let expected = dense.left_null(&[0], &[1]).unwrap();
     assert_eq!(
         provider.queries_since_reset.load(Ordering::Relaxed),
         compact_queries
     );
     assert_eq!(svd_calls.of(PINV_SVD), 1);
+    assert_eq!(compact.codomain(), expected.codomain());
+    assert_eq!(compact.domain(), expected.domain());
+    assert_eq!(
+        compact.dense_data().unwrap(),
+        expected.dense_data().unwrap()
+    );
 }
 
 // Why not fewer args: each parameter is an independent fixture input for one

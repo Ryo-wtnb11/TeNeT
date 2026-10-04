@@ -199,9 +199,13 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
     )
     .unwrap();
     checked_provider.calls.set(0);
+    // A non-bond space is misuse for diagonal storage, refused before any
+    // provider query (MAK `@assert m == n && isdiag(A)`).
     assert!(matches!(
-        svd_full_diagonal_factors_dyn_checked_generic::<_, f64>(&checked, &[]).unwrap(),
-        CheckedDiagonalFullSvdFactors::NotAdmitted
+        svd_full_diagonal_factors_dyn_checked_generic::<_, f64>(&checked, &[]),
+        Err(CheckedGenericFactorPlanError::Operation(
+            OperationError::InvalidArgument { .. }
+        ))
     ));
     assert_eq!(checked_provider.calls.get(), 0);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
@@ -274,10 +278,7 @@ fn checked_compact_diagonal_full_svd_has_no_post_preflight_provider_query() {
     .unwrap();
     let dimension_calls = successful_provider.calls.get();
     successful_provider.calls.set(0);
-    assert!(matches!(
-        svd_full_diagonal_factors_dyn_checked_generic(&successful, &spectrum).unwrap(),
-        CheckedDiagonalFullSvdFactors::Direct(_)
-    ));
+    svd_full_diagonal_factors_dyn_checked_generic(&successful, &spectrum).unwrap();
     assert_eq!(successful_provider.calls.get(), dimension_calls);
 }
 
@@ -872,4 +873,102 @@ fn checked_generic_svd_compact_enumerates_each_factor_layout_once() {
             + checked_enumeration_calls(&s)
             + checked_enumeration_calls(&vh)
     );
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn compact_diagonal_on_an_expert_bond_layout_is_normalized_not_refused() {
+    // What: a compact diagonal whose bond space has an expert (padded) layout
+    // is re-derived in canonical layout before the direct route, so its
+    // values, eigenvalues and null space equal those on the canonical bond,
+    // and its compact QR factors stay on the given expert space.
+    let x = SectorId::new(1);
+    let vacuum = SectorId::new(0);
+    let leg = SectorLeg::new([(vacuum, 1), (x, 2)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone()]),
+        FusionProductSpace::new([leg]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let canonical =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let source_structure = source.space().structure();
+    let mut offset = 1usize;
+    let mut blocks = Vec::new();
+    for index in 0..source_structure.block_count() {
+        let block = source_structure.block(index).unwrap();
+        blocks.push(
+            BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
+                .unwrap(),
+        );
+        offset += block.shape().iter().product::<usize>() + 1;
+    }
+    let structure = BlockStructure::from_blocks_with_rank(2, blocks).unwrap();
+    let typed = FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+        canonical.space().homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(source.provider())
+    .unwrap();
+    let expert = BoundDynamicFusionMapSpace::bind_generic(
+        DynamicFusionMapSpace::from_typed(&typed),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    assert!(!matches!(
+        expert.space().structure().coupled_sector_regions(1),
+        Ok(Some(regions)) if regions.iter().all(|region| region.has_aligned_diagonal())
+    ));
+    let spectrum = [
+        SectorSpectrum {
+            sector: vacuum,
+            values: vec![-2.0],
+        },
+        SectorSpectrum {
+            sector: x,
+            values: vec![0.0, 3.0],
+        },
+    ];
+    let diagonal = |space| FactorSource::Diagonal {
+        space,
+        spectrum: &spectrum,
+    };
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    assert_eq!(
+        svd_vals_checked_generic(&mut dense, diagonal(&expert)).unwrap(),
+        svd_vals_checked_generic(&mut dense, diagonal(&canonical)).unwrap()
+    );
+    assert_eq!(
+        eig_vals_checked_generic(&mut dense, diagonal(&expert)).unwrap(),
+        eig_vals_checked_generic(&mut dense, diagonal(&canonical)).unwrap()
+    );
+    let expert_null = left_null_checked_generic(&mut dense, diagonal(&expert)).unwrap();
+    let canonical_null = left_null_checked_generic(&mut dense, diagonal(&canonical)).unwrap();
+    assert_eq!(expert_null.data(), canonical_null.data());
+    assert_eq!(
+        expert_null.space().space().structure(),
+        canonical_null.space().space().structure()
+    );
+    let Qr { q, r } = qr_compact_checked_generic(&mut dense, diagonal(&expert)).unwrap();
+    for factor in [q, r] {
+        let FactorOutput::Diagonal { space, .. } = factor else {
+            panic!("a compact diagonal's QR factors stay compact");
+        };
+        assert_eq!(space.space().structure(), expert.space().structure());
+    }
 }

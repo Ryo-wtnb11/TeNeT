@@ -269,31 +269,23 @@ where
     })
 }
 
-/// Forms the full eigenbasis of an admitted owned compact diagonal directly.
+/// Forms the full eigenbasis of an owned compact diagonal directly, MAK
+/// `eigh_full!(::Diagonal, …, ::DiagonalAlgorithm)` in TeNeT's eigenvalue
+/// order.
 #[doc(hidden)]
 pub fn eigh_full_diagonal_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<EighFullDyn<R, D>>, OperationError>
+) -> Result<EighFullDyn<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
+    let bond = hermitian_diagonal_bond(&MfAuthority(authority), authority, spectrum)?;
+    let authority = bond.space();
     let space = authority.space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Ok(None);
-    }
-    let Ok(Some(plan)) = compact_factor_plan(authority) else {
-        return Ok(None);
-    };
-    if validate_endomorphism_tree_stacking(plan.source_regions.as_ref(), EIGH_FULL_STACKING)
-        .is_err()
-    {
-        return Ok(None);
-    }
-    let Some(by_sector) = real_diagonal_by_sector(&plan.source_regions, spectrum) else {
-        return Ok(None);
-    };
+    let plan = compact_factor_plan(authority)?.ok_or(missing_compact_plan())?;
+    let by_sector = &bond.by_sector;
     let v_space = authority.rebind_validated(&plan.left_layout)?;
     let mut v_data = vec![D::zero(); plan.left_layout.required_len()?];
     let mut eigenvalues = Vec::with_capacity(plan.routes.len());
@@ -309,10 +301,10 @@ where
             values: compact_diagonal_eigh_sector(&entry.values, &mut v_data[start..start + n * n]),
         });
     }
-    Ok(Some(EighFullDyn {
+    Ok(EighFullDyn {
         v: BoundDynFactor::from_bound(v_space, v_data, space.nout(), 1)?,
         eigenvalues,
-    }))
+    })
 }
 
 /// Sorts one admitted real diagonal sector into the dense EIGH order and
@@ -331,32 +323,25 @@ fn compact_diagonal_eigh_sector<D: FactorScalar>(values: &[D], vectors: &mut [D]
     order.into_iter().map(real).collect()
 }
 
-/// Checked-provider full eigenbasis of an admitted owned compact diagonal.
-/// Ineligible layouts or values return `None` before any output work, so the
-/// checked dense route keeps its errors and their order; admitted output uses
-/// the same checked factor builder over the same region geometry.
-#[doc(hidden)]
-pub fn eigh_full_diagonal_dyn_checked_generic<R, D>(
+/// Checked-provider full eigenbasis of an owned compact diagonal; output
+/// uses the checked factor builder over the bond's region geometry.
+fn eigh_full_diagonal_dyn_checked_generic<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<EighFullDyn<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<EighFullDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
+    let bond = hermitian_diagonal_bond(
+        &CheckedAuthority(authority.provider_arc()),
+        authority,
+        spectrum,
+    )?;
+    let authority = bond.space();
     let space = authority.space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Ok(None);
-    }
-    let Ok(Some(regions)) = checked_sector_regions(space.structure(), space.nout()) else {
-        return Ok(None);
-    };
-    if validate_endomorphism_tree_stacking(regions.as_ref(), EIGH_FULL_STACKING).is_err() {
-        return Ok(None);
-    }
-    let Some(by_sector) = real_diagonal_by_sector(&regions, spectrum) else {
-        return Ok(None);
-    };
+    let regions = &bond.regions;
+    let by_sector = &bond.by_sector;
     let mut eigenvalues = Vec::with_capacity(regions.len());
     let mut pairs = Vec::with_capacity(regions.len());
     let mut dimensions = BTreeMap::new();
@@ -384,18 +369,18 @@ where
             false,
         )
     }) {
-        factor_on_input_space(authority, &regions, pairs.into_iter().map(|pair| pair.left))?
+        factor_on_input_space(authority, regions, pairs.into_iter().map(|pair| pair.left))?
     } else {
         build_bound_factor_generic_checked(
             authority.provider_arc(),
             space.homspace(),
-            &regions,
+            regions,
             &mut pairs,
             &dimensions,
             FactorSide::Left,
         )?
     };
-    Ok(Some(EighFullDyn { v, eigenvalues }))
+    Ok(EighFullDyn { v, eigenvalues })
 }
 
 pub(crate) fn eigenvector_gauge<D: FactorScalar>(
@@ -532,29 +517,22 @@ where
 pub fn eig_full_diagonal_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<EigFullDyn<R, D>>, OperationError>
+) -> Result<EigFullDyn<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
+    let bond = diagonal_bond(
+        &MfAuthority(authority),
+        authority,
+        spectrum,
+        FactorFamily::Eig,
+    )?;
+    validate_diagonal_eigenvalues(&bond)?;
+    let authority = bond.space();
     let space = authority.space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Ok(None);
-    }
-    let Ok(Some(plan)) = compact_factor_plan(authority) else {
-        return Ok(None);
-    };
-    if validate_endomorphism_tree_stacking(
-        plan.source_regions.as_ref(),
-        "eig_full requires identical endomorphism row/column fusion-tree stacking",
-    )
-    .is_err()
-    {
-        return Ok(None);
-    }
-    let Some(by_sector) = complex_diagonal_by_sector(&plan.source_regions, spectrum) else {
-        return Ok(None);
-    };
+    let plan = compact_factor_plan(authority)?.ok_or(missing_compact_plan())?;
+    let by_sector = &bond.by_sector;
     let v_space = authority.rebind_validated(&plan.left_layout)?;
     let mut v_data = vec![<D::Eig as num_traits::Zero>::zero(); plan.left_layout.required_len()?];
     let mut eigenvalues = Vec::with_capacity(plan.routes.len());
@@ -570,10 +548,10 @@ where
             values: compact_diagonal_eig_sector(&entry.values, &mut v_data[start..start + n * n]),
         });
     }
-    Ok(Some(EigFullDyn {
+    Ok(EigFullDyn {
         v: BoundDynFactor::from_bound(v_space, v_data, space.nout(), 1)?,
         eigenvalues,
-    }))
+    })
 }
 
 /// Sorts one admitted complex diagonal sector by descending magnitude, with
@@ -601,39 +579,29 @@ fn compact_diagonal_eig_sector<D: FactorScalar>(
     ordered.into_iter().map(|(_, value, _)| value).collect()
 }
 
-/// Checked-provider full general eigenbasis of an admitted owned compact
-/// diagonal. Ineligible layouts or values return `None` before any output
-/// work, so the checked dense route keeps its errors and their order; admitted
-/// output uses the same checked factor builder over the same region geometry.
+/// Checked-provider full general eigenbasis of an owned compact diagonal;
+/// output uses the checked factor builder over the bond's region geometry.
 /// The dense route's eigenvector `svd_vals` rank gate is not run: every
 /// singular value of a permutation is 1, so the gate cannot fail.
-#[doc(hidden)]
-pub fn eig_full_diagonal_dyn_checked_generic<R, D>(
+fn eig_full_diagonal_dyn_checked_generic<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<EigFullDyn<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<EigFullDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
+    let bond = diagonal_bond(
+        &CheckedAuthority(authority.provider_arc()),
+        authority,
+        spectrum,
+        FactorFamily::Eig,
+    )?;
+    validate_diagonal_eigenvalues(&bond)?;
+    let authority = bond.space();
     let space = authority.space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Ok(None);
-    }
-    let Ok(Some(regions)) = checked_sector_regions(space.structure(), space.nout()) else {
-        return Ok(None);
-    };
-    if validate_endomorphism_tree_stacking(
-        regions.as_ref(),
-        "eig_full requires identical endomorphism row/column fusion-tree stacking",
-    )
-    .is_err()
-    {
-        return Ok(None);
-    }
-    let Some(by_sector) = complex_diagonal_by_sector(&regions, spectrum) else {
-        return Ok(None);
-    };
+    let regions = &bond.regions;
+    let by_sector = &bond.by_sector;
     let mut eigenvalues = Vec::with_capacity(regions.len());
     let mut pairs = Vec::with_capacity(regions.len());
     let mut dimensions = BTreeMap::new();
@@ -661,55 +629,42 @@ where
             false,
         )
     }) {
-        factor_on_input_space(authority, &regions, pairs.into_iter().map(|pair| pair.left))?
+        factor_on_input_space(authority, regions, pairs.into_iter().map(|pair| pair.left))?
     } else {
         build_bound_factor_generic_checked(
             authority.provider_arc(),
             space.homspace(),
-            &regions,
+            regions,
             &mut pairs,
             &dimensions,
             FactorSide::Left,
         )?
     };
-    Ok(Some(EigFullDyn { v, eigenvalues }))
+    Ok(EigFullDyn { v, eigenvalues })
 }
 
-/// Reads an admitted compact diagonal without packing or an eigensolver.
-#[doc(hidden)]
-pub fn eigh_vals_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
+/// Hermitian eigenvalues of a compact diagonal: the real parts, after the
+/// dense route's Hermiticity check, in TeNeT's eigenvalue order.
+fn eigh_vals_diagonal<A, R, D>(
+    authority: &A,
+    space: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<Vec<SectorSpectrum>>, OperationError>
+) -> Result<Vec<SectorSpectrum>, A::Error>
 where
+    A: FactorSpaceAuthority<R>,
+    A::Error: From<OperationError>,
     D: FactorScalar,
 {
-    let space = authority.space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Ok(None);
-    }
-    let Ok(Some(regions)) = checked_sector_regions(space.structure(), space.nout()) else {
-        return Ok(None);
-    };
-    if validate_endomorphism_region_stacking(
-        &regions,
-        "eigh_vals requires identical endomorphism row/column fusion-tree stacking",
-    )
-    .is_err()
-    {
-        return Ok(None);
-    }
-    let Some(by_sector) = real_diagonal_by_sector(&regions, spectrum) else {
-        return Ok(None);
-    };
-    let mut result = Vec::with_capacity(regions.len());
-    for region in regions.iter() {
-        let entry = by_sector[&region.coupled()];
-        let mut values: Vec<f64> = entry
+    let bond = hermitian_diagonal_bond(authority, space, spectrum)?;
+    let mut result = Vec::with_capacity(bond.len());
+    for region in bond.iter() {
+        let mut values: Vec<f64> = bond
+            .entry(region)
             .values
             .iter()
             .map(|&value| value.widen_complex().re)
             .collect();
+        validate_real_eigenvalues(&values)?;
         // Dense EIGH first orders signed values ascending, then stably sorts
         // by magnitude. The first pass preserves its tie order for ±x.
         values.sort_by(f64::total_cmp);
@@ -719,85 +674,134 @@ where
             values,
         });
     }
-    Ok(Some(result))
+    Ok(result)
 }
 
-fn real_diagonal_by_sector<'a, D: FactorScalar>(
-    regions: &[CoupledSectorRegion],
-    spectrum: &'a [SectorSpectrum<D>],
-) -> Option<FxHashMap<SectorId, &'a SectorSpectrum<D>>> {
-    if spectrum
-        .iter()
-        .flat_map(|entry| &entry.values)
-        .any(|&value| {
-            let value = value.widen_complex();
-            !value.re.is_finite() || value.im != 0.0
-        })
-    {
-        return None;
-    }
-    aligned_diagonal_spectrum_by_sector(regions, spectrum)
-}
-
-fn complex_diagonal_by_sector<'a, D: FactorScalar>(
-    regions: &[CoupledSectorRegion],
-    spectrum: &'a [SectorSpectrum<D>],
-) -> Option<FxHashMap<SectorId, &'a SectorSpectrum<D>>> {
-    if spectrum
-        .iter()
-        .flat_map(|entry| &entry.values)
-        .any(|&value| {
-            let value = value.widen_complex();
-            !value.re.is_finite() || !value.im.is_finite() || !value.norm().is_finite()
-        })
-    {
-        return None;
-    }
-    aligned_diagonal_spectrum_by_sector(regions, spectrum)
-}
-
-/// Reads an admitted compact diagonal spectrum without dense input or eigensolver.
+/// Multiplicity-free Hermitian eigenvalues of a compact diagonal.
 #[doc(hidden)]
-pub fn eig_vals_diagonal_dyn<R, D>(
+pub fn eigh_vals_diagonal_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<Vec<SectorSpectrum<Complex64>>>, OperationError>
+) -> Result<Vec<SectorSpectrum>, OperationError>
 where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let space = authority.space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Ok(None);
+    eigh_vals_diagonal(&MfAuthority(authority), authority, spectrum)
+}
+
+/// A finite compact diagonal that passes the dense route's
+/// relative-Frobenius Hermiticity check, applied to the diagonal matrix
+/// itself; its real parts are its eigenvalues.
+fn hermitian_diagonal_bond<'a, A, R, D>(
+    authority: &A,
+    space: &'a BoundDynamicFusionMapSpace<R>,
+    spectrum: &'a [SectorSpectrum<D>],
+) -> Result<DiagonalBond<'a, R, D>, A::Error>
+where
+    A: FactorSpaceAuthority<R>,
+    A::Error: From<OperationError>,
+    D: FactorScalar,
+{
+    let bond = diagonal_bond(authority, space, spectrum, FactorFamily::Eigh)?;
+    for region in bond.iter() {
+        let values = &bond.entry(region).values;
+        let hermitian = if D::epsilon() == f32::EPSILON as f64 {
+            normwise_hermitian_diagonal::<D, f32>(values)
+        } else if D::epsilon() == f64::EPSILON {
+            normwise_hermitian_diagonal::<D, f64>(values)
+        } else {
+            false
+        };
+        if !hermitian {
+            return Err(OperationError::InvalidArgument {
+                message: "eigh requires Hermitian coupled-sector blocks",
+            }
+            .into());
+        }
     }
-    let Ok(Some(regions)) = checked_sector_regions(space.structure(), space.nout()) else {
-        return Ok(None);
-    };
-    if validate_endomorphism_region_stacking(
-        &regions,
-        "eig_vals requires identical endomorphism row/column fusion-tree stacking",
-    )
-    .is_err()
-    {
-        return Ok(None);
+    Ok(bond)
+}
+
+/// [`normwise_hermitian`] of the diagonal matrix with diagonal `values`,
+/// without forming it. Off-diagonal zeros and the zero real residuals of the
+/// diagonal add nothing to either scaled sum, and both sums visit the
+/// diagonal in the same order as the dense scan, so the decision is equal.
+fn normwise_hermitian_diagonal<D: FactorScalar, R: HermitianReal>(values: &[D]) -> bool {
+    let mut input = ScaledFrobenius::zero();
+    for &value in values {
+        let value = value.widen_complex();
+        let re = R::from_f64(value.re);
+        let im = R::from_f64(value.im);
+        if !re.is_finite() || !im.is_finite() || !input.add_complex(re, im) {
+            return false;
+        }
     }
-    let Some(by_sector) = complex_diagonal_by_sector(&regions, spectrum) else {
-        return Ok(None);
-    };
-    let mut result = Vec::with_capacity(regions.len());
-    for region in regions.iter() {
-        let entry = by_sector[&region.coupled()];
-        let mut values: Vec<Complex64> = entry
+    if input.scale == R::zero() {
+        return true;
+    }
+    let mut residual = ScaledFrobenius::zero();
+    for &value in values {
+        let value = value.widen_complex();
+        let re = R::from_f64(value.re) / input.scale - R::from_f64(value.re) / input.scale;
+        let im = R::from_f64(value.im) / input.scale + R::from_f64(value.im) / input.scale;
+        if !residual.add_complex(re, im) {
+            return false;
+        }
+    }
+    residual.scaled_norm(R::one())
+        <= (R::one() + R::one()) * R::relative_tolerance() * input.sum_squares.sqrt()
+}
+
+/// General eigenvalues of a compact diagonal: the values themselves in
+/// TeNeT's eigenvalue order (descending magnitude, stable), after the dense
+/// route's eigenvalue check.
+fn eig_vals_diagonal<A, R, D>(
+    authority: &A,
+    space: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Vec<SectorSpectrum<Complex64>>, A::Error>
+where
+    A: FactorSpaceAuthority<R>,
+    A::Error: From<OperationError>,
+    D: FactorScalar,
+{
+    let bond = diagonal_bond(authority, space, spectrum, FactorFamily::Eig)?;
+    let mut result = Vec::with_capacity(bond.len());
+    for region in bond.iter() {
+        let mut values: Vec<Complex64> = bond
+            .entry(region)
             .values
             .iter()
             .map(|&value| value.widen_complex())
             .collect();
+        validate_complex_eigenvalues(&values)?;
         values.sort_by(|a, b| b.norm().total_cmp(&a.norm()));
         result.push(SectorSpectrum {
             sector: region.coupled(),
             values,
         });
     }
-    Ok(Some(result))
+    Ok(result)
+}
+
+/// Multiplicity-free general eigenvalues of a compact diagonal.
+#[doc(hidden)]
+pub fn eig_vals_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Vec<SectorSpectrum<Complex64>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    eig_vals_diagonal(&MfAuthority(authority), authority, spectrum)
+}
+
+fn missing_compact_plan() -> OperationError {
+    OperationError::UnsupportedTensorContractScope {
+        message: "canonical bond layout has no compact factor plan",
+    }
 }
 
 #[cfg(test)]
@@ -1401,7 +1405,7 @@ pub(super) fn validate_complex_eigenvalues(values: &[Complex64]) -> Result<(), O
 /// Checked-Generic full Hermitian eigendecomposition. The exact source
 /// provider remains the authority for the eigenvector factor.
 #[doc(hidden)]
-pub fn eigh_full_dyn_checked_generic<E, R, D>(
+pub(crate) fn eigh_full_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<EighFullDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
@@ -1530,7 +1534,7 @@ pub(crate) fn validate_eigenvector_singular_values(
 /// dense results are validated before the exact source provider is asked to
 /// admit either output factor.
 #[doc(hidden)]
-pub fn eig_full_dyn_checked_generic<E, R, D>(
+pub(crate) fn eig_full_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<EigFullDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
@@ -1555,23 +1559,18 @@ where
             "eig_full requires identical endomorphism row/column fusion-tree stacking",
         )
         .map_err(CheckedGenericFactorPlanError::from)?;
-    let mut nonfinite = false;
+    // Every sector is read before the shared finite-input stage reports, so
+    // a matricization error still precedes it.
+    let mut finite = Ok(());
     for index in 0..matrices.len() {
         let matrix = matrices
             .get(index)
             .map_err(CheckedGenericFactorPlanError::from)?;
-        nonfinite |= matrix.data.iter().any(|&value| {
-            let value = value.widen_complex();
-            !value.re.is_finite() || !value.im.is_finite()
-        });
+        if finite.is_ok() {
+            finite = require_finite_factor_input(matrix.data.iter().copied(), FactorFamily::Eig);
+        }
     }
-    if nonfinite {
-        return Err(CheckedGenericFactorPlanError::Operation(
-            OperationError::InvalidArgument {
-                message: "eig input components must be finite",
-            },
-        ));
-    }
+    finite.map_err(CheckedGenericFactorPlanError::from)?;
 
     let mut pairs: Vec<FactorPair<D::Eig>> = Vec::with_capacity(matrices.len());
     let mut eigenvalues = Vec::with_capacity(matrices.len());
@@ -1619,7 +1618,7 @@ where
 /// Checked-Generic Hermitian eigenvalues only. No eigenvector or factor-space
 /// publication occurs.
 #[doc(hidden)]
-pub fn eigh_vals_dyn_checked_generic<E, R, D>(
+pub(crate) fn eigh_vals_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Vec<SectorSpectrum>, CheckedGenericFactorPlanError<R::Error>>
@@ -1653,7 +1652,7 @@ where
 /// Checked-Generic general eigenvalues only. No eigenvector or factor-space
 /// publication occurs.
 #[doc(hidden)]
-pub fn eig_vals_dyn_checked_generic<E, R, D>(
+pub(crate) fn eig_vals_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Vec<SectorSpectrum<Complex64>>, CheckedGenericFactorPlanError<R::Error>>
@@ -1679,4 +1678,111 @@ where
         )
         .map_err(CheckedGenericFactorPlanError::from)?;
     eig_vals_spectra(dense, &matricizations).map_err(CheckedGenericFactorPlanError::from)
+}
+
+/// Checked Hermitian eigenvalues of `source`, descending by magnitude per
+/// coupled sector.
+#[doc(hidden)]
+pub fn eigh_vals_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<Vec<SectorSpectrum>, CheckedGenericFactorPlanError<R::Error>>
+where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    factor_from_source(
+        lease,
+        source,
+        |space, spectrum| {
+            eigh_vals_diagonal(&CheckedAuthority(space.provider_arc()), space, spectrum)
+        },
+        eigh_vals_dyn_checked_generic,
+    )
+    .map(|(values, _)| values)
+}
+
+/// Checked general eigenvalues of `source`, descending by magnitude per
+/// coupled sector.
+#[doc(hidden)]
+pub fn eig_vals_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<Vec<SectorSpectrum<Complex64>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    factor_from_source(
+        lease,
+        source,
+        |space, spectrum| {
+            eig_vals_diagonal(&CheckedAuthority(space.provider_arc()), space, spectrum)
+        },
+        eig_vals_dyn_checked_generic,
+    )
+    .map(|(values, _)| values)
+}
+
+/// Checked Hermitian eigendecomposition of `source`, with the route that
+/// produced it.
+#[doc(hidden)]
+pub fn eigh_full_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Routed<EighFullDyn<R, D>, R::Error>
+where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    factor_from_source(
+        lease,
+        source,
+        eigh_full_diagonal_dyn_checked_generic,
+        eigh_full_dyn_checked_generic,
+    )
+}
+
+/// Checked general eigendecomposition of `source`, with the route that
+/// produced it.
+#[doc(hidden)]
+pub fn eig_full_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Routed<EigFullDyn<R, D>, R::Error>
+where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    factor_from_source(
+        lease,
+        source,
+        eig_full_diagonal_dyn_checked_generic,
+        eig_full_dyn_checked_generic,
+    )
+}
+
+/// The dense route's eigenvalue check (`validate_complex_eigenvalues`) on a
+/// compact diagonal's eigenvalues, which are its values: an overflowing
+/// magnitude is refused as the dense route refuses it.
+fn validate_diagonal_eigenvalues<R, D: FactorScalar>(
+    bond: &DiagonalBond<'_, R, D>,
+) -> Result<(), OperationError> {
+    for region in bond.iter() {
+        for &value in &bond.entry(region).values {
+            let value = value.widen_complex();
+            if !(value.re.is_finite() && value.im.is_finite() && value.norm().is_finite()) {
+                return Err(invalid_eigenvalues());
+            }
+        }
+    }
+    Ok(())
 }

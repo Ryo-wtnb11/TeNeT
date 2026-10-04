@@ -24,7 +24,7 @@ use tenet_core::{
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite};
 use tenet_matrixalgebra::seam::{
-    svd_vals_dyn_checked_generic, BoundDynamicTensorRef, CheckedGenericFactorPlanError,
+    svd_vals_checked_generic, BoundDynamicTensorRef, CheckedGenericFactorPlanError,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 
@@ -297,7 +297,11 @@ fn fixture(labels: &[usize], degeneracy: usize, interleave: bool) -> Fixture {
 fn run_once(fixture: &Fixture) -> (CheckedGenericFactorPlanError<Infallible>, usize) {
     let input = BoundDynamicTensorRef::try_new(&fixture.space, &fixture.data).unwrap();
     let mut dense = RejectDense { calls: 0 };
-    let error = svd_vals_dyn_checked_generic(&mut dense, &input).unwrap_err();
+    let error = svd_vals_checked_generic(
+        &mut dense,
+        tenet_matrixalgebra::seam::FactorSource::Dense(input),
+    )
+    .unwrap_err();
     (error, dense.calls)
 }
 

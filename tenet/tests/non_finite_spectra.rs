@@ -141,6 +141,9 @@ fn su2_complex_nan_spectrum_is_rejected() {
 
 #[test]
 fn compact_svd_rejects_infinite_input_without_changing_spectrum() {
+    // The shared finite-input stage refuses a nonfinite diagonal before any
+    // work, as the dense route refuses nonfinite input (#1986); the input is
+    // unchanged.
     let input: TensorMap<_, f64> = TensorMap::diagonal(
         &host_runtime(),
         &u1(),
@@ -157,7 +160,13 @@ fn compact_svd_rejects_infinite_input_without_changing_spectrum() {
     )
     .unwrap();
     let before = input.diagview().unwrap();
-    assert!(input.svd_compact(&[0], &[1]).is_err());
+    let error = input.svd_compact(&[0], &[1]).err().unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("svd input components must be finite"),
+        "{error}"
+    );
     assert_eq!(input.diagview().unwrap(), before);
 }
 

@@ -18,6 +18,58 @@ pub use mode::{
     TypedTensorSvdValsDispatch,
 };
 
+/// The runtime as the seam's executor lease: the checked entries lease a
+/// dense executor only for a dense stage, so a compact diagonal never takes
+/// the runtime lock or mints an executor.
+struct RuntimeDense<'a>(&'a Runtime);
+
+impl tenet_matrixalgebra::seam::ExecutorLease for RuntimeDense<'_> {
+    type Executor = dyn tenet_dense::DenseExecutor + Send;
+
+    // Why not `DenseLease::dense`: its signature ties the trait object's
+    // lifetime to the borrow, while both arms hold `'static` executors.
+    fn run<T>(self, stage: impl FnOnce(&mut Self::Executor) -> T) -> T {
+        let mut lease = self.0.lease_dense();
+        let executor: &mut Self::Executor = match &mut lease {
+            crate::runtime::DenseLease::Pooled { executor, .. } => &mut **executor
+                .as_mut()
+                .expect("dense lease always owns an executor"),
+            crate::runtime::DenseLease::Locked { state, .. } => &mut *state.dense,
+        };
+        stage(executor)
+    }
+}
+
+impl<R, D> TensorMap<R, D> {
+    /// A seam factor in the storage its route produced.
+    fn factor_output(&self, output: tenet_matrixalgebra::seam::FactorOutput<R, D>) -> Self {
+        match output {
+            tenet_matrixalgebra::seam::FactorOutput::Dense(factor) => {
+                wrap_factor_on(&self.runtime, factor)
+            }
+            tenet_matrixalgebra::seam::FactorOutput::Diagonal { space, values } => {
+                self.with_spectrum_on(space, values)
+            }
+        }
+    }
+}
+
+/// The seam source of an owned checked body: its compact diagonal, or its
+/// dense payload bound to its space.
+fn owned_factor_source<'a, R, D>(
+    body: &'a TypedTensorBody<R, D>,
+) -> Result<tenet_matrixalgebra::seam::FactorSource<'a, R, D>, Error> {
+    Ok(match body.data.as_ref() {
+        TypedData::Diagonal(spectrum) => tenet_matrixalgebra::seam::FactorSource::Diagonal {
+            space: &body.space,
+            spectrum,
+        },
+        TypedData::Dense(data) => tenet_matrixalgebra::seam::FactorSource::Dense(
+            BoundDynamicTensorRef::try_new(&body.space, data)?,
+        ),
+    })
+}
+
 pub(super) type CheckedGenericSpectrumResult<R, V> = Result<
     Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, V>>,
     GenericTensorError<<R as CheckedGenericFusion>::Error>,

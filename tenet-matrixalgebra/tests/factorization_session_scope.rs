@@ -26,7 +26,7 @@ use tenet_core::{
 };
 use tenet_dense::{cpu_session_stats, DefaultDenseExecutor};
 use tenet_matrixalgebra::seam::{
-    qr_compact_dyn, qr_compact_dyn_checked_generic, BoundDynamicTensorRef,
+    qr_compact_checked_generic, qr_compact_dyn, BoundDynamicTensorRef, FactorSource,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 
@@ -236,7 +236,7 @@ fn assert_fallback_and_checked_generic_routes_open_one_session(mut dense: Defaul
     assert_not_matrix_layout(&adjoint);
     let input = BoundDynamicTensorRef::try_new(&adjoint, &data).unwrap();
     assert_eq!(
-        sessions_during(|| qr_compact_dyn_checked_generic(&mut dense, &input).unwrap()),
+        sessions_during(|| qr_compact_checked_generic(&mut dense, dense_source(&input)).unwrap()),
         1,
         "Generic matricization qr_compact"
     );
@@ -251,7 +251,7 @@ fn assert_fallback_and_checked_generic_routes_open_one_session(mut dense: Defaul
         .collect::<Vec<f64>>();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     assert_eq!(
-        sessions_during(|| qr_compact_dyn_checked_generic(&mut dense, &input).unwrap()),
+        sessions_during(|| qr_compact_checked_generic(&mut dense, dense_source(&input)).unwrap()),
         1,
         "checked-Generic qr_compact"
     );
@@ -334,11 +334,10 @@ fn assert_one_admission(label: &str, (sessions, admissions): (u64, u64)) {
 
 fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     use tenet_matrixalgebra::seam::{
-        eigh_full_dyn, eigh_full_dyn_checked_generic, left_null_dyn,
-        left_null_dyn_checked_generic_with_dimensions, left_polar_dyn_checked_generic,
-        lq_compact_dyn, lq_compact_dyn_checked_generic, pinv_direct_into_dyn, right_null_dyn,
-        right_null_dyn_checked_generic_with_dimensions, svd_compact_dyn_checked_generic,
-        svd_compact_factors_dyn,
+        eigh_full_checked_generic, eigh_full_dyn, left_null_checked_generic, left_null_dyn,
+        left_polar_checked_generic, lq_compact_checked_generic, lq_compact_dyn,
+        pinv_direct_into_dyn, right_null_checked_generic, right_null_dyn,
+        svd_compact_dyn_checked_generic, svd_compact_factors_dyn,
     };
     let _guard = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let dense = &mut dense;
@@ -395,11 +394,15 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     let generic_matricized = BoundDynamicTensorRef::try_new(&generic_adjoint, &data).unwrap();
     assert_one_admission(
         "generic lq direct",
-        admissions_during(|| lq_compact_dyn_checked_generic(dense, &generic).unwrap()),
+        admissions_during(|| {
+            lq_compact_checked_generic(&mut *dense, dense_source(&generic)).unwrap()
+        }),
     );
     assert_one_admission(
         "generic lq matricized",
-        admissions_during(|| lq_compact_dyn_checked_generic(dense, &generic_matricized).unwrap()),
+        admissions_during(|| {
+            lq_compact_checked_generic(&mut *dense, dense_source(&generic_matricized)).unwrap()
+        }),
     );
     assert_one_admission(
         "generic svd matricized",
@@ -416,7 +419,9 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     assert_one_admission(
         "checked lq",
-        admissions_during(|| lq_compact_dyn_checked_generic(dense, &input).unwrap()),
+        admissions_during(|| {
+            lq_compact_checked_generic(&mut *dense, dense_source(&input)).unwrap()
+        }),
     );
     assert_one_admission(
         "checked svd",
@@ -424,14 +429,12 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     );
     assert_one_admission(
         "checked left_null",
-        admissions_during(|| {
-            left_null_dyn_checked_generic_with_dimensions(dense, &input, None).unwrap()
-        }),
+        admissions_during(|| left_null_checked_generic(&mut *dense, dense_source(&input)).unwrap()),
     );
     assert_one_admission(
         "checked right_null",
         admissions_during(|| {
-            right_null_dyn_checked_generic_with_dimensions(dense, &input, None).unwrap()
+            right_null_checked_generic(&mut *dense, dense_source(&input)).unwrap()
         }),
     );
 
@@ -448,7 +451,9 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     let input = BoundDynamicTensorRef::try_new(&matrix, &data).unwrap();
     assert_one_admission(
         "checked left_polar",
-        admissions_during(|| left_polar_dyn_checked_generic(dense, &input).unwrap()),
+        admissions_during(|| {
+            left_polar_checked_generic(&mut *dense, dense_source(&input)).unwrap()
+        }),
     );
     let swapped = FusionTreeHomSpace::new(
         matrix.space().homspace().domain().clone(),
@@ -476,7 +481,7 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     let input = BoundDynamicTensorRef::try_new(&endo, &data).unwrap();
     assert_one_admission(
         "checked eigh",
-        admissions_during(|| eigh_full_dyn_checked_generic(dense, &input).unwrap()),
+        admissions_during(|| eigh_full_checked_generic(&mut *dense, dense_source(&input)).unwrap()),
     );
 }
 
@@ -513,4 +518,9 @@ fn streaming_site_without_the_executor_scope_admits_per_session() {
         assert!(sessions > 1);
         assert_eq!(admissions, sessions);
     }
+}
+
+/// `input` as the dense source of a checked entry.
+fn dense_source<'a, R, D>(input: &'a BoundDynamicTensorRef<'_, R, D>) -> FactorSource<'a, R, D> {
+    FactorSource::Dense(BoundDynamicTensorRef::try_new(input.space(), input.data()).unwrap())
 }
