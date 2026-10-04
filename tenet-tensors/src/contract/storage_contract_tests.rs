@@ -2053,8 +2053,7 @@ mod device {
             let twisted = artifact.requires_source_twist();
             let resolution = StorageContractResolution::new(StorageContractRoute::DynamicTree(
                 Arc::new(artifact),
-            ))
-            .unwrap();
+            ));
             let device = self.execute(&resolution, &dst, &lhs, &rhs);
             (device, host, borrowed, twisted)
         }

@@ -175,7 +175,10 @@ where
         #[cfg(feature = "cuda")]
         let device_plan = match (placement, direct_core) {
             // The exact-sign contract was required above.
-            (Placement::Cuda(_), Some((core, swapped))) => Some((Arc::clone(core), swapped)),
+            (Placement::Cuda(_), Some((core, swapped))) => {
+                resolution.admit_cuda_inactive_regions()?;
+                Some((Arc::clone(core), swapped))
+            }
             (Placement::Cuda(_), None) => {
                 resolution.admit_cuda_dynamic_tree_members()?;
                 None

@@ -1858,7 +1858,9 @@ where
                 message: "dynamic-tree core plan over transformed sources is not fully direct",
             });
         }
-        StorageContractResolution::new(StorageContractRoute::DynamicTree(Arc::new(artifact)))
+        Ok(StorageContractResolution::new(
+            StorageContractRoute::DynamicTree(Arc::new(artifact)),
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2881,7 +2883,7 @@ where
                       operands",
         });
     }
-    StorageContractResolution::new(route).map(Some)
+    Ok(Some(StorageContractResolution::new(route)))
 }
 
 #[cfg(test)]

@@ -97,6 +97,15 @@ impl CudaMemberZeroRegions {
         })
     }
 
+    /// Checks, without building them, that every block has a device region:
+    /// the admission a CUDA replay runs before any device work.
+    pub fn admit(layouts: &[FusionScaleBlockLayout]) -> Result<(), OperationError> {
+        for layout in layouts {
+            let _ = unsigned_zero_layout(&layout.block)?;
+        }
+        Ok(())
+    }
+
     /// The single-tensor (B = 1) case of [`Self::prepare`], without the
     /// member axis, written into `regions` in place. Why not `prepare`: an
     /// eager replay re-derives its regions every call, so it reuses one
@@ -1719,6 +1728,11 @@ mod zero_region_tests {
             assert!(matches!(
                 CudaMemberZeroRegions::fill_single(&mut Vec::new(), &layouts),
                 Err(OperationError::UnsupportedTensorContractScope { .. })
+            ));
+            assert!(matches!(
+                CudaMemberZeroRegions::admit(&layouts),
+                Err(OperationError::UnsupportedTensorContractScope { message })
+                    if message == "device contraction cannot zero a negatively strided destination block"
             ));
         }
         assert!(CudaMemberZeroRegions::prepare(&[layout(&[4], &[1], 6)], 8, 2).is_err());

@@ -78,6 +78,7 @@ impl StorageContractResolution<f64> {
     #[doc(hidden)]
     pub fn admit_cuda_dynamic_tree_members(&self) -> Result<usize, OperationError> {
         let artifact = artifact(self)?;
+        self.admit_cuda_inactive_regions()?;
         artifact.block_plan.require_identity_direct_replay()?;
         let mut entries = artifact.block_plan.cuda_direct_plan_entries();
         let transforms = [&artifact.lhs_transform, &artifact.rhs_transform];

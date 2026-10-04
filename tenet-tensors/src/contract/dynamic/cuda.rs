@@ -224,6 +224,7 @@ where
     D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + 'static,
     C: DenseBlockScalar,
 {
+    resolution.admit_cuda_inactive_regions()?;
     let (lhs, rhs) = match resolution.route {
         StorageContractRoute::SwappedCore(_) => (rhs, lhs),
         StorageContractRoute::Core(_) | StorageContractRoute::DynamicTree(_) => (lhs, rhs),
@@ -446,28 +447,4 @@ fn materialized<D: CudaScalar>(
     slot.as_ref().ok_or(OperationError::InvalidArgument {
         message: "device contraction source was not materialized",
     })
-}
-
-/// Why a negatively strided inactive block is rejected: a device region's
-/// strides and offset are unsigned (see [`CudaRegion`]).
-fn inactive_region_unsupported() -> OperationError {
-    OperationError::UnsupportedTensorContractScope {
-        message: "device contraction cannot zero a negatively strided destination block",
-    }
-}
-
-/// Rejects, at compile time and without building them, the core plan's
-/// inactive destination blocks no device region can express.
-pub(crate) fn validate_inactive_regions<C>(
-    plan: &tenet_operations::FusionBlockContractPlan<C>,
-) -> Result<(), OperationError>
-where
-    C: Copy + PartialEq + num_traits::One,
-{
-    for layout in plan.inactive_destination_regions() {
-        if layout.block.offset < 0 || layout.block.strides.iter().any(|&stride| stride < 0) {
-            return Err(inactive_region_unsupported());
-        }
-    }
-    Ok(())
 }
