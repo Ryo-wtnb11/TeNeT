@@ -294,10 +294,7 @@ where
             right_leading: rows,
         });
     }
-    let dimensions = space
-        .homspace()
-        .codomain()
-        .coupled_sector_block_dimensions(input.space().provider())?;
+    let dimensions = MfAuthority(input.space()).coupled_dimensions(space.homspace().codomain())?;
     with_input_geometry!(&matrices, |geometry| Ok(Qr {
         q: build_bound_factor(
             input.space(),
@@ -372,10 +369,7 @@ where
             right_leading: cols,
         });
     }
-    let dimensions = space
-        .homspace()
-        .domain()
-        .coupled_sector_block_dimensions(input.space().provider())?;
+    let dimensions = MfAuthority(input.space()).coupled_dimensions(space.homspace().domain())?;
     with_input_geometry!(&matrices, |geometry| Ok(Lq {
         l: build_bound_factor(
             input.space(),
@@ -1089,10 +1083,7 @@ where
             right_leading: rows,
         });
     }
-    let dimensions = coupled_sector_block_dimensions_generic_checked(
-        space.homspace().codomain(),
-        provider.as_ref(),
-    )?;
+    let dimensions = CheckedAuthority(provider).coupled_dimensions(space.homspace().codomain())?;
     with_input_geometry!(&matrices, |geometry| checked_full_factor_pair(
         provider,
         space.homspace(),
@@ -1137,10 +1128,7 @@ where
             right_leading: cols,
         });
     }
-    let dimensions = coupled_sector_block_dimensions_generic_checked(
-        space.homspace().domain(),
-        provider.as_ref(),
-    )?;
+    let dimensions = CheckedAuthority(provider).coupled_dimensions(space.homspace().domain())?;
     with_input_geometry!(&matrices, |geometry| checked_full_factor_pair(
         provider,
         space.homspace(),

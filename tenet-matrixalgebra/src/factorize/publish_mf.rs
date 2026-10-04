@@ -43,7 +43,9 @@ where
         FactorSide::Left => FusionTreeHomSpace::new(homspace.codomain().clone(), bond),
         FactorSide::Right => FusionTreeHomSpace::new(bond, homspace.domain().clone()),
     };
-    MfAuthority(authority).stage(hom)
+    let authority = MfAuthority(authority);
+    let staged = authority.stage(hom)?;
+    authority.commit(staged, |_| Ok(()))
 }
 
 /// Builds the `(codomain <- W, W <- domain)` factor pair shared by SVD and

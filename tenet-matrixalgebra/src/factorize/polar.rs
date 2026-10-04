@@ -912,21 +912,17 @@ impl PolarDirection {
     }
 }
 
-pub(super) fn validate_polar_direction(
+pub(super) fn validate_polar_direction<R>(
     acceptance_direction: PolarDirection,
     error_direction: PolarDirection,
-    space: &BoundDynamicFusionMapSpace<impl FusionRule>,
-) -> Result<(), OperationError> {
-    let row_dimensions = space
-        .space()
-        .homspace()
-        .codomain()
-        .coupled_sector_block_dimensions(space.provider())?;
-    let col_dimensions = space
-        .space()
-        .homspace()
-        .domain()
-        .coupled_sector_block_dimensions(space.provider())?;
+    space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let authority = MfAuthority(space);
+    let row_dimensions = authority.coupled_dimensions(space.space().homspace().codomain())?;
+    let col_dimensions = authority.coupled_dimensions(space.space().homspace().domain())?;
     for (&sector, &rows) in &row_dimensions {
         let cols = col_dimensions.get(&sector).copied().unwrap_or(0);
         if !acceptance_direction.accepts(rows, cols) {

@@ -646,17 +646,14 @@ where
             adjoint_space: None,
         }));
     }
-    let dimensions = coupled_sector_block_dimensions_generic_checked(
-        source.homspace().codomain(),
-        authority.provider_arc().as_ref(),
-    )
-    .and_then(|rows| {
-        coupled_sector_block_dimensions_generic_checked(
-            source.homspace().domain(),
-            authority.provider_arc().as_ref(),
-        )
-        .map(|cols| (rows, cols))
-    });
+    let checked = CheckedAuthority(authority.provider_arc());
+    let dimensions = checked
+        .coupled_dimensions(source.homspace().codomain())
+        .and_then(|rows| {
+            checked
+                .coupled_dimensions(source.homspace().domain())
+                .map(|cols| (rows, cols))
+        });
     let (row_dimensions, col_dimensions) = match dimensions {
         Ok(dimensions) => dimensions,
         Err(error) => {
@@ -1687,11 +1684,6 @@ where
             D::dense_write(vt_view),
         )
         .map_err(OperationError::Dense)?;
-    let s_values = workspace.s[..rank]
-        .iter()
-        .copied()
-        .map(Into::into)
-        .collect::<Vec<_>>();
     let mut u_thin = vec![D::zero(); rows * rank];
     let mut vt_thin = vec![D::zero(); rank * cols];
     copy_col_major_strided(&workspace.u, rows, rank, max_rows, &mut u_thin, rows);
@@ -1699,6 +1691,11 @@ where
     let u_full = orthonormal_completion(dense, &u_thin, rows, rank)?;
     let v_thin = adjoint_col_major(&vt_thin, rank, cols);
     let v_full = orthonormal_completion(dense, &v_thin, cols, rank)?;
+    let s_values = workspace.s[..rank]
+        .iter()
+        .copied()
+        .map(Into::into)
+        .collect::<Vec<_>>();
     Ok((u_full, s_values, FullSvdRight::V(v_full)))
 }
 
@@ -1744,14 +1741,9 @@ where
     // moves each matrix into the dense provider, so a borrowed region would
     // be copied into an owned buffer anyway.
     let mut matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
-    let row_dimensions = space
-        .homspace()
-        .codomain()
-        .coupled_sector_block_dimensions(input.space().provider())?;
-    let col_dimensions = space
-        .homspace()
-        .domain()
-        .coupled_sector_block_dimensions(input.space().provider())?;
+    let authority = MfAuthority(input.space());
+    let row_dimensions = authority.coupled_dimensions(space.homspace().codomain())?;
+    let col_dimensions = authority.coupled_dimensions(space.homspace().domain())?;
 
     let mut pairs = Vec::with_capacity(matricizations.len());
     let mut singular_values = Vec::with_capacity(matricizations.len());
@@ -2559,16 +2551,13 @@ where
         .map_err(CheckedGenericFactorPlanError::from)?;
     let (row_dimensions, col_dimensions) = match dimensions {
         Some(dimensions) => dimensions?,
-        None => (
-            coupled_sector_block_dimensions_generic_checked(
-                space.homspace().codomain(),
-                provider.as_ref(),
-            )?,
-            coupled_sector_block_dimensions_generic_checked(
-                space.homspace().domain(),
-                provider.as_ref(),
-            )?,
-        ),
+        None => {
+            let checked = CheckedAuthority(provider);
+            (
+                checked.coupled_dimensions(space.homspace().codomain())?,
+                checked.coupled_dimensions(space.homspace().domain())?,
+            )
+        }
     };
     let mut workspace =
         FullSvdWorkspace::for_sectors(matrices.iter().map(|matrix| (matrix.rows, matrix.cols)));
