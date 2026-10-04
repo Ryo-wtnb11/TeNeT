@@ -1,43 +1,30 @@
 use super::*;
 
-/// Phase and magnitude spectra of an admitted compact diagonal endomorphism:
-/// `W` is the per-value phase and `P` the magnitude, both on the input's own
-/// coupled sectors, so the caller publishes them on the input space. The
-/// right polar factors are the same spectra (`Wh = W`).
-fn polar_diagonal_spectra<D>(
-    authority: &DynamicFusionMapSpace,
+/// Phase and magnitude spectra of a compact diagonal: MAK's polar of a
+/// diagonal (`PolarViaSVD` over `svd_compact!(::DiagonalAlgorithm)`) is
+/// `W = sign_safe(a)` and `P = abs(a)`, both on the input bond, so the caller
+/// publishes them on the input space. The right polar factors are the same
+/// spectra (`Wh = W`).
+fn polar_diagonal_spectra<A, R, D>(
+    authority: &A,
+    space: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Option<LeftPolar<Vec<SectorSpectrum<D>>>>
+) -> Result<LeftPolar<Vec<SectorSpectrum<D>>>, A::Error>
 where
+    A: FactorSpaceAuthority<R>,
+    A::Error: From<OperationError>,
     D: FactorScalar,
 {
-    if authority.homspace().codomain() != authority.homspace().domain() {
-        return None;
-    }
-    let Ok(Some(source_regions)) = checked_sector_regions(authority.structure(), authority.nout())
-    else {
-        return None;
-    };
-    if validate_endomorphism_region_stacking(
-        &source_regions,
-        "polar requires identical endomorphism row/column fusion-tree stacking",
-    )
-    .is_err()
-    {
-        return None;
-    }
-    let by_sector = aligned_diagonal_spectrum_by_sector(&source_regions, spectrum)?;
-    let mut phase = Vec::with_capacity(source_regions.len());
-    let mut magnitude = Vec::with_capacity(source_regions.len());
-    for region in source_regions.iter() {
-        let entry = by_sector.get(&region.coupled())?;
-        let mut phases = Vec::with_capacity(entry.values.len());
-        let mut magnitudes = Vec::with_capacity(entry.values.len());
-        for &value in &entry.values {
-            let (value_phase, value_magnitude) = diagonal_phase_magnitude(value)?;
-            phases.push(value_phase);
-            magnitudes.push(value_magnitude);
-        }
+    let bond = diagonal_bond(authority, space, spectrum, FactorFamily::Polar)?;
+    let mut phase = Vec::with_capacity(bond.len());
+    let mut magnitude = Vec::with_capacity(bond.len());
+    for region in bond.iter() {
+        let entry = bond.entry(region);
+        let (phases, magnitudes) = entry
+            .values
+            .iter()
+            .map(|&value| diagonal_phase_magnitude(value))
+            .unzip();
         phase.push(SectorSpectrum {
             sector: region.coupled(),
             values: phases,
@@ -47,39 +34,39 @@ where
             values: magnitudes,
         });
     }
-    Some(LeftPolar {
+    Ok(LeftPolar {
         w: phase,
         p: magnitude,
     })
 }
 
 /// Compact left polar spectra `W` (phase) and `P` (magnitude) of an owned
-/// compact diagonal endomorphism, or `None` when the input is not admitted.
+/// compact diagonal endomorphism.
 #[doc(hidden)]
 pub fn left_polar_diagonal_spectra_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<LeftPolar<Vec<SectorSpectrum<D>>>>, OperationError>
+) -> Result<LeftPolar<Vec<SectorSpectrum<D>>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    Ok(polar_diagonal_spectra(authority.space(), spectrum))
+    polar_diagonal_spectra(&MfAuthority(authority), authority, spectrum)
 }
 
 /// Compact right polar spectra `P` (magnitude) and `Wh` (phase) of an owned
-/// compact diagonal endomorphism, or `None` when the input is not admitted.
+/// compact diagonal endomorphism.
 #[doc(hidden)]
 pub fn right_polar_diagonal_spectra_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<RightPolar<Vec<SectorSpectrum<D>>>>, OperationError>
+) -> Result<RightPolar<Vec<SectorSpectrum<D>>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    Ok(polar_diagonal_spectra(authority.space(), spectrum)
-        .map(|LeftPolar { w, p }| RightPolar { p, wh: w }))
+    polar_diagonal_spectra(&MfAuthority(authority), authority, spectrum)
+        .map(|LeftPolar { w, p }| RightPolar { p, wh: w })
 }
 
 #[cfg(test)]
@@ -384,15 +371,6 @@ struct CheckedPolarPlan<R> {
     p_space: BoundDynamicFusionMapSpace<R>,
 }
 
-/// Compact checked-provider polar factors after the ordinary checked prelude.
-#[doc(hidden)]
-pub struct CheckedCompactPolarFactors<R, D> {
-    pub w_space: BoundDynamicFusionMapSpace<R>,
-    pub p_space: BoundDynamicFusionMapSpace<R>,
-    pub phase: Vec<SectorSpectrum<D>>,
-    pub magnitude: Vec<SectorSpectrum<D>>,
-}
-
 fn checked_polar_plan<R>(
     authority: &BoundDynamicFusionMapSpace<R>,
     source_len: usize,
@@ -477,149 +455,70 @@ where
     })
 }
 
-fn polar_diagonal_spectra_dyn_checked_generic<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
+/// The `(W, P)` factors of one polar decomposition.
+type PolarOutputs<R, D> = (FactorOutput<R, D>, FactorOutput<R, D>);
+
+/// Checked polar factors of `source`, as `(W, P)`. A compact diagonal's
+/// phases and magnitudes stay compact on the input space.
+fn polar_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
     direction: PolarDirection,
-) -> Result<Option<CheckedCompactPolarFactors<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<PolarOutputs<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    // Refused numerics stay on the ordinary dense path, whose prelude remains
-    // the sole provider query sequence for that fallback.
-    if spectrum.iter().any(|entry| {
-        entry
-            .values
-            .iter()
-            .any(|&value| diagonal_phase_magnitude(value).is_none())
-    }) {
-        return Ok(None);
-    }
-    let source = authority.space();
-    // TensorKit's polar output (`initialize_output(left_polar!)`) is
-    // `W = space(t)` and `P = domain(t) <- domain(t)` (`codomain <- codomain`
-    // on the right): for a one-leg bond `V <- V` both are the input space, so
-    // they need no provider-built space and no admission query.
-    if source.nout() == 1
-        && source.nin() == 1
-        && source.homspace().codomain() == source.homspace().domain()
-    {
-        if let Ok(Some(regions)) = checked_sector_regions(source.structure(), 1) {
-            let Some(by_sector) = aligned_diagonal_spectrum_by_sector(&regions, spectrum) else {
-                return Ok(None);
+    factor_from_source(
+        lease,
+        source,
+        |space, spectrum| {
+            let LeftPolar { w, p } =
+                polar_diagonal_spectra(&CheckedAuthority(space.provider_arc()), space, spectrum)?;
+            let on_input = |values| FactorOutput::Diagonal {
+                space: space.clone(),
+                values,
             };
-            let Some((phase, magnitude)) = polar_diagonal_values(
-                &by_sector,
-                regions.iter().map(|region| (region, region, region)),
-            ) else {
-                return Ok(None);
-            };
-            return Ok(Some(CheckedCompactPolarFactors {
-                w_space: authority.clone(),
-                p_space: authority.clone(),
-                phase,
-                magnitude,
-            }));
-        }
-    }
-    let source_len = source
-        .required_len()
-        .map_err(OperationError::from_core_preserving_context)?;
-    let plan = checked_polar_plan(authority, source_len, direction, direction)?;
-    let Some(by_sector) = aligned_diagonal_spectrum_by_sector(&plan.source_regions, spectrum)
-    else {
-        return Ok(None);
-    };
-    let Some((phase, magnitude)) = polar_diagonal_values(
-        &by_sector,
-        plan.routes.iter().map(|route| {
-            (
-                &plan.source_regions[route.source],
-                &plan.w_regions[route.w],
-                &plan.p_regions[route.p],
-            )
-        }),
-    ) else {
-        return Ok(None);
-    };
-    Ok(Some(CheckedCompactPolarFactors {
-        w_space: plan.w_space,
-        p_space: plan.p_space,
-        phase,
-        magnitude,
-    }))
+            Ok((on_input(w), on_input(p)))
+        },
+        |dense, input| {
+            polar_dyn_checked_generic_reported(dense, input, direction, direction)
+                .map(|(w, p)| (FactorOutput::Dense(w), FactorOutput::Dense(p)))
+        },
+    )
+    .map(|(factors, _)| factors)
 }
 
-/// Phase and magnitude spectra of a compact diagonal over aligned
-/// `(source, W, P)` region triples, or `None` when dense polar must decide.
-#[allow(clippy::type_complexity)]
-fn polar_diagonal_values<'r, D: FactorScalar>(
-    by_sector: &FxHashMap<SectorId, &SectorSpectrum<D>>,
-    triples: impl Iterator<
-        Item = (
-            &'r CoupledSectorRegion,
-            &'r CoupledSectorRegion,
-            &'r CoupledSectorRegion,
-        ),
-    >,
-) -> Option<(Vec<SectorSpectrum<D>>, Vec<SectorSpectrum<D>>)> {
-    let mut phase = Vec::with_capacity(by_sector.len());
-    let mut magnitude = Vec::with_capacity(by_sector.len());
-    for (source, w, p) in triples {
-        let entry = by_sector.get(&source.coupled())?;
-        if !w.has_aligned_diagonal()
-            || !p.has_aligned_diagonal()
-            || source.row_trees().len() != 1
-            || source.col_trees().len() != 1
-            || w.row_trees().len() != 1
-            || w.col_trees().len() != 1
-            || p.row_trees().len() != 1
-            || p.col_trees().len() != 1
-        {
-            return None;
-        }
-        let mut phases = Vec::with_capacity(entry.values.len());
-        let mut magnitudes = Vec::with_capacity(entry.values.len());
-        for &value in &entry.values {
-            let (value_phase, value_magnitude) = diagonal_phase_magnitude(value)?;
-            phases.push(value_phase);
-            magnitudes.push(value_magnitude);
-        }
-        phase.push(SectorSpectrum {
-            sector: source.coupled(),
-            values: phases,
-        });
-        magnitude.push(SectorSpectrum {
-            sector: source.coupled(),
-            values: magnitudes,
-        });
-    }
-    Some((phase, magnitude))
-}
-
+/// Checked left polar decomposition `W * P` of `source`.
 #[doc(hidden)]
-pub fn left_polar_diagonal_spectra_dyn_checked_generic<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<CheckedCompactPolarFactors<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+pub fn left_polar_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<LeftPolar<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
 where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    polar_diagonal_spectra_dyn_checked_generic(authority, spectrum, PolarDirection::Left)
+    polar_checked_generic(lease, source, PolarDirection::Left).map(|(w, p)| LeftPolar { w, p })
 }
 
+/// Checked right polar decomposition `P * Wh` of `source`.
 #[doc(hidden)]
-pub fn right_polar_diagonal_spectra_dyn_checked_generic<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<CheckedCompactPolarFactors<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+pub fn right_polar_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<RightPolar<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
 where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    polar_diagonal_spectra_dyn_checked_generic(authority, spectrum, PolarDirection::Right)
+    polar_checked_generic(lease, source, PolarDirection::Right).map(|(wh, p)| RightPolar { p, wh })
 }
 
 pub(super) fn project_hermitian_col_major<D: FactorScalar>(matrix: &mut [D], n: usize) {
@@ -816,8 +715,8 @@ where
     Ok((w, p))
 }
 
-#[doc(hidden)]
-pub fn left_polar_dyn_checked_generic<E, R, D>(
+#[cfg(test)]
+pub(crate) fn left_polar_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<LeftPolar<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>
@@ -830,8 +729,8 @@ where
         .map(|(w, p)| LeftPolar { w, p })
 }
 
-#[doc(hidden)]
-pub fn right_polar_dyn_checked_generic<E, R, D>(
+#[cfg(test)]
+pub(crate) fn right_polar_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<RightPolar<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>

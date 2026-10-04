@@ -266,11 +266,12 @@ fn checked_compact_diagonal_qr_lq_all_modes_use_hand_phase_and_magnitude() {
     assert_eq!(calls.of(Kernel::QR), 8);
 }
 
-/// A nonfinite compact diagonal takes the dense route, while a finite one is
+/// A nonfinite compact diagonal is refused by the shared finite-input stage
+/// (stricter than the dense QR until #1986 wires it there), and a finite one is
 /// factorized on its input bond without consulting the provider, so a failing
 /// provider no longer fails `qr_full` (approval A1, #1751).
 #[test]
-fn checked_compact_diagonal_qr_densifies_nonfinite_and_skips_the_provider_when_finite() {
+fn checked_compact_diagonal_qr_rejects_nonfinite_and_skips_the_provider_when_finite() {
     let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -288,8 +289,14 @@ fn checked_compact_diagonal_qr_densifies_nonfinite_and_skips_the_provider_when_f
         }],
     )
     .unwrap();
-    let _ = nonfinite.qr_compact(&[0], &[1]);
-    assert_eq!(calls.of(Kernel::QR), 1);
+    let error = nonfinite.qr_compact(&[0], &[1]).map(drop).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("qr input components must be finite"),
+        "{error}"
+    );
+    assert_eq!(calls.of(Kernel::QR), 0);
 
     let failing_provider = Arc::new(CheckedOnlyToy::new_product_probe(1));
     let failing_bond =
@@ -317,7 +324,7 @@ fn checked_compact_diagonal_qr_densifies_nonfinite_and_skips_the_provider_when_f
         );
         assert_eq!(factor.codomain(), finite.codomain());
     }
-    assert_eq!(calls.of(Kernel::QR), 1);
+    assert_eq!(calls.of(Kernel::QR), 0);
 }
 
 /// A bosonic Abelian rule exposed only through the checked-Generic contract,
@@ -653,19 +660,21 @@ fn checked_dual_diagonal_qr_lq_keeps_dual_bond_for_self_dual_and_non_self_dual_r
     }
     calls.reset();
 
-    // Ineligible dual inputs keep the dense route and its fresh nondual W:
-    // materialized payload and a nonfinite spectrum. U(1) W is `flip(V')`,
-    // nondual with the same physical sectors -1 and -2.
+    // A nonfinite dual diagonal is refused by the shared finite-input stage,
+    // with no dense QR.
     let nonfinite: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
         &u1_dual,
         real_spectra(u1_sectors, [&[f64::NAN, 1.0], &[2.0, 3.0, 4.0]]),
     )
     .unwrap();
-    for (index, input) in [u1_real.materialize().unwrap(), nonfinite]
-        .iter()
-        .enumerate()
-    {
+    assert!(nonfinite.qr_compact(&[0], &[1]).is_err());
+    assert!(nonfinite.lq_full(&[0], &[1]).is_err());
+    assert_eq!(calls.of(Kernel::QR), 0);
+
+    // A materialized dual payload keeps the dense route and its fresh nondual
+    // W. U(1) W is `flip(V')`, nondual with the same physical sectors -1 and -2.
+    for (index, input) in [u1_real.materialize().unwrap()].iter().enumerate() {
         let before = calls.of(Kernel::QR);
         let Qr { r, .. } = input.qr_compact(&[0], &[1]).unwrap();
         let Qr { r: full_r, .. } = input.qr_full(&[0], &[1]).unwrap();

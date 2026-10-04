@@ -68,31 +68,47 @@ fn compact_diagonal_qr_lq_rejects_inconsistent_spectra_and_nonbond_spaces() {
     let admit = |values: &[tenet_matrixalgebra::SectorSpectrum<f64>]| {
         tenet_matrixalgebra::seam::qr_diagonal_dyn(input.logical_space(), values)
     };
-    assert!(admit(spectrum).is_some());
+    assert!(admit(spectrum).is_ok());
     let mut reversed = spectrum.to_vec();
     reversed.reverse();
-    assert!(admit(&reversed).is_some());
-    assert!(admit(&spectrum[..1]).is_none());
+    assert!(admit(&reversed).is_ok());
+    // A spectrum that does not cover the bond is misuse (MAK asserts the
+    // sizes), not a reason to try a dense route.
+    let misuse = |result: Result<_, tenet_tensors::OperationError>| {
+        matches!(
+            result,
+            Err(tenet_tensors::OperationError::InvalidArgument { .. })
+        )
+    };
+    assert!(misuse(admit(&spectrum[..1])));
     let mut duplicate = spectrum.to_vec();
     duplicate[1].sector = duplicate[0].sector;
-    assert!(admit(&duplicate).is_none());
+    assert!(misuse(admit(&duplicate)));
     let mut wrong = spectrum.to_vec();
     wrong[0].values.push(1.0);
-    assert!(admit(&wrong).is_none());
+    assert!(misuse(admit(&wrong)));
+    // A NaN is refused by the shared finite-input stage.
     wrong = spectrum.to_vec();
     wrong[0].values[0] = f64::NAN;
-    assert!(admit(&wrong).is_none());
+    assert!(matches!(
+        admit(&wrong),
+        Err(tenet_tensors::OperationError::InvalidArgument {
+            message: "qr input components must be finite"
+        })
+    ));
     let multileg: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1).unwrap();
-    assert!(
-        tenet_matrixalgebra::seam::qr_diagonal_dyn(multileg.logical_space(), spectrum).is_none()
-    );
+    assert!(misuse(tenet_matrixalgebra::seam::qr_diagonal_dyn(
+        multileg.logical_space(),
+        spectrum
+    )));
     let dual = leg.try_dual().unwrap();
     let nonendo: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&dual], 1).unwrap();
-    assert!(
-        tenet_matrixalgebra::seam::qr_diagonal_dyn(nonendo.logical_space(), spectrum).is_none()
-    );
+    assert!(misuse(tenet_matrixalgebra::seam::qr_diagonal_dyn(
+        nonendo.logical_space(),
+        spectrum
+    )));
 }
 
 #[test]
@@ -433,8 +449,24 @@ fn compact_diagonal_qr_lq_scales_complex_subnormals_before_normalizing() {
     check!(Complex64, f64::from_bits(1), 1e-12);
 }
 
+/// Hand-computed MAK `sign_safe` / `abs` of the finite `MAX (1 + i)`: TeNeT's
+/// scaled unit phase `(1 + i) / sqrt(2)`, and a magnitude that overflows to
+/// `Inf`.
+fn assert_overflow_phase_magnitude(phase: Complex64, magnitude: Complex64, tolerance: f64) {
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    assert!(
+        (phase - Complex64::new(half, half)).norm() <= tolerance,
+        "{phase}"
+    );
+    assert_eq!(magnitude, Complex64::new(f64::INFINITY, 0.0));
+}
+
 #[test]
-fn compact_diagonal_qr_lq_nonfinite_and_unrepresentable_values_use_existing_route() {
+fn compact_diagonal_qr_lq_refuse_nonfinite_and_are_direct_when_overflowing() {
+    // A nonfinite value is refused by the shared finite-input stage (stricter
+    // than the dense QR until #1986). A finite overflowing value is MAK
+    // `_diagonal_qr!` / `lq_diagonal!` (`positive = true`): `q` the phase,
+    // `r` (`l`) the magnitude. No materialization and no dense QR.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
     for value in [
@@ -451,24 +483,34 @@ fn compact_diagonal_qr_lq_nonfinite_and_unrepresentable_values_use_existing_rout
             }],
         )
         .unwrap();
-        for operation in 0..4 {
-            DIAGONAL_MATERIALIZATIONS.set(0);
-            match operation {
-                0 => {
-                    let _ = input.qr_compact(&[0], &[1]);
-                }
-                1 => {
-                    let _ = input.qr_full(&[0], &[1]);
-                }
-                2 => {
-                    let _ = input.lq_compact(&[0], &[1]);
-                }
-                _ => {
-                    let _ = input.lq_full(&[0], &[1]);
-                }
+        let first =
+            |tensor: &TensorMap<U1FusionRule, Complex64>| tensor.diagview().unwrap()[0].values[0];
+        DIAGONAL_MATERIALIZATIONS.set(0);
+        if value.re.is_finite() {
+            for Qr { q, r } in [
+                input.qr_compact(&[0], &[1]).unwrap(),
+                input.qr_full(&[0], &[1]).unwrap(),
+            ] {
+                assert_overflow_phase_magnitude(first(&q), first(&r), 4.0 * f64::EPSILON);
             }
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+            for Lq { l, q } in [
+                input.lq_compact(&[0], &[1]).unwrap(),
+                input.lq_full(&[0], &[1]).unwrap(),
+            ] {
+                assert_overflow_phase_magnitude(first(&q), first(&l), 4.0 * f64::EPSILON);
+            }
+        } else {
+            for (error, family) in [
+                (input.qr_compact(&[0], &[1]).map(drop).unwrap_err(), "qr"),
+                (input.qr_full(&[0], &[1]).map(drop).unwrap_err(), "qr"),
+                (input.lq_compact(&[0], &[1]).map(drop).unwrap_err(), "lq"),
+                (input.lq_full(&[0], &[1]).map(drop).unwrap_err(), "lq"),
+            ] {
+                let expected = format!("{family} input components must be finite");
+                assert!(error.to_string().contains(&expected), "{error}");
+            }
         }
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     }
     let input: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
         &runtime,
@@ -479,24 +521,16 @@ fn compact_diagonal_qr_lq_nonfinite_and_unrepresentable_values_use_existing_rout
         }],
     )
     .unwrap();
-    for operation in 0..4 {
-        DIAGONAL_MATERIALIZATIONS.set(0);
-        match operation {
-            0 => {
-                let _ = input.qr_compact(&[0], &[1]);
-            }
-            1 => {
-                let _ = input.qr_full(&[0], &[1]);
-            }
-            2 => {
-                let _ = input.lq_compact(&[0], &[1]);
-            }
-            _ => {
-                let _ = input.lq_full(&[0], &[1]);
-            }
-        }
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-    }
+    let widen = |tensor: &TensorMap<U1FusionRule, num_complex::Complex32>| {
+        let value = tensor.diagview().unwrap()[0].values[0];
+        Complex64::new(f64::from(value.re), f64::from(value.im))
+    };
+    DIAGONAL_MATERIALIZATIONS.set(0);
+    let Qr { q, r } = input.qr_compact(&[0], &[1]).unwrap();
+    assert_overflow_phase_magnitude(widen(&q), widen(&r), 4.0 * f64::from(f32::EPSILON));
+    let Lq { l, q } = input.lq_full(&[0], &[1]).unwrap();
+    assert_overflow_phase_magnitude(widen(&q), widen(&l), 4.0 * f64::from(f32::EPSILON));
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
 #[test]
@@ -775,12 +809,16 @@ fn compact_diagonal_polar_scales_complex_subnormals_before_normalizing() {
 }
 
 #[test]
-fn compact_diagonal_polar_nonfinite_and_unrepresentable_values_use_existing_route() {
+fn compact_diagonal_polar_refuses_nonfinite_and_is_direct_when_overflowing() {
+    // A nonfinite value is refused by the shared finite-input stage; a finite
+    // overflowing one is MAK's diagonal polar `W = sign_safe(a)`, `P = abs(a)`.
+    // No materialization and no dense SVD.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
     for value in [
         Complex64::new(f64::NAN, 0.0),
         Complex64::new(f64::INFINITY, 1.0),
+        Complex64::new(f64::MAX, f64::MAX),
     ] {
         let input: TensorMap<_, Complex64> = TensorMap::diagonal(
             &runtime,
@@ -791,32 +829,27 @@ fn compact_diagonal_polar_nonfinite_and_unrepresentable_values_use_existing_rout
             }],
         )
         .unwrap();
-        for left in [true, false] {
-            DIAGONAL_MATERIALIZATIONS.set(0);
-            if left {
-                let _ = input.left_polar(&[0], &[1]);
-            } else {
-                let _ = input.right_polar(&[0], &[1]);
-            }
-            assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-        }
-    }
-    let input: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
-        &runtime,
-        &leg,
-        [SectorSpectrum {
-            sector: U1Irrep::new(0),
-            values: vec![num_complex::Complex32::new(f32::MAX, f32::MAX)],
-        }],
-    )
-    .unwrap();
-    for left in [true, false] {
+        let first =
+            |tensor: &TensorMap<U1FusionRule, Complex64>| tensor.diagview().unwrap()[0].values[0];
         DIAGONAL_MATERIALIZATIONS.set(0);
-        if left {
-            let _ = input.left_polar(&[0], &[1]);
+        if value.re.is_finite() {
+            let LeftPolar { w, p } = input.left_polar(&[0], &[1]).unwrap();
+            assert_overflow_phase_magnitude(first(&w), first(&p), 4.0 * f64::EPSILON);
+            let RightPolar { p, wh } = input.right_polar(&[0], &[1]).unwrap();
+            assert_overflow_phase_magnitude(first(&wh), first(&p), 4.0 * f64::EPSILON);
         } else {
-            let _ = input.right_polar(&[0], &[1]);
+            for error in [
+                input.left_polar(&[0], &[1]).map(drop).unwrap_err(),
+                input.right_polar(&[0], &[1]).map(drop).unwrap_err(),
+            ] {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("polar input components must be finite"),
+                    "{error}"
+                );
+            }
         }
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     }
 }

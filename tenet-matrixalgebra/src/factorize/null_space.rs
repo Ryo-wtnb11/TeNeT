@@ -1,102 +1,67 @@
 use super::*;
 
-fn compact_singular_value<D: FactorScalar>(value: D) -> Option<f64> {
-    let magnitude = finite_compact_magnitude(value)?;
-    let rounded = D::from_real(magnitude).widen_complex().re;
-    (rounded.is_finite() && (magnitude == 0.0 || rounded > 0.0)).then_some(rounded)
-}
-
-fn compact_null_sector<D: FactorScalar>(values: &[D], side: FactorSide) -> Option<(usize, Vec<D>)> {
+/// Null-space coordinates of one finite diagonal sector, by the dense
+/// route's numerical-rank rule applied to the singular values `|a_i|`
+/// directly.
+///
+/// The dense route keeps singular values above
+/// `epsilon * max(rows, cols) * sigma_max` and spans the null space with the
+/// remaining singular vectors in descending singular-value order. On a
+/// diagonal those vectors are unit vectors, so the sector's null basis is
+/// `e_i` for each `|a_i|` at or below the tolerance, in descending `|a_i|`
+/// (stable).
+fn compact_null_sector<D: FactorScalar>(values: &[D], side: FactorSide) -> (usize, Vec<D>) {
     let k = values.len();
-    let (sigma_max, nullity) =
-        values
-            .iter()
-            .copied()
-            .try_fold((0.0_f64, 0_usize), |(largest, zeros), value| {
-                compact_singular_value(value).map(|magnitude| {
-                    (
-                        largest.max(magnitude),
-                        zeros + usize::from(magnitude == 0.0),
-                    )
-                })
-            })?;
-    let cutoff = D::epsilon() * k as f64 * sigma_max;
-    let margin = cutoff.max(D::epsilon().sqrt() * sigma_max);
-    if !margin.is_finite()
-        || (sigma_max > 0.0 && (margin == 0.0 || sigma_max < D::safe_minimum()))
-        || values.iter().copied().any(|value| {
-            compact_singular_value(value)
-                .is_none_or(|magnitude| magnitude > 0.0 && magnitude <= margin)
+    let sigma: Vec<f64> = values
+        .iter()
+        .map(|&value| {
+            D::from_real(value.widen_complex().norm())
+                .widen_complex()
+                .re
         })
-    {
-        return None;
-    }
+        .collect();
+    let sigma_max = sigma.iter().copied().fold(0.0_f64, f64::max);
+    let tolerance = D::epsilon() * k as f64 * sigma_max;
+    let mut null: Vec<usize> = (0..k).filter(|&index| sigma[index] <= tolerance).collect();
+    null.sort_by(|&a, &b| sigma[b].total_cmp(&sigma[a]));
+    let nullity = null.len();
     let mut coordinates = vec![D::zero(); k * nullity];
-    let mut column = 0;
-    for (index, &value) in values.iter().enumerate() {
-        if compact_singular_value(value) != Some(0.0) {
-            continue;
-        }
+    for (column, &index) in null.iter().enumerate() {
         match side {
             FactorSide::Left => coordinates[index + column * k] = D::from_real(1.0),
             FactorSide::Right => coordinates[column + index * nullity] = D::from_real(1.0),
         }
-        column += 1;
     }
-    Some((nullity, coordinates))
+    (nullity, coordinates)
 }
 
-/// Outcome of the compact-diagonal null kernel; each mode's public entry maps
-/// the declines onto its own fallback contract.
-enum DiagonalNull<R, D, E> {
-    Direct(BoundDynFactor<R, D>),
-    /// The spectrum does not cover the aligned regions.
-    NotDiagonal,
-    /// A sector declined the closed form after the coupled dimensions were
-    /// queried; the query result is handed to the solver path.
-    Declined(Result<BTreeMap<SectorId, usize>, E>),
-}
-
-/// Coordinate kernels of an admitted compact diagonal. A sector with any
-/// positive magnitude near the rank cutoff stays on the solver path; the
-/// margin is conservative, not a provider-specific singular-value bound.
+/// Null space of a compact diagonal, published through `authority`.
 fn null_diagonal<A, R, D>(
     authority: &A,
-    space: &DynamicFusionMapSpace,
-    regions: &[CoupledSectorRegion],
+    space: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
     side: FactorSide,
-) -> Result<DiagonalNull<R, D, A::Error>, A::Error>
+) -> Result<BoundDynFactor<R, D>, A::Error>
 where
     A: FactorSpaceAuthority<R>,
+    A::Error: From<OperationError>,
     D: FactorScalar,
 {
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != regions.len() || spectrum.len() != regions.len() {
-        return Ok(DiagonalNull::NotDiagonal);
-    }
-    let mut null_dimensions = match authority.coupled_dimensions(match side {
-        FactorSide::Left => space.homspace().codomain(),
-        FactorSide::Right => space.homspace().domain(),
-    }) {
-        Ok(dimensions) => dimensions,
-        Err(error) => return Ok(DiagonalNull::Declined(Err(error))),
-    };
+    let bond = diagonal_bond(authority, space, spectrum, FactorFamily::Null)?;
+    let homspace = bond.space().space().homspace();
+    let mut null_dimensions = authority.coupled_dimensions(match side {
+        FactorSide::Left => homspace.codomain(),
+        FactorSide::Right => homspace.domain(),
+    })?;
     let mut pairs = Vec::new();
-    for region in regions {
+    for region in bond.iter() {
         let k = region.rows();
-        let Some(entry) = by_sector.get(&region.coupled()) else {
-            return Ok(DiagonalNull::Declined(Ok(null_dimensions)));
-        };
-        if !region.has_aligned_diagonal() || k != region.cols() || entry.values.len() != k {
-            return Ok(DiagonalNull::Declined(Ok(null_dimensions)));
-        }
-        let Some((nullity, coordinates)) = compact_null_sector(&entry.values, side) else {
-            return Ok(DiagonalNull::Declined(Ok(null_dimensions)));
-        };
+        let (nullity, coordinates) = compact_null_sector(&bond.entry(region).values, side);
         if nullity == 0 {
+            null_dimensions.remove(&region.coupled());
             continue;
         }
+        null_dimensions.insert(region.coupled(), nullity);
         let (left_data, right_data) = match side {
             FactorSide::Left => (coordinates, Vec::new()),
             FactorSide::Right => (Vec::new(), coordinates),
@@ -110,132 +75,118 @@ where
             right_leading: nullity,
         });
     }
-    // The dimensions change only once every sector is admitted: a decline
-    // hands the solver path the queried dimensions unmodified.
-    let mut kept = pairs.iter().peekable();
-    for region in regions {
-        match kept.next_if(|pair| pair.sector == region.coupled()) {
-            Some(pair) => null_dimensions.insert(pair.sector, pair.kept),
-            None => null_dimensions.remove(&region.coupled()),
-        };
-    }
-    Ok(DiagonalNull::Direct(publish_one_sided_factor(
+    publish_one_sided_factor(
         authority,
-        space.homspace(),
-        regions,
+        homspace,
+        &bond.regions,
         &mut pairs,
         &null_dimensions,
         side,
         FactorPlacement::Direct,
-    )?))
-}
-
-fn null_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-    side: FactorSide,
-) -> Result<Option<BoundDynFactor<R, D>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let space = authority.space();
-    let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
-        return Ok(None);
-    };
-    match null_diagonal(
-        &MfAuthority(authority),
-        space,
-        regions.as_ref(),
-        spectrum,
-        side,
-    )? {
-        DiagonalNull::Direct(factor) => Ok(Some(factor)),
-        DiagonalNull::NotDiagonal | DiagonalNull::Declined(Ok(_)) => Ok(None),
-        DiagonalNull::Declined(Err(error)) => Err(error),
-    }
-}
-
-pub type CheckedNullDimensions<E> =
-    Result<BTreeMap<SectorId, usize>, CheckedGenericFactorPlanError<E>>;
-
-#[doc(hidden)]
-pub enum CheckedDiagonalNullFactor<R, D, E> {
-    Direct(BoundDynFactor<R, D>),
-    Fallback(Option<CheckedNullDimensions<E>>),
-}
-
-fn null_diagonal_dyn_checked_generic<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-    side: FactorSide,
-) -> Result<CheckedDiagonalNullFactor<R, D, R::Error>, CheckedGenericFactorPlanError<R::Error>>
-where
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    let space = authority.space();
-    let Ok(Some(regions)) = checked_sector_regions(space.structure(), space.nout()) else {
-        return Ok(CheckedDiagonalNullFactor::Fallback(None));
-    };
-    let checked = CheckedAuthority(authority.provider_arc());
-    Ok(
-        match null_diagonal(&checked, space, regions.as_ref(), spectrum, side)? {
-            DiagonalNull::Direct(factor) => CheckedDiagonalNullFactor::Direct(factor),
-            DiagonalNull::NotDiagonal => CheckedDiagonalNullFactor::Fallback(None),
-            DiagonalNull::Declined(dimensions) => {
-                CheckedDiagonalNullFactor::Fallback(Some(dimensions))
-            }
-        },
     )
 }
 
-#[doc(hidden)]
-pub fn left_null_diagonal_dyn_checked_generic<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<CheckedDiagonalNullFactor<R, D, R::Error>, CheckedGenericFactorPlanError<R::Error>>
-where
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    null_diagonal_dyn_checked_generic(authority, spectrum, FactorSide::Left)
-}
-
-#[doc(hidden)]
-pub fn right_null_diagonal_dyn_checked_generic<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<CheckedDiagonalNullFactor<R, D, R::Error>, CheckedGenericFactorPlanError<R::Error>>
-where
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    null_diagonal_dyn_checked_generic(authority, spectrum, FactorSide::Right)
-}
-
+/// Multiplicity-free left null space of a compact diagonal; see
+/// [`compact_null_sector`].
 #[doc(hidden)]
 pub fn left_null_diagonal_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<BoundDynFactor<R, D>>, OperationError>
+) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    null_diagonal_dyn(authority, spectrum, FactorSide::Left)
+    null_diagonal(
+        &MfAuthority(authority),
+        authority,
+        spectrum,
+        FactorSide::Left,
+    )
 }
 
+/// Multiplicity-free right null space of a compact diagonal.
 #[doc(hidden)]
 pub fn right_null_diagonal_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Result<Option<BoundDynFactor<R, D>>, OperationError>
+) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    null_diagonal_dyn(authority, spectrum, FactorSide::Right)
+    null_diagonal(
+        &MfAuthority(authority),
+        authority,
+        spectrum,
+        FactorSide::Right,
+    )
+}
+
+fn null_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+    side: FactorSide,
+) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    factor_from_source(
+        lease,
+        source,
+        |space, spectrum| {
+            null_diagonal(
+                &CheckedAuthority(space.provider_arc()),
+                space,
+                spectrum,
+                side,
+            )
+        },
+        |dense, input| {
+            null_dense(
+                dense,
+                &CheckedAuthority(input.space().provider_arc()),
+                input,
+                side,
+            )
+        },
+    )
+    .map(|(factor, _)| factor)
+}
+
+/// Checked numerical left null space of `source`. All SVDs and completions
+/// of a dense input are staged before the data-dependent bond is admitted.
+#[doc(hidden)]
+pub fn left_null_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    null_checked_generic(lease, source, FactorSide::Left)
+}
+
+/// Checked numerical right null space of `source`; see
+/// [`left_null_checked_generic`].
+#[doc(hidden)]
+pub fn right_null_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    null_checked_generic(lease, source, FactorSide::Right)
 }
 
 #[cfg(test)]
@@ -268,13 +219,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    null_dense(
-        dense,
-        &MfAuthority(input.space()),
-        input,
-        FactorSide::Left,
-        None,
-    )
+    null_dense(dense, &MfAuthority(input.space()), input, FactorSide::Left)
 }
 
 #[cfg(test)]
@@ -307,13 +252,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    null_dense(
-        dense,
-        &MfAuthority(input.space()),
-        input,
-        FactorSide::Right,
-        None,
-    )
+    null_dense(dense, &MfAuthority(input.space()), input, FactorSide::Right)
 }
 
 #[cfg(test)]
@@ -331,26 +270,11 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    left_null_dyn_checked_generic_with_dimensions(dense, input, None)
-}
-
-#[doc(hidden)]
-pub fn left_null_dyn_checked_generic_with_dimensions<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    dimensions: Option<CheckedNullDimensions<R::Error>>,
-) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
     null_dense(
         dense,
         &CheckedAuthority(input.space().provider_arc()),
         input,
         FactorSide::Left,
-        dimensions,
     )
 }
 
@@ -366,38 +290,21 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    right_null_dyn_checked_generic_with_dimensions(dense, input, None)
-}
-
-#[doc(hidden)]
-pub fn right_null_dyn_checked_generic_with_dimensions<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    dimensions: Option<CheckedNullDimensions<R::Error>>,
-) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
     null_dense(
         dense,
         &CheckedAuthority(input.space().provider_arc()),
         input,
         FactorSide::Right,
-        dimensions,
     )
 }
 
 /// Numerical null space of every coupled sector of `input`, published through
-/// `authority`. `dimensions` is a coupled-dimension query the caller already
-/// ran (the checked compact-diagonal decline); `None` queries here.
+/// `authority`.
 fn null_dense<A, E, R, D>(
     dense: &mut E,
     authority: &A,
     input: &BoundDynamicTensorRef<'_, R, D>,
     side: FactorSide,
-    dimensions: Option<Result<BTreeMap<SectorId, usize>, A::Error>>,
 ) -> Result<BoundDynFactor<R, D>, A::Error>
 where
     A: FactorSpaceAuthority<R>,
@@ -407,13 +314,10 @@ where
     let space = input.space().space();
     let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())?;
     // A sector only on the null side has no tensor block but is entirely null.
-    let mut null_dimensions = match dimensions {
-        Some(dimensions) => dimensions?,
-        None => authority.coupled_dimensions(match side {
-            FactorSide::Left => space.homspace().codomain(),
-            FactorSide::Right => space.homspace().domain(),
-        })?,
-    };
+    let mut null_dimensions = authority.coupled_dimensions(match side {
+        FactorSide::Left => space.homspace().codomain(),
+        FactorSide::Right => space.homspace().domain(),
+    })?;
     let mut pairs = Vec::new();
     in_linalg_scope(dense, |dense| {
         for index in 0..matrices.len() {

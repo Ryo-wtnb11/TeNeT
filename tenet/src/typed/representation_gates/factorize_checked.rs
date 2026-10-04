@@ -45,30 +45,26 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(solver_calls.total(), 0);
 
+    // A spectrum that does not cover the bond is misuse: a typed error.
     let stored = real.spectrum().unwrap();
+    let values_of = |spectrum| {
+        tenet_matrixalgebra::seam::svd_vals_checked_generic(
+            &mut tenet_dense::DefaultDenseExecutor::new(),
+            tenet_matrixalgebra::seam::FactorSource::Diagonal {
+                space: &owned(&real).space,
+                spectrum,
+            },
+        )
+    };
     let mut missing = stored.to_vec();
     missing.pop();
-    assert!(tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(
-        &owned(&real).space,
-        &missing
-    )
-    .unwrap()
-    .is_none());
+    assert!(values_of(&missing).is_err());
     let mut duplicate = stored.to_vec();
     duplicate[1].sector = duplicate[0].sector;
-    assert!(tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(
-        &owned(&real).space,
-        &duplicate
-    )
-    .unwrap()
-    .is_none());
+    assert!(values_of(&duplicate).is_err());
     let mut short = stored.to_vec();
     short[0].values.pop();
-    assert!(
-        tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(&owned(&real).space, &short)
-            .unwrap()
-            .is_none()
-    );
+    assert!(values_of(&short).is_err());
 
     let complex: TensorMap<_, Complex64> = TensorMap::diagonal(
         &runtime,
@@ -339,20 +335,34 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
     duplicate[1].sector = duplicate[0].sector;
     let mut short = spectrum.clone();
     short[0].values.pop();
+    // A spectrum that does not cover the bond is misuse: a typed error, not a
+    // dense fallback (MAK asserts the sizes).
+    let diagonal = |spectrum| tenet_matrixalgebra::seam::FactorSource::Diagonal {
+        space: source,
+        spectrum,
+    };
+    let misuse = |error: &tenet_matrixalgebra::seam::CheckedGenericFactorPlanError<_>| {
+        matches!(
+            error,
+            tenet_matrixalgebra::seam::CheckedGenericFactorPlanError::Operation(
+                tenet_tensors::OperationError::InvalidArgument { .. }
+            )
+        )
+    };
     for malformed in [&missing, &duplicate, &short] {
-        assert!(
-            tenet_matrixalgebra::seam::svd_compact_diagonal_factors_dyn_checked_generic(
-                source, malformed
+        let mut dense = tenet_dense::DefaultDenseExecutor::new();
+        assert!(misuse(
+            &tenet_matrixalgebra::seam::svd_compact_checked_generic(
+                &mut dense,
+                diagonal(malformed)
             )
+            .err()
             .unwrap()
-            .is_none()
-        );
-        assert!(matches!(
-            tenet_matrixalgebra::seam::svd_full_diagonal_factors_dyn_checked_generic(
-                source, malformed
-            )
-            .unwrap(),
-            tenet_matrixalgebra::seam::CheckedDiagonalFullSvdFactors::NotAdmitted
+        ));
+        assert!(misuse(
+            &tenet_matrixalgebra::seam::svd_full_checked_generic(&mut dense, diagonal(malformed))
+                .err()
+                .unwrap()
         ));
     }
 }
@@ -649,13 +659,23 @@ fn checked_compact_diagonal_svd_vals_rounds_at_payload_precision() {
             }],
         )
         .unwrap();
+        // A nonfinite value is refused by the shared finite-input stage; a
+        // finite one is MAK `svd_vals!(::DiagonalAlgorithm)`, `abs` then a
+        // descending sort: `|0.75 MAX (1 + i)| = 1.06 MAX` overflows f32 to Inf.
         DIAGONAL_MATERIALIZATIONS.set(0);
-        let compact = input.svd_vals(&[0], &[1]);
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-        let dense = input.materialize().unwrap().svd_vals(&[0], &[1]);
-        assert_eq!(compact.is_err(), dense.is_err());
-        if let (Err(compact_error), Err(dense_error)) = (compact, dense) {
-            assert_eq!(compact_error.to_string(), dense_error.to_string());
+        let result = input.svd_vals(&[0], &[1]);
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        if value.re.is_finite() {
+            let values = result.unwrap().remove(0).values;
+            assert_eq!(values, [f64::INFINITY, 0.0]);
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("svd input components must be finite"),
+                "{error}"
+            );
         }
     }
 }

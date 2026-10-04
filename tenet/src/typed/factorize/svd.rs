@@ -15,27 +15,10 @@ where
                 "checked Generic svd_vals does not accept lazy adjoints".to_string(),
             )));
         };
-        let direct = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if is_diagonal_bond_space(body.space.space()) {
-                tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(&body.space, spectrum)
-                    .map_err(|error| {
-                        GenericTensorError::Plan(CheckedGenericPlanError::Operation(error))
-                    })?
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let raw = if let Some(raw) = direct {
-            raw
-        } else {
-            let mut dense = self.runtime.lease_dense();
-            let payload = body.materialized_dense_data();
-            let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-                .map_err(|error| GenericTensorError::Facade(error.into()))?;
-            tenet_matrixalgebra::seam::svd_vals_dyn_checked_generic(dense.dense(), &input)?
-        };
+        let raw = tenet_matrixalgebra::seam::svd_vals_checked_generic(
+            RuntimeDense(&self.runtime),
+            owned_factor_source(body).map_err(GenericTensorError::Facade)?,
+        )?;
         let provider = self.logical_space().provider();
         let mut decoded = raw
             .into_iter()
@@ -68,46 +51,11 @@ where
                 "checked Generic svd_full does not accept lazy adjoints".to_string(),
             )));
         };
-        let admission = if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            Some(
-                tenet_matrixalgebra::seam::svd_full_diagonal_factors_dyn_checked_generic(
-                    &body.space,
-                    spectrum,
-                )?,
-            )
-        } else {
-            None
-        };
-        let on_diagonal = matches!(
-            admission,
-            Some(tenet_matrixalgebra::seam::CheckedDiagonalFullSvdFactors::Direct(_))
-        );
-        let factors = match admission {
-            Some(tenet_matrixalgebra::seam::CheckedDiagonalFullSvdFactors::Direct(factors)) => {
-                factors
-            }
-            admission => {
-                let mut dense = self.runtime.lease_dense();
-                let payload = body.materialized_dense_data();
-                let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-                    .map_err(|error| GenericTensorError::Facade(error.into()))?;
-                match admission {
-                    Some(tenet_matrixalgebra::seam::CheckedDiagonalFullSvdFactors::Fallback(
-                        dimensions,
-                    )) => {
-                        tenet_matrixalgebra::seam::svd_full_factors_dyn_checked_generic_with_dimensions(
-                            dense.dense(),
-                            &input,
-                            Some(dimensions),
-                        )?
-                    }
-                    _ => tenet_matrixalgebra::seam::svd_full_factors_dyn_checked_generic(
-                        dense.dense(),
-                        &input,
-                    )?,
-                }
-            }
-        };
+        let (factors, route) = tenet_matrixalgebra::seam::svd_full_checked_generic(
+            RuntimeDense(&self.runtime),
+            owned_factor_source(body).map_err(GenericTensorError::Facade)?,
+        )?;
+        let on_diagonal = route == tenet_matrixalgebra::seam::FactorRoute::Diagonal;
         let (u, vh, mut spectrum, row_dimensions, col_dimensions) = factors.into_parts();
         if full_svd_compact_bond(&u, &vh, &spectrum) {
             let space = if on_diagonal {
@@ -152,41 +100,26 @@ where
                 "checked Generic svd_compact does not accept lazy adjoints".to_string(),
             )));
         };
-        if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if let Some((u, vh, mut singular_values)) =
-                tenet_matrixalgebra::seam::svd_compact_diagonal_factors_dyn_checked_generic(
-                    &body.space,
-                    spectrum,
-                )?
-            {
-                let s = diagonal_factor_on_source_checked(
-                    &self.runtime,
-                    &body.space,
-                    &mut singular_values,
-                    D::from_real,
-                )?;
-                return Ok(Svd {
-                    u: wrap_factor_on(&self.runtime, u),
-                    s,
-                    vh: wrap_factor_on(&self.runtime, vh),
-                });
-            }
-        }
-        let mut dense = self.runtime.lease_dense();
-        let payload = body.materialized_dense_data();
-        let input = BoundDynamicTensorRef::try_new(&body.space, &payload)
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let (u, vh, mut singular_values) =
-            tenet_matrixalgebra::seam::svd_compact_factors_with_spectrum_dyn_checked_generic(
-                dense.dense(),
-                &input,
+        let ((u, vh, mut singular_values), route) =
+            tenet_matrixalgebra::seam::svd_compact_checked_generic(
+                RuntimeDense(&self.runtime),
+                owned_factor_source(body).map_err(GenericTensorError::Facade)?,
             )?;
-        let s = diagonal_factor_on_checked(
-            &self.runtime,
-            Arc::clone(input.space().provider_arc()),
-            &mut singular_values,
-            D::from_real,
-        )?;
+        let s = if route == tenet_matrixalgebra::seam::FactorRoute::Diagonal {
+            diagonal_factor_on_source_checked(
+                &self.runtime,
+                &body.space,
+                &mut singular_values,
+                D::from_real,
+            )?
+        } else {
+            diagonal_factor_on_checked(
+                &self.runtime,
+                Arc::clone(body.space.provider_arc()),
+                &mut singular_values,
+                D::from_real,
+            )?
+        };
         Ok(Svd {
             u: wrap_factor_on(&self.runtime, u),
             s,
@@ -264,10 +197,10 @@ where
         let compact = match &self.repr {
             TypedTensorRepr::Owned(body) => match body.data.as_ref() {
                 TypedData::Diagonal(spectrum) => {
-                    tenet_matrixalgebra::seam::svd_compact_diagonal_factors_dyn(
+                    Some(tenet_matrixalgebra::seam::svd_compact_diagonal_factors_dyn(
                         &body.space,
                         spectrum,
-                    )?
+                    )?)
                 }
                 TypedData::Dense(_) => None,
             },
@@ -326,18 +259,16 @@ where
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
                 // A diagonal input has square sectors, so compact and full
                 // factor spaces coincide, including their nondual bond W.
-                if let Some((u, vh, mut spectrum)) =
+                let (u, vh, mut spectrum) =
                     tenet_matrixalgebra::seam::svd_compact_diagonal_factors_dyn(
                         &body.space,
                         spectrum,
-                    )?
-                {
-                    return Ok(Svd {
-                        u: self.wrap_bound_factor(u),
-                        s: self.diagonal_factor(&mut spectrum, D::from_real)?,
-                        vh: self.wrap_bound_factor(vh),
-                    });
-                }
+                    )?;
+                return Ok(Svd {
+                    u: self.wrap_bound_factor(u),
+                    s: self.diagonal_factor(&mut spectrum, D::from_real)?,
+                    vh: self.wrap_bound_factor(vh),
+                });
             }
         }
         let mut dense = self.runtime.lease_dense();
@@ -404,11 +335,11 @@ where
     {
         if let TypedTensorRepr::Owned(body) = &self.repr {
             if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-                if let Some(raw) =
-                    tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(&body.space, spectrum)?
-                {
-                    return self.decode_spectrum(raw);
-                }
+                let raw = tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(
+                    &body.space,
+                    spectrum,
+                )?;
+                return self.decode_spectrum(raw);
             }
         }
         let mut dense = self.runtime.lease_dense();

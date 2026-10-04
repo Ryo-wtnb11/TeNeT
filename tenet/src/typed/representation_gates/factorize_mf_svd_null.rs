@@ -290,7 +290,7 @@ fn compact_diagonal_null_su2_sectors_use_reduced_coordinate_basis() {
 }
 
 #[test]
-fn compact_diagonal_null_and_cutoff_fallback_cover_all_scalars() {
+fn compact_diagonal_null_and_cutoff_cover_all_scalars() {
     let calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .with_dense_executor(Box::new(polar_spy(&calls)))
@@ -349,13 +349,11 @@ fn compact_diagonal_null_and_cutoff_fallback_cover_all_scalars() {
             assert!(full_left.domain()[0].sectors().unwrap().is_empty());
             assert!(full_right.codomain()[0].sectors().unwrap().is_empty());
 
+            // The dense route's rank cutoff `eps * max(rows, cols) * sigma_max`
+            // is applied to `|a_i|` directly: at or below it is null.
             let cutoff = ($eps as f64) * 2.0;
             let small_leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(sector, 2)]).unwrap();
-            for (small, expected_len) in [
-                (0.5 * cutoff, Some(2)),
-                (cutoff, None),
-                (2.0 * cutoff, Some(0)),
-            ] {
+            for (small, expected_len) in [(0.5 * cutoff, 2), (cutoff, 2), (2.0 * cutoff, 0)] {
                 let near: TensorMap<_, $scalar> = TensorMap::diagonal(
                     &near_runtime,
                     &small_leg,
@@ -368,15 +366,14 @@ fn compact_diagonal_null_and_cutoff_fallback_cover_all_scalars() {
                 DIAGONAL_MATERIALIZATIONS.set(0);
                 let left = near.left_null(&[0], &[1]).unwrap();
                 let right = near.right_null(&[0], &[1]).unwrap();
-                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 2);
-                if let Some(expected_len) = expected_len {
-                    assert_eq!(left.dense_data().unwrap().len(), expected_len);
-                    assert_eq!(right.dense_data().unwrap().len(), expected_len);
-                } else {
-                    assert_eq!(left.codomain(), near.codomain());
-                    assert_eq!(right.domain(), near.domain());
-                    assert!(left.dense_data().unwrap().len() <= 2);
-                    assert!(right.dense_data().unwrap().len() <= 2);
+                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+                assert_eq!(left.dense_data().unwrap().len(), expected_len);
+                assert_eq!(right.dense_data().unwrap().len(), expected_len);
+                if expected_len != 0 {
+                    // The null direction is the unit vector of the small value.
+                    let unit = [($convert)(0.0), ($convert)(1.0)];
+                    assert_eq!(left.dense_data().unwrap(), unit);
+                    assert_eq!(right.dense_data().unwrap(), unit);
                 }
             }
         }};
@@ -403,9 +400,16 @@ fn compact_diagonal_null_and_cutoff_fallback_cover_all_scalars() {
         }],
     )
     .unwrap();
+    // A subnormal is above its own `eps * sigma_max` cutoff, so the sector has
+    // full rank; read directly, with no materialization.
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let _ = tiny.left_null(&[0], &[1]);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    assert!(tiny
+        .left_null(&[0], &[1])
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .is_empty());
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
     let unrepresentable: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
         &near_runtime,
@@ -416,9 +420,12 @@ fn compact_diagonal_null_and_cutoff_fallback_cover_all_scalars() {
         }],
     )
     .unwrap();
+    // `|MAX (1 + i)|` overflows f32 to Inf, so `sigma_max` and the cutoff are
+    // Inf and no value is above it, as on the dense route: the sector is null.
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let _ = unrepresentable.left_null(&[0], &[1]);
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    let null = unrepresentable.left_null(&[0], &[1]).unwrap();
+    assert_eq!(null.domain()[0].degeneracy(&sector).unwrap(), 1);
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
 #[test]
@@ -490,7 +497,7 @@ fn compact_diagonal_null_preserves_dual_space_and_lazy_adjoint_semantics() {
 }
 
 #[test]
-fn compact_diagonal_null_product_sectors_roles_and_nonfinite_fallback() {
+fn compact_diagonal_null_product_sectors_roles_and_nonfinite_refusal() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule.product(FermionParityFusionRule));
     let even = product_sector(U1Irrep::new(0), Z2Irrep::EVEN);
@@ -560,9 +567,17 @@ fn compact_diagonal_null_product_sectors_roles_and_nonfinite_fallback() {
         ],
     )
     .unwrap();
+    // A NaN is refused by the shared finite-input stage, with no
+    // materialization.
     DIAGONAL_MATERIALIZATIONS.set(0);
-    assert!(nonfinite.left_null(&[0], &[1]).is_err());
-    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
+    let error = nonfinite.left_null(&[0], &[1]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("null input components must be finite"),
+        "{error}"
+    );
+    assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
 #[test]
@@ -635,7 +650,7 @@ fn compact_diagonal_svd_full_sorted_hand_oracle_all_scalars() {
 }
 
 #[test]
-fn compact_diagonal_svd_full_subnormal_phase_and_nonfinite_fallback() {
+fn compact_diagonal_svd_full_subnormal_phase_and_nonfinite_refusal() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
     macro_rules! check {
@@ -671,16 +686,27 @@ fn compact_diagonal_svd_full_subnormal_phase_and_nonfinite_fallback() {
                     .unwrap(),
                 &[$value]
             );
+            // A nonfinite value is refused by the shared finite-input stage;
+            // a finite overflowing one is MAK `svd_full!(::DiagonalAlgorithm)`,
+            // `S = abs(a) = Inf`. No materialization either way.
             for value in $bad {
                 let input = make(value);
-                let dense_result = input.materialize().unwrap().svd_full(&[0], &[1]);
                 DIAGONAL_MATERIALIZATIONS.set(0);
                 let result = input.svd_full(&[0], &[1]);
-                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-                match (result, dense_result) {
-                    (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
-                    (Ok(a), Ok(_)) => assert!(a.s.dense_data().is_ok()),
-                    _ => panic!("diagonal fallback changed dense acceptance"),
+                assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+                let widened = value.widen_complex();
+                if widened.re.is_finite() && widened.im.is_finite() {
+                    let out = result.unwrap();
+                    let singular = out.s.diagview().unwrap()[0].values[0].widen_complex().re;
+                    assert_eq!(singular, f64::INFINITY);
+                } else {
+                    let error = result.map(drop).unwrap_err();
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("svd input components must be finite"),
+                        "{error}"
+                    );
                 }
             }
         }};
@@ -877,7 +903,7 @@ fn compact_diagonal_svd_vals_rounds_at_payload_precision() {
 }
 
 #[test]
-fn compact_diagonal_svd_vals_retains_dense_rejection_edges() {
+fn compact_diagonal_svd_vals_refuses_nonfinite_and_overflows_at_range_edges() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
     for value in [
@@ -894,11 +920,23 @@ fn compact_diagonal_svd_vals_retains_dense_rejection_edges() {
             }],
         )
         .unwrap();
+        // A nonfinite value is refused by the shared finite-input stage; a
+        // finite one is MAK `svd_vals!(::DiagonalAlgorithm)`, `abs(a)`:
+        // `|0.75 MAX (1 + i)| = 1.06 MAX` overflows f32 to Inf.
         DIAGONAL_MATERIALIZATIONS.set(0);
-        let compact = input.svd_vals(&[0], &[1]);
-        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 1);
-        let dense = input.materialize().unwrap().svd_vals(&[0], &[1]);
-        assert_eq!(compact.is_err(), dense.is_err());
+        let result = input.svd_vals(&[0], &[1]);
+        assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+        if value.re.is_finite() {
+            assert_eq!(result.unwrap()[0].values[0], f64::INFINITY);
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("svd input components must be finite"),
+                "{error}"
+            );
+        }
     }
 }
 
@@ -1125,7 +1163,7 @@ fn compact_diagonal_svd_other_host_scalars_and_sectors() {
 }
 
 #[test]
-fn compact_diagonal_svd_preserves_dense_failure_at_c32_range_edge() {
+fn compact_diagonal_svd_at_c32_range_edge_overflows_like_mak() {
     for full in [false, true] {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 1)]).unwrap();
@@ -1139,17 +1177,21 @@ fn compact_diagonal_svd_preserves_dense_failure_at_c32_range_edge() {
             }],
         )
         .unwrap();
-        let dense_result = if full {
-            input.materialize().unwrap().svd_full(&[0], &[1])
-        } else {
-            input.materialize().unwrap().svd_compact(&[0], &[1])
-        };
-        let compact_result = if full {
+        // MAK `svd_full!(::DiagonalAlgorithm)`: `S = abs(a)` overflows f32
+        // to Inf (`1.06 MAX`), and `Vh` keeps the finite unit phase.
+        let Svd { s, vh, .. } = if full {
             input.svd_full(&[0], &[1])
         } else {
             input.svd_compact(&[0], &[1])
-        };
-        assert_eq!(compact_result.is_err(), dense_result.is_err());
+        }
+        .unwrap();
+        assert_eq!(
+            s.diagview().unwrap()[0].values,
+            [num_complex::Complex32::new(f32::INFINITY, 0.0)]
+        );
+        let phase = vh.dense_data().unwrap()[0];
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((phase - num_complex::Complex32::new(half, half)).norm() <= 4.0 * f32::EPSILON);
     }
 }
 

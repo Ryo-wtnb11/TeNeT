@@ -208,39 +208,30 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              decide_bond_truncation_generic_checked \
              diagonal_bond_bound_space_generic_checked diagonal_bond_bound_space_like \
              diagonal_bond_bound_space_on_source_checked_generic \
-             diagonal_bond_data eig_full_diagonal_dyn eig_full_diagonal_dyn_checked_generic \
-             eig_full_dyn eig_full_dyn_checked_generic eig_vals_diagonal_dyn eig_vals_dyn \
-             eig_vals_dyn_checked_generic eigh_full_diagonal_dyn \
-             eigh_full_diagonal_dyn_checked_generic eigh_full_dyn eigh_full_dyn_checked_generic \
-             eigh_vals_diagonal_dyn eigh_vals_dyn eigh_vals_dyn_checked_generic \
+             diagonal_bond_data eig_full_checked_generic eig_full_diagonal_dyn eig_full_dyn \
+             eig_vals_checked_generic eig_vals_diagonal_dyn eig_vals_dyn \
+             eigh_full_checked_generic eigh_full_diagonal_dyn eigh_full_dyn \
+             eigh_vals_checked_generic eigh_vals_diagonal_dyn eigh_vals_dyn \
              factor_isomorphic_checked_generic factor_output_space_checked_generic \
-             left_null_diagonal_dyn left_null_diagonal_dyn_checked_generic left_null_dyn \
-             left_null_dyn_checked_generic_with_dimensions left_polar_adjoint_parent_dyn \
-             left_polar_adjoint_parent_dyn_checked_generic left_polar_diagonal_spectra_dyn \
-             left_polar_diagonal_spectra_dyn_checked_generic left_polar_dyn \
-             left_polar_dyn_checked_generic lq_compact_dyn lq_compact_dyn_checked_generic \
-             lq_diagonal_dyn_checked_generic lq_full_dyn \
-             lq_full_dyn_checked_generic qr_compact_dyn qr_compact_dyn_checked_generic \
-             qr_diagonal_dyn qr_diagonal_dyn_checked_generic qr_full_dyn \
-             qr_full_dyn_checked_generic rectangular_diagonal_bond_tensor \
-             rectangular_diagonal_bond_tensor_generic_checked right_null_diagonal_dyn \
-             right_null_diagonal_dyn_checked_generic right_null_dyn \
-             right_null_dyn_checked_generic_with_dimensions right_polar_adjoint_parent_dyn \
-             right_polar_adjoint_parent_dyn_checked_generic right_polar_diagonal_spectra_dyn \
-             right_polar_diagonal_spectra_dyn_checked_generic right_polar_dyn \
-             right_polar_dyn_checked_generic scale_axis_by_spectrum_mapped \
-             svd_compact_adjoint_factors_dyn svd_compact_diagonal_factors_dyn \
-             svd_compact_diagonal_factors_dyn_checked_generic svd_compact_dyn_checked_generic \
-             svd_compact_factors_dyn \
-             svd_compact_factors_with_spectrum_dyn_checked_generic svd_full_adjoint_factors_dyn \
-             svd_full_diagonal_factors_dyn_checked_generic svd_full_factors_dyn \
-             svd_full_factors_dyn_checked_generic \
-             svd_full_factors_dyn_checked_generic_with_dimensions svd_vals_compact_diagonal_dyn \
-             svd_vals_dyn svd_vals_dyn_checked_generic \
-             validate_endomorphism_region_stacking validate_hermitian_regions \
-             BoundDynamicTensorRef CheckedCompactPolarFactors CheckedDiagonalFullSvdFactors \
-             CheckedDiagonalNullFactor CheckedFullSvdDimensions CheckedGenericFactorPlanError \
-             EigFullDyn EighFullDyn EIGH_FULL_STACKING SvdFactorsDyn SvdFullFactorsDyn \
+             left_null_checked_generic left_null_diagonal_dyn left_null_dyn \
+             left_polar_adjoint_parent_dyn left_polar_adjoint_parent_dyn_checked_generic \
+             left_polar_checked_generic left_polar_diagonal_spectra_dyn left_polar_dyn \
+             lq_compact_checked_generic lq_compact_dyn lq_diagonal_dyn lq_full_checked_generic \
+             lq_full_dyn \
+             qr_compact_checked_generic qr_compact_dyn qr_diagonal_dyn qr_full_checked_generic \
+             qr_full_dyn rectangular_diagonal_bond_tensor \
+             rectangular_diagonal_bond_tensor_generic_checked right_null_checked_generic \
+             right_null_diagonal_dyn right_null_dyn right_polar_adjoint_parent_dyn \
+             right_polar_adjoint_parent_dyn_checked_generic right_polar_checked_generic \
+             right_polar_diagonal_spectra_dyn right_polar_dyn scale_axis_by_spectrum_mapped \
+             svd_compact_adjoint_factors_dyn svd_compact_checked_generic \
+             svd_compact_diagonal_factors_dyn svd_compact_dyn_checked_generic \
+             svd_compact_factors_dyn svd_full_adjoint_factors_dyn svd_full_checked_generic \
+             svd_full_factors_dyn svd_vals_checked_generic svd_vals_compact_diagonal_dyn \
+             svd_vals_dyn validate_endomorphism_region_stacking validate_hermitian_regions \
+             BoundDynamicTensorRef CheckedGenericFactorPlanError EigFullDyn EighFullDyn \
+             EIGH_FULL_STACKING ExecutorLease FactorOutput FactorRoute FactorSource Routed \
+             SvdFactorsDyn SvdFullFactorsDyn \
              sector_matricization_diagnostic SectorMatricizationDiagnostic \
              exp_dyn exp_pade13_direct_into_dyn inv_direct_dyn inv_direct_into_dyn \
              pinv_adjoint_parent_dyn pinv_direct_into_dyn pinv_dyn solve_left_direct_dyn \

@@ -1,0 +1,141 @@
+//! Compact-diagonal input, factorized directly as MatrixAlgebraKit's
+//! `DiagonalAlgorithm` does (`src/implementations/{svd,qr,lq,eig,eigh}.jl`,
+//! v0.6.8, reached through TensorKit `src/factorizations/diagonal.jl`).
+//!
+//! Every spectrum takes the direct route. A nonfinite value is refused by the
+//! shared finite-input stage, as TeNeT's dense routes refuse it (#1986). Why
+//! no dense fallback: `DiagonalAlgorithm` has none.
+
+use std::ops::Deref;
+
+use super::*;
+
+/// The input bond of a compact diagonal, in a layout whose coupled-sector
+/// regions are aligned one-tree diagonals, with the spectrum keyed by sector.
+pub(super) struct DiagonalBond<'a, R, D> {
+    space: BondSpace<'a, R>,
+    pub(super) regions: Arc<[CoupledSectorRegion]>,
+    pub(super) by_sector: FxHashMap<SectorId, &'a SectorSpectrum<D>>,
+}
+
+enum BondSpace<'a, R> {
+    Input(&'a BoundDynamicFusionMapSpace<R>),
+    Normalized(BoundDynamicFusionMapSpace<R>),
+}
+
+impl<R, D> DiagonalBond<'_, R, D> {
+    /// The bond space the regions describe: the input itself, or its
+    /// canonical layout when the input's layout was normalized.
+    pub(super) fn space(&self) -> &BoundDynamicFusionMapSpace<R> {
+        match &self.space {
+            BondSpace::Input(space) => space,
+            BondSpace::Normalized(space) => space,
+        }
+    }
+
+    /// The spectrum entry of `region`, in region order.
+    pub(super) fn entry(&self, region: &CoupledSectorRegion) -> &SectorSpectrum<D> {
+        self.by_sector[&region.coupled()]
+    }
+}
+
+impl<R, D> Deref for DiagonalBond<'_, R, D> {
+    type Target = [CoupledSectorRegion];
+
+    fn deref(&self) -> &[CoupledSectorRegion] {
+        &self.regions
+    }
+}
+
+fn aligned_one_tree_regions(regions: &[CoupledSectorRegion]) -> bool {
+    regions.iter().all(|region| {
+        region.has_aligned_diagonal()
+            && region.row_trees().len() == 1
+            && region.col_trees().len() == 1
+    })
+}
+
+/// Admits a compact diagonal `spectrum` on `space`.
+///
+/// # Errors
+///
+/// - `space` is not a one-leg endomorphism `V <- V`, or `spectrum` does not
+///   cover its coupled sectors with the bond degeneracies. Diagonal storage
+///   exists only in that form, so either is misuse; MAK asserts
+///   `m == n && isdiag(A)` and checks the output sizes at the same stage.
+/// - The coupled-sector region error of an inconsistent structure.
+/// - A nonfinite value, from the shared finite-input stage
+///   ([`require_finite_factor_input`]).
+///
+/// A layout whose regions are not aligned one-tree diagonals (an expert
+/// layout) is a representation TensorKit has no counterpart for; it is
+/// re-derived in canonical layout through `authority`. The spectrum does not
+/// depend on layout, so this is representation conversion, not a solver
+/// fallback.
+pub(super) fn diagonal_bond<'a, A, R, D>(
+    authority: &A,
+    space: &'a BoundDynamicFusionMapSpace<R>,
+    spectrum: &'a [SectorSpectrum<D>],
+    family: FactorFamily,
+) -> Result<DiagonalBond<'a, R, D>, A::Error>
+where
+    A: FactorSpaceAuthority<R>,
+    A::Error: From<OperationError>,
+    D: FactorScalar,
+{
+    let raw = space.space();
+    let homspace = raw.homspace();
+    if raw.nout() != 1 || raw.nin() != 1 || homspace.codomain().legs() != homspace.domain().legs() {
+        return Err(OperationError::InvalidArgument {
+            message: "compact diagonal input must be a one-leg endomorphism V <- V",
+        }
+        .into());
+    }
+    let (space, regions) = match checked_sector_regions(raw.structure(), 1)? {
+        Some(regions) if aligned_one_tree_regions(&regions) => (BondSpace::Input(space), regions),
+        _ => {
+            let staged = authority.stage(homspace.clone())?;
+            let canonical = authority.commit(staged, |_| Ok(()))?;
+            let regions = checked_sector_regions(canonical.space().structure(), 1)?
+                .filter(|regions| aligned_one_tree_regions(regions))
+                .ok_or(OperationError::UnsupportedTensorContractScope {
+                    message: "canonical bond layout has no aligned coupled-sector diagonal",
+                })?;
+            (BondSpace::Normalized(canonical), regions)
+        }
+    };
+    let by_sector = aligned_diagonal_spectrum_by_sector(&regions, spectrum).ok_or(
+        OperationError::InvalidArgument {
+            message: "compact diagonal spectrum does not match its bond sectors and degeneracies",
+        },
+    )?;
+    require_finite_factor_input(
+        spectrum
+            .iter()
+            .flat_map(|entry| entry.values.iter().copied()),
+        family,
+    )?;
+    Ok(DiagonalBond {
+        space,
+        regions,
+        by_sector,
+    })
+}
+
+/// Phase and magnitude of one finite diagonal value, with unit phase at
+/// zero. Scaling before normalizing keeps complex subnormals on the unit
+/// circle; the magnitude overflows to `Inf` past the dtype's range, as MAK's
+/// `abs` does. Why not MAK's `s / abs(s)` for the phase: the two agree to
+/// within rounding, and the scaled form is TeNeT's established result.
+pub(super) fn diagonal_phase_magnitude<D: FactorScalar>(value: D) -> (D, D) {
+    let value = value.widen_complex();
+    let scale = value.re.abs().max(value.im.abs());
+    let (phase, magnitude) = if scale == 0.0 {
+        (Complex64::new(1.0, 0.0), 0.0)
+    } else {
+        let normalized = value / scale;
+        let norm = normalized.norm();
+        (normalized / norm, scale * norm)
+    };
+    (D::from_complex64(phase), D::from_real(magnitude))
+}

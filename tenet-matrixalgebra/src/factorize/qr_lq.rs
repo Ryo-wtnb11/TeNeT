@@ -1,70 +1,31 @@
 use super::*;
 
-/// Finite, dtype-representable phase and magnitude, with unit phase at zero.
-/// Scaling before normalization keeps complex subnormals on the unit circle.
-pub(super) fn diagonal_phase_magnitude<D: FactorScalar>(value: D) -> Option<(D, D)> {
-    let value = value.widen_complex();
-    if !value.re.is_finite() || !value.im.is_finite() {
-        return None;
-    }
-    let scale = value.re.abs().max(value.im.abs());
-    let (phase, magnitude) = if scale == 0.0 {
-        (Complex64::new(1.0, 0.0), 0.0)
-    } else {
-        let normalized = value / scale;
-        let norm = normalized.norm();
-        (normalized / norm, scale * norm)
-    };
-    if !magnitude.is_finite() {
-        return None;
-    }
-    let phase = D::from_complex64(phase);
-    let magnitude = D::from_real(magnitude);
-    let phase_check = phase.widen_complex();
-    let magnitude_check = magnitude.widen_complex();
-    if !phase_check.re.is_finite()
-        || !phase_check.im.is_finite()
-        || !magnitude_check.re.is_finite()
-        || !magnitude_check.im.is_finite()
-    {
-        return None;
-    }
-    Some((phase, magnitude))
-}
-
-/// QR spectra on the input bond `V <- V`, including its dual orientation.
-/// Full and compact QR coincide; LQ exchanges the phase/magnitude factors.
-/// Returns `None` when existing dense execution must decide the result.
-#[doc(hidden)]
-pub fn qr_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
+/// QR of a compact diagonal, MAK `_diagonal_qr!` with `positive = true`:
+/// phases (`q`, `sign_safe`) and magnitudes (`r`, `abs`), both on the input
+/// bond `V <- V`, its dual orientation included (TensorKit keeps `W = V`,
+/// `diagonal.jl` `initialize_output(qr_full!, …)`). Full and compact QR
+/// coincide; LQ exchanges the factors.
+fn qr_diagonal_spectra<A, R, D>(
+    authority: &A,
+    space: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Option<Qr<Vec<SectorSpectrum<D>>>>
+    family: FactorFamily,
+) -> Result<Qr<Vec<SectorSpectrum<D>>>, A::Error>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    A: FactorSpaceAuthority<R>,
+    A::Error: From<OperationError>,
     D: FactorScalar,
 {
-    let source = authority.space();
-    if source.nout() != 1
-        || source.nin() != 1
-        || source.homspace().codomain() != source.homspace().domain()
-    {
-        return None;
-    }
-    let regions = checked_sector_regions(source.structure(), source.nout()).ok()??;
-    validate_endomorphism_region_stacking(&regions, "diagonal QR requires aligned trees").ok()?;
-    let by_sector = aligned_diagonal_spectrum_by_sector(&regions, spectrum)?;
-    let mut q = Vec::with_capacity(regions.len());
-    let mut r = Vec::with_capacity(regions.len());
-    for region in regions.iter() {
-        let entry = by_sector.get(&region.coupled())?;
-        let mut phases = Vec::with_capacity(entry.values.len());
-        let mut magnitudes = Vec::with_capacity(entry.values.len());
-        for &value in &entry.values {
-            let (phase, magnitude) = diagonal_phase_magnitude(value)?;
-            phases.push(phase);
-            magnitudes.push(magnitude);
-        }
+    let bond = diagonal_bond(authority, space, spectrum, family)?;
+    let mut q = Vec::with_capacity(bond.len());
+    let mut r = Vec::with_capacity(bond.len());
+    for region in bond.iter() {
+        let entry = bond.entry(region);
+        let (phases, magnitudes) = entry
+            .values
+            .iter()
+            .map(|&value| diagonal_phase_magnitude(value))
+            .unzip();
         q.push(SectorSpectrum {
             sector: entry.sector,
             values: phases,
@@ -74,98 +35,197 @@ where
             values: magnitudes,
         });
     }
-    Some(Qr { q, r })
+    Ok(Qr { q, r })
 }
 
-/// Phases (`q`) and magnitudes (`r`) of an admitted checked compact diagonal
-/// `V <- V`,
-/// or `None` when dense execution must decide. Every QR/LQ factor of the
-/// diagonal lives on the input space itself, so no factor space is built.
+/// Multiplicity-free QR spectra of a compact diagonal; see
+/// [`qr_diagonal_spectra`].
 ///
-/// Why not a `FactorSpaceAuthority` step: reusing the admitted input space is
-/// the same, provider-free identity in both modes (the multiplicity-free
-/// `qr_diagonal_dyn` does the same), so there is no mode-dependent work to own.
-fn checked_diagonal_phase_magnitude<R, D>(
+/// # Errors
+///
+/// Misuse (not a `V <- V` diagonal) and the coupled-sector region error of an
+/// inconsistent structure. Why not decline to a dense route: TensorKit's
+/// diagonal QR has none, and declining would hide a structure error.
+#[doc(hidden)]
+pub fn qr_diagonal_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Option<Qr<Vec<SectorSpectrum<D>>>>
+) -> Result<Qr<Vec<SectorSpectrum<D>>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    qr_diagonal_spectra(
+        &MfAuthority(authority),
+        authority,
+        spectrum,
+        FactorFamily::Qr,
+    )
+}
+
+/// Multiplicity-free LQ spectra of a compact diagonal: `l` holds the
+/// magnitudes and `q` the phases; see [`qr_diagonal_spectra`].
+#[doc(hidden)]
+pub fn lq_diagonal_dyn<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+) -> Result<Lq<Vec<SectorSpectrum<D>>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    qr_diagonal_spectra(
+        &MfAuthority(authority),
+        authority,
+        spectrum,
+        FactorFamily::Lq,
+    )
+    .map(|Qr { q, r }| Lq { l: r, q })
+}
+
+fn qr_diagonal_outputs<R, D>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<D>],
+    family: FactorFamily,
+) -> Result<Qr<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    let source = authority.space();
-    if source.nout() != 1
-        || source.nin() != 1
-        || source.homspace().codomain() != source.homspace().domain()
-    {
-        return None;
-    }
-    let source_regions = checked_sector_regions(source.structure(), 1).ok()??;
-    // TensorKit's diagonal dispatch (`diagonal.jl:16-42`) keeps `W = V`, dual
-    // orientation included. Why not `compact_bond_leg` for a dual `V`: that is
-    // the dense route's fresh nondual `W = fuse(V)`, which the diagonal
-    // convention deliberately does not share.
-    let bond = &source.homspace().codomain().legs()[0];
-    if !bond.is_dual() && compact_bond_leg(&source_regions) != *bond {
-        return None;
-    }
-    let by_sector = aligned_diagonal_spectrum_by_sector(&source_regions, spectrum)?;
-    let mut phases = Vec::with_capacity(source_regions.len());
-    let mut magnitudes = Vec::with_capacity(source_regions.len());
-    for region in source_regions.iter() {
-        let entry = by_sector.get(&region.coupled())?;
-        if region.row_trees().len() != 1 || region.col_trees().len() != 1 {
-            return None;
-        }
-        let mut sector_phases = Vec::with_capacity(entry.values.len());
-        let mut sector_magnitudes = Vec::with_capacity(entry.values.len());
-        for &value in &entry.values {
-            let (phase, magnitude) = diagonal_phase_magnitude(value)?;
-            sector_phases.push(phase);
-            sector_magnitudes.push(magnitude);
-        }
-        phases.push(SectorSpectrum {
-            sector: entry.sector,
-            values: sector_phases,
-        });
-        magnitudes.push(SectorSpectrum {
-            sector: entry.sector,
-            values: sector_magnitudes,
-        });
-    }
-    Some(Qr {
-        q: phases,
-        r: magnitudes,
+    let Qr { q, r } = qr_diagonal_spectra(
+        &CheckedAuthority(space.provider_arc()),
+        space,
+        spectrum,
+        family,
+    )?;
+    let on_input = |values| FactorOutput::Diagonal {
+        space: space.clone(),
+        values,
+    };
+    Ok(Qr {
+        q: on_input(q),
+        r: on_input(r),
     })
 }
 
-/// Checked-Generic sibling of [`qr_diagonal_dyn`]: `q` holds the phases and
-/// `r` the magnitudes, both on the input bond; full and compact QR coincide.
-#[doc(hidden)]
-pub fn qr_diagonal_dyn_checked_generic<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Option<Qr<Vec<SectorSpectrum<D>>>>
+fn qr_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+    dense_qr: impl FnOnce(
+        &mut E,
+        &BoundDynamicTensorRef<'_, R, D>,
+    )
+        -> Result<Qr<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>,
+) -> Result<Qr<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
 where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    checked_diagonal_phase_magnitude(authority, spectrum)
+    factor_from_source(
+        lease,
+        source,
+        |space, spectrum| qr_diagonal_outputs(space, spectrum, FactorFamily::Qr),
+        |dense, input| {
+            dense_qr(dense, input).map(|Qr { q, r }| Qr {
+                q: FactorOutput::Dense(q),
+                r: FactorOutput::Dense(r),
+            })
+        },
+    )
+    .map(|(factors, _)| factors)
 }
 
-/// Checked-Generic diagonal LQ: `l` holds the magnitudes and `q` the phases,
-/// both on the input bond; full and compact LQ coincide.
-#[doc(hidden)]
-pub fn lq_diagonal_dyn_checked_generic<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Option<Lq<Vec<SectorSpectrum<D>>>>
+fn lq_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+    dense_lq: impl FnOnce(
+        &mut E,
+        &BoundDynamicTensorRef<'_, R, D>,
+    )
+        -> Result<Lq<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>,
+) -> Result<Lq<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
 where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    let Qr { q, r } = checked_diagonal_phase_magnitude(authority, spectrum)?;
-    Some(Lq { l: r, q })
+    factor_from_source(
+        lease,
+        source,
+        |space, spectrum| {
+            qr_diagonal_outputs(space, spectrum, FactorFamily::Lq).map(|Qr { q, r }| Lq { l: r, q })
+        },
+        |dense, input| {
+            dense_lq(dense, input).map(|Lq { l, q }| Lq {
+                l: FactorOutput::Dense(l),
+                q: FactorOutput::Dense(q),
+            })
+        },
+    )
+    .map(|(factors, _)| factors)
+}
+
+/// Checked full QR of `source`.
+#[doc(hidden)]
+pub fn qr_full_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<Qr<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    qr_checked_generic(lease, source, qr_full_dyn_checked_generic)
+}
+
+/// Checked compact QR of `source`.
+#[doc(hidden)]
+pub fn qr_compact_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<Qr<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    qr_checked_generic(lease, source, qr_compact_dyn_checked_generic)
+}
+
+/// Checked full LQ of `source`.
+#[doc(hidden)]
+pub fn lq_full_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<Lq<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    lq_checked_generic(lease, source, lq_full_dyn_checked_generic)
+}
+
+/// Checked compact LQ of `source`.
+#[doc(hidden)]
+pub fn lq_compact_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<Lq<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    lq_checked_generic(lease, source, lq_compact_dyn_checked_generic)
 }
 
 pub(super) fn full_qr_numerical_stage<E, D>(
@@ -985,7 +1045,7 @@ pub(super) fn compact_qr_outputs<D: FactorScalar>(
 /// through the checked staging boundary; dense QR itself performs no provider
 /// queries and therefore needs no Tenferro-specific capability.
 #[doc(hidden)]
-pub fn qr_compact_dyn_checked_generic<E, R, D>(
+pub(crate) fn qr_compact_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Qr<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>
@@ -1015,7 +1075,7 @@ where
 /// Checked-Generic compact LQ, implemented through the existing host
 /// adjoint-plus-QR boundary; no borrowed conjugated-dot capability is needed.
 #[doc(hidden)]
-pub fn lq_compact_dyn_checked_generic<E, R, D>(
+pub(crate) fn lq_compact_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Lq<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>
@@ -1052,7 +1112,7 @@ where
 
 /// Checked-Generic full QR, augmenting only sectors that require completion.
 #[doc(hidden)]
-pub fn qr_full_dyn_checked_generic<E, R, D>(
+pub(crate) fn qr_full_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Qr<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>
@@ -1096,7 +1156,7 @@ where
 
 /// Checked-Generic full LQ via the full QR of each sector's adjoint matrix.
 #[doc(hidden)]
-pub fn lq_full_dyn_checked_generic<E, R, D>(
+pub(crate) fn lq_full_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Lq<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>

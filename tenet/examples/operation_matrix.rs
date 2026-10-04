@@ -33,9 +33,9 @@ use tenet_core::{
 };
 use tenet_dense::strided_batch_runs;
 use tenet_matrixalgebra::seam::{
-    eig_full_dyn_checked_generic, lq_compact_dyn_checked_generic, lq_full_dyn_checked_generic,
-    qr_compact_dyn_checked_generic, qr_full_dyn_checked_generic, svd_compact_dyn_checked_generic,
-    CheckedGenericFactorPlanError,
+    eig_full_checked_generic, lq_compact_checked_generic, lq_full_checked_generic,
+    qr_compact_checked_generic, qr_full_checked_generic, svd_compact_dyn_checked_generic,
+    CheckedGenericFactorPlanError, EigFullDyn, FactorSource,
 };
 use tenet_matrixalgebra::BoundDynFactor;
 use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace};
@@ -1048,9 +1048,9 @@ fn run_layout_generic_qr(
     let ordered_input = BoundDynamicTensorRef::try_new(&ordered.space, &ordered.data)?;
     let reordered_input = BoundDynamicTensorRef::try_new(&reordered.space, &reordered.data)?;
     let mut preflight_dense = DefaultDenseExecutor::new();
-    let ordered_expected = qr_compact_dyn_checked_generic(&mut preflight_dense, &ordered_input)
+    let ordered_expected = qr_compact_dense(&mut preflight_dense, &ordered_input)
         .map_err(checked_compact_example_error)?;
-    let reordered_expected = qr_compact_dyn_checked_generic(&mut preflight_dense, &reordered_input)
+    let reordered_expected = qr_compact_dense(&mut preflight_dense, &reordered_input)
         .map_err(checked_compact_example_error)?;
     assert_layout_generic_factors_equal(&reordered_expected.q, &ordered_expected.q);
     assert_layout_generic_factors_equal(&reordered_expected.r, &ordered_expected.r);
@@ -1078,10 +1078,7 @@ fn run_layout_generic_qr(
             "first_after_setup",
             "warm_after_setup",
             min_time,
-            || {
-                qr_compact_dyn_checked_generic(&mut dense, input)
-                    .map_err(checked_compact_example_error)
-            },
+            || qr_compact_dense(&mut dense, input).map_err(checked_compact_example_error),
         )?;
         assert_layout_generic_qr_reconstructs(&left, &right);
     }
@@ -1360,8 +1357,7 @@ fn preflight_checked_compact_input<D: HarnessScalar>(
     sector_count: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut dense = DefaultDenseExecutor::new();
-    let qr =
-        qr_compact_dyn_checked_generic(&mut dense, input).map_err(checked_compact_example_error)?;
+    let qr = qr_compact_dense(&mut dense, input).map_err(checked_compact_example_error)?;
     assert_checked_pair_reconstructs(&qr.q, &qr.r, sector_count);
     assert_columns_orthonormal(&qr.q, sector_count);
     drop(qr);
@@ -1371,8 +1367,7 @@ fn preflight_checked_compact_input<D: HarnessScalar>(
     assert_columns_orthonormal(&svd.u, sector_count);
     assert_rows_orthonormal(&svd.vh, sector_count);
     drop(svd);
-    let lq =
-        lq_compact_dyn_checked_generic(&mut dense, input).map_err(checked_compact_example_error)?;
+    let lq = lq_compact_dense(&mut dense, input).map_err(checked_compact_example_error)?;
     assert_checked_pair_reconstructs(&lq.l, &lq.q, sector_count);
     assert_rows_orthonormal(&lq.q, sector_count);
     Ok(())
@@ -1385,13 +1380,13 @@ fn run_checked_compact_operation<D: HarnessScalar>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match operation {
         "qr" => drop(black_box(
-            qr_compact_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
+            qr_compact_dense(dense, input).map_err(checked_compact_example_error)?,
         )),
         "svd" => drop(black_box(
             svd_compact_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
         )),
         "lq" => drop(black_box(
-            lq_compact_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
+            lq_compact_dense(dense, input).map_err(checked_compact_example_error)?,
         )),
         _ => unreachable!("fixed checked compact operation table"),
     }
@@ -1475,10 +1470,7 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
             "first_after_setup",
             "warm_after_setup",
             min_time,
-            || {
-                qr_compact_dyn_checked_generic(&mut dense, &input)
-                    .map_err(checked_compact_example_error)
-            },
+            || qr_compact_dense(&mut dense, &input).map_err(checked_compact_example_error),
         )?;
         assert_checked_pair_reconstructs(&qr.q, &qr.r, sector_count);
         drop(qr);
@@ -1505,10 +1497,7 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
             "first_after_setup",
             "warm_after_setup",
             min_time,
-            || {
-                lq_compact_dyn_checked_generic(&mut dense, &input)
-                    .map_err(checked_compact_example_error)
-            },
+            || lq_compact_dense(&mut dense, &input).map_err(checked_compact_example_error),
         )?;
         assert_checked_pair_reconstructs(&lq.l, &lq.q, sector_count);
         drop(lq);
@@ -2168,13 +2157,13 @@ fn run_checked_eig<D: HarnessScalar<Eig = Complex64>>(
             BoundDynamicTensorRef::try_new(&changed_control.space, &changed_control.data)?;
         let mut preflight = DefaultDenseExecutor::new();
         for selected in [&input, &changed_input] {
-            let eig = eig_full_dyn_checked_generic(&mut preflight, selected)
-                .map_err(checked_compact_example_error)?;
+            let eig =
+                eig_full_dense(&mut preflight, selected).map_err(checked_compact_example_error)?;
             assert_checked_eig(selected, &eig, sector_count);
             drop(eig);
         }
         for selected in [&control_input, &changed_control_input] {
-            let qr = qr_compact_dyn_checked_generic(&mut preflight, selected)
+            let qr = qr_compact_dense(&mut preflight, selected)
                 .map_err(checked_compact_example_error)?;
             assert_checked_pair_reconstructs(&qr.q, &qr.r, sector_count);
             drop(qr);
@@ -2201,12 +2190,12 @@ fn run_checked_eig<D: HarnessScalar<Eig = Complex64>>(
                 || {
                     if is_eig {
                         drop(black_box(
-                            eig_full_dyn_checked_generic(&mut dense, &input)
+                            eig_full_dense(&mut dense, &input)
                                 .map_err(checked_compact_example_error)?,
                         ));
                     } else {
                         drop(black_box(
-                            qr_compact_dyn_checked_generic(&mut dense, fixed)
+                            qr_compact_dense(&mut dense, fixed)
                                 .map_err(checked_compact_example_error)?,
                         ));
                     }
@@ -2227,12 +2216,12 @@ fn run_checked_eig<D: HarnessScalar<Eig = Complex64>>(
                     changed = !changed;
                     if is_eig {
                         drop(black_box(
-                            eig_full_dyn_checked_generic(&mut dense, selected)
+                            eig_full_dense(&mut dense, selected)
                                 .map_err(checked_compact_example_error)?,
                         ));
                     } else {
                         drop(black_box(
-                            qr_compact_dyn_checked_generic(&mut dense, selected)
+                            qr_compact_dense(&mut dense, selected)
                                 .map_err(checked_compact_example_error)?,
                         ));
                     }
@@ -2406,11 +2395,11 @@ fn run_checked_multitree_eig<D: HarnessScalar<Eig = Complex64>>(
         for (selected, selected_degeneracy) in
             [(&input, degeneracy), (&changed_input, degeneracy + 1)]
         {
-            let eig = eig_full_dyn_checked_generic(&mut preflight, selected)
-                .map_err(checked_compact_example_error)?;
+            let eig =
+                eig_full_dense(&mut preflight, selected).map_err(checked_compact_example_error)?;
             assert_multitree_eig(selected, &eig, selected_degeneracy, sector_count);
             drop(eig);
-            let qr = qr_compact_dyn_checked_generic(&mut preflight, selected)
+            let qr = qr_compact_dense(&mut preflight, selected)
                 .map_err(checked_compact_example_error)?;
             assert_multitree_qr(selected, &qr.q, &qr.r, selected_degeneracy, sector_count);
             drop(qr);
@@ -2435,12 +2424,12 @@ fn run_checked_multitree_eig<D: HarnessScalar<Eig = Complex64>>(
                 || {
                     if is_eig {
                         drop(black_box(
-                            eig_full_dyn_checked_generic(&mut dense, &input)
+                            eig_full_dense(&mut dense, &input)
                                 .map_err(checked_compact_example_error)?,
                         ));
                     } else {
                         drop(black_box(
-                            qr_compact_dyn_checked_generic(&mut dense, &input)
+                            qr_compact_dense(&mut dense, &input)
                                 .map_err(checked_compact_example_error)?,
                         ));
                     }
@@ -2461,12 +2450,12 @@ fn run_checked_multitree_eig<D: HarnessScalar<Eig = Complex64>>(
                     changed = !changed;
                     if is_eig {
                         drop(black_box(
-                            eig_full_dyn_checked_generic(&mut dense, selected)
+                            eig_full_dense(&mut dense, selected)
                                 .map_err(checked_compact_example_error)?,
                         ));
                     } else {
                         drop(black_box(
-                            qr_compact_dyn_checked_generic(&mut dense, selected)
+                            qr_compact_dense(&mut dense, selected)
                                 .map_err(checked_compact_example_error)?,
                         ));
                     }
@@ -2551,11 +2540,11 @@ fn run_checked_full_qr_lq<D: HarnessScalar>(
 ) -> Result<(), Error> {
     if operation == "qr" {
         drop(black_box(
-            qr_full_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
+            qr_full_dense(dense, input).map_err(checked_compact_example_error)?,
         ));
     } else {
         drop(black_box(
-            lq_full_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
+            lq_full_dense(dense, input).map_err(checked_compact_example_error)?,
         ));
     }
     Ok(())
@@ -2596,11 +2585,11 @@ fn run_full_qr_fixture<D: HarnessScalar>(
         let changed_original = changed_fixture.data.clone();
         let mut preflight_dense = DefaultDenseExecutor::new();
         for selected in [&input, &changed] {
-            let qr = qr_full_dyn_checked_generic(&mut preflight_dense, selected)
+            let qr = qr_full_dense(&mut preflight_dense, selected)
                 .map_err(checked_compact_example_error)?;
             assert_full_qr_lq(selected, &qr.q, &qr.r, "qr", sector_count);
             drop(qr);
-            let lq = lq_full_dyn_checked_generic(&mut preflight_dense, selected)
+            let lq = lq_full_dense(&mut preflight_dense, selected)
                 .map_err(checked_compact_example_error)?;
             assert_full_qr_lq(selected, &lq.l, &lq.q, "lq", sector_count);
             drop(lq);
@@ -3774,4 +3763,94 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn env_or_unset(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| "unset".into())
+}
+
+// Dense-input checked factorizations through the seam's one entry per op;
+// a dense source yields dense factors only.
+fn dense_source<'a, R, D>(input: &'a BoundDynamicTensorRef<'_, R, D>) -> FactorSource<'a, R, D> {
+    FactorSource::Dense(
+        BoundDynamicTensorRef::try_new(input.space(), input.data())
+            .expect("a validated input revalidates"),
+    )
+}
+
+type CheckedQr<R, D> = Result<
+    tenet_matrixalgebra::Qr<BoundDynFactor<R, D>>,
+    CheckedGenericFactorPlanError<<R as CheckedGenericFusion>::Error>,
+>;
+type CheckedLq<R, D> = Result<
+    tenet_matrixalgebra::Lq<BoundDynFactor<R, D>>,
+    CheckedGenericFactorPlanError<<R as CheckedGenericFusion>::Error>,
+>;
+
+fn qr_dense<R, D>(
+    qr: tenet_matrixalgebra::Qr<tenet_matrixalgebra::seam::FactorOutput<R, D>>,
+) -> tenet_matrixalgebra::Qr<BoundDynFactor<R, D>> {
+    tenet_matrixalgebra::Qr {
+        q: qr.q.into_dense().expect("dense source"),
+        r: qr.r.into_dense().expect("dense source"),
+    }
+}
+
+fn lq_dense<R, D>(
+    lq: tenet_matrixalgebra::Lq<tenet_matrixalgebra::seam::FactorOutput<R, D>>,
+) -> tenet_matrixalgebra::Lq<BoundDynFactor<R, D>> {
+    tenet_matrixalgebra::Lq {
+        l: lq.l.into_dense().expect("dense source"),
+        q: lq.q.into_dense().expect("dense source"),
+    }
+}
+
+fn qr_compact_dense<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> CheckedQr<R, D>
+where
+    E: tenet_dense::DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    qr_compact_checked_generic(dense, dense_source(input)).map(qr_dense)
+}
+
+fn qr_full_dense<E, R, D>(dense: &mut E, input: &BoundDynamicTensorRef<'_, R, D>) -> CheckedQr<R, D>
+where
+    E: tenet_dense::DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    qr_full_checked_generic(dense, dense_source(input)).map(qr_dense)
+}
+
+fn lq_compact_dense<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> CheckedLq<R, D>
+where
+    E: tenet_dense::DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    lq_compact_checked_generic(dense, dense_source(input)).map(lq_dense)
+}
+
+fn lq_full_dense<E, R, D>(dense: &mut E, input: &BoundDynamicTensorRef<'_, R, D>) -> CheckedLq<R, D>
+where
+    E: tenet_dense::DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    lq_full_checked_generic(dense, dense_source(input)).map(lq_dense)
+}
+
+fn eig_full_dense<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<EigFullDyn<R, D>, CheckedGenericFactorPlanError<<R as CheckedGenericFusion>::Error>>
+where
+    E: tenet_dense::DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    eig_full_checked_generic(dense, dense_source(input)).map(|(eig, _)| eig)
 }

@@ -199,9 +199,13 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
     )
     .unwrap();
     checked_provider.calls.set(0);
+    // A non-bond space is misuse for diagonal storage, refused before any
+    // provider query (MAK `@assert m == n && isdiag(A)`).
     assert!(matches!(
-        svd_full_diagonal_factors_dyn_checked_generic::<_, f64>(&checked, &[]).unwrap(),
-        CheckedDiagonalFullSvdFactors::NotAdmitted
+        svd_full_diagonal_factors_dyn_checked_generic::<_, f64>(&checked, &[]),
+        Err(CheckedGenericFactorPlanError::Operation(
+            OperationError::InvalidArgument { .. }
+        ))
     ));
     assert_eq!(checked_provider.calls.get(), 0);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
@@ -274,10 +278,7 @@ fn checked_compact_diagonal_full_svd_has_no_post_preflight_provider_query() {
     .unwrap();
     let dimension_calls = successful_provider.calls.get();
     successful_provider.calls.set(0);
-    assert!(matches!(
-        svd_full_diagonal_factors_dyn_checked_generic(&successful, &spectrum).unwrap(),
-        CheckedDiagonalFullSvdFactors::Direct(_)
-    ));
+    svd_full_diagonal_factors_dyn_checked_generic(&successful, &spectrum).unwrap();
     assert_eq!(successful_provider.calls.get(), dimension_calls);
 }
 

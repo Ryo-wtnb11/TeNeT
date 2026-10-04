@@ -58,6 +58,7 @@ mod authority;
 mod bound;
 mod compact_plan;
 mod dense_stage;
+mod diagonal;
 mod eig;
 mod inverse;
 mod matricize;
@@ -68,6 +69,7 @@ mod publish_checked;
 mod publish_mf;
 mod qr_lq;
 mod scalar;
+mod source;
 mod svd;
 
 #[cfg(test)]
@@ -99,6 +101,7 @@ pub(crate) use bound::*;
 pub(crate) use compact_plan::*;
 // `dense_stage` items are consumed only by sibling factorization modules.
 use dense_stage::*;
+use diagonal::*;
 pub(crate) use eig::*;
 pub(crate) use inverse::*;
 pub(crate) use matricize::*;
@@ -115,6 +118,8 @@ pub(crate) use probes::*;
 #[cfg(not(test))]
 use probes::*;
 pub(crate) use qr_lq::*;
+use source::factor_from_source;
+pub use source::{ExecutorLease, FactorOutput, FactorRoute, FactorSource, Routed};
 pub(crate) use svd::*;
 
 // Explicit overrides: an item re-exported through the blanket globs above
@@ -127,11 +132,10 @@ pub(crate) use svd::*;
 pub use bound::BoundDynFactor;
 pub use compact_plan::CheckedGenericFactorPlanError;
 pub use eig::{
-    eig_full_diagonal_dyn, eig_full_diagonal_dyn_checked_generic, eig_full_dyn,
-    eig_full_dyn_checked_generic, eig_vals_diagonal_dyn, eig_vals_dyn,
-    eig_vals_dyn_checked_generic, eigh_full_diagonal_dyn, eigh_full_diagonal_dyn_checked_generic,
-    eigh_full_dyn, eigh_full_dyn_checked_generic, eigh_vals_diagonal_dyn, eigh_vals_dyn,
-    eigh_vals_dyn_checked_generic, validate_hermitian_regions, EigFullDyn, EighFullDyn,
+    eig_full_checked_generic, eig_full_diagonal_dyn, eig_full_dyn, eig_vals_checked_generic,
+    eig_vals_diagonal_dyn, eig_vals_dyn, eigh_full_checked_generic, eigh_full_diagonal_dyn,
+    eigh_full_dyn, eigh_vals_checked_generic, eigh_vals_diagonal_dyn, eigh_vals_dyn,
+    validate_hermitian_regions, EigFullDyn, EighFullDyn,
 };
 pub use matricize::{
     coupled_sector_block_dimensions_generic_checked, validate_endomorphism_region_stacking,
@@ -144,28 +148,26 @@ pub(crate) use null_space::{
     left_null, left_null_dyn_checked_generic, right_null, right_null_dyn_checked_generic,
 };
 pub use null_space::{
-    left_null_diagonal_dyn, left_null_diagonal_dyn_checked_generic, left_null_dyn,
-    left_null_dyn_checked_generic_with_dimensions, right_null_diagonal_dyn,
-    right_null_diagonal_dyn_checked_generic, right_null_dyn,
-    right_null_dyn_checked_generic_with_dimensions, CheckedDiagonalNullFactor,
+    left_null_checked_generic, left_null_diagonal_dyn, left_null_dyn, right_null_checked_generic,
+    right_null_diagonal_dyn, right_null_dyn,
 };
 #[cfg(test)]
-pub(crate) use polar::{left_polar, right_polar};
+pub(crate) use polar::{
+    left_polar, left_polar_dyn_checked_generic, right_polar, right_polar_dyn_checked_generic,
+};
 pub use polar::{
     left_polar_adjoint_parent_dyn, left_polar_adjoint_parent_dyn_checked_generic,
-    left_polar_diagonal_spectra_dyn, left_polar_diagonal_spectra_dyn_checked_generic,
-    left_polar_dyn, left_polar_dyn_checked_generic, right_polar_adjoint_parent_dyn,
-    right_polar_adjoint_parent_dyn_checked_generic, right_polar_diagonal_spectra_dyn,
-    right_polar_diagonal_spectra_dyn_checked_generic, right_polar_dyn,
-    right_polar_dyn_checked_generic, CheckedCompactPolarFactors,
+    left_polar_checked_generic, left_polar_diagonal_spectra_dyn, left_polar_dyn,
+    right_polar_adjoint_parent_dyn, right_polar_adjoint_parent_dyn_checked_generic,
+    right_polar_checked_generic, right_polar_diagonal_spectra_dyn, right_polar_dyn,
 };
 use polar::{validate_polar_direction, PolarDirection};
-use qr_lq::diagonal_phase_magnitude;
 pub use qr_lq::{
-    lq_compact_dyn, lq_compact_dyn_checked_generic, lq_diagonal_dyn_checked_generic, lq_full_dyn,
-    lq_full_dyn_checked_generic, qr_compact_dyn, qr_compact_dyn_checked_generic, qr_diagonal_dyn,
-    qr_diagonal_dyn_checked_generic, qr_full_dyn, qr_full_dyn_checked_generic,
+    lq_compact_checked_generic, lq_compact_dyn, lq_diagonal_dyn, lq_full_checked_generic,
+    lq_full_dyn, qr_compact_checked_generic, qr_compact_dyn, qr_diagonal_dyn,
+    qr_full_checked_generic, qr_full_dyn,
 };
+pub(crate) use scalar::{require_finite_factor_input, FactorFamily};
 pub use scalar::{FactorScalar, SectorSpectrum, SpectrumMagnitude};
 pub use svd::{
     decide_bond_truncation, decide_bond_truncation_generic_checked,
@@ -173,11 +175,8 @@ pub use svd::{
     diagonal_bond_bound_space_on_source_checked_generic, diagonal_bond_data,
     rectangular_diagonal_bond_tensor, rectangular_diagonal_bond_tensor_generic_checked,
     scale_axis_by_spectrum, scale_axis_by_spectrum_mapped, svd_compact_adjoint_factors_dyn,
-    svd_compact_diagonal_factors_dyn, svd_compact_diagonal_factors_dyn_checked_generic,
-    svd_compact_dyn_checked_generic, svd_compact_factors_dyn,
-    svd_compact_factors_with_spectrum_dyn_checked_generic, svd_full_adjoint_factors_dyn,
-    svd_full_diagonal_factors_dyn_checked_generic, svd_full_factors_dyn,
-    svd_full_factors_dyn_checked_generic, svd_full_factors_dyn_checked_generic_with_dimensions,
-    svd_vals_compact_diagonal_dyn, svd_vals_dyn, svd_vals_dyn_checked_generic,
-    CheckedDiagonalFullSvdFactors, CheckedFullSvdDimensions, SvdFactorsDyn, SvdFullFactorsDyn,
+    svd_compact_checked_generic, svd_compact_diagonal_factors_dyn, svd_compact_dyn_checked_generic,
+    svd_compact_factors_dyn, svd_full_adjoint_factors_dyn, svd_full_checked_generic,
+    svd_full_factors_dyn, svd_vals_checked_generic, svd_vals_compact_diagonal_dyn, svd_vals_dyn,
+    SvdFactorsDyn, SvdFullFactorsDyn,
 };
