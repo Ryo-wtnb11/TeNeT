@@ -23,8 +23,8 @@ pub(super) fn tensorcontract_descriptor<'a>(
         });
     }
 
-    let lhs_seen = validate_axis_subset_inline(lhs_contracting_axes, lhs.rank())?;
-    let rhs_seen = validate_axis_subset_inline(rhs_contracting_axes, rhs.rank())?;
+    let lhs_seen = validate_axis_subset_inline("lhs", lhs_contracting_axes, lhs.rank())?;
+    let rhs_seen = validate_axis_subset_inline("rhs", rhs_contracting_axes, rhs.rank())?;
     let lhs_open_axes = lhs_seen.complement().collect::<SmallVec<[usize; 8]>>();
     let rhs_open_axes = rhs_seen.complement().collect::<SmallVec<[usize; 8]>>();
     let output_rank = lhs_open_axes.len() + rhs_open_axes.len();
@@ -60,11 +60,13 @@ pub(super) fn tensorcontract_descriptor<'a>(
 }
 
 fn validate_axis_subset_inline(
+    tensor: &'static str,
     axes: &[usize],
     rank: usize,
 ) -> Result<crate::axes::AxisMask, CoreError> {
-    crate::axes::validate_axis_subset(axes, rank).map_err(|_| CoreError::InvalidPermutation {
-        permutation: axes.to_vec(),
+    crate::axes::validate_axis_subset(axes, rank).map_err(|_| CoreError::InvalidAxisSet {
+        tensor,
+        axes: axes.to_vec(),
         rank,
     })
 }

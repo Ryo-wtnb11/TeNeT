@@ -20,7 +20,7 @@ use tenet::typed::{Complex64, GradedSpace, Runtime, TensorMap};
 /// The misuse class an error reports.
 fn class(error: impl Debug) -> &'static str {
     let text = format!("{error:?}");
-    if text.contains("invalid trace pair list") {
+    if text.contains(r#"InvalidAxisSet { tensor: "trace pairs""#) {
         "pair list"
     } else if text.contains(r#"StructureMismatch { tensor: "trace axes" }"#) {
         "non-dual pair"

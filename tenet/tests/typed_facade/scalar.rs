@@ -363,7 +363,7 @@ fn trace_pairs_of_nothing_is_the_source() {
 
 #[test]
 fn trace_pairs_rejects_malformed_pairs() {
-    // Out-of-range and repeated axes both use the public invalid-pair error.
+    // Out-of-range and repeated axes are an invalid axis subset (#1873).
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
@@ -371,8 +371,11 @@ fn trace_pairs_rejects_malformed_pairs() {
     for pairs in [vec![(0usize, 9usize)], vec![(0, 0)], vec![(0, 1), (1, 0)]] {
         assert!(matches!(
             typed.trace_pairs(&pairs).unwrap_err(),
-            tenet::typed::Error::InvalidArgument(message)
-                if message.contains("invalid trace pair list")
+            tenet::typed::Error::Operation(operation)
+                if matches!(
+                    *operation,
+                    tenet::typed::OperationError::InvalidAxisSet { tensor: "trace pairs", .. }
+                )
         ));
     }
 }

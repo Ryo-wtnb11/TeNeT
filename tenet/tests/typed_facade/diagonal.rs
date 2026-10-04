@@ -1480,8 +1480,11 @@ fn compact_trace_boundary_geometries_keep_their_existing_routes() {
     for pairs in [vec![(0usize, 9usize)], vec![(0, 0)], vec![(0, 1), (1, 0)]] {
         assert!(matches!(
             s.trace_pairs(&pairs).unwrap_err(),
-            tenet::typed::Error::InvalidArgument(message)
-                if message.contains("invalid trace pair list")
+            tenet::typed::Error::Operation(operation)
+                if matches!(
+                    *operation,
+                    tenet::typed::OperationError::InvalidAxisSet { tensor: "trace pairs", .. }
+                )
         ));
     }
 }
