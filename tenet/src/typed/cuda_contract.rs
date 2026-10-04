@@ -137,8 +137,8 @@ where
     ///
     /// Device and Host agree to dtype tolerance, never bitwise: the GEMM
     /// summation order is cuTENSOR's, a Single-block move rounds as
-    /// `alpha * (c * x)`, and where the Host picks its dense `Structure` route
-    /// for a conjugated operand the device runs the transform route instead.
+    /// `alpha * (c * x)`, and over a non-canonical expert tiling the Host packs
+    /// around its core where the device runs the transform route.
     /// Exact zeros may differ in sign (Host `-0.0` where the device writes
     /// `+0.0`).
     ///
@@ -215,24 +215,21 @@ where
         // lease compiles the `CopyC` or `DynamicTree` route and is dropped
         // before the device lease is taken; nothing under the device lease
         // leases again.
-        let resolution = match tenet_tensors::try_compile_storage_contract_core_route(
-            &dst_space,
-            lhs_operand,
-            rhs_operand,
-            axes,
-        )? {
+        let resolution = match tenet_tensors::try_compile_storage_contract_core_route::<
+            tenet_tensors::DirectCoreExecutor,
+            _,
+        >(&dst_space, lhs_operand, rhs_operand, axes)?
+        {
             tenet_tensors::CoreRoute::Hit(core) => core,
             tenet_tensors::CoreRoute::Miss(miss) => {
                 let mut lease = self.runtime.lease_context()?;
                 lease
                     .context()
                     .multiplicity_free_lane::<D>()?
-                    .plan_contract_beyond_core(
+                    .plan_contract_beyond_core::<tenet_tensors::DirectCoreExecutor, _>(
                         miss,
                         &dst_space,
-                        lhs_space,
                         lhs_operand,
-                        rhs_space,
                         rhs_operand,
                         lhs_axes,
                         rhs_axes,
@@ -421,24 +418,21 @@ where
             lhs_operand.storage_conjugate(),
             rhs_operand.storage_conjugate(),
         );
-        let resolution = match tenet_tensors::try_compile_storage_contract_core_route(
-            &execution_destination,
-            lhs_operand,
-            rhs_operand,
-            axes,
-        )? {
+        let resolution = match tenet_tensors::try_compile_storage_contract_core_route::<
+            tenet_tensors::DirectCoreExecutor,
+            _,
+        >(&execution_destination, lhs_operand, rhs_operand, axes)?
+        {
             tenet_tensors::CoreRoute::Hit(core) => core,
             tenet_tensors::CoreRoute::Miss(miss) => {
                 let mut lease = self.runtime.lease_context()?;
                 lease
                     .context()
                     .multiplicity_free_lane::<D>()?
-                    .plan_contract_beyond_core(
+                    .plan_contract_beyond_core::<tenet_tensors::DirectCoreExecutor, _>(
                         miss,
                         &execution_destination,
-                        lhs_space,
                         lhs_operand,
-                        rhs_space,
                         rhs_operand,
                         lhs_axes,
                         rhs_axes,

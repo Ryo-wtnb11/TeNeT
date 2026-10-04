@@ -329,8 +329,45 @@ where
             &inactive_dst_scale_blocks,
             &direct_batch,
         )?;
-        let (direct_batch, direct_batch_alpha): (Vec<_>, Vec<_>) = direct_batch.into_iter().unzip();
-        let direct_batch_runs = strided_batch_runs(&direct_batch);
+        let (mut direct_batch, mut direct_batch_alpha): (Vec<_>, Vec<_>) =
+            direct_batch.into_iter().unzip();
+        let direct_batch_runs = if direct_batch_alpha.iter().all(|&alpha| alpha == C::one()) {
+            strided_batch_runs(&direct_batch)
+        } else {
+            // A scaled (twisted) plan: group the jobs by coefficient, in
+            // first-appearance order, so each coefficient is one contiguous
+            // batch, and partition runs per group.
+            let mut coefficients: Vec<C> = Vec::new();
+            for &alpha in &direct_batch_alpha {
+                if !coefficients.contains(&alpha) {
+                    coefficients.push(alpha);
+                }
+            }
+            let mut grouped: Vec<(Rank2GemmBatchJob, C)> = direct_batch
+                .iter()
+                .copied()
+                .zip(direct_batch_alpha.iter().copied())
+                .collect();
+            grouped.sort_by_key(|&(_, alpha)| {
+                coefficients
+                    .iter()
+                    .position(|&coefficient| coefficient == alpha)
+            });
+            (direct_batch, direct_batch_alpha) = grouped.into_iter().unzip();
+            let mut runs = Vec::new();
+            let mut start = 0;
+            while start < direct_batch.len() {
+                let coefficient = direct_batch_alpha[start];
+                let end = start
+                    + direct_batch_alpha[start..]
+                        .iter()
+                        .take_while(|&&alpha| alpha == coefficient)
+                        .count();
+                runs.extend(strided_batch_runs(&direct_batch[start..end]));
+                start = end;
+            }
+            runs
+        };
         Ok(Some(Self {
             dst_structure: Arc::clone(dst_structure),
             lhs_structure: Arc::clone(lhs_storage_structure),

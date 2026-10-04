@@ -177,6 +177,11 @@ pub struct FusionBlockContractPlan<C = f64> {
     // A backend-agnostic shape fact, so it lives in this operations-layer plan
     // while the route choice (strided seam vs grouped) stays at the
     // dense-executor boundary.
+    //
+    // Jobs of one `direct_batch_alpha` coefficient are contiguous, and runs
+    // never cross a coefficient change, so a Host replay submits one batch
+    // per coefficient (a fermionic twist uniform per coupled sector) with no
+    // per-replay partition and no extra plan field.
     direct_batch_runs: Vec<usize>,
     irregular: Vec<FusionIrregularGroupExecution>,
     max_irregular_scratch_len: usize,

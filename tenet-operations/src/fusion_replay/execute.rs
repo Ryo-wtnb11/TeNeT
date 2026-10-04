@@ -138,7 +138,6 @@ where
         D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     {
         let beta = init.active_beta();
-        self.require_unit_direct_batch_alpha()?;
         let total_start = PROFILED.then(std::time::Instant::now);
         let start = PROFILED.then(std::time::Instant::now);
         self.validate_replay_inputs(
@@ -178,16 +177,7 @@ where
         }
         if !self.direct_batch.is_empty() {
             let start = PROFILED.then(std::time::Instant::now);
-            self.execute_batch(
-                gemm,
-                dst_data,
-                lhs_data,
-                rhs_data,
-                &self.direct_batch,
-                &self.direct_batch_runs,
-                alpha,
-                beta,
-            )?;
+            self.execute_direct_batches(gemm, dst_data, lhs_data, rhs_data, alpha, beta)?;
             if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
                 profile.core_matmul += start.elapsed();
             }
@@ -220,6 +210,72 @@ where
 
         if let (Some(start), Some(profile)) = (total_start, profile) {
             profile.core_contract_total += start.elapsed();
+        }
+        Ok(())
+    }
+
+    /// `direct_batch` as one batch per job coefficient: the jobs of one
+    /// coefficient are contiguous and its runs end at the next coefficient
+    /// (plan-time invariant), so an unscaled plan is exactly one batch. The
+    /// batches write disjoint destination blocks, so `beta` reaches each
+    /// written element once.
+    fn execute_direct_batches<G, D>(
+        &self,
+        gemm: &mut G,
+        dst: &mut [D],
+        lhs: &[D],
+        rhs: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        G: Rank2Gemm<D>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    {
+        if self.direct_batch.len() != self.direct_batch_alpha.len() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "direct plan has misaligned GEMM coefficients",
+            });
+        }
+        let (mut start, mut run) = (0, 0);
+        while start < self.direct_batch.len() {
+            let coefficient = self.direct_batch_alpha[start];
+            let mut end = start;
+            let first_run = run;
+            while end < self.direct_batch.len() && self.direct_batch_alpha[end] == coefficient {
+                let len = self.direct_batch_runs.get(run).copied().ok_or(
+                    OperationError::UnsupportedTensorContractScope {
+                        message: "direct plan runs do not cover its jobs",
+                    },
+                )?;
+                end += len;
+                run += 1;
+            }
+            if end > self.direct_batch.len()
+                || self.direct_batch_alpha[start..end]
+                    .iter()
+                    .any(|&alpha| alpha != coefficient)
+            {
+                return Err(OperationError::UnsupportedTensorContractScope {
+                    message: "direct plan runs cross a coefficient change",
+                });
+            }
+            let job_alpha = if coefficient == C::one() {
+                alpha
+            } else {
+                alpha.scale_by_coefficient(coefficient)
+            };
+            self.execute_batch(
+                gemm,
+                dst,
+                lhs,
+                rhs,
+                &self.direct_batch[start..end],
+                &self.direct_batch_runs[first_run..run],
+                job_alpha,
+                beta,
+            )?;
+            start = end;
         }
         Ok(())
     }

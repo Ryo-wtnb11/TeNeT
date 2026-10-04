@@ -638,8 +638,7 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
     .unwrap();
     let unsupported = OperationError::UnsupportedTensorContractScope {
         message: "storage-direct contraction supports only the canonical fully-direct route; \
-                  this contraction needs tree transforms or conjugate structures, which have \
-                  no device kernels yet",
+                  this contraction needs tree transforms, which have no device kernels here",
     };
 
     for storage_first in [true, false] {

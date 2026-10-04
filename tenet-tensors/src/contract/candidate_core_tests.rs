@@ -252,15 +252,16 @@ where
         assert!(dst.iter().any(|&x| x != 0.0), "{name}: empty fixture");
 
         // What: the device compile route takes the same Core candidate.
-        let resolution = crate::try_compile_storage_contract_core_route(
-            &space,
-            operand(&space, lhs_lazy),
-            operand(&space, rhs_lazy),
-            axes,
-        )
-        .unwrap()
-        .hit()
-        .unwrap_or_else(|| panic!("{name}: device route declined Core"));
+        let resolution =
+            crate::try_compile_storage_contract_core_route::<crate::DirectCoreExecutor, _>(
+                &space,
+                operand(&space, lhs_lazy),
+                operand(&space, rhs_lazy),
+                axes,
+            )
+            .unwrap()
+            .hit()
+            .unwrap_or_else(|| panic!("{name}: device route declined Core"));
         assert!(!resolution.is_dynamic_tree(), "{name}");
         assert_eq!(
             resolution.is_swapped_core(),
@@ -370,10 +371,12 @@ fn zero_copy_candidates_resolve_to_core_on_fermion_u1() {
 }
 
 /// `A: V⊗V ← V*⊗V*` against `B: V*⊗V* ← V⊗V` sorted into `mul!` form puts
-/// dual legs on B's contracted codomain: TensorKit `blas_contract!` copies
-/// one operand to twist it, so the Host must not select a Core candidate.
+/// dual legs on B's contracted codomain. TensorKit `blas_contract!` copies
+/// one operand to twist it; θ here is the parity of B's coupled sector, so
+/// the Host core carries it as per-job GEMM alpha and copies nothing (#1858).
+/// Values against TensorKit's steps: `tenet/tests/typed_contract_host_oracle.rs`.
 #[test]
-fn a_fermionic_twist_keeps_the_sorted_candidate_off_the_host_core_route() {
+fn a_uniform_fermionic_twist_rides_the_sorted_candidate_core_as_gemm_alpha() {
     let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let (v, v_dual) = (fermion_u1_leg(&rule, false), fermion_u1_leg(&rule, true));
     let lhs = square(&rule, &v, &v_dual);
@@ -395,5 +398,5 @@ fn a_fermionic_twist_keeps_the_sorted_candidate_off_the_host_core_route() {
             0.0,
         )
         .unwrap();
-    assert!(!context.last_resolution_is_core());
+    assert!(context.last_resolution_is_core());
 }

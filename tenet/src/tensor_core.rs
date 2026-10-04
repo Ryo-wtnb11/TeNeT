@@ -610,12 +610,12 @@ where
 {
     #[cfg(test)]
     observe_contract_seam_call();
-    context.tensorcontract_fusion_dyn_into_with_init(
+    context.tensorcontract_fusion_dyn_prelowered_into_with_init(
         destination,
         data,
-        lhs.space(),
+        FusionOperand::direct(lhs.space().space()),
         lhs.data(),
-        rhs.space(),
+        FusionOperand::direct(rhs.space().space()),
         rhs.data(),
         TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
         D::from_real(1.0),

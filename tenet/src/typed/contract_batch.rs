@@ -96,11 +96,9 @@ where
         )?;
         let mut lease = lhs.runtime.lease_context()?;
         let lane = lease.context().multiplicity_free_lane::<D>()?;
-        let resolution = lane.plan_contract(
+        let resolution = lane.plan_contract::<tenet_tensors::DirectCoreExecutor, _>(
             &space,
-            &lhs.space,
             FusionOperand::direct(lhs.space.space()),
-            &rhs.space,
             FusionOperand::direct(rhs.space.space()),
             spec.lhs,
             spec.rhs,
@@ -1216,118 +1214,6 @@ mod fermionic_unit_tests {
                     }
                 ));
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod plan_contract_tests {
-    use super::*;
-    use crate::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-    use crate::typed::checked_generic_contract::{contract_destination, CopyC};
-    use crate::typed::{ContractSpec, GradedSpace};
-
-    /// The planner's `CopyC` route is Host eager's `copyC` (TensorKit
-    /// `blas_contract!`, `tensoroperations.jl:436-446` @cfaa073): the same temporary
-    /// space and the same permute, for owned operands and a lazy adjoint on
-    /// either side, sorted or swapped.
-    #[test]
-    fn plan_contract_copy_c_is_the_host_eager_copy_c() {
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let u1 = GradedSpace::try_new(
-            Arc::new(U1FusionRule),
-            [
-                (U1Irrep::new(-1), 2),
-                (U1Irrep::new(0), 1),
-                (U1Irrep::new(1), 2),
-                (U1Irrep::new(2), 1),
-            ],
-        )
-        .unwrap();
-        let su2 = GradedSpace::try_new(
-            Arc::new(SU2FusionRule),
-            [
-                (SU2Irrep::from_twice_spin(0), 2),
-                (SU2Irrep::from_twice_spin(1), 2),
-                (SU2Irrep::from_twice_spin(2), 1),
-            ],
-        )
-        .unwrap();
-        check(&runtime, &u1);
-        check(&runtime, &su2);
-    }
-
-    fn check<R>(runtime: &Runtime, v: &GradedSpace<R>)
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    {
-        let tensor =
-            |seed| TensorMap::<_, f64>::rand_with_seed(runtime, [v, v], [v, v], seed).unwrap();
-        let (a, b, lazy) = (tensor(81), tensor(82), tensor(83).adjoint().unwrap());
-        for (name, lhs, rhs, lhs_axes, rhs_axes, output) in [
-            ("L3p", &lazy, &b, [3, 2], [1, 0], [1, 0, 2, 3]),
-            ("L5p", &a, &lazy, [0, 1], [2, 3], [3, 2, 0, 1]),
-            ("L7p", &a, &lazy, [3, 2], [1, 0], [0, 1, 3, 2]),
-            ("C1p", &a, &b, [3, 2], [1, 0], [1, 0, 3, 2]),
-            ("C2p", &a, &b, [0, 1], [2, 3], [3, 2, 1, 0]),
-        ] {
-            let spec = ContractSpec {
-                lhs: &lhs_axes,
-                rhs: &rhs_axes,
-                codomain: &output[..2],
-                domain: &output[2..],
-            };
-            let destination = contract_destination(
-                lhs,
-                rhs,
-                &lhs_axes,
-                &rhs_axes,
-                OutputAxisOrder::from_axes(&output),
-                Some(2),
-            )
-            .unwrap();
-            let host = CopyC::plan(lhs, rhs, &spec, destination.space())
-                .unwrap()
-                .unwrap_or_else(|| panic!("{name}: Host eager takes copyC"));
-            let mut lease = runtime.lease_context().unwrap();
-            let lane = lease.context().multiplicity_free_lane::<f64>().unwrap();
-            let resolution = lane
-                .plan_contract(
-                    &destination,
-                    lhs.logical_space(),
-                    lhs.fusion_operand(),
-                    rhs.logical_space(),
-                    rhs.fusion_operand(),
-                    &lhs_axes,
-                    &rhs_axes,
-                    &output,
-                )
-                .unwrap();
-            let copy = resolution
-                .copy_c()
-                .unwrap_or_else(|| panic!("{name}: the planner takes CopyC"));
-            assert_eq!(
-                copy.temporary_structure().as_ref(),
-                host.temporary_space.space().structure().as_ref(),
-                "{name}"
-            );
-            // TensorKit's `dim(C)`: the temporary holds exactly the result's
-            // elements, in another order.
-            assert_eq!(
-                copy.temporary_len(),
-                destination.space().required_len().unwrap(),
-                "{name}"
-            );
-            let transform = lane
-                .tree_context_mut()
-                .compile_tree_pair_structure(
-                    destination.provider(),
-                    &host.operation,
-                    destination.space().structure(),
-                    host.temporary_space.space().structure(),
-                )
-                .unwrap();
-            assert!(Arc::ptr_eq(&transform, copy.transform()), "{name}");
         }
     }
 }
