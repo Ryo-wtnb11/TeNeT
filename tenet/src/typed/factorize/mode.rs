@@ -64,15 +64,6 @@ where
 }
 
 #[doc(hidden)]
-pub trait TypedTensorQrDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: FactorizationScalar,
-{
-    fn qr_compact(tensor: &TensorMap<R, D>) -> Result<Qr<TensorMap<R, D>>, Self::FacadeError>;
-}
-
-#[doc(hidden)]
 pub trait TypedTensorSvdDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -80,33 +71,6 @@ where
 {
     fn svd_compact(tensor: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, Self::FacadeError>;
     fn svd_full(tensor: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, Self::FacadeError>;
-}
-
-#[doc(hidden)]
-pub trait TypedTensorLqDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: FactorizationScalar,
-{
-    fn lq_compact(tensor: &TensorMap<R, D>) -> Result<Lq<TensorMap<R, D>>, Self::FacadeError>;
-}
-
-#[doc(hidden)]
-pub trait TypedTensorFullQrDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: FactorizationScalar,
-{
-    fn qr_full(tensor: &TensorMap<R, D>) -> Result<Qr<TensorMap<R, D>>, Self::FacadeError>;
-}
-
-#[doc(hidden)]
-pub trait TypedTensorFullLqDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: FactorizationScalar,
-{
-    fn lq_full(tensor: &TensorMap<R, D>) -> Result<Lq<TensorMap<R, D>>, Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -157,13 +121,14 @@ where
 /// A factorization, as named in its errors.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// ponytail: the values family lands first; #1862's later slices add the
-// factor-producing ops, which ends the shared suffix.
-#[allow(clippy::enum_variant_names)]
 pub enum FactorOp {
     SvdVals,
     EighVals,
     EigVals,
+    QrCompact,
+    QrFull,
+    LqCompact,
+    LqFull,
 }
 
 impl FactorOp {
@@ -173,6 +138,10 @@ impl FactorOp {
             Self::SvdVals => "checked Generic svd_vals does not accept lazy adjoints",
             Self::EighVals => "checked Generic eigh_vals does not accept lazy adjoints",
             Self::EigVals => "checked Generic eig_vals does not accept lazy adjoints",
+            Self::QrCompact => "checked Generic qr_compact does not accept lazy adjoints",
+            Self::QrFull => "checked Generic qr_full does not accept lazy adjoints",
+            Self::LqCompact => "checked Generic lq_compact does not accept lazy adjoints",
+            Self::LqFull => "checked Generic lq_full does not accept lazy adjoints",
         }
     }
 }
@@ -187,6 +156,9 @@ pub enum AdjointRule {
     Parent,
     /// An operation-local materialized adjoint.
     Materialize,
+    /// The factorization's adjoint partner on the parent, whose factors are
+    /// adjointed back (LQ of `t^H` from QR of `t`).
+    Redirect,
 }
 
 impl<R> FusionMode<R> for MultiplicityFreeAdmissionMode
@@ -203,7 +175,10 @@ where
         match op {
             // Singular values and coupled sectors are invariant under adjoint.
             FactorOp::SvdVals => AdjointRule::Parent,
-            FactorOp::EighVals | FactorOp::EigVals => AdjointRule::Materialize,
+            FactorOp::EighVals | FactorOp::EigVals | FactorOp::QrCompact | FactorOp::QrFull => {
+                AdjointRule::Materialize
+            }
+            FactorOp::LqCompact | FactorOp::LqFull => AdjointRule::Redirect,
         }
     }
 

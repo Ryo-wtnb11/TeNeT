@@ -66,7 +66,7 @@ fn compact_diagonal_qr_lq_rejects_inconsistent_spectra_and_nonbond_spaces() {
     .unwrap();
     let spectrum = input.spectrum().unwrap();
     let admit = |values: &[tenet_matrixalgebra::SectorSpectrum<f64>]| {
-        tenet_matrixalgebra::seam::qr_diagonal_dyn(input.logical_space(), values)
+        qr_diagonal(input.logical_space(), values)
     };
     assert!(admit(spectrum).is_ok());
     let mut reversed = spectrum.to_vec();
@@ -98,17 +98,11 @@ fn compact_diagonal_qr_lq_rejects_inconsistent_spectra_and_nonbond_spaces() {
     ));
     let multileg: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1).unwrap();
-    assert!(misuse(tenet_matrixalgebra::seam::qr_diagonal_dyn(
-        multileg.logical_space(),
-        spectrum
-    )));
+    assert!(misuse(qr_diagonal(multileg.logical_space(), spectrum)));
     let dual = leg.try_dual().unwrap();
     let nonendo: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&dual], 1).unwrap();
-    assert!(misuse(tenet_matrixalgebra::seam::qr_diagonal_dyn(
-        nonendo.logical_space(),
-        spectrum
-    )));
+    assert!(misuse(qr_diagonal(nonendo.logical_space(), spectrum)));
 }
 
 #[test]
@@ -852,4 +846,15 @@ fn compact_diagonal_polar_refuses_nonfinite_and_is_direct_when_overflowing() {
         }
         assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     }
+}
+
+/// Multiplicity-free QR of a compact diagonal through the single entry.
+fn qr_diagonal<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<f64>],
+) -> Result<Qr<tenet_matrixalgebra::seam::FactorOutput<R, f64>>, tenet_tensors::OperationError> {
+    tenet_matrixalgebra::seam::qr_compact_from_source::<MultiplicityFreeAdmissionMode, _, _, _, _>(
+        &mut tenet_dense::DefaultDenseExecutor::new(),
+        tenet_matrixalgebra::seam::FactorSource::Diagonal { space, spectrum },
+    )
 }

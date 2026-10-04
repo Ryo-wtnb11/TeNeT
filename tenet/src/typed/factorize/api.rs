@@ -167,7 +167,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorQrDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the compact QR factorization `self = q * r` as a [`Qr`].
@@ -228,11 +228,13 @@ where
         rows: &[usize],
         cols: &[usize],
     ) -> Result<Qr<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorQrDispatch<R, D>>::qr_compact,
-        )
+        self.with_leg_roles(rows, cols, |t| {
+            t.factor_qr(FactorOp::QrCompact, |lease, source| {
+                tenet_matrixalgebra::seam::qr_compact_from_source::<R::Mode, _, _, _, _>(
+                    lease, source,
+                )
+            })
+        })
     }
 }
 
@@ -350,7 +352,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorLqDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorAdjointDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the compact LQ factorization `self = l * q` as an [`Lq`].
@@ -391,11 +393,23 @@ where
         rows: &[usize],
         cols: &[usize],
     ) -> Result<Lq<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorLqDispatch<R, D>>::lq_compact,
-        )
+        self.with_leg_roles(rows, cols, |t| {
+            t.factor_lq(
+                FactorOp::LqCompact,
+                |parent| {
+                    parent.factor_qr(FactorOp::QrCompact, |lease, source| {
+                        tenet_matrixalgebra::seam::qr_compact_from_source::<R::Mode, _, _, _, _>(
+                            lease, source,
+                        )
+                    })
+                },
+                |lease, source| {
+                    tenet_matrixalgebra::seam::lq_compact_from_source::<R::Mode, _, _, _, _>(
+                        lease, source,
+                    )
+                },
+            )
+        })
     }
 }
 
@@ -464,7 +478,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorFullQrDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the full QR factorization `self = q * r` as a [`Qr`].
@@ -485,18 +499,18 @@ where
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn qr_full(&self, rows: &[usize], cols: &[usize]) -> Result<Qr<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorFullQrDispatch<R, D>>::qr_full,
-        )
+        self.with_leg_roles(rows, cols, |t| {
+            t.factor_qr(FactorOp::QrFull, |lease, source| {
+                tenet_matrixalgebra::seam::qr_full_from_source::<R::Mode, _, _, _, _>(lease, source)
+            })
+        })
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorFullLqDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorAdjointDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the full LQ factorization `self = l * q` as an [`Lq`].
@@ -516,11 +530,23 @@ where
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn lq_full(&self, rows: &[usize], cols: &[usize]) -> Result<Lq<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorFullLqDispatch<R, D>>::lq_full,
-        )
+        self.with_leg_roles(rows, cols, |t| {
+            t.factor_lq(
+                FactorOp::LqFull,
+                |parent| {
+                    parent.factor_qr(FactorOp::QrFull, |lease, source| {
+                        tenet_matrixalgebra::seam::qr_full_from_source::<R::Mode, _, _, _, _>(
+                            lease, source,
+                        )
+                    })
+                },
+                |lease, source| {
+                    tenet_matrixalgebra::seam::lq_full_from_source::<R::Mode, _, _, _, _>(
+                        lease, source,
+                    )
+                },
+            )
+        })
     }
 }
 

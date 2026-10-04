@@ -48,21 +48,20 @@ pub mod seam {
         factor_output_space_checked_generic, left_null_checked_generic, left_null_diagonal_dyn,
         left_null_dyn, left_polar_adjoint_parent_dyn,
         left_polar_adjoint_parent_dyn_checked_generic, left_polar_checked_generic,
-        left_polar_diagonal_spectra_dyn, left_polar_dyn, lq_compact_checked_generic,
-        lq_compact_dyn, lq_diagonal_dyn, lq_full_checked_generic, lq_full_dyn,
-        qr_compact_checked_generic, qr_compact_dyn, qr_diagonal_dyn, qr_full_checked_generic,
-        qr_full_dyn, rectangular_diagonal_bond_tensor,
-        rectangular_diagonal_bond_tensor_generic_checked, right_null_checked_generic,
-        right_null_diagonal_dyn, right_null_dyn, right_polar_adjoint_parent_dyn,
-        right_polar_adjoint_parent_dyn_checked_generic, right_polar_checked_generic,
-        right_polar_diagonal_spectra_dyn, right_polar_dyn, scale_axis_by_spectrum_mapped,
-        svd_compact_adjoint_factors_dyn, svd_compact_checked_generic,
-        svd_compact_diagonal_factors_dyn, svd_compact_dyn_checked_generic, svd_compact_factors_dyn,
-        svd_full_adjoint_factors_dyn, svd_full_checked_generic, svd_full_factors_dyn, svd_vals_dyn,
-        svd_vals_from_source, validate_endomorphism_region_stacking, validate_hermitian_regions,
-        BoundDynamicTensorRef, CheckedGenericFactorPlanError, EigFullDyn, EighFullDyn,
-        ExecutorLease, FactorMode, FactorOutput, FactorRoute, FactorSource, Routed, SvdFactorsDyn,
-        SvdFullFactorsDyn, EIGH_FULL_STACKING,
+        left_polar_diagonal_spectra_dyn, left_polar_dyn, lq_compact_from_source,
+        lq_full_from_source, qr_compact_from_source, qr_full_from_source,
+        rectangular_diagonal_bond_tensor, rectangular_diagonal_bond_tensor_generic_checked,
+        right_null_checked_generic, right_null_diagonal_dyn, right_null_dyn,
+        right_polar_adjoint_parent_dyn, right_polar_adjoint_parent_dyn_checked_generic,
+        right_polar_checked_generic, right_polar_diagonal_spectra_dyn, right_polar_dyn,
+        scale_axis_by_spectrum_mapped, svd_compact_adjoint_factors_dyn,
+        svd_compact_checked_generic, svd_compact_diagonal_factors_dyn,
+        svd_compact_dyn_checked_generic, svd_compact_factors_dyn, svd_full_adjoint_factors_dyn,
+        svd_full_checked_generic, svd_full_factors_dyn, svd_vals_dyn, svd_vals_from_source,
+        validate_endomorphism_region_stacking, validate_hermitian_regions, BoundDynamicTensorRef,
+        CheckedGenericFactorPlanError, EigFullDyn, EighFullDyn, ExecutorLease, FactorMode,
+        FactorOutput, FactorRoute, FactorSource, Routed, SvdFactorsDyn, SvdFullFactorsDyn,
+        EIGH_FULL_STACKING,
     };
     #[cfg(feature = "diagnostics")]
     pub use crate::factorize::{sector_matricization_diagnostic, SectorMatricizationDiagnostic};
@@ -80,9 +79,10 @@ pub mod seam {
 #[cfg(test)]
 use factorize::{
     eig_full, eig_vals, eigh_full, eigh_vals, left_null, left_null_dyn_checked_generic, left_polar,
-    lq_compact, lq_full, qr_compact, qr_full, right_null, right_null_dyn_checked_generic,
-    right_polar, scale_axis_by_spectrum, svd_compact, svd_compact_dyn, svd_full,
-    svd_full_adjoint_dyn, svd_full_dyn, svd_full_dyn_checked_generic, svd_vals,
+    lq_compact, lq_compact_dyn, lq_full, lq_full_dyn, qr_compact, qr_compact_dyn, qr_full,
+    qr_full_dyn, right_null, right_null_dyn_checked_generic, right_polar, scale_axis_by_spectrum,
+    svd_compact, svd_compact_dyn, svd_full, svd_full_adjoint_dyn, svd_full_dyn,
+    svd_full_dyn_checked_generic, svd_vals,
 };
 #[cfg(test)]
 use factorize::{

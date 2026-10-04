@@ -40,95 +40,38 @@ where
     Ok(Qr { q, r })
 }
 
-/// Multiplicity-free QR spectra of a compact diagonal; see
-/// [`qr_diagonal_spectra`].
-///
-/// # Errors
-///
-/// Misuse (not a `V <- V` diagonal) and the coupled-sector region error of an
-/// inconsistent structure. Why not decline to a dense route: TensorKit's
-/// diagonal QR has none, and declining would hide a structure error.
-#[doc(hidden)]
-pub fn qr_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<Qr<Vec<SectorSpectrum<D>>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    qr_diagonal_spectra(
-        &MfAuthority(authority),
-        authority,
-        spectrum,
-        FactorFamily::Qr,
-    )
-}
-
-/// Multiplicity-free LQ spectra of a compact diagonal: `l` holds the
-/// magnitudes and `q` the phases; see [`qr_diagonal_spectra`].
-#[doc(hidden)]
-pub fn lq_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<Lq<Vec<SectorSpectrum<D>>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    qr_diagonal_spectra(
-        &MfAuthority(authority),
-        authority,
-        spectrum,
-        FactorFamily::Lq,
-    )
-    .map(|Qr { q, r }| Lq { l: r, q })
-}
-
-fn qr_diagonal_outputs<R, D>(
-    space: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-    family: FactorFamily,
-) -> Result<Qr<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
-where
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    let Qr { q, r } = qr_diagonal_spectra(
-        &CheckedAuthority(space.provider_arc()),
-        space,
-        spectrum,
-        family,
-    )?;
-    let on_input = |values| FactorOutput::Diagonal {
-        space: space.clone(),
-        values,
-    };
-    Ok(Qr {
-        q: on_input(q),
-        r: on_input(r),
-    })
-}
-
-fn qr_checked_generic<L, E, R, D>(
+/// QR of `source` in fusion mode `M`: a compact diagonal factors directly on
+/// its bond (`family` names its finite-input error), dense storage runs
+/// `dense_qr` with a leased executor.
+fn qr_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
+    family: FactorFamily,
     dense_qr: impl FnOnce(
         &mut E,
         &BoundDynamicTensorRef<'_, R, D>,
-    )
-        -> Result<Qr<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>,
-) -> Result<Qr<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+    ) -> Result<Qr<BoundDynFactor<R, D>>, M::Error>,
+) -> Result<Qr<FactorOutput<R, D>>, M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
     factor_from_source(
         lease,
         source,
-        |space, spectrum| qr_diagonal_outputs(space, spectrum, FactorFamily::Qr),
+        |space, spectrum| {
+            let Qr { q, r } = qr_diagonal_spectra(&M::authority(space), space, spectrum, family)?;
+            let on_input = |values| FactorOutput::Diagonal {
+                space: space.clone(),
+                values,
+            };
+            Ok(Qr {
+                q: on_input(q),
+                r: on_input(r),
+            })
+        },
         |dense, input| {
             dense_qr(dense, input).map(|Qr { q, r }| Qr {
                 q: FactorOutput::Dense(q),
@@ -139,26 +82,66 @@ where
     .map(|(factors, _)| factors)
 }
 
-fn lq_checked_generic<L, E, R, D>(
+/// Compact QR of `source` in fusion mode `M`.
+#[doc(hidden)]
+pub fn qr_compact_from_source<M, L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<Qr<FactorOutput<R, D>>, M::Error>
+where
+    M: FactorMode<R>,
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    qr_from_source::<M, _, _, _, _>(lease, source, FactorFamily::Qr, M::qr_compact_dense)
+}
+
+/// Full QR of `source` in fusion mode `M`.
+#[doc(hidden)]
+pub fn qr_full_from_source<M, L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<Qr<FactorOutput<R, D>>, M::Error>
+where
+    M: FactorMode<R>,
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    qr_from_source::<M, _, _, _, _>(lease, source, FactorFamily::Qr, M::qr_full_dense)
+}
+
+/// LQ of `source` in fusion mode `M`: a compact diagonal's `l` holds the
+/// magnitudes and `q` the phases (see [`qr_diagonal_spectra`]).
+fn lq_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
     dense_lq: impl FnOnce(
         &mut E,
         &BoundDynamicTensorRef<'_, R, D>,
-    )
-        -> Result<Lq<BoundDynFactor<R, D>>, CheckedGenericFactorPlanError<R::Error>>,
-) -> Result<Lq<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+    ) -> Result<Lq<BoundDynFactor<R, D>>, M::Error>,
+) -> Result<Lq<FactorOutput<R, D>>, M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
     factor_from_source(
         lease,
         source,
         |space, spectrum| {
-            qr_diagonal_outputs(space, spectrum, FactorFamily::Lq).map(|Qr { q, r }| Lq { l: r, q })
+            let Qr { q, r } =
+                qr_diagonal_spectra(&M::authority(space), space, spectrum, FactorFamily::Lq)?;
+            let on_input = |values| FactorOutput::Diagonal {
+                space: space.clone(),
+                values,
+            };
+            Ok(Lq {
+                l: on_input(r),
+                q: on_input(q),
+            })
         },
         |dense, input| {
             dense_lq(dense, input).map(|Lq { l, q }| Lq {
@@ -170,64 +153,34 @@ where
     .map(|(factors, _)| factors)
 }
 
-/// Checked full QR of `source`.
+/// Compact LQ of `source` in fusion mode `M`.
 #[doc(hidden)]
-pub fn qr_full_checked_generic<L, E, R, D>(
+pub fn lq_compact_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
-) -> Result<Qr<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<Lq<FactorOutput<R, D>>, M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    qr_checked_generic(lease, source, qr_full_dyn_checked_generic)
+    lq_from_source::<M, _, _, _, _>(lease, source, M::lq_compact_dense)
 }
 
-/// Checked compact QR of `source`.
+/// Full LQ of `source` in fusion mode `M`.
 #[doc(hidden)]
-pub fn qr_compact_checked_generic<L, E, R, D>(
+pub fn lq_full_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
-) -> Result<Qr<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<Lq<FactorOutput<R, D>>, M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    qr_checked_generic(lease, source, qr_compact_dyn_checked_generic)
-}
-
-/// Checked full LQ of `source`.
-#[doc(hidden)]
-pub fn lq_full_checked_generic<L, E, R, D>(
-    lease: L,
-    source: FactorSource<'_, R, D>,
-) -> Result<Lq<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
-where
-    L: ExecutorLease<Executor = E>,
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    lq_checked_generic(lease, source, lq_full_dyn_checked_generic)
-}
-
-/// Checked compact LQ of `source`.
-#[doc(hidden)]
-pub fn lq_compact_checked_generic<L, E, R, D>(
-    lease: L,
-    source: FactorSource<'_, R, D>,
-) -> Result<Lq<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
-where
-    L: ExecutorLease<Executor = E>,
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    lq_checked_generic(lease, source, lq_compact_dyn_checked_generic)
+    lq_from_source::<M, _, _, _, _>(lease, source, M::lq_full_dense)
 }
 
 pub(super) fn full_qr_numerical_stage<E, D>(
@@ -329,7 +282,7 @@ where
 }
 
 /// Provider-bound dynamic-rank [`qr_full`].
-pub fn qr_full_dyn<E, R, D>(
+pub(crate) fn qr_full_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Qr<BoundDynFactor<R, D>>, OperationError>
@@ -403,7 +356,7 @@ where
 }
 
 /// Provider-bound dynamic-rank [`lq_full`].
-pub fn lq_full_dyn<E, R, D>(
+pub(crate) fn lq_full_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Lq<BoundDynFactor<R, D>>, OperationError>
@@ -479,7 +432,7 @@ where
 }
 
 /// Provider-bound compact QR used by authority-preserving callers.
-pub fn qr_compact_dyn<E, R, D>(
+pub(crate) fn qr_compact_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Qr<BoundDynFactor<R, D>>, OperationError>
@@ -675,7 +628,7 @@ where
 }
 
 /// Provider-bound compact LQ used by authority-preserving callers.
-pub fn lq_compact_dyn<E, R, D>(
+pub(crate) fn lq_compact_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Lq<BoundDynFactor<R, D>>, OperationError>

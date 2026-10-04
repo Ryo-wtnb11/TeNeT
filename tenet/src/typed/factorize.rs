@@ -6,16 +6,13 @@ mod exp_solve;
 mod inverse;
 mod mode;
 mod polar_null;
-mod qr_lq;
 mod svd;
 
 use mode::{AdjointRule, FactorOp};
 pub use mode::{
     FusionMode, TypedTensorEigDispatch, TypedTensorEighDispatch, TypedTensorExpDispatch,
-    TypedTensorFullLqDispatch, TypedTensorFullQrDispatch, TypedTensorInvDispatch,
-    TypedTensorLqDispatch, TypedTensorNullDispatch, TypedTensorPinvDispatch,
-    TypedTensorPolarDispatch, TypedTensorQrDispatch, TypedTensorSolveDispatch,
-    TypedTensorSvdDispatch,
+    TypedTensorInvDispatch, TypedTensorNullDispatch, TypedTensorPinvDispatch,
+    TypedTensorPolarDispatch, TypedTensorSolveDispatch, TypedTensorSvdDispatch,
 };
 
 /// The runtime as the seam's executor lease: the checked entries lease a
@@ -76,10 +73,44 @@ where
     R::Mode: FusionMode<R>,
     D: TensorScalar,
 {
-    /// The one body of the values-only factorizations: the mode's adjoint
-    /// rule picks the input storage, `stage` (the matrix-algebra entry for
-    /// `R::Mode`) computes the raw spectra, and the coupled sectors are
-    /// decoded into public labels and sorted by label.
+    /// The storage `op` reads: the receiver's own, or for a lazy adjoint
+    /// whatever the mode's adjoint rule (D1, #1755) selects. `local` holds an
+    /// operation-local materialization.
+    fn factor_input<'a>(
+        &'a self,
+        op: FactorOp,
+        local: &'a mut Option<Self>,
+    ) -> Result<tenet_matrixalgebra::seam::FactorSource<'a, R, D>, TypedFacadeError<R>> {
+        let view = match &self.repr {
+            TypedTensorRepr::Owned(body) => return Ok(owned_factor_source(body)?),
+            TypedTensorRepr::Adjoint(view) => view,
+        };
+        match R::Mode::adjoint_rule(op) {
+            AdjointRule::Reject => {
+                Err(Error::InvalidArgument(op.lazy_adjoint_refusal().to_string()).into())
+            }
+            AdjointRule::Parent => Ok(tenet_matrixalgebra::seam::FactorSource::Dense(
+                BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
+                    .map_err(Error::from)?,
+            )),
+            AdjointRule::Materialize => {
+                let local = local.insert(self.materialized_tensor_uncached()?);
+                Ok(owned_factor_source(
+                    local
+                        .owned_body()
+                        .expect("materialize returns an owned body"),
+                )?)
+            }
+            AdjointRule::Redirect => Err(internal_layout_error(
+                "a redirected factorization must not read its own lazy input",
+            )
+            .into()),
+        }
+    }
+
+    /// The one body of the values-only factorizations: `stage` (the
+    /// matrix-algebra entry for `R::Mode`) computes the raw spectra, and the
+    /// coupled sectors are decoded into public labels and sorted by label.
     fn factor_values<V>(
         &self,
         op: FactorOp,
@@ -91,29 +122,8 @@ where
             <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
         >,
     ) -> Result<Vec<SectorSpectrum<R::Sector, V>>, TypedFacadeError<R>> {
-        let local;
-        let source = match &self.repr {
-            TypedTensorRepr::Owned(body) => owned_factor_source(body)?,
-            TypedTensorRepr::Adjoint(view) => match R::Mode::adjoint_rule(op) {
-                AdjointRule::Reject => {
-                    return Err(
-                        Error::InvalidArgument(op.lazy_adjoint_refusal().to_string()).into(),
-                    )
-                }
-                AdjointRule::Parent => tenet_matrixalgebra::seam::FactorSource::Dense(
-                    BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
-                        .map_err(Error::from)?,
-                ),
-                AdjointRule::Materialize => {
-                    local = self.materialized_tensor_uncached()?;
-                    owned_factor_source(
-                        local
-                            .owned_body()
-                            .expect("materialize returns an owned body"),
-                    )?
-                }
-            },
-        };
+        let mut local = None;
+        let source = self.factor_input(op, &mut local)?;
         let raw = stage(RuntimeDense(&self.runtime), source).map_err(R::Mode::map_factor_error)?;
         let provider = self.logical_space().provider();
         let mut decoded = raw
@@ -128,6 +138,66 @@ where
         // Public label order, not the engine's opaque sector-id order.
         decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
         Ok(decoded)
+    }
+
+    /// The one body of QR: `stage` factors the input storage, and each factor
+    /// keeps the storage its route produced.
+    fn factor_qr(
+        &self,
+        op: FactorOp,
+        stage: impl FnOnce(
+            RuntimeDense<'_>,
+            tenet_matrixalgebra::seam::FactorSource<'_, R, D>,
+        ) -> Result<
+            Qr<tenet_matrixalgebra::seam::FactorOutput<R, D>>,
+            <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
+        >,
+    ) -> Result<Qr<Self>, TypedFacadeError<R>> {
+        let mut local = None;
+        let source = self.factor_input(op, &mut local)?;
+        let Qr { q, r } =
+            stage(RuntimeDense(&self.runtime), source).map_err(R::Mode::map_factor_error)?;
+        Ok(Qr {
+            q: self.factor_output(q),
+            r: self.factor_output(r),
+        })
+    }
+
+    /// The one body of LQ. Under [`AdjointRule::Redirect`] a lazy adjoint is
+    /// factored as `qr` of its parent with both factors adjointed back and
+    /// detached.
+    fn factor_lq(
+        &self,
+        op: FactorOp,
+        qr: impl FnOnce(&Self) -> Result<Qr<Self>, TypedFacadeError<R>>,
+        stage: impl FnOnce(
+            RuntimeDense<'_>,
+            tenet_matrixalgebra::seam::FactorSource<'_, R, D>,
+        ) -> Result<
+            Lq<tenet_matrixalgebra::seam::FactorOutput<R, D>>,
+            <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
+        >,
+    ) -> Result<Lq<Self>, TypedFacadeError<R>>
+    where
+        R::Mode: TypedTensorAdjointDispatch<R, D>,
+    {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
+            && R::Mode::adjoint_rule(op) == AdjointRule::Redirect
+        {
+            let Qr { q, r } = qr(&self.adjoint()?)?;
+            return Ok(Lq {
+                l: r.adjoint()?.materialized_tensor_uncached()?,
+                q: q.adjoint()?.materialized_tensor_uncached()?,
+            });
+        }
+        let mut local = None;
+        let source = self.factor_input(op, &mut local)?;
+        let Lq { l, q } =
+            stage(RuntimeDense(&self.runtime), source).map_err(R::Mode::map_factor_error)?;
+        Ok(Lq {
+            l: self.factor_output(l),
+            q: self.factor_output(q),
+        })
     }
 }
 

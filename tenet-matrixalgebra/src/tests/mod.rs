@@ -74,6 +74,19 @@ where
     eig_vals_from_source::<CheckedGenericAdmissionMode, _, _, _, _>(lease, source)
 }
 
+fn qr_compact_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<Qr<FactorOutput<R, D>>, CheckedGenericFactorPlanError<R::Error>>
+where
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    qr_compact_from_source::<CheckedGenericAdmissionMode, _, _, _, _>(lease, source)
+}
+
 fn dense_source<'a, R, D>(input: &'a BoundDynamicTensorRef<'_, R, D>) -> FactorSource<'a, R, D> {
     FactorSource::Dense(BoundDynamicTensorRef::try_new(input.space(), input.data()).unwrap())
 }
