@@ -342,6 +342,7 @@ impl CompactMultiplicityFreeTreePairBasis {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 fn seed_generic_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
@@ -369,6 +370,7 @@ where
     Ok((basis, columns))
 }
 
+#[cfg(any(test, feature = "testing"))]
 fn order_generic_tree_pair_block<S>(
     basis: Vec<FusionTreePairKey>,
     columns: DenseColumns<S>,
@@ -382,10 +384,12 @@ fn order_generic_tree_pair_block<S>(
 }
 
 /// The Generic keyed-block driver of the shared block schedule.
+#[cfg(any(test, feature = "testing"))]
 struct GenericTreePairBlockDriver<'a, R> {
     rule: &'a R,
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl<R> BlockDriver for GenericTreePairBlockDriver<'_, R>
 where
     R: GenericRigidSymbols,
@@ -432,6 +436,7 @@ where
 }
 
 #[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
 pub fn generic_braid_tree_pair_block_ordered<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
@@ -505,6 +510,7 @@ where
 }
 
 #[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
 pub fn generic_permute_tree_pair_block_ordered<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
@@ -542,6 +548,7 @@ where
 }
 
 #[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
 pub fn generic_transpose_tree_pair_block_ordered<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],

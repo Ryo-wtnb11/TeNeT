@@ -4,17 +4,20 @@ use smallvec::SmallVec;
 use std::{collections::hash_map::Entry, sync::Arc};
 
 use num_traits::Zero;
+#[cfg(any(test, feature = "testing"))]
 use tenet_core::{
-    generic_braid_tree_pair_block_ordered, generic_braid_tree_pair_checked,
-    generic_permute_tree_pair_block_ordered, generic_permute_tree_pair_checked,
-    generic_transpose_tree_pair_block_ordered, generic_transpose_tree_pair_checked,
-    multiplicity_free_braid_tree_pair_block_ordered_indexed,
+    generic_braid_tree_pair_block_ordered, generic_permute_tree_pair_block_ordered,
+    generic_transpose_tree_pair_block_ordered, GenericRigidSymbols,
+};
+use tenet_core::{
+    generic_braid_tree_pair_checked, generic_permute_tree_pair_checked,
+    generic_transpose_tree_pair_checked, multiplicity_free_braid_tree_pair_block_ordered_indexed,
     multiplicity_free_transpose_tree_pair_block_ordered_indexed,
     validate_generic_fusion_tree_pair_checked, BlockKey, BlockKeyKind, BlockStructure,
     CategoricalScalar, CheckedGenericFusion, CheckedGenericRigidSymbols,
     CheckedGenericStructureError, CheckedGenericSymbolError, CoreError, FusionRule,
     FusionStyleKind, FusionTreeBlockGroup, FusionTreeGroupKey, FusionTreeKey, FusionTreePairKey,
-    FusionTreePairOrientation, GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure,
+    FusionTreePairOrientation, LocallyValidatedFusionTreeBlockStructure,
     MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, OrderedBlockLinearMap,
     OrderedBlockLinearStorage, PreparedTreePairOperation,
 };
@@ -251,6 +254,7 @@ where
         .map_err(OperationError::from_core_preserving_context)
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn validate_generic_tree_pair_preflight<'rule, 'structure, R>(
     rule: &'rule R,
     operation: &TreeTransformOperation,
@@ -2226,6 +2230,7 @@ where
 /// Fusion-tree block keys in `src_structure` follow
 /// [`tenet_core::FusionTreeKey::validate_for_rule`]'s provider-domain
 /// precondition.
+#[cfg(any(test, feature = "testing"))]
 pub fn build_generic_tree_pair_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperation,
@@ -2239,6 +2244,7 @@ where
     build_generic_tree_pair_transform_group_plan_validated(&source_proof, operation)
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn build_generic_tree_pair_transform_group_plan_validated<R>(
     source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,

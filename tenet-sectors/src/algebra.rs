@@ -1053,6 +1053,7 @@ impl<R: FusionRule> CheckedGenericFusion for InfallibleGeneric<'_, R> {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl<R> CheckedGenericRigidSymbols for InfallibleGeneric<'_, R>
 where
     R: GenericRigidSymbols,
@@ -1102,6 +1103,9 @@ where
 /// trait returns a bare `Scalar` per (a,b,c,...) because `nsymbol` is always
 /// 0 or 1, this trait returns a dense rank-4 array / matrix because
 /// `nsymbol` can exceed 1.
+///
+/// Test-only (`testing` feature): production Generic is checked only.
+#[cfg(any(test, feature = "testing"))]
 pub trait GenericFusionSymbols: FusionRule {
     type Scalar: CategoricalScalar + Send + Sync;
 
@@ -1127,7 +1131,7 @@ pub trait GenericFusionSymbols: FusionRule {
 /// conjugation, and — for the Generic-fusion accumulation and pruning paths —
 /// an additive identity and an exact-zero test.
 ///
-/// [`MultiplicityFreeFusionSymbols::Scalar`] and [`GenericFusionSymbols::Scalar`]
+/// [`MultiplicityFreeFusionSymbols::Scalar`] and `CheckedGenericRigidSymbols::Scalar`
 /// both bound on this one trait (issue #972). It used to be two shapes: a
 /// provider method pair (`scalar_one`/`scalar_conj`, unable to depend on the
 /// provider because every implementation just returns the scalar unit and
@@ -1286,6 +1290,9 @@ impl CategoricalScalar for Complex64 {
 /// `F` block has all its `N`-labels forced to 1 by the pivotal axioms, so it
 /// is a single number even in the Generic case
 /// (TensorKitSectors `sectors.jl:463-468`, `frobenius_schur_phase_from_Fsymbol`).
+///
+/// Test-only (`testing` feature): production Generic is checked only.
+#[cfg(any(test, feature = "testing"))]
 pub trait GenericRigidSymbols: GenericFusionSymbols
 where
     Self::Scalar: CategoricalScalar,

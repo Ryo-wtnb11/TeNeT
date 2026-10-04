@@ -243,6 +243,7 @@ where
 /// assignment (:110) keeps the *last* non-skipped `ν`; we reproduce that with a
 /// keep-last overwrite on key collision. When the domain is non-empty, `ν` is
 /// stored on the new domain tree, keys are distinct, and no overwrite occurs.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn generic_bendright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -372,6 +373,7 @@ where
 /// swap codomain/domain, run `bendright`, swap back, and conjugate every
 /// coefficient. Structurally identical to the mult-free
 /// [`multiplicity_free_bendleft_tree_pair`] :2439-2460.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn generic_bendleft_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -463,6 +465,7 @@ where
         .map_err(map_infallible_generic_symbol_error)
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub(super) fn generic_repartition_tree_pair_unchecked<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,

@@ -72,6 +72,7 @@ where
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub(super) fn collect_generic_fusion_trees_for_coupled_frozen<R>(
     rule: &R,
     uncoupled: &Arc<[SectorId]>,

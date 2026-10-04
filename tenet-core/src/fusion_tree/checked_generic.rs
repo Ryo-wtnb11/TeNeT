@@ -81,6 +81,7 @@ impl<E: std::error::Error + 'static> std::error::Error for CheckedGenericSymbolE
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub(super) fn map_infallible_generic_symbol_error(
     error: CheckedGenericSymbolError<std::convert::Infallible>,
 ) -> CoreError {
@@ -166,8 +167,10 @@ pub(crate) trait GenericRigidAccess: GenericFRAccess {
     ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>>;
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub(crate) struct InfallibleGenericFR<'a, R>(pub(crate) &'a R);
 
+#[cfg(any(test, feature = "testing"))]
 impl<R> GenericFRAccess for InfallibleGenericFR<'_, R>
 where
     R: GenericFusionSymbols,
@@ -239,6 +242,7 @@ where
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl<R> GenericRigidAccess for InfallibleGenericFR<'_, R>
 where
     R: GenericRigidSymbols,

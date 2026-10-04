@@ -106,6 +106,7 @@ pub use contract::{
     execute_storage_contract_resolution_on_cuda, CudaContractScratch,
     CudaDynamicTreeMembersWorkspace,
 };
+#[cfg(any(test, feature = "testing"))]
 pub use facade::{
     braid_into_generic, permute_into_generic, transpose_into_generic, tree_transform_into_generic,
     tree_transform_into_with_generic, tree_transform_structure_generic,

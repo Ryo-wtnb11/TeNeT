@@ -34,9 +34,12 @@ pub(crate) use plan::{
 };
 pub(crate) use plan::{
     build_checked_generic_tree_pair_transform_group_plan_validated,
-    build_generic_tree_pair_transform_group_plan_validated,
     compile_multiplicity_free_tree_pair_structure,
-    validate_checked_generic_tree_pair_plan_preflight, validate_generic_tree_pair_preflight,
+    validate_checked_generic_tree_pair_plan_preflight,
 };
 #[cfg(test)]
 pub use plan::{build_generic_tree_pair_transform_group_plan, build_tree_transform_group_plan};
+#[cfg(any(test, feature = "testing"))]
+pub(crate) use plan::{
+    build_generic_tree_pair_transform_group_plan_validated, validate_generic_tree_pair_preflight,
+};
