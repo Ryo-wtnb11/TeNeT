@@ -179,8 +179,8 @@ where
     /// [`Self::qr_full`] instead uses `dim(W_c) = m_c`, making `q` square and
     /// `r` upper trapezoidal in every sector.
     ///
-    /// An admitted finite owned Host compact diagonal on `V <- V` returns
-    /// both factors in compact storage with `W = V`, including dual
+    /// An owned Host compact diagonal on `V <- V` is factorized directly and
+    /// returns both factors in compact storage with `W = V`, including dual
     /// orientation, for multiplicity-free and checked-Generic providers alike
     /// (TensorKit's diagonal dispatch). Any other input, including a
     /// materialized diagonal or swapped leg roles, takes the dense route,
@@ -189,7 +189,8 @@ where
     /// Phase is +1 at zero; work and output storage are `O(sum_c k_c)` after
     /// sector/layout validation. Use [`Self::diagview`] to read the factors,
     /// or [`Self::materialize`] before [`Self::dense_data`] for a dense buffer.
-    /// Nonfinite or unrepresentable magnitudes retain the dense provider route.
+    /// A nonfinite diagonal entry returns [`Error::InvalidArgument`]
+    /// (`qr`/`lq input components must be finite`) before any work.
     ///
     /// Other inputs run one dense QR per sector, with cost
     /// `O(sum_c m_c * n_c * min(m_c, n_c))`. Multiplicity-free lazy adjoints
@@ -263,10 +264,10 @@ where
     /// a dense input or dense SVD call; its dense `u` and `vh` still require
     /// `O(sum_c k_c²)` output storage and writes. A multiplicity-free lazy
     /// adjoint is handled from its parent without materializing it.
-    /// Checked-Generic SVD requires owned input. An admitted square compact
-    /// diagonal uses the same direct per-sector sorting and factor publication;
-    /// other layouts and nonfinite or unrepresentable spectra use the ordinary
-    /// dense solver path.
+    /// Checked-Generic SVD requires owned input. A compact diagonal uses the
+    /// same direct per-sector sorting and factor publication in both modes; a
+    /// nonfinite entry returns [`Error::InvalidArgument`]
+    /// (`svd input components must be finite`) before any work.
     /// Any sector, layout, or provider failure returns no factors.
     ///
     /// ```
@@ -321,12 +322,11 @@ where
     /// dense storage. On Host, `s` uses compact diagonal storage exactly when
     /// the constructed `W_out` and `W_in` legs coincide, every positive bond
     /// sector has a complete spectrum, and the compact layout is admitted.
-    /// Otherwise it is dense. An admitted owned compact input avoids dense
-    /// input materialization and a solver call. For a checked-Generic provider,
-    /// this requires a rank-(1,1) square aligned source with one tree per side
-    /// and complete checked row and column bond maps exactly equal to the
-    /// source spectrum sectors and dimensions; other checked inputs use the
-    /// dense route.
+    /// Otherwise it is dense. An owned compact diagonal input is factorized
+    /// directly, without dense input materialization or a solver call. For a
+    /// checked-Generic provider whose coupled row and column dimensions
+    /// disagree with the diagonal's own bond, it returns
+    /// [`Error::InvalidArgument`].
     /// Call `s.materialize()` before `dense_data()` when needed.
     /// Checked factors use the source provider instance; a failure returns no
     /// factors.
@@ -362,7 +362,7 @@ where
     /// `l` is lower trapezoidal.
     ///
     /// Its cost and compact storage contract are the same as [`Self::qr_compact`]:
-    /// admitted owned Host compact diagonals preserve `W = V` and both factors
+    /// owned Host compact diagonals preserve `W = V` and both factors
     /// are compact, including on a dual `V`. Checked Generic requires an owned
     /// input.
     /// Checked factors use the source provider instance, and a failure returns
@@ -475,7 +475,7 @@ where
     /// and non-negative. For sector shape `m_c x n_c`, dense work is
     /// `O(m_c² n_c)` when `m_c <= n_c`; when `m_c > n_c`, completing the
     /// square `q` costs `O(m_c²(n_c + m_c))`. Source packing and owned factor
-    /// publication are additional costs. An admitted owned Host compact diagonal
+    /// publication are additional costs. An owned Host compact diagonal
     /// uses `W = V` and two compact factors under the boundary documented by
     /// [`Self::qr_compact`].
     /// See [`Self::qr_compact`] for the
@@ -507,8 +507,8 @@ where
     /// non-negative. For sector shape `m_c x n_c`, dense work is
     /// `O(n_c² m_c)` when `n_c <= m_c`; when `n_c > m_c`, completing the
     /// square `q` costs `O(n_c²(m_c + n_c))`. Source packing, the sectorwise
-    /// adjoint, and owned factor publication are additional costs. An admitted
-    /// owned Host compact diagonal uses `W = V` and two compact factors under
+    /// adjoint, and owned factor publication are additional costs. An owned
+    /// Host compact diagonal uses `W = V` and two compact factors under
     /// the boundary documented by [`Self::lq_compact`]. See [`Self::lq_compact`] for the compact alternative, storage and
     /// lazy-input behavior, errors, and example.
     ///
@@ -536,10 +536,10 @@ where
     /// No factor tensor or intermediate bond is built. This is the least
     /// allocating member of the SVD family when only the spectrum is needed.
     /// Multiplicity-free lazy adjoints are read through their owned parent,
-    /// and an owned compact diagonal input with finite, representable magnitudes
-    /// is read and sorted directly without a dense solver for both
-    /// multiplicity-free and checked-Generic providers. Other compact cases
-    /// retain the dense solver's behavior. Checked Generic requires an owned
+    /// and an owned compact diagonal input is read and sorted directly without
+    /// a dense solver for both multiplicity-free and checked-Generic providers;
+    /// a nonfinite entry returns [`Error::InvalidArgument`]
+    /// (`svd input components must be finite`). Checked Generic requires an owned
     /// input and returns [`Error::InvalidArgument`] for a lazy adjoint. A dense failure returns
     /// [`Error::Operation`]; if a provider cannot decode a sector label, its
     /// original error is available as the source. See [`Self::svd_compact`] for
@@ -576,12 +576,11 @@ where
     ///
     /// No eigenvector factor or bond space is built. The input must be an
     /// endomorphism and every sector must satisfy the same Hermiticity check as
-    /// [`Self::eigh_full`]. An owned Host compact diagonal with finite, exactly
-    /// real entries and an admitted endomorphism sector layout is read directly
-    /// for both multiplicity-free and checked-Generic providers. The checked
-    /// route also requires the canonical bond space and a bijection between
-    /// stored spectra and aligned square sector regions. Other compact inputs
-    /// use the dense route; checked Generic requires owned input and rejects
+    /// [`Self::eigh_full`]. An owned Host compact diagonal is read directly for
+    /// both multiplicity-free and checked-Generic providers: a nonfinite entry
+    /// returns [`Error::InvalidArgument`] (`eigh input components must be
+    /// finite`), the dense route's Hermiticity check is applied to the diagonal,
+    /// and the eigenvalues are its real parts. Checked Generic requires owned input and rejects
     /// lazy adjoints for this values-only method. Dense failures return
     /// [`Error::Operation`],
     /// layout failures return [`Error::Core`], and an original provider or
@@ -623,11 +622,11 @@ where
     ///
     /// Both multiplicity-free and checked-Generic `d` factors use compact
     /// diagonal storage. Checked factors retain the exact source provider
-    /// `Arc`. An owned Host compact diagonal with finite, exactly real entries
-    /// and one aligned square region per coupled sector is read directly into
-    /// a permutation eigenbasis, for both multiplicity-free and checked-Generic
-    /// providers; its dense output still occupies `Σ_c k_c²` elements. Other
-    /// compact inputs and lazy adjoints use an operation-local dense payload.
+    /// `Arc`. An owned Host compact diagonal is read directly into a
+    /// permutation eigenbasis, for both multiplicity-free and checked-Generic
+    /// providers, after the same finite-input and Hermiticity checks as
+    /// [`Self::eigh_vals`]; its dense output still occupies `Σ_c k_c²`
+    /// elements. Lazy adjoints use an operation-local dense payload.
     ///
     /// # Errors and cost
     ///
@@ -683,14 +682,13 @@ where
     /// provider-labelled sector and descending by magnitude.
     ///
     /// No eigenvector factor or bond space is built. The input must be an
-    /// endomorphism. An owned Host compact diagonal with finite eigenvalue
-    /// magnitudes and an admitted endomorphism sector layout is read directly
-    /// for both multiplicity-free and checked-Generic providers. The checked
-    /// route also requires the canonical bond space and a bijection between
-    /// stored spectra and aligned square sector regions. For multiplicity-free
-    /// providers, other compact inputs and lazy adjoints use an operation-local
-    /// dense payload. Checked Generic uses that dense route only for owned
-    /// inputs and rejects lazy adjoints for this values-only method. Unlike
+    /// endomorphism. An owned Host compact diagonal is read directly for both
+    /// multiplicity-free and checked-Generic providers: a nonfinite entry
+    /// returns [`Error::InvalidArgument`] (`eig input components must be
+    /// finite`), and an eigenvalue of infinite magnitude fails the dense
+    /// route's eigenvalue check. For multiplicity-free providers, lazy
+    /// adjoints use an operation-local dense payload; checked Generic rejects
+    /// lazy adjoints for this values-only method. Unlike
     /// [`Self::eig_full`], no eigenvector-rank gate is needed because no
     /// eigenbasis is returned.
     ///
@@ -736,13 +734,12 @@ where
     /// `n * epsilon * sigma_max`. This is an operational gate on the computed
     /// matrix, not a universal detector for every defective floating-point
     /// input. The multiplicity-free path forwards the dense backend result
-    /// without this additional rank gate. An admitted owned Host compact
-    /// diagonal with finite values of finite norm and one aligned square
-    /// region per coupled sector reads its eigenvalues directly and builds a
-    /// dense permutation factor, for both multiplicity-free and checked-Generic
-    /// providers; the rank gate is not evaluated there because a permutation
-    /// has unit singular values. Lazy adjoints and other inputs use an
-    /// operation-local dense payload.
+    /// without this additional rank gate. An owned Host compact diagonal reads
+    /// its eigenvalues directly and builds a dense permutation factor, for both
+    /// multiplicity-free and checked-Generic providers, after the same
+    /// finite-input and eigenvalue checks as [`Self::eig_vals`]; the rank gate
+    /// is not evaluated there because a permutation has unit singular values.
+    /// Lazy adjoints use an operation-local dense payload.
     ///
     /// A non-endomorphism, invalid/non-finite dense result, checked rank-gate
     /// failure, factor-layout failure, or provider failure returns no factors.
@@ -799,14 +796,14 @@ where
     ///
     /// The dense-input compact SVD costs
     /// `O(sum_c m_c * n_c * min(m_c, n_c))`, plus an orthonormal completion in
-    /// sectors that keep null directions. An admitted Host compact diagonal
-    /// with exact zero and well-separated nonzero entries uses a direct
-    /// coordinate basis in `O(sum_c k_c + sum_c k_c q_c)` work and storage,
-    /// where `k_c` is sector size and `q_c` is nullity. Positive magnitudes
-    /// within `max(epsilon(dtype) * k_c, sqrt(epsilon(dtype))) * sigma_max,c`
-    /// retain the SVD route, as do nonfinite, subnormal-scaled, and unsupported layouts. This
-    /// conservative gate does not promise bitwise agreement with any dense
-    /// provider at the cutoff. Lazy adjoints use the opposite null space of their
+    /// sectors that keep null directions. An owned Host compact diagonal uses a
+    /// direct coordinate basis in `O(sum_c k_c + sum_c k_c q_c)` work and
+    /// storage, where `k_c` is sector size and `q_c` is nullity: the dense
+    /// route's rank cutoff is applied to the magnitudes `|a_i|` directly, and
+    /// the null directions are the unit vectors of the magnitudes at or below
+    /// it, in descending magnitude. A nonfinite entry returns
+    /// [`Error::InvalidArgument`] (`null input components must be finite`).
+    /// Lazy adjoints use the opposite null space of their
     /// owned parent and return a detached result without filling the receiver
     /// cache. Checked results use the same provider instance as `self`. TeNeT
     /// creates the output bond only after every sector succeeds; otherwise it
@@ -841,7 +838,7 @@ where
     ///
     /// The fresh bond contains `n_c - rank_c` directions per sector. It uses
     /// the same numerical cutoff and cost as [`Self::left_null`], with rows and
-    /// columns exchanged. Admitted Host compact diagonals use the direct
+    /// columns exchanged. Host compact diagonals use the direct
     /// coordinate route described above; a lazy
     /// adjoint uses the left null space of its owned parent without
     /// materializing the receiver. Checked results use the source provider instance, and a
@@ -874,7 +871,7 @@ where
     /// is wide. [`Self::right_polar`] handles wide blocks.
     ///
     /// Dense-input cost is `O(sum_c m_c * n_c * min(m_c, n_c))` plus sectorwise
-    /// composition. An admitted owned compact diagonal stores both factors
+    /// composition. An owned compact diagonal stores both factors
     /// compactly; use [`Self::materialize`] for dense buffers. A lazy
     /// adjoint runs the opposite decomposition on its owned parent and returns
     /// detached owned factors without materializing the receiver. Checked factors

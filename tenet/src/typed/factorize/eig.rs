@@ -187,7 +187,7 @@ where
     /// eigenvalues are real for both payload dtypes — TensorKit's Hermitian `D`
     /// is real too — but `d` keeps the payload dtype `D` so it composes with
     /// `v` directly.
-    /// An admitted owned compact diagonal builds the sorted spectrum and dense
+    /// An owned compact diagonal builds the sorted spectrum and dense
     /// permutation eigenbasis without materializing a dense input.
     ///
     /// # Errors
@@ -233,9 +233,9 @@ where
     ///
     /// No factor and no bond space is built, so this is the cheap way to ask
     /// about a spectrum — the [`Self::svd_vals`] of the eigendecompositions.
-    /// An owned compact diagonal with finite, exactly real entries is read
-    /// directly without materializing input blocks or invoking a dense solver.
-    /// Other inputs retain the usual Hermiticity admission and dense path.
+    /// An owned compact diagonal is read directly, after the finite-input and
+    /// Hermiticity checks, without materializing input blocks or invoking a
+    /// dense solver.
     ///
     /// # Errors
     ///
@@ -275,7 +275,7 @@ where
     /// complex in general, and TensorKit's `eigen` likewise returns
     /// `ComplexF64` `D` and `V` for a real argument. `d` carries the spectrum
     /// in compact diagonal storage.
-    /// An admitted owned compact diagonal builds the sorted spectrum and dense
+    /// An owned compact diagonal builds the sorted spectrum and dense
     /// permutation eigenbasis without materializing a dense input.
     ///
     /// # The `D::Eig` bound
@@ -341,7 +341,7 @@ where
 
     /// TensorKit 0.17 / MatrixAlgebraKit `eig_vals`: the general eigenvalues
     /// per coupled sector, and nothing else. `Complex64` for every payload dtype.
-    /// An admitted owned compact diagonal is read without dense materialization.
+    /// An owned compact diagonal is read without dense materialization.
     ///
     /// # Errors
     ///

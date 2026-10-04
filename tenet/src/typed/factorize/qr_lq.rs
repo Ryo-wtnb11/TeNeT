@@ -150,7 +150,7 @@ where
     /// `O(Σ_c n_c³)` — sectorwise cubic; the seam runs one dense QR per
     /// coupled-sector matrix. A lazy adjoint first allocates its whole logical
     /// dense payload as an operation-local owned tensor, released with the
-    /// operation, and the returned factors are owned. An admitted owned compact
+    /// operation, and the returned factors are owned. An owned compact
     /// diagonal uses O(Σ_c k_c) spectrum work/storage and no dense QR. Both
     /// factors preserve the input bond, including dual orientation.
     pub(super) fn qr_compact_multiplicity_free(&self) -> Result<Qr<Self>, Error>
@@ -268,7 +268,7 @@ where
     /// `n_c <= m_c`, and `O(n_c²(m_c + n_c))` when completion is required.
     /// Source packing, the sectorwise adjoint, and owned factor publication are
     /// additional costs. A lazy adjoint uses the parent full-QR route and two
-    /// detached owned output payloads. An admitted owned compact diagonal uses
+    /// detached owned output payloads. An owned compact diagonal uses
     /// the same O(Σ_c k_c) spectrum route as compact LQ.
     pub(super) fn lq_full_multiplicity_free(&self) -> Result<Lq<Self>, Error>
     where

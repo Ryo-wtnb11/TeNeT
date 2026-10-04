@@ -420,12 +420,36 @@ fn compact_diagonal_null_and_cutoff_cover_all_scalars() {
         }],
     )
     .unwrap();
-    // `|MAX (1 + i)|` overflows f32 to Inf, so `sigma_max` and the cutoff are
-    // Inf and no value is above it, as on the dense route: the sector is null.
+    // `|MAX (1 + i)|` overflows f32, so the sector is ranked in scaled form:
+    // a nonzero 1 x 1 sector has full rank and an empty null space.
     DIAGONAL_MATERIALIZATIONS.set(0);
     let null = unrepresentable.left_null(&[0], &[1]).unwrap();
-    assert_eq!(null.domain()[0].degeneracy(&sector).unwrap(), 1);
+    assert!(null.dense_data().unwrap().is_empty());
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
+
+    // Hand-computed, scaled by `m = MAX`: `|a| / m = (sqrt 2, 1 / MAX)` and the
+    // cutoff `eps * 2 * sqrt 2`, so the `1` direction is null and the overflow
+    // direction is not.
+    let mixed: TensorMap<_, num_complex::Complex32> = TensorMap::diagonal(
+        &near_runtime,
+        &GradedSpace::try_new(Arc::new(U1FusionRule), [(sector, 2)]).unwrap(),
+        [SectorSpectrum {
+            sector,
+            values: vec![
+                num_complex::Complex32::new(f32::MAX, f32::MAX),
+                num_complex::Complex32::new(1.0, 0.0),
+            ],
+        }],
+    )
+    .unwrap();
+    let null = mixed.left_null(&[0], &[1]).unwrap();
+    assert_eq!(
+        null.dense_data().unwrap(),
+        [
+            num_complex::Complex32::new(0.0, 0.0),
+            num_complex::Complex32::new(1.0, 0.0)
+        ]
+    );
 }
 
 #[test]

@@ -12,10 +12,25 @@ use super::*;
 /// (stable).
 fn compact_null_sector<D: FactorScalar>(values: &[D], side: FactorSide) -> (usize, Vec<D>) {
     let k = values.len();
-    let sigma = |index: usize| {
+    let rounded = |index: usize| {
         D::from_real(values[index].widen_complex().norm())
             .widen_complex()
             .re
+    };
+    // A finite value whose magnitude overflows (e.g. `MAX (1 + i)`) would make
+    // `sigma_max` and the cutoff infinite and every direction null. Why not
+    // refuse it: the relative rule is scale-invariant, so such a sector is
+    // ranked in the scaled form `|a_i / m|`, `m` its largest component, which
+    // is finite and decides as exact arithmetic would.
+    let scale = (0..k).any(|index| !rounded(index).is_finite()).then(|| {
+        values.iter().fold(0.0_f64, |largest, &value| {
+            let value = value.widen_complex();
+            largest.max(value.re.abs()).max(value.im.abs())
+        })
+    });
+    let sigma = |index: usize| match scale {
+        None => rounded(index),
+        Some(scale) => (values[index].widen_complex() / scale).norm(),
     };
     let sigma_max = (0..k).map(sigma).fold(0.0_f64, f64::max);
     let tolerance = D::epsilon() * k as f64 * sigma_max;
