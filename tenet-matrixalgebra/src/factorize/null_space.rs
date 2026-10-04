@@ -12,24 +12,31 @@ use super::*;
 /// (stable).
 fn compact_null_sector<D: FactorScalar>(values: &[D], side: FactorSide) -> (usize, Vec<D>) {
     let k = values.len();
-    let sigma: Vec<f64> = values
-        .iter()
-        .map(|&value| {
-            D::from_real(value.widen_complex().norm())
-                .widen_complex()
-                .re
-        })
-        .collect();
-    let sigma_max = sigma.iter().copied().fold(0.0_f64, f64::max);
+    let sigma = |index: usize| {
+        D::from_real(values[index].widen_complex().norm())
+            .widen_complex()
+            .re
+    };
+    let sigma_max = (0..k).map(sigma).fold(0.0_f64, f64::max);
     let tolerance = D::epsilon() * k as f64 * sigma_max;
-    let mut null: Vec<usize> = (0..k).filter(|&index| sigma[index] <= tolerance).collect();
-    null.sort_by(|&a, &b| sigma[b].total_cmp(&sigma[a]));
-    let nullity = null.len();
+    let is_null = |&index: &usize| sigma(index) <= tolerance;
+    let nullity = (0..k).filter(is_null).count();
     let mut coordinates = vec![D::zero(); k * nullity];
-    for (column, &index) in null.iter().enumerate() {
-        match side {
-            FactorSide::Left => coordinates[index + column * k] = D::from_real(1.0),
-            FactorSide::Right => coordinates[column + index * nullity] = D::from_real(1.0),
+    let mut place = |column: usize, index: usize| match side {
+        FactorSide::Left => coordinates[index + column * k] = D::from_real(1.0),
+        FactorSide::Right => coordinates[column + index * nullity] = D::from_real(1.0),
+    };
+    // Exact zeros, the common case, are already in descending (equal) order;
+    // only a nonzero direction below the cutoff needs the stable sort.
+    if (0..k).filter(is_null).all(|index| sigma(index) == 0.0) {
+        for (column, index) in (0..k).filter(is_null).enumerate() {
+            place(column, index);
+        }
+    } else {
+        let mut null: Vec<usize> = (0..k).filter(is_null).collect();
+        null.sort_by(|&a, &b| sigma(b).total_cmp(&sigma(a)));
+        for (column, &index) in null.iter().enumerate() {
+            place(column, index);
         }
     }
     (nullity, coordinates)

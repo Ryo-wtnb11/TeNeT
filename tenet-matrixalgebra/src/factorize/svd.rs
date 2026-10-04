@@ -410,7 +410,7 @@ where
         plan.right_regions.len(),
         plan.left_layout.required_len()?,
         plan.right_layout.required_len()?,
-        spectrum,
+        &bond.by_sector,
     )?;
     let u = BoundDynFactor::from_bound(
         authority.rebind_validated(&plan.left_layout)?,
@@ -434,10 +434,9 @@ fn compact_diagonal_svd_factor_data<D: FactorScalar>(
     right_region_count: usize,
     left_len: usize,
     right_len: usize,
-    spectrum: &[SectorSpectrum<D>],
+    by_sector: &FxHashMap<SectorId, &SectorSpectrum<D>>,
 ) -> Result<(Vec<D>, Vec<D>, Vec<SectorSpectrum>), OperationError> {
-    let by_sector: FxHashMap<_, _> = spectrum.iter().map(|entry| (entry.sector, entry)).collect();
-    if by_sector.len() != spectrum.len() || spectrum.len() != routes.len() {
+    if by_sector.len() != routes.len() {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: "compact diagonal spectrum does not match source sectors",
         });
@@ -573,10 +572,11 @@ where
     let source = authority.space();
     let source_regions = &bond.regions;
     let by_sector = &bond.by_sector;
-    let source_dimensions = source_regions
-        .iter()
-        .map(|region| (region.coupled(), region.rows()))
-        .collect::<BTreeMap<_, _>>();
+    // Why not `collect`: `BTreeMap::from_iter` sorts through a scratch `Vec`.
+    let mut source_dimensions = BTreeMap::new();
+    for region in source_regions.iter() {
+        source_dimensions.insert(region.coupled(), region.rows());
+    }
 
     if factor_bond_is_input_bond(source, || {
         SectorLeg::new(

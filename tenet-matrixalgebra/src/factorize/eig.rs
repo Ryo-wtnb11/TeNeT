@@ -1777,13 +1777,12 @@ fn validate_diagonal_eigenvalues<R, D: FactorScalar>(
     bond: &DiagonalBond<'_, R, D>,
 ) -> Result<(), OperationError> {
     for region in bond.iter() {
-        let values: Vec<Complex64> = bond
-            .entry(region)
-            .values
-            .iter()
-            .map(|&value| value.widen_complex())
-            .collect();
-        validate_complex_eigenvalues(&values)?;
+        for &value in &bond.entry(region).values {
+            let value = value.widen_complex();
+            if !(value.re.is_finite() && value.im.is_finite() && value.norm().is_finite()) {
+                return Err(invalid_eigenvalues());
+            }
+        }
     }
     Ok(())
 }

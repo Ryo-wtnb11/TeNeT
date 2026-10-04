@@ -21,11 +21,13 @@ where
     let mut r = Vec::with_capacity(bond.len());
     for region in bond.iter() {
         let entry = bond.entry(region);
-        let (phases, magnitudes) = entry
-            .values
-            .iter()
-            .map(|&value| diagonal_phase_magnitude(value))
-            .unzip();
+        let mut phases = Vec::with_capacity(entry.values.len());
+        let mut magnitudes = Vec::with_capacity(entry.values.len());
+        for &value in &entry.values {
+            let (phase, magnitude) = diagonal_phase_magnitude(value);
+            phases.push(phase);
+            magnitudes.push(magnitude);
+        }
         q.push(SectorSpectrum {
             sector: entry.sector,
             values: phases,
