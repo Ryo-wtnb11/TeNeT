@@ -223,18 +223,13 @@ where
                     message: "trace rhs axis has no external leg",
                 })
             })?;
-        let rhs_dual = rule
-            .try_dual(*rhs.sectors().first().ok_or_else(|| {
-                CheckedGenericPlanError::Operation(OperationError::InvalidArgument {
-                    message: "trace rhs leg has no sector",
-                })
-            })?)
-            .map_err(CheckedGenericPlanError::Provider)?;
-        Ok(*lhs.sectors().first().ok_or_else(|| {
-            CheckedGenericPlanError::Operation(OperationError::InvalidArgument {
-                message: "trace lhs leg has no sector",
-            })
-        })? == rhs_dual)
+        // Why the whole leg: TensorKit `trace_permute!` requires
+        // `space(tsrc, q₁) == dual(space(tsrc, q₂))`; comparing only the first
+        // sector admitted non-dual pairs and summed only the sectors they share.
+        let rhs_dual = rhs
+            .try_dual_generic(rule)
+            .map_err(CheckedGenericPlanError::from)?;
+        Ok(lhs == rhs_dual)
     }
 
     fn non_dual_error() -> Option<Self::Error> {
