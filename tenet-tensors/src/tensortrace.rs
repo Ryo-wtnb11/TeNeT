@@ -32,9 +32,12 @@ use tenet_operations::{ConjugateValue, RealStructuralCoefficient, RecouplingCoef
 
 #[cfg(feature = "cuda")]
 mod cuda;
+mod pipeline;
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub use cuda::tensortrace_fusion_structure_into_on_cuda;
+use pipeline::{build_trace_terms, trace_geometry, trace_preflight};
+use tenet_core::{CheckedGenericAdmissionMode, MultiplicityFreeAdmissionMode};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TensorTraceStructure {
@@ -390,7 +393,13 @@ impl<C> TensorTraceFusionStructure<C> {
             src,
             axes,
             |logical_src, axis_plan| {
-                checked_fusion_trace_geometry(rule, logical_src, axis_plan, dst.nout()).map(Some)
+                trace_geometry::<MultiplicityFreeAdmissionMode, R>(
+                    rule,
+                    logical_src,
+                    axis_plan,
+                    dst.nout(),
+                )
+                .map(Some)
             },
         )
     }
@@ -496,8 +505,13 @@ impl<C> TensorTraceFusionStructure<C> {
             dst_codomain_rank,
             checked_geometry,
         )?;
-        let terms =
-            build_fusion_trace_terms(rule, &dst_structure, src, &axis_plan, dst_codomain_rank)?;
+        let terms = build_trace_terms::<MultiplicityFreeAdmissionMode, R>(
+            rule,
+            &dst_structure,
+            src,
+            &axis_plan,
+            dst_codomain_rank,
+        )?;
         Self::assemble(axis_plan, terms, dst_structure, src)
     }
 
@@ -1235,283 +1249,8 @@ pub fn tensortrace_fusion_dyn_selected_homspace_generic_checked<R>(
 where
     R: CheckedGenericFusion,
 {
-    let orientation = if axes.source_conjugate() {
-        FusionTreePairOrientation::Adjoint
-    } else {
-        FusionTreePairOrientation::Direct
-    };
-    let lowered_axes =
-        lower_tensortrace_source_adjoint_axes_dyn(src.space().nout(), src.space().nin(), axes)
-            .map_err(CheckedGenericPlanError::Operation)?;
-    let lowered_spec = lowered_axes.as_spec();
-    let axis_plan = TensorTraceAxisPlan::compile(
-        src.space().rank(),
-        lowered_spec.output_axes().len(),
-        lowered_spec,
-    )
-    .map_err(CheckedGenericPlanError::Operation)?;
-    if dst_nout > axis_plan.output_axes.len() {
-        return Err(CheckedGenericPlanError::Operation(
-            OperationError::RankMismatch {
-                expected: axis_plan.output_axes.len(),
-                actual: dst_nout,
-            },
-        ));
-    }
-    let oriented = OrientedFusionTreeHomSpace::new(src.space().homspace(), orientation);
-    let selected = oriented
-        .try_select_generic_checked(
-            src.provider(),
-            &axis_plan.output_axes[..dst_nout],
-            &axis_plan.output_axes[dst_nout..],
-        )
-        .map_err(CheckedGenericPlanError::from)?;
-    for (&lhs_axis, &rhs_axis) in axis_plan
-        .trace_lhs_axes
-        .iter()
-        .zip(axis_plan.trace_rhs_axes.iter())
-    {
-        let lhs = oriented
-            .try_external_axis_leg_generic(src.provider(), lhs_axis)
-            .map_err(CheckedGenericPlanError::from)?
-            .ok_or_else(|| {
-                CheckedGenericPlanError::Operation(OperationError::InvalidArgument {
-                    message: "trace lhs axis has no external leg",
-                })
-            })?;
-        let rhs = oriented
-            .try_external_axis_leg_generic(src.provider(), rhs_axis)
-            .map_err(CheckedGenericPlanError::from)?
-            .ok_or_else(|| {
-                CheckedGenericPlanError::Operation(OperationError::InvalidArgument {
-                    message: "trace rhs axis has no external leg",
-                })
-            })?;
-        let rhs_dual = src
-            .provider()
-            .try_dual(*rhs.sectors().first().ok_or_else(|| {
-                CheckedGenericPlanError::Operation(OperationError::InvalidArgument {
-                    message: "trace rhs leg has no sector",
-                })
-            })?)
-            .map_err(CheckedGenericPlanError::Provider)?;
-        if *lhs.sectors().first().ok_or_else(|| {
-            CheckedGenericPlanError::Operation(OperationError::InvalidArgument {
-                message: "trace lhs leg has no sector",
-            })
-        })? != rhs_dual
-        {
-            return Err(CheckedGenericPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope {
-                    message: "trace pairs must contain dual sectors",
-                },
-            ));
-        }
-    }
-    Ok(selected)
-}
-
-fn build_fusion_trace_terms<R>(
-    rule: &R,
-    dst_structure: &BlockStructure,
-    src: OrientedTraceSource<'_>,
-    axis_plan: &TensorTraceAxisPlan,
-    dst_codomain_rank: usize,
-) -> Result<Vec<TensorTraceFusionStructureTerm<R::Scalar>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
-{
-    let mut codomain_permutation =
-        Vec::with_capacity(dst_codomain_rank + axis_plan.trace_lhs_axes.len());
-    codomain_permutation.extend_from_slice(&axis_plan.output_axes[..dst_codomain_rank]);
-    codomain_permutation.extend_from_slice(&axis_plan.trace_lhs_axes);
-    let mut domain_permutation = Vec::with_capacity(
-        axis_plan.output_axes.len() - dst_codomain_rank + axis_plan.trace_rhs_axes.len(),
-    );
-    domain_permutation.extend_from_slice(&axis_plan.output_axes[dst_codomain_rank..]);
-    domain_permutation.extend_from_slice(&axis_plan.trace_rhs_axes);
-
-    src.validate_source_keys()?;
-    let mut terms = Vec::new();
-    if rule.fusion_style() == FusionStyleKind::Unique {
-        let (source_codomain_rank, source_domain_rank) = match src.orientation {
-            FusionTreePairOrientation::Direct => (src.storage_nout, src.storage_nin),
-            FusionTreePairOrientation::Adjoint => (src.storage_nin, src.storage_nout),
-        };
-        let prepared = PreparedTreePairOperation::prepare_permute(
-            rule,
-            source_codomain_rank,
-            source_domain_rank,
-            &codomain_permutation,
-            &domain_permutation,
-        )
-        .map_err(OperationError::from_core_preserving_context)?;
-        for src_block_index in 0..src.structure.block_count() {
-            record_trace_transform_invocation(src_block_index);
-            let row = prepared
-                .execute_unique_rigid(rule, &src.source_key(src_block_index)?)
-                .map_err(OperationError::from_core_preserving_context)?;
-            lower_fusion_trace_source_rows(
-                rule,
-                dst_structure,
-                axis_plan,
-                dst_codomain_rank,
-                src_block_index,
-                src,
-                core::iter::once(row),
-                &mut terms,
-            )?;
-        }
-        return Ok(terms);
-    }
-
-    let groups = src.structure.fusion_tree_group_slice();
-    let mut rows_by_source = (0..src.structure.block_count())
-        .map(|_| None)
-        .collect::<Vec<Option<Vec<(FusionTreePairKey, R::Scalar)>>>>();
-    let mut group_by_source = vec![None; src.structure.block_count()];
-    for (group_index, group) in groups.iter().enumerate() {
-        for &src_block_index in group.block_indices() {
-            group_by_source[src_block_index] = Some(group_index);
-        }
-    }
-
-    for src_block_index in 0..src.structure.block_count() {
-        if rows_by_source[src_block_index].is_none() {
-            let group_index =
-                group_by_source[src_block_index].ok_or(OperationError::InvalidArgument {
-                    message: "trace source block was not assigned to a fusion group",
-                })?;
-            let group = &groups[group_index];
-            record_trace_transform_invocation(src_block_index);
-            let group_rows = multiplicity_free_permute_tree_pair_block_indexed(
-                rule,
-                src.structure,
-                group.block_indices(),
-                src.orientation,
-                &codomain_permutation,
-                &domain_permutation,
-            )
-            .map_err(OperationError::from_core_preserving_context)?;
-            if group_rows.len() != group.block_indices().len() {
-                return Err(OperationError::InvalidArgument {
-                    message: "trace block transform returned the wrong source row count",
-                });
-            }
-            for (&src_block_index, rows) in group.block_indices().iter().zip(group_rows) {
-                rows_by_source[src_block_index] = Some(rows);
-            }
-        }
-
-        // Why not transform every group up front: a later group's symbol error
-        // must not overtake an earlier source's lowering error. The whole current
-        // group stays atomic because per-source replay would duplicate its F/R
-        // traversal; expert incomplete structures can therefore observe changed
-        // error timing only between members of that same group.
-        let rows =
-            rows_by_source[src_block_index]
-                .take()
-                .ok_or(OperationError::InvalidArgument {
-                    message: "trace source block was not assigned to a fusion group",
-                })?;
-        lower_fusion_trace_source_rows(
-            rule,
-            dst_structure,
-            axis_plan,
-            dst_codomain_rank,
-            src_block_index,
-            src,
-            rows,
-            &mut terms,
-        )?;
-    }
-    Ok(terms)
-}
-
-/// Lowers Generic trace terms after the checked output HomSpace admission.
-///
-/// This is intentionally an uncached structural seam: the existing strided
-/// execution path can consume the resulting terms, while a later compiler can
-/// add grouped replay without changing the checked publication boundary.
-#[doc(hidden)]
-fn build_fusion_trace_terms_generic_checked<R>(
-    rule: &R,
-    dst_structure: &BlockStructure,
-    src: OrientedTraceSource<'_>,
-    axis_plan: &TensorTraceAxisPlan,
-    dst_codomain_rank: usize,
-) -> Result<Vec<TensorTraceFusionStructureTerm<R::Scalar>>, CheckedGenericPlanError<R::Error>>
-where
-    R: CheckedGenericPivotal,
-    R::Scalar: Clone + Mul<Output = R::Scalar> + Zero,
-{
-    let mut codomain_permutation =
-        Vec::with_capacity(dst_codomain_rank + axis_plan.trace_lhs_axes.len());
-    codomain_permutation.extend_from_slice(&axis_plan.output_axes[..dst_codomain_rank]);
-    codomain_permutation.extend_from_slice(&axis_plan.trace_lhs_axes);
-    let mut domain_permutation = Vec::with_capacity(
-        axis_plan.output_axes.len() - dst_codomain_rank + axis_plan.trace_rhs_axes.len(),
-    );
-    domain_permutation.extend_from_slice(&axis_plan.output_axes[dst_codomain_rank..]);
-    domain_permutation.extend_from_slice(&axis_plan.trace_rhs_axes);
-
-    let mut terms = Vec::new();
-    for src_block_index in 0..src.structure.block_count() {
-        let src_key = src
-            .source_key(src_block_index)
-            .map_err(CheckedGenericPlanError::Operation)?;
-        validate_generic_fusion_tree_pair_checked(rule, &src_key).map_err(|error| match error {
-            tenet_core::CheckedGenericStructureError::Provider(error) => {
-                CheckedGenericPlanError::Provider(error)
-            }
-            tenet_core::CheckedGenericStructureError::Core(error) => {
-                CheckedGenericPlanError::Core(error)
-            }
-        })?;
-        let rows = generic_permute_tree_pair_checked(
-            rule,
-            &src_key,
-            &codomain_permutation,
-            &domain_permutation,
-        )
-        .map_err(map_checked_generic_trace_symbol_error)?;
-        for (permuted_key, permutation_coefficient) in rows {
-            let (dst_codomain_tree, trace_codomain_tree) = split_fusion_tree_generic_checked(
-                rule,
-                permuted_key.codomain_tree(),
-                dst_codomain_rank,
-            )
-            .map_err(map_checked_generic_trace_structure_error)?;
-            let (dst_domain_tree, trace_domain_tree) = split_fusion_tree_generic_checked(
-                rule,
-                permuted_key.domain_tree(),
-                axis_plan.output_axes.len() - dst_codomain_rank,
-            )
-            .map_err(map_checked_generic_trace_structure_error)?;
-            if trace_codomain_tree != trace_domain_tree {
-                continue;
-            }
-            let trace_factor = trace_channel_factor_generic_checked(rule, &trace_codomain_tree)?;
-            let coefficient = permutation_coefficient * trace_factor;
-            let dst_key = FusionTreePairKey::pair(dst_codomain_tree, dst_domain_tree);
-            let dst_block = dst_structure
-                .find_block_index_by_fusion_tree_pair(&dst_key)
-                .ok_or_else(|| {
-                    CheckedGenericPlanError::Operation(OperationError::MissingBlockKey {
-                        key: Box::new(BlockKey::from(dst_key.clone())),
-                    })
-                })?;
-            terms.push(TensorTraceFusionStructureTerm {
-                dst_key,
-                src_key: src_key.clone(),
-                dst_block,
-                src_block: src_block_index,
-                coefficient,
-            });
-        }
-    }
-    Ok(terms)
+    trace_preflight::<CheckedGenericAdmissionMode, R>(src, axes, dst_nout)
+        .map(|geometry| geometry.selected_homspace)
 }
 
 /// The checked Generic trace terms and descriptor
@@ -1560,7 +1299,7 @@ where
         src_space.space().nin(),
         orientation,
     );
-    let terms = build_fusion_trace_terms_generic_checked(
+    let terms = build_trace_terms::<CheckedGenericAdmissionMode, R>(
         src_space.provider(),
         dst_space.space().structure(),
         source,
@@ -1643,44 +1382,6 @@ fn map_checked_generic_trace_structure_error<E>(
     }
 }
 
-fn trace_channel_factor_generic_checked<R>(
-    rule: &R,
-    trace_tree: &FusionTreeKey,
-) -> Result<R::Scalar, CheckedGenericPlanError<R::Error>>
-where
-    R: CheckedGenericPivotal,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
-{
-    let first = trace_tree.uncoupled().first().copied().ok_or_else(|| {
-        CheckedGenericPlanError::Core(tenet_core::CoreError::MalformedFusionTree {
-            message: "trace channel requires at least one uncoupled sector",
-        })
-    })?;
-    let sqrt_coupled = rule
-        .try_sqrt_dim_scalar(trace_tree.coupled())
-        .map_err(CheckedGenericPlanError::Provider)?;
-    let inv_sqrt_first = rule
-        .try_inv_sqrt_dim_scalar(first)
-        .map_err(CheckedGenericPlanError::Provider)?;
-    // The categorical trace factor is dim(coupled)/dim(first), expressed
-    // through the Generic provider's square-root dimension interface.
-    let mut factor = sqrt_coupled.clone() * sqrt_coupled * inv_sqrt_first.clone() * inv_sqrt_first;
-    for (&sector, &is_dual) in trace_tree
-        .uncoupled()
-        .iter()
-        .zip(trace_tree.is_dual())
-        .skip(1)
-    {
-        if !is_dual {
-            factor = factor
-                * rule
-                    .try_twist_scalar(sector)
-                    .map_err(CheckedGenericPlanError::Provider)?;
-        }
-    }
-    Ok(factor)
-}
-
 #[cfg(test)]
 pub(crate) fn build_fusion_trace_terms_for_test<R>(
     rule: &R,
@@ -1706,85 +1407,13 @@ where
         0,
         FusionTreePairOrientation::Direct,
     );
-    build_fusion_trace_terms(rule, dst_structure, src, &axis_plan, dst_codomain_rank)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn lower_fusion_trace_source_rows<R, I>(
-    rule: &R,
-    dst_structure: &BlockStructure,
-    axis_plan: &TensorTraceAxisPlan,
-    dst_codomain_rank: usize,
-    src_block_index: usize,
-    src: OrientedTraceSource<'_>,
-    rows: I,
-    terms: &mut Vec<TensorTraceFusionStructureTerm<R::Scalar>>,
-) -> Result<(), OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
-    I: IntoIterator<Item = (FusionTreePairKey, R::Scalar)>,
-{
-    for (permuted_key, permutation_coefficient) in rows {
-        let (dst_codomain_tree, trace_codomain_tree) =
-            split_fusion_tree(rule, permuted_key.codomain_tree(), dst_codomain_rank)
-                .map_err(OperationError::from_core_preserving_context)?;
-        let (dst_domain_tree, trace_domain_tree) = split_fusion_tree(
-            rule,
-            permuted_key.domain_tree(),
-            axis_plan.output_axes.len() - dst_codomain_rank,
-        )
-        .map_err(OperationError::from_core_preserving_context)?;
-        if trace_codomain_tree != trace_domain_tree {
-            continue;
-        }
-
-        let trace_factor = trace_channel_factor(rule, &trace_codomain_tree)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let coefficient = permutation_coefficient * trace_factor;
-        let dst_key = FusionTreePairKey::pair(dst_codomain_tree, dst_domain_tree);
-        let dst_block = dst_structure
-            .find_block_index_by_fusion_tree_pair(&dst_key)
-            .ok_or_else(|| OperationError::MissingBlockKey {
-                key: Box::new(BlockKey::from(dst_key.clone())),
-            })?;
-        terms.push(TensorTraceFusionStructureTerm {
-            dst_key,
-            src_key: src.source_key(src_block_index)?,
-            dst_block,
-            src_block: src_block_index,
-            coefficient,
-        });
-    }
-    Ok(())
-}
-
-fn trace_channel_factor<R>(
-    rule: &R,
-    trace_tree: &FusionTreeKey,
-) -> Result<R::Scalar, tenet_core::CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Mul<Output = R::Scalar>,
-{
-    let coupled = trace_tree.coupled();
-    let first = trace_tree.uncoupled().first().copied().ok_or(
-        tenet_core::CoreError::MalformedFusionTree {
-            message: "trace channel requires at least one uncoupled sector",
-        },
-    )?;
-    let mut factor = rule.dim_scalar(coupled) * rule.inv_dim_scalar(first);
-    for (&sector, &is_dual) in trace_tree
-        .uncoupled()
-        .iter()
-        .zip(trace_tree.is_dual())
-        .skip(1)
-    {
-        if !is_dual {
-            factor = factor * rule.twist_scalar(sector);
-        }
-    }
-    Ok(factor)
+    build_trace_terms::<MultiplicityFreeAdmissionMode, R>(
+        rule,
+        dst_structure,
+        src,
+        &axis_plan,
+        dst_codomain_rank,
+    )
 }
 
 fn validate_fusion_trace_homspace<R>(
@@ -2358,27 +1987,8 @@ pub fn tensortrace_fusion_dyn_selected_homspace_checked<R>(
 where
     R: FusionRule + CheckedFusionAlgebra,
 {
-    src.space().validate_rule(src.provider())?;
-    let orientation = if axes.source_conjugate() {
-        FusionTreePairOrientation::Adjoint
-    } else {
-        FusionTreePairOrientation::Direct
-    };
-    let lowered_axes =
-        lower_tensortrace_source_adjoint_axes_dyn(src.space().nout(), src.space().nin(), axes)?;
-    let lowered_spec = lowered_axes.as_spec();
-    let axis_plan = TensorTraceAxisPlan::compile(
-        src.space().rank(),
-        lowered_spec.output_axes().len(),
-        lowered_spec,
-    )?;
-    checked_fusion_trace_geometry(
-        src.provider(),
-        OrientedFusionTreeHomSpace::new(src.space().homspace(), orientation),
-        &axis_plan,
-        dst_nout,
-    )
-    .map(|geometry| geometry.selected_homspace)
+    trace_preflight::<MultiplicityFreeAdmissionMode, R>(src, axes, dst_nout)
+        .map(|geometry| geometry.selected_homspace)
 }
 
 /// Checked lowered trace entry point. The legacy dynamic API intentionally
@@ -2415,58 +2025,6 @@ where
     tensortrace_fusion_dyn_structure_into_raw(
         &structure, dst_space, dst_data, src_space, src_data, alpha, beta,
     )
-}
-
-fn checked_fusion_trace_geometry<R>(
-    rule: &R,
-    src_homspace: OrientedFusionTreeHomSpace<'_>,
-    axis_plan: &TensorTraceAxisPlan,
-    dst_nout: usize,
-) -> Result<CheckedTraceGeometry, OperationError>
-where
-    R: FusionRule + CheckedFusionAlgebra,
-{
-    if dst_nout > axis_plan.output_axes.len() {
-        return Err(OperationError::RankMismatch {
-            expected: axis_plan.output_axes.len(),
-            actual: dst_nout,
-        });
-    }
-    // Why not widen the public rule bound: custom encoded rules retain their
-    // established infallible contract while lowered built-ins close overflow.
-    record_trace_selected_homspace_derivation();
-    let selected = src_homspace
-        .try_select_checked(
-            rule,
-            &axis_plan.output_axes[..dst_nout],
-            &axis_plan.output_axes[dst_nout..],
-        )
-        .map_err(|error| match error {
-            CheckedFusionSpaceError::FusionAlgebra(error) => OperationError::FusionAlgebra(error),
-            CheckedFusionSpaceError::Core(error) => OperationError::Core(*error),
-            _ => OperationError::InvalidArgument {
-                message: "checked trace metadata error",
-            },
-        })?;
-    let mut trace_pairs_match = true;
-    for (&lhs_axis, &rhs_axis) in axis_plan
-        .trace_lhs_axes
-        .iter()
-        .zip(axis_plan.trace_rhs_axes.iter())
-    {
-        let lhs = outward_axis_leg_checked(rule, src_homspace, lhs_axis)?;
-        let rhs = outward_axis_leg_checked(rule, src_homspace, rhs_axis)?;
-        let rhs_dual = rhs
-            .try_dual(rule)
-            .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?;
-        lhs.try_dual(rule)
-            .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?;
-        trace_pairs_match &= lhs == rhs_dual;
-    }
-    Ok(CheckedTraceGeometry {
-        selected_homspace: selected,
-        trace_pairs_match,
-    })
 }
 
 fn validate_trace_data_extents(
