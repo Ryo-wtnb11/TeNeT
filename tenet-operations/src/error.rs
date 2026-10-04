@@ -259,9 +259,22 @@ impl std::error::Error for OperationError {
     }
 }
 
+/// Core's axis-list rejections become this crate's own variants, so a
+/// permutation misuse is always [`OperationError::InvalidPermutation`] and an
+/// axis-subset misuse [`OperationError::InvalidAxisSet`], whichever layer
+/// validated the list (#1989).
 impl From<CoreError> for OperationError {
     fn from(value: CoreError) -> Self {
-        Self::Core(value)
+        match value {
+            CoreError::InvalidPermutation { permutation, rank } => Self::InvalidPermutation {
+                axes: permutation,
+                rank,
+            },
+            CoreError::InvalidAxisSet { tensor, axes, rank } => {
+                Self::InvalidAxisSet { tensor, axes, rank }
+            }
+            other => Self::Core(other),
+        }
     }
 }
 
@@ -271,7 +284,7 @@ impl OperationError {
     pub fn from_core_preserving_context(value: CoreError) -> Self {
         match value {
             CoreError::MissingBlockKey { key } => Self::MissingBlockKey { key },
-            other => Self::Core(other),
+            other => Self::from(other),
         }
     }
 }

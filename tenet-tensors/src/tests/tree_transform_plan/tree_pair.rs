@@ -126,10 +126,10 @@ fn tree_pair_operation_key_uses_tensorkit_global_source_axes() {
     .unwrap_err();
     assert_eq!(
         local_domain_identity,
-        OperationError::Core(CoreError::InvalidPermutation {
-            permutation: vec![1, 0, 0],
-            rank: 3,
-        })
+        OperationError::InvalidPermutation {
+            axes: vec![1, 0, 0],
+            rank: 3
+        }
     );
 
     build_tree_pair_transform_group_plan(

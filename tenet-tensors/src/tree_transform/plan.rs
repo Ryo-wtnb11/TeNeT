@@ -57,7 +57,11 @@ pub enum CheckedGenericPlanError<E> {
 
 impl<E> From<CoreError> for CheckedGenericPlanError<E> {
     fn from(error: CoreError) -> Self {
-        Self::Core(error)
+        // An axis-list rejection is the operations crate's variant (#1989).
+        match OperationError::from(error) {
+            OperationError::Core(error) => Self::Core(error),
+            axis => Self::Operation(axis),
+        }
     }
 }
 
@@ -1267,10 +1271,10 @@ mod generic_preflight_tests {
         // Generic categorical data.
         assert_eq!(
             error,
-            OperationError::Core(CoreError::InvalidPermutation {
-                permutation: vec![0, 0],
-                rank: 2,
-            })
+            OperationError::InvalidPermutation {
+                axes: vec![0, 0],
+                rank: 2
+            }
         );
     }
 
@@ -1295,10 +1299,10 @@ mod generic_preflight_tests {
         };
         assert_eq!(
             syntax_error,
-            OperationError::Core(CoreError::InvalidPermutation {
-                permutation: vec![0, 0],
-                rank: 2,
-            })
+            OperationError::InvalidPermutation {
+                axes: vec![0, 0],
+                rank: 2
+            }
         );
 
         let namespace_error = match validate_generic_tree_pair_preflight(

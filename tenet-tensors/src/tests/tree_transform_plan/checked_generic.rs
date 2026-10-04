@@ -899,9 +899,7 @@ fn checked_generic_plan_rejects_style_before_structure_or_symbol_queries() {
     .unwrap_err();
     assert!(matches!(
         error,
-        CheckedGenericPlanError::Operation(OperationError::Core(
-            CoreError::InvalidPermutation { .. }
-        ))
+        CheckedGenericPlanError::Operation(OperationError::InvalidPermutation { .. })
     ));
     // Syntax rejection precedes structural (Dual/N), rigidity, and F/R
     // provider queries.

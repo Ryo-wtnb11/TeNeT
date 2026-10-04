@@ -48,40 +48,38 @@ impl<E> From<tenet_tensors::OperationError> for GenericTensorError<E> {
     }
 }
 
-/// Whether a checked plan error is an axis misuse, which the facade reports
-/// in [`GenericTensorError::Facade`] exactly as the multiplicity-free mode
-/// does (#1873): it is an argument error, not a plan failure.
-fn plan_axis_misuse<E>(error: &CheckedGenericPlanError<E>) -> Option<Error> {
-    match error {
-        CheckedGenericPlanError::Core(core) => crate::error::axis_misuse(core).map(Error::from),
-        CheckedGenericPlanError::Operation(
-            operation @ (OperationError::InvalidPermutation { .. }
-            | OperationError::InvalidAxisSet { .. }),
-        ) => Some(Error::from(operation.clone())),
-        CheckedGenericPlanError::Operation(OperationError::Core(core)) => {
-            crate::error::axis_misuse(core).map(Error::from)
-        }
-        _ => None,
-    }
+/// Whether an error is an axis misuse, which the facade reports in
+/// [`GenericTensorError::Facade`] exactly as the multiplicity-free mode does
+/// (#1873): it is an argument error, not a plan failure. Below the facade it
+/// has one variant per kind (#1989).
+fn is_axis_misuse(error: &OperationError) -> bool {
+    matches!(
+        error,
+        OperationError::InvalidPermutation { .. } | OperationError::InvalidAxisSet { .. }
+    )
 }
 
 impl<E> From<CheckedGenericStructureError<E>> for GenericTensorError<E> {
     fn from(error: CheckedGenericStructureError<E>) -> Self {
-        match &error {
-            CheckedGenericStructureError::Core(core) => match crate::error::axis_misuse(core) {
-                Some(axis) => Self::Facade(Error::from(axis)),
-                None => Self::Structure(error),
+        match error {
+            CheckedGenericStructureError::Core(core) => match OperationError::from(core) {
+                OperationError::Core(core) => {
+                    Self::Structure(CheckedGenericStructureError::Core(core))
+                }
+                axis => Self::Facade(Error::from(axis)),
             },
-            CheckedGenericStructureError::Provider(_) => Self::Structure(error),
+            provider => Self::Structure(provider),
         }
     }
 }
 
 impl<E> From<CheckedGenericPlanError<E>> for GenericTensorError<E> {
     fn from(error: CheckedGenericPlanError<E>) -> Self {
-        match plan_axis_misuse(&error) {
-            Some(axis) => Self::Facade(axis),
-            None => Self::Plan(error),
+        match error {
+            CheckedGenericPlanError::Operation(operation) if is_axis_misuse(&operation) => {
+                Self::Facade(Error::from(operation))
+            }
+            other => Self::Plan(other),
         }
     }
 }

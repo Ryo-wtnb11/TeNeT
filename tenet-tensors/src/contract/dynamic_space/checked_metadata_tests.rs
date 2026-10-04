@@ -1201,10 +1201,10 @@ fn transform_invalid_axis_error_is_reported_exactly() {
         .unwrap_err();
     assert_eq!(
         error,
-        OperationError::Core(CoreError::InvalidPermutation {
-            permutation: vec![1],
-            rank: 1,
-        })
+        OperationError::InvalidPermutation {
+            axes: vec![1],
+            rank: 1
+        }
     );
 }
 
