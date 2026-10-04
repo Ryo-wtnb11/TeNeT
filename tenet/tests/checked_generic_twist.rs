@@ -1233,3 +1233,37 @@ fn factorization_leg_roles_keep_the_permute_braiding_boundary() {
         assert!(error.contains("UnsupportedBraidingStyle"), "{error}");
     }
 }
+
+#[test]
+fn checked_generic_trace_gates_non_symmetric_braiding_before_the_pair_list() {
+    // What: as TensorKit `trace_permute!`, the braiding gate comes before any
+    // index handling, so a non-symmetric provider's trace fails even with an
+    // empty or malformed pair list (#1872).
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for braiding in [
+        BraidingStyleKind::NoBraiding,
+        BraidingStyleKind::Anyonic,
+        BraidingStyleKind::Bosonic,
+        BraidingStyleKind::Fermionic,
+    ] {
+        let provider = Arc::new(CheckedPivotalToy::new(9, braiding, -1.0));
+        let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+        let square = TensorMap::<_, f64>::from_subblock_fn(&runtime, [&x], [&x], |_, indices| {
+            indices.iter().sum::<usize>() as f64
+        })
+        .unwrap();
+        for pairs in [vec![], vec![(0, 1)], vec![(0, 0)], vec![(0, 7)]] {
+            let result = square.trace_pairs(&pairs).map(|_| ());
+            let text = format!("{result:?}");
+            if braiding.is_symmetric() {
+                let malformed = pairs.iter().any(|&(lhs, rhs)| lhs == rhs || rhs > 1);
+                assert_eq!(result.is_ok(), !malformed, "{braiding:?} {pairs:?}: {text}");
+            } else {
+                assert!(
+                    text.contains("fusion tensortrace requires symmetric braiding"),
+                    "{braiding:?} {pairs:?}: {text}"
+                );
+            }
+        }
+    }
+}

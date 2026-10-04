@@ -568,15 +568,15 @@ where
     ///
     /// # Errors
     ///
-    /// In the Host's order, all before any device work: the Host's
-    /// [`Error::InvalidArgument`] for a malformed pair list and its errors for
-    /// legs that are not mutually dual; [`Error::UnsupportedOnDevice`] for a
+    /// In the Host's order, all before any device work: the braiding gate; the
+    /// Host's [`Error::InvalidArgument`] for a malformed pair list and its
+    /// errors for legs that are not mutually dual; [`Error::UnsupportedOnDevice`] for a
     /// compact (diagonal) device payload, where the Host takes its
     /// compact-spectrum arm; the Host compile's own errors;
     /// [`Error::PlacementMismatch`]. A rejected call leaves the device and the
     /// Runtime unchanged.
     pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
-        match self.prepare_trace_pairs(pairs)? {
+        match self.prepare_trace_pairs(pairs, None)? {
             Some(trace) => trace.execute(),
             None => Ok(self.clone()),
         }
@@ -589,15 +589,18 @@ where
     /// becomes `beta * destination` through a zero-source region move (zeros
     /// for `beta = 0`, which never reads the destination; nothing for
     /// `beta = 1`), then every term accumulates as in [`Self::trace_pairs`].
-    /// An empty `pairs` is [`Self::axpby_into`].
+    /// Past the braiding gate, an empty `pairs` is [`Self::axpby_into`].
     ///
     /// # Errors
     ///
-    /// [`Self::trace_pairs`]'s, then
+    /// The Host [`TensorMap::trace_pairs_into`]'s order:
     /// [`Error::RuntimeMismatch`] / [`Error::RuleMismatch`] against the
-    /// destination, [`Error::InvalidArgument`] for a destination that is not
-    /// owned dense CUDA storage, aliases the source, or has the wrong space,
-    /// layout or length, [`Error::DestinationShared`] and
+    /// destination; the braiding gate and pair-list errors of
+    /// [`Self::trace_pairs`]; [`Error::InvalidArgument`] for a destination
+    /// whose space or layout is not the result's; the duality error; then
+    /// [`Self::trace_pairs`]'s device errors, [`Error::InvalidArgument`] for a
+    /// destination that is not owned dense CUDA storage, aliases the source,
+    /// or has the wrong length, [`Error::DestinationShared`] and
     /// [`Error::PlacementMismatch`].
     ///
     /// # Failure
@@ -622,7 +625,9 @@ where
         {
             return Err(Error::RuleMismatch);
         }
-        let Some(trace) = self.prepare_trace_pairs(pairs)? else {
+        let Some(trace) =
+            self.prepare_trace_pairs(pairs, Some(destination.logical_space().space()))?
+        else {
             return self.axpby_into(destination, alpha, beta);
         };
         let destination_storage = unique_dense_destination(
@@ -671,20 +676,29 @@ where
     pub(crate) fn prepare_trace_pairs(
         &self,
         pairs: &[(usize, usize)],
+        destination_space: Option<&tenet_tensors::DynamicFusionMapSpace>,
     ) -> Result<Option<CudaTracePairs<'_, R, D>>, Error> {
-        let Some(traced) = trace_source(self, pairs)? else {
+        let braiding = self.provider().braiding_style();
+        let Some(traced) = trace_source(self, braiding, pairs)? else {
             return Ok(None);
         };
         let destination_codomain_rank = traced.axes.destination_codomain_rank;
         let source_space = &traced.body.space;
         let source_data = traced.body.data.as_ref();
         let axes = traced.spec();
-        let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
+        let preflight = tenet_tensors::tensortrace_fusion_dyn_preflight_checked(
             source_space,
             axes,
             destination_codomain_rank,
         )?;
-        let space = source_space.derive_from_final_homspace(homspace)?;
+        let dual_pairs = preflight.require_dual_pairs();
+        let space = source_space.derive_from_final_homspace(preflight.into_selected_homspace())?;
+        // TensorKit `trace_permute!`'s order: the destination space, then the
+        // pair duality; the representation and storage checks are TeNeT's own.
+        if let Some(destination_space) = destination_space {
+            require_destination_space(destination_space, space.space())?;
+        }
+        dual_pairs?;
         let TypedData::Dense(source) = source_data else {
             return Err(Error::UnsupportedOnDevice(
                 "trace_pairs requires dense CUDA storage".to_string(),

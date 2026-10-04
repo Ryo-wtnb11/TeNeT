@@ -327,7 +327,10 @@ pub use serialization::{
 
 // --- split leaf #1587: generated module wiring below ---
 mod scalar;
-use linear_ops::{host_add_impl, host_axpby_into, host_scale_impl, unique_dense_destination};
+use linear_ops::{
+    host_add_impl, host_axpby_into, host_scale_impl, require_destination_space,
+    unique_dense_destination,
+};
 pub(crate) use scalar::ScalarOps;
 pub use scalar::{AdvancedLinalgScalar, FactorizationScalar, TensorScalar};
 #[cfg(feature = "cuda")]

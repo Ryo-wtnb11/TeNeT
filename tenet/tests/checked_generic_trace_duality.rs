@@ -18,7 +18,7 @@ fn checked_generic_trace_rejects_legs_that_are_not_mutually_dual() {
     let rejects = |result: Result<TensorMap<SUNFusionRule, f64>, _>, what: &str| {
         let error = format!("{:?}", result.expect_err(what));
         assert!(
-            error.contains("trace pairs must contain dual sectors"),
+            error.contains(r#"StructureMismatch { tensor: "trace axes" }"#),
             "{what}: {error}"
         );
     };

@@ -417,7 +417,7 @@ impl<C> TensorTraceFusionStructure<C> {
         F: FnOnce(
             OrientedFusionTreeHomSpace<'_>,
             &TensorTraceAxisPlan,
-        ) -> Result<Option<CheckedTraceGeometry>, OperationError>,
+        ) -> Result<Option<TracePreflight>, OperationError>,
     {
         dst.validate_rule(rule)?;
         src.validate_rule(rule)?;
@@ -486,7 +486,7 @@ impl<C> TensorTraceFusionStructure<C> {
         F: FnOnce(
             OrientedFusionTreeHomSpace<'_>,
             &TensorTraceAxisPlan,
-        ) -> Result<Option<CheckedTraceGeometry>, OperationError>,
+        ) -> Result<Option<TracePreflight>, OperationError>,
     {
         crate::admission::require_symmetric_braiding(
             rule.braiding_style(),
@@ -1232,25 +1232,59 @@ impl TensorTraceAxisPlan {
     }
 }
 
-struct CheckedTraceGeometry {
+/// What the trace preflight decided: the selected output HomSpace, and
+/// whether every traced pair joins mutually dual legs.
+///
+/// Why the duality is a check and not the preflight's own error: TensorKit
+/// `trace_permute!` compares `space(tdst)` before the pair duality, so a
+/// trace into a destination raises the destination's space error first; an
+/// eager trace has no destination and raises it right away.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct TracePreflight {
     selected_homspace: FusionTreeHomSpace,
     trace_pairs_match: bool,
 }
 
-/// Select the traced output HomSpace through the checked Generic descriptor
-/// path. This is the structural half of Generic trace compilation; no payload
-/// or destination layout is allocated here.
+impl TracePreflight {
+    #[inline]
+    pub fn selected_homspace(&self) -> &FusionTreeHomSpace {
+        &self.selected_homspace
+    }
+
+    #[inline]
+    pub fn into_selected_homspace(self) -> FusionTreeHomSpace {
+        self.selected_homspace
+    }
+
+    /// `StructureMismatch { "trace axes" }` when a traced pair joins legs
+    /// that are not mutually dual (TensorKit
+    /// `space(tsrc, q₁) == dual(space(tsrc, q₂))`).
+    #[inline]
+    pub fn require_dual_pairs(&self) -> Result<(), OperationError> {
+        if self.trace_pairs_match {
+            Ok(())
+        } else {
+            Err(OperationError::StructureMismatch {
+                tensor: "trace axes",
+            })
+        }
+    }
+}
+
+/// The checked Generic trace preflight (see
+/// [`tensortrace_fusion_dyn_preflight_checked`]). No payload or destination
+/// layout is allocated here.
 #[doc(hidden)]
-pub fn tensortrace_fusion_dyn_selected_homspace_generic_checked<R>(
+pub fn tensortrace_fusion_dyn_preflight_generic_checked<R>(
     src: &BoundDynamicFusionMapSpace<R>,
     axes: TensorTraceAxisSpec<'_>,
     dst_nout: usize,
-) -> Result<FusionTreeHomSpace, CheckedGenericPlanError<R::Error>>
+) -> Result<TracePreflight, CheckedGenericPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
 {
     trace_preflight::<CheckedGenericAdmissionMode, R>(src, axes, dst_nout)
-        .map(|geometry| geometry.selected_homspace)
 }
 
 /// The checked Generic trace terms and descriptor
@@ -1270,16 +1304,20 @@ where
     } else {
         FusionTreePairOrientation::Direct
     };
-    let selected = tensortrace_fusion_dyn_selected_homspace_generic_checked(
+    let preflight = tensortrace_fusion_dyn_preflight_generic_checked(
         src_space,
         axes,
         dst_space.space().nout(),
     )?;
-    if selected != *dst_space.space().homspace() {
+    // TensorKit's order: the destination space, then the pair duality.
+    if preflight.selected_homspace() != dst_space.space().homspace() {
         return Err(CheckedGenericPlanError::Operation(
             OperationError::StructureMismatch { tensor: "dst" },
         ));
     }
+    preflight
+        .require_dual_pairs()
+        .map_err(CheckedGenericPlanError::Operation)?;
     let lowered_axes = lower_tensortrace_source_adjoint_axes_dyn(
         src_space.space().nout(),
         src_space.space().nin(),
@@ -1422,13 +1460,13 @@ fn validate_fusion_trace_homspace<R>(
     src: OrientedFusionTreeHomSpace<'_>,
     axis_plan: &TensorTraceAxisPlan,
     dst_codomain_rank: usize,
-    checked_geometry: Option<CheckedTraceGeometry>,
+    checked_geometry: Option<TracePreflight>,
 ) -> Result<(), OperationError>
 where
     R: FusionRule,
 {
     let (selected, checked_trace_pairs_match) = match checked_geometry {
-        Some(CheckedTraceGeometry {
+        Some(TracePreflight {
             selected_homspace,
             trace_pairs_match,
         }) => (selected_homspace, Some(trace_pairs_match)),
@@ -1973,22 +2011,23 @@ where
     )
 }
 
-/// Preflights finite-label trace metadata and returns the selected result HomSpace.
+/// Preflights finite-label trace metadata: the braiding gate, the axes and
+/// the selected result HomSpace, with the pair duality left to
+/// [`TracePreflight::require_dual_pairs`].
 ///
 /// The user facade calls this before materializing source data or constructing
 /// a result layout, so a checked algebra failure cannot publish either derived
 /// state first.
 #[doc(hidden)]
-pub fn tensortrace_fusion_dyn_selected_homspace_checked<R>(
+pub fn tensortrace_fusion_dyn_preflight_checked<R>(
     src: &BoundDynamicFusionMapSpace<R>,
     axes: TensorTraceAxisSpec<'_>,
     dst_nout: usize,
-) -> Result<FusionTreeHomSpace, OperationError>
+) -> Result<TracePreflight, OperationError>
 where
     R: FusionRule + CheckedFusionAlgebra,
 {
     trace_preflight::<MultiplicityFreeAdmissionMode, R>(src, axes, dst_nout)
-        .map(|geometry| geometry.selected_homspace)
 }
 
 /// Checked lowered trace entry point. The legacy dynamic API intentionally
