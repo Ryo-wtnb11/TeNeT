@@ -4,9 +4,12 @@ use std::sync::Arc;
 
 use num_traits::{One, Zero};
 use tenet_core::{
-    BlockView, BlockViewMut, CategoricalScalar, CoreError, GenericRigidSymbols,
-    HostReadableStorage, HostWritableStorage, LocallyValidatedFusionTreeBlockStructure,
+    BlockView, BlockViewMut, CoreError, HostReadableStorage, HostWritableStorage,
     MultiplicityFreeRigidSymbols, TensorMap, TensorStorage,
+};
+#[cfg(any(test, feature = "testing"))]
+use tenet_core::{
+    CategoricalScalar, GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure,
 };
 
 use crate::lowering::{adjoint_fusion_space_view, lower_tensoradd_source_operation};
@@ -15,9 +18,12 @@ use crate::tensortrace::{
     TensorTraceStructure,
 };
 use crate::tree_context::TreeTransformExecutionContext;
+#[cfg(any(test, feature = "testing"))]
 use crate::tree_transform::{
-    build_generic_tree_pair_transform_group_plan_validated, build_tree_pair_transform_group_plan,
-    compile_multiplicity_free_tree_pair_structure, validate_generic_tree_pair_preflight,
+    build_generic_tree_pair_transform_group_plan_validated, validate_generic_tree_pair_preflight,
+};
+use crate::tree_transform::{
+    build_tree_pair_transform_group_plan, compile_multiplicity_free_tree_pair_structure,
     TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };
 use tenet_operations::OperationError;
@@ -1614,6 +1620,7 @@ where
 ///
 /// The raw block keys follow [`tree_transform_structure`]'s provider-domain
 /// precondition.
+#[cfg(any(test, feature = "testing"))]
 pub fn tree_transform_structure_generic<
     R,
     TDst,
@@ -1652,6 +1659,7 @@ where
 /// The raw block keys follow [`tree_transform_structure`]'s provider-domain
 /// precondition.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "testing"))]
 pub fn tree_transform_into_with_generic<
     B,
     R,
@@ -1692,6 +1700,7 @@ where
 /// The raw block keys follow [`tree_transform_structure`]'s provider-domain
 /// precondition.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "testing"))]
 pub fn tree_transform_into_generic<
     R,
     D,
@@ -1735,6 +1744,7 @@ where
 /// Generic-fusion sibling of [`permute_into`], with the same provider-domain
 /// precondition.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "testing"))]
 pub fn permute_into_generic<
     R,
     D,
@@ -1775,6 +1785,7 @@ where
 /// Generic-fusion sibling of [`braid_into`], with the same provider-domain
 /// precondition.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "testing"))]
 pub fn braid_into_generic<
     R,
     D,
@@ -1822,6 +1833,7 @@ where
 /// Generic-fusion sibling of [`transpose_into`], with the same provider-domain
 /// precondition.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "testing"))]
 pub fn transpose_into_generic<
     R,
     D,

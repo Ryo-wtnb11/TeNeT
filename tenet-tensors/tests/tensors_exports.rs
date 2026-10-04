@@ -13,7 +13,7 @@
 //! Why a source scan and not an import list: an import list only proves
 //! presence, not absence.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Drops comments (line, doc and `/* */`) and blanks string literals so that
 /// neither can hide or fake an item.
@@ -45,15 +45,31 @@ fn strip(source: &str) -> String {
     out
 }
 
-/// Leaf names re-exported by `pub use` in `source`, or an error for any
-/// other inline public item (`pub fn`, `pub enum`, `pub const`, ...) or
+/// The `testing` gate after [`strip`] blanks its string literal.
+const TESTING_GATE: &str = "#[cfg(any(test, feature = \"\"))]";
+
+/// Whether the item starting at `at` carries [`TESTING_GATE`] among the
+/// attribute lines directly above it.
+fn testing_gated(code: &str, at: usize) -> bool {
+    code[..at]
+        .lines()
+        .rev()
+        .map(str::trim)
+        .skip_while(|line| line.is_empty())
+        .take_while(|line| line.starts_with("#["))
+        .any(|line| line == TESTING_GATE)
+}
+
+/// Leaf names re-exported by `pub use` in `source`, each with whether it is
+/// gated behind the `testing` feature (#1854), or an error for any other
+/// inline public item (`pub fn`, `pub enum`, `pub const`, ...) or
 /// `#[macro_export]`, which this firewall would otherwise not see.
-fn exported_names(source: &str) -> Result<BTreeSet<String>, String> {
+fn exported_names(source: &str) -> Result<BTreeMap<String, bool>, String> {
     let code = strip(source);
     if code.contains("macro_export") {
         return Err("lib.rs exports a macro_rules! macro".into());
     }
-    let mut names = BTreeSet::new();
+    let mut names = BTreeMap::new();
     for (at, _) in code.match_indices("pub") {
         let before = code[..at].chars().next_back();
         if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
@@ -63,6 +79,7 @@ fn exported_names(source: &str) -> Result<BTreeSet<String>, String> {
         if after.starts_with('(') || after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
             continue; // `pub(crate)` etc., or an identifier such as `public`
         }
+        let gated = testing_gated(&code, at);
         let item = after.trim_start();
         let Some(tree) = item
             .strip_prefix("use")
@@ -91,7 +108,7 @@ fn exported_names(source: &str) -> Result<BTreeSet<String>, String> {
             .filter(|l| !l.is_empty())
         {
             let name = leaf.rsplit(" as ").next().unwrap();
-            names.insert(name.rsplit("::").next().unwrap().trim().to_owned());
+            names.insert(name.rsplit("::").next().unwrap().trim().to_owned(), gated);
         }
     }
     Ok(names)
@@ -128,9 +145,16 @@ fn firewall_ignores_comments_strings_and_restricted_visibility() {
         pub(super) fn helper() {}
         pub use a::{B, c::D as E}; // pub struct Trailing;
         pub use f::G;
+        #[cfg(any(test, feature = "testing"))]
+        pub use h::Gated;
     "#;
     let names = exported_names(source).unwrap();
-    assert_eq!(names, ["B", "E", "G"].map(str::to_owned).into());
+    assert_eq!(
+        names,
+        [("B", false), ("E", false), ("G", false), ("Gated", true)]
+            .map(|(name, gated)| (name.to_owned(), gated))
+            .into()
+    );
 }
 
 #[test]
@@ -207,12 +231,10 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "ValidatedDynamicFusionLayout",
         // facade
         "braid_into",
-        "braid_into_generic",
         "braid_into_with",
         "braid_into_with_context",
         "copy_into",
         "permute_into",
-        "permute_into_generic",
         "permute_into_with",
         "permute_into_with_context",
         "scaled_add_into",
@@ -236,21 +258,17 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "tensortrace_into",
         "tensortrace_into_with",
         "transpose_into",
-        "transpose_into_generic",
         "transpose_into_with",
         "transpose_into_with_context",
         "tree_transform_execute_with",
         "tree_transform_into",
-        "tree_transform_into_generic",
         "tree_transform_into_with",
         "tree_transform_into_with_context",
-        "tree_transform_into_with_generic",
         "tree_transform_overwrite_execute_with",
         "tree_transform_overwrite_into",
         "tree_transform_overwrite_into_with",
         "tree_transform_overwrite_into_with_context",
         "tree_transform_structure",
-        "tree_transform_structure_generic",
         // oriented_elementwise
         "fusion_scatter_add_assign",
         "oriented_fusion_add_owned",
@@ -345,8 +363,32 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
     .into_iter()
     .map(str::to_owned)
     .collect::<BTreeSet<_>>();
-    assert_eq!(
-        exported_names(include_str!("../src/lib.rs")).unwrap(),
-        expected
-    );
+    assert_eq!(exported(false), expected);
+}
+
+/// The production (ungated) or `testing`-gated names of `lib.rs`.
+fn exported(testing: bool) -> BTreeSet<String> {
+    exported_names(include_str!("../src/lib.rs"))
+        .unwrap()
+        .into_iter()
+        .filter(|&(_, gated)| gated == testing)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The infallible-Generic entries are test oracles only: production Generic
+/// is checked only (#1854).
+#[test]
+fn infallible_generic_entries_are_exported_only_behind_testing() {
+    let expected = [
+        "braid_into_generic",
+        "permute_into_generic",
+        "transpose_into_generic",
+        "tree_transform_into_generic",
+        "tree_transform_into_with_generic",
+        "tree_transform_structure_generic",
+    ]
+    .map(str::to_owned)
+    .into();
+    assert_eq!(exported(true), expected);
 }

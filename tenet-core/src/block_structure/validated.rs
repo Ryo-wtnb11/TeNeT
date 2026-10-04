@@ -362,6 +362,7 @@ where
 }
 
 #[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
 impl<'rule, 'structure, R> LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R>
 where
     R: GenericRigidSymbols,

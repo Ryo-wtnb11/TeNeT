@@ -16,7 +16,7 @@ default = []
 racah-generated = ["tenet-sectors/racah-generated"]
 # Unstable test oracles (`tenet_core::testing`) for sibling crates' tests; not
 # part of the public API.
-testing = []
+testing = ["tenet-sectors/testing"]
 
 [dependencies]
 tenet-sectors = { version = "0.1.1", path = "../tenet-sectors" }

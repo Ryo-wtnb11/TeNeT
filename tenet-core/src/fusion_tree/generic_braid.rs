@@ -215,6 +215,7 @@ where
     generic_braid_tree_unchecked(rule, tree.key, permutation, steps)
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub(super) fn generic_braid_tree_unchecked<R>(
     rule: &R,
     tree: &FusionTreeKey,

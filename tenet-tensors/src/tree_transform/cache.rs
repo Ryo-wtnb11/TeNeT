@@ -7,11 +7,13 @@ use std::sync::{Arc, Mutex, Weak};
 use num_traits::Zero;
 use rustc_hash::FxHashMap;
 use tenet_core::{
-    BlockStructure, BlockStructureContent, CategoricalScalar, FusionTreeGroupKey,
-    FusionTreePairKey, FusionTreePairOrientation, GenericRigidSymbols, HomSpaceId,
-    LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, RuleIdentity, TensorMap, TensorStorage, WeakHomSpaceId,
+    BlockStructure, BlockStructureContent, FusionTreeGroupKey, FusionTreePairKey,
+    FusionTreePairOrientation, HomSpaceId, LocallyValidatedFusionTreeBlockStructure,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, RuleIdentity, TensorMap,
+    TensorStorage, WeakHomSpaceId,
 };
+#[cfg(any(test, feature = "testing"))]
+use tenet_core::{CategoricalScalar, GenericRigidSymbols};
 
 use crate::cache::{BlockStructureCacheKey, OperationCachePolicy, TreeTransformStructureCacheKey};
 use crate::{
@@ -22,15 +24,18 @@ use crate::{
 use super::operation::{TreeTransformOperation, TreeTransformRuleCacheKey};
 use super::plan::{
     build_all_codomain_tree_transform_group_plan_validated_with_threads,
-    build_generic_tree_pair_transform_group_plan_validated,
     build_multiplicity_free_tree_pair_plan_after_capability_with_threads,
     build_oriented_tree_pair_transform_group_plan_with_threads,
     compile_multiplicity_free_tree_pair_structure_after_capability_with_threads,
     compile_multiplicity_free_tree_pair_structure_with_threads,
-    validate_all_codomain_namespace_before_cache, validate_generic_tree_pair_preflight,
+    validate_all_codomain_namespace_before_cache,
     validate_multiplicity_free_all_codomain_preflight_after_capability,
     validate_multiplicity_free_tree_transform_capability,
     validate_tree_pair_namespace_before_cache,
+};
+#[cfg(any(test, feature = "testing"))]
+use super::plan::{
+    build_generic_tree_pair_transform_group_plan_validated, validate_generic_tree_pair_preflight,
 };
 #[cfg(test)]
 use super::plan::{
@@ -653,6 +658,7 @@ where
     /// fusion needs its own measured key and ownership contract. Why not retain
     /// a rule key here: provider-domain validation is the eager boundary, and
     /// this path retains no key or completed structure.
+    #[cfg(any(test, feature = "testing"))]
     pub fn get_or_compile_tree_pair_structures_generic<R>(
         &mut self,
         rule: &R,

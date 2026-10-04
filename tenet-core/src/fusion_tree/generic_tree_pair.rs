@@ -152,6 +152,7 @@ where
     generic_cycle_tree_pair_unchecked(rule, tree_pair.key, PreparedCycleDirection::Clockwise)
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub(super) fn generic_cycle_tree_pair_unchecked<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -286,6 +287,7 @@ where
     )
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn generic_braid_tree_pair_proven<R>(
     tree_pair: ValidatedFusionTreePair<'_, R>,
     codomain_permutation: &[usize],
@@ -336,6 +338,7 @@ where
     )
 }
 
+#[cfg(any(test, feature = "testing"))]
 fn generic_braid_tree_pair_validated<R>(
     tree_pair: ValidatedFusionTreePair<'_, R>,
     target_codomain_rank: usize,
@@ -520,6 +523,7 @@ where
     )
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn generic_permute_tree_pair_proven<R>(
     tree_pair: ValidatedFusionTreePair<'_, R>,
     codomain_permutation: &[usize],
@@ -570,6 +574,7 @@ where
 /// runs on planar (non-symmetric) Generic rules too.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
+#[cfg(any(test, feature = "testing"))]
 pub fn generic_transpose_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -604,6 +609,7 @@ where
     generic_transpose_tree_pair_proven(validated, codomain_permutation, domain_permutation)
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn generic_transpose_tree_pair_proven<R>(
     tree_pair: ValidatedFusionTreePair<'_, R>,
     codomain_permutation: &[usize],
@@ -642,6 +648,7 @@ where
     )
 }
 
+#[cfg(any(test, feature = "testing"))]
 fn generic_transpose_tree_pair_validated<R>(
     tree_pair: ValidatedFusionTreePair<'_, R>,
     target_codomain_rank: usize,

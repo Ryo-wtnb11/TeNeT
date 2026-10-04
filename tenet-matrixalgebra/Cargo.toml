@@ -15,6 +15,11 @@ num-complex = "0.4"
 num-traits = "0.2"
 rustc-hash = "2"
 
+[dev-dependencies]
+# Generic test fixtures implement the infallible symbol tier, which is
+# test-only (#1854).
+tenet-core = { version = "0.1.1", path = "../tenet-core", features = ["testing"] }
+
 [features]
 default = ["cpu-faer"]
 cpu-faer = ["tenet-dense/cpu-faer", "tenet-tensors/cpu-faer"]
