@@ -205,6 +205,8 @@ fn tenet_tensors_exports_exactly_the_pinned_names() {
         "zero_copy_contract_order_for_output_permute",
         "copy_c_output_transform",
         "CopyCRoute",
+        "CoreMiss",
+        "CoreRoute",
         "BoundDynamicFusionMapSpace",
         "CudaContractScratch",
         "CudaDynamicTreeMembersWorkspace",

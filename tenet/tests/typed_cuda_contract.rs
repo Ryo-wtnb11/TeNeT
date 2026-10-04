@@ -45,7 +45,7 @@ use common::{DevicePayload, DeviceRule};
 use contract_cases::{
     blas_contract_oracle, candidate_core_probes, copy_c_probes, dense_oracle, fermion_su2,
     fermion_u1, fermionic_blas_contract_oracle, fermionic_general, fz2_tensorkit_loops, lazy_cases,
-    poisoned_destination, product_general, su2, su2_bent, su2_reordered, su2_structure_cases,
+    poisoned_destination, product_general, su2, su2_bent, su2_core_form_lazy_cases, su2_reordered,
     u1_inactive_cases, u1_lhs_identity, u1_non_self_dual, u1_rank_five, u1_reordered,
     u1_rhs_identity, Case, FermionU1, TwistRole,
 };
@@ -211,12 +211,12 @@ fn zero_copy_candidates_match_the_host_at_every_dtype() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn where_the_host_takes_its_structure_route_the_device_agrees_at_every_dtype() {
-    // The device runs the prelowered DynamicTree artifact for this class,
-    // a path the Host itself never takes for it (it picks `Structure`).
+fn core_form_lazy_contractions_take_copy_c_and_match_the_host_at_every_dtype() {
+    // Host and device both take TensorKit's `copyC` for this class (#1857):
+    // the zero-copy core into a temporary, then one permute.
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     fn at<D: DevicePayload>(runtime: &Runtime) {
-        for case in su2_structure_cases::<D>(runtime) {
+        for case in su2_core_form_lazy_cases::<D>(runtime) {
             check(case);
         }
     }
@@ -738,7 +738,7 @@ fn every_overwrite_fixture<D: DevicePayload>(runtime: &Runtime) {
     for case in lazy_cases(&product_general::<D>(runtime).lhs, "U(1) x SU(2) lazy") {
         check_overwrite(case);
     }
-    for case in su2_structure_cases::<D>(runtime) {
+    for case in su2_core_form_lazy_cases::<D>(runtime) {
         check_overwrite(case);
     }
     for_each_fermionic_fixture!(runtime, D, check_overwrite_fermionic);
@@ -747,7 +747,7 @@ fn every_overwrite_fixture<D: DevicePayload>(runtime: &Runtime) {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn contract_into_a_poisoned_destination_matches_the_host_and_the_oracles_at_every_dtype() {
-    // What: general axes, lazy adjoints, the Host-`Structure` class, both
+    // What: general axes, lazy adjoints, the core-form lazy (`copyC`) class, both
     // fermionic twist roles, and destinations with blocks no GEMM writes —
     // by the core route, by an identity output and under an output transform
     // — each rewritten over NaN.

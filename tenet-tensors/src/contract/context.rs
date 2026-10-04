@@ -44,8 +44,8 @@ use super::resolution::{
     compile_composition_plan, compile_core_plan, compile_prelowered_resolution, compile_resolution,
     compile_storage_resolution, try_compile_oriented_canonical_core_resolution,
     try_compile_oriented_storage_composition_plan,
-    try_compile_oriented_storage_contract_candidate_plan, ContractRoute, CopyCRoute, Resolution,
-    StorageContractResolution,
+    try_compile_oriented_storage_contract_candidate_plan, ContractRoute, CopyCRoute, CoreMiss,
+    CoreRoute, Resolution, StorageContractResolution,
 };
 #[cfg(test)]
 use super::resolution::{try_compile_oriented_storage_contract_plan, NonuniformTwist};
@@ -1728,8 +1728,9 @@ where
     /// The ladder: the canonical fully-direct core
     /// ([`try_compile_storage_contract_core_route`]), then
     /// [`Self::plan_contract_beyond_core`] — TensorKit's `copyC`, then the
-    /// `DynamicTree` artifact. A caller that wants the canonical route without
-    /// taking a context lock calls the two halves itself, in that order.
+    /// `DynamicTree` artifact. A caller that wants the canonical route
+    /// without taking a context lock calls the two halves itself, in that
+    /// order. The requested order's zero-copy candidates are walked once.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn plan_contract<R>(
@@ -1757,8 +1758,9 @@ where
             rhs.storage_conjugate(),
         );
         match try_compile_storage_contract_core_route(dst_space, lhs, rhs, axes)? {
-            Some(core) => Ok(core),
-            None => self.plan_contract_beyond_core(
+            CoreRoute::Hit(core) => Ok(core),
+            CoreRoute::Miss(miss) => self.plan_contract_beyond_core(
+                miss,
                 dst_space,
                 lhs_authority,
                 lhs,
@@ -1771,11 +1773,12 @@ where
         }
     }
 
-    /// [`Self::plan_contract`] after its canonical core declined: TensorKit's
-    /// `copyC` (`blas_contract!`, `tensoroperations.jl:436-446` @cfaa073) when
-    /// [`zero_copy_contract_order_for_output_permute`] takes it — a zero-copy
-    /// core into a temporary in its own default output, then one permute —
-    /// else the `DynamicTree` artifact.
+    /// [`Self::plan_contract`] after its canonical core declined (`miss`, from
+    /// [`try_compile_storage_contract_core_route`] on the same request):
+    /// TensorKit's `copyC` (`blas_contract!`, `tensoroperations.jl:436-446`
+    /// @cfaa073) when [`zero_copy_contract_order_for_output_permute`] takes it
+    /// — a zero-copy core into a temporary in its own default output, then one
+    /// permute — else the `DynamicTree` artifact.
     ///
     /// Why the core precedes `copyC`: a contraction that has the canonical
     /// core needs no output permute (`zero_copy_contract_order_for_output_permute`
@@ -1784,6 +1787,7 @@ where
     #[allow(clippy::too_many_arguments)]
     pub fn plan_contract_beyond_core<R>(
         &mut self,
+        miss: CoreMiss,
         dst_space: &BoundDynamicFusionMapSpace<R>,
         lhs_authority: &BoundDynamicFusionMapSpace<R>,
         lhs: FusionOperand<'_>,
@@ -1800,7 +1804,7 @@ where
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         let rule = dst_space.provider();
-        if let Some(orientation) = super::resolution::zero_copy_contract_order_for_output_permute(
+        if let Some(orientation) = super::resolution::copy_c_order(
             rule,
             dst_space.space(),
             lhs,
@@ -1808,6 +1812,7 @@ where
             lhs_axes,
             rhs_axes,
             output_axes,
+            Some(miss.requested_zero_copy),
         ) {
             if let Some(copy) = self.plan_copy_c(
                 dst_space,
@@ -1891,7 +1896,7 @@ where
                 None,
             )?
         };
-        let Some(core) = try_compile_storage_contract_core_route(
+        let CoreRoute::Hit(core) = try_compile_storage_contract_core_route(
             &temporary,
             first,
             second,
@@ -1953,8 +1958,10 @@ where
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         match try_compile_storage_contract_core_route(dst_space, lhs, rhs, axes)? {
-            Some(core) => Ok(core),
-            None => self.compile_storage_contract_dynamic_tree(dst_space, lhs, rhs, axes),
+            CoreRoute::Hit(core) => Ok(core),
+            CoreRoute::Miss(_) => {
+                self.compile_storage_contract_dynamic_tree(dst_space, lhs, rhs, axes)
+            }
         }
     }
 
@@ -3056,9 +3063,9 @@ where
 /// First half of the storage (device) contraction route: validation and
 /// the canonical fully-direct core over the parent buffers — the
 /// storage-direct route, lazy adjoints as GEMM operand flags and a uniform
-/// fermionic twist folded into per-job alpha. `Ok(None)` means the
-/// contraction needs the `DynamicTree` artifact
-/// ([`TensorContractFusionExecutionContext::compile_storage_contract_dynamic_tree`]).
+/// fermionic twist folded into per-job alpha. A [`CoreRoute::Miss`] is the
+/// input of the rest of the planner
+/// ([`TensorContractFusionExecutionContext::plan_contract_beyond_core`]).
 ///
 /// Free function, not a context method: this half resolves entirely from
 /// the operands, so the canonical device contraction takes no Runtime
@@ -3069,7 +3076,7 @@ pub fn try_compile_storage_contract_core_route<R>(
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
-) -> Result<Option<StorageContractResolution<R::Scalar>>, OperationError>
+) -> Result<CoreRoute<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
@@ -3078,17 +3085,22 @@ where
     validate_storage_contract_request(dst_space, lhs, rhs, axes)?;
     // A twist that is not uniform within one coupled-sector matrix has no
     // per-job alpha; the DynamicTree artifact applies it per block instead.
-    let Some(route) = try_compile_oriented_storage_contract_candidate_plan(
-        rule,
-        dst_space.space(),
-        lhs,
-        rhs,
-        axes,
-    )?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(StorageContractResolution::new(route)))
+    let mut requested_zero_copy = false;
+    Ok(
+        match try_compile_oriented_storage_contract_candidate_plan(
+            rule,
+            dst_space.space(),
+            lhs,
+            rhs,
+            axes,
+            &mut requested_zero_copy,
+        )? {
+            Some(route) => CoreRoute::Hit(StorageContractResolution::new(route)),
+            None => CoreRoute::Miss(CoreMiss {
+                requested_zero_copy,
+            }),
+        },
+    )
 }
 
 #[cfg(test)]

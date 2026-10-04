@@ -488,20 +488,21 @@ where
     ]
 }
 
-/// The class the Host resolves to its dense `Structure` route, which the
-/// device replaces by the prelowered `DynamicTree` artifact: a lazy adjoint
-/// over SU(2) (every sector self-dual), contracted in core-form source order
-/// (lhs whole domain, rhs whole codomain, in order), with a non-identity
-/// output. Lazy lhs, then lazy rhs; multi-block, degeneracy > 1. That the
-/// Host really takes `Structure` for this geometry is pinned in
-/// `tenet-tensors/src/contract/storage_contract_tests.rs`.
-pub fn su2_structure_cases<D: Payload>(runtime: &Runtime) -> [Case<SU2FusionRule, D>; 2] {
+/// A lazy adjoint over SU(2) (every sector self-dual), contracted in
+/// core-form source order (lhs whole domain, rhs whole codomain, in order),
+/// with a non-identity output. Lazy lhs, then lazy rhs; multi-block,
+/// degeneracy > 1. Typed Host eager and the device both take TensorKit's
+/// `copyC` here: the zero-copy core into a temporary, then one permute.
+/// Without the `copyC` predicate the context's prelowered entry resolves this
+/// geometry to its dense `Structure` route (pinned in
+/// `tenet-tensors/src/contract/storage_contract_tests.rs`).
+pub fn su2_core_form_lazy_cases<D: Payload>(runtime: &Runtime) -> [Case<SU2FusionRule, D>; 2] {
     let s = su2();
     let x: TensorMap<_, D> = tensor(runtime, &[&s, &s], &[&s, &s], 15);
     let y: TensorMap<_, D> = tensor(runtime, &[&s], &[&s, &s], 17);
     [
         Case {
-            name: "SU(2) Structure class, lazy lhs",
+            name: "SU(2) core-form lazy lhs (copyC)",
             lhs: x.adjoint().unwrap(),
             rhs: tensor(runtime, &[&s, &s], &[&s], 16),
             lhs_axes: vec![2, 3],
@@ -510,7 +511,7 @@ pub fn su2_structure_cases<D: Payload>(runtime: &Runtime) -> [Case<SU2FusionRule
             dense: false,
         },
         Case {
-            name: "SU(2) Structure class, lazy rhs",
+            name: "SU(2) core-form lazy rhs (copyC)",
             lhs: tensor(runtime, &[&s], &[&s, &s], 18),
             rhs: y.adjoint().unwrap(),
             lhs_axes: vec![1, 2],

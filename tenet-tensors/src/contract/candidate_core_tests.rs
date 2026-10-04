@@ -259,6 +259,7 @@ where
             axes,
         )
         .unwrap()
+        .hit()
         .unwrap_or_else(|| panic!("{name}: device route declined Core"));
         assert!(!resolution.is_dynamic_tree(), "{name}");
         assert_eq!(
