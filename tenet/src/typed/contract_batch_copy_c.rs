@@ -114,7 +114,14 @@ where
             .as_ref()
             .is_none_or(|(replay, _)| replay.members() != members)
         {
-            workspace.replay = plan.resolution.stacked_direct_host_replay(members)?;
+            workspace.replay = plan
+                .resolution
+                .direct_core()
+                .map(|(core, swapped)| {
+                    StackedDirectReplay::new(Arc::clone(core), members)
+                        .map(|replay| (replay, swapped))
+                })
+                .transpose()?;
         }
         let (replay, swapped) = workspace
             .replay
