@@ -82,11 +82,10 @@ where
         {
             return Err(Error::RuleMismatch);
         }
-        let Some(axes) = trace_pair_axes(self.rank(), self.codomain_rank(), pairs)? else {
+        let Some(source) = trace_source(self, pairs)? else {
             return host_axpby_into(self, destination, alpha, beta);
         };
-        let destination_codomain_rank = axes.destination_codomain_rank;
-        let source = trace_source(self, axes);
+        let destination_codomain_rank = source.axes.destination_codomain_rank;
         let source_space = &source.body.space;
         let axes = source.spec();
         let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
@@ -1102,11 +1101,10 @@ where
     ) -> Result<Self, Error> {
         let _host_pool = self.runtime.enter_host_pool();
         let rank = self.rank();
-        let Some(axes) = trace_pair_axes(rank, self.codomain_rank(), pairs)? else {
+        let Some(source) = trace_source(self, pairs)? else {
             return Ok(self.clone());
         };
-        let destination_codomain_rank = axes.destination_codomain_rank;
-        let source = trace_source(self, axes);
+        let destination_codomain_rank = source.axes.destination_codomain_rank;
         let source_space = &source.body.space;
         // A lazy adjoint's parent is always dense, so `None` is an owned
         // compact payload.

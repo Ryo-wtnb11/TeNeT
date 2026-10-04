@@ -48,7 +48,7 @@ pub(super) struct TracePairAxes {
 /// check, it is the derivation of `output_axes` — the seam cannot supply it,
 /// and a malformed list would otherwise produce a silently wrong output order
 /// rather than an error. Same precedent as `braid`'s levels pre-check.
-pub(super) fn trace_pair_axes(
+fn trace_pair_axes(
     rank: usize,
     codomain_rank: usize,
     pairs: &[(usize, usize)],
@@ -99,11 +99,16 @@ impl<R, D, S> TraceSource<'_, R, D, S> {
     }
 }
 
-pub(super) fn trace_source<R, D, S>(
-    tensor: &TensorMap<R, D, S>,
-    mut axes: TracePairAxes,
-) -> TraceSource<'_, R, D, S> {
-    match &tensor.repr {
+/// Validates `pairs` and lowers `tensor` to its trace source; `None` for an
+/// empty list.
+pub(super) fn trace_source<'t, R, D, S>(
+    tensor: &'t TensorMap<R, D, S>,
+    pairs: &[(usize, usize)],
+) -> Result<Option<TraceSource<'t, R, D, S>>, Error> {
+    let Some(mut axes) = trace_pair_axes(tensor.rank(), tensor.codomain_rank(), pairs)? else {
+        return Ok(None);
+    };
+    Ok(Some(match &tensor.repr {
         TypedTensorRepr::Owned(body) => TraceSource {
             body,
             axes,
@@ -125,7 +130,7 @@ pub(super) fn trace_source<R, D, S>(
                 conjugate: true,
             }
         }
-    }
+    }))
 }
 
 pub(super) fn trace_pairs_checked_generic<R, D>(
@@ -139,11 +144,10 @@ where
         > + CheckedGenericPivotal<Scalar = f64>,
     D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    let Some(axes) = trace_pair_axes(tensor.rank(), tensor.codomain_rank(), pairs)? else {
+    let Some(source) = trace_source(tensor, pairs)? else {
         return Ok(tensor.clone());
     };
-    let destination_codomain_rank = axes.destination_codomain_rank;
-    let source = trace_source(tensor, axes);
+    let destination_codomain_rank = source.axes.destination_codomain_rank;
     let source_space = &source.body.space;
     let payload = source.body.materialized_dense_data();
     let source_data = &*payload;

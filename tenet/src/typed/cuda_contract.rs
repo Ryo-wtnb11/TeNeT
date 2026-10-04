@@ -672,11 +672,10 @@ where
         &self,
         pairs: &[(usize, usize)],
     ) -> Result<Option<CudaTracePairs<'_, R, D>>, Error> {
-        let Some(axes) = trace_pair_axes(self.rank(), self.codomain_rank(), pairs)? else {
+        let Some(traced) = trace_source(self, pairs)? else {
             return Ok(None);
         };
-        let destination_codomain_rank = axes.destination_codomain_rank;
-        let traced = trace_source(self, axes);
+        let destination_codomain_rank = traced.axes.destination_codomain_rank;
         let source_space = &traced.body.space;
         let source_data = traced.body.data.as_ref();
         let axes = traced.spec();
