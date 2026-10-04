@@ -103,46 +103,9 @@ fn u1_tensor(charges: &[i32]) -> BoundTensorMap {
 
 /// A Generic toy rule with one self-dual sector `x` whose `x ⊗ x` channel has
 /// multiplicity 2: the smallest rule that takes the Generic entry.
-#[derive(Clone, Copy)]
-struct ToyGenericRule;
-
-impl FusionRule for ToyGenericRule {
-    fn rule_identity(&self) -> RuleIdentity {
-        RuleIdentity::of_type::<Self>()
-    }
-
-    fn fusion_style(&self) -> FusionStyleKind {
-        FusionStyleKind::Generic
-    }
-
-    fn braiding_style(&self) -> BraidingStyleKind {
-        BraidingStyleKind::Bosonic
-    }
-
-    fn vacuum(&self) -> SectorId {
-        SectorId::new(0)
-    }
-
-    fn dual(&self, sector: SectorId) -> SectorId {
-        sector
-    }
-
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        match (left.id(), right.id()) {
-            (0, x) | (x, 0) => [SectorId::new(x)].into_iter().collect(),
-            (1, 1) => [SectorId::new(0), SectorId::new(1)].into_iter().collect(),
-            _ => SectorVec::new(),
-        }
-    }
-
-    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
-        if (left.id(), right.id(), coupled.id()) == (1, 1, 1) {
-            2
-        } else {
-            usize::from(self.fusion_channels(left, right).contains(&coupled))
-        }
-    }
-}
+#[path = "../../tests/support/generic_toy_fusion.rs"]
+mod generic_toy_fusion;
+use generic_toy_fusion::ToyGenericRule;
 
 /// [`ToyGenericRule`] behind the fallible checked-Generic provider surface.
 struct CheckedToyRule;
@@ -155,27 +118,27 @@ impl FusionRule for CheckedToyRule {
     }
 
     fn fusion_style(&self) -> FusionStyleKind {
-        ToyGenericRule.fusion_style()
+        ToyGenericRule::<0>.fusion_style()
     }
 
     fn braiding_style(&self) -> BraidingStyleKind {
-        ToyGenericRule.braiding_style()
+        ToyGenericRule::<0>.braiding_style()
     }
 
     fn vacuum(&self) -> SectorId {
-        ToyGenericRule.vacuum()
+        ToyGenericRule::<0>.vacuum()
     }
 
     fn dual(&self, sector: SectorId) -> SectorId {
-        ToyGenericRule.dual(sector)
+        ToyGenericRule::<0>.dual(sector)
     }
 
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        ToyGenericRule.fusion_channels(left, right)
+        ToyGenericRule::<0>.fusion_channels(left, right)
     }
 
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
-        ToyGenericRule.nsymbol(left, right, coupled)
+        ToyGenericRule::<0>.nsymbol(left, right, coupled)
     }
 }
 
@@ -187,19 +150,19 @@ impl CheckedGenericFusion for CheckedToyRule {
     }
 
     fn fusion_style(&self) -> FusionStyleKind {
-        ToyGenericRule.fusion_style()
+        ToyGenericRule::<0>.fusion_style()
     }
 
     fn braiding_style(&self) -> BraidingStyleKind {
-        ToyGenericRule.braiding_style()
+        ToyGenericRule::<0>.braiding_style()
     }
 
     fn vacuum(&self) -> SectorId {
-        ToyGenericRule.vacuum()
+        ToyGenericRule::<0>.vacuum()
     }
 
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
-        Ok(ToyGenericRule.dual(sector))
+        Ok(ToyGenericRule::<0>.dual(sector))
     }
 
     fn try_fusion_channels(
@@ -207,7 +170,7 @@ impl CheckedGenericFusion for CheckedToyRule {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
-        Ok(ToyGenericRule.fusion_channels(left, right))
+        Ok(ToyGenericRule::<0>.fusion_channels(left, right))
     }
 
     fn try_fusion_channels_in_table(
@@ -215,7 +178,7 @@ impl CheckedGenericFusion for CheckedToyRule {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
-        Ok(ToyGenericRule.fusion_channels(left, right))
+        Ok(ToyGenericRule::<0>.fusion_channels(left, right))
     }
 
     fn try_nsymbol(
@@ -224,7 +187,7 @@ impl CheckedGenericFusion for CheckedToyRule {
         right: SectorId,
         coupled: SectorId,
     ) -> Result<usize, Self::Error> {
-        Ok(ToyGenericRule.nsymbol(left, right, coupled))
+        Ok(ToyGenericRule::<0>.nsymbol(left, right, coupled))
     }
 }
 

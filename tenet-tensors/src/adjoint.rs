@@ -556,16 +556,20 @@ where
 }
 
 #[cfg(test)]
+#[path = "../../tests/support/generic_toy_fusion.rs"]
+mod generic_toy_fusion;
+
+#[cfg(test)]
 mod cache_tests {
     use super::*;
     use num_complex::Complex64;
     use std::cell::Cell;
     use std::ops::{Add, Mul};
     use tenet_core::{
-        BlockSpec, BraidingStyleKind, FermionParityFusionRule, FusionProductSpace, FusionStyleKind,
-        FusionTreeKey, Fz2SectorLayout, PackedProductCodec, ProductFusionRule, ProductSectorCodec,
-        ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorVec,
-        Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
+        BlockSpec, FermionParityFusionRule, FusionProductSpace, FusionTreeKey, Fz2SectorLayout,
+        PackedProductCodec, ProductFusionRule, ProductSectorCodec, ProductSectorLayout,
+        SU2FusionRule, SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, U1FusionRule, U1Irrep,
+        U1SectorLayout, Z2Irrep,
     };
 
     type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
@@ -623,46 +627,7 @@ mod cache_tests {
         }
     }
 
-    #[derive(Clone, Copy)]
-    struct ToyGenericRule<const ID: u8>;
-
-    impl<const ID: u8> FusionRule for ToyGenericRule<ID> {
-        fn rule_identity(&self) -> tenet_core::RuleIdentity {
-            tenet_core::RuleIdentity::of_type::<Self>()
-        }
-
-        fn fusion_style(&self) -> FusionStyleKind {
-            FusionStyleKind::Generic
-        }
-
-        fn braiding_style(&self) -> BraidingStyleKind {
-            BraidingStyleKind::Bosonic
-        }
-
-        fn vacuum(&self) -> SectorId {
-            SectorId::new(0)
-        }
-
-        fn dual(&self, sector: SectorId) -> SectorId {
-            sector
-        }
-
-        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-            match (left.id(), right.id()) {
-                (0, sector) | (sector, 0) => [SectorId::new(sector)].into_iter().collect(),
-                (1, 1) => [SectorId::new(0), SectorId::new(1)].into_iter().collect(),
-                _ => SectorVec::new(),
-            }
-        }
-
-        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
-            if (left.id(), right.id(), coupled.id()) == (1, 1, 1) {
-                2
-            } else {
-                usize::from(self.fusion_channels(left, right).contains(&coupled))
-            }
-        }
-    }
+    use super::generic_toy_fusion::ToyGenericRule;
 
     fn triple_rule() -> TripleRule {
         TripleRule::new(
