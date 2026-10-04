@@ -102,6 +102,39 @@ pub(super) struct SectorMatrixRef<'a, D> {
     pub(super) data: &'a [D],
 }
 
+/// Indexed access to the per-sector matrices a factorization stage reads,
+/// borrowed regions or packed copies alike.
+pub(super) trait SectorMatrices<D> {
+    fn len(&self) -> usize;
+    fn get(&self, index: usize) -> Result<SectorMatrixRef<'_, D>, OperationError>;
+}
+
+impl<D: FactorScalar> SectorMatrices<D> for InputMatricizations<'_, D> {
+    fn len(&self) -> usize {
+        InputMatricizations::len(self)
+    }
+
+    fn get(&self, index: usize) -> Result<SectorMatrixRef<'_, D>, OperationError> {
+        InputMatricizations::get(self, index)
+    }
+}
+
+impl<D> SectorMatrices<D> for [SectorMatricization<D>] {
+    fn len(&self) -> usize {
+        <[SectorMatricization<D>]>::len(self)
+    }
+
+    fn get(&self, index: usize) -> Result<SectorMatrixRef<'_, D>, OperationError> {
+        let matrix = &self[index];
+        Ok(SectorMatrixRef {
+            sector: matrix.sector,
+            rows: matrix.rows,
+            cols: matrix.cols,
+            data: &matrix.data,
+        })
+    }
+}
+
 pub(super) enum InputMatricizations<'a, D> {
     Regions {
         data: &'a [D],
