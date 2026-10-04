@@ -222,10 +222,9 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              right_null_diagonal_dyn right_null_dyn right_polar_adjoint_parent_dyn \
              right_polar_adjoint_parent_dyn_checked_generic right_polar_checked_generic \
              right_polar_diagonal_spectra_dyn right_polar_dyn scale_axis_by_spectrum_mapped \
-             svd_compact_adjoint_factors_dyn svd_compact_checked_generic \
-             svd_compact_diagonal_factors_dyn svd_compact_dyn_checked_generic \
-             svd_compact_factors_dyn svd_full_adjoint_factors_dyn svd_full_checked_generic \
-             svd_full_factors_dyn svd_vals_dyn svd_vals_from_source validate_endomorphism_region_stacking validate_hermitian_regions \
+             svd_compact_adjoint_from_parent svd_compact_dyn_checked_generic \
+             svd_compact_from_source svd_full_adjoint_from_parent svd_full_from_source \
+             svd_vals_dyn svd_vals_from_source validate_endomorphism_region_stacking validate_hermitian_regions \
              BoundDynamicTensorRef CheckedGenericFactorPlanError EigFullDyn EighFullDyn \
              EIGH_FULL_STACKING ExecutorLease FactorMode FactorOutput FactorRoute FactorSource Routed \
              SvdFactorsDyn SvdFullFactorsDyn \

@@ -111,6 +111,71 @@ pub trait FactorMode<R>: sealed::Sealed {
     where
         E: DenseExecutor + ?Sized,
         D: FactorScalar;
+
+    // SVD (#1862 D3, owned by #1994): the multiplicity-free and checked
+    // diagonal and dense stages publish through their own builders, and the
+    // bond of a spectrum factor (`S`, `D`) is fresh in multiplicity-free mode
+    // and the input bond on a checked diagonal route.
+
+    /// Whether a full SVD of a compact diagonal runs the compact route:
+    /// multiplicity-free compact and full factor spaces coincide on a
+    /// diagonal and that mode publishes them without a layout check.
+    const SVD_FULL_DIAGONAL_IS_COMPACT: bool;
+
+    fn svd_compact_diagonal<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Result<SvdFactorsDyn<R, D>, Self::Error>;
+
+    fn svd_compact_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<SvdFactorsDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar;
+
+    fn svd_compact_adjoint_dense<E, D>(
+        dense: &mut E,
+        parent: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<SvdFactorsDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar;
+
+    fn svd_full_diagonal<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Result<SvdFullFactorsDyn<R, D>, Self::Error>;
+
+    fn svd_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<SvdFullFactorsDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar;
+
+    fn svd_full_adjoint_dense<E, D>(
+        dense: &mut E,
+        parent: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<SvdFullFactorsDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar;
+
+    fn spectrum_bond<V>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        route: FactorRoute,
+        spectrum: &[SectorSpectrum<V>],
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::Error>;
+
+    fn rectangular_spectrum_factor<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum],
+        row_dimensions: &BTreeMap<SectorId, usize>,
+        col_dimensions: &BTreeMap<SectorId, usize>,
+    ) -> Result<BoundDynFactor<R, D>, Self::Error>;
 }
 
 impl sealed::Sealed for MultiplicityFreeAdmissionMode {}
@@ -126,6 +191,87 @@ where
         space: &BoundDynamicFusionMapSpace<R>,
     ) -> impl FactorSpaceAuthority<R, Error = Self::Error> + '_ {
         MfAuthority(space)
+    }
+
+    const SVD_FULL_DIAGONAL_IS_COMPACT: bool = true;
+
+    fn svd_compact_diagonal<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Result<SvdFactorsDyn<R, D>, Self::Error> {
+        svd_compact_diagonal_factors_dyn(space, spectrum)
+    }
+
+    fn svd_compact_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<SvdFactorsDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        svd_compact_factors_dyn(dense, input)
+    }
+
+    fn svd_compact_adjoint_dense<E, D>(
+        dense: &mut E,
+        parent: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<SvdFactorsDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        svd_compact_adjoint_factors_dyn(dense, parent)
+    }
+
+    fn svd_full_diagonal<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Result<SvdFullFactorsDyn<R, D>, Self::Error> {
+        let _ = (space, spectrum);
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "multiplicity-free full SVD of a compact diagonal runs the compact route",
+        })
+    }
+
+    fn svd_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<SvdFullFactorsDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        svd_full_factors_dyn(dense, input)
+    }
+
+    fn svd_full_adjoint_dense<E, D>(
+        dense: &mut E,
+        parent: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<SvdFullFactorsDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        svd_full_adjoint_factors_dyn(dense, parent)
+    }
+
+    fn spectrum_bond<V>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        route: FactorRoute,
+        spectrum: &[SectorSpectrum<V>],
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::Error> {
+        let _ = route;
+        diagonal_bond_bound_space_like(space, spectrum)
+    }
+
+    fn rectangular_spectrum_factor<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum],
+        row_dimensions: &BTreeMap<SectorId, usize>,
+        col_dimensions: &BTreeMap<SectorId, usize>,
+    ) -> Result<BoundDynFactor<R, D>, Self::Error> {
+        rectangular_diagonal_bond_tensor(space, spectrum, row_dimensions, col_dimensions)
     }
 
     fn qr_compact_dense<E, D>(
@@ -183,6 +329,105 @@ where
         space: &BoundDynamicFusionMapSpace<R>,
     ) -> impl FactorSpaceAuthority<R, Error = Self::Error> + '_ {
         CheckedAuthority(space.provider_arc())
+    }
+
+    const SVD_FULL_DIAGONAL_IS_COMPACT: bool = false;
+
+    fn svd_compact_diagonal<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Result<SvdFactorsDyn<R, D>, Self::Error> {
+        svd_compact_diagonal_factors_dyn_checked_generic(space, spectrum)
+    }
+
+    fn svd_compact_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<SvdFactorsDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        svd_compact_factors_with_spectrum_dyn_checked_generic(dense, input)
+    }
+
+    fn svd_compact_adjoint_dense<E, D>(
+        dense: &mut E,
+        parent: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<SvdFactorsDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        let _ = (dense, parent);
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "checked Generic SVD does not read lazy adjoints",
+        }
+        .into())
+    }
+
+    fn svd_full_diagonal<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Result<SvdFullFactorsDyn<R, D>, Self::Error> {
+        svd_full_diagonal_factors_dyn_checked_generic(space, spectrum)
+    }
+
+    fn svd_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<SvdFullFactorsDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        svd_full_factors_dyn_checked_generic(dense, input)
+    }
+
+    fn svd_full_adjoint_dense<E, D>(
+        dense: &mut E,
+        parent: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<SvdFullFactorsDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        let _ = (dense, parent);
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "checked Generic SVD does not read lazy adjoints",
+        }
+        .into())
+    }
+
+    fn spectrum_bond<V>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        route: FactorRoute,
+        spectrum: &[SectorSpectrum<V>],
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::Error> {
+        match route {
+            FactorRoute::Diagonal => {
+                diagonal_bond_bound_space_on_source_checked_generic(space, spectrum)
+            }
+            FactorRoute::Dense => diagonal_bond_bound_space_generic_checked(
+                Arc::clone(space.provider_arc()),
+                spectrum,
+            ),
+        }
+    }
+
+    fn rectangular_spectrum_factor<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum],
+        row_dimensions: &BTreeMap<SectorId, usize>,
+        col_dimensions: &BTreeMap<SectorId, usize>,
+    ) -> Result<BoundDynFactor<R, D>, Self::Error> {
+        rectangular_diagonal_bond_tensor_generic_checked(
+            Arc::clone(space.provider_arc()),
+            spectrum,
+            row_dimensions,
+            col_dimensions,
+            &D::from_real,
+        )
     }
 
     fn qr_compact_dense<E, D>(

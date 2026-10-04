@@ -54,10 +54,9 @@ pub mod seam {
         right_null_checked_generic, right_null_diagonal_dyn, right_null_dyn,
         right_polar_adjoint_parent_dyn, right_polar_adjoint_parent_dyn_checked_generic,
         right_polar_checked_generic, right_polar_diagonal_spectra_dyn, right_polar_dyn,
-        scale_axis_by_spectrum_mapped, svd_compact_adjoint_factors_dyn,
-        svd_compact_checked_generic, svd_compact_diagonal_factors_dyn,
-        svd_compact_dyn_checked_generic, svd_compact_factors_dyn, svd_full_adjoint_factors_dyn,
-        svd_full_checked_generic, svd_full_factors_dyn, svd_vals_dyn, svd_vals_from_source,
+        scale_axis_by_spectrum_mapped, svd_compact_adjoint_from_parent,
+        svd_compact_dyn_checked_generic, svd_compact_from_source, svd_full_adjoint_from_parent,
+        svd_full_from_source, svd_vals_dyn, svd_vals_from_source,
         validate_endomorphism_region_stacking, validate_hermitian_regions, BoundDynamicTensorRef,
         CheckedGenericFactorPlanError, EigFullDyn, EighFullDyn, ExecutorLease, FactorMode,
         FactorOutput, FactorRoute, FactorSource, Routed, SvdFactorsDyn, SvdFullFactorsDyn,
@@ -81,8 +80,8 @@ use factorize::{
     eig_full, eig_vals, eigh_full, eigh_vals, left_null, left_null_dyn_checked_generic, left_polar,
     lq_compact, lq_compact_dyn, lq_full, lq_full_dyn, qr_compact, qr_compact_dyn, qr_full,
     qr_full_dyn, right_null, right_null_dyn_checked_generic, right_polar, scale_axis_by_spectrum,
-    svd_compact, svd_compact_dyn, svd_full, svd_full_adjoint_dyn, svd_full_dyn,
-    svd_full_dyn_checked_generic, svd_vals,
+    svd_compact, svd_compact_adjoint_factors_dyn, svd_compact_dyn, svd_compact_factors_dyn,
+    svd_full, svd_full_adjoint_dyn, svd_full_dyn, svd_full_dyn_checked_generic, svd_vals,
 };
 #[cfg(test)]
 use factorize::{

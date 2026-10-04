@@ -64,16 +64,6 @@ where
 }
 
 #[doc(hidden)]
-pub trait TypedTensorSvdDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: FactorizationScalar,
-{
-    fn svd_compact(tensor: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, Self::FacadeError>;
-    fn svd_full(tensor: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, Self::FacadeError>;
-}
-
-#[doc(hidden)]
 pub trait TypedTensorEighDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -129,6 +119,8 @@ pub enum FactorOp {
     QrFull,
     LqCompact,
     LqFull,
+    SvdCompact,
+    SvdFull,
 }
 
 impl FactorOp {
@@ -142,6 +134,8 @@ impl FactorOp {
             Self::QrFull => "checked Generic qr_full does not accept lazy adjoints",
             Self::LqCompact => "checked Generic lq_compact does not accept lazy adjoints",
             Self::LqFull => "checked Generic lq_full does not accept lazy adjoints",
+            Self::SvdCompact => "checked Generic svd_compact does not accept lazy adjoints",
+            Self::SvdFull => "checked Generic svd_full does not accept lazy adjoints",
         }
     }
 }
@@ -159,6 +153,9 @@ pub enum AdjointRule {
     /// The factorization's adjoint partner on the parent, whose factors are
     /// adjointed back (LQ of `t^H` from QR of `t`).
     Redirect,
+    /// The dense parent through the factorization's adjoint-aware stage,
+    /// which returns the factors of the adjoint without forming it.
+    AdjointSeam,
 }
 
 impl<R> FusionMode<R> for MultiplicityFreeAdmissionMode
@@ -176,6 +173,7 @@ where
                 AdjointRule::Materialize
             }
             FactorOp::LqCompact | FactorOp::LqFull => AdjointRule::Redirect,
+            FactorOp::SvdCompact | FactorOp::SvdFull => AdjointRule::AdjointSeam,
         }
     }
 

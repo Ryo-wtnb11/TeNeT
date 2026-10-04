@@ -352,17 +352,26 @@ fn checked_compact_diagonal_svd_avoids_input_materialization_and_solver() {
     for malformed in [&missing, &duplicate, &short] {
         let mut dense = tenet_dense::DefaultDenseExecutor::new();
         assert!(misuse(
-            &tenet_matrixalgebra::seam::svd_compact_checked_generic(
-                &mut dense,
-                diagonal(malformed)
-            )
+            &tenet_matrixalgebra::seam::svd_compact_from_source::<
+                CheckedGenericAdmissionMode,
+                _,
+                _,
+                _,
+                _,
+            >(&mut dense, diagonal(malformed))
             .err()
             .unwrap()
         ));
         assert!(misuse(
-            &tenet_matrixalgebra::seam::svd_full_checked_generic(&mut dense, diagonal(malformed))
-                .err()
-                .unwrap()
+            &tenet_matrixalgebra::seam::svd_full_from_source::<
+                CheckedGenericAdmissionMode,
+                _,
+                _,
+                _,
+                _,
+            >(&mut dense, diagonal(malformed))
+            .err()
+            .unwrap()
         ));
     }
 }
