@@ -42,32 +42,41 @@ where
     })
 }
 
-/// Compact left polar spectra `W` (phase) and `P` (magnitude) of an owned
-/// compact diagonal endomorphism.
+/// Left polar factors `W` (phase) and `P` (magnitude) of the compact diagonal
+/// `spectrum` on `space`, in fusion mode `M`; both stay compact on the input
+/// space.
 #[doc(hidden)]
-pub fn left_polar_diagonal_spectra_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
+pub fn left_polar_of_diagonal<M, R, D>(
+    space: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Result<LeftPolar<Vec<SectorSpectrum<D>>>, OperationError>
+) -> Result<LeftPolar<FactorOutput<R, D>>, M::Error>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    M: FactorMode<R>,
     D: FactorScalar,
 {
-    polar_diagonal_spectra(&MfAuthority(authority), authority, spectrum)
+    let LeftPolar { w, p } = polar_diagonal_spectra(&M::authority(space), space, spectrum)?;
+    let on_input = |values| FactorOutput::Diagonal {
+        space: space.clone(),
+        values,
+    };
+    Ok(LeftPolar {
+        w: on_input(w),
+        p: on_input(p),
+    })
 }
 
-/// Compact right polar spectra `P` (magnitude) and `Wh` (phase) of an owned
-/// compact diagonal endomorphism.
+/// Right polar factors `P` (magnitude) and `Wh` (phase) of a compact
+/// diagonal; see [`left_polar_of_diagonal`].
 #[doc(hidden)]
-pub fn right_polar_diagonal_spectra_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
+pub fn right_polar_of_diagonal<M, R, D>(
+    space: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
-) -> Result<RightPolar<Vec<SectorSpectrum<D>>>, OperationError>
+) -> Result<RightPolar<FactorOutput<R, D>>, M::Error>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    M: FactorMode<R>,
     D: FactorScalar,
 {
-    polar_diagonal_spectra(&MfAuthority(authority), authority, spectrum)
+    left_polar_of_diagonal::<M, R, D>(space, spectrum)
         .map(|LeftPolar { w, p }| RightPolar { p, wh: w })
 }
 
@@ -477,13 +486,8 @@ where
         lease,
         source,
         |space, spectrum| {
-            let LeftPolar { w, p } =
-                polar_diagonal_spectra(&CheckedAuthority(space.provider_arc()), space, spectrum)?;
-            let on_input = |values| FactorOutput::Diagonal {
-                space: space.clone(),
-                values,
-            };
-            Ok((on_input(w), on_input(p)))
+            left_polar_of_diagonal::<CheckedGenericAdmissionMode, R, D>(space, spectrum)
+                .map(|LeftPolar { w, p }| (w, p))
         },
         |dense, input| {
             polar_dyn_checked_generic_reported(dense, input, direction, direction)

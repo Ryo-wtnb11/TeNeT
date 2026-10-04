@@ -336,9 +336,8 @@ fn assert_one_admission(label: &str, (sessions, admissions): (u64, u64)) {
 
 fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     use tenet_matrixalgebra::seam::{
-        eigh_full_checked_generic, eigh_full_dyn, left_null_checked_generic, left_null_dyn,
-        left_polar_checked_generic, pinv_direct_into_dyn, right_null_checked_generic,
-        right_null_dyn, svd_compact_dyn_checked_generic,
+        eigh_full_checked_generic, eigh_full_dyn, left_polar_checked_generic, pinv_direct_into_dyn,
+        svd_compact_dyn_checked_generic,
     };
     let _guard = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let dense = &mut dense;
@@ -603,4 +602,84 @@ where
         _,
     >(dense, dense_source(input))
     .map(|(factors, _)| factors)
+}
+
+fn left_null_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<tenet_matrixalgebra::BoundDynFactor<R, D>, tenet_tensors::OperationError>
+where
+    E: tenet_dense::DenseExecutor + ?Sized,
+    tenet_core::MultiplicityFreeAdmissionMode: FactorMode<R, Error = tenet_tensors::OperationError>,
+    D: tenet_matrixalgebra::FactorScalar,
+{
+    tenet_matrixalgebra::seam::left_null_from_source::<
+        tenet_core::MultiplicityFreeAdmissionMode,
+        _,
+        _,
+        _,
+        _,
+    >(dense, dense_source(input))
+}
+
+fn left_null_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<
+    tenet_matrixalgebra::BoundDynFactor<R, D>,
+    <tenet_core::CheckedGenericAdmissionMode as FactorMode<R>>::Error,
+>
+where
+    L: ExecutorLease<Executor = E>,
+    E: tenet_dense::DenseExecutor + ?Sized,
+    tenet_core::CheckedGenericAdmissionMode: FactorMode<R>,
+    D: tenet_matrixalgebra::FactorScalar,
+{
+    tenet_matrixalgebra::seam::left_null_from_source::<
+        tenet_core::CheckedGenericAdmissionMode,
+        _,
+        _,
+        _,
+        _,
+    >(lease, source)
+}
+
+fn right_null_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<tenet_matrixalgebra::BoundDynFactor<R, D>, tenet_tensors::OperationError>
+where
+    E: tenet_dense::DenseExecutor + ?Sized,
+    tenet_core::MultiplicityFreeAdmissionMode: FactorMode<R, Error = tenet_tensors::OperationError>,
+    D: tenet_matrixalgebra::FactorScalar,
+{
+    tenet_matrixalgebra::seam::right_null_from_source::<
+        tenet_core::MultiplicityFreeAdmissionMode,
+        _,
+        _,
+        _,
+        _,
+    >(dense, dense_source(input))
+}
+
+fn right_null_checked_generic<L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<
+    tenet_matrixalgebra::BoundDynFactor<R, D>,
+    <tenet_core::CheckedGenericAdmissionMode as FactorMode<R>>::Error,
+>
+where
+    L: ExecutorLease<Executor = E>,
+    E: tenet_dense::DenseExecutor + ?Sized,
+    tenet_core::CheckedGenericAdmissionMode: FactorMode<R>,
+    D: tenet_matrixalgebra::FactorScalar,
+{
+    tenet_matrixalgebra::seam::right_null_from_source::<
+        tenet_core::CheckedGenericAdmissionMode,
+        _,
+        _,
+        _,
+        _,
+    >(lease, source)
 }

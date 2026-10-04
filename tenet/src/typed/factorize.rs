@@ -5,13 +5,11 @@ mod eig;
 mod exp_solve;
 mod inverse;
 mod mode;
-mod polar_null;
 
 use mode::{AdjointRule, FactorOp};
 pub use mode::{
     FusionMode, TypedTensorEigDispatch, TypedTensorEighDispatch, TypedTensorExpDispatch,
-    TypedTensorInvDispatch, TypedTensorNullDispatch, TypedTensorPinvDispatch,
-    TypedTensorPolarDispatch, TypedTensorSolveDispatch,
+    TypedTensorInvDispatch, TypedTensorPinvDispatch, TypedTensorSolveDispatch,
 };
 
 /// The runtime as the seam's executor lease: the checked entries lease a
@@ -197,6 +195,91 @@ where
             l: self.factor_output(l),
             q: self.factor_output(q),
         })
+    }
+
+    /// The one body of the null spaces. Under [`AdjointRule::Redirect`] a
+    /// lazy adjoint's null space is the adjoint of `partner` (the opposite
+    /// null space) of its parent, detached.
+    fn factor_null(
+        &self,
+        op: FactorOp,
+        partner: impl FnOnce(&Self) -> Result<Self, TypedFacadeError<R>>,
+        stage: impl FnOnce(
+            RuntimeDense<'_>,
+            tenet_matrixalgebra::seam::FactorSource<'_, R, D>,
+        ) -> Result<
+            tenet_matrixalgebra::BoundDynFactor<R, D>,
+            <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
+        >,
+    ) -> Result<Self, TypedFacadeError<R>>
+    where
+        R::Mode: TypedAdjointSpace<R>,
+    {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
+            && R::Mode::adjoint_rule(op) == AdjointRule::Redirect
+        {
+            return Ok(partner(&self.adjoint()?)?
+                .adjoint()?
+                .materialized_tensor_uncached()?);
+        }
+        let mut local = None;
+        let source = self.factor_input(op, &mut local)?;
+        let factor =
+            stage(RuntimeDense(&self.runtime), source).map_err(R::Mode::map_factor_error)?;
+        Ok(wrap_factor_on(&self.runtime, factor))
+    }
+
+    /// The one body of the left polar decomposition. A lazy adjoint and a
+    /// dense input run the mode's own stage (D1, #1755; D5, #1752); a compact
+    /// diagonal factors directly on its bond.
+    fn factor_left_polar(&self) -> Result<LeftPolar<Self>, TypedFacadeError<R>>
+    where
+        D: FactorizationScalar,
+    {
+        match &self.repr {
+            TypedTensorRepr::Adjoint(_) => R::Mode::left_polar_adjoint(self),
+            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+                TypedData::Diagonal(spectrum) => {
+                    let LeftPolar { w, p } = tenet_matrixalgebra::seam::left_polar_of_diagonal::<
+                        R::Mode,
+                        R,
+                        D,
+                    >(&body.space, spectrum)
+                    .map_err(R::Mode::map_factor_error)?;
+                    Ok(LeftPolar {
+                        w: self.factor_output(w),
+                        p: self.factor_output(p),
+                    })
+                }
+                TypedData::Dense(_) => R::Mode::left_polar_dense(self),
+            },
+        }
+    }
+
+    /// The one body of the right polar decomposition; see
+    /// [`Self::factor_left_polar`].
+    fn factor_right_polar(&self) -> Result<RightPolar<Self>, TypedFacadeError<R>>
+    where
+        D: FactorizationScalar,
+    {
+        match &self.repr {
+            TypedTensorRepr::Adjoint(_) => R::Mode::right_polar_adjoint(self),
+            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+                TypedData::Diagonal(spectrum) => {
+                    let RightPolar { p, wh } =
+                        tenet_matrixalgebra::seam::right_polar_of_diagonal::<R::Mode, R, D>(
+                            &body.space,
+                            spectrum,
+                        )
+                        .map_err(R::Mode::map_factor_error)?;
+                    Ok(RightPolar {
+                        p: self.factor_output(p),
+                        wh: self.factor_output(wh),
+                    })
+                }
+                TypedData::Dense(_) => R::Mode::right_polar_dense(self),
+            },
+        }
     }
 
     /// The SVD factors `op` computes, with their route. Under

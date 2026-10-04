@@ -108,107 +108,58 @@ where
     )
 }
 
-/// Multiplicity-free left null space of a compact diagonal; see
-/// [`compact_null_sector`].
-#[doc(hidden)]
-pub fn left_null_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    null_diagonal(
-        &MfAuthority(authority),
-        authority,
-        spectrum,
-        FactorSide::Left,
-    )
-}
-
-/// Multiplicity-free right null space of a compact diagonal.
-#[doc(hidden)]
-pub fn right_null_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    null_diagonal(
-        &MfAuthority(authority),
-        authority,
-        spectrum,
-        FactorSide::Right,
-    )
-}
-
-fn null_checked_generic<L, E, R, D>(
+fn null_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
     side: FactorSide,
-) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<BoundDynFactor<R, D>, M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
     factor_from_source(
         lease,
         source,
-        |space, spectrum| {
-            null_diagonal(
-                &CheckedAuthority(space.provider_arc()),
-                space,
-                spectrum,
-                side,
-            )
-        },
-        |dense, input| {
-            null_dense(
-                dense,
-                &CheckedAuthority(input.space().provider_arc()),
-                input,
-                side,
-            )
-        },
+        |space, spectrum| null_diagonal(&M::authority(space), space, spectrum, side),
+        |dense, input| null_dense(dense, &M::authority(input.space()), input, side),
     )
     .map(|(factor, _)| factor)
 }
 
-/// Checked numerical left null space of `source`. All SVDs and completions
-/// of a dense input are staged before the data-dependent bond is admitted.
+/// Numerical left null space of `source` in fusion mode `M`; a compact
+/// diagonal is read directly (see [`compact_null_sector`]). A checked dense
+/// input stages all SVDs and completions before the data-dependent bond is
+/// admitted.
 #[doc(hidden)]
-pub fn left_null_checked_generic<L, E, R, D>(
+pub fn left_null_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
-) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<BoundDynFactor<R, D>, M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    null_checked_generic(lease, source, FactorSide::Left)
+    null_from_source::<M, _, _, _, _>(lease, source, FactorSide::Left)
 }
 
-/// Checked numerical right null space of `source`; see
-/// [`left_null_checked_generic`].
+/// Numerical right null space of `source` in fusion mode `M`; see
+/// [`left_null_from_source`].
 #[doc(hidden)]
-pub fn right_null_checked_generic<L, E, R, D>(
+pub fn right_null_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
-) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<BoundDynFactor<R, D>, M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    null_checked_generic(lease, source, FactorSide::Right)
+    null_from_source::<M, _, _, _, _>(lease, source, FactorSide::Right)
 }
 
 #[cfg(test)]
@@ -231,8 +182,9 @@ where
     typed_from_bound_factor(out)
 }
 
+#[cfg(test)]
 /// Provider-bound dynamic-rank [`left_null`].
-pub fn left_null_dyn<E, R, D>(
+pub(crate) fn left_null_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
@@ -264,8 +216,9 @@ where
     typed_from_bound_factor(out)
 }
 
+#[cfg(test)]
 /// Provider-bound dynamic-rank [`right_null`].
-pub fn right_null_dyn<E, R, D>(
+pub(crate) fn right_null_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
