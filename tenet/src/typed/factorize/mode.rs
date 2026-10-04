@@ -163,11 +163,8 @@ pub enum AdjointRule {
 
 impl<R> FusionMode<R> for MultiplicityFreeAdmissionMode
 where
-    R: TypedSectorAdmission<
-            Error = FusionAlgebraError,
-            Mode = MultiplicityFreeAdmissionMode,
-            Sector = <R as SectorCodec>::Sector,
-        > + MultiplicityFreeRigidSymbols<Scalar = f64>
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
 {
@@ -190,7 +187,10 @@ where
         provider: &R,
         sector: SectorId,
     ) -> Result<<R as TypedSectorAdmission>::Sector, Error> {
-        Ok(provider.decode_sector(sector)?)
+        // The blanket `TypedSectorAdmission` impl (the only one a
+        // `CheckedFusionAlgebra + SectorCodec` rule can have) decodes through
+        // `SectorCodec::decode_sector`.
+        Ok(provider.try_decode_label(sector)?)
     }
 }
 
