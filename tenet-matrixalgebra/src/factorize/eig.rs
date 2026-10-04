@@ -677,19 +677,6 @@ where
     Ok(result)
 }
 
-/// Multiplicity-free Hermitian eigenvalues of a compact diagonal.
-#[doc(hidden)]
-pub fn eigh_vals_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<Vec<SectorSpectrum>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    eigh_vals_diagonal(&MfAuthority(authority), authority, spectrum)
-}
-
 /// A finite compact diagonal that passes the dense route's
 /// relative-Frobenius Hermiticity check, applied to the diagonal matrix
 /// itself; its real parts are its eigenvalues.
@@ -785,19 +772,6 @@ where
     Ok(result)
 }
 
-/// Multiplicity-free general eigenvalues of a compact diagonal.
-#[doc(hidden)]
-pub fn eig_vals_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<Vec<SectorSpectrum<Complex64>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    eig_vals_diagonal(&MfAuthority(authority), authority, spectrum)
-}
-
 fn missing_compact_plan() -> OperationError {
     OperationError::UnsupportedTensorContractScope {
         message: "canonical bond layout has no compact factor plan",
@@ -822,14 +796,13 @@ where
     eigh_vals_dyn(dense, &input.dynamic())
 }
 
-/// Dynamic-rank [`eigh_vals`].
+/// Dynamic-rank [`eigh_vals`]: the dense stage, the same in every fusion mode.
 pub fn eigh_vals_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Vec<SectorSpectrum>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let space = input.space().space();
@@ -867,14 +840,13 @@ where
     eig_vals_dyn::<E, R, D>(dense, &input.dynamic())
 }
 
-/// Dynamic-rank [`eig_vals`].
+/// Dynamic-rank [`eig_vals`]: the dense stage, the same in every fusion mode.
 pub fn eig_vals_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Vec<SectorSpectrum<Complex64>>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let space = input.space().space();
@@ -1615,115 +1587,48 @@ where
     Ok(EigFullDyn { v, eigenvalues })
 }
 
-/// Checked-Generic Hermitian eigenvalues only. No eigenvector or factor-space
-/// publication occurs.
+/// Hermitian eigenvalues of `source` in fusion mode `M`, descending by
+/// magnitude per coupled sector. A compact diagonal is read directly; only
+/// dense storage leases an executor.
 #[doc(hidden)]
-pub(crate) fn eigh_vals_dyn_checked_generic<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<Vec<SectorSpectrum>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    let space = input.space().space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Err(CheckedGenericFactorPlanError::Operation(
-            OperationError::UnsupportedTensorContractScope {
-                message: "eigh requires an endomorphism (codomain == domain)",
-            },
-        ));
-    }
-    let matricizations =
-        generic_value_matricizations(space.structure(), input.data(), space.nout())
-            .map_err(CheckedGenericFactorPlanError::from)?;
-    matricizations
-        .validate_endomorphism_stacking(
-            "eigh_vals requires identical endomorphism row/column fusion-tree stacking",
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    matricizations
-        .validate_hermitian()
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    eigh_vals_spectra(dense, &matricizations).map_err(CheckedGenericFactorPlanError::from)
-}
-
-/// Checked-Generic general eigenvalues only. No eigenvector or factor-space
-/// publication occurs.
-#[doc(hidden)]
-pub(crate) fn eig_vals_dyn_checked_generic<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<Vec<SectorSpectrum<Complex64>>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    let space = input.space().space();
-    if space.homspace().codomain() != space.homspace().domain() {
-        return Err(CheckedGenericFactorPlanError::Operation(
-            OperationError::UnsupportedTensorContractScope {
-                message: "eig requires an endomorphism (codomain == domain)",
-            },
-        ));
-    }
-    let matricizations =
-        generic_value_matricizations(space.structure(), input.data(), space.nout())
-            .map_err(CheckedGenericFactorPlanError::from)?;
-    matricizations
-        .validate_endomorphism_stacking(
-            "eig_vals requires identical endomorphism row/column fusion-tree stacking",
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    eig_vals_spectra(dense, &matricizations).map_err(CheckedGenericFactorPlanError::from)
-}
-
-/// Checked Hermitian eigenvalues of `source`, descending by magnitude per
-/// coupled sector.
-#[doc(hidden)]
-pub fn eigh_vals_checked_generic<L, E, R, D>(
+pub fn eigh_vals_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
-) -> Result<Vec<SectorSpectrum>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<Vec<SectorSpectrum>, M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
     factor_from_source(
         lease,
         source,
-        |space, spectrum| {
-            eigh_vals_diagonal(&CheckedAuthority(space.provider_arc()), space, spectrum)
-        },
-        eigh_vals_dyn_checked_generic,
+        |space, spectrum| eigh_vals_diagonal(&M::authority(space), space, spectrum),
+        |dense, input| Ok(eigh_vals_dyn(dense, input)?),
     )
     .map(|(values, _)| values)
 }
 
-/// Checked general eigenvalues of `source`, descending by magnitude per
-/// coupled sector.
+/// General eigenvalues of `source` in fusion mode `M`, descending by
+/// magnitude per coupled sector. A compact diagonal is read directly; only
+/// dense storage leases an executor.
 #[doc(hidden)]
-pub fn eig_vals_checked_generic<L, E, R, D>(
+pub fn eig_vals_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
-) -> Result<Vec<SectorSpectrum<Complex64>>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<Vec<SectorSpectrum<Complex64>>, M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
     factor_from_source(
         lease,
         source,
-        |space, spectrum| {
-            eig_vals_diagonal(&CheckedAuthority(space.provider_arc()), space, spectrum)
-        },
-        eig_vals_dyn_checked_generic,
+        |space, spectrum| eig_vals_diagonal(&M::authority(space), space, spectrum),
+        |dense, input| Ok(eig_vals_dyn(dense, input)?),
     )
     .map(|(values, _)| values)
 }

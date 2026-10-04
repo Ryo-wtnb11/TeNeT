@@ -8,41 +8,6 @@ where
         > + CheckedGenericFusion,
     D: FactorizationScalar,
 {
-    /// Checked-Generic singular values only for owned host tensors.
-    pub(super) fn svd_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, f64> {
-        let TypedTensorRepr::Owned(body) = &self.repr else {
-            return Err(GenericTensorError::Facade(Error::InvalidArgument(
-                "checked Generic svd_vals does not accept lazy adjoints".to_string(),
-            )));
-        };
-        let raw = tenet_matrixalgebra::seam::svd_vals_checked_generic(
-            RuntimeDense(&self.runtime),
-            owned_factor_source(body).map_err(GenericTensorError::Facade)?,
-        )?;
-        let provider = self.logical_space().provider();
-        let mut decoded = raw
-            .into_iter()
-            .map(|entry| {
-                Ok(SectorSpectrum {
-                    sector: provider.try_decode_label(entry.sector)?,
-                    values: entry.values,
-                })
-            })
-            .collect::<Result<Vec<_>, <R as TypedSectorAdmission>::Error>>()
-            .map_err(|error| GenericTensorError::Plan(CheckedGenericPlanError::Provider(error)))?;
-        decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
-        Ok(decoded)
-    }
-}
-
-impl<R, D> TensorMap<R, D>
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericFusion,
-    D: FactorizationScalar,
-{
     pub(super) fn svd_full_checked_generic(
         &self,
     ) -> Result<Svd<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
@@ -312,53 +277,6 @@ where
             vh: self.wrap_bound_factor(vh),
         })
     }
-
-    /// TensorKit 0.17 / MatrixAlgebraKit `svd_vals`: the singular values per
-    /// coupled sector, and nothing else.
-    ///
-    /// No factor tensor and no bond space is built at all, so this is cheaper
-    /// still than reading [`Self::svd_compact`]'s compact `s`.
-    /// Finite owned compact-diagonal inputs are sorted sectorwise without
-    /// materializing the input or calling a dense SVD.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Operation`] / [`Error::Core`] from the seam, plus
-    /// [`Error::FusionAlgebra`] when the provider cannot decode a coupled
-    /// sector its own algebra produced.
-    pub(super) fn svd_vals_multiplicity_free(
-        &self,
-    ) -> Result<Vec<SectorSpectrum<R::Sector, f64>>, Error>
-    where
-        D: FactorizationScalar,
-    {
-        if let TypedTensorRepr::Owned(body) = &self.repr {
-            if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-                let raw = tenet_matrixalgebra::seam::svd_vals_compact_diagonal_dyn(
-                    &body.space,
-                    spectrum,
-                )?;
-                return self.decode_spectrum(raw);
-            }
-        }
-        let mut dense = self.runtime.lease_dense();
-        // Singular values and coupled-sector ids are invariant under adjoint,
-        // so an oriented input or logical-payload copy cannot change this output.
-        let raw = match &self.repr {
-            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::seam::svd_vals_dyn(
-                dense.dense(),
-                &BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())?,
-            )?,
-            TypedTensorRepr::Owned(_) => {
-                let (bound_space, bound_payload) = self.bound_payload()?;
-                tenet_matrixalgebra::seam::svd_vals_dyn(
-                    dense.dense(),
-                    &BoundDynamicTensorRef::try_new(bound_space, &bound_payload)?,
-                )?
-            }
-        };
-        self.decode_spectrum(raw)
-    }
 }
 
 impl<R, D> TypedTensorSvdDispatch<R, D> for MultiplicityFreeAdmissionMode
@@ -375,24 +293,6 @@ where
 
     fn svd_full(tensor: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, Error> {
         tensor.svd_full_multiplicity_free()
-    }
-}
-
-impl<R, D> TypedTensorSvdValsDispatch<R, D> for MultiplicityFreeAdmissionMode
-where
-    R: TypedSectorAdmission<
-            Error = FusionAlgebraError,
-            Mode = MultiplicityFreeAdmissionMode,
-            Sector = <R as SectorCodec>::Sector,
-        > + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-    D: FactorizationScalar,
-{
-    fn svd_vals(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, Error> {
-        tensor.svd_vals_multiplicity_free()
     }
 }
 
@@ -414,23 +314,5 @@ where
         tensor: &TensorMap<R, D>,
     ) -> Result<Svd<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         tensor.svd_full_checked_generic()
-    }
-}
-
-impl<R, D> TypedTensorSvdValsDispatch<R, D> for CheckedGenericAdmissionMode
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericFusion,
-    D: FactorizationScalar,
-{
-    fn svd_vals(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<
-        Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>,
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
-        tensor.svd_vals_checked_generic()
     }
 }

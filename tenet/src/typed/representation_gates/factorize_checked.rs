@@ -48,7 +48,7 @@ fn checked_compact_diagonal_svd_vals_skips_materialization_and_solver() {
     // A spectrum that does not cover the bond is misuse: a typed error.
     let stored = real.spectrum().unwrap();
     let values_of = |spectrum| {
-        tenet_matrixalgebra::seam::svd_vals_checked_generic(
+        tenet_matrixalgebra::seam::svd_vals_from_source::<CheckedGenericAdmissionMode, _, _, _, _>(
             &mut tenet_dense::DefaultDenseExecutor::new(),
             tenet_matrixalgebra::seam::FactorSource::Diagonal {
                 space: &owned(&real).space,

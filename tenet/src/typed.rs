@@ -393,12 +393,11 @@ pub use dispatch::{
 };
 mod factorize;
 pub use factorize::{
-    TypedTensorEigDispatch, TypedTensorEigValsDispatch, TypedTensorEighDispatch,
-    TypedTensorEighValsDispatch, TypedTensorExpDispatch, TypedTensorFullLqDispatch,
-    TypedTensorFullQrDispatch, TypedTensorInvDispatch, TypedTensorLqDispatch,
-    TypedTensorNullDispatch, TypedTensorPinvDispatch, TypedTensorPolarDispatch,
-    TypedTensorQrDispatch, TypedTensorSolveDispatch, TypedTensorSvdDispatch,
-    TypedTensorSvdValsDispatch,
+    FusionMode, TypedTensorEigDispatch, TypedTensorEighDispatch, TypedTensorExpDispatch,
+    TypedTensorFullLqDispatch, TypedTensorFullQrDispatch, TypedTensorInvDispatch,
+    TypedTensorLqDispatch, TypedTensorNullDispatch, TypedTensorPinvDispatch,
+    TypedTensorPolarDispatch, TypedTensorQrDispatch, TypedTensorSolveDispatch,
+    TypedTensorSvdDispatch,
 };
 mod checked_generic_contract;
 mod mode_dispatch;
