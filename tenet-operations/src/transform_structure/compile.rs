@@ -219,6 +219,25 @@ impl<T: Copy> TreeTransformStructure<T> {
         )?;
 
         let mut layouts = TreeTransformLayoutTable::default();
+        // Every destination block gets exactly one entry (a spec's or an
+        // inactive one) and every spec source one more; only `Multi` specs'
+        // entries are packed.
+        let (source_entries, packed_entries) =
+            specs
+                .iter()
+                .fold((0usize, 0usize), |(sources, packed), spec| {
+                    let (dst, src) = (spec.dst_blocks().len(), spec.src_blocks().len());
+                    let multi = !(dst == 1 && src == 1);
+                    (
+                        sources.saturating_add(src),
+                        packed.saturating_add(if multi { dst.saturating_add(src) } else { 0 }),
+                    )
+                });
+        layouts.reserve_exact(
+            dst_structure.block_count().saturating_add(source_entries),
+            rank,
+            packed_entries,
+        );
         let mut blocks = Vec::with_capacity(specs.len());
         let mut single_end = 0usize;
         let mut matrix_end = shared.singles.len();
@@ -258,12 +277,18 @@ impl<T: Copy> TreeTransformStructure<T> {
                 *touched = true;
             }
 
+            let packed = !(src_count == 1 && dst_count == 1);
             let dst_layout_start = layouts.entry_count();
             let mut element_count = None;
             for &dst_block in dst_blocks {
                 let block = dst_structure.block(dst_block)?;
-                let layout_element_count =
-                    layouts.push_block(rank, block.shape(), block.strides(), block.offset())?;
+                let layout_element_count = layouts.push_block(
+                    rank,
+                    block.shape(),
+                    block.strides(),
+                    block.offset(),
+                    packed,
+                )?;
                 match element_count {
                     Some(expected) if expected != layout_element_count => {
                         return Err(OperationError::ElementCountMismatch {
@@ -285,6 +310,7 @@ impl<T: Copy> TreeTransformStructure<T> {
                     block.strides(),
                     block.offset(),
                     spec.source_axes(),
+                    packed,
                 )?;
                 match element_count {
                     Some(expected) if expected != layout_element_count => {
@@ -300,7 +326,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             let element_count = element_count.expect("validated non-empty block");
             validate_uniform_layout_shapes(&layouts, dst_layout_start)?;
 
-            if src_count == 1 && dst_count == 1 {
+            if !packed {
                 if shared_coefficient_mismatch(
                     shared.singles.get(single_end..=single_end),
                     spec_coefficients,
@@ -342,7 +368,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             }
             let block = dst_structure.block(dst_block)?;
             inactive_dst_layouts.push(layouts.entry_count());
-            layouts.push_block(rank, block.shape(), block.strides(), block.offset())?;
+            layouts.push_block(rank, block.shape(), block.strides(), block.offset(), false)?;
         }
         blocks.sort_by(|lhs, rhs| {
             tree_transform_block_weight(rhs, &layouts)

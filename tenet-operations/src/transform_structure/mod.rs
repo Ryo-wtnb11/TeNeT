@@ -461,18 +461,21 @@ mod tests {
                 TreeTransformLayout {
                     layout_start: 0,
                     rank: 1,
+                    packed_start: 0,
                     offset: 5,
                     element_count: 3,
                 },
                 TreeTransformLayout {
                     layout_start: 1,
                     rank: 0,
+                    packed_start: 0,
                     offset: 7,
                     element_count: 1,
                 },
                 TreeTransformLayout {
                     layout_start: 1,
                     rank: 1,
+                    packed_start: 0,
                     offset: 0,
                     element_count: 0,
                 },
@@ -542,7 +545,7 @@ mod tests {
         let mut layouts = TreeTransformLayoutTable::default();
 
         let count = layouts
-            .push_block_with_axes(3, &[2, 3, 4], &[1, 2, 6], 7, Some(&[2, 0, 1]))
+            .push_block_with_axes(3, &[2, 3, 4], &[1, 2, 6], 7, Some(&[2, 0, 1]), true)
             .unwrap();
 
         // What: source-axis permutation changes stored shape and source
@@ -562,7 +565,7 @@ mod tests {
         let empty = layouts.clone();
 
         let error = layouts
-            .push_block_with_axes(3, &[2, 3, 4], &[1, 2, 6], 0, Some(&[0, 0, 2]))
+            .push_block_with_axes(3, &[2, 3, 4], &[1, 2, 6], 0, Some(&[0, 0, 2]), true)
             .unwrap_err();
         assert_eq!(
             error,
@@ -574,7 +577,14 @@ mod tests {
         assert_eq!(layouts, empty);
 
         let count = layouts
-            .push_block_with_axes(3, &[usize::MAX, 2, 0], &[1, 1, 1], 0, Some(&[2, 0, 1]))
+            .push_block_with_axes(
+                3,
+                &[usize::MAX, 2, 0],
+                &[1, 1, 1],
+                0,
+                Some(&[2, 0, 1]),
+                true,
+            )
             .unwrap();
         // What: validation follows the materialized permutation's order, so a
         // leading zero extent keeps the same non-overflowing element count.
