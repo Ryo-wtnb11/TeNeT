@@ -176,6 +176,35 @@ pub trait FactorMode<R>: sealed::Sealed {
         row_dimensions: &BTreeMap<SectorId, usize>,
         col_dimensions: &BTreeMap<SectorId, usize>,
     ) -> Result<BoundDynFactor<R, D>, Self::Error>;
+
+    // Eigendecomposition stages, publishing through each mode's own
+    // builders (the checked dense `eig_full` also keeps its rank gate, D4 of
+    // the one-path audit, #1798).
+    fn eigh_full_diagonal<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Result<EighFullDyn<R, D>, Self::Error>;
+
+    fn eigh_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<EighFullDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar;
+
+    fn eig_full_diagonal<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Result<EigFullDyn<R, D>, Self::Error>;
+
+    fn eig_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<EigFullDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar;
 }
 
 impl sealed::Sealed for MultiplicityFreeAdmissionMode {}
@@ -316,6 +345,42 @@ where
         D: FactorScalar,
     {
         lq_full_dyn(dense, input)
+    }
+
+    fn eigh_full_diagonal<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Result<EighFullDyn<R, D>, Self::Error> {
+        eigh_full_diagonal_dyn(space, spectrum)
+    }
+
+    fn eigh_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<EighFullDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        eigh_full_dyn(dense, input)
+    }
+
+    fn eig_full_diagonal<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Result<EigFullDyn<R, D>, Self::Error> {
+        eig_full_diagonal_dyn(space, spectrum)
+    }
+
+    fn eig_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<EigFullDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        eig_full_dyn(dense, input)
     }
 }
 
@@ -472,6 +537,42 @@ where
         D: FactorScalar,
     {
         lq_full_dyn_checked_generic(dense, input)
+    }
+
+    fn eigh_full_diagonal<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Result<EighFullDyn<R, D>, Self::Error> {
+        eigh_full_diagonal_dyn_checked_generic(space, spectrum)
+    }
+
+    fn eigh_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<EighFullDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        eigh_full_dyn_checked_generic(dense, input)
+    }
+
+    fn eig_full_diagonal<D: FactorScalar>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        spectrum: &[SectorSpectrum<D>],
+    ) -> Result<EigFullDyn<R, D>, Self::Error> {
+        eig_full_diagonal_dyn_checked_generic(space, spectrum)
+    }
+
+    fn eig_full_dense<E, D>(
+        dense: &mut E,
+        input: &BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<EigFullDyn<R, D>, Self::Error>
+    where
+        E: DenseExecutor + ?Sized,
+        D: FactorScalar,
+    {
+        eig_full_dyn_checked_generic(dense, input)
     }
 }
 

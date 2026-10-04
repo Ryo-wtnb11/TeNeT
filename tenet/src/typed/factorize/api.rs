@@ -629,7 +629,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorEighDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the Hermitian eigendecomposition `self = v * d * v^H` as an
@@ -685,11 +685,7 @@ where
         rows: &[usize],
         cols: &[usize],
     ) -> Result<Eigh<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorEighDispatch<R, D>>::eigh_full,
-        )
+        self.with_leg_roles(rows, cols, Self::factor_eigh_full)
     }
 }
 
@@ -741,8 +737,9 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorEigDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: AdvancedLinalgScalar,
+    <D as FactorScalar>::Eig: TensorScalar,
 {
     /// Returns the general eigendecomposition `self * v = v * d` as an
     /// [`Eig`] of complex factors.
@@ -796,11 +793,7 @@ where
         rows: &[usize],
         cols: &[usize],
     ) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, TypedFacadeError<R>> {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorEigDispatch<R, D>>::eig_full,
-        )
+        self.with_leg_roles(rows, cols, Self::factor_eig_full)
     }
 }
 

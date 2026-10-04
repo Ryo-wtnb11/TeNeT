@@ -1,15 +1,14 @@
 use super::*;
 
 mod api;
-mod eig;
 mod exp_solve;
 mod inverse;
 mod mode;
 
 use mode::{AdjointRule, FactorOp};
 pub use mode::{
-    FusionMode, TypedTensorEigDispatch, TypedTensorEighDispatch, TypedTensorExpDispatch,
-    TypedTensorInvDispatch, TypedTensorPinvDispatch, TypedTensorSolveDispatch,
+    FusionMode, TypedTensorExpDispatch, TypedTensorInvDispatch, TypedTensorPinvDispatch,
+    TypedTensorSolveDispatch,
 };
 
 /// The runtime as the seam's executor lease: the checked entries lease a
@@ -282,6 +281,68 @@ where
         }
     }
 
+    /// The one body of the Hermitian eigendecomposition: `d` is a compact
+    /// diagonal on the bond the mode chooses for the route (D3, #1994).
+    fn factor_eigh_full(&self) -> Result<Eigh<Self>, TypedFacadeError<R>>
+    where
+        D: FactorizationScalar,
+    {
+        let mut local = None;
+        let source = self.factor_input(FactorOp::EighFull, &mut local)?;
+        let (out, route) = tenet_matrixalgebra::seam::eigh_full_from_source::<R::Mode, _, _, _, _>(
+            RuntimeDense(&self.runtime),
+            source,
+        )
+        .map_err(R::Mode::map_factor_error)?;
+        let (v, mut eigenvalues) = out.into_parts();
+        let space = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::spectrum_bond(
+            self.logical_space(),
+            route,
+            &eigenvalues,
+        )
+        .map_err(R::Mode::map_factor_error)?;
+        Ok(Eigh {
+            d: diagonal_factor_on_bound(&self.runtime, space, &mut eigenvalues, D::from_real),
+            v: wrap_factor_on(&self.runtime, v),
+        })
+    }
+
+    /// The one body of the general eigendecomposition; complex factors at the
+    /// payload's precision, `d` on the mode's bond as for
+    /// [`Self::factor_eigh_full`].
+    #[allow(clippy::type_complexity)]
+    fn factor_eig_full(
+        &self,
+    ) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, TypedFacadeError<R>>
+    where
+        D: AdvancedLinalgScalar,
+        <D as FactorScalar>::Eig: TensorScalar,
+    {
+        let mut local = None;
+        let source = self.factor_input(FactorOp::EigFull, &mut local)?;
+        let (out, route) = tenet_matrixalgebra::seam::eig_full_from_source::<R::Mode, _, _, _, _>(
+            RuntimeDense(&self.runtime),
+            source,
+        )
+        .map_err(R::Mode::map_factor_error)?;
+        let (v, mut eigenvalues) = out.into_parts();
+        let space = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::spectrum_bond(
+            self.logical_space(),
+            route,
+            &eigenvalues,
+        )
+        .map_err(R::Mode::map_factor_error)?;
+        Ok(Eig {
+            d: diagonal_factor_on_bound(
+                &self.runtime,
+                space,
+                &mut eigenvalues,
+                <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
+            ),
+            v: wrap_factor_on(&self.runtime, v),
+        })
+    }
+
     /// The SVD factors `op` computes, with their route. Under
     /// [`AdjointRule::AdjointSeam`] a lazy adjoint's dense parent is read in
     /// place by `adjoint_stage`.
@@ -418,24 +479,6 @@ where
     /// seam already certified the space against its own data.
     fn wrap_bound_factor(&self, factor: BoundDynFactor<R, D>) -> Self {
         wrap_factor_on(&self.runtime, factor)
-    }
-
-    /// Wraps a seam spectrum as a factor in compact diagonal storage: the bond
-    /// space is derived from the spectrum itself, but the payload stays the
-    /// `Σ_c k_c` values rather than the `Σ_c k_c²` block-diagonal buffer they
-    /// would fill (TensorKit's `DiagonalTensorMap`).
-    ///
-    /// The spectrum is stored raw — engine [`crate::sector::SectorId`]s, values in
-    /// the payload dtype `D`. Decoding belongs to the caller-facing spectrum
-    /// fields, not to storage; a stored payload never leaves this module.
-    ///
-    /// Sorted by sector id first because the bond leg is built from this order.
-    fn diagonal_factor<V: Copy>(
-        &self,
-        spectrum: &mut [tenet_matrixalgebra::SectorSpectrum<V>],
-        to_scalar: impl Fn(V) -> D,
-    ) -> Result<Self, Error> {
-        diagonal_factor_on(&self.runtime, self.logical_space(), spectrum, to_scalar)
     }
 
     /// The bound space and dense payload of this owned tensor map; a compact

@@ -389,8 +389,8 @@ pub use dispatch::{
 };
 mod factorize;
 pub use factorize::{
-    FusionMode, TypedTensorEigDispatch, TypedTensorEighDispatch, TypedTensorExpDispatch,
-    TypedTensorInvDispatch, TypedTensorPinvDispatch, TypedTensorSolveDispatch,
+    FusionMode, TypedTensorExpDispatch, TypedTensorInvDispatch, TypedTensorPinvDispatch,
+    TypedTensorSolveDispatch,
 };
 mod checked_generic_contract;
 mod mode_dispatch;
@@ -406,15 +406,14 @@ use space::{
 };
 pub use space::{GradedSpace, LegSelection, TruncatedSelection};
 mod fusion_tree;
-#[cfg(test)]
-use fusion_tree::full_svd_spectrum_matches_bonds;
 use fusion_tree::{
-    add_spectrum_into, decode_block_fusion_trees, diagonal_factor_on, diagonal_factor_on_bound,
-    diagonal_factor_on_checked, diagonal_factor_on_source_checked, exp_spectrum,
+    add_spectrum_into, decode_block_fusion_trees, diagonal_factor_on_bound, exp_spectrum,
     full_svd_compact_bond, full_svd_compact_layout, inv_spectrum, is_diagonal_bond_space,
     map_spectrum, prepare_product_operand, reject_singular_compact_divisor, scatter_spectrum,
     spectra_disagree, wrap_factor_on, TypedData,
 };
+#[cfg(test)]
+use fusion_tree::{diagonal_factor_on, full_svd_spectrum_matches_bonds};
 pub use fusion_tree::{
     BlockFusionTrees, CoupledBlock, CoupledBlockPayload, FusionTreeLabels, SectorSpectrum,
 };

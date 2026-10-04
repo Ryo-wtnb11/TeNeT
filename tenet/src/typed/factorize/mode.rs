@@ -39,26 +39,6 @@ where
     fn exp(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
-#[doc(hidden)]
-pub trait TypedTensorEighDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: FactorizationScalar,
-{
-    fn eigh_full(tensor: &TensorMap<R, D>) -> Result<Eigh<TensorMap<R, D>>, Self::FacadeError>;
-}
-
-#[doc(hidden)]
-pub trait TypedTensorEigDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: AdvancedLinalgScalar,
-{
-    fn eig_full(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, Self::FacadeError>;
-}
-
 /// The facade half of a fusion mode's factorization contract. Every
 /// factorization has one body over it; the mode chooses only what differs by
 /// design or is still owned by a unification leaf (#1862, table in its body):
@@ -125,6 +105,8 @@ pub enum FactorOp {
     SvdFull,
     LeftNull,
     RightNull,
+    EighFull,
+    EigFull,
 }
 
 impl FactorOp {
@@ -142,6 +124,8 @@ impl FactorOp {
             Self::SvdFull => "checked Generic svd_full does not accept lazy adjoints",
             Self::LeftNull => "checked Generic left_null does not accept lazy adjoints",
             Self::RightNull => "checked Generic right_null does not accept lazy adjoints",
+            Self::EighFull => "checked Generic eigh_full does not accept lazy adjoints",
+            Self::EigFull => "checked Generic eig_full does not accept lazy adjoints",
         }
     }
 }
@@ -181,6 +165,7 @@ where
             FactorOp::LqCompact | FactorOp::LqFull => AdjointRule::Redirect,
             FactorOp::SvdCompact | FactorOp::SvdFull => AdjointRule::AdjointSeam,
             FactorOp::LeftNull | FactorOp::RightNull => AdjointRule::Redirect,
+            FactorOp::EighFull | FactorOp::EigFull => AdjointRule::Materialize,
         }
     }
 
@@ -291,6 +276,7 @@ where
             // The null space of `t^H` is the adjoint of the opposite null
             // space of `t`.
             FactorOp::LeftNull | FactorOp::RightNull => AdjointRule::Redirect,
+            FactorOp::EighFull | FactorOp::EigFull => AdjointRule::Materialize,
             // D1: checked Generic refuses the other lazy adjoints until #1755.
             _ => AdjointRule::Reject,
         }
