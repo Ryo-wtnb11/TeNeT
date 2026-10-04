@@ -414,8 +414,8 @@ fn tree_transform_group_block_spec_from_groups_uses_source_group_and_ordered_key
     )
     .unwrap();
 
-    assert_eq!(spec.group_key(), src_groups[0].group_key());
-    assert_ne!(spec.group_key(), dst_groups[0].group_key());
+    assert_eq!(&spec.group_key(), src_groups[0].group_key());
+    assert_ne!(&spec.group_key(), dst_groups[0].group_key());
     assert_eq!(spec.src_keys(), &[src_key1, src_key2]);
     assert_eq!(spec.dst_keys(), &[dst_key1, dst_key2]);
     assert_eq!(

@@ -429,7 +429,6 @@ impl<T> TreeTransformKeyBlockSpec<T> {
 /// Opaque application labels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformGroupBlockSpec<T> {
-    group_key: FusionTreeGroupKey,
     entries: SpecEntries<FusionTreePairKey, T>,
     source_axes: Option<Arc<[usize]>>,
 }
@@ -439,9 +438,7 @@ impl<T> TreeTransformGroupBlockSpec<T> {
     ///
     /// The stored group identity is the source key's fusion-tree group.
     pub fn single(dst_key: FusionTreePairKey, src_key: FusionTreePairKey, coefficient: T) -> Self {
-        let group_key = src_key.group_key();
         Self {
-            group_key,
             entries: SpecEntries::Single {
                 dst: dst_key,
                 src: src_key,
@@ -510,16 +507,10 @@ impl<T> TreeTransformGroupBlockSpec<T> {
                 index,
             });
         }
-        Self::multi_from_validated(
-            group_key,
-            dst_keys,
-            src_keys,
-            recoupling_coefficients_dst_src,
-        )
+        Self::multi_from_validated(dst_keys, src_keys, recoupling_coefficients_dst_src)
     }
 
     fn multi_from_validated(
-        group_key: FusionTreeGroupKey,
         dst_keys: Vec<FusionTreePairKey>,
         src_keys: Vec<FusionTreePairKey>,
         recoupling_coefficients_dst_src: Vec<T>,
@@ -535,7 +526,6 @@ impl<T> TreeTransformGroupBlockSpec<T> {
             });
         }
         Ok(Self {
-            group_key,
             entries: SpecEntries::Multi {
                 dst: dst_keys.into(),
                 src: src_keys.into(),
@@ -569,10 +559,7 @@ impl<T> TreeTransformGroupBlockSpec<T> {
     ) -> Result<Self, OperationError> {
         let dst_keys = fusion_tree_group_block_keys(dst_structure, dst_group, "dst")?;
         let src_keys = fusion_tree_group_block_keys(src_structure, src_group, "src")?;
-        let Some(first_src) = src_keys.first() else {
-            return Err(OperationError::EmptyTransformBlock);
-        };
-        if dst_keys.is_empty() {
+        if src_keys.is_empty() || dst_keys.is_empty() {
             return Err(OperationError::EmptyTransformBlock);
         }
         let (duplicate_src, duplicate_dst) =
@@ -589,17 +576,23 @@ impl<T> TreeTransformGroupBlockSpec<T> {
                 index,
             });
         }
-        Self::multi_from_validated(
-            first_src.group_key(),
-            dst_keys,
-            src_keys,
-            recoupling_coefficients_dst_src,
-        )
+        Self::multi_from_validated(dst_keys, src_keys, recoupling_coefficients_dst_src)
     }
 
+    /// The source fusion-tree group. Why derived rather than stored: every
+    /// constructor takes it from the first source key, so a stored copy is
+    /// 64 bytes per spec that a group key's four `Arc` bumps rebuild (#1998).
     #[inline]
-    pub fn group_key(&self) -> &FusionTreeGroupKey {
-        &self.group_key
+    pub fn group_key(&self) -> FusionTreeGroupKey {
+        self.entries.src()[0].group_key()
+    }
+
+    /// Whether the keys and coefficients live in shared heap slices (`Multi`)
+    /// rather than inline (`Single`). Cache charging only.
+    #[doc(hidden)]
+    #[inline]
+    pub fn has_shared_slices(&self) -> bool {
+        matches!(self.entries, SpecEntries::Multi { .. })
     }
 
     #[inline]

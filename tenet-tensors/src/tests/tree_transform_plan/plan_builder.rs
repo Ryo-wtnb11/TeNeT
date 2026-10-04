@@ -174,7 +174,7 @@ fn tree_transform_group_block_spec_preserves_group_identity_and_ordered_keys() {
     )
     .unwrap();
 
-    assert_eq!(spec.group_key(), &group_key);
+    assert_eq!(&spec.group_key(), &group_key);
     assert_eq!(
         spec.group_key()
             .codomain_uncoupled()
@@ -210,8 +210,8 @@ fn grouped_spec_accepts_distinct_source_and_destination_cohorts() {
 
     // What: the stored identity is derived from the authoritative source
     // cohort, while a transform may target a different coherent cohort.
-    assert_eq!(spec.group_key(), &src1.group_key());
-    assert_ne!(spec.group_key(), &dst1.group_key());
+    assert_eq!(&spec.group_key(), &src1.group_key());
+    assert_ne!(&spec.group_key(), &dst1.group_key());
     assert_eq!(spec.dst_keys(), &[dst1, dst2]);
     assert_eq!(spec.src_keys(), &[src1, src2]);
 }
@@ -366,11 +366,11 @@ fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
     .unwrap();
 
     assert_eq!(plan.specs().len(), 2);
-    assert_eq!(plan.specs()[0].group_key(), &src_tree1.group_key());
+    assert_eq!(&plan.specs()[0].group_key(), &src_tree1.group_key());
     assert_eq!(plan.specs()[0].src_keys(), &[src_key1]);
     assert_eq!(plan.specs()[0].dst_keys(), &[dst_key1]);
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[2.0]);
-    assert_eq!(plan.specs()[1].group_key(), &src_tree2.group_key());
+    assert_eq!(&plan.specs()[1].group_key(), &src_tree2.group_key());
     assert_eq!(plan.specs()[1].src_keys(), &[src_key2]);
     assert_eq!(plan.specs()[1].dst_keys(), &[dst_key2]);
     assert_eq!(plan.specs()[1].recoupling_coefficients_dst_src(), &[3.0]);

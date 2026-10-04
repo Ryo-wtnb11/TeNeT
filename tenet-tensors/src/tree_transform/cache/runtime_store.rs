@@ -32,7 +32,111 @@ type RuntimeTreeTransformLookup<T> = (Option<Arc<TreeTransformStructure<T>>>, u6
 struct RuntimeTreeTransformStoreEntry<T> {
     structure: Arc<TreeTransformStructure<T>>,
     charged_bytes: usize,
+    contents: ContentRefs,
     exact_layout: Option<RuntimeExactLayoutAdmission>,
+}
+
+/// The distinct interned [`BlockStructureContent`]s one entry retains
+/// (destination, source, logical source), `0`-padded: content ids start at 1
+/// and are never reused.
+type ContentRefs = [usize; 3];
+
+/// One entry's distinct content references and, for those the store does not
+/// retain yet, their charges.
+///
+/// Why charge only the new ones: a content's charge walks its blocks, and the
+/// plan and structure entries of one transform share theirs.
+#[derive(Default)]
+struct ContentCharges<'a> {
+    ids: ContentRefs,
+    contents: [Option<&'a Arc<BlockStructureContent>>; 3],
+    bytes: [Option<usize>; 3],
+}
+
+impl<'a> ContentCharges<'a> {
+    fn of(contents: impl IntoIterator<Item = &'a Arc<BlockStructureContent>>) -> Self {
+        let mut charges = Self::default();
+        let mut len = 0;
+        for content in contents {
+            let id = content.id();
+            if !charges.ids[..len].contains(&id) {
+                charges.ids[len] = id;
+                charges.contents[len] = Some(content);
+                len += 1;
+            }
+        }
+        charges
+    }
+
+    /// Computes the charges of the slots `retained` does not cover. Callers
+    /// run it outside the store lock.
+    fn charge_unretained(&mut self, retained: [bool; 3]) {
+        for (slot, retained) in retained.into_iter().enumerate() {
+            if !retained {
+                self.bytes(slot);
+            }
+        }
+    }
+
+    /// Slot `slot`'s charge, computed on first use; `0` for an empty slot.
+    fn bytes(&mut self, slot: usize) -> usize {
+        let content = self.contents[slot];
+        *self.bytes[slot]
+            .get_or_insert_with(|| content.map_or(0, |content| content.charged_retained_bytes()))
+    }
+}
+
+/// Reference counts of the interned contents a store's entries retain.
+///
+/// Why one count per store rather than a charge per entry (#1998): every
+/// structure- and plan-tier entry over the same HomSpaces retains the same
+/// interned content, which a per-entry charge counted once per reference.
+/// Each distinct content is charged once, to the Runtime ledger's content
+/// account, from the first retaining admission until the last retaining
+/// entry leaves. The account has the tiers' byte budget, so a store retains
+/// at most four budgets: the three tiers' payloads and their contents.
+/// Why not charge only a handle when the complete-HomSpace cache owns the
+/// content: that cache evicts FIFO, after which an entry would keep the
+/// content alive with no budget charged for it.
+#[derive(Default)]
+struct RuntimeContentLedger {
+    counts: rustc_hash::FxHashMap<usize, (usize, usize)>,
+    charged_bytes: usize,
+}
+
+impl RuntimeContentLedger {
+    /// Which of `ids` some entry already retains (empty slots count as
+    /// retained: there is nothing to charge).
+    fn retains(&self, ids: &ContentRefs) -> [bool; 3] {
+        ids.map(|id| id == 0 || self.counts.contains_key(&id))
+    }
+
+    /// Drops one reference to each of `ids`, releasing a content's charge with
+    /// its last reference.
+    fn release(&mut self, ledger: &RuntimeTreeTransformCacheLedger, ids: &ContentRefs) {
+        for &id in ids.iter().filter(|&&id| id != 0) {
+            let Some((refs, bytes)) = self.counts.get_mut(&id) else {
+                continue;
+            };
+            *refs -= 1;
+            if *refs == 0 {
+                let bytes = *bytes;
+                self.counts.remove(&id);
+                self.charged_bytes = self.charged_bytes.saturating_sub(bytes);
+                ledger.release(RuntimeCacheAccount::Contents, 1, bytes);
+            }
+        }
+    }
+
+    fn clear(&mut self, ledger: &RuntimeTreeTransformCacheLedger) {
+        ledger.release(
+            RuntimeCacheAccount::Contents,
+            self.counts.len(),
+            self.charged_bytes,
+        );
+        self.counts.clear();
+        self.charged_bytes = 0;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -139,24 +243,12 @@ impl CategoricalTransformKey {
         }
     }
 
+    /// The key's own bytes. Its sector contents are charged once per store,
+    /// by `RuntimeContentLedger`.
     fn charged_bytes(&self) -> usize {
-        let mut seen = rustc_hash::FxHashSet::default();
-        let mut bytes = core::mem::size_of::<Self>()
+        core::mem::size_of::<Self>()
             .saturating_add(self.rule.charged_retained_bytes())
-            .saturating_add(self.operation.charged_retained_bytes());
-        for content in [
-            Some(&self.dst),
-            Some(&self.src),
-            self.logical_source.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if seen.insert(Arc::as_ptr(&content.0) as usize) {
-                bytes = bytes.saturating_add(content.0.charged_retained_bytes());
-            }
-        }
-        bytes
+            .saturating_add(self.operation.charged_retained_bytes())
     }
 }
 
@@ -185,21 +277,21 @@ fn charged_spec_bytes<T>(
     const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
     let key_bytes = core::mem::size_of::<FusionTreePairKey>();
     let mut bytes = 0usize;
-    // ponytail: every spec is charged as if its keys and coefficients were
-    // shared heap slices with three `Arc` control blocks (`Multi`: dst, src,
-    // coefficients). `Single` keeps them inline and is over-charged the same
-    // way, since spec kinds are private to `tenet-operations`; over-charging
-    // is the contract.
+    // A `Multi` spec holds its keys and coefficients in three shared heap
+    // slices (dst, src, coefficients); a `Single` spec holds them inline,
+    // where the caller's `size_of` charge already counts them. The group key
+    // is derived from the source keys, whose backings it shares.
     for spec in specs {
-        let coefficients = spec.recoupling_coefficients_dst_src().len();
-        bytes = bytes
-            .saturating_add(3 * ARC_CONTROL_BYTES)
-            .saturating_add(
-                (spec.dst_keys().len().saturating_add(spec.src_keys().len()))
-                    .saturating_mul(key_bytes),
-            )
-            .saturating_add(coefficients.saturating_mul(core::mem::size_of::<T>()))
-            .saturating_add(spec.group_key().charge_retained_backings(backings));
+        if spec.has_shared_slices() {
+            let coefficients = spec.recoupling_coefficients_dst_src().len();
+            bytes = bytes
+                .saturating_add(3 * ARC_CONTROL_BYTES)
+                .saturating_add(
+                    (spec.dst_keys().len().saturating_add(spec.src_keys().len()))
+                        .saturating_mul(key_bytes),
+                )
+                .saturating_add(coefficients.saturating_mul(core::mem::size_of::<T>()));
+        }
         for key in spec.dst_keys().iter().chain(spec.src_keys()) {
             bytes = bytes.saturating_add(key.charge_retained_backings(backings));
         }
@@ -474,9 +566,12 @@ impl<T> GroupSpecReuse<'_, T> {
         if state.generation != self.generation {
             return;
         }
+        let state = &mut *state;
         for (key, entry) in entries {
             if !state.groups.entries.contains(&key) {
-                state.groups.insert(&self.store.ledger, key, entry);
+                state
+                    .groups
+                    .insert(&self.store.ledger, &mut state.contents, key, entry);
             }
         }
     }
@@ -485,11 +580,21 @@ impl<T> GroupSpecReuse<'_, T> {
 /// A cache value whose admission charge is fixed at insertion.
 trait RuntimeCacheCharge {
     fn charged_bytes(&self) -> usize;
+
+    /// Interned contents this value retains; their charge is the store's
+    /// [`RuntimeContentLedger`]'s, not this value's.
+    fn contents(&self) -> ContentRefs {
+        [0; 3]
+    }
 }
 
 impl<T> RuntimeCacheCharge for RuntimeTreeTransformStoreEntry<T> {
     fn charged_bytes(&self) -> usize {
         self.charged_bytes
+    }
+
+    fn contents(&self) -> ContentRefs {
+        self.contents
     }
 }
 
@@ -497,11 +602,16 @@ impl<T> RuntimeCacheCharge for RuntimeTreeTransformStoreEntry<T> {
 struct RuntimePlanEntry<T> {
     plan: Arc<TreeTransformGroupPlan<T>>,
     charged_bytes: usize,
+    contents: ContentRefs,
 }
 
 impl<T> RuntimeCacheCharge for RuntimePlanEntry<T> {
     fn charged_bytes(&self) -> usize {
         self.charged_bytes
+    }
+
+    fn contents(&self) -> ContentRefs {
+        self.contents
     }
 }
 
@@ -511,6 +621,7 @@ enum RuntimeCacheAccount {
     Structures,
     Plans,
     Groups,
+    Contents,
 }
 
 /// One bounded LRU tier of a typed Runtime store.
@@ -563,6 +674,7 @@ impl<K: Hash + Eq, V: RuntimeCacheCharge> RuntimeCacheTier<K, V> {
         }
     }
 
+    /// Callers clear the store's [`RuntimeContentLedger`] with it.
     fn clear(&mut self, ledger: &RuntimeTreeTransformCacheLedger) {
         ledger.release(self.account, self.entries.len(), self.charged_payload_bytes);
         self.entries.clear();
@@ -573,7 +685,11 @@ impl<K: Hash + Eq, V: RuntimeCacheCharge> RuntimeCacheTier<K, V> {
         self.admission_bypasses = 0;
     }
 
-    fn evict_lru(&mut self, ledger: &RuntimeTreeTransformCacheLedger) -> bool {
+    fn evict_lru(
+        &mut self,
+        ledger: &RuntimeTreeTransformCacheLedger,
+        contents: &mut RuntimeContentLedger,
+    ) -> bool {
         let Some((_, evicted)) = self.entries.pop_lru() else {
             return false;
         };
@@ -581,26 +697,44 @@ impl<K: Hash + Eq, V: RuntimeCacheCharge> RuntimeCacheTier<K, V> {
         self.charged_payload_bytes = self.charged_payload_bytes.saturating_sub(charged);
         self.evictions = self.evictions.saturating_add(1);
         ledger.release(self.account, 1, charged);
+        contents.release(ledger, &evicted.contents());
         true
     }
 
-    /// Admits `value` under the local and Runtime-wide limits, evicting LRU
-    /// entries as needed. Returns `false` when the value bypassed retention.
-    fn insert(&mut self, ledger: &RuntimeTreeTransformCacheLedger, key: K, value: V) -> bool {
-        let charged = value.charged_bytes();
-        if charged > self.max_entry_bytes || charged > self.byte_budget {
+    /// Counts a bypass for a value no eviction could make room for. Callers
+    /// ask before referencing its contents, so an oversized entry never evicts
+    /// other entries for contents it then does not retain.
+    fn bypasses_oversized(&mut self, charged: usize) -> bool {
+        let oversized = charged > self.max_entry_bytes || charged > self.byte_budget;
+        if oversized {
             self.admission_bypasses = self.admission_bypasses.saturating_add(1);
+        }
+        oversized
+    }
+
+    /// Admits `value` under the local and Runtime-wide limits, evicting LRU
+    /// entries as needed. Returns `false` when the value bypassed retention;
+    /// its content references are then the caller's to release.
+    fn insert(
+        &mut self,
+        ledger: &RuntimeTreeTransformCacheLedger,
+        contents: &mut RuntimeContentLedger,
+        key: K,
+        value: V,
+    ) -> bool {
+        let charged = value.charged_bytes();
+        if self.bypasses_oversized(charged) {
             return false;
         }
         while self.entries.len() == self.entry_capacity
             || self.charged_payload_bytes.saturating_add(charged) > self.byte_budget
         {
-            if !self.evict_lru(ledger) {
+            if !self.evict_lru(ledger, contents) {
                 break;
             }
         }
-        while !ledger.try_reserve(self.account, charged) {
-            if !self.evict_lru(ledger) {
+        while !ledger.try_reserve(self.account, 1, charged) {
+            if !self.evict_lru(ledger, contents) {
                 self.admission_bypasses = self.admission_bypasses.saturating_add(1);
                 return false;
             }
@@ -615,7 +749,54 @@ struct RuntimeTreeTransformStoreState<T> {
     structures: RuntimeCacheTier<RuntimeTreeTransformKey, RuntimeTreeTransformStoreEntry<T>>,
     plans: RuntimeCacheTier<CategoricalTransformKey, RuntimePlanEntry<T>>,
     groups: RuntimeCacheTier<CategoricalGroupKey, RuntimeGroupEntry<T>>,
+    contents: RuntimeContentLedger,
     generation: u64,
+}
+
+impl<T> RuntimeTreeTransformStoreState<T> {
+    /// References `charges`' contents for an entry about to be admitted,
+    /// charging the ones no entry retains yet. To make room it evicts LRU
+    /// structures, then plans; already-retained contents are referenced first,
+    /// so those evictions cannot release them. Returns `false`, with nothing
+    /// referenced, when the new contents do not fit.
+    fn reference_contents(
+        &mut self,
+        ledger: &RuntimeTreeTransformCacheLedger,
+        charges: &mut ContentCharges<'_>,
+    ) -> bool {
+        let mut retained = [false; 3];
+        for (slot, id) in charges.ids.iter().enumerate() {
+            if let Some((refs, _)) = self.contents.counts.get_mut(id) {
+                *refs += 1;
+                retained[slot] = true;
+            }
+        }
+        let ids = charges.ids;
+        let new = || (0..3).filter(move |&slot| ids[slot] != 0 && !retained[slot]);
+        // A content released since `charge_unretained` is charged here.
+        let new_bytes = new().fold(0usize, |total, slot| {
+            total.saturating_add(charges.bytes(slot))
+        });
+        let new_count = new().count();
+        let mut fits = new_bytes <= ledger.byte_budget;
+        while fits && !ledger.try_reserve(RuntimeCacheAccount::Contents, new_count, new_bytes) {
+            fits = self.structures.evict_lru(ledger, &mut self.contents)
+                || self.plans.evict_lru(ledger, &mut self.contents);
+        }
+        if !fits {
+            let referenced =
+                std::array::from_fn(|slot| if retained[slot] { charges.ids[slot] } else { 0 });
+            self.contents.release(ledger, &referenced);
+            return false;
+        }
+        for slot in new() {
+            self.contents
+                .counts
+                .insert(ids[slot], (1, charges.bytes(slot)));
+        }
+        self.contents.charged_bytes = self.contents.charged_bytes.saturating_add(new_bytes);
+        true
+    }
 }
 
 const DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_ENTRIES: usize = 256;
@@ -696,6 +877,7 @@ pub struct RuntimeTreeTransformCacheLedger {
     state: Mutex<RuntimeTreeTransformCacheLedgerState>,
     plan_state: Mutex<RuntimeTreeTransformCacheLedgerState>,
     group_state: Mutex<RuntimeTreeTransformCacheLedgerState>,
+    content_state: Mutex<RuntimeTreeTransformCacheLedgerState>,
 }
 
 impl RuntimeTreeTransformCacheInfo {
@@ -765,6 +947,7 @@ impl RuntimeTreeTransformCacheLedger {
             state: Mutex::new(RuntimeTreeTransformCacheLedgerState::EMPTY),
             plan_state: Mutex::new(RuntimeTreeTransformCacheLedgerState::EMPTY),
             group_state: Mutex::new(RuntimeTreeTransformCacheLedgerState::EMPTY),
+            content_state: Mutex::new(RuntimeTreeTransformCacheLedgerState::EMPTY),
         }
     }
 
@@ -776,6 +959,7 @@ impl RuntimeTreeTransformCacheLedger {
             RuntimeCacheAccount::Structures => &self.state,
             RuntimeCacheAccount::Plans => &self.plan_state,
             RuntimeCacheAccount::Groups => &self.group_state,
+            RuntimeCacheAccount::Contents => &self.content_state,
         }
         .lock()
         .expect("runtime tree-transform cache ledger poisoned")
@@ -785,17 +969,25 @@ impl RuntimeTreeTransformCacheLedger {
         match account {
             RuntimeCacheAccount::Structures | RuntimeCacheAccount::Plans => self.entry_capacity,
             RuntimeCacheAccount::Groups => self.group_entry_capacity,
+            // Bounded by the byte budget alone: a content is retained only
+            // through a structure or plan entry, whose tiers cap the count.
+            RuntimeCacheAccount::Contents => usize::MAX,
         }
     }
 
-    fn try_reserve(&self, account: RuntimeCacheAccount, charged_bytes: usize) -> bool {
+    fn try_reserve(
+        &self,
+        account: RuntimeCacheAccount,
+        entries: usize,
+        charged_bytes: usize,
+    ) -> bool {
         let mut state = self.account(account);
-        if state.entries == self.entry_capacity_of(account)
+        if state.entries.saturating_add(entries) > self.entry_capacity_of(account)
             || state.charged_payload_bytes.saturating_add(charged_bytes) > self.byte_budget
         {
             return false;
         }
-        state.entries += 1;
+        state.entries += entries;
         state.charged_payload_bytes = state.charged_payload_bytes.saturating_add(charged_bytes);
         true
     }
@@ -936,6 +1128,7 @@ impl<T> RuntimeTreeTransformStore<T> {
                 structures,
                 plans,
                 groups,
+                contents: RuntimeContentLedger::default(),
                 generation: 0,
             }),
             ledger,
@@ -973,6 +1166,7 @@ impl<T> RuntimeTreeTransformStore<T> {
         state.structures.clear(&self.ledger);
         state.plans.clear(&self.ledger);
         state.groups.clear(&self.ledger);
+        state.contents.clear(&self.ledger);
     }
 
     pub(super) fn charged_entry_bytes(
@@ -981,24 +1175,13 @@ impl<T> RuntimeTreeTransformStore<T> {
     ) -> usize {
         const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
 
-        let mut dependent_structure_bytes = key.dst().charged_retained_bytes();
-        if key.src().id() != key.dst().id() {
-            dependent_structure_bytes =
-                dependent_structure_bytes.saturating_add(key.src().charged_retained_bytes());
-        }
-        if let Some(logical) = &key.plan().logical_source {
-            if logical.id() != key.src().id() && logical.id() != key.dst().id() {
-                dependent_structure_bytes =
-                    dependent_structure_bytes.saturating_add(logical.charged_retained_bytes());
-            }
-        }
-
+        // The retained block-structure contents are charged once per store,
+        // by `RuntimeContentLedger`, not here.
         core::mem::size_of::<RuntimeTreeTransformKey>()
             .saturating_add(core::mem::size_of::<RuntimeTreeTransformStoreEntry<T>>())
             .saturating_add(key.plan().rule.charged_retained_bytes())
             .saturating_add(key.plan().operation.charged_retained_bytes())
             .saturating_add(structure.charged_payload_bytes())
-            .saturating_add(dependent_structure_bytes)
             .saturating_add(ARC_CONTROL_BYTES)
             .saturating_add(RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE)
     }
@@ -1036,6 +1219,18 @@ impl<T> RuntimeTreeTransformStore<T> {
         generation: u64,
     ) -> Arc<TreeTransformStructure<T>> {
         let charged_bytes = Self::charged_entry_bytes(&key, &structure);
+        let mut contents = ContentCharges::of(
+            [
+                Some(key.dst()),
+                Some(key.src()),
+                key.plan().logical_source.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(BlockStructureCacheKey::content),
+        );
+        let retained = self.lock().contents.retains(&contents.ids);
+        contents.charge_unretained(retained);
         let mut state = self.lock();
         if let Some(entry) = state.structures.entries.get(&key) {
             return Arc::clone(&entry.structure);
@@ -1043,15 +1238,29 @@ impl<T> RuntimeTreeTransformStore<T> {
         if state.generation != generation {
             return structure;
         }
-        state.structures.insert(
+        if state.structures.bypasses_oversized(charged_bytes) {
+            return structure;
+        }
+        if !state.reference_contents(&self.ledger, &mut contents) {
+            state.structures.admission_bypasses =
+                state.structures.admission_bypasses.saturating_add(1);
+            return structure;
+        }
+        let ids = contents.ids;
+        let state = &mut *state;
+        if !state.structures.insert(
             &self.ledger,
+            &mut state.contents,
             key,
             RuntimeTreeTransformStoreEntry {
                 structure: Arc::clone(&structure),
                 charged_bytes,
+                contents: ids,
                 exact_layout: None,
             },
-        );
+        ) {
+            state.contents.release(&self.ledger, &ids);
+        }
         structure
     }
 
@@ -1107,19 +1316,41 @@ impl<T> RuntimeTreeTransformStore<T> {
         };
         let plan = Arc::new(build(&reuse)?);
         let charged_bytes = Self::charged_plan_entry_bytes(&key, &plan);
+        let mut contents = ContentCharges::of(
+            [Some(&key.dst), Some(&key.src), key.logical_source.as_ref()]
+                .into_iter()
+                .flatten()
+                .map(|content| &content.0),
+        );
+        let retained = self.lock().contents.retains(&contents.ids);
+        contents.charge_unretained(retained);
         let mut state = self.lock();
         if let Some(entry) = state.plans.entries.get(&key) {
             return Ok(Arc::clone(&entry.plan));
         }
-        if state.generation == generation {
-            state.plans.insert(
-                &self.ledger,
-                key,
-                RuntimePlanEntry {
-                    plan: Arc::clone(&plan),
-                    charged_bytes,
-                },
-            );
+        if state.generation != generation {
+            return Ok(plan);
+        }
+        if state.plans.bypasses_oversized(charged_bytes) {
+            return Ok(plan);
+        }
+        if !state.reference_contents(&self.ledger, &mut contents) {
+            state.plans.admission_bypasses = state.plans.admission_bypasses.saturating_add(1);
+            return Ok(plan);
+        }
+        let ids = contents.ids;
+        let state = &mut *state;
+        if !state.plans.insert(
+            &self.ledger,
+            &mut state.contents,
+            key,
+            RuntimePlanEntry {
+                plan: Arc::clone(&plan),
+                charged_bytes,
+                contents: ids,
+            },
+        ) {
+            state.contents.release(&self.ledger, &ids);
         }
         Ok(plan)
     }
@@ -1307,6 +1538,30 @@ impl<T> RuntimeTreeTransformStore<T> {
     }
 }
 
+#[cfg(test)]
+impl<T> RuntimeTreeTransformStore<T> {
+    /// The content-account charge `key`'s distinct contents add to an empty
+    /// store.
+    pub(super) fn charged_content_bytes(key: &RuntimeTreeTransformKey) -> usize {
+        let mut charges = ContentCharges::of(
+            [
+                Some(key.dst()),
+                Some(key.src()),
+                key.plan().logical_source.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(BlockStructureCacheKey::content),
+        );
+        (0..3).map(|slot| charges.bytes(slot)).sum()
+    }
+
+    /// Bytes this store currently charges to the content account.
+    pub(super) fn retained_content_bytes(&self) -> usize {
+        self.lock().contents.charged_bytes
+    }
+}
+
 impl<T> Default for RuntimeTreeTransformStore<T> {
     fn default() -> Self {
         Self::new(Self::DEFAULT_BYTE_BUDGET)
@@ -1334,6 +1589,11 @@ impl<T> Drop for RuntimeTreeTransformStore<T> {
                 RuntimeCacheAccount::Groups,
                 state.groups.entries.len(),
                 state.groups.charged_payload_bytes,
+            ),
+            (
+                RuntimeCacheAccount::Contents,
+                state.contents.counts.len(),
+                state.contents.charged_bytes,
             ),
         ] {
             self.ledger.release(account, entries, bytes);
