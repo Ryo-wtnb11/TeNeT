@@ -260,23 +260,12 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     C: DenseBlockScalar,
 {
-    if artifact.requires_source_twist()
-        && if artifact.twist_lhs {
-            artifact.lhs_borrowed
-        } else {
-            artifact.rhs_borrowed
-        }
-    {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "member source twist requires transformed owned scratch",
-        });
-    }
     let lhs_src = &artifact.lhs_transform.replay_structure;
     let rhs_src = &artifact.rhs_transform.replay_structure;
     let lhs_core = artifact.lhs_transform.space.structure();
     let rhs_core = artifact.rhs_transform.space.structure();
     let core_dst = artifact.core_dst.as_ref();
-    let core_dst_structure = core_dst.map_or(dst_structure, |entry| entry.space.structure());
+    let core_dst_structure = artifact.core_dst_structure(dst_structure);
     let lhs_src_len = member_len::<D>(lhs_src, members)?;
     let rhs_src_len = member_len::<D>(rhs_src, members)?;
     let dst_len = member_len::<D>(dst_structure, members)?;
@@ -302,17 +291,8 @@ where
         .as_ref()
         .or(workspace.core.as_ref())
         .expect("cached or freshly built replay");
-    let (left_len, right_len) = if artifact.orientation == FusionContractOrientation::RhsLhs {
-        (rhs_core_len, lhs_core_len)
-    } else {
-        (lhs_core_len, rhs_core_len)
-    };
-    let (left_structure, right_structure) =
-        if artifact.orientation == FusionContractOrientation::RhsLhs {
-            (rhs_core, lhs_core)
-        } else {
-            (lhs_core, rhs_core)
-        };
+    let (left_len, right_len) = artifact.core_order(lhs_core_len, rhs_core_len);
+    let (left_structure, right_structure) = artifact.core_order(lhs_core, rhs_core);
     replay.plan().validate_replay_structures(
         core_dst_structure,
         left_structure,
@@ -324,11 +304,8 @@ where
         });
     }
     if artifact.requires_source_twist() {
-        let (structure, len) = if artifact.twist_lhs {
-            (lhs_core, lhs_core_len)
-        } else {
-            (rhs_core, rhs_core_len)
-        };
+        let (structure, len) =
+            artifact.on_twisted((lhs_core, lhs_core_len), (rhs_core, rhs_core_len));
         admit_member_twist(
             structure,
             &artifact.source_twist,
@@ -420,11 +397,10 @@ where
         )?;
     }
     if artifact.requires_source_twist() {
-        let (scratch, len) = if artifact.twist_lhs {
-            (&mut workspace.lhs[..], lhs_core_len)
-        } else {
-            (&mut workspace.rhs[..], rhs_core_len)
-        };
+        let (scratch, len) = artifact.on_twisted(
+            (&mut workspace.lhs[..], lhs_core_len),
+            (&mut workspace.rhs[..], rhs_core_len),
+        );
         replay_member_twist(
             &mut kernels,
             scratch,
@@ -449,11 +425,7 @@ where
     } else {
         &workspace.rhs
     };
-    let (core_left, core_right) = if artifact.orientation == FusionContractOrientation::RhsLhs {
-        (physical_rhs, physical_lhs)
-    } else {
-        (physical_lhs, physical_rhs)
-    };
+    let (core_left, core_right) = artifact.core_order(physical_lhs, physical_rhs);
     let left_storage = ReadSlice(core_left);
     let right_storage = ReadSlice(core_right);
     let left_view = StackedStorageView::new::<D>(&left_storage, left_len, members, left_len)?;

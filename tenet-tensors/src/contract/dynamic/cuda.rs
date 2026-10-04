@@ -20,7 +20,7 @@ use tenet_dense::{cuda_region_scale, CudaDenseContext, CudaRegion, CudaScalar};
 use tenet_operations::cuda::{CudaStorage, CudaStorageGemm};
 use tenet_operations::{CudaTreeTransformDestination, CudaTreeTransformExecutor};
 
-use super::{DynamicTreeExecutionArtifact, FusionContractOrientation};
+use super::DynamicTreeExecutionArtifact;
 use crate::contract::resolution::{StorageContractResolution, StorageContractRoute};
 use crate::{
     ContractDestinationInit, DenseBlockScalar, OperationError, RecouplingCoefficientAction,
@@ -323,18 +323,6 @@ where
     D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + 'static,
     C: DenseBlockScalar,
 {
-    let reverse = artifact.orientation == FusionContractOrientation::RhsLhs;
-    let scales = artifact.source_twist_destination_scales();
-    let twisted_borrowed = if artifact.twists_lhs() {
-        artifact.lhs_borrowed
-    } else {
-        artifact.rhs_borrowed
-    };
-    if twisted_borrowed && !scales.is_empty() {
-        return Err(OperationError::InvalidArgument {
-            message: "device contraction artifact borrows its twisted operand",
-        });
-    }
     let lhs_len = artifact.lhs_transform.space.required_len()?;
     let rhs_len = artifact.rhs_transform.space.required_len()?;
     let core_dst_len = artifact
@@ -361,12 +349,7 @@ where
         rhs: rhs_slot,
         dst: dst_slot,
     } = buffers;
-    let no_scales: &[(usize, C)] = &[];
-    let (lhs_scales, rhs_scales) = if artifact.twists_lhs() {
-        (scales, no_scales)
-    } else {
-        (no_scales, scales)
-    };
+    let [lhs_scales, rhs_scales] = artifact.stage_scales();
     for (borrowed, transform, slot, source, len, destination_scales) in [
         (
             artifact.lhs_borrowed,
@@ -412,11 +395,7 @@ where
     } else {
         materialized(rhs_slot)?
     };
-    let (core_left, core_right) = if reverse {
-        (physical_rhs, physical_lhs)
-    } else {
-        (physical_lhs, physical_rhs)
-    };
+    let (core_left, core_right) = artifact.core_order(physical_lhs, physical_rhs);
 
     let (Some(core_dst), Some(core_dst_len)) = (artifact.core_dst.as_ref(), core_dst_len) else {
         let beta = active_beta(init);

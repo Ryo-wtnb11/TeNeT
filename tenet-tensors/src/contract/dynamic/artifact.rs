@@ -45,13 +45,56 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
         !self.source_twist.is_empty()
     }
 
+    /// `(lhs, rhs)` in the core GEMM's operand order: swapped for an
+    /// `RhsLhs` orientation.
+    #[inline]
+    pub(crate) fn core_order<T>(&self, lhs: T, rhs: T) -> (T, T) {
+        if self.orientation == FusionContractOrientation::RhsLhs {
+            (rhs, lhs)
+        } else {
+            (lhs, rhs)
+        }
+    }
+
+    /// The physical lhs or rhs value, whichever source the contraction twist
+    /// scales; meaningful only when [`Self::requires_source_twist`].
+    #[inline]
+    pub(crate) fn on_twisted<T>(&self, lhs: T, rhs: T) -> T {
+        if self.twist_lhs {
+            lhs
+        } else {
+            rhs
+        }
+    }
+
+    /// The structure the core GEMMs write: the output transform's source, or
+    /// the caller's destination when the output transform is the identity.
+    pub(crate) fn core_dst_structure<'a>(
+        &'a self,
+        dst: &'a Arc<BlockStructure>,
+    ) -> &'a Arc<BlockStructure> {
+        self.core_dst
+            .as_ref()
+            .map_or(dst, |entry| entry.space.structure())
+    }
+
+    /// The device twist folds of the lhs and rhs source stages: the twisted
+    /// stage carries [`Self::source_twist_destination_scales`], the other
+    /// none. A twisted source is never borrowed (checked at construction).
+    #[cfg(feature = "cuda")]
+    pub(crate) fn stage_scales(&self) -> [&[(usize, C)]; 2] {
+        let scales = &self.source_twist_destination_scales[..];
+        let (lhs, rhs) = self.on_twisted((scales, &[][..]), (&[][..], scales));
+        [lhs, rhs]
+    }
+
     /// Whether the twist, if any, scales the physical lhs's core source.
-    #[cfg(any(feature = "cuda", test))]
+    #[cfg(test)]
     pub(crate) fn twists_lhs(&self) -> bool {
         self.twist_lhs
     }
 
-    #[cfg(any(feature = "cuda", test))]
+    #[cfg(test)]
     pub(crate) fn source_twist_destination_scales(&self) -> &[(usize, C)] {
         &self.source_twist_destination_scales
     }
@@ -430,6 +473,19 @@ where
         PROFILED_ARTIFACT_COMPILE_PHASES
             .with(|phases| phases.set(phases.get() | PROFILED_ARTIFACT_BLOCK_PLAN_PHASE));
     }
+    // Why not check this in every executor: Host, member and device replays
+    // all scale the twisted source in its owned scratch, and borrowing never
+    // picks the twisted side (`resolve_source_borrowing`).
+    let twisted_borrowed = if borrowing.twist_lhs {
+        borrowing.lhs_borrowed
+    } else {
+        borrowing.rhs_borrowed
+    };
+    if !source_twist.is_empty() && twisted_borrowed {
+        return Err(OperationError::InvalidArgument {
+            message: "contraction twist must scale an owned source",
+        });
+    }
     Ok(DynamicTreeExecutionArtifact {
         orientation: plan.orientation(),
         lhs_transform,
@@ -546,7 +602,6 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     C: DenseBlockScalar,
 {
-    let reverse = artifact.orientation == FusionContractOrientation::RhsLhs;
     let lhs_transform = &artifact.lhs_transform;
     let rhs_transform = &artifact.rhs_transform;
     let lhs_borrowed = artifact.lhs_borrowed;
@@ -660,11 +715,7 @@ where
         let physical_rhs_core = select_core_source(rhs_borrowed, &rhs_core_space, rhs_data, || {
             CoreSource::from_host_scratch(scratch.rhs())
         });
-        let (core_left, core_right) = if reverse {
-            (physical_rhs_core, physical_lhs_core)
-        } else {
-            (physical_lhs_core, physical_rhs_core)
-        };
+        let (core_left, core_right) = artifact.core_order(physical_lhs_core, physical_rhs_core);
         let mut kernels = crate::StridedHostKernelAdapter::default();
         let mut gemm =
             super::fusion_block::BackendRank2Gemm::new(contract_backend, contract_workspace);
@@ -767,11 +818,7 @@ where
                 rhs_scratch.expect("non-borrowed RHS materialized before core contraction"),
             )
         });
-        let (core_left, core_right) = if reverse {
-            (physical_rhs_core, physical_lhs_core)
-        } else {
-            (physical_lhs_core, physical_rhs_core)
-        };
+        let (core_left, core_right) = artifact.core_order(physical_lhs_core, physical_rhs_core);
         execute(core_left, core_right, core_dst)?;
     }
     let transform_start = PROFILED.then(std::time::Instant::now);
