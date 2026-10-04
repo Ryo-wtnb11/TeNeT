@@ -522,12 +522,7 @@ fn prepared_lowered_final_structure_checks_signature_but_reads_target_degeneraci
     );
     let structure = prepared.build_from_leg_degeneracies(&target).unwrap();
     assert_eq!(
-        structure
-            .degeneracy_structure()
-            .blocks()
-            .first()
-            .unwrap()
-            .shape(),
+        structure.degeneracy_structure().block(0).unwrap().shape(),
         &[5, 7]
     );
     assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));

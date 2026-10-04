@@ -346,19 +346,22 @@ fn copy_c_plan_allocations(rank: usize) -> [usize; 2] {
 #[test]
 fn warm_copy_c_planning_is_bounded_and_no_costlier_than_the_dynamic_tree() {
     let _serial = counting_alloc::serial();
-    // Rank 6 is left out: its structures (a 111 MB complete HomSpace, a
-    // 249 MB transform) exceed the 64 MiB budgets, the documented ceiling
-    // above which a structure is rebuilt per call (#1993). #1998, slimming
-    // the per-block transform entries, owns that ceiling.
-    for rank in [2, 3, 4, 5] {
+    // Rank 6 is the #1998 acceptance: its complete HomSpace (formerly
+    // 111 MB), its transform (formerly 249 MB) and its fusion-tree layouts
+    // used to exceed the 64 MiB budgets or the 8 MiB entry limits, so each
+    // warm call rebuilt them (#1993).
+    for rank in [2, 3, 4, 5, 6] {
         let complete_bypasses = tenet_core::complete_hom_space_structure_cache_info().bypasses();
+        let layout_bypasses = tenet_core::fusion_tree_layout_cache_info().admission_bypasses();
+        let intern_bypasses =
+            tenet_core::block_structure_intern_cache_info().oversized_admission_bypasses();
         let [copy_c, dynamic_tree] = copy_c_plan_allocations(rank);
         eprintln!("rank {rank}: warm CopyC plan {copy_c}, DynamicTree ladder {dynamic_tree}");
         // What: device-eager CopyC planning stays a small bounded count once
-        // its structures are warm (9-10 through rank 4, 18 at rank 5 where
-        // rank-sized inline vectors spill), and never above the DynamicTree
-        // compile it replaced for this contraction. Rank 5 was 850,760
-        // before #1993.
+        // its structures are warm (9-10 through rank 4, 18 at ranks 5 and 6
+        // where rank-sized inline axis vectors spill), and never above the
+        // DynamicTree compile it replaced for this contraction. Rank 5 was
+        // 850,760 before #1993; rank 6 was 23,467 before #1998.
         assert!(copy_c <= 20, "rank {rank}: {copy_c}");
         assert!(
             copy_c <= dynamic_tree,
@@ -369,5 +372,42 @@ fn warm_copy_c_planning_is_bounded_and_no_costlier_than_the_dynamic_tree() {
             complete_bypasses,
             "rank {rank}: a complete HomSpace structure bypassed the cache"
         );
+        assert_eq!(
+            tenet_core::fusion_tree_layout_cache_info().admission_bypasses(),
+            layout_bypasses,
+            "rank {rank}: a fusion-tree layout bypassed the cache"
+        );
+        assert_eq!(
+            tenet_core::block_structure_intern_cache_info().oversized_admission_bypasses(),
+            intern_bypasses,
+            "rank {rank}: a block-structure content bypassed the interner"
+        );
     }
+}
+
+#[test]
+fn rank_six_block_structure_content_is_interned_across_derivations() {
+    let _serial = counting_alloc::serial();
+    // What (#1998): the U(1) `V^6 <- V^6` content (73,789 blocks) is
+    // interned, so equal derivations share one content id while it is live.
+    // Before #1998 its copied intern key exceeded the 8 MiB entry limit and
+    // every derivation minted a new id, missing every id-keyed cache.
+    let provider = Arc::new(U1FusionRule);
+    let structure = Arc::clone(space(&provider, 6, 6).space().structure());
+    let bypasses = tenet_core::block_structure_intern_cache_info().oversized_admission_bypasses();
+    let derive = || {
+        tenet_core::BlockStructure::from_parts(
+            structure.sector_structure().clone(),
+            structure.degeneracy_structure().clone(),
+        )
+        .unwrap()
+    };
+    let first = derive();
+    let second = derive();
+    assert_eq!(first.content_id(), structure.content_id());
+    assert_eq!(second.content_id(), structure.content_id());
+    assert_eq!(
+        tenet_core::block_structure_intern_cache_info().oversized_admission_bypasses(),
+        bypasses
+    );
 }

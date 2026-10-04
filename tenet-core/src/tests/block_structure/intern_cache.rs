@@ -1,58 +1,92 @@
 use super::*;
 
-fn local_block_structure_intern_key(index: usize) -> BlockStructureInternKey {
-    BlockStructureInternKey {
+fn local_parts(index: usize) -> (SectorStructure, DegeneracyStructure) {
+    (
+        SectorStructure::from_keys(1, vec![BlockKey::ordinal(index)]).unwrap(),
+        DegeneracyStructure::packed_column_major(1, [vec![1]]).unwrap(),
+    )
+}
+
+#[derive(Clone)]
+struct LocalKey {
+    index: usize,
+    key: BlockStructureInternKey,
+    rank: usize,
+}
+
+fn local_block_structure_intern_key(index: usize) -> LocalKey {
+    let (sector, degeneracy) = local_parts(index);
+    LocalKey {
+        index,
+        key: BlockStructureInternKey::of(&sector, &degeneracy),
         rank: 1,
-        blocks: Arc::from([BlockStructureContentBlock {
-            key: BlockKey::ordinal(index),
-            shape: smallvec![1],
-            strides: smallvec![1],
-            offset: 0,
-        }]),
     }
 }
 
 fn local_block_structure_intern(
     table: &mut BlockStructureInternTable,
-    key: BlockStructureInternKey,
+    key: LocalKey,
     charged_key_bytes: usize,
 ) -> Arc<BlockStructureContent> {
-    let rank = key.rank;
-    let blocks = Arc::clone(&key.blocks);
-    let sector = SectorStructure::from_keys(
-        rank,
-        blocks
-            .iter()
-            .map(|block| block.key.clone())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-    let degeneracy = DegeneracyStructure::from_blocks_with_rank(
-        rank,
-        blocks
-            .iter()
-            .map(|block| {
-                DegeneracyBlock::new(block.shape.clone(), block.strides.clone(), block.offset)
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap(),
-    )
-    .unwrap();
+    let (sector, degeneracy) = local_parts(key.index);
+    if let Some(content) = table.lookup(&key.key, |content| {
+        content.sector == sector && content.degeneracy == degeneracy
+    }) {
+        return content;
+    }
     let required_len = degeneracy.required_len().unwrap();
     table.intern_with(
-        key,
+        key.key,
         |_| charged_key_bytes,
         || {
             Arc::new(BlockStructureContent {
                 id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
                 sector,
                 degeneracy,
-                blocks,
                 required_len,
                 storage_tiling: Default::default(),
             })
         },
     )
+}
+
+#[test]
+fn block_structure_intern_hash_collision_never_aliases() {
+    // What (#1998): a live content of different blocks under the same hash key
+    // is neither returned for the colliding content nor replaced by it; the
+    // colliding content comes back uninterned with its own id.
+    let key0 = local_block_structure_intern_key(50);
+    let charge = charged_block_structure_intern_key_bytes(&key0.key);
+    let mut table = BlockStructureInternTable::new(4, charge.saturating_mul(4), charge);
+    let original = local_block_structure_intern(&mut table, key0.clone(), charge);
+    let before = table.info();
+
+    let (sector, degeneracy) = local_parts(51);
+    let matches_colliding = |content: &BlockStructureContent| {
+        content.sector == sector && content.degeneracy == degeneracy
+    };
+    assert!(table.lookup(&key0.key, matches_colliding).is_none());
+    let required_len = degeneracy.required_len().unwrap();
+    let colliding = table.intern_with(
+        key0.key.clone(),
+        |_| charge,
+        || {
+            Arc::new(BlockStructureContent {
+                id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
+                sector: sector.clone(),
+                degeneracy: degeneracy.clone(),
+                required_len,
+                storage_tiling: Default::default(),
+            })
+        },
+    );
+
+    assert!(!Arc::ptr_eq(&colliding, &original));
+    assert_ne!(colliding.id(), original.id());
+    assert_eq!(colliding.sector_structure(), &sector);
+    let still = table.lookup(&key0.key, |_| true).unwrap();
+    assert!(Arc::ptr_eq(&still, &original));
+    assert_eq!(table.info(), before);
 }
 
 #[test]
@@ -77,19 +111,19 @@ fn block_structure_intern_entry_pressure_evicts_oldest() {
     let key0 = local_block_structure_intern_key(0);
     let key1 = local_block_structure_intern_key(1);
     let key2 = local_block_structure_intern_key(2);
-    let charge = charged_block_structure_intern_key_bytes(&key0);
-    assert_eq!(charged_block_structure_intern_key_bytes(&key1), charge);
-    assert_eq!(charged_block_structure_intern_key_bytes(&key2), charge);
+    let charge = charged_block_structure_intern_key_bytes(&key0.key);
+    assert_eq!(charged_block_structure_intern_key_bytes(&key1.key), charge);
+    assert_eq!(charged_block_structure_intern_key_bytes(&key2.key), charge);
     let mut table = BlockStructureInternTable::new(2, charge.saturating_mul(3), charge);
 
     let _content0 = local_block_structure_intern(&mut table, key0.clone(), charge);
     let _content1 = local_block_structure_intern(&mut table, key1.clone(), charge);
-    assert!(table.lookup(&key0).is_some());
+    assert!(table.lookup(&key0.key, |_| true).is_some());
     let _content2 = local_block_structure_intern(&mut table, key2.clone(), charge);
 
-    assert!(table.lookup(&key0).is_none());
-    assert!(table.lookup(&key1).is_some());
-    assert!(table.lookup(&key2).is_some());
+    assert!(table.lookup(&key0.key, |_| true).is_none());
+    assert!(table.lookup(&key1.key, |_| true).is_some());
+    assert!(table.lookup(&key2.key, |_| true).is_some());
     let info = table.info();
     assert_eq!(info.entries(), 2);
     assert_eq!(info.pressure_evictions(), 1);
@@ -102,7 +136,7 @@ fn block_structure_intern_byte_pressure_subtracts_exact_charge() {
     let key0 = local_block_structure_intern_key(10);
     let key1 = local_block_structure_intern_key(11);
     let key2 = local_block_structure_intern_key(12);
-    let base_charge = charged_block_structure_intern_key_bytes(&key0);
+    let base_charge = charged_block_structure_intern_key_bytes(&key0.key);
     let charges = [base_charge, base_charge + 1, base_charge + 2];
     let budget = charges[1].saturating_add(charges[2]);
     let mut table = BlockStructureInternTable::new(3, budget, charges[2]);
@@ -114,12 +148,12 @@ fn block_structure_intern_byte_pressure_subtracts_exact_charge() {
         charges[0].saturating_add(charges[1])
     );
     assert_eq!(table.info().pressure_evictions(), 0);
-    assert!(table.lookup(&key0).is_some());
+    assert!(table.lookup(&key0.key, |_| true).is_some());
 
     let _content2 = local_block_structure_intern(&mut table, key2.clone(), charges[2]);
-    assert!(table.lookup(&key0).is_none());
-    assert!(table.lookup(&key1).is_some());
-    assert!(table.lookup(&key2).is_some());
+    assert!(table.lookup(&key0.key, |_| true).is_none());
+    assert!(table.lookup(&key1.key, |_| true).is_some());
+    assert!(table.lookup(&key2.key, |_| true).is_some());
     assert_eq!(table.info().charged_key_bytes(), budget);
     assert_eq!(table.info().pressure_evictions(), 1);
 }
@@ -130,22 +164,32 @@ fn block_structure_intern_bypasses_oversized_and_saturated_charges() {
     // never consume an entry or charged-byte budget.
     let oversized_key = local_block_structure_intern_key(20);
     let saturated_key = local_block_structure_intern_key(21);
-    let charge = charged_block_structure_intern_key_bytes(&oversized_key);
+    let charge = charged_block_structure_intern_key_bytes(&oversized_key.key);
     let mut oversized_table = BlockStructureInternTable::new(2, charge, charge - 1);
 
     let oversized =
         local_block_structure_intern(&mut oversized_table, oversized_key.clone(), charge);
     assert_eq!(oversized.rank(), oversized_key.rank);
-    assert_eq!(oversized.blocks(), oversized_key.blocks.as_ref());
-    assert!(oversized_table.lookup(&oversized_key).is_none());
+    assert_eq!(
+        oversized.sector_structure(),
+        &local_parts(oversized_key.index).0
+    );
+    assert!(oversized_table
+        .lookup(&oversized_key.key, |_| true)
+        .is_none());
     assert_eq!(oversized_table.info().oversized_admission_bypasses(), 1);
 
     let mut saturated_table = BlockStructureInternTable::new(2, usize::MAX, usize::MAX);
     let saturated =
         local_block_structure_intern(&mut saturated_table, saturated_key.clone(), usize::MAX);
     assert_eq!(saturated.rank(), saturated_key.rank);
-    assert_eq!(saturated.blocks(), saturated_key.blocks.as_ref());
-    assert!(saturated_table.lookup(&saturated_key).is_none());
+    assert_eq!(
+        saturated.sector_structure(),
+        &local_parts(saturated_key.index).0
+    );
+    assert!(saturated_table
+        .lookup(&saturated_key.key, |_| true)
+        .is_none());
 
     let info = saturated_table.info();
     assert_eq!(info.entries(), 0);
@@ -160,7 +204,7 @@ fn block_structure_intern_dead_replacement_preserves_fifo_accounting() {
     let key0 = local_block_structure_intern_key(30);
     let key1 = local_block_structure_intern_key(31);
     let key2 = local_block_structure_intern_key(32);
-    let charge = charged_block_structure_intern_key_bytes(&key0);
+    let charge = charged_block_structure_intern_key_bytes(&key0.key);
     let mut table = BlockStructureInternTable::new(2, charge.saturating_mul(2), charge);
 
     let content0 = local_block_structure_intern(&mut table, key0.clone(), charge);
@@ -168,16 +212,16 @@ fn block_structure_intern_dead_replacement_preserves_fifo_accounting() {
     let _content1 = local_block_structure_intern(&mut table, key1.clone(), charge);
     let before = table.info();
     drop(content0);
-    assert!(table.lookup(&key0).is_none());
+    assert!(table.lookup(&key0.key, |_| true).is_none());
 
     let replacement = local_block_structure_intern(&mut table, key0.clone(), charge);
     assert!(replacement.id() > id0);
     assert_eq!(table.info(), before);
 
     let _content2 = local_block_structure_intern(&mut table, key2.clone(), charge);
-    assert!(table.lookup(&key0).is_none());
-    assert!(table.lookup(&key1).is_some());
-    assert!(table.lookup(&key2).is_some());
+    assert!(table.lookup(&key0.key, |_| true).is_none());
+    assert!(table.lookup(&key1.key, |_| true).is_some());
+    assert!(table.lookup(&key2.key, |_| true).is_some());
     assert_eq!(table.info().pressure_evictions(), 1);
 }
 
@@ -188,7 +232,7 @@ fn block_structure_intern_clear_resets_resources_and_counters() {
     let key0 = local_block_structure_intern_key(40);
     let key1 = local_block_structure_intern_key(41);
     let key2 = local_block_structure_intern_key(42);
-    let charge = charged_block_structure_intern_key_bytes(&key0);
+    let charge = charged_block_structure_intern_key_bytes(&key0.key);
     let mut table = BlockStructureInternTable::new(1, charge, charge);
     let _content0 = local_block_structure_intern(&mut table, key0, charge);
     let _content1 = local_block_structure_intern(&mut table, key1, charge);

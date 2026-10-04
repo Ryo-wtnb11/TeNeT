@@ -3,7 +3,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockRef<'a> {
     pub(super) key: &'a BlockKey,
-    pub(super) degeneracy: &'a DegeneracyBlock,
+    pub(super) degeneracy: DegeneracyBlockRef<'a>,
 }
 
 impl<'a> BlockRef<'a> {
@@ -116,36 +116,6 @@ impl CoupledSectorRegion {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct BlockStructureContentBlock {
-    pub(crate) key: BlockKey,
-    pub(crate) shape: DimVec,
-    pub(crate) strides: DimVec,
-    pub(crate) offset: usize,
-}
-
-impl BlockStructureContentBlock {
-    #[inline]
-    pub fn key(&self) -> &BlockKey {
-        &self.key
-    }
-
-    #[inline]
-    pub fn shape(&self) -> &[usize] {
-        &self.shape
-    }
-
-    #[inline]
-    pub fn strides(&self) -> &[usize] {
-        &self.strides
-    }
-
-    #[inline]
-    pub fn offset(&self) -> usize {
-        self.offset
-    }
-}
-
 type CoupledRegionResult = Result<Option<Arc<[CoupledSectorRegion]>>, CoreError>;
 pub(super) type CoupledRegionCache = Arc<[OnceLock<CoupledRegionResult>]>;
 
@@ -154,7 +124,6 @@ pub struct BlockStructureContent {
     pub(crate) id: usize,
     pub(crate) sector: SectorStructure,
     pub(crate) degeneracy: DegeneracyStructure,
-    pub(crate) blocks: Arc<[BlockStructureContentBlock]>,
     pub(crate) required_len: usize,
     pub(crate) storage_tiling: StorageTilingProof,
 }
@@ -191,7 +160,7 @@ impl core::fmt::Debug for BlockStructureContent {
             .debug_struct("BlockStructureContent")
             .field("id", &self.id)
             .field("rank", &self.sector.rank())
-            .field("blocks", &self.blocks)
+            .field("degeneracy", &self.degeneracy)
             .finish()
     }
 }
@@ -208,7 +177,6 @@ impl PartialEq for BlockStructureContent {
     fn eq(&self, other: &Self) -> bool {
         self.sector == other.sector
             && self.degeneracy == other.degeneracy
-            && self.blocks == other.blocks
             && self.required_len == other.required_len
     }
 }
@@ -236,8 +204,8 @@ impl BlockStructureContent {
     /// once; the element counts are checked here to sum to `required_len`, so
     /// the disjoint blocks cover all of it.
     pub(super) fn record_storage_tiling(&self) {
-        let covered = self.blocks.iter().try_fold(0usize, |total, block| {
-            checked_product(&block.shape)
+        let covered = self.degeneracy.blocks().try_fold(0usize, |total, block| {
+            checked_product(block.shape())
                 .ok()
                 .and_then(|count| total.checked_add(count))
         });
@@ -256,11 +224,6 @@ impl BlockStructureContent {
     #[inline]
     pub fn sector_structure(&self) -> &SectorStructure {
         &self.sector
-    }
-
-    #[inline]
-    pub fn blocks(&self) -> &[BlockStructureContentBlock] {
-        &self.blocks
     }
 
     #[doc(hidden)]
@@ -297,17 +260,6 @@ impl BlockStructureContent {
             .compact_lookup
             .as_ref()
             .map_or(0, |lookup| spilled_smallvec_heap_bytes(&lookup.indices));
-        let degeneracy = self.degeneracy.blocks.iter().fold(0usize, |bytes, block| {
-            bytes
-                .saturating_add(spilled_smallvec_heap_bytes(&block.shape))
-                .saturating_add(spilled_smallvec_heap_bytes(&block.strides))
-        });
-        let copied_blocks = self.blocks.iter().fold(0usize, |bytes, block| {
-            bytes
-                .saturating_add(key_bytes(&block.key, &mut frozen_backings))
-                .saturating_add(spilled_smallvec_heap_bytes(&block.shape))
-                .saturating_add(spilled_smallvec_heap_bytes(&block.strides))
-        });
 
         std::mem::size_of::<BlockStructureContent>()
             .saturating_add(
@@ -326,18 +278,6 @@ impl BlockStructureContent {
             .saturating_add(groups)
             .saturating_add(spilled_smallvec_heap_bytes(&self.sector.sorted_indices))
             .saturating_add(compact_lookup)
-            .saturating_add(
-                self.degeneracy
-                    .blocks
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<DegeneracyBlock>()),
-            )
-            .saturating_add(degeneracy)
-            .saturating_add(
-                self.blocks
-                    .len()
-                    .saturating_mul(std::mem::size_of::<BlockStructureContentBlock>()),
-            )
-            .saturating_add(copied_blocks)
+            .saturating_add(self.degeneracy.charged_heap_bytes())
     }
 }

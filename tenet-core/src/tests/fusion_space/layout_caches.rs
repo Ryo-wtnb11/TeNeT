@@ -1,5 +1,8 @@
 use super::*;
 
+/// A per-entry limit for local caches, small enough to exceed cheaply.
+const LOCAL_MAX_ENTRY_BYTES: usize = 1024 * 1024;
+
 #[test]
 fn fusion_layout_local_cache_is_strict_insertion_order_and_resets_exactly() {
     // What: read hits do not promote FIFO order; entry eviction and reset
@@ -89,15 +92,12 @@ fn fusion_layout_local_cache_bypasses_oversized_rule_identity() {
 
     // What: canonical rule bytes participate in admission accounting, so
     // an identity alone above the per-entry limit is computed but not retained.
-    let canonical_bytes = Arc::<[u8]>::from(vec![
-        0;
-        FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES
-            .saturating_add(1)
-    ]);
+    // Why a local limit: the process cache's limit is its 64 MiB budget.
+    let canonical_bytes = Arc::<[u8]>::from(vec![0; LOCAL_MAX_ENTRY_BYTES.saturating_add(1)]);
     let rule = OversizedIdentityRule {
         identity: RuleIdentity::from_canonical_bytes::<OversizedIdentityRule>(0, canonical_bytes),
     };
-    assert!(rule.identity.charged_retained_bytes() > FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES);
+    assert!(rule.identity.charged_retained_bytes() > LOCAL_MAX_ENTRY_BYTES);
     let hom =
         FusionTreeHomSpace::from_sectors([(SectorId::new(0), 1)], Vec::<(SectorId, usize)>::new());
     let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
@@ -105,12 +105,12 @@ fn fusion_layout_local_cache_bypasses_oversized_rule_identity() {
         hom.fusion_tree_layout_data_uncached(&rule),
     ));
     let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
-    assert!(charged_bytes > FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES);
+    assert!(charged_bytes > LOCAL_MAX_ENTRY_BYTES);
 
     let mut cache = FusionTreeLayoutCache::new(
         8,
         FUSION_TREE_LAYOUT_CACHE_BYTE_BUDGET,
-        FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES,
+        LOCAL_MAX_ENTRY_BYTES,
     );
     let returned = cache.admit(Arc::clone(&key), Arc::clone(&layout), charged_bytes);
     assert!(Arc::ptr_eq(&returned, &layout));
@@ -155,18 +155,14 @@ fn fusion_layout_local_cache_bypasses_oversized_product_rule_identity() {
 
     // What: a product identity retains the canonical bytes of both child
     // identities, so core admission continues to reject an oversized key.
-    let canonical_bytes = Arc::<[u8]>::from(vec![
-        0;
-        FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES
-            .saturating_add(1)
-    ]);
+    let canonical_bytes = Arc::<[u8]>::from(vec![0; LOCAL_MAX_ENTRY_BYTES.saturating_add(1)]);
     let rule = OversizedProductIdentityRule {
         identity: RuleIdentity::compose_with_codec::<ProductIdentityCodec>(
             RuleIdentity::from_canonical_bytes::<OversizedProductIdentityRule>(0, canonical_bytes),
             RuleIdentity::of_type::<Z2FusionRule>(),
         ),
     };
-    assert!(rule.identity.charged_retained_bytes() > FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES);
+    assert!(rule.identity.charged_retained_bytes() > LOCAL_MAX_ENTRY_BYTES);
     let hom =
         FusionTreeHomSpace::from_sectors([(SectorId::new(0), 1)], Vec::<(SectorId, usize)>::new());
     let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
@@ -174,12 +170,12 @@ fn fusion_layout_local_cache_bypasses_oversized_product_rule_identity() {
         hom.fusion_tree_layout_data_uncached(&rule),
     ));
     let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
-    assert!(charged_bytes > FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES);
+    assert!(charged_bytes > LOCAL_MAX_ENTRY_BYTES);
 
     let mut cache = FusionTreeLayoutCache::new(
         8,
         FUSION_TREE_LAYOUT_CACHE_BYTE_BUDGET,
-        FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES,
+        LOCAL_MAX_ENTRY_BYTES,
     );
     let returned = cache.admit(Arc::clone(&key), Arc::clone(&layout), charged_bytes);
     assert!(Arc::ptr_eq(&returned, &layout));
