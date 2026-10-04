@@ -1,5 +1,3 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
 
 use tenet_core::testing::{
@@ -15,40 +13,11 @@ use tenet_core::{
     SectorLeg, SectorStructure, SectorVec, Z2FusionRule, Z2Irrep,
 };
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-    static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(ptr, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + new_size);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 #[derive(Clone, Copy)]
 struct AllocationAnyonicRule;
@@ -206,14 +175,12 @@ fn unique_identity_permute_does_not_allocate() {
     .unwrap();
     let _ = unique_permute_tree(&Z2FusionRule, &tree, &[0]).unwrap();
 
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    let transformed = unique_permute_tree(&Z2FusionRule, &tree, &[0]).unwrap();
-    COUNTING.set(false);
+    let (transformed, allocations) =
+        measured_allocations(|| unique_permute_tree(&Z2FusionRule, &tree, &[0]).unwrap());
 
     assert_eq!(transformed.0, tree);
     assert_eq!(transformed.1, 1.0);
-    assert_eq!(ALLOCATIONS.get(), 0);
+    assert_eq!(allocations, 0);
 }
 
 #[test]
@@ -321,16 +288,14 @@ fn block_identity_permute_allocates_only_owned_output() {
     let _ =
         multiplicity_free_permute_tree_pair_block(&Z2FusionRule, &sources, &[0, 1], &[2]).unwrap();
 
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    let transformed =
-        multiplicity_free_permute_tree_pair_block(&Z2FusionRule, &sources, &[0, 1], &[2]).unwrap();
-    COUNTING.set(false);
+    let (transformed, allocations) = measured_allocations(|| {
+        multiplicity_free_permute_tree_pair_block(&Z2FusionRule, &sources, &[0, 1], &[2]).unwrap()
+    });
 
     // What: identity block permutation allocates only the intentional owned
     // outer result and its one owned row, with no level-vector temporaries.
     assert_eq!(transformed, vec![vec![(source, 1.0)]]);
-    assert_eq!(ALLOCATIONS.get(), 2);
+    assert_eq!(allocations, 2);
 }
 
 #[test]
@@ -572,13 +537,11 @@ fn measured_allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
     (output, allocations)
 }
 
+/// Allocating calls (`alloc`, `alloc_zeroed`, `realloc`) and their requested
+/// bytes on this thread while `operation` runs.
 fn measured_allocation_stats<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
-    ALLOCATIONS.set(0);
-    ALLOCATED_BYTES.set(0);
-    COUNTING.set(true);
-    let output = operation();
-    COUNTING.set(false);
-    (output, ALLOCATIONS.get(), ALLOCATED_BYTES.get())
+    let (output, allocs) = counting_alloc::measure(operation);
+    (output, allocs.calls as usize, allocs.bytes as usize)
 }
 
 #[test]
