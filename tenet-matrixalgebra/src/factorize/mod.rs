@@ -96,7 +96,9 @@ mod sector_matricization_tests;
 #[cfg(test)]
 pub(crate) use authority::MF_FACTOR_SPACE_STAGES;
 use authority::*;
-pub use authority::{factor_isomorphic_checked_generic, factor_output_space_checked_generic};
+pub use authority::{
+    factor_isomorphic_checked_generic, factor_output_space_checked_generic, FactorMode,
+};
 pub(crate) use bound::*;
 pub(crate) use compact_plan::*;
 // `dense_stage` items are consumed only by sibling factorization modules.
@@ -132,10 +134,9 @@ pub(crate) use svd::*;
 pub use bound::BoundDynFactor;
 pub use compact_plan::CheckedGenericFactorPlanError;
 pub use eig::{
-    eig_full_checked_generic, eig_full_diagonal_dyn, eig_full_dyn, eig_vals_checked_generic,
-    eig_vals_diagonal_dyn, eig_vals_dyn, eigh_full_checked_generic, eigh_full_diagonal_dyn,
-    eigh_full_dyn, eigh_vals_checked_generic, eigh_vals_diagonal_dyn, eigh_vals_dyn,
-    validate_hermitian_regions, EigFullDyn, EighFullDyn,
+    eig_full_checked_generic, eig_full_diagonal_dyn, eig_full_dyn, eig_vals_dyn,
+    eig_vals_from_source, eigh_full_checked_generic, eigh_full_diagonal_dyn, eigh_full_dyn,
+    eigh_vals_dyn, eigh_vals_from_source, validate_hermitian_regions, EigFullDyn, EighFullDyn,
 };
 pub use matricize::{
     coupled_sector_block_dimensions_generic_checked, validate_endomorphism_region_stacking,
@@ -177,6 +178,5 @@ pub use svd::{
     scale_axis_by_spectrum, scale_axis_by_spectrum_mapped, svd_compact_adjoint_factors_dyn,
     svd_compact_checked_generic, svd_compact_diagonal_factors_dyn, svd_compact_dyn_checked_generic,
     svd_compact_factors_dyn, svd_full_adjoint_factors_dyn, svd_full_checked_generic,
-    svd_full_factors_dyn, svd_vals_checked_generic, svd_vals_compact_diagonal_dyn, svd_vals_dyn,
-    SvdFactorsDyn, SvdFullFactorsDyn,
+    svd_full_factors_dyn, svd_vals_dyn, svd_vals_from_source, SvdFactorsDyn, SvdFullFactorsDyn,
 };

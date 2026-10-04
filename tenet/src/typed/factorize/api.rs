@@ -527,7 +527,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorSvdValsDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns only the singular values, grouped by provider-labelled coupled
@@ -557,18 +557,20 @@ where
         cols: &[usize],
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
     {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorSvdValsDispatch<R, D>>::svd_vals,
-        )
+        self.with_leg_roles(rows, cols, |t| {
+            t.factor_values(FactorOp::SvdVals, |lease, source| {
+                tenet_matrixalgebra::seam::svd_vals_from_source::<R::Mode, _, _, _, _>(
+                    lease, source,
+                )
+            })
+        })
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorEighValsDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns only the real Hermitian eigenvalues, grouped by
@@ -596,11 +598,13 @@ where
         cols: &[usize],
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
     {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorEighValsDispatch<R, D>>::eigh_vals,
-        )
+        self.with_leg_roles(rows, cols, |t| {
+            t.factor_values(FactorOp::EighVals, |lease, source| {
+                tenet_matrixalgebra::seam::eigh_vals_from_source::<R::Mode, _, _, _, _>(
+                    lease, source,
+                )
+            })
+        })
     }
 }
 
@@ -674,8 +678,11 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorEigValsDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: AdvancedLinalgScalar,
+    // Carried across the whole eig row even though this member builds no
+    // factor: the three are one API surface.
+    <D as FactorScalar>::Eig: TensorScalar,
 {
     /// Returns only the general eigenvalues as `Complex64` (at every payload
     /// dtype, like every spectrum of this crate), grouped by
@@ -703,11 +710,13 @@ where
         Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, num_complex::Complex64>>,
         TypedFacadeError<R>,
     > {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorEigValsDispatch<R, D>>::eig_vals,
-        )
+        self.with_leg_roles(rows, cols, |t| {
+            t.factor_values(FactorOp::EigVals, |lease, source| {
+                tenet_matrixalgebra::seam::eig_vals_from_source::<R::Mode, _, _, _, _>(
+                    lease, source,
+                )
+            })
+        })
     }
 }
 

@@ -209,9 +209,9 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              diagonal_bond_bound_space_generic_checked diagonal_bond_bound_space_like \
              diagonal_bond_bound_space_on_source_checked_generic \
              diagonal_bond_data eig_full_checked_generic eig_full_diagonal_dyn eig_full_dyn \
-             eig_vals_checked_generic eig_vals_diagonal_dyn eig_vals_dyn \
+             eig_vals_dyn eig_vals_from_source \
              eigh_full_checked_generic eigh_full_diagonal_dyn eigh_full_dyn \
-             eigh_vals_checked_generic eigh_vals_diagonal_dyn eigh_vals_dyn \
+             eigh_vals_dyn eigh_vals_from_source \
              factor_isomorphic_checked_generic factor_output_space_checked_generic \
              left_null_checked_generic left_null_diagonal_dyn left_null_dyn \
              left_polar_adjoint_parent_dyn left_polar_adjoint_parent_dyn_checked_generic \
@@ -227,10 +227,9 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              svd_compact_adjoint_factors_dyn svd_compact_checked_generic \
              svd_compact_diagonal_factors_dyn svd_compact_dyn_checked_generic \
              svd_compact_factors_dyn svd_full_adjoint_factors_dyn svd_full_checked_generic \
-             svd_full_factors_dyn svd_vals_checked_generic svd_vals_compact_diagonal_dyn \
-             svd_vals_dyn validate_endomorphism_region_stacking validate_hermitian_regions \
+             svd_full_factors_dyn svd_vals_dyn svd_vals_from_source validate_endomorphism_region_stacking validate_hermitian_regions \
              BoundDynamicTensorRef CheckedGenericFactorPlanError EigFullDyn EighFullDyn \
-             EIGH_FULL_STACKING ExecutorLease FactorOutput FactorRoute FactorSource Routed \
+             EIGH_FULL_STACKING ExecutorLease FactorMode FactorOutput FactorRoute FactorSource Routed \
              SvdFactorsDyn SvdFullFactorsDyn \
              sector_matricization_diagnostic SectorMatricizationDiagnostic \
              exp_dyn exp_pade13_direct_into_dyn inv_direct_dyn inv_direct_into_dyn \

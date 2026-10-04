@@ -300,22 +300,6 @@ pub(super) fn checked_sector_regions(
         .map_err(OperationError::from_core_preserving_context)
 }
 
-pub(super) fn generic_value_matricizations<'a, D>(
-    structure: &BlockStructure,
-    data: &'a [D],
-    nout: usize,
-) -> Result<InputMatricizations<'a, D>, OperationError>
-where
-    D: FactorScalar,
-{
-    let matricizations = generic_input_matricizations(structure, data, nout)?;
-    #[cfg(test)]
-    if matricizations.is_packed() {
-        record_values_matricization_fallback();
-    }
-    Ok(matricizations)
-}
-
 pub(super) fn generic_input_matricizations<'a, D>(
     structure: &BlockStructure,
     data: &'a [D],

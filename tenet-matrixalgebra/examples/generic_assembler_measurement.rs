@@ -18,13 +18,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tenet_core::{
-    BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CheckedGenericFusion,
-    FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
-    RuleIdentity, SectorId, SectorLeg, SectorVec, TensorMapSpace,
+    BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CheckedGenericAdmissionMode,
+    CheckedGenericFusion, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
+    FusionTreeHomSpace, RuleIdentity, SectorId, SectorLeg, SectorVec, TensorMapSpace,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite};
 use tenet_matrixalgebra::seam::{
-    svd_vals_checked_generic, BoundDynamicTensorRef, CheckedGenericFactorPlanError,
+    svd_vals_from_source, BoundDynamicTensorRef, CheckedGenericFactorPlanError,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 
@@ -297,7 +297,7 @@ fn fixture(labels: &[usize], degeneracy: usize, interleave: bool) -> Fixture {
 fn run_once(fixture: &Fixture) -> (CheckedGenericFactorPlanError<Infallible>, usize) {
     let input = BoundDynamicTensorRef::try_new(&fixture.space, &fixture.data).unwrap();
     let mut dense = RejectDense { calls: 0 };
-    let error = svd_vals_checked_generic(
+    let error = svd_vals_from_source::<CheckedGenericAdmissionMode, _, _, _, _>(
         &mut dense,
         tenet_matrixalgebra::seam::FactorSource::Dense(input),
     )

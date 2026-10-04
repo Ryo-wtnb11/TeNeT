@@ -163,7 +163,7 @@ fn checked_compact_diagonal_eigh_vals_rejects_inconsistent_spectrum_admission() 
     let spectrum = input.spectrum().unwrap();
     // A spectrum that does not cover the bond is misuse: a typed error.
     let admit = |entries: &[tenet_matrixalgebra::SectorSpectrum<f64>]| {
-        tenet_matrixalgebra::seam::eigh_vals_checked_generic(
+        tenet_matrixalgebra::seam::eigh_vals_from_source::<CheckedGenericAdmissionMode, _, _, _, _>(
             &mut tenet_dense::DefaultDenseExecutor::new(),
             tenet_matrixalgebra::seam::FactorSource::Diagonal {
                 space: input.logical_space(),
@@ -551,7 +551,7 @@ fn checked_compact_diagonal_eig_vals_rejects_inconsistent_spectrum_admission() {
     let spectrum = input.spectrum().unwrap();
     // A spectrum that does not cover the bond is misuse: a typed error.
     let admit = |entries: &[tenet_matrixalgebra::SectorSpectrum<Complex64>]| {
-        tenet_matrixalgebra::seam::eig_vals_checked_generic(
+        tenet_matrixalgebra::seam::eig_vals_from_source::<CheckedGenericAdmissionMode, _, _, _, _>(
             &mut tenet_dense::DefaultDenseExecutor::new(),
             tenet_matrixalgebra::seam::FactorSource::Diagonal {
                 space: input.logical_space(),

@@ -249,14 +249,13 @@ where
     svd_vals_dyn(dense, &input.dynamic())
 }
 
-/// Dynamic-rank [`svd_vals`].
+/// Dynamic-rank [`svd_vals`]: the dense stage, the same in every fusion mode.
 pub fn svd_vals_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<Vec<SectorSpectrum>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let space = input.space().space();
@@ -336,18 +335,27 @@ where
     Ok(values)
 }
 
-/// Multiplicity-free singular values of a compact diagonal; see
-/// [`svd_vals_diagonal`].
+/// Singular values of `source` in fusion mode `M`, descending per coupled
+/// sector. A compact diagonal is read directly; only dense storage leases an
+/// executor.
 #[doc(hidden)]
-pub fn svd_vals_compact_diagonal_dyn<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &[SectorSpectrum<D>],
-) -> Result<Vec<SectorSpectrum>, OperationError>
+pub fn svd_vals_from_source<M, L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<Vec<SectorSpectrum>, M::Error>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    M: FactorMode<R>,
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
-    svd_vals_diagonal(&MfAuthority(authority), authority, spectrum)
+    factor_from_source(
+        lease,
+        source,
+        |space, spectrum| svd_vals_diagonal(&M::authority(space), space, spectrum),
+        |dense, input| Ok(svd_vals_dyn(dense, input)?),
+    )
+    .map(|(values, _)| values)
 }
 
 #[cfg(test)]
@@ -2526,46 +2534,6 @@ where
         #[cfg(test)]
         adjoint_space: None,
     })
-}
-
-/// Checked-Generic singular values only. No factor-space publication occurs.
-#[doc(hidden)]
-pub(crate) fn svd_vals_dyn_checked_generic<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<Vec<SectorSpectrum>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    let space = input.space().space();
-    let matricizations =
-        generic_value_matricizations(space.structure(), input.data(), space.nout())?;
-    Ok(svd_vals_spectra(dense, &matricizations)?)
-}
-
-/// Checked singular values of `source`, descending per coupled sector.
-#[doc(hidden)]
-pub fn svd_vals_checked_generic<L, E, R, D>(
-    lease: L,
-    source: FactorSource<'_, R, D>,
-) -> Result<Vec<SectorSpectrum>, CheckedGenericFactorPlanError<R::Error>>
-where
-    L: ExecutorLease<Executor = E>,
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    factor_from_source(
-        lease,
-        source,
-        |space, spectrum| {
-            svd_vals_diagonal(&CheckedAuthority(space.provider_arc()), space, spectrum)
-        },
-        svd_vals_dyn_checked_generic,
-    )
-    .map(|(values, _)| values)
 }
 
 /// Checked compact SVD factors and singular values of `source`, with the

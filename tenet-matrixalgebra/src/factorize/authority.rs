@@ -23,7 +23,7 @@ mod sealed {
 /// Why not one `factor_space(source, hom)` call (target design §2.2):
 /// publishing before validation would reorder the checked error precedence,
 /// which is an observable contract.
-pub(super) trait FactorSpaceAuthority<R>: sealed::Sealed {
+pub trait FactorSpaceAuthority<R>: sealed::Sealed {
     type Error: From<OperationError>;
     type Staged;
 
@@ -59,6 +59,51 @@ pub(super) trait FactorSpaceAuthority<R>: sealed::Sealed {
         &self,
         homspace: FusionTreeHomSpace,
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::RootError>;
+}
+
+/// A fusion mode's factorization authority, chosen statically by the mode
+/// marker. Each factorization has one entry generic over it, so a mode
+/// supplies only its factor-space authority and its error type.
+///
+/// Why not a runtime flag or one entry per mode: the two authorities have
+/// different provider bounds and error types, and monomorphizing over the
+/// marker keeps the multiplicity-free path free of the checked one's costs.
+pub trait FactorMode<R>: sealed::Sealed {
+    type Error: From<OperationError>;
+
+    /// The factor-space authority of `space`'s provider.
+    fn authority(
+        space: &BoundDynamicFusionMapSpace<R>,
+    ) -> impl FactorSpaceAuthority<R, Error = Self::Error> + '_;
+}
+
+impl sealed::Sealed for MultiplicityFreeAdmissionMode {}
+impl sealed::Sealed for CheckedGenericAdmissionMode {}
+
+impl<R> FactorMode<R> for MultiplicityFreeAdmissionMode
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    type Error = OperationError;
+
+    fn authority(
+        space: &BoundDynamicFusionMapSpace<R>,
+    ) -> impl FactorSpaceAuthority<R, Error = Self::Error> + '_ {
+        MfAuthority(space)
+    }
+}
+
+impl<R> FactorMode<R> for CheckedGenericAdmissionMode
+where
+    R: CheckedGenericFusion,
+{
+    type Error = CheckedGenericFactorPlanError<R::Error>;
+
+    fn authority(
+        space: &BoundDynamicFusionMapSpace<R>,
+    ) -> impl FactorSpaceAuthority<R, Error = Self::Error> + '_ {
+        CheckedAuthority(space.provider_arc())
+    }
 }
 
 /// Multiplicity-free factor spaces, derived through the source space's cached

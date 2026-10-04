@@ -9,13 +9,13 @@ mod polar_null;
 mod qr_lq;
 mod svd;
 
+use mode::{AdjointRule, FactorOp};
 pub use mode::{
-    TypedTensorEigDispatch, TypedTensorEigValsDispatch, TypedTensorEighDispatch,
-    TypedTensorEighValsDispatch, TypedTensorExpDispatch, TypedTensorFullLqDispatch,
-    TypedTensorFullQrDispatch, TypedTensorInvDispatch, TypedTensorLqDispatch,
-    TypedTensorNullDispatch, TypedTensorPinvDispatch, TypedTensorPolarDispatch,
-    TypedTensorQrDispatch, TypedTensorSolveDispatch, TypedTensorSvdDispatch,
-    TypedTensorSvdValsDispatch,
+    FusionMode, TypedTensorEigDispatch, TypedTensorEighDispatch, TypedTensorExpDispatch,
+    TypedTensorFullLqDispatch, TypedTensorFullQrDispatch, TypedTensorInvDispatch,
+    TypedTensorLqDispatch, TypedTensorNullDispatch, TypedTensorPinvDispatch,
+    TypedTensorPolarDispatch, TypedTensorQrDispatch, TypedTensorSolveDispatch,
+    TypedTensorSvdDispatch,
 };
 
 /// The runtime as the seam's executor lease: the checked entries lease a
@@ -70,10 +70,66 @@ fn owned_factor_source<'a, R, D>(
     })
 }
 
-pub(super) type CheckedGenericSpectrumResult<R, V> = Result<
-    Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, V>>,
-    GenericTensorError<<R as CheckedGenericFusion>::Error>,
->;
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: FusionMode<R>,
+    D: TensorScalar,
+{
+    /// The one body of the values-only factorizations: the mode's adjoint
+    /// rule picks the input storage, `stage` (the matrix-algebra entry for
+    /// `R::Mode`) computes the raw spectra, and the coupled sectors are
+    /// decoded into public labels and sorted by label.
+    fn factor_values<V>(
+        &self,
+        op: FactorOp,
+        stage: impl FnOnce(
+            RuntimeDense<'_>,
+            tenet_matrixalgebra::seam::FactorSource<'_, R, D>,
+        ) -> Result<
+            Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
+            <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
+        >,
+    ) -> Result<Vec<SectorSpectrum<R::Sector, V>>, TypedFacadeError<R>> {
+        let local;
+        let source = match &self.repr {
+            TypedTensorRepr::Owned(body) => owned_factor_source(body)?,
+            TypedTensorRepr::Adjoint(view) => match R::Mode::adjoint_rule(op) {
+                AdjointRule::Reject => {
+                    return Err(
+                        Error::InvalidArgument(op.lazy_adjoint_refusal().to_string()).into(),
+                    )
+                }
+                AdjointRule::Parent => tenet_matrixalgebra::seam::FactorSource::Dense(
+                    BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
+                        .map_err(Error::from)?,
+                ),
+                AdjointRule::Materialize => {
+                    local = self.materialized_tensor_uncached()?;
+                    owned_factor_source(
+                        local
+                            .owned_body()
+                            .expect("materialize returns an owned body"),
+                    )?
+                }
+            },
+        };
+        let raw = stage(RuntimeDense(&self.runtime), source).map_err(R::Mode::map_factor_error)?;
+        let provider = self.logical_space().provider();
+        let mut decoded = raw
+            .into_iter()
+            .map(|entry| {
+                Ok(SectorSpectrum {
+                    sector: R::Mode::decode_label(provider, entry.sector)?,
+                    values: entry.values,
+                })
+            })
+            .collect::<Result<Vec<_>, TypedFacadeError<R>>>()?;
+        // Public label order, not the engine's opaque sector-id order.
+        decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
+        Ok(decoded)
+    }
+}
 
 impl<R, D> TensorMap<R, D>
 where
@@ -104,30 +160,6 @@ where
         to_scalar: impl Fn(V) -> D,
     ) -> Result<Self, Error> {
         diagonal_factor_on(&self.runtime, self.logical_space(), spectrum, to_scalar)
-    }
-
-    /// Decodes a seam spectrum into provider labels and sorts it by label.
-    ///
-    /// Every id here came out of the engine's own coupled-sector enumeration,
-    /// so a decode failure is the provider breaking [`SectorCodec`]'s
-    /// decode-totality law — same contract as [`decode_block_fusion_trees`].
-    fn decode_spectrum<V>(
-        &self,
-        raw: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
-    ) -> Result<Vec<SectorSpectrum<R::Sector, V>>, Error> {
-        let provider = self.logical_space().provider();
-        let mut decoded: Vec<SectorSpectrum<R::Sector, V>> = raw
-            .into_iter()
-            .map(|entry| {
-                Ok(SectorSpectrum {
-                    sector: provider.decode_sector(entry.sector)?,
-                    values: entry.values,
-                })
-            })
-            .collect::<Result<_, Error>>()?;
-        // Public label order, not the engine's opaque sector-id order.
-        decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
-        Ok(decoded)
     }
 
     /// The bound space and dense payload of this owned tensor map; a compact
