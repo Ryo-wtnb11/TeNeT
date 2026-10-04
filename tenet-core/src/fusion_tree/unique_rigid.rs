@@ -182,8 +182,12 @@ where
     Ok((current.frame.materialize(current.local), coefficient))
 }
 
-/// TensorKit `multi_Fmove`'s `UniqueFusion` branch (`basic_manipulations.jl:209-213`)
-/// at every rank: the tail couples to the one channel of `ā ⊗ c`.
+/// The forward move is TensorKit `multi_Fmove`'s `UniqueFusion` branch
+/// (`basic_manipulations.jl:209-213`) at every rank: the tail couples to the
+/// one channel of `ā ⊗ c`. The inverse is a TeNeT deviation: TensorKit
+/// `multi_Fmove_inv` has no `UniqueFusion` branch, but with one channel per
+/// fusion step its enumeration yields exactly one lifted tree, which is the
+/// unique standard tree built here.
 impl<R: MultiplicityFreeRigidSymbols> MultiFKernel for UniqueK<'_, R> {
     type Moves = (FusionTreeKey, R::Scalar);
     type Lift = (SectorId, bool);
@@ -217,9 +221,12 @@ impl<R: MultiplicityFreeRigidSymbols> MultiFKernel for UniqueK<'_, R> {
         leading
     }
 
-    // Why not check `c ∈ a ⊗ b` here as the other kernels do: the unique
-    // standard tree below fails with a channel-count error on exactly the
-    // same inputs, and the admission would add a fusion query per fold.
+    // Why not check `c ∈ a ⊗ b` here as the other kernels do: for a
+    // well-formed source tree (its coupled sector is the fusion of its
+    // uncoupled legs), the unique standard tree below fails with a
+    // channel-count error on exactly the inputs the admission rejects, and
+    // the admission would add a fusion query per fold. Malformed source
+    // trees are rejected by upstream validation before reaching this move.
     fn admit_lift(&self, _: SectorId, _: SectorId, _: SectorId) -> Result<(), CoreError> {
         Ok(())
     }
