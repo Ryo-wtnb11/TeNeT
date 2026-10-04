@@ -682,9 +682,7 @@ where
         source_space.homspace().domain(),
         "callers refuse a non-endomorphism in their own words first"
     );
-    let output_space = input
-        .space()
-        .derive_from_final_homspace(source_space.homspace().clone())?;
+    let output_space = MfAuthority(input.space()).output_space(source_space.homspace().clone())?;
     map_square_sectors_dyn_into(input, output_space, init, apply)
 }
 
