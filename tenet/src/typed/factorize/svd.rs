@@ -78,6 +78,10 @@ where
         } else {
             None
         };
+        let on_diagonal = matches!(
+            admission,
+            Some(tenet_matrixalgebra::seam::CheckedDiagonalFullSvdFactors::Direct(_))
+        );
         let factors = match admission {
             Some(tenet_matrixalgebra::seam::CheckedDiagonalFullSvdFactors::Direct(factors)) => {
                 factors
@@ -106,10 +110,17 @@ where
         };
         let (u, vh, mut spectrum, row_dimensions, col_dimensions) = factors.into_parts();
         if full_svd_compact_bond(&u, &vh, &spectrum) {
-            let space = tenet_matrixalgebra::seam::diagonal_bond_bound_space_generic_checked(
-                Arc::clone(body.space.provider_arc()),
-                &spectrum,
-            )?;
+            let space = if on_diagonal {
+                tenet_matrixalgebra::seam::diagonal_bond_bound_space_on_source_checked_generic(
+                    &body.space,
+                    &spectrum,
+                )?
+            } else {
+                tenet_matrixalgebra::seam::diagonal_bond_bound_space_generic_checked(
+                    Arc::clone(body.space.provider_arc()),
+                    &spectrum,
+                )?
+            };
             if full_svd_compact_layout(&space, &spectrum) {
                 return Ok(Svd {
                     u: wrap_factor_on(&self.runtime, u),
@@ -148,9 +159,9 @@ where
                     spectrum,
                 )?
             {
-                let s = diagonal_factor_on_checked(
+                let s = diagonal_factor_on_source_checked(
                     &self.runtime,
-                    Arc::clone(body.space.provider_arc()),
+                    &body.space,
                     &mut singular_values,
                     D::from_real,
                 )?;

@@ -204,19 +204,14 @@ where
                 .materialized_tensor_uncached()
                 .map_err(GenericTensorError::from);
         }
-        let source = tensor.logical_space();
-        let output = tenet_matrixalgebra::seam::factor_output_space_checked_generic(
-            source.provider_arc(),
-            FusionTreeHomSpace::new(
-                source.space().homspace().domain().clone(),
-                source.space().homspace().codomain().clone(),
-            ),
-        )?;
         let body = tensor
             .owned_body()
             .expect("checked Generic pinv input is owned after lazy dispatch");
+        // A proven bond is its own swapped space (TensorKit
+        // `pinv(::DiagonalTensorMap)` keeps `d.domain`, dual included), so the
+        // compact arm needs no separately admitted output root, as for `inv`.
         if let TypedData::Diagonal(spectrum) = body.data.as_ref() {
-            if checked_compact_spectrum_layout(&body.space, &output, spectrum) {
+            if checked_compact_spectrum_layout(&body.space, &body.space, spectrum) {
                 let sigma_max = spectrum.iter().flat_map(|entry| &entry.values).try_fold(
                     0.0_f64,
                     |largest, &value| {
@@ -244,11 +239,19 @@ where
                                 D::from_real(0.0)
                             })
                         })?;
-                        return Ok(tensor.with_spectrum_on(output, mapped));
+                        return Ok(tensor.with_spectrum(mapped));
                     }
                 }
             }
         }
+        let source = tensor.logical_space();
+        let output = tenet_matrixalgebra::seam::factor_output_space_checked_generic(
+            source.provider_arc(),
+            FusionTreeHomSpace::new(
+                source.space().homspace().domain().clone(),
+                source.space().homspace().codomain().clone(),
+            ),
+        )?;
         let mut dense = tensor.runtime.lease_dense();
         let factor = tenet_matrixalgebra::seam::pinv_direct_into_dyn(
             dense.dense(),

@@ -131,6 +131,7 @@ where
             }
             _ => None,
         };
+        let on_diagonal = direct.is_some();
         let out = if let Some(out) = direct {
             out
         } else {
@@ -141,12 +142,21 @@ where
             tenet_matrixalgebra::seam::eigh_full_dyn_checked_generic(dense.dense(), &input)?
         };
         let (v, mut eigenvalues) = out.into_parts();
-        let d = diagonal_factor_on_checked(
-            &self.runtime,
-            Arc::clone(body.space.provider_arc()),
-            &mut eigenvalues,
-            D::from_real,
-        )?;
+        let d = if on_diagonal {
+            diagonal_factor_on_source_checked(
+                &self.runtime,
+                &body.space,
+                &mut eigenvalues,
+                D::from_real,
+            )?
+        } else {
+            diagonal_factor_on_checked(
+                &self.runtime,
+                Arc::clone(body.space.provider_arc()),
+                &mut eigenvalues,
+                D::from_real,
+            )?
+        };
         Ok(Eigh {
             d,
             v: wrap_factor_on(&self.runtime, v),
@@ -189,6 +199,7 @@ where
             }
             _ => None,
         };
+        let on_diagonal = direct.is_some();
         let out = if let Some(out) = direct {
             out
         } else {
@@ -199,12 +210,21 @@ where
             tenet_matrixalgebra::seam::eig_full_dyn_checked_generic(dense.dense(), &input)?
         };
         let (v, mut eigenvalues) = out.into_parts();
-        let d = diagonal_factor_on_checked(
-            &self.runtime,
-            Arc::clone(body.space.provider_arc()),
-            &mut eigenvalues,
-            <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
-        )?;
+        let d = if on_diagonal {
+            diagonal_factor_on_source_checked(
+                &self.runtime,
+                &body.space,
+                &mut eigenvalues,
+                <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
+            )?
+        } else {
+            diagonal_factor_on_checked(
+                &self.runtime,
+                Arc::clone(body.space.provider_arc()),
+                &mut eigenvalues,
+                <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
+            )?
+        };
         Ok(Eig {
             d,
             v: wrap_factor_on(&self.runtime, v),

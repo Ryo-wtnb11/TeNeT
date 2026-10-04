@@ -679,6 +679,27 @@ where
     ))
 }
 
+/// [`diagonal_factor_on_checked`] for a factor of the compact diagonal
+/// `source`: its bond reuses `source`'s space when it is the same bond.
+pub(super) fn diagonal_factor_on_source_checked<R, E, V>(
+    runtime: &Runtime,
+    source: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &mut [tenet_matrixalgebra::SectorSpectrum<V>],
+    to_scalar: impl Fn(V) -> E,
+) -> Result<TensorMap<R, E>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    E: TensorScalar,
+    V: Copy,
+{
+    let space = tenet_matrixalgebra::seam::diagonal_bond_bound_space_on_source_checked_generic(
+        source, spectrum,
+    )?;
+    Ok(diagonal_factor_on_bound(
+        runtime, space, spectrum, to_scalar,
+    ))
+}
+
 pub(super) fn diagonal_factor_on_bound<R, E, V>(
     runtime: &Runtime,
     space: BoundDynamicFusionMapSpace<R>,

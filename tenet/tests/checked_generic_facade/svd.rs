@@ -317,7 +317,7 @@ fn checked_compact_diagonal_svd_matches_hand_permutation_and_phase() {
 }
 
 #[test]
-fn checked_compact_diagonal_svd_compact_preserves_fallback_error_order() {
+fn checked_compact_diagonal_svd_densifies_nonfinite_and_skips_the_provider_when_finite() {
     let svd_calls = Arc::new(SpyCounts::default());
     let runtime = Runtime::builder()
         .dense_threads(1)
@@ -358,39 +358,30 @@ fn checked_compact_diagonal_svd_compact_preserves_fallback_error_order() {
         }],
     )
     .unwrap();
-    svd_calls.reset();
-    provider.invalid_style.store(true, Ordering::Relaxed);
-    let error = finite.svd_compact(&[0], &[1]).unwrap_err();
-    assert!(matches!(
-        error,
-        GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Operation(
-            tenet::typed::OperationError::Core(
-                tenet::typed::CoreError::UnsupportedFusionStyle { .. }
-            )
-        ))
-    ));
-    assert_eq!(svd_calls.of(PINV_SVD), 0);
-    assert_eq!(svd_calls.total(), 0);
-
-    provider.invalid_style.store(false, Ordering::Relaxed);
-    provider.fail_algebra.store(true, Ordering::Relaxed);
-    let dense = finite.materialize().unwrap();
-    reset_provider_queries(provider.as_ref());
-    svd_calls.reset();
-    let expected = dense.svd_full(&[0], &[1]).unwrap_err();
-    let expected_queries = provider.queries_since_reset.load(Ordering::Relaxed);
-    assert_eq!(svd_calls.of(PINV_SVD), 0);
-    assert_eq!(svd_calls.total(), 0);
-    reset_provider_queries(provider.as_ref());
-    svd_calls.reset();
-    let actual = finite.svd_full(&[0], &[1]).unwrap_err();
-    assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
-    assert_eq!(
-        provider.queries_since_reset.load(Ordering::Relaxed),
-        expected_queries
-    );
-    assert_eq!(svd_calls.of(PINV_SVD), 0);
-    assert_eq!(svd_calls.total(), 0);
+    // A finite nondual bond is its own SVD bond (TensorKit `fuse(V) = V`):
+    // `u`, `s` and `vh` live on the input space, so neither a style-changing
+    // nor a failing provider is ever queried, and no dense SVD runs.
+    for (invalid_style, fail_algebra) in [(true, false), (false, true)] {
+        provider
+            .invalid_style
+            .store(invalid_style, Ordering::Relaxed);
+        provider.fail_algebra.store(fail_algebra, Ordering::Relaxed);
+        svd_calls.reset();
+        reset_provider_queries(provider.as_ref());
+        let factors = [
+            finite.svd_compact(&[0], &[1]).unwrap(),
+            finite.svd_full(&[0], &[1]).unwrap(),
+        ];
+        assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 0);
+        assert_eq!(svd_calls.of(PINV_SVD), 0);
+        assert_eq!(svd_calls.total(), 0);
+        for Svd { u, s, vh } in factors {
+            for factor in [&u, &s, &vh] {
+                assert_eq!(factor.codomain(), finite.codomain());
+                assert_eq!(factor.domain(), finite.domain());
+            }
+        }
+    }
 }
 
 #[test]
@@ -600,24 +591,40 @@ fn checked_compact_diagonal_svd_full_falls_back_for_a_complete_bond_mismatch() {
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
-    let input: TensorMap<_, f64> = TensorMap::diagonal(
-        &runtime,
-        &bond,
-        [SectorSpectrum {
-            sector: Label::X,
-            values: vec![2.0, -1.0],
-        }],
-    )
-    .unwrap();
+    let on = |bond: &GradedSpace<_>| -> TensorMap<_, f64> {
+        TensorMap::diagonal(
+            &runtime,
+            bond,
+            [SectorSpectrum {
+                sector: Label::X,
+                values: vec![2.0, -1.0],
+            }],
+        )
+        .unwrap()
+    };
+    let nondual = on(&bond);
+    let dual = on(&bond.try_dual().unwrap());
     provider.extra_vacuum_channel.store(true, Ordering::Relaxed);
 
-    let Svd { u, s, vh } = input.svd_full(&[0], &[1]).unwrap();
+    // A nondual one-leg bond is its own SVD bond (`fuse(V) = V`, no fusion),
+    // so the factors are direct on the input space and the provider's
+    // coupled-dimension report is never consulted.
+    reset_provider_queries(&provider);
+    let Svd { u, s, vh } = nondual.svd_full(&[0], &[1]).unwrap();
+    assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 0);
+    assert_eq!(svd_calls.of(PINV_SVD), 0);
+    for factor in [&u, &s, &vh] {
+        assert_eq!(factor.codomain(), nondual.codomain());
+    }
 
+    // A dual bond needs the fresh nondual `fuse(V)`; when the provider's
+    // coupled dimensions disagree with the diagonal, the dense route decides.
+    let Svd { u, s, vh } = dual.svd_full(&[0], &[1]).unwrap();
     assert_eq!(svd_calls.of(PINV_SVD), 1);
     let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
     assert_eq!(
         rebuilt.dense_data().unwrap(),
-        input.materialize().unwrap().dense_data().unwrap()
+        dual.materialize().unwrap().dense_data().unwrap()
     );
 }
 
@@ -929,4 +936,45 @@ fn checked_generic_full_svd_failure_is_typed_and_nonpublishing() {
         ))
     ));
     assert_eq!(source.dense_data().unwrap(), before.as_slice());
+}
+
+/// A dual compact diagonal's SVD bond is the fresh nondual `fuse(V)`, built
+/// by the provider, so a provider that changes its fusion style still fails
+/// `svd_compact` with the typed plan error and runs no dense SVD.
+#[test]
+fn checked_dual_compact_diagonal_svd_compact_propagates_provider_errors() {
+    let svd_calls = Arc::new(SpyCounts::default());
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(pinv_spy(&svd_calls, None, None)))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let diagonal: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        [SectorSpectrum {
+            sector: Label::X,
+            values: vec![2.0, 1.0],
+        }],
+    )
+    .unwrap();
+    provider.invalid_style.store(true, Ordering::Relaxed);
+    let error = diagonal.svd_compact(&[0], &[1]).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Operation(
+                tenet::typed::OperationError::Core(
+                    tenet::typed::CoreError::UnsupportedFusionStyle { .. }
+                )
+            ))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(svd_calls.total(), 0);
 }
