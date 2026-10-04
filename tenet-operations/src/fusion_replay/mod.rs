@@ -10,7 +10,7 @@ use std::sync::Arc;
 use num_traits::{One, Zero};
 use tenet_core::{BlockStructure, CoupledSectorRegion, Placement, SectorId, TensorStorage};
 pub use tenet_dense::MatrixOp;
-use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
+use tenet_dense::{strided_batch_runs, strided_batch_runs_into, DenseGemmBatchJob};
 
 use crate::host_scalar_kernels::validate_raw_strided_bounds;
 use crate::host_scratch::HostScratchBuffer;
