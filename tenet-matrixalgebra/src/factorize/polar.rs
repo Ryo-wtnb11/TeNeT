@@ -403,14 +403,9 @@ where
     R: CheckedGenericFusion,
 {
     let source_space = authority.space();
-    let rows = coupled_sector_block_dimensions_generic_checked(
-        source_space.homspace().codomain(),
-        authority.provider(),
-    )?;
-    let cols = coupled_sector_block_dimensions_generic_checked(
-        source_space.homspace().domain(),
-        authority.provider(),
-    )?;
+    let checked = CheckedAuthority(authority.provider_arc());
+    let rows = checked.coupled_dimensions(source_space.homspace().codomain())?;
+    let cols = checked.coupled_dimensions(source_space.homspace().domain())?;
     for (&sector, &row_count) in &rows {
         if !direction.accepts(row_count, cols.get(&sector).copied().unwrap_or(0)) {
             return Err(CheckedGenericFactorPlanError::Operation(
@@ -437,10 +432,7 @@ where
         ),
     };
     let p_nout = p_homspace.codomain().len();
-    let p_space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
-        Arc::clone(authority.provider_arc()),
-        p_homspace,
-    )?;
+    let p_space = checked.output_space(p_homspace)?;
     let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?
         .ok_or(CheckedGenericFactorPlanError::Operation(
             OperationError::UnsupportedTensorContractScope {
