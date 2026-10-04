@@ -10,7 +10,7 @@ use tenet_core::{
 };
 use tenet_matrixalgebra::seam::{
     eigh_full_dyn, qr_compact_from_source, sector_matricization_diagnostic,
-    svd_compact_factors_dyn, validate_hermitian_regions, BoundDynamicTensorRef, FactorSource,
+    svd_compact_from_source, validate_hermitian_regions, BoundDynamicTensorRef, FactorSource,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 
@@ -111,11 +111,11 @@ fn main() {
     );
 
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    black_box(svd_compact_factors_dyn(&mut dense, &general_input).unwrap());
+    black_box(svd_compact_factors(&mut dense, &general_input).unwrap());
     ALLOCATIONS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..svd_iters {
-        black_box(svd_compact_factors_dyn(&mut dense, &general_input).unwrap());
+        black_box(svd_compact_factors(&mut dense, &general_input).unwrap());
     }
     let elapsed = start.elapsed();
     let allocation_calls = ALLOCATIONS.load(Ordering::Relaxed);
@@ -270,4 +270,21 @@ fn qr_compact<E: tenet_dense::DenseExecutor + ?Sized>(
         dense,
         FactorSource::Dense(source),
     )
+}
+
+/// Multiplicity-free compact SVD factors of dense `input` through the single
+/// entry.
+fn svd_compact_factors<E: tenet_dense::DenseExecutor + ?Sized>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, SU2FusionRule, f64>,
+) -> Result<
+    tenet_matrixalgebra::seam::SvdFactorsDyn<SU2FusionRule, f64>,
+    tenet_tensors::OperationError,
+> {
+    let source = BoundDynamicTensorRef::try_new(input.space(), input.data())?;
+    svd_compact_from_source::<MultiplicityFreeAdmissionMode, _, _, _, _>(
+        dense,
+        FactorSource::Dense(source),
+    )
+    .map(|(factors, _)| factors)
 }

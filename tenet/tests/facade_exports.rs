@@ -374,7 +374,6 @@ const TYPED: &[&str] = &[
     "TypedTensorProductDispatch",
     "TypedTensorRootDispatch",
     "TypedTensorSolveDispatch",
-    "TypedTensorSvdDispatch",
     "TypedTensorTraceDispatch",
     "TypedTensorTransformDispatch",
     "TypedTensorTwistDispatch",

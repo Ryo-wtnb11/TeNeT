@@ -391,7 +391,7 @@ mod factorize;
 pub use factorize::{
     FusionMode, TypedTensorEigDispatch, TypedTensorEighDispatch, TypedTensorExpDispatch,
     TypedTensorInvDispatch, TypedTensorNullDispatch, TypedTensorPinvDispatch,
-    TypedTensorPolarDispatch, TypedTensorSolveDispatch, TypedTensorSvdDispatch,
+    TypedTensorPolarDispatch, TypedTensorSolveDispatch,
 };
 mod checked_generic_contract;
 mod mode_dispatch;

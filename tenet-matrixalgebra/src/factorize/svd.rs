@@ -393,7 +393,7 @@ pub type SvdFactorsDyn<R, D> = (
 /// sector's magnitudes and write the permutation/phase factors directly into
 /// the dense factor layout. Compact and full SVD coincide on a diagonal.
 #[doc(hidden)]
-pub fn svd_compact_diagonal_factors_dyn<R, D>(
+pub(crate) fn svd_compact_diagonal_factors_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
 ) -> Result<SvdFactorsDyn<R, D>, OperationError>
@@ -504,7 +504,7 @@ fn compact_diagonal_svd_sector<D: FactorScalar>(values: &[D]) -> (Vec<D>, Vec<D>
 
 /// Checked-provider diagonal SVD factors, MAK `svd_full!(::DiagonalAlgorithm)`;
 /// outputs use the usual checked factor builder.
-fn svd_compact_diagonal_factors_dyn_checked_generic<R, D>(
+pub(super) fn svd_compact_diagonal_factors_dyn_checked_generic<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
 ) -> Result<CheckedCompactSvdFactorsWithSpectrum<R, D>, CheckedGenericFactorPlanError<R::Error>>
@@ -686,7 +686,7 @@ fn diagonal_full_svd_pairs<D: FactorScalar>(
     (pairs, singular_values)
 }
 
-pub fn svd_compact_factors_dyn<E, R, D>(
+pub(crate) fn svd_compact_factors_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<SvdFactorsDyn<R, D>, OperationError>
@@ -702,7 +702,7 @@ where
 /// if `A = U S Vh`, returns `(V, Uh, spectrum)` with the phase gauge applied
 /// to the final left factor `V`.
 #[doc(hidden)]
-pub fn svd_compact_adjoint_factors_dyn<E, R, D>(
+pub(crate) fn svd_compact_adjoint_factors_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<SvdFactorsDyn<R, D>, OperationError>
@@ -1449,7 +1449,7 @@ where
 
 /// Full-SVD numerical factors without publishing a dense `S` tensor.
 #[doc(hidden)]
-pub fn svd_full_factors_dyn<E, R, D>(
+pub(crate) fn svd_full_factors_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<SvdFullFactorsDyn<R, D>, OperationError>
@@ -1462,7 +1462,7 @@ where
 }
 
 #[doc(hidden)]
-pub fn svd_full_adjoint_factors_dyn<E, R, D>(
+pub(crate) fn svd_full_adjoint_factors_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<SvdFullFactorsDyn<R, D>, OperationError>
@@ -2536,44 +2536,69 @@ where
     })
 }
 
-/// Checked compact SVD factors and singular values of `source`, with the
-/// route that produced them.
+/// Compact SVD factors and singular values of `source` in fusion mode `M`,
+/// with the route that produced them; only dense storage leases an executor.
 #[doc(hidden)]
-pub fn svd_compact_checked_generic<L, E, R, D>(
+pub fn svd_compact_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
-) -> Routed<CheckedCompactSvdFactorsWithSpectrum<R, D>, R::Error>
+) -> Result<(SvdFactorsDyn<R, D>, FactorRoute), M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    factor_from_source(
-        lease,
-        source,
-        svd_compact_diagonal_factors_dyn_checked_generic,
-        svd_compact_factors_with_spectrum_dyn_checked_generic,
-    )
+    factor_from_source(lease, source, M::svd_compact_diagonal, M::svd_compact_dense)
 }
 
-/// Checked full SVD factors of `source` before choosing `S` storage, with the
-/// route that produced them.
+/// Compact SVD factors of the lazy adjoint of the dense `parent`, read in place,
+/// in fusion mode `M`.
 #[doc(hidden)]
-pub fn svd_full_checked_generic<L, E, R, D>(
+pub fn svd_compact_adjoint_from_parent<M, L, E, R, D>(
     lease: L,
-    source: FactorSource<'_, R, D>,
-) -> Routed<SvdFullFactorsDyn<R, D>, R::Error>
+    parent: BoundDynamicTensorRef<'_, R, D>,
+) -> Result<SvdFactorsDyn<R, D>, M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    factor_from_source(
-        lease,
-        source,
-        svd_full_diagonal_factors_dyn_checked_generic,
-        svd_full_factors_dyn_checked_generic,
-    )
+    lease.run(|dense| M::svd_compact_adjoint_dense(dense, &parent))
+}
+
+/// Full SVD factors and singular values of `source` in fusion mode `M`,
+/// with the route that produced them; only dense storage leases an executor.
+/// A multiplicity-free compact diagonal is refused here: that mode factors
+/// it through [`svd_compact_from_source`] (see
+/// [`FactorMode::SVD_FULL_DIAGONAL_IS_COMPACT`]).
+#[doc(hidden)]
+pub fn svd_full_from_source<M, L, E, R, D>(
+    lease: L,
+    source: FactorSource<'_, R, D>,
+) -> Result<(SvdFullFactorsDyn<R, D>, FactorRoute), M::Error>
+where
+    M: FactorMode<R>,
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    factor_from_source(lease, source, M::svd_full_diagonal, M::svd_full_dense)
+}
+
+/// Full SVD factors of the lazy adjoint of the dense `parent`, read in place,
+/// in fusion mode `M`.
+#[doc(hidden)]
+pub fn svd_full_adjoint_from_parent<M, L, E, R, D>(
+    lease: L,
+    parent: BoundDynamicTensorRef<'_, R, D>,
+) -> Result<SvdFullFactorsDyn<R, D>, M::Error>
+where
+    M: FactorMode<R>,
+    L: ExecutorLease<Executor = E>,
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    lease.run(|dense| M::svd_full_adjoint_dense(dense, &parent))
 }

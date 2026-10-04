@@ -173,8 +173,7 @@ pub use svd::{
     diagonal_bond_bound_space_generic_checked, diagonal_bond_bound_space_like,
     diagonal_bond_bound_space_on_source_checked_generic, diagonal_bond_data,
     rectangular_diagonal_bond_tensor, rectangular_diagonal_bond_tensor_generic_checked,
-    scale_axis_by_spectrum, scale_axis_by_spectrum_mapped, svd_compact_adjoint_factors_dyn,
-    svd_compact_checked_generic, svd_compact_diagonal_factors_dyn, svd_compact_dyn_checked_generic,
-    svd_compact_factors_dyn, svd_full_adjoint_factors_dyn, svd_full_checked_generic,
-    svd_full_factors_dyn, svd_vals_dyn, svd_vals_from_source, SvdFactorsDyn, SvdFullFactorsDyn,
+    scale_axis_by_spectrum, scale_axis_by_spectrum_mapped, svd_compact_adjoint_from_parent,
+    svd_compact_dyn_checked_generic, svd_compact_from_source, svd_full_adjoint_from_parent,
+    svd_full_from_source, svd_vals_dyn, svd_vals_from_source, SvdFactorsDyn, SvdFullFactorsDyn,
 };

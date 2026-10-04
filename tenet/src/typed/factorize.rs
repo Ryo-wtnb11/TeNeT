@@ -6,13 +6,12 @@ mod exp_solve;
 mod inverse;
 mod mode;
 mod polar_null;
-mod svd;
 
 use mode::{AdjointRule, FactorOp};
 pub use mode::{
     FusionMode, TypedTensorEigDispatch, TypedTensorEighDispatch, TypedTensorExpDispatch,
     TypedTensorInvDispatch, TypedTensorNullDispatch, TypedTensorPinvDispatch,
-    TypedTensorPolarDispatch, TypedTensorSolveDispatch, TypedTensorSvdDispatch,
+    TypedTensorPolarDispatch, TypedTensorSolveDispatch,
 };
 
 /// The runtime as the seam's executor lease: the checked entries lease a
@@ -101,7 +100,7 @@ where
                         .expect("materialize returns an owned body"),
                 )?)
             }
-            AdjointRule::Redirect => Err(internal_layout_error(
+            AdjointRule::Redirect | AdjointRule::AdjointSeam => Err(internal_layout_error(
                 "a redirected factorization must not read its own lazy input",
             )
             .into()),
@@ -197,6 +196,130 @@ where
         Ok(Lq {
             l: self.factor_output(l),
             q: self.factor_output(q),
+        })
+    }
+
+    /// The SVD factors `op` computes, with their route. Under
+    /// [`AdjointRule::AdjointSeam`] a lazy adjoint's dense parent is read in
+    /// place by `adjoint_stage`.
+    fn svd_factors<T>(
+        &self,
+        op: FactorOp,
+        stage: impl FnOnce(
+            RuntimeDense<'_>,
+            tenet_matrixalgebra::seam::FactorSource<'_, R, D>,
+        ) -> Result<
+            (T, tenet_matrixalgebra::seam::FactorRoute),
+            <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
+        >,
+        adjoint_stage: impl FnOnce(
+            RuntimeDense<'_>,
+            BoundDynamicTensorRef<'_, R, D>,
+        ) -> Result<
+            T,
+            <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::Error,
+        >,
+    ) -> Result<(T, tenet_matrixalgebra::seam::FactorRoute), TypedFacadeError<R>> {
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            if R::Mode::adjoint_rule(op) == AdjointRule::AdjointSeam {
+                let parent = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
+                    .map_err(Error::from)?;
+                let factors = adjoint_stage(RuntimeDense(&self.runtime), parent)
+                    .map_err(R::Mode::map_factor_error)?;
+                // A lazy adjoint's parent is dense by construction, so the
+                // spectrum bond follows the dense route (D3).
+                return Ok((factors, tenet_matrixalgebra::seam::FactorRoute::Dense));
+            }
+        }
+        let mut local = None;
+        let source = self.factor_input(op, &mut local)?;
+        stage(RuntimeDense(&self.runtime), source).map_err(R::Mode::map_factor_error)
+    }
+
+    /// The one body of compact SVD: `s` is a compact diagonal on the bond the
+    /// mode chooses for the route (D3, #1994).
+    fn factor_svd_compact(&self) -> Result<Svd<Self>, TypedFacadeError<R>>
+    where
+        D: FactorizationScalar,
+    {
+        let ((u, vh, mut spectrum), route) = self.svd_factors(
+            FactorOp::SvdCompact,
+            |lease, source| {
+                tenet_matrixalgebra::seam::svd_compact_from_source::<R::Mode, _, _, _, _>(
+                    lease, source,
+                )
+            },
+            |lease, parent| {
+                tenet_matrixalgebra::seam::svd_compact_adjoint_from_parent::<R::Mode, _, _, _, _>(
+                    lease, parent,
+                )
+            },
+        )?;
+        let space = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::spectrum_bond(
+            self.logical_space(),
+            route,
+            &spectrum,
+        )
+        .map_err(R::Mode::map_factor_error)?;
+        Ok(Svd {
+            u: wrap_factor_on(&self.runtime, u),
+            s: diagonal_factor_on_bound(&self.runtime, space, &mut spectrum, D::from_real),
+            vh: wrap_factor_on(&self.runtime, vh),
+        })
+    }
+
+    /// The one body of full SVD: `s` is compact only on the exact constructed
+    /// bond with an admitted layout, and dense (possibly rectangular)
+    /// otherwise.
+    fn factor_svd_full(&self) -> Result<Svd<Self>, TypedFacadeError<R>>
+    where
+        D: FactorizationScalar,
+    {
+        if <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::SVD_FULL_DIAGONAL_IS_COMPACT
+            && self.spectrum().is_some()
+        {
+            return self.factor_svd_compact();
+        }
+        let (factors, route) = self.svd_factors(
+            FactorOp::SvdFull,
+            |lease, source| {
+                tenet_matrixalgebra::seam::svd_full_from_source::<R::Mode, _, _, _, _>(
+                    lease, source,
+                )
+            },
+            |lease, parent| {
+                tenet_matrixalgebra::seam::svd_full_adjoint_from_parent::<R::Mode, _, _, _, _>(
+                    lease, parent,
+                )
+            },
+        )?;
+        let (u, vh, mut spectrum, row_dimensions, col_dimensions) = factors.into_parts();
+        if full_svd_compact_bond(&u, &vh, &spectrum) {
+            let space = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::spectrum_bond(
+                self.logical_space(),
+                route,
+                &spectrum,
+            )
+            .map_err(R::Mode::map_factor_error)?;
+            if full_svd_compact_layout(&space, &spectrum) {
+                return Ok(Svd {
+                    u: wrap_factor_on(&self.runtime, u),
+                    s: diagonal_factor_on_bound(&self.runtime, space, &mut spectrum, D::from_real),
+                    vh: wrap_factor_on(&self.runtime, vh),
+                });
+            }
+        }
+        let s = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::rectangular_spectrum_factor(
+            self.logical_space(),
+            &spectrum,
+            &row_dimensions,
+            &col_dimensions,
+        )
+        .map_err(R::Mode::map_factor_error)?;
+        Ok(Svd {
+            u: wrap_factor_on(&self.runtime, u),
+            s: wrap_factor_on(&self.runtime, s),
+            vh: wrap_factor_on(&self.runtime, vh),
         })
     }
 }

@@ -241,7 +241,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorSvdDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the compact singular-value decomposition
@@ -307,11 +307,7 @@ where
         rows: &[usize],
         cols: &[usize],
     ) -> Result<Svd<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_compact,
-        )
+        self.with_leg_roles(rows, cols, Self::factor_svd_compact)
     }
 
     /// Returns the full SVD `self = u * s * vh` with square outer factors.
@@ -341,11 +337,7 @@ where
         rows: &[usize],
         cols: &[usize],
     ) -> Result<Svd<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_full,
-        )
+        self.with_leg_roles(rows, cols, Self::factor_svd_full)
     }
 }
 
