@@ -609,6 +609,19 @@ fn typed_fz2_multiple_trace_terms_and_inactive_block_scale_beta_once() {
         TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
     )
     .unwrap();
+    // Replay pairs descriptor and fusion terms unchecked: the descriptor is
+    // compiled from the fusion terms, one entry per term, in order.
+    assert_eq!(
+        full_structure.descriptor().terms().len(),
+        full_structure.terms().len()
+    );
+    assert!(full_structure.paired_terms().all(|(term, fusion_term)| (
+        term.dst_block,
+        term.src_block
+    ) == (
+        fusion_term.dst_block(),
+        fusion_term.src_block()
+    )));
     let active_block = (0..canonical_dst.subblock_structure().block_count())
         .find(|&dst_block| {
             full_structure
