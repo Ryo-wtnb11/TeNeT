@@ -583,8 +583,9 @@ where
     /// # Errors
     ///
     /// In the Host's order, all before any device work: the braiding gate; the
-    /// Host's [`Error::InvalidArgument`] for a malformed pair list and its
-    /// errors for legs that are not mutually dual; [`Error::UnsupportedOnDevice`] for a
+    /// Host's [`Error::Operation`] with `InvalidAxisSet { tensor: "trace pairs" }`
+    /// for a malformed pair list and its errors for legs that are not mutually
+    /// dual; [`Error::UnsupportedOnDevice`] for a
     /// compact (diagonal) device payload, where the Host takes its
     /// compact-spectrum arm; the Host compile's own errors;
     /// [`Error::PlacementMismatch`]. A rejected call leaves the device and the

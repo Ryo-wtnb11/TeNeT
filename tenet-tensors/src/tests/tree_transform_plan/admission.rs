@@ -1264,10 +1264,10 @@ fn invalid_operation_precedes_malformed_simple_source_without_cache_mutation() {
 
     assert_eq!(
         error,
-        OperationError::Core(CoreError::InvalidPermutation {
-            permutation: vec![0, 0],
-            rank: 2,
-        })
+        OperationError::InvalidPermutation {
+            axes: vec![0, 0],
+            rank: 2
+        }
     );
     assert_eq!(tree_pair_operation_preparations(), 0);
     assert_eq!(cache.stats(), TreeTransformCacheStats::default());
@@ -1305,10 +1305,10 @@ fn invalid_operation_precedes_non_categorical_namespace_without_cache_mutation()
             .unwrap_err();
         assert_eq!(
             error,
-            OperationError::Core(CoreError::InvalidPermutation {
-                permutation: vec![0, 0],
-                rank: 2,
-            })
+            OperationError::InvalidPermutation {
+                axes: vec![0, 0],
+                rank: 2
+            }
         );
         assert_eq!(cache.stats(), TreeTransformCacheStats::default());
         assert!(cache.is_empty());

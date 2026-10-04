@@ -1308,10 +1308,10 @@ pub(crate) fn lower_adjoint_tree_transform_operation(
 
 pub(crate) fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), Error> {
     tenet_core::axes::validate_permutation(axes, rank).map_err(|_| {
-        tenet_tensors::OperationError::Core(tenet_core::CoreError::InvalidPermutation {
-            permutation: axes.to_vec(),
+        tenet_tensors::OperationError::InvalidPermutation {
+            axes: axes.to_vec(),
             rank,
-        })
+        }
         .into()
     })
 }

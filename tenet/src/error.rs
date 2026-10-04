@@ -166,35 +166,14 @@ impl From<RuntimeConfigError> for Error {
     }
 }
 
-/// The one facade variant of an axis misuse, whichever layer detected it
-/// (#1873): a permutation is [`OperationError::InvalidPermutation`], an axis
-/// subset (contracted legs, traced pairs) is [`OperationError::InvalidAxisSet`].
-///
-/// Why normalize here rather than at each producer: core, the operations
-/// crate and the facade each validate the axes they own, and the same misuse
-/// would otherwise surface wrapped differently by route.
-pub(crate) fn axis_misuse(err: &CoreError) -> Option<OperationError> {
-    match err {
-        CoreError::InvalidPermutation { permutation, rank } => {
-            Some(OperationError::InvalidPermutation {
-                axes: permutation.clone(),
-                rank: *rank,
-            })
-        }
-        CoreError::InvalidAxisSet { tensor, axes, rank } => Some(OperationError::InvalidAxisSet {
-            tensor,
-            axes: axes.clone(),
-            rank: *rank,
-        }),
-        _ => None,
-    }
-}
-
+/// A core error the facade reports as is, except an axis-list rejection,
+/// which is the operations crate's variant (`OperationError::from`, #1989):
+/// one facade variant per axis-misuse kind (#1873).
 impl From<CoreError> for Error {
     fn from(err: CoreError) -> Self {
-        match axis_misuse(&err) {
-            Some(axis) => Self::Operation(Box::new(axis)),
-            None => Self::Core(Box::new(err)),
+        match OperationError::from(err) {
+            OperationError::Core(err) => Self::Core(Box::new(err)),
+            axis => Self::Operation(Box::new(axis)),
         }
     }
 }
@@ -203,10 +182,6 @@ impl From<OperationError> for Error {
     fn from(err: OperationError) -> Self {
         match err {
             OperationError::FusionAlgebra(cause) => Self::FusionAlgebra(cause),
-            OperationError::Core(core) => match axis_misuse(&core) {
-                Some(axis) => Self::Operation(Box::new(axis)),
-                None => Self::Operation(Box::new(OperationError::Core(core))),
-            },
             other => Self::Operation(Box::new(other)),
         }
     }
