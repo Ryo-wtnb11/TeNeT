@@ -148,19 +148,18 @@ pub use matricize::{sector_matricization_diagnostic, SectorMatricizationDiagnost
 pub(crate) use null_space::{
     left_null, left_null_dyn_checked_generic, right_null, right_null_dyn_checked_generic,
 };
-pub use null_space::{
-    left_null_checked_generic, left_null_diagonal_dyn, left_null_dyn, right_null_checked_generic,
-    right_null_diagonal_dyn, right_null_dyn,
-};
+#[cfg(test)]
+pub(crate) use null_space::{left_null_dyn, right_null_dyn};
+pub use null_space::{left_null_from_source, right_null_from_source};
 #[cfg(test)]
 pub(crate) use polar::{
     left_polar, left_polar_dyn_checked_generic, right_polar, right_polar_dyn_checked_generic,
 };
 pub use polar::{
     left_polar_adjoint_parent_dyn, left_polar_adjoint_parent_dyn_checked_generic,
-    left_polar_checked_generic, left_polar_diagonal_spectra_dyn, left_polar_dyn,
+    left_polar_checked_generic, left_polar_dyn, left_polar_of_diagonal,
     right_polar_adjoint_parent_dyn, right_polar_adjoint_parent_dyn_checked_generic,
-    right_polar_checked_generic, right_polar_diagonal_spectra_dyn, right_polar_dyn,
+    right_polar_checked_generic, right_polar_dyn, right_polar_of_diagonal,
 };
 use polar::{validate_polar_direction, PolarDirection};
 pub use qr_lq::{

@@ -807,7 +807,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorNullDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedAdjointSpace<R> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns an orthonormal basis `n : codomain(self) <- W` for the numerical
@@ -853,11 +853,34 @@ where
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn left_null(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorNullDispatch<R, D>>::left_null,
-        )
+        self.with_leg_roles(rows, cols, |t| {
+            t.factor_null(
+                FactorOp::LeftNull,
+                |parent| {
+                    parent.factor_null(
+                        FactorOp::RightNull,
+                        |_| {
+                            // A lazy adjoint's parent is owned, so it is
+                            // never redirected again.
+                            Err(internal_layout_error(
+                                "an owned null-space parent was redirected",
+                            )
+                            .into())
+                        },
+                        |lease, source| {
+                            tenet_matrixalgebra::seam::right_null_from_source::<R::Mode, _, _, _, _>(
+                                lease, source,
+                            )
+                        },
+                    )
+                },
+                |lease, source| {
+                    tenet_matrixalgebra::seam::left_null_from_source::<R::Mode, _, _, _, _>(
+                        lease, source,
+                    )
+                },
+            )
+        })
     }
 
     /// Returns an orthonormal-row basis `n : W <- domain(self)` for the
@@ -875,18 +898,41 @@ where
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn right_null(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorNullDispatch<R, D>>::right_null,
-        )
+        self.with_leg_roles(rows, cols, |t| {
+            t.factor_null(
+                FactorOp::RightNull,
+                |parent| {
+                    parent.factor_null(
+                        FactorOp::LeftNull,
+                        |_| {
+                            // A lazy adjoint's parent is owned, so it is
+                            // never redirected again.
+                            Err(
+                                internal_layout_error("an owned null-space parent was redirected")
+                                    .into(),
+                            )
+                        },
+                        |lease, source| {
+                            tenet_matrixalgebra::seam::left_null_from_source::<R::Mode, _, _, _, _>(
+                                lease, source,
+                            )
+                        },
+                    )
+                },
+                |lease, source| {
+                    tenet_matrixalgebra::seam::right_null_from_source::<R::Mode, _, _, _, _>(
+                        lease, source,
+                    )
+                },
+            )
+        })
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorPolarDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: FactorizationScalar,
 {
     /// Returns the left polar decomposition `self = w * p` as a [`LeftPolar`].
@@ -926,11 +972,7 @@ where
         rows: &[usize],
         cols: &[usize],
     ) -> Result<LeftPolar<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorPolarDispatch<R, D>>::left_polar,
-        )
+        self.with_leg_roles(rows, cols, Self::factor_left_polar)
     }
 
     /// Returns the right polar decomposition `self = p * wh` as a
@@ -952,11 +994,7 @@ where
         rows: &[usize],
         cols: &[usize],
     ) -> Result<RightPolar<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(
-            rows,
-            cols,
-            <R::Mode as TypedTensorPolarDispatch<R, D>>::right_polar,
-        )
+        self.with_leg_roles(rows, cols, Self::factor_right_polar)
     }
 }
 

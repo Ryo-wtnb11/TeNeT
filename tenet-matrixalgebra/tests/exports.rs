@@ -213,15 +213,15 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              eigh_full_checked_generic eigh_full_diagonal_dyn eigh_full_dyn \
              eigh_vals_dyn eigh_vals_from_source \
              factor_isomorphic_checked_generic factor_output_space_checked_generic \
-             left_null_checked_generic left_null_diagonal_dyn left_null_dyn \
+             left_null_from_source \
              left_polar_adjoint_parent_dyn left_polar_adjoint_parent_dyn_checked_generic \
-             left_polar_checked_generic left_polar_diagonal_spectra_dyn left_polar_dyn \
+             left_polar_checked_generic left_polar_dyn left_polar_of_diagonal \
              lq_compact_from_source lq_full_from_source \
              qr_compact_from_source qr_full_from_source rectangular_diagonal_bond_tensor \
-             rectangular_diagonal_bond_tensor_generic_checked right_null_checked_generic \
-             right_null_diagonal_dyn right_null_dyn right_polar_adjoint_parent_dyn \
+             rectangular_diagonal_bond_tensor_generic_checked right_null_from_source \
+             right_polar_adjoint_parent_dyn \
              right_polar_adjoint_parent_dyn_checked_generic right_polar_checked_generic \
-             right_polar_diagonal_spectra_dyn right_polar_dyn scale_axis_by_spectrum_mapped \
+             right_polar_dyn right_polar_of_diagonal scale_axis_by_spectrum_mapped \
              svd_compact_adjoint_from_parent svd_compact_dyn_checked_generic \
              svd_compact_from_source svd_full_adjoint_from_parent svd_full_from_source \
              svd_vals_dyn svd_vals_from_source validate_endomorphism_region_stacking validate_hermitian_regions \
