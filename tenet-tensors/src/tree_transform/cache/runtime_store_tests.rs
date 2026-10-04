@@ -1002,3 +1002,48 @@ fn plan_built_across_a_clear_is_not_admitted() {
         .unwrap();
     assert_eq!(store.plan_info().entries(), 0);
 }
+
+#[test]
+fn shared_ledger_admits_an_entry_of_exactly_the_budget_and_bypasses_one_byte_more() {
+    // What (#1993): with no per-entry limit below the budget, an entry
+    // charged exactly the budget evicts what is retained and is itself
+    // retained; one charged a byte more bypasses retention (the ceiling).
+    let (key0, structure0, _) = fixture(50);
+    let (key1, structure1, _) = fixture(51);
+    let charge0 = RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&key0, &structure0);
+    let charge1 = RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&key1, &structure1);
+    assert_eq!(charge0, charge1, "premise: equal-size fixtures");
+
+    let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(4, charge1));
+    let store = RuntimeTreeTransformStore::<f64>::with_runtime_ledger(Arc::clone(&ledger));
+    store
+        .get_or_compile(key0.clone(), || Ok::<_, Infallible>(structure0))
+        .unwrap();
+    store
+        .get_or_compile(key1.clone(), || {
+            Ok::<_, Infallible>(Arc::clone(&structure1))
+        })
+        .unwrap();
+    let info = store.info();
+    assert_eq!(
+        (info.entries(), info.evictions(), info.admission_bypasses()),
+        (1, 1, 0)
+    );
+    assert_eq!(info.charged_payload_bytes(), charge1);
+    let hit = store
+        .get_or_compile(key1, || -> Result<_, Infallible> {
+            panic!("the exact-budget entry is retained")
+        })
+        .unwrap();
+    assert!(Arc::ptr_eq(&hit, &structure1));
+
+    let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(4, charge0 - 1));
+    let store = RuntimeTreeTransformStore::<f64>::with_runtime_ledger(Arc::clone(&ledger));
+    let (key0, structure0, _) = fixture(50);
+    store
+        .get_or_compile(key0, || Ok::<_, Infallible>(structure0))
+        .unwrap();
+    let info = store.info();
+    assert_eq!((info.entries(), info.admission_bypasses()), (0, 1));
+    assert_eq!(info.charged_payload_bytes(), 0);
+}
