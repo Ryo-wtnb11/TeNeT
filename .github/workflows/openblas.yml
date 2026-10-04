@@ -50,5 +50,5 @@ jobs:
       - uses: ./tenet/.github/actions/cargo-build-script-cache
         with:
           key: backend-openblas
-      - run: cargo check --workspace --all-targets --no-default-features --features blas-openblas
+      - run: cargo check --locked --workspace --all-targets --no-default-features --features blas-openblas
         working-directory: tenet
