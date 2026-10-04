@@ -253,8 +253,21 @@ fn parallel_owned_permute_allocates_like_the_serial_owned_path() {
     let pool = pool();
     let warm_parallel = pool.install(|| source_parallel.permute(&[1], &[2, 0]).unwrap());
     assert!(warm_serial.dense_data().unwrap() == warm_parallel.dense_data().unwrap());
+    // The replay's joins can make this worker wait. Under load its first
+    // Rayon sleeps lazily box the worker's OS lock primitives inside the
+    // window (#1964): at most three allocations per thread (64, 64 and 48 B
+    // observed on macOS), each made once. Four windows on the same worker
+    // therefore include one free of them, and the cleanest is the
+    // steady-state count; a per-call allocation would appear in all four.
+    // Why not more warm-up: nothing in Rayon's public API forces a worker to
+    // sleep.
     let (result_parallel, parallel_allocations, parallel_bytes, parallel_zeroed) =
-        pool.install(|| measure(|| source_parallel.permute(&[1], &[2, 0]).unwrap()));
+        pool.install(|| {
+            (0..4)
+                .map(|_| measure(|| source_parallel.permute(&[1], &[2, 0]).unwrap()))
+                .min_by_key(|&(_, calls, bytes, _)| (calls, bytes))
+                .unwrap()
+        });
     black_box(result_parallel.dense_data().unwrap());
 
     assert!(result_serial.dense_data().unwrap() == result_parallel.dense_data().unwrap());
