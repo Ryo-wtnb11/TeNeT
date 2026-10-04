@@ -331,43 +331,46 @@ where
         )?;
         let (mut direct_batch, mut direct_batch_alpha): (Vec<_>, Vec<_>) =
             direct_batch.into_iter().unzip();
-        let direct_batch_runs = if direct_batch_alpha.iter().all(|&alpha| alpha == C::one()) {
-            strided_batch_runs(&direct_batch)
-        } else {
+        let scaled = direct_batch_alpha.iter().any(|&alpha| alpha != C::one());
+        if scaled {
             // A scaled (twisted) plan: group the jobs by coefficient, in
-            // first-appearance order, so each coefficient is one contiguous
-            // batch, and partition runs per group.
-            let mut coefficients: Vec<C> = Vec::new();
-            for &alpha in &direct_batch_alpha {
-                if !coefficients.contains(&alpha) {
-                    coefficients.push(alpha);
-                }
-            }
-            let mut grouped: Vec<(Rank2GemmBatchJob, C)> = direct_batch
-                .iter()
-                .copied()
-                .zip(direct_batch_alpha.iter().copied())
-                .collect();
-            grouped.sort_by_key(|&(_, alpha)| {
-                coefficients
-                    .iter()
-                    .position(|&coefficient| coefficient == alpha)
-            });
-            (direct_batch, direct_batch_alpha) = grouped.into_iter().unzip();
-            let mut runs = Vec::new();
+            // first-appearance order and stably, so each coefficient is one
+            // contiguous batch; rotations in place, no scratch (a fermionic
+            // θ has two values, and the job count is the coupled sectors').
             let mut start = 0;
             while start < direct_batch.len() {
                 let coefficient = direct_batch_alpha[start];
-                let end = start
-                    + direct_batch_alpha[start..]
-                        .iter()
-                        .take_while(|&&alpha| alpha == coefficient)
-                        .count();
-                runs.extend(strided_batch_runs(&direct_batch[start..end]));
+                let mut end = start + 1;
+                for i in start + 1..direct_batch.len() {
+                    if direct_batch_alpha[i] == coefficient {
+                        direct_batch[end..=i].rotate_right(1);
+                        direct_batch_alpha[end..=i].rotate_right(1);
+                        end += 1;
+                    }
+                }
                 start = end;
             }
-            runs
-        };
+        }
+        let mut direct_batch_runs = strided_batch_runs(&direct_batch);
+        if scaled {
+            // A prefix of a same-shape constant-stride run is one too: split
+            // each run at a coefficient change so no run crosses one.
+            let (mut run, mut position) = (0, 0);
+            while run < direct_batch_runs.len() {
+                let len = direct_batch_runs[run];
+                let coefficient = direct_batch_alpha[position];
+                let same = direct_batch_alpha[position..position + len]
+                    .iter()
+                    .take_while(|&&alpha| alpha == coefficient)
+                    .count();
+                if same < len {
+                    direct_batch_runs[run] = same;
+                    direct_batch_runs.insert(run + 1, len - same);
+                }
+                position += direct_batch_runs[run];
+                run += 1;
+            }
+        }
         Ok(Some(Self {
             dst_structure: Arc::clone(dst_structure),
             lhs_structure: Arc::clone(lhs_storage_structure),
