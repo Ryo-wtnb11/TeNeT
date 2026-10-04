@@ -617,6 +617,7 @@ impl<R, D, S> TensorMap<R, D, S> {
         }
     }
 
+    #[cfg(feature = "cuda")]
     pub(super) fn dense_adjoint_view(&self) -> Result<Self, Error>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,

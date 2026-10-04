@@ -19,7 +19,7 @@ pub trait HostNetworkModeDispatch<R, D, S = Vec<D>>:
     host_mode_sealed::Sealed
     + TypedTensorModeDispatch<R>
     + TypedSpaceModeDispatch<R>
-    + TypedTensorAdjointDispatch<R, D>
+    + TypedAdjointSpace<R>
     + TypedTensorContractDispatch<R, D>
     + TypedTensorRootDispatch<R>
     + TypedTensorTransformDispatch<R, D>

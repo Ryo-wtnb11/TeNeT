@@ -327,10 +327,7 @@ pub use serialization::{
 
 // --- split leaf #1587: generated module wiring below ---
 mod scalar;
-use linear_ops::{
-    host_add_impl, host_axpby_into, host_scale_impl, require_destination_space,
-    unique_dense_destination,
-};
+use linear_ops::{host_axpby_into, require_destination_space, unique_dense_destination};
 pub(crate) use scalar::ScalarOps;
 pub use scalar::{AdvancedLinalgScalar, FactorizationScalar, TensorScalar};
 #[cfg(feature = "cuda")]
@@ -338,7 +335,7 @@ pub use scalar::{CudaFactorizationPayload, CudaPayload};
 mod numeric;
 pub(crate) use numeric::{
     absorb_compact_source, absorb_mapped, coupled_region_inner, coupled_region_weighted_sum,
-    multiplicity_free_dim, sector_regions, validate_norm_p, weighted_inner, weighted_trace,
+    multiplicity_free_dim, sector_regions, validate_norm_p, weighted_trace,
 };
 use numeric::{max_abs, pinv_seam_error, scaled_power};
 mod block_layout;
@@ -385,11 +382,10 @@ pub use generic_error::GenericTensorError;
 mod dispatch;
 use dispatch::{MultiplicityFreeContractExecution, MultiplicityFreeTransformExecution};
 pub use dispatch::{
-    TypedSpaceModeDispatch, TypedTensorAddScaleDispatch, TypedTensorAdjointDispatch,
-    TypedTensorConstructionDispatch, TypedTensorContractDispatch, TypedTensorFlipDispatch,
-    TypedTensorModeDispatch, TypedTensorProductDispatch, TypedTensorReductionDispatch,
-    TypedTensorRootDispatch, TypedTensorTraceDispatch, TypedTensorTransformDispatch,
-    TypedTensorTwistDispatch, TypedTruncationDispatch,
+    TypedAdjointSpace, TypedSpaceModeDispatch, TypedTensorConstructionDispatch,
+    TypedTensorContractDispatch, TypedTensorFlipDispatch, TypedTensorModeDispatch,
+    TypedTensorProductDispatch, TypedTensorRootDispatch, TypedTensorTraceDispatch,
+    TypedTensorTransformDispatch, TypedTensorTwistDispatch, TypedTruncationDispatch,
 };
 mod factorize;
 pub use factorize::{

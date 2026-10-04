@@ -35,6 +35,27 @@ fn checked_generic_reductions_cover_real_complex_dense_payloads() {
 }
 
 #[test]
+fn checked_generic_reductions_do_not_requery_the_admitted_fusion_style() {
+    // Admission fixed the Generic style; a provider whose answer changes
+    // afterwards is neither asked again nor able to drop the `dim` weights.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
+            (indices.iter().sum::<usize>() + 1) as f64
+        })
+        .unwrap();
+    let inner = source.inner(&source).unwrap();
+    let norm = source.norm(2.0).unwrap();
+    provider.style_queries.store(0, Ordering::Relaxed);
+    provider.invalid_style.store(true, Ordering::Relaxed);
+    assert_eq!(source.inner(&source).unwrap().to_bits(), inner.to_bits());
+    assert_eq!(source.norm(2.0).unwrap().to_bits(), norm.to_bits());
+    assert_eq!(provider.style_queries.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn checked_generic_host_add_scale_cover_real_and_complex_payloads() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));

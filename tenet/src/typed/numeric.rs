@@ -344,40 +344,6 @@ where
     .map_err(Error::from)
 }
 
-/// Quantum-dimension-weighted Frobenius inner product over the stored
-/// blocks: `sum_c dim(c) * <a_c, b_c>` with the first argument conjugated,
-/// matching TensorKit's `dot` (which conjugates its first argument). Real
-/// tensors produce an exactly-real result.
-pub(crate) fn weighted_inner<R, D>(
-    rule: &R,
-    structure: &BlockStructure,
-    nout: usize,
-    a: &[D],
-    b: &[D],
-) -> Result<Complex64, Error>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: ScalarOps,
-{
-    // Abelian (UniqueFusion) fast path: every `dim(c) == 1`, and the coupled
-    // buffer is a padding-free concatenation of the per-sector blocks, so the
-    // weighted per-block sum collapses to one whole-buffer conjugated dot —
-    // no `dim(c)` weights and no per-element odometer. Mirrors TensorKit's
-    // `inner(tx.data, ty.data)` / `norm(t.data)` UniqueFusion specialization
-    // (vectorinterface.jl:124, linalg.jl:277). Non-abelian keeps the weighted
-    // block loop below, where `dim(c) != 1`.
-    if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
-        let mut total = D::Wide::from_real(0.0);
-        for (&ai, &bi) in a.iter().zip(b) {
-            total = total + FactorScalar::adjoint(ai.widen()) * bi.widen();
-        }
-        return Ok(total.widen_complex());
-    }
-    coupled_region_inner(structure, nout, a, b, |coupled| {
-        multiplicity_free_dim(rule, coupled)
-    })
-}
-
 /// Quantum-dimension-weighted block trace of an endomorphism:
 /// `sum_c dim(c) * tr(b_c)`, matching TensorKit's `tr` (`linalg.jl`, the
 /// native `sum_c dim(c) * tr(block)`). Only fusion-tree blocks whose codomain
@@ -520,7 +486,7 @@ pub(super) fn max_propagating_nan(accumulator: f64, magnitude: f64) -> f64 {
 /// one dense payload: the weighted sum under TensorKit `_norm(blocks(t), p, 0)`
 /// (`linalg.jl:261-270`) for finite `p > 0`.
 ///
-/// Why no `UniqueFusion` whole-buffer fast path like [`weighted_inner`]'s: that
+/// Why no `UniqueFusion` whole-buffer fast path like `dense_weighted_inner`'s (`reduction_ops.rs`): that
 /// one exists to reach a single BLAS-shaped dot, and an entrywise `|x|^p`
 /// reduction has no such kernel to reach. The region walk is a partition of the
 /// same buffer, so the element count is identical either way.

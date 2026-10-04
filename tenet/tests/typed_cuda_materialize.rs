@@ -90,8 +90,8 @@ where
         + tenet::sector::CheckedFusionAlgebra
         + tenet::sector::SectorCodec
         + tenet::sector::TypedSectorAdmission,
-    R::Mode: tenet::typed::TypedTensorAdjointDispatch<R, D>
-        + tenet::typed::TypedTensorConstructionDispatch<R, D>,
+    R::Mode:
+        tenet::typed::TypedAdjointSpace<R> + tenet::typed::TypedTensorConstructionDispatch<R, D>,
     D: Bits + tenet::typed::CudaPayload,
 {
     assert!(host.subblock_count() >= 2, "{what}: multi-block fixture");
@@ -216,8 +216,8 @@ where
         + tenet::sector::CheckedFusionAlgebra
         + tenet::sector::SectorCodec
         + tenet::sector::TypedSectorAdmission,
-    R::Mode: tenet::typed::TypedTensorAdjointDispatch<R, D>
-        + tenet::typed::TypedTensorConstructionDispatch<R, D>,
+    R::Mode:
+        tenet::typed::TypedAdjointSpace<R> + tenet::typed::TypedTensorConstructionDispatch<R, D>,
     D: Bits + tenet::typed::CudaPayload,
 {
     let dual = leg.try_dual().unwrap();
