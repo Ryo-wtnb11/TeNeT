@@ -150,7 +150,7 @@ where
     ///
     /// That warm contract holds only while this Runtime's Host transform store
     /// admits the structure: with a tree-transform cache byte budget of zero,
-    /// or for a structure whose entry exceeds the store's per-entry limit, the
+    /// or for a structure whose entry exceeds that budget, the
     /// store hands back a fresh allocation per call and the device therefore
     /// re-uploads its coefficients per call.
     ///

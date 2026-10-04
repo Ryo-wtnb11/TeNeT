@@ -1203,8 +1203,9 @@ impl Runtime {
     /// Bounds: every tier is charged separately against the configured
     /// [`RuntimeBuilder::tree_transform_cache_byte_budget`] (64 MiB by
     /// default), so the three retain at most three times that budget. The
-    /// entry caps are 256 structures, 256 plans and 10⁴ groups; a single entry
-    /// above 8 MiB is never retained.
+    /// entry caps are 256 structures, 256 plans and 10⁴ groups; any entry that
+    /// fits the budget alone is retained, and one larger than the budget is
+    /// rebuilt per call.
     pub fn tree_transform_cache_info(&self) -> TreeTransformCacheInfo {
         let stores = &self.inner.tree_transform_stores;
         TreeTransformCacheInfo {

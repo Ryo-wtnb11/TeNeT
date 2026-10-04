@@ -331,22 +331,38 @@ fn copy_c_plan_allocations(rank: usize) -> [usize; 2] {
         assert!(resolution.is_dynamic_tree(), "rank {rank}");
         resolution
     });
+    // #1993: every structure this fixture builds is retained; the old 8 MiB
+    // per-entry limit bypassed the rank-5 transform and recompiled it per call.
+    for info in [store.info(), store.plan_info(), store.group_info()] {
+        assert_eq!(info.admission_bypasses(), 0, "rank {rank}: {info:?}");
+    }
     [copy_c, dynamic_tree]
 }
 
 #[test]
 fn warm_copy_c_planning_is_bounded_and_no_costlier_than_the_dynamic_tree() {
     let _serial = counting_alloc::serial();
-    for rank in [2, 3, 4] {
+    // Rank 6 is left out: its structures (a 111 MB complete HomSpace, a
+    // 249 MB transform) exceed the 64 MiB budgets, the documented ceiling
+    // above which a structure is rebuilt per call (#1993).
+    for rank in [2, 3, 4, 5] {
+        let complete_bypasses = tenet_core::complete_hom_space_structure_cache_info().bypasses();
         let [copy_c, dynamic_tree] = copy_c_plan_allocations(rank);
         eprintln!("rank {rank}: warm CopyC plan {copy_c}, DynamicTree ladder {dynamic_tree}");
         // What: device-eager CopyC planning stays a small bounded count once
-        // its structures are warm (9-10 at these ranks), and never above
-        // the DynamicTree compile it replaced for this contraction (19-20).
-        assert!(copy_c <= 12, "rank {rank}: {copy_c}");
+        // its structures are warm (9-10 through rank 4, 18 at rank 5 where
+        // rank-sized inline vectors spill), and never above the DynamicTree
+        // compile it replaced for this contraction. Rank 5 was 850,760
+        // before #1993.
+        assert!(copy_c <= 20, "rank {rank}: {copy_c}");
         assert!(
             copy_c <= dynamic_tree,
             "rank {rank}: {copy_c} > {dynamic_tree}"
+        );
+        assert_eq!(
+            tenet_core::complete_hom_space_structure_cache_info().bypasses(),
+            complete_bypasses,
+            "rank {rank}: a complete HomSpace structure bypassed the cache"
         );
     }
 }

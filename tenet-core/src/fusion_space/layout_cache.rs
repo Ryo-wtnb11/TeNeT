@@ -366,15 +366,21 @@ pub(crate) enum CompleteHomSpaceStructureLookup {
 
 /// Bounded FIFO owner for complete immutable multiplicity-free layouts.
 ///
-/// Memory tradeoff: retains up to 4 MiB of charged bytes process-wide. The
-/// byte budget is the binding bound; the 1024-entry cap only stops the count
-/// growing without bound when entries are very small. An entry above
-/// `max_entry_bytes` (about 39 % of the budget) is returned uncached, so one
-/// outlier can no longer evict the working set and hold the budget alone.
-/// Why not shrink `max_entry_bytes` as well: a smaller limit bypasses
-/// high-rank structures that are cached today, e.g. the 361,285-byte rank-7
-/// U(1) destination of `warm_contract_compile_allocations`; the larger budget,
-/// not a smaller entry limit, is what removes the monopolisation. The census of #1365
+/// Memory tradeoff: retains up to 64 MiB of charged bytes process-wide, the
+/// layout cache's and the tree-transform store's budget. The byte budget is
+/// the binding bound; the 1024-entry cap only stops the count growing without
+/// bound when entries are very small. Any entry that fits the budget alone is
+/// admitted, evicting the oldest admissions to make room, as TensorKit's
+/// `GlobalLRUCache` admits every `sectorstructure` (entry-count bound only,
+/// `caches.jl:19,162` @cfaa073); TeNeT keeps a byte bound on top. The ceiling:
+/// a single structure larger than the budget is returned uncached and
+/// rebuilt per call.
+///
+/// Why no per-entry limit below the budget (#1993): the 1,650,641-byte limit
+/// #1365 kept bypassed every rank-5 U(1) `V^5 ← V^5` contraction structure,
+/// so each warm call rebuilt it (35,889 allocations per derivation). The
+/// structure a caller is using is the one worth keeping; the budget, not an
+/// entry limit, is what bounds retained memory. The census of #1365
 /// (`benchmarks/history/complete-structure-census-2026-09-24.md`) measured
 /// entries of 2.6-47 KB and warm live sets of up to 53 structures and 301 KB
 /// in MPS sweeps and `tensor!` networks; a single eager op touches at most 3.
@@ -418,8 +424,7 @@ pub(crate) fn complete_hom_space_miss_observations() -> usize {
 }
 
 pub(crate) const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP: usize = 1024;
-pub(crate) const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET: usize = 4 * 1024 * 1024;
-pub(crate) const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES: usize = 1_650_641;
+pub(crate) const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 
 impl CompleteHomSpaceStructureCache {
     pub(crate) fn new(entry_capacity: usize, byte_budget: usize, max_entry_bytes: usize) -> Self {
@@ -637,7 +642,7 @@ pub(crate) fn complete_hom_space_structure_cache() -> &'static RwLock<CompleteHo
         RwLock::new(CompleteHomSpaceStructureCache::new(
             COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP,
             COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET,
-            COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES,
+            COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET,
         ))
     })
 }
