@@ -98,6 +98,34 @@ pub(crate) enum ContractRoute<C> {
     CopyC(Arc<CopyCRoute<C>>),
 }
 
+/// The planner's first rung: the canonical core over the parent buffers, or
+/// what its candidate walk learned for the rest of the planner.
+#[doc(hidden)]
+pub enum CoreRoute<C> {
+    Hit(StorageContractResolution<C>),
+    Miss(CoreMiss),
+}
+
+impl<C> CoreRoute<C> {
+    #[doc(hidden)]
+    pub fn hit(self) -> Option<StorageContractResolution<C>> {
+        match self {
+            Self::Hit(resolution) => Some(resolution),
+            Self::Miss(_) => None,
+        }
+    }
+}
+
+/// A canonical-core miss of one contraction request: the input of
+/// `plan_contract_beyond_core` for that same request, carrying whether the
+/// requested order had a twist-free zero-copy candidate, so the planner
+/// walks the requested order once.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct CoreMiss {
+    pub(crate) requested_zero_copy: bool,
+}
+
 /// The plans of a [`ContractRoute::CopyC`] route.
 #[doc(hidden)]
 #[derive(Debug)]
@@ -317,6 +345,7 @@ where
             FusionOperand::direct(rhs),
             axes,
             false,
+            &mut false,
             |core_lhs, core_rhs, core_axes, orientation| {
                 let (core_lhs, core_rhs) = (core_lhs.storage_space(), core_rhs.storage_space());
                 let Some(validated) =
@@ -437,6 +466,7 @@ where
         rhs,
         axes,
         false,
+        &mut false,
         |core_lhs, core_rhs, core_axes, orientation| {
             let preflight = CoreContractPreflight::compile_oriented(
                 rule,
@@ -468,6 +498,18 @@ impl<C> Resolution<C> {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// This thread's zero-copy candidate walks: the preflight-count probe.
+    static CANDIDATE_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Zero-copy candidate walks on this thread so far.
+#[cfg(test)]
+pub(crate) fn candidate_walks() -> usize {
+    CANDIDATE_WALKS.get()
+}
+
 /// Runs `compile` on the TensorKit `contract!` candidates
 /// (`_contract_candidates`: pairs sorted by lhs or by rhs keys, times A·B or
 /// B·A) that need no source or output materialization, in TensorKit's tie
@@ -492,6 +534,12 @@ impl<C> Resolution<C> {
 /// would under TensorKit's cost; when none compiles, the DynamicTree scorer
 /// runs unchanged. The checks here are axis and dual-flag comparisons only;
 /// `compile` runs the categorical preflight for a qualifying candidate.
+///
+/// `twist_free_seen` becomes true when some candidate passes the geometry
+/// checks with no fermionic twist on its core-right contracted legs: the
+/// question `zero_copy_contract_order_for_output_permute` asks of the
+/// requested order, answered by this walk so the planner walks it once.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_zero_copy_contract_candidates<'a, R, T>(
     rule: &R,
     dst_nout: usize,
@@ -499,6 +547,7 @@ pub(crate) fn try_zero_copy_contract_candidates<'a, R, T>(
     rhs: FusionOperand<'a>,
     axes: TensorContractSpec<'_>,
     twist_consumable: bool,
+    twist_free_seen: &mut bool,
     mut compile: impl FnMut(
         FusionOperand<'a>,
         FusionOperand<'a>,
@@ -509,6 +558,8 @@ pub(crate) fn try_zero_copy_contract_candidates<'a, R, T>(
 where
     R: MultiplicityFreeRigidSymbols,
 {
+    #[cfg(test)]
+    CANDIDATE_WALKS.set(CANDIDATE_WALKS.get() + 1);
     let (lhs_axes, rhs_axes) = (axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
     let contracted = lhs_axes.len();
     let (lhs_rank, rhs_rank) = (lhs.storage_space().rank(), rhs.storage_space().rank());
@@ -547,14 +598,14 @@ where
             {
                 continue;
             }
-            if fermionic
-                && !twist_consumable
+            let twisted = fermionic
                 && core_rhs_axes
                     .iter()
-                    .any(|&axis| right.external_axis_is_dual(axis) == Some(true))
-            {
+                    .any(|&axis| right.external_axis_is_dual(axis) == Some(true));
+            if twisted && !twist_consumable {
                 continue;
             }
+            *twist_free_seen |= !twisted;
             let core_axes = TensorContractSpec::new_with_conjugation(
                 core_lhs_axes,
                 core_rhs_axes,
@@ -747,6 +798,7 @@ pub(crate) fn try_compile_oriented_storage_contract_candidate_plan<R>(
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
+    twist_free_seen: &mut bool,
 ) -> Result<Option<ContractRoute<R::Scalar>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -759,6 +811,7 @@ where
         rhs,
         axes,
         true,
+        twist_free_seen,
         |core_lhs, core_rhs, core_axes, orientation| {
             let plan = try_compile_oriented_storage_contract_plan(
                 rule,
@@ -1008,6 +1061,28 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
 {
+    copy_c_order(rule, dst, lhs, rhs, lhs_axes, rhs_axes, output_axes, None)
+}
+
+/// [`zero_copy_contract_order_for_output_permute`] with the requested-order
+/// question already answered: `requested_zero_copy` is the
+/// `twist_free_seen` of the planner's core walk over the requested order,
+/// which therefore runs once (`None` walks it here).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn copy_c_order<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_axes: &[usize],
+    requested_zero_copy: Option<bool>,
+) -> Option<FusionContractOrientation>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
     let lhs_open = lhs.storage_space().rank().checked_sub(lhs_axes.len())?;
     let rhs_open = rhs.storage_space().rank().checked_sub(rhs_axes.len())?;
     let open = lhs_open + rhs_open;
@@ -1023,6 +1098,7 @@ where
                 rhs,
                 TensorContractSpec::new(lhs_axes, rhs_axes, output),
                 false,
+                &mut false,
                 |_, _, _, _| Ok(Some(())),
             ),
             Ok(Some(()))
@@ -1031,7 +1107,9 @@ where
     let requested = OutputAxisOrder::from_axes(output_axes);
     // The requested split is `dst`'s; only the temporaries below use the
     // default one.
-    if zero_copy(lhs, rhs, lhs_axes, rhs_axes, requested, dst.nout()) {
+    if requested_zero_copy
+        .unwrap_or_else(|| zero_copy(lhs, rhs, lhs_axes, rhs_axes, requested, dst.nout()))
+    {
         return None;
     }
     let identity = OutputAxisOrder::identity();

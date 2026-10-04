@@ -221,13 +221,14 @@ where
             rhs_operand,
             axes,
         )? {
-            Some(core) => core,
-            None => {
+            tenet_tensors::CoreRoute::Hit(core) => core,
+            tenet_tensors::CoreRoute::Miss(miss) => {
                 let mut lease = self.runtime.lease_context()?;
                 lease
                     .context()
                     .multiplicity_free_lane::<D>()?
                     .plan_contract_beyond_core(
+                        miss,
                         &dst_space,
                         lhs_space,
                         lhs_operand,
@@ -426,13 +427,14 @@ where
             rhs_operand,
             axes,
         )? {
-            Some(core) => core,
-            None => {
+            tenet_tensors::CoreRoute::Hit(core) => core,
+            tenet_tensors::CoreRoute::Miss(miss) => {
                 let mut lease = self.runtime.lease_context()?;
                 lease
                     .context()
                     .multiplicity_free_lane::<D>()?
                     .plan_contract_beyond_core(
+                        miss,
                         &execution_destination,
                         lhs_space,
                         lhs_operand,

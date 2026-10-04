@@ -30,9 +30,9 @@ mod contract_cases;
 
 use contract_cases::{
     blas_contract_oracle, dense_oracle, fermionic_blas_contract_oracle, fz2_tensorkit_loops,
-    lazy_cases, poisoned_destination, product_general, su2_bent, su2_reordered,
-    su2_structure_cases, u1_inactive_cases, u1_lhs_identity, u1_rank_five, u1_reordered,
-    u1_rhs_identity, Case, Payload, TwistRole,
+    lazy_cases, poisoned_destination, product_general, su2_bent, su2_core_form_lazy_cases,
+    su2_reordered, u1_inactive_cases, u1_lhs_identity, u1_rank_five, u1_reordered, u1_rhs_identity,
+    Case, Payload, TwistRole,
 };
 use num_complex::{Complex32, Complex64};
 use tenet::sector::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
@@ -77,7 +77,7 @@ fn every_fixture<D: Payload>() {
     for case in lazy_cases(&product_general::<D>(&runtime).lhs, "U(1) x SU(2) lazy") {
         check_blas(case);
     }
-    for case in su2_structure_cases::<D>(&runtime) {
+    for case in su2_core_form_lazy_cases::<D>(&runtime) {
         check_blas(case);
     }
 }
@@ -229,7 +229,7 @@ fn every_overwrite_fixture<D: Payload>() {
     for case in lazy_cases(&su2_reordered::<D>(&runtime).lhs, "SU(2) lazy") {
         check_overwrite(case);
     }
-    for case in su2_structure_cases::<D>(&runtime) {
+    for case in su2_core_form_lazy_cases::<D>(&runtime) {
         check_overwrite(case);
     }
     for_each_fermionic_fixture!(&runtime, D, check_overwrite_fermionic);

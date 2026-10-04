@@ -1511,6 +1511,7 @@ fn a_canonical_nonuniform_twist_leaves_the_device_core_route_for_dynamic_tree() 
     assert!(
         crate::try_compile_storage_contract_core_route(&dst, lhs, rhs, case.axes())
             .unwrap()
+            .hit()
             .is_none()
     );
     let resolution = Context::<f64>::default()
@@ -1640,10 +1641,11 @@ fn canonical_axes_keep_the_direct_core_route_and_others_compile_one_dynamic_tree
     assert!(!lazy.requires_source_twist());
 }
 
-/// The geometry of `tenet/tests/contract_cases::su2_structure_cases`: the
-/// Host resolves it to its dense `Structure` route, the storage compile
-/// entry to the prelowered `DynamicTree` artifact. Pinned so the device
-/// fixture cannot silently stop covering the Host-`Structure` class.
+/// The geometry of `tenet/tests/contract_cases::su2_core_form_lazy_cases`:
+/// the context's prelowered entry, which has no `copyC` predicate in front of
+/// it, resolves it to its dense `Structure` route, the storage compile entry
+/// to the prelowered `DynamicTree` artifact (typed eager and the planner take
+/// `copyC` there).
 #[test]
 fn a_self_dual_core_form_lazy_contraction_is_host_structure_and_device_dynamic_tree() {
     let provider = Arc::new(SU2FusionRule);
@@ -2282,4 +2284,489 @@ mod device {
         at::<f64>();
         at::<Complex64>();
     }
+}
+
+/// One route kind, the same for the planner and the Host ladder.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RouteKind {
+    Core,
+    CopyC,
+    Structure,
+    DynamicTree,
+}
+
+fn planner_route<R>(
+    dst: &BoundDynamicFusionMapSpace<R>,
+    (lhs_authority, lhs): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>),
+    (rhs_authority, rhs): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>),
+    (lhs_axes, rhs_axes, output): (&[usize], &[usize], &[usize]),
+) -> RouteKind
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet_core::CheckedFusionAlgebra
+        + crate::tree_transform::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    let resolution = Context::<f64>::default()
+        .plan_contract(
+            dst,
+            lhs_authority,
+            lhs,
+            rhs_authority,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output,
+        )
+        .unwrap();
+    if resolution.copy_c().is_some() {
+        RouteKind::CopyC
+    } else if resolution.is_dynamic_tree() {
+        RouteKind::DynamicTree
+    } else {
+        RouteKind::Core
+    }
+}
+
+/// The route today's Host eager contraction takes: the typed `copyC`
+/// predicate, then the owned (`compile_resolution`) or prelowered
+/// (`try_compile_oriented_canonical_core_resolution`,
+/// `compile_prelowered_resolution`) ladder, observed on a real execution.
+fn host_ladder_route<R>(
+    dst: &BoundDynamicFusionMapSpace<R>,
+    (lhs_authority, lhs): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>),
+    (rhs_authority, rhs): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>),
+    (lhs_axes, rhs_axes, output): (&[usize], &[usize], &[usize]),
+) -> RouteKind
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + crate::tree_transform::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    if crate::zero_copy_contract_order_for_output_permute(
+        dst.provider(),
+        dst.space(),
+        lhs,
+        rhs,
+        lhs_axes,
+        rhs_axes,
+        output,
+    )
+    .is_some()
+    {
+        return RouteKind::CopyC;
+    }
+    let lhs_data = host_data(lhs.storage_space(), 3);
+    let rhs_data = host_data(rhs.storage_space(), 4);
+    let mut out = vec![0.0; dst.space().required_len().unwrap()];
+    let mut context = Context::<f64>::default();
+    if lhs.storage_conjugate() || rhs.storage_conjugate() {
+        context
+            .tensorcontract_fusion_dyn_prelowered_into(
+                dst,
+                &mut out,
+                lhs,
+                &lhs_data,
+                rhs,
+                &rhs_data,
+                TensorContractSpec::new_with_conjugation(
+                    lhs_axes,
+                    rhs_axes,
+                    OutputAxisOrder::from_axes(output),
+                    lhs.storage_conjugate(),
+                    rhs.storage_conjugate(),
+                ),
+                1.0,
+                0.0,
+            )
+            .unwrap();
+    } else {
+        context
+            .tensorcontract_fusion_dyn_into(
+                dst,
+                &mut out,
+                lhs_authority,
+                &lhs_data,
+                rhs_authority,
+                &rhs_data,
+                TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::from_axes(output)),
+                1.0,
+                0.0,
+            )
+            .unwrap();
+    }
+    if context.last_resolution_is_core() {
+        RouteKind::Core
+    } else if context.last_resolution_is_structure() {
+        RouteKind::Structure
+    } else {
+        RouteKind::DynamicTree
+    }
+}
+
+fn owned_routes<R>(case: &Case<R>) -> (RouteKind, RouteKind)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet_core::CheckedFusionAlgebra
+        + crate::tree_transform::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    let dst = case.dst();
+    let lhs = (&case.lhs, FusionOperand::direct(case.lhs.space()));
+    let rhs = (&case.rhs, FusionOperand::direct(case.rhs.space()));
+    let axes = (
+        &case.lhs_axes[..],
+        &case.rhs_axes[..],
+        &case.output_axes[..],
+    );
+    (
+        host_ladder_route(&dst, lhs, rhs, axes),
+        planner_route(&dst, lhs, rhs, axes),
+    )
+}
+
+/// `lhs(v,v ← v,v) · rhs(v,v ← v,v)` on the given axes and output: the
+/// TensorKit `copyC` probes C1p/C2p and the zero-copy controls C1/C2.
+fn square_case<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+    provider: &Arc<R>,
+    leg: impl Fn() -> SectorLeg,
+    lhs_axes: [usize; 2],
+    rhs_axes: [usize; 2],
+    output_axes: [usize; 4],
+) -> Case<R> {
+    Case {
+        lhs: space(provider, vec![leg(), leg()], vec![leg(), leg()]),
+        rhs: space(provider, vec![leg(), leg()], vec![leg(), leg()]),
+        lhs_axes: lhs_axes.to_vec(),
+        rhs_axes: rhs_axes.to_vec(),
+        output_axes: output_axes.to_vec(),
+    }
+}
+
+/// #1858: the planner and the Host eager ladder take the same route on
+/// every bosonic fixture, owned and lazy, Core, CopyC and DynamicTree. The
+/// Host's dense `Structure` route needs core-form sources, which make
+/// `copyC` (cost `dim(C)`) no costlier than any DynamicTree candidate for a
+/// conjugated operand, so typed Host eager never reaches it. The one planned difference is the fermionic twist: where
+/// the twist is uniform within each RHS coupled-sector matrix the planner
+/// consumes it as per-job GEMM alpha (Core), where the Host ladder copies an
+/// operand to twist it (DynamicTree, as TensorKit's `blas_contract!`
+/// `tensoroperations.jl:399-429` @cfaa073 copies). Host eager adopts the
+/// planner's route in the second #1858 PR.
+#[test]
+fn the_planner_takes_the_host_ladders_route_except_the_uniform_twist() {
+    let u1 = Arc::new(U1FusionRule);
+    let su2 = Arc::new(SU2FusionRule);
+    let u1_v = || u1_leg(false);
+    let bosonic: Vec<(&str, (RouteKind, RouteKind), RouteKind)> = vec![
+        (
+            "U1 rank 5",
+            owned_routes(&u1_case()),
+            RouteKind::DynamicTree,
+        ),
+        ("SU2", owned_routes(&su2_case()), RouteKind::DynamicTree),
+        (
+            "SU2 rank 5",
+            owned_routes(&su2_rank5_case()),
+            RouteKind::DynamicTree,
+        ),
+        (
+            "U1 lhs identity",
+            owned_routes(&lhs_identity_case()),
+            RouteKind::DynamicTree,
+        ),
+        (
+            "U1 rhs identity",
+            owned_routes(&rhs_identity_case()),
+            RouteKind::DynamicTree,
+        ),
+        (
+            "U1 C0 (mul!)",
+            owned_routes(&square_case(&u1, u1_v, [2, 3], [0, 1], [0, 1, 2, 3])),
+            RouteKind::Core,
+        ),
+        (
+            "U1 C1 (sorted)",
+            owned_routes(&square_case(&u1, u1_v, [3, 2], [1, 0], [0, 1, 2, 3])),
+            RouteKind::Core,
+        ),
+        (
+            "U1 C2 (swapped)",
+            owned_routes(&square_case(&u1, u1_v, [0, 1], [2, 3], [2, 3, 0, 1])),
+            RouteKind::Core,
+        ),
+        (
+            "U1 C1p",
+            owned_routes(&square_case(&u1, u1_v, [3, 2], [1, 0], [1, 0, 3, 2])),
+            RouteKind::CopyC,
+        ),
+        (
+            "U1 C2p",
+            owned_routes(&square_case(&u1, u1_v, [0, 1], [2, 3], [3, 2, 1, 0])),
+            RouteKind::CopyC,
+        ),
+        (
+            "SU2 C1p",
+            owned_routes(&square_case(&su2, su2_leg, [3, 2], [1, 0], [1, 0, 3, 2])),
+            RouteKind::CopyC,
+        ),
+    ];
+    for (name, (host, planner), expected) in bosonic {
+        assert_eq!((host, planner), (expected, expected), "{name}");
+    }
+
+    // Lazy adjoints: the canonical lazy core, a lazy CopyC (L3p), a lazy
+    // DynamicTree, and the two self-dual core-form lazy contractions the
+    // Host resolves to `Structure`.
+    let x = space(&su2, vec![su2_leg(), su2_leg()], vec![su2_leg(), su2_leg()]);
+    let x_adjoint = x.adjoint_view().unwrap();
+    let rhs = space(&su2, vec![su2_leg(), su2_leg()], vec![su2_leg()]);
+    let lhs = space(&su2, vec![su2_leg()], vec![su2_leg(), su2_leg()]);
+    let y = space(&su2, vec![su2_leg()], vec![su2_leg(), su2_leg()]);
+    let y_adjoint = y.adjoint_view().unwrap();
+    let square = space(&su2, vec![su2_leg(), su2_leg()], vec![su2_leg(), su2_leg()]);
+    let p = space(&su2, vec![su2_leg(), su2_leg()], vec![su2_leg(), su2_leg()]);
+    let p_adjoint = p.adjoint_view().unwrap();
+    let u1_lhs = space(&u1, vec![u1_v(), u1_v()], vec![u1_v()]);
+    let u1_lhs_adjoint = u1_lhs.adjoint_view().unwrap();
+    let u1_rhs = space(&u1, vec![u1_v(), u1_v()], vec![u1_v()]);
+    type Lazy<'a> = (
+        &'a str,
+        &'a BoundDynamicFusionMapSpace<SU2FusionRule>,
+        FusionOperand<'a>,
+        &'a BoundDynamicFusionMapSpace<SU2FusionRule>,
+        FusionOperand<'a>,
+        Vec<usize>,
+        Vec<usize>,
+        Vec<usize>,
+        RouteKind,
+    );
+    // `tenet/tests/contract_cases::su2_core_form_lazy_cases` take `copyC`,
+    // the predicate preceding the Host ladder; contracting a codomain and a
+    // domain leg together leaves no zero-copy order, so DynamicTree.
+    let lazy: Vec<Lazy<'_>> = vec![
+        (
+            "SU2 core-form lazy lhs",
+            &x_adjoint,
+            FusionOperand::adjoint(x.space()),
+            &rhs,
+            FusionOperand::direct(rhs.space()),
+            vec![2, 3],
+            vec![0, 1],
+            vec![2, 0, 1],
+            RouteKind::CopyC,
+        ),
+        (
+            "SU2 core-form lazy rhs",
+            &lhs,
+            FusionOperand::direct(lhs.space()),
+            &y_adjoint,
+            FusionOperand::adjoint(y.space()),
+            vec![1, 2],
+            vec![0, 1],
+            vec![1, 0],
+            RouteKind::CopyC,
+        ),
+        (
+            "SU2 lazy DynamicTree (lhs, mixed sides)",
+            &x_adjoint,
+            FusionOperand::adjoint(x.space()),
+            &rhs,
+            FusionOperand::direct(rhs.space()),
+            vec![1, 3],
+            vec![2, 0],
+            vec![0, 1, 2],
+            RouteKind::DynamicTree,
+        ),
+        (
+            "SU2 lazy DynamicTree (rhs, mixed sides)",
+            &square,
+            FusionOperand::direct(square.space()),
+            &p_adjoint,
+            FusionOperand::adjoint(p.space()),
+            vec![0, 2],
+            vec![2, 0],
+            vec![0, 1, 2, 3],
+            RouteKind::DynamicTree,
+        ),
+        (
+            "SU2 L4 (lazy mul!)",
+            &p_adjoint,
+            FusionOperand::adjoint(p.space()),
+            &square,
+            FusionOperand::direct(square.space()),
+            vec![2, 3],
+            vec![0, 1],
+            vec![0, 1, 2, 3],
+            RouteKind::Core,
+        ),
+        (
+            "SU2 L3p (lazy copyC)",
+            &p_adjoint,
+            FusionOperand::adjoint(p.space()),
+            &square,
+            FusionOperand::direct(square.space()),
+            vec![3, 2],
+            vec![1, 0],
+            vec![1, 0, 2, 3],
+            RouteKind::CopyC,
+        ),
+    ];
+    for (name, lhs_authority, lhs, rhs_authority, rhs, lhs_axes, rhs_axes, output, expected) in lazy
+    {
+        let dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented(
+            lhs_authority,
+            lhs,
+            rhs_authority,
+            rhs,
+            &lhs_axes,
+            &rhs_axes,
+            OutputAxisOrder::from_axes(&output),
+            None,
+        )
+        .unwrap();
+        let operands = ((lhs_authority, lhs), (rhs_authority, rhs));
+        let axes = (&lhs_axes[..], &rhs_axes[..], &output[..]);
+        let host = host_ladder_route(&dst, operands.0, operands.1, axes);
+        let planner = planner_route(&dst, operands.0, operands.1, axes);
+        assert_eq!((host, planner), (expected, expected), "{name}");
+    }
+    let output = [3, 0, 1, 2];
+    let dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented(
+        &u1_lhs_adjoint,
+        FusionOperand::adjoint(u1_lhs.space()),
+        &u1_rhs,
+        FusionOperand::direct(u1_rhs.space()),
+        &[1],
+        &[0],
+        OutputAxisOrder::from_axes(&output),
+        None,
+    )
+    .unwrap();
+    let operands = (
+        (&u1_lhs_adjoint, FusionOperand::adjoint(u1_lhs.space())),
+        (&u1_rhs, FusionOperand::direct(u1_rhs.space())),
+    );
+    let axes = (&[1][..], &[0][..], &output[..]);
+    assert_eq!(
+        (
+            host_ladder_route(&dst, operands.0, operands.1, axes),
+            planner_route(&dst, operands.0, operands.1, axes),
+        ),
+        (RouteKind::DynamicTree, RouteKind::DynamicTree),
+        "U1 lazy DynamicTree"
+    );
+
+    // Fermionic: equal routes, except that a twisted contraction the planner
+    // serves with the scaled-twist core is DynamicTree on the Host ladder.
+    let mut differences = Vec::new();
+    for (name, case) in fermionic_cases() {
+        let (host, planner) = owned_routes(&case);
+
+        if host != planner {
+            assert_eq!(
+                (host, planner),
+                (RouteKind::DynamicTree, RouteKind::Core),
+                "{name}"
+            );
+            differences.push(name);
+        }
+    }
+    for (name, case) in fermionic_su2_cases() {
+        let (host, planner) = owned_routes(&case);
+
+        if host != planner {
+            assert_eq!(
+                (host, planner),
+                (RouteKind::DynamicTree, RouteKind::Core),
+                "{name}"
+            );
+            differences.push(name);
+        }
+    }
+    // The `mul!` form over one dual contracted leg: θ is the parity of the
+    // coupled sector, uniform within each RHS matrix.
+    let fu1 = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let fsu2 = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
+    let uniform = [
+        (
+            "fZ2xU1 uniform mul!",
+            owned_routes(&Case {
+                lhs: space(
+                    &fu1,
+                    vec![fermion_u1_leg(&fu1, false)],
+                    vec![fermion_u1_leg(&fu1, true)],
+                ),
+                rhs: space(
+                    &fu1,
+                    vec![fermion_u1_leg(&fu1, true)],
+                    vec![fermion_u1_leg(&fu1, false)],
+                ),
+                lhs_axes: vec![1],
+                rhs_axes: vec![0],
+                output_axes: vec![0, 1],
+            }),
+        ),
+        (
+            "fZ2xSU2 uniform mul!",
+            owned_routes(&Case {
+                lhs: space(
+                    &fsu2,
+                    vec![fermion_su2_leg(&fsu2, false)],
+                    vec![fermion_su2_leg(&fsu2, true)],
+                ),
+                rhs: space(
+                    &fsu2,
+                    vec![fermion_su2_leg(&fsu2, true)],
+                    vec![fermion_su2_leg(&fsu2, false)],
+                ),
+                lhs_axes: vec![1],
+                rhs_axes: vec![0],
+                output_axes: vec![0, 1],
+            }),
+        ),
+    ];
+    for (name, (host, planner)) in uniform {
+        assert_eq!(
+            (host, planner),
+            (RouteKind::DynamicTree, RouteKind::Core),
+            "{name}"
+        );
+        differences.push(name);
+    }
+    eprintln!("uniform-twist route changes: {differences:?}");
+    assert_eq!(
+        differences.len(),
+        2,
+        "only the uniform-twist fixtures differ"
+    );
+}
+
+/// #1858: the planner walks the requested order's zero-copy candidates once.
+/// Before, `copyC`'s predicate walked it again after the core rung missed.
+#[test]
+fn the_planner_walks_the_requested_order_once() {
+    let u1 = Arc::new(U1FusionRule);
+    let u1_v = || u1_leg(false);
+    let walks = |case: &Case<U1FusionRule>| {
+        let dst = case.dst();
+        let before = super::resolution::candidate_walks();
+        let route = planner_route(
+            &dst,
+            (&case.lhs, FusionOperand::direct(case.lhs.space())),
+            (&case.rhs, FusionOperand::direct(case.rhs.space())),
+            (&case.lhs_axes, &case.rhs_axes, &case.output_axes),
+        );
+        (route, super::resolution::candidate_walks() - before)
+    };
+    // Core: the requested order only.
+    assert_eq!(
+        walks(&square_case(&u1, u1_v, [3, 2], [1, 0], [0, 1, 2, 3])),
+        (RouteKind::Core, 1)
+    );
+    // CopyC: the requested order, the A·B default order (found), the
+    // temporary's own core. Four before #1858.
+    assert_eq!(
+        walks(&square_case(&u1, u1_v, [3, 2], [1, 0], [1, 0, 3, 2])),
+        (RouteKind::CopyC, 3)
+    );
+    // DynamicTree: the requested order and both default orders. Four before.
+    assert_eq!(walks(&u1_case()), (RouteKind::DynamicTree, 3));
 }

@@ -96,7 +96,10 @@ fn storage_ladder(
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
 ) -> StorageContractResolution<f64> {
-    match try_compile_storage_contract_core_route(dst, lhs, rhs, axes).unwrap() {
+    match try_compile_storage_contract_core_route(dst, lhs, rhs, axes)
+        .unwrap()
+        .hit()
+    {
         Some(core) => core,
         None => context
             .compile_storage_contract_dynamic_tree(dst, lhs, rhs, axes)
@@ -130,6 +133,7 @@ fn warm_compile_allocations(codomain: usize, domain: usize) -> [usize; 3] {
             TensorContractSpec::with_default_output_order(&lhs_domain, &square_codomain),
         )
         .unwrap()
+        .hit()
         .expect("canonical composition takes the core route")
     });
 
