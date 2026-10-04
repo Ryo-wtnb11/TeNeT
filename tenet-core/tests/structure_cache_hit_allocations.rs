@@ -1,41 +1,13 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::Arc;
 
 use tenet_core::{FusionTreeHomSpace, SU2FusionRule, SU2Irrep};
 
-struct CountingAllocator;
-
-thread_local! {
-    static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(ptr, layout, new_size) };
-        if !pointer.is_null() && COUNTING.get() {
-            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-        }
-        pointer
-    }
-}
+#[path = "../../tests/support/counting_alloc.rs"]
+mod counting_alloc;
 
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
 
 #[test]
 fn complete_structure_cache_hit_returns_canonical_arc_without_allocating() {
@@ -52,15 +24,14 @@ fn complete_structure_cache_hit_returns_canonical_arc_without_allocating() {
         .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
         .unwrap();
 
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    let second = black_box(&hom)
-        .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
-        .unwrap();
-    COUNTING.set(false);
+    let (second, allocs) = counting_alloc::measure(|| {
+        black_box(&hom)
+            .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
+            .unwrap()
+    });
 
     assert!(Arc::ptr_eq(&first, &second));
-    assert_eq!(ALLOCATIONS.get(), 0);
+    assert_eq!(allocs.calls, 0);
 }
 
 #[test]
@@ -76,11 +47,9 @@ fn warm_layout_cache_hit_builds_its_lookup_key_without_allocating() {
     );
     let first = hom.fusion_tree_keys(&SU2FusionRule);
 
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    let second = black_box(&hom).fusion_tree_keys(&SU2FusionRule);
-    COUNTING.set(false);
+    let (second, allocs) =
+        counting_alloc::measure(|| black_box(&hom).fusion_tree_keys(&SU2FusionRule));
 
     assert!(Arc::ptr_eq(&first, &second));
-    assert_eq!(ALLOCATIONS.get(), 0);
+    assert_eq!(allocs.calls, 0);
 }
