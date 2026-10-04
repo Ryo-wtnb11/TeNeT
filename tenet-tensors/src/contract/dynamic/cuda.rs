@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tenet_core::BlockStructure;
 use tenet_dense::{cuda_region_scale, CudaDenseContext, CudaRegion, CudaScalar};
 use tenet_operations::cuda::{CudaStorage, CudaStorageGemm};
+use tenet_operations::cuda_transform::CudaMemberZeroRegions;
 use tenet_operations::{CudaTreeTransformDestination, CudaTreeTransformExecutor};
 
 use super::DynamicTreeExecutionArtifact;
@@ -231,7 +232,10 @@ where
         StorageContractRoute::Core(plan) | StorageContractRoute::SwappedCore(plan) => {
             // Converted before the first submission, like every other check.
             let regions = if direct_regions_need_beta(init) {
-                fill_inactive_regions(&mut scratch.zero_regions, plan)?
+                CudaMemberZeroRegions::fill_single(
+                    &mut scratch.zero_regions,
+                    plan.inactive_destination_regions(),
+                )?
             } else {
                 &[][..]
             };
@@ -338,7 +342,10 @@ where
         zero_regions: region_scratch,
     } = scratch;
     let core_zero_regions = if artifact.core_dst.is_some() || direct_regions_need_beta(init) {
-        fill_inactive_regions(region_scratch, artifact.block_plan())?
+        CudaMemberZeroRegions::fill_single(
+            region_scratch,
+            artifact.block_plan().inactive_destination_regions(),
+        )?
     } else {
         &[]
     };
@@ -463,37 +470,4 @@ where
         }
     }
     Ok(())
-}
-
-/// The core plan's inactive destination blocks as device regions: the exact
-/// set a retained core-destination buffer must zero. Host `execute_raw` applies
-/// the same strong-zero rule when beta is zero. Writes the regions in place.
-fn fill_inactive_regions<'a, C>(
-    regions: &'a mut Vec<CudaRegion>,
-    plan: &tenet_operations::FusionBlockContractPlan<C>,
-) -> Result<&'a [CudaRegion], OperationError>
-where
-    C: Copy + PartialEq + num_traits::One,
-{
-    let layouts = plan.inactive_destination_regions();
-    regions.truncate(layouts.len());
-    for (index, layout) in layouts.iter().enumerate() {
-        let block = &layout.block;
-        if block.offset < 0 || block.strides.iter().any(|&stride| stride < 0) {
-            return Err(inactive_region_unsupported());
-        }
-        // Checked non-negative just above, so the casts are exact.
-        let strides = block.strides.iter().map(|&stride| stride as usize);
-        let offset = block.offset as usize;
-        match regions.get_mut(index) {
-            Some(region) => region
-                .assign(&block.shape, strides, offset)
-                .map_err(OperationError::Dense)?,
-            None => regions.push(
-                CudaRegion::new(block.shape.clone(), strides.collect(), offset)
-                    .map_err(OperationError::Dense)?,
-            ),
-        }
-    }
-    Ok(regions)
 }

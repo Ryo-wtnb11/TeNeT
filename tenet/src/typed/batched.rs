@@ -642,17 +642,10 @@ where
 impl<R, D, S> ComposeWorkspace<R, D, S> {
     #[cfg(feature = "cuda")]
     fn reserve_plan_entries(&mut self, plan: &FusionBlockContractPlan<f64>) -> Result<(), Error> {
-        let gemms = plan.distinct_direct_gemm_shapes();
-        let fills = plan
-            .inactive_destination_regions()
-            .iter()
-            .map(|layout| (&layout.block.shape, &layout.block.strides))
-            .collect::<std::collections::HashSet<_>>()
-            .len();
         self.device.reserved_plan_entries = self
             .runtime
             .lease_cuda()?
-            .reserve_plan_entries(gemms + fills)
+            .reserve_plan_entries(plan.cuda_direct_plan_entries())
             .map_err(tenet_operations::OperationError::Dense)?;
         Ok(())
     }

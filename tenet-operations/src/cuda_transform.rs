@@ -40,6 +40,7 @@ use crate::cuda_transform_plan::{
     compile_device_plan, DeviceMoveSpec, DeviceTransformPlan, PlanSignatures, StructureCache,
     StructureKey, DEFAULT_STRUCTURE_CACHE_ENTRIES,
 };
+use crate::fusion_replay::{FusionScaleBlockLayout, FusionStridedBlockLayout};
 use crate::opaque_admission::{
     validate_stage_a, validate_stage_c, AllocationIdentity, CoefficientReadiness, ContextIdentity,
     ExecutorSnapshot, StorageDomain, StorageRegion, StorageSnapshot, WorkspaceSnapshot,
@@ -48,6 +49,129 @@ use crate::task_view::TreeTransformTaskView;
 use crate::{
     OperationError, RecouplingCoefficientAction, TreeTransformBlock, TreeTransformStructure,
 };
+
+/// A direct core's inactive destination blocks as device zero regions: the
+/// one conversion from host block layouts that the eager, member and
+/// prepared CUDA contractions share (#1776). A device region's strides and
+/// offset are unsigned, so a negatively strided block is rejected.
+#[doc(hidden)]
+pub struct CudaMemberZeroRegions {
+    regions: Vec<CudaRegion>,
+    max_zero_len: usize,
+}
+
+impl CudaMemberZeroRegions {
+    /// The blocks over a `members`-member stack: each region gains a trailing
+    /// member axis of stride `member_len` and is validated within the stack
+    /// and as a destination.
+    pub fn prepare(
+        layouts: &[FusionScaleBlockLayout],
+        member_len: usize,
+        members: usize,
+    ) -> Result<Self, OperationError> {
+        let total = member_len
+            .checked_mul(members)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let mut regions = Vec::with_capacity(layouts.len());
+        let mut max_zero_len = 0;
+        for layout in layouts {
+            let block = &layout.block;
+            let (strides, offset) = unsigned_zero_layout(block)?;
+            let mut dims = block.shape.clone();
+            dims.push(members);
+            let mut strides: Vec<usize> = strides.collect();
+            strides.push(member_len);
+            let region = CudaRegion::new(dims, strides, offset).map_err(OperationError::Dense)?;
+            region
+                .validate_within(total)
+                .map_err(OperationError::Dense)?;
+            region
+                .validate_as_destination("CUDA member contraction zero fill")
+                .map_err(OperationError::Dense)?;
+            max_zero_len = max_zero_len.max(block.shape.iter().product::<usize>());
+            regions.push(region);
+        }
+        Ok(Self {
+            regions,
+            max_zero_len,
+        })
+    }
+
+    /// The single-tensor (B = 1) case of [`Self::prepare`], without the
+    /// member axis, written into `regions` in place. Why not `prepare`: an
+    /// eager replay re-derives its regions every call, so it reuses one
+    /// vector's allocations instead of building a new one.
+    pub fn fill_single<'a>(
+        regions: &'a mut Vec<CudaRegion>,
+        layouts: &[FusionScaleBlockLayout],
+    ) -> Result<&'a [CudaRegion], OperationError> {
+        regions.truncate(layouts.len());
+        for (index, layout) in layouts.iter().enumerate() {
+            let block = &layout.block;
+            let (strides, offset) = unsigned_zero_layout(block)?;
+            match regions.get_mut(index) {
+                Some(region) => region
+                    .assign(&block.shape, strides, offset)
+                    .map_err(OperationError::Dense)?,
+                None => regions.push(
+                    CudaRegion::new(block.shape.clone(), strides.collect(), offset)
+                        .map_err(OperationError::Dense)?,
+                ),
+            }
+        }
+        Ok(regions)
+    }
+
+    pub fn regions(&self) -> &[CudaRegion] {
+        &self.regions
+    }
+
+    pub fn into_regions(self) -> Vec<CudaRegion> {
+        self.regions
+    }
+
+    /// Elements of the largest block, before the member axis.
+    pub fn max_zero_len(&self) -> usize {
+        self.max_zero_len
+    }
+
+    /// Sizes the dtype's zero template for the largest block over `members`
+    /// members, and the ones template when any region exists, so the fills
+    /// upload nothing.
+    pub fn reserve_templates<D: CudaScalar>(
+        &self,
+        ctx: &mut CudaDenseContext,
+        members: usize,
+    ) -> Result<(), OperationError> {
+        ctx.reserve_zero_template::<D>(
+            self.max_zero_len
+                .checked_mul(members)
+                .ok_or(OperationError::ElementCountOverflow)?,
+        )
+        .map_err(OperationError::Dense)?;
+        if !self.regions.is_empty() {
+            ctx.reserve_ones_template::<D>(1)
+                .map_err(OperationError::Dense)?;
+        }
+        Ok(())
+    }
+}
+
+/// A block's strides and offset as a device region's unsigned ones.
+fn unsigned_zero_layout(
+    block: &FusionStridedBlockLayout,
+) -> Result<(impl Iterator<Item = usize> + '_, usize), OperationError> {
+    if block.offset < 0 || block.strides.iter().any(|&stride| stride < 0) {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "device contraction cannot zero a negatively strided destination block",
+        });
+    }
+    // Checked non-negative just above, so the casts are exact.
+    Ok((
+        block.strides.iter().map(|&stride| stride as usize),
+        block.offset as usize,
+    ))
+}
 
 /// The validated B-appended views of a nonzero-Single CopyC output transform.
 /// No tensor payload or backend handle is retained here.
@@ -1525,5 +1649,78 @@ fn empty_workspace_snapshot(executor: ExecutorSnapshot) -> StorageSnapshot {
         placement: executor.placement,
         context: executor.context,
         region: StorageRegion::Empty,
+    }
+}
+
+#[cfg(test)]
+mod zero_region_tests {
+    use super::*;
+
+    fn layout(shape: &[usize], strides: &[isize], offset: isize) -> FusionScaleBlockLayout {
+        FusionScaleBlockLayout {
+            block: FusionStridedBlockLayout {
+                shape: shape.to_vec(),
+                strides: strides.to_vec(),
+                offset,
+            },
+        }
+    }
+
+    #[test]
+    fn member_zero_regions_append_the_member_axis_and_track_the_largest_block() {
+        // What: each inactive block gains a trailing member axis of stride
+        // member_len, keeps its own strides and offset, and the largest block
+        // (before the member axis) sizes the zero template. No device needed.
+        let layouts = [layout(&[2, 3], &[1, 2], 4), layout(&[5], &[1], 10)];
+        let zeros = CudaMemberZeroRegions::prepare(&layouts, 16, 3).unwrap();
+        let regions: Vec<_> = zeros
+            .regions()
+            .iter()
+            .map(|region| {
+                (
+                    region.dims().to_vec(),
+                    region.strides().to_vec(),
+                    region.offset(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            regions,
+            vec![
+                (vec![2, 3, 3], vec![1, 2, 16], 4),
+                (vec![5, 3], vec![1, 16], 10),
+            ]
+        );
+        assert_eq!(zeros.max_zero_len(), 6);
+    }
+
+    #[test]
+    fn single_zero_regions_are_the_member_free_case_written_in_place() {
+        // What: the single-tensor fill yields the same blocks without the
+        // member axis and reuses (truncates) the caller's vector.
+        let layouts = [layout(&[2, 3], &[1, 2], 4)];
+        let mut regions = vec![CudaRegion::packed(&[7], 0).unwrap(); 3];
+        let filled = CudaMemberZeroRegions::fill_single(&mut regions, &layouts).unwrap();
+        assert_eq!(filled.len(), 1);
+        assert_eq!(filled[0].dims(), &[2, 3]);
+        assert_eq!(filled[0].strides(), &[1, 2]);
+        assert_eq!(filled[0].offset(), 4);
+    }
+
+    #[test]
+    fn zero_regions_reject_negative_strides_and_out_of_stack_blocks() {
+        // What: a negatively strided block has no device region, and a block
+        // reaching past its member slot is rejected before any device work.
+        for layouts in [vec![layout(&[2], &[-1], 4)], vec![layout(&[2], &[1], -1)]] {
+            assert!(matches!(
+                CudaMemberZeroRegions::prepare(&layouts, 8, 2),
+                Err(OperationError::UnsupportedTensorContractScope { .. })
+            ));
+            assert!(matches!(
+                CudaMemberZeroRegions::fill_single(&mut Vec::new(), &layouts),
+                Err(OperationError::UnsupportedTensorContractScope { .. })
+            ));
+        }
+        assert!(CudaMemberZeroRegions::prepare(&[layout(&[4], &[1], 6)], 8, 2).is_err());
     }
 }
