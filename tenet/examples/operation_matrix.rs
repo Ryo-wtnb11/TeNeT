@@ -33,7 +33,7 @@ use tenet_core::{
 };
 use tenet_dense::strided_batch_runs;
 use tenet_matrixalgebra::seam::{
-    eig_full_checked_generic, lq_compact_from_source, lq_full_from_source, qr_compact_from_source,
+    eig_full_from_source, lq_compact_from_source, lq_full_from_source, qr_compact_from_source,
     qr_full_from_source, svd_compact_dyn_checked_generic, CheckedGenericFactorPlanError,
     EigFullDyn, FactorSource,
 };
@@ -3868,5 +3868,9 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    eig_full_checked_generic(dense, dense_source(input)).map(|(eig, _)| eig)
+    eig_full_from_source::<tenet::sector::CheckedGenericAdmissionMode, _, _, _, _>(
+        dense,
+        dense_source(input),
+    )
+    .map(|(eig, _)| eig)
 }

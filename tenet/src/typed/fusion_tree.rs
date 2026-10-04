@@ -629,10 +629,10 @@ pub(super) fn spectra_disagree() -> Error {
     Error::InvalidArgument("equal bond spaces carry incompatible compact spectra".to_string())
 }
 
-/// [`TensorMap::diagonal_factor`]'s body, as a free function so the
-/// `eig_*` family can build a `TensorMap<R, D::Eig>` from a `TensorMap<R, D>`.
-/// The payload type of a factor need not be the payload type of the tensor it
-/// came from, and an inherent method cannot say that.
+/// Test helper: a compact diagonal factor on a fresh multiplicity-free bond
+/// derived from `authority`, whose payload type may differ from the tensor it
+/// came from (the factorizations build theirs from `FactorMode::spectrum_bond`
+/// and [`diagonal_factor_on_bound`]).
 ///
 /// Borrowed rather than consumed, and filled from a slice rather than by
 /// `into_iter().collect()`: the standard library's in-place collect reuses the
@@ -640,6 +640,7 @@ pub(super) fn spectra_disagree() -> Error {
 /// the spectrum made the number of buffers a spectrum factor costs depend on
 /// the payload dtype — free for `f64`, one `Vec<E>` per coupled sector for
 /// `f32`, `Complex32` and `Complex64` (#1337).
+#[cfg(test)]
 pub(super) fn diagonal_factor_on<R, E, V>(
     runtime: &Runtime,
     authority: &BoundDynamicFusionMapSpace<R>,
@@ -651,50 +652,6 @@ where
     V: Copy,
 {
     let space = tenet_matrixalgebra::seam::diagonal_bond_bound_space_like(authority, spectrum)?;
-    Ok(diagonal_factor_on_bound(
-        runtime, space, spectrum, to_scalar,
-    ))
-}
-
-/// [`diagonal_factor_on`] for the checked-generic providers, and borrowing for
-/// the same reason. It used to deep-copy the spectrum just to sort it; every
-/// caller owns the spectrum as a local and re-sorts its public copy by decoded
-/// label afterwards, so sorting in place is free and the copy was one `Vec<V>`
-/// per coupled sector that nothing read.
-pub(super) fn diagonal_factor_on_checked<R, E, V>(
-    runtime: &Runtime,
-    provider: Arc<R>,
-    spectrum: &mut [tenet_matrixalgebra::SectorSpectrum<V>],
-    to_scalar: impl Fn(V) -> E,
-) -> Result<TensorMap<R, E>, CheckedGenericFactorPlanError<R::Error>>
-where
-    R: CheckedGenericFusion,
-    E: TensorScalar,
-    V: Copy,
-{
-    let space =
-        tenet_matrixalgebra::seam::diagonal_bond_bound_space_generic_checked(provider, spectrum)?;
-    Ok(diagonal_factor_on_bound(
-        runtime, space, spectrum, to_scalar,
-    ))
-}
-
-/// [`diagonal_factor_on_checked`] for a factor of the compact diagonal
-/// `source`: its bond reuses `source`'s space when it is the same bond.
-pub(super) fn diagonal_factor_on_source_checked<R, E, V>(
-    runtime: &Runtime,
-    source: &BoundDynamicFusionMapSpace<R>,
-    spectrum: &mut [tenet_matrixalgebra::SectorSpectrum<V>],
-    to_scalar: impl Fn(V) -> E,
-) -> Result<TensorMap<R, E>, CheckedGenericFactorPlanError<R::Error>>
-where
-    R: CheckedGenericFusion,
-    E: TensorScalar,
-    V: Copy,
-{
-    let space = tenet_matrixalgebra::seam::diagonal_bond_bound_space_on_source_checked_generic(
-        source, spectrum,
-    )?;
     Ok(diagonal_factor_on_bound(
         runtime, space, spectrum, to_scalar,
     ))

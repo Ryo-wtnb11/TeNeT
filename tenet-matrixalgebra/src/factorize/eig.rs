@@ -272,8 +272,7 @@ where
 /// Forms the full eigenbasis of an owned compact diagonal directly, MAK
 /// `eigh_full!(::Diagonal, …, ::DiagonalAlgorithm)` in TeNeT's eigenvalue
 /// order.
-#[doc(hidden)]
-pub fn eigh_full_diagonal_dyn<R, D>(
+pub(super) fn eigh_full_diagonal_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
 ) -> Result<EighFullDyn<R, D>, OperationError>
@@ -325,7 +324,7 @@ fn compact_diagonal_eigh_sector<D: FactorScalar>(values: &[D], vectors: &mut [D]
 
 /// Checked-provider full eigenbasis of an owned compact diagonal; output
 /// uses the checked factor builder over the bond's region geometry.
-fn eigh_full_diagonal_dyn_checked_generic<R, D>(
+pub(super) fn eigh_full_diagonal_dyn_checked_generic<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
 ) -> Result<EighFullDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
@@ -513,8 +512,7 @@ where
 }
 
 /// Forms the full eigenbasis of an admitted owned compact diagonal directly.
-#[doc(hidden)]
-pub fn eig_full_diagonal_dyn<R, D>(
+pub(super) fn eig_full_diagonal_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
 ) -> Result<EigFullDyn<R, D>, OperationError>
@@ -583,7 +581,7 @@ fn compact_diagonal_eig_sector<D: FactorScalar>(
 /// output uses the checked factor builder over the bond's region geometry.
 /// The dense route's eigenvector `svd_vals` rank gate is not run: every
 /// singular value of a permutation is 1, so the gate cannot fail.
-fn eig_full_diagonal_dyn_checked_generic<R, D>(
+pub(super) fn eig_full_diagonal_dyn_checked_generic<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
 ) -> Result<EigFullDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
@@ -1633,46 +1631,36 @@ where
     .map(|(values, _)| values)
 }
 
-/// Checked Hermitian eigendecomposition of `source`, with the route that
-/// produced it.
+/// Hermitian eigendecomposition of `source` in fusion mode `M`, with the route that produced it;
+/// only dense storage leases an executor.
 #[doc(hidden)]
-pub fn eigh_full_checked_generic<L, E, R, D>(
+pub fn eigh_full_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
-) -> Routed<EighFullDyn<R, D>, R::Error>
+) -> Result<(EighFullDyn<R, D>, FactorRoute), M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    factor_from_source(
-        lease,
-        source,
-        eigh_full_diagonal_dyn_checked_generic,
-        eigh_full_dyn_checked_generic,
-    )
+    factor_from_source(lease, source, M::eigh_full_diagonal, M::eigh_full_dense)
 }
 
-/// Checked general eigendecomposition of `source`, with the route that
-/// produced it.
+/// General eigendecomposition of `source` in fusion mode `M`, with the route that produced it;
+/// only dense storage leases an executor.
 #[doc(hidden)]
-pub fn eig_full_checked_generic<L, E, R, D>(
+pub fn eig_full_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
-) -> Routed<EigFullDyn<R, D>, R::Error>
+) -> Result<(EigFullDyn<R, D>, FactorRoute), M::Error>
 where
+    M: FactorMode<R>,
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
-    R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    factor_from_source(
-        lease,
-        source,
-        eig_full_diagonal_dyn_checked_generic,
-        eig_full_dyn_checked_generic,
-    )
+    factor_from_source(lease, source, M::eig_full_diagonal, M::eig_full_dense)
 }
 
 /// The dense route's eigenvalue check (`validate_complex_eigenvalues`) on a
