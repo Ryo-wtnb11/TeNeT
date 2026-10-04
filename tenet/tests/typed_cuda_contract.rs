@@ -245,7 +245,11 @@ fn lazy_adjoint_operands_match_the_host_at_every_dtype() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn copy_c_probes_move_only_c_and_match_the_host_at_every_dtype() {
-    fn at<R: DeviceRule, D: DevicePayload>(v: &tenet::typed::GradedSpace<R>, symmetry: &str) {
+    fn at<R: DeviceRule, D: DevicePayload>(
+        v: &tenet::typed::GradedSpace<R>,
+        symmetry: &str,
+        oracle: impl Fn(&Case<R, D>) -> TensorMap<R, D>,
+    ) {
         for index in 0..copy_c_probes::<R, D>(&Runtime::builder().build().unwrap(), v).len() {
             // A fresh Runtime per probe: its scratch high-water mark is this
             // probe's alone.
@@ -268,11 +272,10 @@ fn copy_c_probes_move_only_c_and_match_the_host_at_every_dtype() {
                 host.dense_data().unwrap(),
                 case.terms(),
             );
-            let oracle = blas_contract_oracle(&case);
             numerics::assert_nonzero_slices_close(
                 &name,
                 device.to_host().unwrap().dense_data().unwrap(),
-                oracle.dense_data().unwrap(),
+                oracle(&case).dense_data().unwrap(),
                 case.terms(),
             );
             let mut destination = poisoned_destination(&case).to_cuda().unwrap();
@@ -299,12 +302,18 @@ fn copy_c_probes_move_only_c_and_match_the_host_at_every_dtype() {
             );
         }
     }
-    at::<_, f64>(&u1_non_self_dual(), "U(1)");
-    at::<_, Complex64>(&u1_non_self_dual(), "U(1)");
-    at::<_, f32>(&su2(), "SU(2)");
-    at::<_, Complex32>(&su2(), "SU(2)");
-    at::<_, f64>(&su2(), "SU(2)");
-    at::<_, f64>(&fermion_u1(), "fZ2xU(1)");
+    at::<_, f64>(&u1_non_self_dual(), "U(1)", blas_contract_oracle);
+    at::<_, Complex64>(&u1_non_self_dual(), "U(1)", blas_contract_oracle);
+    at::<_, f32>(&su2(), "SU(2)", blas_contract_oracle);
+    at::<_, Complex32>(&su2(), "SU(2)", blas_contract_oracle);
+    at::<_, f64>(&su2(), "SU(2)", blas_contract_oracle);
+    // The swapped probes' literal sequence twists dual `B` legs the selected
+    // candidate does not, so TensorKit's fermionic sequence is the oracle.
+    at::<_, f64>(&fermion_u1(), "fZ2xU(1)", |case| {
+        fermionic_blas_contract_oracle(case, TwistRole::B, |t, legs| {
+            t.twist(legs, Direction::Forward).unwrap()
+        })
+    });
 }
 
 #[test]
