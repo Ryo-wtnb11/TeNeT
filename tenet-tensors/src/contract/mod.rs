@@ -38,7 +38,10 @@ pub(crate) use fusion::{
 mod fusion_block;
 mod resolution;
 #[doc(hidden)]
-pub use resolution::{zero_copy_contract_order_for_output_permute, StorageContractResolution};
+pub use resolution::{
+    copy_c_output_transform, zero_copy_contract_order_for_output_permute, CopyCRoute,
+    StorageContractResolution,
+};
 #[cfg(test)]
 mod candidate_core_tests;
 mod scratch;

@@ -357,6 +357,47 @@ where
     ]
 }
 
+/// Zero-copy candidates under a requested output order that is neither the
+/// identity nor `pAB′` (#1475): TensorKit `blas_contract!` then copies only
+/// C (`copyC`: `mul!` into a temporary, then a permuting `tensoradd!`), and
+/// `has_shared_permute(::AdjointTensorMap)` keeps `P'` free. Each probe is
+/// paired with whether that zero-copy candidate is the swap `B·A`:
+///
+/// - `L3p` `P'[3,2]·B[1,0] → [1,0,2,3]` (the issue's example, sort);
+/// - `L5p` `A[0,1]·P'[2,3] → [3,2,0,1]` (swap);
+/// - `L7p` `A[3,2]·P'[1,0] → [0,1,3,2]` (sort, lazy rhs);
+/// - `C1p` `A[3,2]·B[1,0] → [1,0,3,2]`, `C2p` `A[0,1]·B[2,3] → [3,2,1,0]`
+///   (owned sort and swap).
+pub fn copy_c_probes<R, D>(runtime: &Runtime, v: &GradedSpace<R>) -> Vec<(Case<R, D>, bool)>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let tensor = |salt| tensor::<R, D>(runtime, &[v, v], &[v, v], salt);
+    let (a, b, lazy) = (tensor(81), tensor(82), tensor(83).adjoint().unwrap());
+    let case = |name,
+                lhs: &TensorMap<R, D>,
+                rhs: &TensorMap<R, D>,
+                l: [usize; 2],
+                r: [usize; 2],
+                out: [usize; 4]| Case {
+        name,
+        lhs: lhs.clone(),
+        rhs: rhs.clone(),
+        lhs_axes: l.to_vec(),
+        rhs_axes: r.to_vec(),
+        output_axes: out.to_vec(),
+        dense: l == [3, 2],
+    };
+    vec![
+        (case("L3p", &lazy, &b, [3, 2], [1, 0], [1, 0, 2, 3]), false),
+        (case("L5p", &a, &lazy, [0, 1], [2, 3], [3, 2, 0, 1]), true),
+        (case("L7p", &a, &lazy, [3, 2], [1, 0], [0, 1, 3, 2]), false),
+        (case("C1p", &a, &b, [3, 2], [1, 0], [1, 0, 3, 2]), false),
+        (case("C2p", &a, &b, [0, 1], [2, 3], [3, 2, 1, 0]), true),
+    ]
+}
+
 /// A destination of `case`'s result space holding NaN everywhere: a retained
 /// buffer `contract_into` must rewrite element by element.
 pub fn poisoned_destination<R, D>(case: &Case<R, D>) -> TensorMap<R, D>

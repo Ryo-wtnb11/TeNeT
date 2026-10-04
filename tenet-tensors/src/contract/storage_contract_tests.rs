@@ -281,7 +281,7 @@ fn dynamic_artifact_replays_host_members() {
             case.axes(),
         )
         .unwrap();
-    let super::resolution::StorageContractRoute::DynamicTree(artifact) = resolution.route else {
+    let super::resolution::ContractRoute::DynamicTree(artifact) = resolution.route else {
         panic!("fixture must select DynamicTree");
     };
     assert!(artifact
@@ -437,7 +437,7 @@ fn dynamic_artifact_complex_members_match_eager() {
             case.axes(),
         )
         .unwrap();
-    let super::resolution::StorageContractRoute::DynamicTree(artifact) = resolution.route else {
+    let super::resolution::ContractRoute::DynamicTree(artifact) = resolution.route else {
         panic!("fixture must select DynamicTree");
     };
     let mut workspace = super::dynamic::DynamicTreeMembersWorkspace::default();
@@ -500,7 +500,7 @@ fn dynamic_artifact_overwrites_inactive_u1_members() {
             case.axes(),
         )
         .unwrap();
-    let super::resolution::StorageContractRoute::DynamicTree(artifact) = resolution.route else {
+    let super::resolution::ContractRoute::DynamicTree(artifact) = resolution.route else {
         panic!("fixture must select DynamicTree");
     };
     let lhs_len = case.lhs.space().required_len().unwrap();
@@ -613,7 +613,7 @@ fn rank_five_su2_member_transform_matches_physical_permutation_and_ordinary_repl
             case.axes(),
         )
         .unwrap();
-    let super::resolution::StorageContractRoute::DynamicTree(artifact) = resolution.route else {
+    let super::resolution::ContractRoute::DynamicTree(artifact) = resolution.route else {
         panic!("noncomposition SU(2) fixture must select DynamicTree");
     };
     let (transform, dst_structure, src_structure, transformed_space) =
@@ -1937,7 +1937,7 @@ mod device {
     use tenet_operations::cuda::CudaStorage;
     use tenet_operations::CudaTreeTransformExecutor;
 
-    use crate::contract::resolution::{StorageContractResolution, StorageContractRoute};
+    use crate::contract::resolution::{ContractRoute, StorageContractResolution};
     use crate::CudaContractScratch;
 
     trait Payload:
@@ -2051,9 +2051,8 @@ mod device {
             let (artifact, host, _) = forced_artifact(case, candidate, orientation, &lhs, &rhs);
             let borrowed = artifact.borrowed_sources();
             let twisted = artifact.requires_source_twist();
-            let resolution = StorageContractResolution::new(StorageContractRoute::DynamicTree(
-                Arc::new(artifact),
-            ));
+            let resolution =
+                StorageContractResolution::new(ContractRoute::DynamicTree(Arc::new(artifact)));
             let device = self.execute(&resolution, &dst, &lhs, &rhs);
             (device, host, borrowed, twisted)
         }

@@ -7,7 +7,8 @@ use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule
 use tenet_tensors::{
     prepare_tensorcontract_fusion_plan_dyn, try_compile_storage_contract_core_route,
     BoundDynamicFusionMapSpace, FusionOperand, OperationCachePolicy, OutputAxisOrder, RuleIdentity,
-    RuntimeTreeTransformStore, TensorContractFusionExecutionContext, TensorContractSpec,
+    RuntimeTreeTransformStore, StorageContractResolution, TensorContractFusionExecutionContext,
+    TensorContractSpec,
 };
 
 #[path = "../../tests/support/counting_alloc.rs"]
@@ -86,6 +87,23 @@ fn runtime_like_context(
     context
 }
 
+/// The storage ladder these rows pin: the lock-free canonical core, then the
+/// `DynamicTree` artifact (the planner's `CopyC` rung is not measured here).
+fn storage_ladder(
+    context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
+    dst: &Space,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    axes: TensorContractSpec<'_>,
+) -> StorageContractResolution<f64> {
+    match try_compile_storage_contract_core_route(dst, lhs, rhs, axes).unwrap() {
+        Some(core) => core,
+        None => context
+            .compile_storage_contract_dynamic_tree(dst, lhs, rhs, axes)
+            .unwrap(),
+    }
+}
+
 /// `A(V^codomain ← V^domain)` composed with `S(V^domain ← V^domain)` in
 /// three ways: the canonical Core route, the same contraction with its two
 /// leading open axes swapped (a DynamicTree route whose source and output
@@ -137,14 +155,13 @@ fn warm_compile_allocations(codomain: usize, domain: usize) -> [usize; 3] {
     ));
     let mut context = runtime_like_context(&store);
     let dynamic_tree = warm_allocations(|| {
-        let resolution = context
-            .compile_storage_contract_resolution(
-                &dst,
-                FusionOperand::direct(lhs.space()),
-                FusionOperand::direct(square.space()),
-                axes(),
-            )
-            .unwrap();
+        let resolution = storage_ladder(
+            &mut context,
+            &dst,
+            FusionOperand::direct(lhs.space()),
+            FusionOperand::direct(square.space()),
+            axes(),
+        );
         assert!(resolution.is_dynamic_tree());
         resolution
     });
@@ -202,14 +219,13 @@ fn crossing_compile_allocations(
     ));
     let mut context = runtime_like_context(&store);
     warm_allocations(|| {
-        context
-            .compile_storage_contract_resolution(
-                &dst,
-                FusionOperand::direct(lhs.space()),
-                FusionOperand::direct(matrix.space()),
-                axes(),
-            )
-            .unwrap()
+        storage_ladder(
+            &mut context,
+            &dst,
+            FusionOperand::direct(lhs.space()),
+            FusionOperand::direct(matrix.space()),
+            axes(),
+        )
     })
 }
 

@@ -44,8 +44,8 @@ use super::resolution::{
     compile_composition_plan, compile_core_plan, compile_prelowered_resolution, compile_resolution,
     compile_storage_resolution, try_compile_oriented_canonical_core_resolution,
     try_compile_oriented_storage_composition_plan,
-    try_compile_oriented_storage_contract_candidate_plan, Resolution, StorageContractResolution,
-    StorageContractRoute,
+    try_compile_oriented_storage_contract_candidate_plan, ContractRoute, CopyCRoute, Resolution,
+    StorageContractResolution,
 };
 #[cfg(test)]
 use super::resolution::{try_compile_oriented_storage_contract_plan, NonuniformTwist};
@@ -540,7 +540,7 @@ where
         rhs: &[D],
         members: usize,
     ) -> Result<(), OperationError> {
-        let StorageContractRoute::DynamicTree(artifact) = &resolution.route else {
+        let ContractRoute::DynamicTree(artifact) = &resolution.route else {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "Host member contraction requires transformed-tree route",
             });
@@ -1721,16 +1721,227 @@ where
         }
     }
 
-    /// Compiles, on the host, the owned route a storage-resident (device)
-    /// contraction replays: the single planning authority for device
-    /// contraction, so a device executor never re-derives a permutation.
+    /// The contraction planner of the storage executors (CUDA eager and the
+    /// batched `ContractPlan`, Host and CUDA): TensorKit `contract!`
+    /// (`tensoroperations.jl:314-357` @cfaa073) under `contract_memcost` (`:358-368`).
     ///
-    /// It is [`try_compile_storage_contract_core_route`] followed, on a miss,
-    /// by [`Self::compile_storage_contract_dynamic_tree`]; a caller that wants
-    /// the canonical route without taking a context lock calls the two
-    /// halves itself, in that order.
+    /// The ladder: the canonical fully-direct core
+    /// ([`try_compile_storage_contract_core_route`]), then
+    /// [`Self::plan_contract_beyond_core`] — TensorKit's `copyC`, then the
+    /// `DynamicTree` artifact. A caller that wants the canonical route without
+    /// taking a context lock calls the two halves itself, in that order.
     #[doc(hidden)]
-    pub fn compile_storage_contract_resolution<R>(
+    #[allow(clippy::too_many_arguments)]
+    pub fn plan_contract<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        lhs_authority: &BoundDynamicFusionMapSpace<R>,
+        lhs: FusionOperand<'_>,
+        rhs_authority: &BoundDynamicFusionMapSpace<R>,
+        rhs: FusionOperand<'_>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<StorageContractResolution<C>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C>
+            + tenet_core::CheckedFusionAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
+        let axes = TensorContractSpec::new_with_conjugation(
+            lhs_axes,
+            rhs_axes,
+            tenet_operations::OutputAxisOrder::from_axes(output_axes),
+            lhs.storage_conjugate(),
+            rhs.storage_conjugate(),
+        );
+        match try_compile_storage_contract_core_route(dst_space, lhs, rhs, axes)? {
+            Some(core) => Ok(core),
+            None => self.plan_contract_beyond_core(
+                dst_space,
+                lhs_authority,
+                lhs,
+                rhs_authority,
+                rhs,
+                lhs_axes,
+                rhs_axes,
+                output_axes,
+            ),
+        }
+    }
+
+    /// [`Self::plan_contract`] after its canonical core declined: TensorKit's
+    /// `copyC` (`blas_contract!`, `tensoroperations.jl:436-446` @cfaa073) when
+    /// [`zero_copy_contract_order_for_output_permute`] takes it — a zero-copy
+    /// core into a temporary in its own default output, then one permute —
+    /// else the `DynamicTree` artifact.
+    ///
+    /// Why the core precedes `copyC`: a contraction that has the canonical
+    /// core needs no output permute (`zero_copy_contract_order_for_output_permute`
+    /// returns `None` for it), so TensorKit's memcost never charges it `dim(C)`.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn plan_contract_beyond_core<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        lhs_authority: &BoundDynamicFusionMapSpace<R>,
+        lhs: FusionOperand<'_>,
+        rhs_authority: &BoundDynamicFusionMapSpace<R>,
+        rhs: FusionOperand<'_>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<StorageContractResolution<C>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C>
+            + tenet_core::CheckedFusionAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
+        let rule = dst_space.provider();
+        if let Some(orientation) = super::resolution::zero_copy_contract_order_for_output_permute(
+            rule,
+            dst_space.space(),
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+        ) {
+            if let Some(copy) = self.plan_copy_c(
+                dst_space,
+                lhs_authority,
+                lhs,
+                rhs_authority,
+                rhs,
+                lhs_axes,
+                rhs_axes,
+                output_axes,
+                orientation,
+            )? {
+                return Ok(copy);
+            }
+        }
+        let axes = TensorContractSpec::new_with_conjugation(
+            lhs_axes,
+            rhs_axes,
+            tenet_operations::OutputAxisOrder::from_axes(output_axes),
+            lhs.storage_conjugate(),
+            rhs.storage_conjugate(),
+        );
+        self.compile_storage_contract_dynamic_tree(dst_space, lhs, rhs, axes)
+    }
+
+    /// The `CopyC` route in `orientation`, or `None` when its temporary has
+    /// no canonical core (the `DynamicTree` artifact then applies). The
+    /// temporary space is derived as the Host derives a contraction result:
+    /// owned operands through the owned derivation, a lazy adjoint through the
+    /// oriented one.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_copy_c<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        lhs_authority: &BoundDynamicFusionMapSpace<R>,
+        lhs: FusionOperand<'_>,
+        rhs_authority: &BoundDynamicFusionMapSpace<R>,
+        rhs: FusionOperand<'_>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+        orientation: super::fusion::FusionContractOrientation,
+    ) -> Result<Option<StorageContractResolution<C>>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C>
+            + tenet_core::CheckedFusionAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
+        let swapped = orientation == super::fusion::FusionContractOrientation::RhsLhs;
+        let ((first_authority, first, first_axes), (second_authority, second, second_axes)) =
+            if swapped {
+                (
+                    (rhs_authority, rhs, rhs_axes),
+                    (lhs_authority, lhs, lhs_axes),
+                )
+            } else {
+                (
+                    (lhs_authority, lhs, lhs_axes),
+                    (rhs_authority, rhs, rhs_axes),
+                )
+            };
+        let identity = tenet_operations::OutputAxisOrder::identity();
+        let temporary = if !first.storage_conjugate() && !second.storage_conjugate() {
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+                first_authority,
+                second_authority,
+                first_axes,
+                second_axes,
+                identity,
+            )?
+        } else {
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented(
+                first_authority,
+                first,
+                second_authority,
+                second,
+                first_axes,
+                second_axes,
+                identity,
+                None,
+            )?
+        };
+        let Some(core) = try_compile_storage_contract_core_route(
+            &temporary,
+            first,
+            second,
+            TensorContractSpec::new_with_conjugation(
+                first_axes,
+                second_axes,
+                identity,
+                first.storage_conjugate(),
+                second.storage_conjugate(),
+            ),
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some((core, core_swapped)) = core.direct_core() else {
+            return Ok(None);
+        };
+        let operation = super::resolution::copy_c_output_transform(
+            orientation,
+            lhs.storage_space().rank(),
+            rhs.storage_space().rank(),
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            dst_space.space().nout(),
+        );
+        let temporary_structure = Arc::clone(temporary.space().structure());
+        let transform = self.tree_context.compile_tree_pair_structure(
+            dst_space.provider(),
+            &operation,
+            dst_space.space().structure(),
+            &temporary_structure,
+        )?;
+        Ok(Some(StorageContractResolution::new(ContractRoute::CopyC(
+            Arc::new(CopyCRoute {
+                core: Arc::clone(core),
+                swapped: core_swapped ^ swapped,
+                temporary_len: temporary.space().required_len()?,
+                temporary: temporary_structure,
+                transform,
+            }),
+        ))))
+    }
+
+    /// Test-only: [`try_compile_storage_contract_core_route`] followed, on a
+    /// miss, by [`Self::compile_storage_contract_dynamic_tree`] — the
+    /// planner's ladder without `CopyC`, for gates that pin those two routes.
+    /// Production planning is [`Self::plan_contract`].
+    #[cfg(test)]
+    pub(crate) fn compile_storage_contract_resolution<R>(
         &mut self,
         dst_space: &BoundDynamicFusionMapSpace<R>,
         lhs: FusionOperand<'_>,
@@ -1747,7 +1958,7 @@ where
         }
     }
 
-    /// The second half of [`Self::compile_storage_contract_resolution`]: the
+    /// The last rung of [`Self::plan_contract`]: the
     /// Host `DynamicTree` artifact for a contraction that
     /// [`try_compile_storage_contract_core_route`] declined, compiled by the
     /// same entry the Host contraction uses for this representation — the
@@ -1858,9 +2069,9 @@ where
                 message: "dynamic-tree core plan over transformed sources is not fully direct",
             });
         }
-        Ok(StorageContractResolution::new(
-            StorageContractRoute::DynamicTree(Arc::new(artifact)),
-        ))
+        Ok(StorageContractResolution::new(ContractRoute::DynamicTree(
+            Arc::new(artifact),
+        )))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2877,12 +3088,6 @@ where
     else {
         return Ok(None);
     };
-    if !route.block_plan_is_fully_direct() {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "storage-direct contraction supports only canonical fully-direct oriented \
-                      operands",
-        });
-    }
     Ok(Some(StorageContractResolution::new(route)))
 }
 

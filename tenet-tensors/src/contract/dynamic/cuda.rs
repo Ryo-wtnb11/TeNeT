@@ -3,7 +3,7 @@
 //! Nothing categorical happens here: the route, the orientation, every
 //! transform structure, the borrow decisions and the core plan were compiled
 //! on the host by
-//! [`compile_storage_contract_resolution`](crate::TensorContractFusionExecutionContext::compile_storage_contract_resolution).
+//! [`plan_contract`](crate::TensorContractFusionExecutionContext::plan_contract).
 //! This module replays that value with the device executors — the tree
 //! transform executor for the source and output transforms, the storage GEMM
 //! seam for the core — which is TensorKit's `blas_contract!` dataflow
@@ -22,7 +22,7 @@ use tenet_operations::cuda_transform::CudaMemberZeroRegions;
 use tenet_operations::{CudaTreeTransformDestination, CudaTreeTransformExecutor};
 
 use super::DynamicTreeExecutionArtifact;
-use crate::contract::resolution::{StorageContractResolution, StorageContractRoute};
+use crate::contract::resolution::{ContractRoute, CopyCRoute, StorageContractResolution};
 use crate::{
     ContractDestinationInit, DenseBlockScalar, OperationError, RecouplingCoefficientAction,
 };
@@ -225,12 +225,9 @@ where
     C: DenseBlockScalar,
 {
     resolution.admit_cuda_inactive_regions()?;
-    let (lhs, rhs) = match resolution.route {
-        StorageContractRoute::SwappedCore(_) => (rhs, lhs),
-        StorageContractRoute::Core(_) | StorageContractRoute::DynamicTree(_) => (lhs, rhs),
-    };
     match &resolution.route {
-        StorageContractRoute::Core(plan) | StorageContractRoute::SwappedCore(plan) => {
+        ContractRoute::Core { plan, swapped } => {
+            let (lhs, rhs) = if *swapped { (rhs, lhs) } else { (lhs, rhs) };
             // Converted before the first submission, like every other check.
             let regions = if direct_regions_need_beta(init) {
                 CudaMemberZeroRegions::fill_single(
@@ -244,7 +241,7 @@ where
             execute_core_direct(ctx, plan, dst, lhs, rhs, alpha, beta)?;
             scale_regions(ctx, dst, regions, beta)
         }
-        StorageContractRoute::DynamicTree(artifact) => execute_dynamic_tree_on_cuda(
+        ContractRoute::DynamicTree(artifact) => execute_dynamic_tree_on_cuda(
             ctx,
             transforms,
             scratch,
@@ -256,7 +253,71 @@ where
             alpha,
             init,
         ),
+        ContractRoute::CopyC(copy) => execute_copy_c_on_cuda(
+            ctx,
+            transforms,
+            scratch,
+            copy,
+            dst_structure,
+            dst,
+            lhs,
+            rhs,
+            alpha,
+            init,
+        ),
     }
+}
+
+/// TensorKit `blas_contract!`'s `copyC` (`tensoroperations.jl:436-446` @cfaa073): the
+/// unscaled core into the retained core-destination scratch (inactive blocks
+/// zeroed), then one output transform into `dst` carrying `alpha` and `beta`
+/// — TensorKit's `tensoradd!(C, C′, pAB, false, α, β)`.
+#[allow(clippy::too_many_arguments)]
+fn execute_copy_c_on_cuda<D, C>(
+    ctx: &mut CudaDenseContext,
+    transforms: &mut CudaTreeTransformExecutor,
+    scratch: &mut CudaContractScratch,
+    copy: &CopyCRoute<C>,
+    dst_structure: &Arc<BlockStructure>,
+    dst: &mut CudaStorage<D>,
+    lhs: &CudaStorage<D>,
+    rhs: &CudaStorage<D>,
+    alpha: D,
+    init: ContractDestinationInit<D>,
+) -> Result<(), OperationError>
+where
+    D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + 'static,
+    C: DenseBlockScalar,
+{
+    let (lhs, rhs) = if copy.swapped { (rhs, lhs) } else { (lhs, rhs) };
+    let CudaContractScratch {
+        entries,
+        zero_regions,
+    } = scratch;
+    let regions =
+        CudaMemberZeroRegions::fill_single(zero_regions, copy.core.inactive_destination_regions())?;
+    let (bytes, buffers) = scratch_entry::<D>(entries, ctx.identity())?;
+    let temporary = grow(ctx, &mut buffers.dst, bytes, copy.temporary_len)?;
+    scale_regions(ctx, temporary, regions, D::ZERO)?;
+    copy.core.execute_direct_on_storage_prezeroed(
+        &mut CudaStorageGemm::new(ctx),
+        temporary,
+        lhs,
+        rhs,
+    )?;
+    transforms.replay(
+        ctx,
+        copy.transform.as_ref(),
+        dst_structure,
+        &copy.temporary,
+        dst,
+        temporary,
+        alpha,
+        match init {
+            ContractDestinationInit::Zeroed => CudaTreeTransformDestination::Overwrite,
+            ContractDestinationInit::Axpby(beta) => CudaTreeTransformDestination::Axpby(beta),
+        },
+    )
 }
 
 fn active_beta<D: CudaScalar>(init: ContractDestinationInit<D>) -> D {

@@ -5,8 +5,8 @@ use tenet_core::{
     CanonicalUnitFusionRule, CategoricalScalar, CheckedFusionAlgebra, CheckedFusionSpaceError,
     CheckedGenericFusion, CheckedGenericRigidSymbols, CheckedGenericStructureError,
     CheckedGenericSymbolError, CoreError, FusionProductSpace, FusionTreeHomSpace,
-    FusionTreePairKey, FusionTreePairOrientation, MultiplicityFreeRigidSymbols, MultiplicityIndex,
-    OrientedFusionTreeHomSpace, PreparedTreePairOperation, RuleIdentity,
+    FusionTreePairKey, MultiplicityFreeRigidSymbols, MultiplicityIndex, PreparedTreePairOperation,
+    RuleIdentity,
 };
 use tenet_matrixalgebra::SectorSpectrum;
 use tenet_operations::TreeTransformBlock;
@@ -628,12 +628,8 @@ pub(crate) enum OrientedContractionKind {
     Compose,
 }
 
-/// The destination space of a lazy-adjoint-aware contraction, with the
-/// Host's validation order: rule identity, axis counts, axis sets, output
-/// permutation, then the oriented homspace. Shared by the Host contraction
-/// and the device one, so both derive one destination from one authority.
-/// The result is split after `codomain_rank` output axes, or after every open
-/// lhs axis for `None`.
+/// [`BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented`], the
+/// one oriented contraction-destination derivation.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn oriented_contract_destination<R>(
     lhs_authority: &BoundDynamicFusionMapSpace<R>,
@@ -648,80 +644,16 @@ pub(crate) fn oriented_contract_destination<R>(
 where
     R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
 {
-    if lhs_authority.provider().rule_identity() != rhs_authority.provider().rule_identity() {
-        return Err(tenet_tensors::OperationError::from_core_preserving_context(
-            CoreError::FusionRuleMismatch {
-                expected: lhs_authority.provider().rule_identity(),
-                actual: rhs_authority.provider().rule_identity(),
-            },
-        ));
-    }
-    if lhs_axes.len() != rhs_axes.len() {
-        return Err(tenet_tensors::OperationError::ContractAxisCountMismatch {
-            lhs: lhs_axes.len(),
-            rhs: rhs_axes.len(),
-        });
-    }
-    let lhs_rank = lhs.storage_space().rank();
-    let rhs_rank = rhs.storage_space().rank();
-    // Keep `TensorContractAxisPlan::compile`'s public error order before any
-    // oriented homspace/provider work.
-    for (tensor, axes, rank) in [("lhs", lhs_axes, lhs_rank), ("rhs", rhs_axes, rhs_rank)] {
-        if tenet_core::axes::validate_axis_subset(axes, rank).is_err() {
-            return Err(tenet_tensors::OperationError::InvalidAxisSet {
-                tensor,
-                axes: axes.to_vec(),
-                rank,
-            });
-        }
-    }
-    let lhs_open_rank = lhs_rank - lhs_axes.len();
-    let rhs_open_rank = rhs_rank - rhs_axes.len();
-    let identity_axes;
-    let output_axes = match output_order {
-        OutputAxisOrder::Identity => {
-            identity_axes = (0..lhs_open_rank + rhs_open_rank).collect::<Vec<_>>();
-            identity_axes.as_slice()
-        }
-        OutputAxisOrder::Axes(axes) => axes,
-    };
-    if tenet_core::axes::validate_permutation(output_axes, lhs_open_rank + rhs_open_rank).is_err() {
-        return Err(tenet_tensors::OperationError::InvalidPermutation {
-            axes: output_axes.to_vec(),
-            rank: lhs_open_rank + rhs_open_rank,
-        });
-    }
-    let lhs_orientation = if lhs.storage_conjugate() {
-        FusionTreePairOrientation::Adjoint
-    } else {
-        FusionTreePairOrientation::Direct
-    };
-    let rhs_orientation = if rhs.storage_conjugate() {
-        FusionTreePairOrientation::Adjoint
-    } else {
-        FusionTreePairOrientation::Direct
-    };
-    let homspace = OrientedFusionTreeHomSpace::try_tensorcontract_homspace_checked(
-        lhs_authority.provider(),
-        OrientedFusionTreeHomSpace::new(lhs.storage_space().homspace(), lhs_orientation),
-        OrientedFusionTreeHomSpace::new(rhs.storage_space().homspace(), rhs_orientation),
+    BoundDynamicFusionMapSpace::contracted_multiplicity_free_oriented(
+        lhs_authority,
+        lhs,
+        rhs_authority,
+        rhs,
         lhs_axes,
         rhs_axes,
-        output_axes,
-        codomain_rank.unwrap_or(lhs_open_rank),
+        output_order,
+        codomain_rank,
     )
-    .map_err(|error| match error {
-        tenet_core::CheckedFusionSpaceError::Core(error) => {
-            tenet_tensors::OperationError::from_core_preserving_context(*error)
-        }
-        tenet_core::CheckedFusionSpaceError::FusionAlgebra(error) => {
-            tenet_tensors::OperationError::FusionAlgebra(error)
-        }
-        _ => tenet_tensors::OperationError::InvalidArgument {
-            message: "unknown checked fusion metadata error",
-        },
-    })?;
-    lhs_authority.derive_from_final_homspace(homspace)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -32,7 +32,7 @@ use tenet::typed::ContractSpec;
 use tenet::typed::Direction;
 
 use contract_cases::{
-    blas_contract_oracle, candidate_core_probes as probes, dense_oracle, fermion_u1,
+    blas_contract_oracle, candidate_core_probes as probes, copy_c_probes, dense_oracle, fermion_u1,
     fermionic_blas_contract_oracle, fill, su2, u1, u1_non_self_dual, Case, FermionU1, Payload,
     TwistRole,
 };
@@ -355,48 +355,6 @@ fn mixed_space_candidates_run_no_transform() {
     assert_mixed_zero_copy(&su2(), &su2_second(), "SU(2)");
 }
 
-/// Zero-copy candidates under a requested output order that is neither the
-/// identity nor `pAB′` (#1475): TensorKit `blas_contract!` then copies only
-/// C (`copyC`: `mul!` into a temporary, then a permuting `tensoradd!`), and
-/// `has_shared_permute(::AdjointTensorMap)` keeps `P'` free. Each probe is
-/// paired with whether that zero-copy candidate is the swap `B·A`:
-///
-/// - `L3p` `P'[3,2]·B[1,0] → [1,0,2,3]` (the issue's example, sort);
-/// - `L5p` `A[0,1]·P'[2,3] → [3,2,0,1]` (swap);
-/// - `L7p` `A[3,2]·P'[1,0] → [0,1,3,2]` (sort, lazy rhs);
-/// - `C1p` `A[3,2]·B[1,0] → [1,0,3,2]`, `C2p` `A[0,1]·B[2,3] → [3,2,1,0]`
-///   (owned sort and swap).
-fn output_permute_probes<R, D>(runtime: &Runtime, v: &GradedSpace<R>) -> Vec<(Case<R, D>, bool)>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: Payload,
-{
-    let tensor =
-        |salt| TensorMap::<R, D>::from_subblock_fn(runtime, [v, v], [v, v], fill(salt)).unwrap();
-    let (a, b, lazy) = (tensor(81), tensor(82), tensor(83).adjoint().unwrap());
-    let case = |name,
-                lhs: &TensorMap<R, D>,
-                rhs: &TensorMap<R, D>,
-                l: [usize; 2],
-                r: [usize; 2],
-                out: [usize; 4]| Case {
-        name,
-        lhs: lhs.clone(),
-        rhs: rhs.clone(),
-        lhs_axes: l.to_vec(),
-        rhs_axes: r.to_vec(),
-        output_axes: out.to_vec(),
-        dense: l == [3, 2],
-    };
-    vec![
-        (case("L3p", &lazy, &b, [3, 2], [1, 0], [1, 0, 2, 3]), false),
-        (case("L5p", &a, &lazy, [0, 1], [2, 3], [3, 2, 0, 1]), true),
-        (case("L7p", &a, &lazy, [3, 2], [1, 0], [0, 1, 3, 2]), false),
-        (case("C1p", &a, &b, [3, 2], [1, 0], [1, 0, 3, 2]), false),
-        (case("C2p", &a, &b, [0, 1], [2, 3], [3, 2, 1, 0]), true),
-    ]
-}
-
 fn transform_lookups(runtime: &Runtime) -> usize {
     let info = runtime.tree_transform_cache_info().structures;
     info.hits() + info.misses()
@@ -476,7 +434,7 @@ where
 {
     let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    for (case, swapped) in output_permute_probes::<R, f64>(&runtime, v) {
+    for (case, swapped) in copy_c_probes::<R, f64>(&runtime, v) {
         let (calls, bytes, lookups) = warm(&runtime, &case);
         contract_then_permute(&case, swapped);
         let before = transform_lookups(&runtime);
@@ -545,7 +503,7 @@ where
     D: Payload,
 {
     let runtime = Runtime::builder().build().unwrap();
-    let cases = output_permute_probes::<R, D>(&runtime, v)
+    let cases = copy_c_probes::<R, D>(&runtime, v)
         .into_iter()
         .map(|(case, _)| case)
         .chain([uneven_swap::<R, D>(&runtime, v, w)]);
@@ -590,7 +548,7 @@ where
     D: Payload + PartialEq,
 {
     let runtime = Runtime::builder().build().unwrap();
-    let cases = output_permute_probes::<R, D>(&runtime, v)
+    let cases = copy_c_probes::<R, D>(&runtime, v)
         .into_iter()
         .chain([(uneven_swap::<R, D>(&runtime, v, w), true)]);
     for (case, swapped) in cases {
@@ -621,7 +579,7 @@ where
 {
     let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let cases = output_permute_probes::<R, D>(&runtime, v)
+    let cases = copy_c_probes::<R, D>(&runtime, v)
         .into_iter()
         .chain([(uneven_swap::<R, D>(&runtime, v, w), true)]);
     let alpha = D::entry(1.25, -0.5);
@@ -721,7 +679,7 @@ fn fermionic_output_permute_values<D: Payload>() {
     // probes twists dual `B` legs that the selected candidate does not, so
     // either twist role is the oracle.
     for role in [TwistRole::B, TwistRole::A] {
-        for (case, _) in output_permute_probes::<_, D>(&runtime, &fermion_u1()) {
+        for (case, _) in copy_c_probes::<_, D>(&runtime, &fermion_u1()) {
             let expected = fermionic_blas_contract_oracle(&case, role, twist);
             numerics::assert_nonzero_slices_close(
                 &format!("fZ2xU(1) {} [{}]", case.name, D::NAME),

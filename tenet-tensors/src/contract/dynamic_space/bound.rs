@@ -617,6 +617,96 @@ where
         Self::from_derived_like(lhs, space)
     }
 
+    /// The destination space of a lazy-adjoint-aware contraction, with the
+    /// Host's validation order: rule identity, axis counts, axis sets, output
+    /// permutation, then the oriented homspace. The one derivation the Host
+    /// contraction, the device contraction and the contraction planner's
+    /// `CopyC` temporary share. The result is split after `codomain_rank`
+    /// output axes, or after every open lhs axis for `None`.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn contracted_multiplicity_free_oriented(
+        lhs_authority: &Self,
+        lhs: super::FusionOperand<'_>,
+        rhs_authority: &Self,
+        rhs: super::FusionOperand<'_>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+        codomain_rank: Option<usize>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
+    {
+        use tenet_core::{FusionTreePairOrientation, OrientedFusionTreeHomSpace};
+        Self::validate_shared_provider(lhs_authority, rhs_authority)?;
+        if lhs_axes.len() != rhs_axes.len() {
+            return Err(OperationError::ContractAxisCountMismatch {
+                lhs: lhs_axes.len(),
+                rhs: rhs_axes.len(),
+            });
+        }
+        let lhs_rank = lhs.storage_space().rank();
+        let rhs_rank = rhs.storage_space().rank();
+        // Keep `TensorContractAxisPlan::compile`'s public error order before any
+        // oriented homspace/provider work.
+        for (tensor, axes, rank) in [("lhs", lhs_axes, lhs_rank), ("rhs", rhs_axes, rhs_rank)] {
+            if tenet_core::axes::validate_axis_subset(axes, rank).is_err() {
+                return Err(OperationError::InvalidAxisSet {
+                    tensor,
+                    axes: axes.to_vec(),
+                    rank,
+                });
+            }
+        }
+        let lhs_open_rank = lhs_rank - lhs_axes.len();
+        let rhs_open_rank = rhs_rank - rhs_axes.len();
+        let identity_axes;
+        let output_axes = match output_order {
+            OutputAxisOrder::Identity => {
+                identity_axes = (0..lhs_open_rank + rhs_open_rank).collect::<Vec<_>>();
+                identity_axes.as_slice()
+            }
+            OutputAxisOrder::Axes(axes) => axes,
+        };
+        if tenet_core::axes::validate_permutation(output_axes, lhs_open_rank + rhs_open_rank)
+            .is_err()
+        {
+            return Err(OperationError::InvalidPermutation {
+                axes: output_axes.to_vec(),
+                rank: lhs_open_rank + rhs_open_rank,
+            });
+        }
+        let orientation = |operand: super::FusionOperand<'_>| {
+            if operand.storage_conjugate() {
+                FusionTreePairOrientation::Adjoint
+            } else {
+                FusionTreePairOrientation::Direct
+            }
+        };
+        let homspace = OrientedFusionTreeHomSpace::try_tensorcontract_homspace_checked(
+            lhs_authority.provider(),
+            OrientedFusionTreeHomSpace::new(lhs.storage_space().homspace(), orientation(lhs)),
+            OrientedFusionTreeHomSpace::new(rhs.storage_space().homspace(), orientation(rhs)),
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            codomain_rank.unwrap_or(lhs_open_rank),
+        )
+        .map_err(|error| match error {
+            tenet_core::CheckedFusionSpaceError::Core(error) => {
+                OperationError::from_core_preserving_context(*error)
+            }
+            tenet_core::CheckedFusionSpaceError::FusionAlgebra(error) => {
+                OperationError::FusionAlgebra(error)
+            }
+            _ => OperationError::InvalidArgument {
+                message: "unknown checked fusion metadata error",
+            },
+        })?;
+        lhs_authority.derive_from_final_homspace(homspace)
+    }
+
     fn validate_shared_provider(lhs: &Self, rhs: &Self) -> Result<(), OperationError> {
         if lhs.provider.rule_identity() != rhs.provider.rule_identity() {
             return Err(OperationError::from_core_preserving_context(

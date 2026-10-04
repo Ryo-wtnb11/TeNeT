@@ -1,13 +1,11 @@
 //! Restricted binding for one ordinary contraction over owned-dense stacks.
 
 use super::*;
-use tenet_tensors::{
-    DynamicTreeMembersWorkspace, OutputAxisOrder, StorageContractResolution, TensorContractSpec,
-};
+use tenet_tensors::{DynamicTreeMembersWorkspace, OutputAxisOrder, StorageContractResolution};
 
 #[path = "contract_batch_copy_c.rs"]
 mod copy_c;
-use copy_c::{CopyCPlan, CopyCWorkspace};
+use copy_c::CopyCWorkspace;
 
 // Only the two owned-dense stack payloads have an execution implementation.
 trait ContractBatchStorage<D>: TensorStorage<D> {}
@@ -17,12 +15,13 @@ impl<D: CudaPayload> ContractBatchStorage<D> for CudaStorage<D> {}
 
 /// Immutable contraction structure for owned-dense Host or CUDA stacks.
 ///
-/// This binding admits owned-source transformed-tree routes, fully direct
-/// Core/SwappedCore routes with exact +1/-1 coefficients, and CopyC when its
-/// temporary is a unit-alpha direct core followed by one output transform.
-/// CUDA also admits CopyC when every output move is an unconjugated nonzero
-/// Single task, and transformed-tree routes whose source and output moves are
-/// all such tasks over a unit-alpha direct core. Direct
+/// The route is the contraction planner's (`plan_contract`), the one the
+/// device [`TensorMap::contract`] replays. This binding admits owned-source
+/// transformed-tree routes, and fully direct Core routes and CopyC
+/// temporaries with exact +1/-1 coefficients. CUDA admits CopyC when every
+/// output move is an unconjugated nonzero Single task, and transformed-tree
+/// routes whose source and output moves are all such tasks over a unit-alpha
+/// direct core. Direct
 /// composition is served by [`ComposePlan`]. The plan fixes structure and
 /// axes, but not member count.
 pub struct ContractPlan<R, D, S = Vec<D>> {
@@ -34,7 +33,6 @@ pub struct ContractPlan<R, D, S = Vec<D>> {
     resolution: Arc<StorageContractResolution<f64>>,
     #[cfg(feature = "cuda")]
     device_plan: Option<(Arc<tenet_operations::FusionBlockContractPlan<f64>>, bool)>,
-    copy_c: Option<CopyCPlan<R>>,
     member_len: usize,
     _payload: PhantomData<(D, S)>,
 }
@@ -48,8 +46,9 @@ pub struct ContractWorkspace<R, D, S = Vec<D>> {
     members: DynamicTreeMembersWorkspace<D>,
     replay: Option<(StackedDirectReplay, bool)>,
     copy_c: Option<CopyCWorkspace<D>>,
+    /// The CopyC temporary stack and its member count.
     #[cfg(feature = "cuda")]
-    copy_c_temporary: Option<StackedTensorMap<R, D, S>>,
+    copy_c_temporary: Option<(S, usize)>,
     #[cfg(feature = "cuda")]
     dynamic: tenet_tensors::CudaDynamicTreeMembersWorkspace<S>,
     #[cfg(feature = "cuda")]
@@ -95,80 +94,26 @@ where
             order,
             spec.codomain.len(),
         )?;
-        let lhs_operand = FusionOperand::direct(lhs.space.space());
-        let rhs_operand = FusionOperand::direct(rhs.space.space());
-        let copy_c_order = tenet_tensors::zero_copy_contract_order_for_output_permute(
-            space.provider(),
-            space.space(),
-            lhs_operand,
-            rhs_operand,
+        let mut lease = lhs.runtime.lease_context()?;
+        let lane = lease.context().multiplicity_free_lane::<D>()?;
+        let resolution = lane.plan_contract(
+            &space,
+            &lhs.space,
+            FusionOperand::direct(lhs.space.space()),
+            &rhs.space,
+            FusionOperand::direct(rhs.space.space()),
             spec.lhs,
             spec.rhs,
             &output_axes,
-        );
-        let copy_c = copy_c_order
-            .map(|orientation| {
-                copy_c::CopyCGeometryBinding::new(lhs, rhs, spec, &output_axes, orientation)
-            })
-            .transpose()?;
-        let (contract_space, first, second, first_axes, second_axes) =
-            if let Some(binding) = &copy_c {
-                let (first, second, first_axes, second_axes) =
-                    binding.geometry.oriented(lhs, rhs, spec.lhs, spec.rhs);
-                (
-                    binding.temporary_space.clone(),
-                    first,
-                    second,
-                    first_axes,
-                    second_axes,
-                )
-            } else {
-                (space.clone(), lhs, rhs, spec.lhs, spec.rhs)
-            };
-        let axes = TensorContractSpec::new(first_axes, second_axes, OutputAxisOrder::identity());
-        let mut lease = lhs.runtime.lease_context()?;
-        let lane = lease.context().multiplicity_free_lane::<D>()?;
-        let resolution = lane.compile_storage_contract_resolution(
-            &contract_space,
-            FusionOperand::direct(first.space.space()),
-            FusionOperand::direct(second.space.space()),
-            if copy_c.is_some() {
-                axes
-            } else {
-                TensorContractSpec::new(spec.lhs, spec.rhs, order)
-            },
         )?;
         let direct_core = resolution.direct_core();
-        if copy_c.is_some()
-            && direct_core.is_none_or(|(core, _)| core.require_identity_direct_replay().is_err())
-        {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "Host copyC batch requires a unit-alpha direct temporary",
-            }
-            .into());
-        }
         if let Some((core, _)) = direct_core {
             core.require_identity_signed_direct_replay()?;
         }
-        let copy_c = if let Some(binding) = copy_c {
-            let transform = lane.tree_context_mut().compile_tree_pair_structure(
-                space.provider(),
-                &binding.geometry.operation,
-                space.space().structure(),
-                binding.temporary_space.space().structure(),
-            )?;
-            Some(CopyCPlan {
-                temporary_space: binding.temporary_space,
-                transform,
-                input_swapped: binding.geometry.is_swapped(),
-            })
-        } else {
-            None
-        };
         #[cfg(feature = "cuda")]
         if matches!(placement, Placement::Cuda(_)) {
-            if let Some(copy) = &copy_c {
-                tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(&copy.transform)?;
+            if let Some(copy) = resolution.copy_c() {
+                tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(copy.transform())?;
             }
         }
         let member_len = space.space().required_len()?;
@@ -194,10 +139,13 @@ where
             resolution: Arc::new(resolution),
             #[cfg(feature = "cuda")]
             device_plan,
-            copy_c,
             member_len,
             _payload: PhantomData,
         })
+    }
+
+    fn copy_c(&self) -> Option<&tenet_tensors::CopyCRoute<f64>> {
+        self.resolution.copy_c()
     }
 
     /// Signature required of every output member.
@@ -266,7 +214,7 @@ where
             output: None,
             members: DynamicTreeMembersWorkspace::default(),
             replay: None,
-            copy_c: self.copy_c.as_ref().map(|_| CopyCWorkspace::default()),
+            copy_c: self.copy_c().map(|_| CopyCWorkspace::default()),
             #[cfg(feature = "cuda")]
             copy_c_temporary: None,
             #[cfg(feature = "cuda")]
@@ -284,8 +232,8 @@ where
         members: usize,
         workspace: &mut ContractWorkspace<R, D>,
     ) -> Result<(), Error> {
-        if let Some(copy_c) = &self.copy_c {
-            return copy_c.run(self, lhs, rhs, dst, members, workspace);
+        if let Some(copy_c) = self.copy_c() {
+            return copy_c::run(copy_c, self, lhs, rhs, dst, members, workspace);
         }
         if !self.resolution.is_dynamic_tree() {
             if workspace
@@ -447,11 +395,8 @@ impl<R, D: CudaPayload> ContractWorkspace<R, D, CudaStorage<D>> {
     pub fn retained_bytes(&self) -> usize {
         self.retained_scratch_bytes()
             + self.dynamic.retained_bytes()
-            + self.copy_c_temporary.as_ref().map_or(0, |temporary| {
-                temporary
-                    .members
-                    .saturating_mul(temporary.member_len)
-                    .saturating_mul(std::mem::size_of::<D>())
+            + self.copy_c_temporary.as_ref().map_or(0, |(temporary, _)| {
+                TensorStorage::len(temporary).saturating_mul(std::mem::size_of::<D>())
             })
             + self.output.as_ref().map_or(0, |output| {
                 output
@@ -521,8 +466,8 @@ where
 
     fn direct_plan_entries(&self) -> Result<usize, Error> {
         let core = self.core().0.cuda_direct_plan_entries();
-        let copy_fills = self.copy_c.as_ref().map_or(Ok(0), |copy| {
-            tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(&copy.transform)
+        let copy_fills = self.copy_c().map_or(Ok(0), |copy| {
+            tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(copy.transform())
         })?;
         Ok(core + copy_fills)
     }
@@ -537,8 +482,8 @@ where
             return Ok(());
         }
         workspace.device.copy_regions = None;
-        let core_member_len = if let Some(copy) = &self.copy_c {
-            copy.temporary_space.space().required_len()?
+        let core_member_len = if let Some(copy) = self.copy_c() {
+            copy.temporary_len()
         } else {
             self.member_len
         };
@@ -561,17 +506,17 @@ where
         ctx: &mut tenet_dense::CudaDenseContext,
         members: usize,
     ) -> Result<(), Error> {
-        let Some(copy) = &self.copy_c else {
+        let Some(copy) = self.copy_c() else {
             return Ok(());
         };
         if workspace.device.copy_regions.is_some() {
             return Ok(());
         }
-        let temporary_len = copy.temporary_space.space().required_len()?;
+        let temporary_len = copy.temporary_len();
         let regions = tenet_operations::cuda_transform::CudaSingleMemberRegions::prepare(
-            &copy.transform,
+            copy.transform(),
             self.space.space().structure(),
-            copy.temporary_space.space().structure(),
+            copy.temporary_structure(),
             self.member_len,
             temporary_len,
             self.total_len(self.member_len, members)?,
@@ -604,8 +549,7 @@ where
         zero_inactive: bool,
     ) -> Result<(), Error> {
         let (plan, swapped) = self.core();
-        let swap = *swapped ^ self.copy_c.as_ref().is_some_and(|copy| copy.input_swapped);
-        let (left, right) = if swap { (rhs, lhs) } else { (lhs, rhs) };
+        let (left, right) = if *swapped { (rhs, lhs) } else { (lhs, rhs) };
         let left = StackedStorageView::new::<D>(
             &left.storage,
             left.member_len,
@@ -618,43 +562,30 @@ where
             lhs.members,
             right.member_len,
         )?;
-        let mut temporary = if let Some(copy) = &self.copy_c {
-            let temporary_len = copy.temporary_space.space().required_len()?;
-            let total = self.total_len(temporary_len, lhs.members)?;
+        let temporary_len = self.copy_c().map(|copy| copy.temporary_len());
+        let mut temporary = if let Some(temporary_len) = temporary_len {
             let existing = workspace
                 .copy_c_temporary
                 .take()
-                .filter(|value| value.members == lhs.members);
-            Some((
-                existing.is_none(),
-                match existing {
-                    Some(value) => value,
-                    None => StackedTensorMap {
-                        runtime: self.runtime.clone(),
-                        space: copy.temporary_space.clone(),
-                        signature: StructureSignature::of_space(
-                            &copy.temporary_space,
-                            self.output_signature.placement,
-                            &self.runtime,
-                        ),
-                        storage: CudaStorage::upload_members(
-                            ctx,
-                            zeroed_payload(total),
-                            temporary_len,
-                            lhs.members,
-                        )?,
-                        members: lhs.members,
-                        member_len: temporary_len,
-                        _payload: PhantomData,
-                    },
-                },
-            ))
+                .filter(|(_, members)| *members == lhs.members);
+            Some(match existing {
+                Some((storage, _)) => (false, storage),
+                None => (
+                    true,
+                    CudaStorage::upload_members(
+                        ctx,
+                        zeroed_payload(self.total_len(temporary_len, lhs.members)?),
+                        temporary_len,
+                        lhs.members,
+                    )?,
+                ),
+            })
         } else {
             None
         };
-        let (core_storage, core_len, zero_core) = match &mut temporary {
-            Some((fresh, value)) => (&mut value.storage, value.member_len, !*fresh),
-            None => (&mut *dst, self.member_len, zero_inactive),
+        let (core_storage, core_len, zero_core) = match (&mut temporary, temporary_len) {
+            (Some((fresh, storage)), Some(len)) => (storage, len, !*fresh),
+            _ => (&mut *dst, self.member_len, zero_inactive),
         };
         let mut core_destination =
             StackedStorageViewMut::new::<D>(core_storage, core_len, lhs.members, core_len)?;
@@ -674,20 +605,20 @@ where
             &left,
             &right,
         )?;
-        if let Some((_, value)) = temporary {
+        if let Some((_, storage)) = temporary {
             let result: Result<(), Error> = (|| {
                 let regions = workspace.device.copy_regions.as_ref().ok_or_else(|| {
                     Error::InvalidArgument("CopyC device regions are unprepared".into())
                 })?;
                 regions.execute_overwrite(
                     ctx,
-                    &value.storage,
+                    &storage,
                     workspace.device.copy_coefficients.as_ref(),
                     dst,
                 )?;
                 Ok(())
             })();
-            workspace.copy_c_temporary = Some(value);
+            workspace.copy_c_temporary = Some((storage, lhs.members));
             result?;
         }
         Ok(())
@@ -927,7 +858,7 @@ mod fermionic_unit_tests {
             let left = StackedTensorMap::pack(&[&a]).unwrap();
             let right = StackedTensorMap::pack(&[&b]).unwrap();
             let plan = ContractPlan::new(&left, &right, &spec).unwrap();
-            assert_eq!(plan.copy_c.is_some(), copy_c, "{name}");
+            assert_eq!(plan.copy_c().is_some(), copy_c, "{name}");
             assert!(!plan.resolution.is_dynamic_tree(), "{name}");
             let mut jobs_per_member = 0;
             for members in [1, 2, 17] {
@@ -1215,7 +1146,7 @@ mod fermionic_unit_tests {
             domain: &output[1..],
         };
         let plan = ContractPlan::new(&left, &right, &spec).unwrap();
-        assert!(plan.copy_c.is_none());
+        assert!(plan.copy_c().is_none());
         assert!(!plan.resolution.is_dynamic_tree());
         let (core, swapped) = plan.resolution.direct_core().unwrap();
         assert_eq!(core.require_identity_direct_replay().is_ok(), negative == 0);
@@ -1285,6 +1216,118 @@ mod fermionic_unit_tests {
                     }
                 ));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod plan_contract_tests {
+    use super::*;
+    use crate::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+    use crate::typed::checked_generic_contract::{contract_destination, CopyC};
+    use crate::typed::{ContractSpec, GradedSpace};
+
+    /// The planner's `CopyC` route is Host eager's `copyC` (TensorKit
+    /// `blas_contract!`, `tensoroperations.jl:436-446` @cfaa073): the same temporary
+    /// space and the same permute, for owned operands and a lazy adjoint on
+    /// either side, sorted or swapped.
+    #[test]
+    fn plan_contract_copy_c_is_the_host_eager_copy_c() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let u1 = GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [
+                (U1Irrep::new(-1), 2),
+                (U1Irrep::new(0), 1),
+                (U1Irrep::new(1), 2),
+                (U1Irrep::new(2), 1),
+            ],
+        )
+        .unwrap();
+        let su2 = GradedSpace::try_new(
+            Arc::new(SU2FusionRule),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 2),
+                (SU2Irrep::from_twice_spin(2), 1),
+            ],
+        )
+        .unwrap();
+        check(&runtime, &u1);
+        check(&runtime, &su2);
+    }
+
+    fn check<R>(runtime: &Runtime, v: &GradedSpace<R>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        let tensor =
+            |seed| TensorMap::<_, f64>::rand_with_seed(runtime, [v, v], [v, v], seed).unwrap();
+        let (a, b, lazy) = (tensor(81), tensor(82), tensor(83).adjoint().unwrap());
+        for (name, lhs, rhs, lhs_axes, rhs_axes, output) in [
+            ("L3p", &lazy, &b, [3, 2], [1, 0], [1, 0, 2, 3]),
+            ("L5p", &a, &lazy, [0, 1], [2, 3], [3, 2, 0, 1]),
+            ("L7p", &a, &lazy, [3, 2], [1, 0], [0, 1, 3, 2]),
+            ("C1p", &a, &b, [3, 2], [1, 0], [1, 0, 3, 2]),
+            ("C2p", &a, &b, [0, 1], [2, 3], [3, 2, 1, 0]),
+        ] {
+            let spec = ContractSpec {
+                lhs: &lhs_axes,
+                rhs: &rhs_axes,
+                codomain: &output[..2],
+                domain: &output[2..],
+            };
+            let destination = contract_destination(
+                lhs,
+                rhs,
+                &lhs_axes,
+                &rhs_axes,
+                OutputAxisOrder::from_axes(&output),
+                Some(2),
+            )
+            .unwrap();
+            let host = CopyC::plan(lhs, rhs, &spec, destination.space())
+                .unwrap()
+                .unwrap_or_else(|| panic!("{name}: Host eager takes copyC"));
+            let mut lease = runtime.lease_context().unwrap();
+            let lane = lease.context().multiplicity_free_lane::<f64>().unwrap();
+            let resolution = lane
+                .plan_contract(
+                    &destination,
+                    lhs.logical_space(),
+                    lhs.fusion_operand(),
+                    rhs.logical_space(),
+                    rhs.fusion_operand(),
+                    &lhs_axes,
+                    &rhs_axes,
+                    &output,
+                )
+                .unwrap();
+            let copy = resolution
+                .copy_c()
+                .unwrap_or_else(|| panic!("{name}: the planner takes CopyC"));
+            assert_eq!(
+                copy.temporary_structure().as_ref(),
+                host.temporary_space.space().structure().as_ref(),
+                "{name}"
+            );
+            // TensorKit's `dim(C)`: the temporary holds exactly the result's
+            // elements, in another order.
+            assert_eq!(
+                copy.temporary_len(),
+                destination.space().required_len().unwrap(),
+                "{name}"
+            );
+            let transform = lane
+                .tree_context_mut()
+                .compile_tree_pair_structure(
+                    destination.provider(),
+                    &host.operation,
+                    destination.space().structure(),
+                    host.temporary_space.space().structure(),
+                )
+                .unwrap();
+            assert!(Arc::ptr_eq(&transform, copy.transform()), "{name}");
         }
     }
 }
