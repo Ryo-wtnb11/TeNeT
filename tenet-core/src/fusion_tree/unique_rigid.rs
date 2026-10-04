@@ -46,26 +46,6 @@ where
     }
 }
 
-fn unique_rigid_bendright_tree_pair<R>(
-    rule: &R,
-    tree_pair: &FusionTreePairKey,
-) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-{
-    unique_rigid_bend_tree_pair(rule, tree_pair, Bend::Right)
-}
-
-fn unique_rigid_bendleft_tree_pair<R>(
-    rule: &R,
-    tree_pair: &FusionTreePairKey,
-) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-{
-    unique_rigid_bend_tree_pair(rule, tree_pair, Bend::Left)
-}
-
 fn unique_rigid_bend_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -115,15 +95,15 @@ where
     let codomain = tree_pair.codomain_tree();
     let site = FoldSite::new(codomain.uncoupled(), codomain.is_dual())?;
     let (fold, dual_first) = kernel.fold_begin(&site)?;
-    let (codomain_prime, coeff1) = unique_rigid_multi_fmove_tree(rule, codomain)?;
+    let unique = UniqueK(rule);
+    let (codomain_prime, coeff1) = multi_fmove_surgery(&unique, codomain)?;
     let tail_coupled = codomain_prime.coupled();
     let factors = kernel.fold_factors(&fold, tail_coupled, codomain.coupled())?;
-    let (domain_prime, coeff2) = unique_rigid_multi_fmove_inv_tree(
-        rule,
-        dual_first,
+    let (domain_prime, coeff2) = multi_fmove_inv_surgery(
+        &unique,
+        &(dual_first, !site.first_is_dual),
         tail_coupled,
         tree_pair.domain_tree(),
-        !site.first_is_dual,
     )?;
     let coefficient = kernel.fold_coefficient(&fold, &factors, &coeff1, &coeff2)?;
     Ok((
@@ -132,37 +112,20 @@ where
     ))
 }
 
-pub(crate) fn unique_rigid_cycle_clockwise_tree_pair<R>(
+pub(crate) fn unique_rigid_cycle_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
+    direction: PreparedCycleDirection,
 ) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    cycle_clockwise(
+    cycle(
         tree_pair,
-        |key| unique_rigid_bendleft_tree_pair(rule, key),
+        direction,
+        |key, bend| unique_rigid_bend_tree_pair(rule, key, bend),
         |key| unique_rigid_foldright_tree_pair(rule, key),
-    )
-}
-
-pub(crate) fn unique_rigid_cycle_anticlockwise_tree_pair<R>(
-    rule: &R,
-    tree_pair: &FusionTreePairKey,
-) -> Result<(FusionTreePairKey, R::Scalar), CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
-{
-    cycle_anticlockwise(
-        tree_pair,
-        |key| unique_rigid_bendright_tree_pair(rule, key),
-        |key| {
-            left_move_by_swap(key, |swapped| {
-                unique_rigid_foldright_tree_pair(rule, swapped)
-            })
-        },
     )
 }
 
@@ -219,82 +182,84 @@ where
     Ok((current.frame.materialize(current.local), coefficient))
 }
 
-pub(crate) fn unique_rigid_multi_fmove_tree<R>(
-    rule: &R,
-    tree: &FusionTreeKey,
-) -> Result<(FusionTreeKey, R::Scalar), CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
-{
-    let destination = unique_multi_fmove_tree(rule, tree)?;
-    let coefficient = multiplicity_free_multi_associator_scalar(rule, tree, &destination)?.ok_or(
-        CoreError::MalformedFusionTree {
-            message: "unique multi_Fmove destination does not match the source tail",
-        },
-    )?;
-    Ok((destination, coefficient))
-}
+/// The forward move is TensorKit `multi_Fmove`'s `UniqueFusion` branch
+/// (`basic_manipulations.jl:209-213`) at every rank: the tail couples to the
+/// one channel of `ā ⊗ c`. The inverse is a TeNeT deviation: TensorKit
+/// `multi_Fmove_inv` has no `UniqueFusion` branch, but with one channel per
+/// fusion step its enumeration yields exactly one lifted tree, which is the
+/// unique standard tree built here.
+impl<R: MultiplicityFreeRigidSymbols> MultiFKernel for UniqueK<'_, R> {
+    type Moves = (FusionTreeKey, R::Scalar);
+    type Lift = (SectorId, bool);
 
-pub(crate) fn unique_rigid_multi_fmove_inv_tree<R>(
-    rule: &R,
-    leading_sector: SectorId,
-    coupled: SectorId,
-    tree: &FusionTreeKey,
-    leading_is_dual: bool,
-) -> Result<(FusionTreeKey, R::Scalar), CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
-{
-    let destination =
-        unique_multi_fmove_inv_tree(rule, leading_sector, coupled, tree, leading_is_dual)?;
-    let coefficient = multiplicity_free_multi_associator_scalar(rule, &destination, tree)?.ok_or(
-        CoreError::MalformedFusionTree {
-            message: "unique inverse multi_Fmove destination does not match the source tail",
-        },
-    )?;
-    Ok((destination, (coefficient).conj()))
-}
+    fn tails<T: FramedTree + ?Sized>(&self, tree: &T) -> Result<Self::Moves, CoreError> {
+        let rule = self.0;
+        let recoupled = only_fusion_channel(rule, rule.dual(tree.uncoupled()[0]), tree.coupled())?;
+        let destination = unique_standard_fusion_tree(
+            rule,
+            &tree.uncoupled()[1..],
+            recoupled,
+            &tree.is_dual()[1..],
+        )?;
+        match multiplicity_free_multi_associator_from_parts(
+            rule,
+            tree.uncoupled(),
+            tree.is_dual(),
+            tree,
+            destination.uncoupled(),
+            destination.is_dual(),
+            &destination,
+        )? {
+            Some(coefficient) => Ok((destination, coefficient)),
+            None => Err(CoreError::MalformedFusionTree {
+                message: "unique multi_Fmove destination does not match the source tail",
+            }),
+        }
+    }
 
-fn unique_multi_fmove_tree<R>(rule: &R, tree: &FusionTreeKey) -> Result<FusionTreeKey, CoreError>
-where
-    R: MultiplicityFreeFusionRule,
-{
-    let first = tree
-        .uncoupled()
-        .first()
-        .copied()
-        .ok_or(CoreError::MalformedFusionTree {
-            message: "multi_Fmove requires at least one uncoupled sector",
-        })?;
-    let coupled = tree.coupled();
-    let recoupled = only_fusion_channel(rule, rule.dual(first), coupled)?;
-    unique_standard_fusion_tree(
-        rule,
-        &tree.uncoupled()[1..],
-        recoupled,
-        &tree.is_dual()[1..],
-    )
-}
+    fn lift_leading(&(leading, _): &(SectorId, bool)) -> SectorId {
+        leading
+    }
 
-fn unique_multi_fmove_inv_tree<R>(
-    rule: &R,
-    leading_sector: SectorId,
-    coupled: SectorId,
-    tree: &FusionTreeKey,
-    leading_is_dual: bool,
-) -> Result<FusionTreeKey, CoreError>
-where
-    R: MultiplicityFreeFusionRule,
-{
-    let mut uncoupled = Vec::with_capacity(tree.uncoupled().len() + 1);
-    uncoupled.push(leading_sector);
-    uncoupled.extend_from_slice(tree.uncoupled());
-    let mut is_dual = Vec::with_capacity(tree.is_dual().len() + 1);
-    is_dual.push(leading_is_dual);
-    is_dual.extend_from_slice(tree.is_dual());
-    unique_standard_fusion_tree(rule, &uncoupled, coupled, &is_dual)
+    // Why not check `c ∈ a ⊗ b` here as the other kernels do: for a
+    // well-formed source tree (its coupled sector is the fusion of its
+    // uncoupled legs), the unique standard tree below fails with a
+    // channel-count error on exactly the inputs the admission rejects, and
+    // the admission would add a fusion query per fold. Malformed source
+    // trees are rejected by upstream validation before reaching this move.
+    fn admit_lift(&self, _: SectorId, _: SectorId, _: SectorId) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn lifts<T: FramedTree + ?Sized>(
+        &self,
+        &(leading, leading_is_dual): &(SectorId, bool),
+        coupled: SectorId,
+        tree: &T,
+    ) -> Result<Self::Moves, CoreError> {
+        let rule = self.0;
+        let mut uncoupled = Vec::with_capacity(tree.uncoupled().len() + 1);
+        uncoupled.push(leading);
+        uncoupled.extend_from_slice(tree.uncoupled());
+        let mut is_dual = Vec::with_capacity(tree.is_dual().len() + 1);
+        is_dual.push(leading_is_dual);
+        is_dual.extend_from_slice(tree.is_dual());
+        let destination = unique_standard_fusion_tree(rule, &uncoupled, coupled, &is_dual)?;
+        match multiplicity_free_multi_associator_from_parts(
+            rule,
+            destination.uncoupled(),
+            destination.is_dual(),
+            &destination,
+            tree.uncoupled(),
+            tree.is_dual(),
+            tree,
+        )? {
+            Some(coefficient) => Ok((destination, coefficient.conj())),
+            None => Err(CoreError::MalformedFusionTree {
+                message: "unique inverse multi_Fmove destination does not match the source tail",
+            }),
+        }
+    }
 }
 
 fn unique_standard_fusion_tree<R>(

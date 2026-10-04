@@ -67,18 +67,6 @@ pub(crate) trait TreeView {
     fn vertex(&self, position: usize) -> Option<MultiplicityIndex>;
 }
 
-impl TreeView for UnhashedFusionTree {
-    fn coupled(&self) -> SectorId {
-        MultiplicityFreeTreeLocalData::coupled(self)
-    }
-    fn innerlines(&self) -> &[SectorId] {
-        MultiplicityFreeTreeLocalData::innerlines(self)
-    }
-    fn vertex(&self, position: usize) -> Option<MultiplicityIndex> {
-        self.vertex_at(position)
-    }
-}
-
 impl TreeView for MultiplicityFreeTreeLocal {
     #[inline(always)]
     fn coupled(&self) -> SectorId {
@@ -95,9 +83,11 @@ impl TreeView for MultiplicityFreeTreeLocal {
 }
 
 impl TreeView for FusionTreeKey {
+    #[inline]
     fn coupled(&self) -> SectorId {
         FusionTreeKey::coupled(self)
     }
+    #[inline]
     fn innerlines(&self) -> &[SectorId] {
         FusionTreeKey::innerlines(self)
     }
@@ -192,12 +182,12 @@ impl ArtinSite {
         if index + 1 == self.rank {
             return Ok(tree.coupled());
         }
-        tree.innerlines()
-            .get(index - 1)
-            .copied()
-            .ok_or(CoreError::MalformedFusionTree {
+        match tree.innerlines().get(index - 1) {
+            Some(&line) => Ok(line),
+            None => Err(CoreError::MalformedFusionTree {
                 message: "inner-extended tree is missing an innerline",
-            })
+            }),
+        }
     }
 }
 
@@ -238,12 +228,15 @@ where
 
     if index == 0 {
         let coupled = if site.rank > 2 {
-            tree.innerlines()
-                .first()
-                .copied()
-                .ok_or(CoreError::MalformedFusionTree {
-                    message: "first braid of a rank > 2 tree requires the first innerline",
-                })?
+            match tree.innerlines().first() {
+                Some(&line) => line,
+                None => {
+                    return Err(CoreError::MalformedFusionTree {
+                        message: "first braid of a rank > 2 tree requires the first innerline",
+                    }
+                    .into())
+                }
+            }
         } else {
             tree.coupled()
         };
@@ -305,9 +298,12 @@ impl BendSite {
     }
 
     pub(crate) fn bent_is_dual(&self) -> Result<bool, CoreError> {
-        self.bent_is_dual.ok_or(CoreError::MalformedFusionTree {
-            message: "codomain tree is missing a duality flag",
-        })
+        match self.bent_is_dual {
+            Some(is_dual) => Ok(is_dual),
+            None => Err(CoreError::MalformedFusionTree {
+                message: "codomain tree is missing a duality flag",
+            }),
+        }
     }
 
     /// `a = N₁ == 1 ? unit : N₁ == 2 ? uncoupled[1] : innerlines[end]`
@@ -332,13 +328,14 @@ impl BendSite {
         let left_coupled = match self.codomain_rank {
             1 => vacuum,
             2 => self.codomain_first,
-            _ => codomain
-                .innerlines()
-                .last()
-                .copied()
-                .ok_or(CoreError::MalformedFusionTree {
-                    message: "bendright requires the last codomain innerline",
-                })?,
+            _ => match codomain.innerlines().last() {
+                Some(&line) => line,
+                None => {
+                    return Err(CoreError::MalformedFusionTree {
+                        message: "bendright requires the last codomain innerline",
+                    })
+                }
+            },
         };
         Ok(BendLines {
             coupled,
@@ -640,13 +637,12 @@ pub(crate) fn mu_index<T: TreeView + ?Sized>(
     tree: &T,
     position: usize,
 ) -> Result<usize, CoreError> {
-    Ok(tree
-        .vertex(position)
-        .ok_or(CoreError::MalformedFusionTree {
+    let Some(label) = tree.vertex(position) else {
+        return Err(CoreError::MalformedFusionTree {
             message: "Generic fusion tree requires a vertex label at the read position",
-        })?
-        .get()
-        - 1)
+        });
+    };
+    Ok(label.get() - 1)
 }
 
 impl<C> StyleKernel for GenericK<'_, C>
@@ -844,9 +840,9 @@ pub(crate) trait FoldKernel: StyleKernel {
     ) -> Result<Self::S, Self::E>;
 }
 
-/// The keyed multi-F-moves a fold composes (TensorKit `multi_Fmove` /
-/// `multi_Fmove_inv`, `basic_manipulations.jl:218-327, 343-462`).
-pub(crate) trait MultiFmoveKernel: FoldKernel {
+/// The multi-F-moves a keyed fold composes, on keys: the surgery itself for
+/// keyed kernels, projected and materialized for multiplicity-free locals.
+pub(crate) trait KeyedMultiFKernel: FoldKernel {
     type Moves: IntoIterator<Item = (FusionTreeKey, Self::FCoeff)>;
     fn multi_fmove(&self, tree: &FusionTreeKey) -> Result<Self::Moves, Self::E>;
     fn multi_fmove_inv(
@@ -866,7 +862,7 @@ pub(crate) fn fold_surgery<K, F>(
     mut emit: F,
 ) -> Result<(), K::E>
 where
-    K: MultiFmoveKernel,
+    K: KeyedMultiFKernel,
     F: FnMut(FusionTreePairKey, K::S),
 {
     let codomain = tree_pair.codomain_tree();
@@ -937,25 +933,6 @@ impl<R: MultiplicityFreeRigidSymbols> FoldKernel for SimpleK<'_, R> {
         domain: &R::Scalar,
     ) -> Result<R::Scalar, CoreError> {
         Ok(fold.coefficient(factors, codomain, domain))
-    }
-}
-
-impl<R: MultiplicityFreeRigidSymbols> MultiFmoveKernel for SimpleK<'_, R> {
-    type Moves = Vec<(FusionTreeKey, R::Scalar)>;
-
-    #[inline(always)]
-    fn multi_fmove(&self, tree: &FusionTreeKey) -> Result<Self::Moves, CoreError> {
-        multiplicity_free_multi_fmove_tree(self.0, tree)
-    }
-    #[inline(always)]
-    fn multi_fmove_inv(
-        &self,
-        leading: SectorId,
-        coupled: SectorId,
-        tree: &FusionTreeKey,
-        leading_is_dual: bool,
-    ) -> Result<Self::Moves, CoreError> {
-        multiplicity_free_multi_fmove_inv_tree(self.0, leading, coupled, tree, leading_is_dual)
     }
 }
 
@@ -1037,11 +1014,11 @@ impl<C: GenericRigidAccess> FoldKernel for GenericK<'_, C> {
     }
 }
 
-impl<C: GenericRigidAccess> MultiFmoveKernel for GenericK<'_, C> {
+impl<C: GenericRigidAccess> KeyedMultiFKernel for GenericK<'_, C> {
     type Moves = GenericFmoveTerms<C::Scalar>;
 
     fn multi_fmove(&self, tree: &FusionTreeKey) -> Result<Self::Moves, Self::E> {
-        generic_multi_fmove_tree_result(self.0, tree)
+        multi_fmove_surgery(self, tree)
     }
     fn multi_fmove_inv(
         &self,
@@ -1050,6 +1027,146 @@ impl<C: GenericRigidAccess> MultiFmoveKernel for GenericK<'_, C> {
         tree: &FusionTreeKey,
         leading_is_dual: bool,
     ) -> Result<Self::Moves, Self::E> {
-        generic_multi_fmove_inv_tree_result(self.0, leading, coupled, tree, leading_is_dual)
+        multi_fmove_inv_surgery(self, &(leading, leading_is_dual), coupled, tree)
     }
+}
+
+/// A tree with its externals, as a multi-F-move reads it: a key, or a
+/// multiplicity-free frame with one local.
+pub(crate) trait FramedTree: TreeView {
+    fn uncoupled(&self) -> &[SectorId];
+    fn is_dual(&self) -> &[bool];
+}
+
+impl FramedTree for FusionTreeKey {
+    #[inline]
+    fn uncoupled(&self) -> &[SectorId] {
+        FusionTreeKey::uncoupled(self)
+    }
+    #[inline]
+    fn is_dual(&self) -> &[bool] {
+        FusionTreeKey::is_dual(self)
+    }
+}
+
+/// A multiplicity-free local read against its frame.
+pub(crate) struct FramedLocal<'a> {
+    pub(crate) frame: &'a MultiplicityFreeTreeFrame,
+    pub(crate) local: &'a MultiplicityFreeTreeLocal,
+}
+
+impl TreeView for FramedLocal<'_> {
+    #[inline(always)]
+    fn coupled(&self) -> SectorId {
+        self.local.coupled
+    }
+    #[inline(always)]
+    fn innerlines(&self) -> &[SectorId] {
+        &self.local.innerlines
+    }
+    #[inline(always)]
+    fn vertex(&self, _: usize) -> Option<MultiplicityIndex> {
+        None
+    }
+}
+
+impl FramedTree for FramedLocal<'_> {
+    #[inline(always)]
+    fn uncoupled(&self) -> &[SectorId] {
+        &self.frame.uncoupled
+    }
+    #[inline(always)]
+    fn is_dual(&self) -> &[bool] {
+        &self.frame.is_dual
+    }
+}
+
+/// The per-style part of TensorKit `multi_Fmove` / `multi_Fmove_inv`
+/// (`basic_manipulations.jl:191-328, 353-470`): Stage 1 tree enumeration and
+/// Stage 2 associator products, which differ by fusion style in what is
+/// enumerated (complete channels with prefix pruning, the provider's checked
+/// table, or the one unique channel) and in the coefficient's shape.
+pub(crate) trait MultiFKernel: StyleKernel {
+    /// The destination trees with their coefficients.
+    type Moves;
+    /// What fixes an inverse move's externals besides the source tree: the
+    /// leading leg and its duality, or a prepared output frame.
+    type Lift;
+
+    /// External checks preceding the rank dispatch.
+    fn check_externals<T: FramedTree + ?Sized>(&self, _tree: &T) -> Result<(), Self::E> {
+        Ok(())
+    }
+    /// `N == 1`: the empty tail at the unit (TK `:218-220`).
+    fn unit_tail<T: FramedTree + ?Sized>(&self, tree: &T) -> Result<Self::Moves, Self::E> {
+        self.tails(tree)
+    }
+    /// `N == 2`: the one-leg tail (TK `:221-233`).
+    fn single_tail<T: FramedTree + ?Sized>(&self, tree: &T) -> Result<Self::Moves, Self::E> {
+        self.tails(tree)
+    }
+    /// Every tail and its associator (TK Stage 1 and Stage 2, or the
+    /// `UniqueFusion` branch at `:209-213` for every rank).
+    fn tails<T: FramedTree + ?Sized>(&self, tree: &T) -> Result<Self::Moves, Self::E>;
+
+    fn lift_leading(lift: &Self::Lift) -> SectorId;
+    /// External checks preceding the `c ∈ a ⊗ b` admission.
+    fn check_lift<T: FramedTree + ?Sized>(
+        &self,
+        _lift: &Self::Lift,
+        _tree: &T,
+    ) -> Result<(), Self::E> {
+        Ok(())
+    }
+    /// TK `c ∈ a ⊗ b || throw(SectorMismatch)` (`:355-356`).
+    fn admit_lift(
+        &self,
+        leading: SectorId,
+        tree_coupled: SectorId,
+        coupled: SectorId,
+    ) -> Result<(), Self::E>;
+    /// Every lifted tree and its conjugated associator.
+    fn lifts<T: FramedTree + ?Sized>(
+        &self,
+        lift: &Self::Lift,
+        coupled: SectorId,
+        tree: &T,
+    ) -> Result<Self::Moves, Self::E>;
+}
+
+/// One `multi_Fmove`: split the first leg off `tree`.
+#[inline(always)]
+pub(crate) fn multi_fmove_surgery<K, T>(kernel: &K, tree: &T) -> Result<K::Moves, K::E>
+where
+    K: MultiFKernel,
+    T: FramedTree + ?Sized,
+{
+    kernel.check_externals(tree)?;
+    match tree.uncoupled().len() {
+        0 => Err(CoreError::MalformedFusionTree {
+            message: "multi_Fmove requires at least one uncoupled sector",
+        }
+        .into()),
+        1 => kernel.unit_tail(tree),
+        2 => kernel.single_tail(tree),
+        _ => kernel.tails(tree),
+    }
+}
+
+/// One `multi_Fmove_inv`: fuse the lift's leading leg onto `tree` at
+/// `coupled`.
+#[inline(always)]
+pub(crate) fn multi_fmove_inv_surgery<K, T>(
+    kernel: &K,
+    lift: &K::Lift,
+    coupled: SectorId,
+    tree: &T,
+) -> Result<K::Moves, K::E>
+where
+    K: MultiFKernel,
+    T: FramedTree + ?Sized,
+{
+    kernel.check_lift(lift, tree)?;
+    kernel.admit_lift(K::lift_leading(lift), tree.coupled(), coupled)?;
+    kernel.lifts(lift, coupled, tree)
 }

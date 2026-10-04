@@ -50,15 +50,17 @@ impl UnhashedFusionTree {
     }
 }
 
-impl MultiplicityFreeTreeLocalData for UnhashedFusionTree {
+impl TreeView for UnhashedFusionTree {
     #[inline]
     fn coupled(&self) -> SectorId {
         self.coupled
     }
-
     #[inline]
     fn innerlines(&self) -> &[SectorId] {
         &self.innerlines
+    }
+    fn vertex(&self, position: usize) -> Option<MultiplicityIndex> {
+        self.vertex_at(position)
     }
 }
 
@@ -190,25 +192,8 @@ where
     }
 }
 
-pub(super) trait MultiplicityFreeTreeLocalData {
-    fn coupled(&self) -> SectorId;
-    fn innerlines(&self) -> &[SectorId];
-}
-
-impl MultiplicityFreeTreeLocalData for FusionTreeKey {
-    #[inline]
-    fn coupled(&self) -> SectorId {
-        self.coupled()
-    }
-
-    #[inline]
-    fn innerlines(&self) -> &[SectorId] {
-        self.innerlines()
-    }
-}
-
 #[cfg(test)]
-pub(super) trait MultiplicityFreeTreeData: MultiplicityFreeTreeLocalData {
+pub(super) trait MultiplicityFreeTreeData: TreeView {
     fn uncoupled(&self) -> &[SectorId];
 }
 
@@ -520,18 +505,6 @@ pub(crate) use multiplicity_free_projection::{
     Pairs as MultiplicityFreePairProjection, Tree as ValidatedMultiplicityFreeTree,
     TreeBatch as ValidatedMultiplicityFreeTreeBatch, Trees as MultiplicityFreeTreeProjection,
 };
-
-impl MultiplicityFreeTreeLocalData for MultiplicityFreeTreeLocal {
-    #[inline]
-    fn coupled(&self) -> SectorId {
-        self.coupled
-    }
-
-    #[inline]
-    fn innerlines(&self) -> &[SectorId] {
-        &self.innerlines
-    }
-}
 
 type MultiplicityFreeArtinTerms<S> = SmallVec<[(MultiplicityFreeTreeLocal, S); 2]>;
 

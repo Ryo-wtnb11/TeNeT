@@ -181,7 +181,7 @@ fn orient<T>(swap: bool, codomain: T, domain: T) -> (T, T) {
     clippy::type_complexity,
     reason = "the SmallVec inline capacity is part of this local bend allocation contract"
 )]
-fn multiplicity_free_bend_tree_pair<R>(
+pub(super) fn multiplicity_free_bend_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
     bend: Bend,

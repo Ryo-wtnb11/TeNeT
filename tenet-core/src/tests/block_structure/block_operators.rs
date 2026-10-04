@@ -63,7 +63,7 @@ fn fibonacci_multi_associator_filters_cross_inadmissible_candidates() {
 fn fibonacci_multi_fmove_forward_and_inverse_call_only_admissible_f() {
     let rule = FibonacciFAdmissibilityProbe::new();
     let (long, short) = fibonacci_multi_associator_counterexample();
-    let actual_forward = multiplicity_free_multi_fmove_tree(&rule, &long).unwrap();
+    let actual_forward = SimpleK(&rule).multi_fmove(&long).unwrap();
     let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
     // What: TensorKit's Stage-1 candidate intersection retains these two
     // tails in this order; Stage 2 gives the listed Fibonacci F products.
@@ -83,14 +83,9 @@ fn fibonacci_multi_fmove_forward_and_inverse_call_only_admissible_f() {
     assert!(!calls.is_empty());
     assert_fibonacci_f_calls_are_admissible(&calls);
 
-    let actual_inverse = multiplicity_free_multi_fmove_inv_tree(
-        &rule,
-        SectorId::new(1),
-        SectorId::new(1),
-        &short,
-        false,
-    )
-    .unwrap();
+    let actual_inverse = SimpleK(&rule)
+        .multi_fmove_inv(SectorId::new(1), SectorId::new(1), &short, false)
+        .unwrap();
     // What: TensorKit's right-to-left inverse construction retains these
     // two rank-4 trees in canonical order and conjugates the same real
     // Fibonacci coefficients.
@@ -118,7 +113,7 @@ fn grouped_multi_fmove_matches_legacy_order_and_reuses_stage_symbols() {
     let trees = collect_fusion_trees_for_coupled(&rule, &[tau; 6], &[false; 6], &[tau; 6], tau);
     let mut fixture = None;
     for tree in trees {
-        let grouped = multiplicity_free_multi_fmove_tree(&rule, &tree).unwrap();
+        let grouped = SimpleK(&rule).multi_fmove(&tree).unwrap();
         let grouped_calls = rule.take_calls();
         let legacy = multiplicity_free_multi_fmove_tree_legacy_oracle(&rule, &tree).unwrap();
         let legacy_calls = rule.take_calls();
@@ -145,8 +140,9 @@ fn grouped_multi_fmove_matches_legacy_order_and_reuses_stage_symbols() {
         .expect("rank-six Fibonacci forward move has a tail")
         .0
         .clone();
-    let grouped_inverse =
-        multiplicity_free_multi_fmove_inv_tree(&rule, tau, tree.coupled(), &tail, false).unwrap();
+    let grouped_inverse = SimpleK(&rule)
+        .multi_fmove_inv(tau, tree.coupled(), &tail, false)
+        .unwrap();
     let grouped_inverse_calls = rule.take_calls();
     let legacy_inverse = multiplicity_free_multi_fmove_inv_tree_legacy_oracle(
         &rule,

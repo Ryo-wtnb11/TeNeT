@@ -176,46 +176,40 @@ where
 }
 
 /// `cycleclockwise` (`duality_manipulations.jl:401`): foldright then bendleft,
-/// or bendleft then foldright when the codomain is empty.
-pub(super) fn cycle_clockwise<T, S, E, B, F, IB, IF>(
+/// or bendleft then foldright when the codomain is empty. `cycleanticlockwise`
+/// (`:431`): foldleft then bendright, or bendright then foldleft when the
+/// domain is empty; foldleft is foldright through the swapped pair.
+pub(super) fn cycle<T, S, E, B, F, IB, IF>(
     tree_pair: &FusionTreePairKey,
-    mut bendleft: B,
+    direction: PreparedCycleDirection,
+    mut bend: B,
     mut foldright: F,
 ) -> Result<T, E>
 where
     T: TreePairTerms<S>,
     E: From<CoreError>,
-    B: FnMut(&FusionTreePairKey) -> Result<IB, E>,
+    B: FnMut(&FusionTreePairKey, Bend) -> Result<IB, E>,
     F: FnMut(&FusionTreePairKey) -> Result<IF, E>,
     IB: StepTerms<S>,
-    IF: StepTerms<S>,
+    IF: StepTerms<S> + TreePairTerms<S>,
 {
-    if tree_pair.codomain_tree().uncoupled().is_empty() {
-        T::first_step(bendleft(tree_pair)?)?.then(foldright)
-    } else {
-        T::first_step(foldright(tree_pair)?)?.then(bendleft)
-    }
-}
-
-/// `cycleanticlockwise` (`duality_manipulations.jl:431`): foldleft then
-/// bendright, or bendright then foldleft when the domain is empty.
-pub(super) fn cycle_anticlockwise<T, S, E, B, F, IB, IF>(
-    tree_pair: &FusionTreePairKey,
-    mut bendright: B,
-    mut foldleft: F,
-) -> Result<T, E>
-where
-    T: TreePairTerms<S>,
-    E: From<CoreError>,
-    B: FnMut(&FusionTreePairKey) -> Result<IB, E>,
-    F: FnMut(&FusionTreePairKey) -> Result<IF, E>,
-    IB: StepTerms<S>,
-    IF: StepTerms<S>,
-{
-    if tree_pair.domain_tree().uncoupled().is_empty() {
-        T::first_step(bendright(tree_pair)?)?.then(foldleft)
-    } else {
-        T::first_step(foldleft(tree_pair)?)?.then(bendright)
+    match direction {
+        PreparedCycleDirection::Clockwise => {
+            if tree_pair.codomain_tree().uncoupled().is_empty() {
+                T::first_step(bend(tree_pair, Bend::Left)?)?.then(foldright)
+            } else {
+                T::first_step(foldright(tree_pair)?)?.then(|key| bend(key, Bend::Left))
+            }
+        }
+        PreparedCycleDirection::Anticlockwise => {
+            let foldleft = |key: &FusionTreePairKey| left_move_by_swap(key, &mut foldright);
+            if tree_pair.domain_tree().uncoupled().is_empty() {
+                T::first_step(bend(tree_pair, Bend::Right)?)?.then(foldleft)
+            } else {
+                let mut foldleft = foldleft;
+                T::first_step(foldleft(tree_pair)?)?.then(|key| bend(key, Bend::Right))
+            }
+        }
     }
 }
 
@@ -291,24 +285,19 @@ where
 
 /// Rotate a running transform `count` times in `direction`, applying the
 /// clockwise or anticlockwise cycle move to every term.
-pub(super) fn run_cycle_terms<T, S, E, CW, CCW, I>(
+pub(super) fn run_cycle_terms<T, S, E, C, I>(
     current: T,
     cycles: Option<(PreparedCycleDirection, usize)>,
-    mut clockwise: CW,
-    mut anticlockwise: CCW,
+    mut cycle: C,
 ) -> Result<T, E>
 where
     T: TreePairTerms<S>,
     E: From<CoreError>,
-    CW: FnMut(&FusionTreePairKey) -> Result<I, E>,
-    CCW: FnMut(&FusionTreePairKey) -> Result<I, E>,
+    C: FnMut(&FusionTreePairKey, PreparedCycleDirection) -> Result<I, E>,
     I: StepTerms<S>,
 {
     run_cycles(current, cycles, |terms, direction| {
-        terms.then(|key| match direction {
-            PreparedCycleDirection::Clockwise => clockwise(key),
-            PreparedCycleDirection::Anticlockwise => anticlockwise(key),
-        })
+        terms.then(|key| cycle(key, direction))
     })
 }
 

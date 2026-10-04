@@ -103,37 +103,20 @@ where
     Ok(terms.into_vec())
 }
 
-pub(crate) fn multiplicity_free_cycle_clockwise_tree_pair<R>(
+pub(crate) fn multiplicity_free_cycle_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
+    direction: PreparedCycleDirection,
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    cycle_clockwise(
+    cycle(
         tree_pair,
-        |key| multiplicity_free_bendleft_tree_pair(rule, key),
+        direction,
+        |key, bend| multiplicity_free_bend_tree_pair(rule, key, bend),
         |key| multiplicity_free_foldright_tree_pair(rule, key),
-    )
-}
-
-pub(crate) fn multiplicity_free_cycle_anticlockwise_tree_pair<R>(
-    rule: &R,
-    tree_pair: &FusionTreePairKey,
-) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-{
-    cycle_anticlockwise(
-        tree_pair,
-        |key| multiplicity_free_bendright_tree_pair(rule, key),
-        |key| {
-            left_move_by_swap(key, |swapped| {
-                multiplicity_free_foldright_tree_pair(rule, swapped)
-            })
-        },
     )
 }
 
@@ -226,7 +209,7 @@ fn multiplicity_free_forward_prefix_targets<T>(
     long: &T,
 ) -> Result<SectorVec, CoreError>
 where
-    T: MultiplicityFreeTreeLocalData + ?Sized,
+    T: TreeView + ?Sized,
 {
     let mut targets = SectorVec::with_capacity(long_uncoupled.len().saturating_sub(2));
     for leg_index in 2..long_uncoupled.len() {
@@ -241,7 +224,7 @@ fn multiplicity_free_inverse_prefix_targets<T>(
     short: &T,
 ) -> Result<SectorVec, CoreError>
 where
-    T: MultiplicityFreeTreeLocalData + ?Sized,
+    T: TreeView + ?Sized,
 {
     let mut targets = SectorVec::with_capacity(short_uncoupled.len());
     for leg_index in 1..short_uncoupled.len() {
@@ -291,200 +274,218 @@ where
         ) != 0
 }
 
-pub(super) fn multiplicity_free_multi_fmove_local<R>(
-    rule: &R,
-    frame: &MultiplicityFreeTreeFrame,
-    local: &MultiplicityFreeTreeLocal,
-) -> Result<Vec<(MultiplicityFreeTreeLocal, R::Scalar)>, CoreError>
+impl<R> MultiFKernel for SimpleK<'_, R>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let rank = frame.uncoupled.len();
-    if rank != frame.is_dual.len() {
-        return Err(CoreError::MalformedFusionTree {
-            message: "fusion tree sectors and duality flags must have matching length",
-        });
-    }
-    if rank == 0 {
-        return Err(CoreError::MalformedFusionTree {
-            message: "multi_Fmove requires at least one uncoupled sector",
-        });
-    }
-    if rank == 1 {
-        return Ok(vec![(
-            MultiplicityFreeTreeLocal {
-                coupled: rule.vacuum(),
-                innerlines: SectorVec::new(),
-            },
-            R::Scalar::one(),
-        )]);
-    }
-    if rank == 2 {
-        return Ok(vec![(
-            MultiplicityFreeTreeLocal {
-                coupled: frame.uncoupled[1],
-                innerlines: SectorVec::new(),
-            },
-            R::Scalar::one(),
-        )]);
+    type Moves = Vec<(MultiplicityFreeTreeLocal, R::Scalar)>;
+    type Lift = MultiplicityFreeTreeFrame;
+
+    fn check_externals<T: FramedTree + ?Sized>(&self, tree: &T) -> Result<(), CoreError> {
+        if tree.uncoupled().len() != tree.is_dual().len() {
+            return Err(CoreError::MalformedFusionTree {
+                message: "fusion tree sectors and duality flags must have matching length",
+            });
+        }
+        Ok(())
     }
 
-    let first = frame.uncoupled[0];
-    let coupled = local.coupled;
-    let tail_uncoupled = &frame.uncoupled[1..];
-    let tail_is_dual = &frame.is_dual[1..];
-    let prefix_targets = multiplicity_free_forward_prefix_targets(&frame.uncoupled, local)?;
-    let mut candidates = Vec::new();
-    for tail_coupled in rule.fusion_channels(rule.dual(first), coupled) {
-        candidates.extend(collect_multiplicity_free_tree_locals_for_coupled_where(
+    fn unit_tail<T: FramedTree + ?Sized>(&self, _: &T) -> Result<Self::Moves, CoreError> {
+        Ok(vec![(
+            MultiplicityFreeTreeLocal {
+                coupled: self.0.vacuum(),
+                innerlines: SectorVec::new(),
+            },
+            R::Scalar::one(),
+        )])
+    }
+
+    fn single_tail<T: FramedTree + ?Sized>(&self, tree: &T) -> Result<Self::Moves, CoreError> {
+        Ok(vec![(
+            MultiplicityFreeTreeLocal {
+                coupled: tree.uncoupled()[1],
+                innerlines: SectorVec::new(),
+            },
+            R::Scalar::one(),
+        )])
+    }
+
+    // Stage 1 with TensorKit's prefix pruning, then Stage 2 grouped by
+    // F-symbol arguments per stage.
+    fn tails<T: FramedTree + ?Sized>(&self, tree: &T) -> Result<Self::Moves, CoreError> {
+        let rule = self.0;
+        let first = tree.uncoupled()[0];
+        let tail_uncoupled = &tree.uncoupled()[1..];
+        let tail_is_dual = &tree.is_dual()[1..];
+        let prefix_targets = multiplicity_free_forward_prefix_targets(tree.uncoupled(), tree)?;
+        let mut candidates = Vec::new();
+        for tail_coupled in rule.fusion_channels(rule.dual(first), tree.coupled()) {
+            candidates.extend(collect_multiplicity_free_tree_locals_for_coupled_where(
+                rule,
+                tail_uncoupled,
+                tail_coupled,
+                |prefix_len, prefix_coupled| {
+                    multiplicity_free_forward_prefix_allowed(
+                        rule,
+                        first,
+                        &prefix_targets,
+                        prefix_len,
+                        prefix_coupled,
+                    )
+                },
+            ));
+        }
+        let coefficients = multiplicity_free_multi_associator_grouped_fixed_long(
             rule,
+            tree.uncoupled(),
+            tree.is_dual(),
+            tree,
             tail_uncoupled,
-            tail_coupled,
+            tail_is_dual,
+            &candidates,
+        )?;
+        Ok(candidates
+            .into_iter()
+            .zip(coefficients)
+            .filter_map(|(candidate, coefficient)| {
+                coefficient.map(|coefficient| (candidate, coefficient))
+            })
+            .collect())
+    }
+
+    fn lift_leading(lift: &MultiplicityFreeTreeFrame) -> SectorId {
+        lift.uncoupled[0]
+    }
+
+    fn check_lift<T: FramedTree + ?Sized>(
+        &self,
+        lift: &MultiplicityFreeTreeFrame,
+        tree: &T,
+    ) -> Result<(), CoreError> {
+        if tree.uncoupled().len() != tree.is_dual().len()
+            || lift.uncoupled.len() != lift.is_dual.len()
+            || lift.uncoupled.len() != tree.uncoupled().len() + 1
+            || lift.uncoupled[1..] != *tree.uncoupled()
+            || lift.is_dual[1..] != *tree.is_dual()
+        {
+            return Err(CoreError::MalformedFusionTree {
+                message: "multi_Fmove inverse requires one leading external sector",
+            });
+        }
+        Ok(())
+    }
+
+    fn admit_lift(
+        &self,
+        leading: SectorId,
+        tree_coupled: SectorId,
+        coupled: SectorId,
+    ) -> Result<(), CoreError> {
+        if self.0.nsymbol(leading, tree_coupled, coupled) == 0 {
+            return Err(CoreError::SectorMismatch {
+                expected: coupled,
+                actual: tree_coupled,
+            });
+        }
+        Ok(())
+    }
+
+    fn lifts<T: FramedTree + ?Sized>(
+        &self,
+        lift: &MultiplicityFreeTreeFrame,
+        coupled: SectorId,
+        tree: &T,
+    ) -> Result<Self::Moves, CoreError> {
+        let rule = self.0;
+        let leading = lift.uncoupled[0];
+        let prefix_targets = multiplicity_free_inverse_prefix_targets(tree.uncoupled(), tree)?;
+        let candidates = collect_multiplicity_free_tree_locals_for_coupled_where(
+            rule,
+            &lift.uncoupled,
+            coupled,
             |prefix_len, prefix_coupled| {
-                multiplicity_free_forward_prefix_allowed(
+                multiplicity_free_inverse_prefix_allowed(
                     rule,
-                    first,
+                    leading,
                     &prefix_targets,
                     prefix_len,
+                    lift.uncoupled.len(),
                     prefix_coupled,
                 )
             },
-        ));
+        );
+        let coefficients = multiplicity_free_multi_associator_grouped_fixed_short(
+            rule,
+            &lift.uncoupled,
+            &lift.is_dual,
+            &candidates,
+            tree.uncoupled(),
+            tree.is_dual(),
+            tree,
+        )?;
+        Ok(candidates
+            .into_iter()
+            .zip(coefficients)
+            .filter_map(|(candidate, coefficient)| {
+                coefficient.map(|coefficient| (candidate, coefficient.conj()))
+            })
+            .collect())
     }
-    let coefficients = multiplicity_free_multi_associator_grouped_fixed_long(
-        rule,
-        &frame.uncoupled,
-        &frame.is_dual,
-        local,
-        tail_uncoupled,
-        tail_is_dual,
-        &candidates,
-    )?;
-    Ok(candidates
-        .into_iter()
-        .zip(coefficients)
-        .filter_map(|(candidate, coefficient)| {
-            coefficient.map(|coefficient| (candidate, coefficient))
-        })
-        .collect())
 }
 
-pub(super) fn multiplicity_free_multi_fmove_inv_local<R>(
-    rule: &R,
-    coupled: SectorId,
-    source_frame: &MultiplicityFreeTreeFrame,
-    source: &MultiplicityFreeTreeLocal,
-    output_frame: &MultiplicityFreeTreeFrame,
-) -> Result<Vec<(MultiplicityFreeTreeLocal, R::Scalar)>, CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
-{
-    if source_frame.uncoupled.len() != source_frame.is_dual.len()
-        || output_frame.uncoupled.len() != output_frame.is_dual.len()
-        || output_frame.uncoupled.len() != source_frame.uncoupled.len() + 1
-        || output_frame.uncoupled[1..] != *source_frame.uncoupled.as_ref()
-        || output_frame.is_dual[1..] != *source_frame.is_dual.as_ref()
-    {
-        return Err(CoreError::MalformedFusionTree {
-            message: "multi_Fmove inverse requires one leading external sector",
-        });
-    }
-    let leading_sector = output_frame.uncoupled[0];
-    if rule.nsymbol(leading_sector, source.coupled, coupled) == 0 {
-        return Err(CoreError::SectorMismatch {
-            expected: coupled,
-            actual: source.coupled,
-        });
+/// The keyed multi-F-moves: project, run the surgery on the local, and
+/// materialize against the tail (or lifted) externals.
+impl<R: MultiplicityFreeRigidSymbols> KeyedMultiFKernel for SimpleK<'_, R> {
+    type Moves = Vec<(FusionTreeKey, R::Scalar)>;
+
+    fn multi_fmove(&self, tree: &FusionTreeKey) -> Result<Self::Moves, CoreError> {
+        let (frame, local) = project_multiplicity_free_tree(self.0, tree)?;
+        let terms = multi_fmove_surgery(
+            self,
+            &FramedLocal {
+                frame: &frame,
+                local: &local,
+            },
+        )?;
+        let output_frame = MultiplicityFreeTreeFrame::from_frozen_externals(
+            frame.uncoupled[1..].iter().copied().collect(),
+            frame.is_dual[1..].iter().copied().collect(),
+        );
+        Ok(terms
+            .into_iter()
+            .map(|(local, coefficient)| (output_frame.materialize(local), coefficient))
+            .collect())
     }
 
-    let prefix_targets = multiplicity_free_inverse_prefix_targets(&source_frame.uncoupled, source)?;
-    let candidates = collect_multiplicity_free_tree_locals_for_coupled_where(
-        rule,
-        &output_frame.uncoupled,
-        coupled,
-        |prefix_len, prefix_coupled| {
-            multiplicity_free_inverse_prefix_allowed(
-                rule,
-                leading_sector,
-                &prefix_targets,
-                prefix_len,
-                output_frame.uncoupled.len(),
-                prefix_coupled,
-            )
-        },
-    );
-    let coefficients = multiplicity_free_multi_associator_grouped_fixed_short(
-        rule,
-        &output_frame.uncoupled,
-        &output_frame.is_dual,
-        &candidates,
-        &source_frame.uncoupled,
-        &source_frame.is_dual,
-        source,
-    )?;
-    Ok(candidates
-        .into_iter()
-        .zip(coefficients)
-        .filter_map(|(candidate, coefficient)| {
-            coefficient.map(|coefficient| (candidate, (coefficient).conj()))
-        })
-        .collect())
-}
-
-pub(crate) fn multiplicity_free_multi_fmove_tree<R>(
-    rule: &R,
-    tree: &FusionTreeKey,
-) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
-{
-    let (frame, local) = project_multiplicity_free_tree(rule, tree)?;
-    let terms = multiplicity_free_multi_fmove_local(rule, &frame, &local)?;
-    let output_frame = MultiplicityFreeTreeFrame::from_frozen_externals(
-        frame.uncoupled[1..].iter().copied().collect(),
-        frame.is_dual[1..].iter().copied().collect(),
-    );
-    Ok(terms
+    fn multi_fmove_inv(
+        &self,
+        leading: SectorId,
+        coupled: SectorId,
+        tree: &FusionTreeKey,
+        leading_is_dual: bool,
+    ) -> Result<Self::Moves, CoreError> {
+        let (source_frame, source) = project_multiplicity_free_tree(self.0, tree)?;
+        let output_frame = MultiplicityFreeTreeFrame::from_frozen_externals(
+            std::iter::once(leading)
+                .chain(tree.uncoupled().iter().copied())
+                .collect(),
+            std::iter::once(leading_is_dual)
+                .chain(tree.is_dual().iter().copied())
+                .collect(),
+        );
+        Ok(multi_fmove_inv_surgery(
+            self,
+            &output_frame,
+            coupled,
+            &FramedLocal {
+                frame: &source_frame,
+                local: &source,
+            },
+        )?
         .into_iter()
         .map(|(local, coefficient)| (output_frame.materialize(local), coefficient))
         .collect())
-}
-
-pub(crate) fn multiplicity_free_multi_fmove_inv_tree<R>(
-    rule: &R,
-    leading_sector: SectorId,
-    coupled: SectorId,
-    tree: &FusionTreeKey,
-    leading_is_dual: bool,
-) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
-{
-    let (source_frame, source) = project_multiplicity_free_tree(rule, tree)?;
-    let mut uncoupled = Vec::with_capacity(tree.uncoupled().len() + 1);
-    uncoupled.push(leading_sector);
-    uncoupled.extend_from_slice(tree.uncoupled());
-    let mut is_dual = Vec::with_capacity(tree.is_dual().len() + 1);
-    is_dual.push(leading_is_dual);
-    is_dual.extend_from_slice(tree.is_dual());
-    let output_frame = MultiplicityFreeTreeFrame::from_frozen_externals(
-        uncoupled.into_iter().collect(),
-        is_dual.into_iter().collect(),
-    );
-    Ok(multiplicity_free_multi_fmove_inv_local(
-        rule,
-        coupled,
-        &source_frame,
-        &source,
-        &output_frame,
-    )?
-    .into_iter()
-    .map(|(local, coefficient)| (output_frame.materialize(local), coefficient))
-    .collect())
+    }
 }
 
 #[cfg(test)]
@@ -710,8 +711,8 @@ fn multiplicity_free_multi_associator_arguments_from_parts<L, S>(
     tensor_kit_k: usize,
 ) -> Result<MultiplicityFreeFsymbolArguments, CoreError>
 where
-    L: MultiplicityFreeTreeLocalData + ?Sized,
-    S: MultiplicityFreeTreeLocalData + ?Sized,
+    L: TreeView + ?Sized,
+    S: TreeView + ?Sized,
 {
     let right = long_uncoupled[tensor_kit_k];
     let (left_coupled, coupled) =
@@ -803,8 +804,8 @@ fn multiplicity_free_multi_associator_grouped_fixed_long<R, L, S>(
 where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
-    L: MultiplicityFreeTreeLocalData + ?Sized,
-    S: MultiplicityFreeTreeLocalData,
+    L: TreeView + ?Sized,
+    S: TreeView,
 {
     let rank = long_uncoupled.len();
     if short_uncoupled.len() + 1 != rank
@@ -842,8 +843,8 @@ fn multiplicity_free_multi_associator_grouped_fixed_short<R, L, S>(
 where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
-    L: MultiplicityFreeTreeLocalData,
-    S: MultiplicityFreeTreeLocalData + ?Sized,
+    L: TreeView,
+    S: TreeView + ?Sized,
 {
     let rank = long_uncoupled.len();
     if short_uncoupled.len() + 1 != rank
@@ -868,6 +869,7 @@ where
     )
 }
 
+#[cfg(test)]
 pub(crate) fn multiplicity_free_multi_associator_scalar<R>(
     rule: &R,
     long: &FusionTreeKey,
@@ -889,7 +891,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn multiplicity_free_multi_associator_from_parts<R, L, S>(
+pub(super) fn multiplicity_free_multi_associator_from_parts<R, L, S>(
     rule: &R,
     long_uncoupled: &[SectorId],
     long_is_dual: &[bool],
@@ -901,8 +903,8 @@ fn multiplicity_free_multi_associator_from_parts<R, L, S>(
 where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Mul<Output = R::Scalar>,
-    L: MultiplicityFreeTreeLocalData + ?Sized,
-    S: MultiplicityFreeTreeLocalData + ?Sized,
+    L: TreeView + ?Sized,
+    S: TreeView + ?Sized,
 {
     let rank = long_uncoupled.len();
     if short_uncoupled.len() + 1 != rank {
@@ -937,6 +939,7 @@ where
     Ok(Some(coefficient))
 }
 
+#[cfg(test)]
 pub(crate) fn fusion_tree_vertex_neighbors(
     tree: &FusionTreeKey,
     leg_index: usize,
@@ -944,13 +947,13 @@ pub(crate) fn fusion_tree_vertex_neighbors(
     fusion_tree_vertex_neighbors_from_parts(tree.uncoupled(), tree, leg_index)
 }
 
-fn fusion_tree_vertex_neighbors_from_parts<T>(
+pub(super) fn fusion_tree_vertex_neighbors_from_parts<T>(
     uncoupled: &[SectorId],
     tree: &T,
     leg_index: usize,
 ) -> Result<(SectorId, SectorId), CoreError>
 where
-    T: MultiplicityFreeTreeLocalData + ?Sized,
+    T: TreeView + ?Sized,
 {
     if leg_index == 0 || leg_index >= uncoupled.len() {
         return Err(CoreError::MalformedFusionTree {

@@ -1042,13 +1042,32 @@ fn unique_cycles_match_keyed_multiplicity_free_cycles_on_complex_non_self_dual_z
                 for source in hom.fusion_tree_keys_uncached(&rule) {
                     for (unique, keyed) in [
                         (
-                            unique_rigid_cycle_clockwise_tree_pair(&rule, &source).unwrap(),
-                            multiplicity_free_cycle_clockwise_tree_pair(&rule, &source).unwrap(),
+                            unique_rigid_cycle_tree_pair(
+                                &rule,
+                                &source,
+                                PreparedCycleDirection::Clockwise,
+                            )
+                            .unwrap(),
+                            multiplicity_free_cycle_tree_pair(
+                                &rule,
+                                &source,
+                                PreparedCycleDirection::Clockwise,
+                            )
+                            .unwrap(),
                         ),
                         (
-                            unique_rigid_cycle_anticlockwise_tree_pair(&rule, &source).unwrap(),
-                            multiplicity_free_cycle_anticlockwise_tree_pair(&rule, &source)
-                                .unwrap(),
+                            unique_rigid_cycle_tree_pair(
+                                &rule,
+                                &source,
+                                PreparedCycleDirection::Anticlockwise,
+                            )
+                            .unwrap(),
+                            multiplicity_free_cycle_tree_pair(
+                                &rule,
+                                &source,
+                                PreparedCycleDirection::Anticlockwise,
+                            )
+                            .unwrap(),
                         ),
                     ] {
                         assert_eq!(keyed.len(), 1, "{source:?}");

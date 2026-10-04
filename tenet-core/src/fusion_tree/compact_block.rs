@@ -233,8 +233,13 @@ where
             continue;
         }
         if !forward_cache.contains_key(&source.codomain) {
-            let terms =
-                multiplicity_free_multi_fmove_local(rule, &basis.frame.codomain, &source.codomain)?;
+            let terms = multi_fmove_surgery(
+                &kernel,
+                &FramedLocal {
+                    frame: &basis.frame.codomain,
+                    local: &source.codomain,
+                },
+            )?;
             forward_cache.insert(source.codomain.clone(), terms);
         }
         let forward = forward_cache
@@ -245,12 +250,14 @@ where
             let tail_coupled = codomain.coupled;
             let inverse_key = (tail_coupled, source.domain.clone());
             if !inverse_cache.contains_key(&inverse_key) {
-                let terms = multiplicity_free_multi_fmove_inv_local(
-                    rule,
-                    tail_coupled,
-                    &basis.frame.domain,
-                    &source.domain,
+                let terms = multi_fmove_inv_surgery(
+                    &kernel,
                     &fold_frame.domain,
+                    tail_coupled,
+                    &FramedLocal {
+                        frame: &basis.frame.domain,
+                        local: &source.domain,
+                    },
                 )?;
                 inverse_cache.insert(inverse_key.clone(), terms);
             }
