@@ -85,7 +85,7 @@ fn unique_tree_transform_plan_builder_defers_explicit_no_braiding_to_crossing_lo
     .unwrap();
 
     assert_eq!(plan.specs().len(), 1);
-    assert_eq!(plan.specs()[0].group_key(), &src_tree.group_key());
+    assert_eq!(&plan.specs()[0].group_key(), &src_tree.group_key());
     assert_eq!(plan.specs()[0].src_keys(), &[expect_tree_key(&src_key)]);
     assert_eq!(plan.specs()[0].dst_keys(), &[expect_tree_key(&src_key)]);
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
@@ -106,7 +106,7 @@ fn unique_all_codomain_braid_plan_builder_lowers_codomain_single_tree() {
     .unwrap();
 
     assert_eq!(plan.specs().len(), 1);
-    assert_eq!(plan.specs()[0].group_key(), &src_tree.group_key());
+    assert_eq!(&plan.specs()[0].group_key(), &src_tree.group_key());
     assert_eq!(plan.specs()[0].src_keys(), &[expect_tree_key(&src_key)]);
     assert_eq!(
         plan.specs()[0].dst_keys(),
@@ -357,7 +357,7 @@ fn unique_tree_pair_plan_builder_lowers_domain_only_permutation() {
     .unwrap();
 
     assert_eq!(plan.specs().len(), 1);
-    assert_eq!(plan.specs()[0].group_key(), &src_tree.group_key());
+    assert_eq!(&plan.specs()[0].group_key(), &src_tree.group_key());
     assert_eq!(plan.specs()[0].src_keys(), &[expect_tree_key(&src_key)]);
     assert_eq!(
         plan.specs()[0].dst_keys(),

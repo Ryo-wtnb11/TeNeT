@@ -119,14 +119,15 @@ impl BlockStructureCacheKey {
         })
     }
 
-    #[inline]
-    pub fn id(&self) -> usize {
-        self.content.id()
-    }
-
+    #[cfg(test)]
     #[inline]
     pub(crate) fn charged_retained_bytes(&self) -> usize {
         self.content.charged_retained_bytes()
+    }
+
+    #[inline]
+    pub(crate) fn content(&self) -> &Arc<BlockStructureContent> {
+        &self.content
     }
 
     #[inline]

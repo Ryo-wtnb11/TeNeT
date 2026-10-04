@@ -137,10 +137,10 @@ fn shared_ledger_preserves_full_capacity_for_one_dtype() {
     let (key1, structure1, _) = fixture(41);
     let charge0 = RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&key0, &structure0);
     let charge1 = RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&key1, &structure1);
-    let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(
-        2,
-        charge0.saturating_add(charge1),
-    ));
+    let contents = RuntimeTreeTransformStore::<f64>::charged_content_bytes(&key0)
+        + RuntimeTreeTransformStore::<f64>::charged_content_bytes(&key1);
+    let budget = (charge0 + charge1).max(contents);
+    let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(2, budget));
     let real = RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(&ledger));
     let complex = RuntimeTreeTransformStore::<Complex64>::with_runtime_ledger(Arc::clone(&ledger));
 
@@ -152,7 +152,7 @@ fn shared_ledger_preserves_full_capacity_for_one_dtype() {
     let info = ledger.store_pair_info(&real, &complex);
     assert_eq!(info.entries(), 2);
     assert_eq!(info.entry_capacity(), 2);
-    assert_eq!(info.byte_budget(), charge0 + charge1);
+    assert_eq!(info.byte_budget(), budget);
     assert_eq!(info.admission_bypasses(), 0);
 }
 
@@ -234,7 +234,11 @@ fn concurrent_cross_dtype_admission_obeys_one_total_byte_budget() {
         &complex_key,
         &complex_structure,
     );
-    let budget = real_charge.max(complex_charge);
+    // Each store charges the shared content once, so either both payloads or
+    // both content charges exceed the budget.
+    let content = RuntimeTreeTransformStore::<f64>::charged_content_bytes(&real_key);
+    let budget = real_charge.max(complex_charge).max(content);
+    assert!(real_charge + complex_charge > budget && 2 * content > budget);
     let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(2, budget));
     let real = Arc::new(RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(
         &ledger,
@@ -427,15 +431,19 @@ fn runtime_store_charges_and_releases_dependent_structures() {
     let (distinct_key, distinct_compiled, _, _) = pair_fixture(11, 12);
     let same_charge =
         RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&same_key, &same_compiled);
-    let distinct_charge =
-        RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&distinct_key, &distinct_compiled);
+    let same_contents = RuntimeTreeTransformStore::<f64>::charged_content_bytes(&same_key);
+    let distinct_contents = RuntimeTreeTransformStore::<f64>::charged_content_bytes(&distinct_key);
+    assert_eq!(same_contents, same_key.dst().charged_retained_bytes());
     assert_eq!(
-        distinct_charge,
-        same_charge.saturating_add(distinct_key.src().charged_retained_bytes())
+        distinct_contents,
+        distinct_key.dst().charged_retained_bytes() + distinct_key.src().charged_retained_bytes()
     );
 
-    let budgeted =
-        RuntimeTreeTransformStore::with_limits(2, distinct_charge.saturating_sub(1), usize::MAX);
+    // The payloads fit; the second entry's two contents beside the first's
+    // one do not, and evicting the first still leaves them too large.
+    let budget = same_charge.max(distinct_contents - 1);
+    assert!(same_contents + distinct_contents > budget);
+    let budgeted = RuntimeTreeTransformStore::with_limits(2, budget, usize::MAX);
     budgeted
         .get_or_compile(same_key, || Ok::<_, Infallible>(same_compiled))
         .unwrap();
@@ -444,6 +452,7 @@ fn runtime_store_charges_and_releases_dependent_structures() {
         .unwrap();
     assert_eq!(budgeted.info().entries(), 1);
     assert_eq!(budgeted.info().admission_bypasses(), 1);
+    assert_eq!(budgeted.retained_content_bytes(), same_contents);
 
     let store = RuntimeTreeTransformStore::with_limits(1, usize::MAX, usize::MAX);
     let (first_key, first_compiled, first_dst, first_src) = pair_fixture(20, 21);
@@ -485,6 +494,7 @@ fn runtime_store_charges_and_releases_dependent_structures() {
     store.clear();
     assert!(second_dst_weak.upgrade().is_none());
     assert!(second_src_weak.upgrade().is_none());
+    assert_eq!(store.retained_content_bytes(), 0);
 }
 
 #[test]
@@ -809,7 +819,10 @@ fn checked_generic_cache_charges_distinct_logical_content_once() {
                 0,
             )
             .unwrap();
-        store.info().charged_payload_bytes()
+        (
+            store.info().charged_payload_bytes(),
+            store.retained_content_bytes(),
+        )
     };
     let direct_bytes = admit(None);
     let adjoint_bytes = admit(Some(&logical));
@@ -817,7 +830,10 @@ fn checked_generic_cache_charges_distinct_logical_content_once() {
         .unwrap()
         .charged_retained_bytes();
 
-    assert_eq!(adjoint_bytes - direct_bytes, logical_bytes);
+    // The logical content is charged once, to the content account; the
+    // entry's own payload does not change with it.
+    assert_eq!(adjoint_bytes.0, direct_bytes.0);
+    assert_eq!(adjoint_bytes.1 - direct_bytes.1, logical_bytes);
 }
 
 fn plan_key(tag: usize, degeneracy: usize) -> super::CategoricalTransformKey {
@@ -1013,8 +1029,16 @@ fn shared_ledger_admits_an_entry_of_exactly_the_budget_and_bypasses_one_byte_mor
     let charge0 = RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&key0, &structure0);
     let charge1 = RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&key1, &structure1);
     assert_eq!(charge0, charge1, "premise: equal-size fixtures");
+    // Admission is bound by the larger of the payload and the content charge.
+    let content = RuntimeTreeTransformStore::<f64>::charged_content_bytes(&key1);
+    assert_eq!(
+        content,
+        RuntimeTreeTransformStore::<f64>::charged_content_bytes(&key0),
+        "premise: equal-size contents"
+    );
+    let budget = charge1.max(content);
 
-    let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(4, charge1));
+    let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(4, budget));
     let store = RuntimeTreeTransformStore::<f64>::with_runtime_ledger(Arc::clone(&ledger));
     store
         .get_or_compile(key0.clone(), || Ok::<_, Infallible>(structure0))
@@ -1037,7 +1061,7 @@ fn shared_ledger_admits_an_entry_of_exactly_the_budget_and_bypasses_one_byte_mor
         .unwrap();
     assert!(Arc::ptr_eq(&hit, &structure1));
 
-    let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(4, charge0 - 1));
+    let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(4, budget - 1));
     let store = RuntimeTreeTransformStore::<f64>::with_runtime_ledger(Arc::clone(&ledger));
     let (key0, structure0, _) = fixture(50);
     store
@@ -1046,4 +1070,95 @@ fn shared_ledger_admits_an_entry_of_exactly_the_budget_and_bypasses_one_byte_mor
     let info = store.info();
     assert_eq!((info.entries(), info.admission_bypasses()), (0, 1));
     assert_eq!(info.charged_payload_bytes(), 0);
+}
+
+#[test]
+fn structure_and_plan_entries_charge_a_shared_content_once() {
+    // What (#1998): a content retained by entries of both tiers is charged
+    // once, and released only with its last retaining entry.
+    let (key, compiled, structure) = fixture(60);
+    let content = RuntimeTreeTransformStore::<f64>::charged_content_bytes(&key);
+    let store = RuntimeTreeTransformStore::<f64>::with_limits(1, usize::MAX, usize::MAX);
+    store
+        .get_or_compile(key, || Ok::<_, Infallible>(compiled))
+        .unwrap();
+    assert_eq!(store.retained_content_bytes(), content);
+    let plan_key = super::CategoricalTransformKey::new(
+        RuleIdentity::of_type::<TestRuleIdentity>(),
+        &TreeTransformOperation::permute([0], []),
+        tenet_core::FusionTreePairOrientation::Direct,
+        false,
+        &structure,
+        &structure,
+        None,
+    );
+    store.get_or_build_plan(plan_key, empty_plan).unwrap();
+    assert_eq!(store.plan_info().entries(), 1);
+    assert_eq!(store.retained_content_bytes(), content);
+
+    // The one-entry structure tier evicts the first entry; the plan still
+    // retains its content, which therefore stays charged.
+    let (other_key, other_compiled, _) = fixture(61);
+    let other = RuntimeTreeTransformStore::<f64>::charged_content_bytes(&other_key);
+    store
+        .get_or_compile(other_key, || Ok::<_, Infallible>(other_compiled))
+        .unwrap();
+    assert_eq!(store.info().evictions(), 1);
+    assert_eq!(store.retained_content_bytes(), content + other);
+
+    store.clear();
+    assert_eq!(store.retained_content_bytes(), 0);
+}
+
+#[test]
+fn an_oversized_entry_evicts_nothing_for_its_contents() {
+    // What (#1998 review): an entry whose payload exceeds the budget bypasses
+    // before referencing its contents, so it never evicts retained entries to
+    // make room for contents it would not keep.
+    let (retained_key, retained_compiled, _) = fixture(70);
+    let (key, _, dst, src) = pair_fixture(71, 72);
+    let oversized_key = TreeTransformStructureCacheKey::from_structures(
+        RuntimeTreeTransformOperationKey {
+            operation: TreeTransformOperation::permute(0..256, []),
+            ..key.plan().clone()
+        },
+        &dst,
+        &src,
+    )
+    .unwrap();
+    let oversized = Arc::new(
+        TreeTransformStructure::compile_structures(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .unwrap(),
+    );
+    let retained_charge =
+        RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&retained_key, &retained_compiled);
+    let oversized_charge =
+        RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&oversized_key, &oversized);
+    let contents = RuntimeTreeTransformStore::<f64>::charged_content_bytes(&oversized_key);
+    let budget = retained_charge.max(contents);
+    assert!(
+        oversized_charge > budget,
+        "premise: the payload is oversized"
+    );
+    assert!(
+        RuntimeTreeTransformStore::<f64>::charged_content_bytes(&retained_key) + contents > budget,
+        "premise: the contents alone would evict the retained entry"
+    );
+
+    let store = RuntimeTreeTransformStore::with_limits(4, budget, usize::MAX);
+    store
+        .get_or_compile(retained_key, || Ok::<_, Infallible>(retained_compiled))
+        .unwrap();
+    store
+        .get_or_compile(oversized_key, || Ok::<_, Infallible>(oversized))
+        .unwrap();
+    let info = store.info();
+    assert_eq!(
+        (info.entries(), info.evictions(), info.admission_bypasses()),
+        (1, 0, 1)
+    );
 }
