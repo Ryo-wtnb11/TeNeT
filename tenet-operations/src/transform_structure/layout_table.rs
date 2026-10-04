@@ -83,15 +83,14 @@ impl TreeTransformLayoutTable {
         scratch: &mut FusedLayoutScratch,
     ) -> Result<(), OperationError> {
         let layout = &self.entries[entry_index];
-        let (start, rank) = (layout.layout_start, layout.rank);
-        let range = start..start + rank;
+        let range = layout.range();
         let dst_strides = if dst_is_packed {
-            &self.packed_strides[range.clone()]
+            self.packed_strides(layout)
         } else {
             &self.strides[range.clone()]
         };
         let src_strides = if src_is_packed {
-            &self.packed_strides[range.clone()]
+            self.packed_strides(layout)
         } else {
             &self.strides[range.clone()]
         };
@@ -110,9 +109,8 @@ impl TreeTransformLayoutTable {
         scratch: &mut FusedLayoutScratch,
     ) -> Result<(), OperationError> {
         let dst = &self.entries[dst_entry];
-        let (ds, dr) = (dst.layout_start, dst.rank);
-        let src = &self.entries[src_entry];
-        let (ss, _sr) = (src.layout_start, src.rank);
+        let (ds, dr) = (dst.layout_start, dst.rank as usize);
+        let ss = self.entries[src_entry].layout_start;
         normalize_fused_layout(
             &self.shapes[ds..ds + dr],
             &self.strides[ds..ds + dr],
@@ -227,15 +225,33 @@ impl TreeTransformLayoutTable {
     }
 
     pub fn shape(&self, layout: &TreeTransformLayout) -> &[usize] {
-        &self.shapes[layout.layout_start..layout.layout_start + layout.rank]
+        &self.shapes[layout.range()]
     }
 
     pub fn strides(&self, layout: &TreeTransformLayout) -> &[isize] {
-        &self.strides[layout.layout_start..layout.layout_start + layout.rank]
+        &self.strides[layout.range()]
     }
 
+    /// Column-major strides of the packed column of a `Multi` block's entry.
+    ///
+    /// # Panics
+    ///
+    /// For an entry no `Multi` block packs or scatters (a `Single` block's or
+    /// an inactive destination's); no replay path reads those.
     pub fn packed_strides(&self, layout: &TreeTransformLayout) -> &[isize] {
-        &self.packed_strides[layout.layout_start..layout.layout_start + layout.rank]
+        let start = layout.packed_start as usize;
+        &self.packed_strides[start..start + layout.rank as usize]
+    }
+
+    /// Reserves exact capacity for `entries` layouts of `rank` axes, of which
+    /// `packed_entries` belong to `Multi` blocks. Why exact: a retaining cache
+    /// charges capacity, and amortized growth left up to half of it unused.
+    pub(super) fn reserve_exact(&mut self, entries: usize, rank: usize, packed_entries: usize) {
+        self.entries.reserve_exact(entries);
+        self.shapes.reserve_exact(entries.saturating_mul(rank));
+        self.strides.reserve_exact(entries.saturating_mul(rank));
+        self.packed_strides
+            .reserve_exact(packed_entries.saturating_mul(rank));
     }
 
     /// Populates the baked arena for every replayed (entry, role): each Single
@@ -251,14 +267,35 @@ impl TreeTransformLayoutTable {
         blocks: &[TreeTransformBlock],
     ) -> Result<(), OperationError> {
         // Reserve the arena once so baking adds a bounded, block-count-independent
-        // number of allocations rather than growing per push: fused rank never
-        // exceeds an entry's rank, so `shapes.len()` upper-bounds each arena, and
-        // one slot per entry covers `fused_slots`.
+        // number of allocations rather than growing per push. Fused rank never
+        // exceeds an entry's rank, except that a rank-0 entry fuses to one unit
+        // axis, so the baked entries' ranks (at least 1) bound each arena;
+        // a Single block's source entry and an inactive destination are never
+        // baked, so they reserve nothing (#1998). One slot per entry covers
+        // `fused_slots`.
+        let baked_ranks = blocks.iter().fold(0usize, |total, block| {
+            total.saturating_add(match *block {
+                TreeTransformBlock::Single { dst_layout, .. } => {
+                    (self.entries[dst_layout].rank as usize).max(1)
+                }
+                TreeTransformBlock::Multi {
+                    dst_layout_start,
+                    dst_count,
+                    src_layout_start,
+                    src_count,
+                    ..
+                } => self.entries[src_layout_start..src_layout_start + src_count]
+                    .iter()
+                    .chain(&self.entries[dst_layout_start..dst_layout_start + dst_count])
+                    .map(|entry| (entry.rank as usize).max(1))
+                    .sum(),
+            })
+        });
         self.fused_slots
             .resize(self.entries.len(), FusedSlot::default());
-        self.fused_dims.reserve(self.shapes.len());
-        self.fused_dst_strides.reserve(self.shapes.len());
-        self.fused_src_strides.reserve(self.shapes.len());
+        self.fused_dims.reserve_exact(baked_ranks);
+        self.fused_dst_strides.reserve_exact(baked_ranks);
+        self.fused_src_strides.reserve_exact(baked_ranks);
         let mut scratch = FusedLayoutScratch::default();
         for block in blocks {
             match *block {
@@ -286,14 +323,17 @@ impl TreeTransformLayoutTable {
         Ok(())
     }
 
+    /// Appends one layout entry; `packed` gives it packed strides, for an entry
+    /// of a `Multi` block.
     pub(super) fn push_block(
         &mut self,
         rank: usize,
         shape: &[usize],
         strides: &[usize],
         offset: usize,
+        packed: bool,
     ) -> Result<usize, OperationError> {
-        self.push_block_mapped(rank, shape, strides, offset, None)
+        self.push_block_mapped(rank, shape, strides, offset, None, packed)
     }
 
     fn push_block_mapped(
@@ -303,6 +343,7 @@ impl TreeTransformLayoutTable {
         strides: &[usize],
         offset: usize,
         axes: Option<&[usize]>,
+        packed: bool,
     ) -> Result<usize, OperationError> {
         if shape.len() != rank {
             return Err(OperationError::RankMismatch {
@@ -337,22 +378,33 @@ impl TreeTransformLayoutTable {
                 .map_err(|_| OperationError::StrideOverflow { value: stride })?;
         }
         let offset = offset_to_isize(offset)?;
+        let overflow = |_| OperationError::ElementCountOverflow;
+        let rank_u32 = u32::try_from(rank).map_err(overflow)?;
+        let packed_start = if packed {
+            let start = u32::try_from(self.packed_strides.len()).map_err(overflow)?;
+            if start == NOT_PACKED {
+                return Err(OperationError::ElementCountOverflow);
+            }
+            start
+        } else {
+            NOT_PACKED
+        };
 
         let layout_start = self.shapes.len();
-        self.shapes.reserve(rank);
-        self.strides.reserve(rank);
-        self.packed_strides.reserve(rank);
         let mut packed_stride = 1usize;
         for index in 0..rank {
             let axis = axis(index);
             self.shapes.push(shape[axis]);
             self.strides.push(strides[axis] as isize);
-            self.packed_strides.push(packed_stride as isize);
+            if packed {
+                self.packed_strides.push(packed_stride as isize);
+            }
             packed_stride *= shape[axis];
         }
         self.entries.push(TreeTransformLayout {
             layout_start,
-            rank,
+            rank: rank_u32,
+            packed_start,
             offset,
             element_count,
         });
@@ -366,19 +418,34 @@ impl TreeTransformLayoutTable {
         strides: &[usize],
         offset: usize,
         axes: Option<&[usize]>,
+        packed: bool,
     ) -> Result<usize, OperationError> {
         let Some(axes) = axes else {
-            return self.push_block(rank, shape, strides, offset);
+            return self.push_block(rank, shape, strides, offset, packed);
         };
         crate::axis::validate_permutation(axes, rank)?;
-        self.push_block_mapped(rank, shape, strides, offset, Some(axes))
+        self.push_block_mapped(rank, shape, strides, offset, Some(axes), packed)
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformLayout {
     pub(super) layout_start: usize,
-    pub(super) rank: usize,
+    pub(super) rank: u32,
+    /// Start of this entry's packed strides, or [`NOT_PACKED`]. Why only
+    /// `Multi` entries carry them (#1998): only pack and scatter read packed
+    /// strides, and only a `Multi` block packs or scatters.
+    pub(super) packed_start: u32,
     pub offset: isize,
     pub element_count: usize,
+}
+
+/// [`TreeTransformLayout::packed_start`] of an entry no `Multi` block packs.
+pub(super) const NOT_PACKED: u32 = u32::MAX;
+
+impl TreeTransformLayout {
+    #[inline]
+    fn range(&self) -> Range<usize> {
+        self.layout_start..self.layout_start + self.rank as usize
+    }
 }
