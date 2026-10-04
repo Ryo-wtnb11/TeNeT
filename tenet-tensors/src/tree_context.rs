@@ -967,10 +967,11 @@ where
         )
     }
 
-    /// Generic-fusion dynamic-rank tree transform: the raw-slice
-    /// analogue of [`Self::tree_transform_dyn_into`], routed through the
-    /// non-memoized generic cache sibling. This is the path the top-level
-    /// provider-typed Generic `permute`/`braid`/`transpose` take.
+    /// Infallible Generic-fusion dynamic-rank tree transform, a test oracle
+    /// (`testing` feature): the raw-slice analogue of
+    /// [`Self::tree_transform_dyn_into`], routed through the non-memoized
+    /// generic cache sibling. Production Generic transforms take the checked
+    /// `tree_transform_dyn_owned_checked_generic*` entries (#1854).
     #[allow(clippy::too_many_arguments)]
     #[cfg(any(test, feature = "testing"))]
     pub fn tree_transform_dyn_into_generic<R>(

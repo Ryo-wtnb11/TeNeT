@@ -56,9 +56,14 @@ jobs:
         run: cargo fmt --check
         working-directory: tenet
       # The workspace is Clippy-clean; deny warnings so new findings cannot silently accumulate.
+      # The lib-only pass builds without dev-dependencies, so the `testing`
+      # feature stays off and production code cannot use the test-only
+      # infallible Generic tier (#1854) or leave it dead.
       - name: clippy
         if: ${{ !cancelled() }}
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --workspace -- -D warnings
         working-directory: tenet
       - name: cargo check (Rust 1.96)
         if: ${{ !cancelled() }}
