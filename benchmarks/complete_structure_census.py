@@ -12,9 +12,10 @@ same run. The script
    byte budget, max entry bytes) and checks every step's predicted hits,
    misses, evictions and bypasses against the observed counters;
 3. replays it against FIFO and LRU at larger caps, and prints the tables;
-4. replays it against the bounds chosen from it (FIFO, cap 1024, 4 MiB,
-   max entry unchanged at 1_650_641) and exits non-zero if any warm miss is not compulsory
-   or any E1/conj row evicts in a warm call.
+4. replays it against the current bounds (FIFO, cap 1024, 64 MiB, max entry
+   = budget since #1993; #1365 chose 4 MiB with max entry 1_650_641) and exits
+   non-zero if any warm miss is not compulsory or any E1/conj row evicts in a
+   warm call.
 """
 
 import collections
@@ -25,8 +26,10 @@ import sys
 
 # The bounds the trace was recorded under; the exact-model check uses these.
 CAP, BUDGET, MAX_ENTRY = 5, 1_764_237, 1_650_641
-# The bounds sized from this census (#1365).
-NEW_CAP, NEW_BUDGET, NEW_MAX_ENTRY = 1024, 4 * 1024 * 1024, MAX_ENTRY
+# The current bounds: cap and FIFO sized from this census (#1365); budget
+# 64 MiB and no per-entry limit below it since #1993.
+NEW_CAP, NEW_BUDGET = 1024, 64 * 1024 * 1024
+NEW_MAX_ENTRY = NEW_BUDGET
 CAPS = (5, 8, 16, 32, 64)
 UNBOUNDED = 1 << 62
 

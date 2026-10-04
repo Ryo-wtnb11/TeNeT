@@ -265,12 +265,12 @@ fn complete_homspace_layout_cache_bounds_bind_by_bytes_and_bypass_outliers() {
     ) {
         return;
     }
-    // What: at the production bounds the byte budget, not the entry cap,
-    // evicts first for entries of the smallest measured median size
-    // (4455 bytes, #1365 census); the budget holds two maximum-size
-    // entries; an entry above the limit is returned uncached, one at the
-    // limit is retained; the global cache reports these bounds and reset
-    // zeroes only its activity.
+    // What: at the production bounds the byte budget evicts for entries of
+    // a quarter budget, the entry cap for entries of the smallest measured
+    // median size (4455 bytes, #1365 census); an entry that fits the budget
+    // alone is retained (#1993), one above the budget is returned uncached
+    // (the documented ceiling); the global cache reports these bounds and
+    // reset zeroes only its activity.
     let hom = FusionTreeHomSpace::from_sectors([(u1(0), 1)], Vec::<(SectorId, usize)>::new());
     let structure = BlockStructure::trivial(&[1]).unwrap().into_shared();
     let key = || {
@@ -279,46 +279,40 @@ fn complete_homspace_layout_cache_bounds_bind_by_bytes_and_bypass_outliers() {
             homspace: Arc::clone(&hom.content),
         })
     };
-    let mut cache = CompleteHomSpaceStructureCache::new(
-        COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP,
-        COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET,
-        COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES,
-    );
-    let typical = 4455;
-    let fits = COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET / typical;
-    assert!(fits < COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP);
-    for _ in 0..fits {
-        cache.admit_built(key(), Arc::clone(&structure), typical);
+    let budget = COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET;
+    let mut cache =
+        CompleteHomSpaceStructureCache::new(COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP, budget, budget);
+    for _ in 0..4 {
+        cache.admit_built(key(), Arc::clone(&structure), budget / 4);
     }
     assert_eq!(cache.info().evictions(), 0);
-    cache.admit_built(key(), Arc::clone(&structure), typical);
+    cache.admit_built(key(), Arc::clone(&structure), budget / 4);
     let info = cache.info();
-    assert_eq!(info.evictions(), 1);
-    assert_eq!(info.entries(), fits);
+    assert_eq!((info.evictions(), info.entries()), (1, 4));
     assert!(info.charged_bytes() <= info.byte_budget());
+    cache.clear();
+    let typical = 4455;
+    assert!(budget / typical > COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP);
+    for _ in 0..=COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP {
+        cache.admit_built(key(), Arc::clone(&structure), typical);
+    }
+    let info = cache.info();
+    assert_eq!(
+        (info.evictions(), info.entries()),
+        (1, COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP)
+    );
 
     let outlier = key();
-    let returned = cache.admit_built(
-        Arc::clone(&outlier),
-        Arc::clone(&structure),
-        COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES + 1,
-    );
+    let returned = cache.admit_built(Arc::clone(&outlier), Arc::clone(&structure), budget + 1);
     assert!(Arc::ptr_eq(&returned, &structure));
     assert!(cache.peek_counting_hit(&outlier).is_none());
     assert_eq!(cache.info().bypasses(), 1);
-    cache.clear();
-    let at_limit = [key(), key()];
-    for limit_key in &at_limit {
-        cache.admit_built(
-            Arc::clone(limit_key),
-            Arc::clone(&structure),
-            COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES,
-        );
-    }
-    assert!(at_limit
-        .iter()
-        .all(|limit_key| cache.peek_counting_hit(limit_key).is_some()));
-    assert_eq!((cache.info().evictions(), cache.info().bypasses()), (0, 0));
+    let at_limit = key();
+    cache.admit_built(Arc::clone(&at_limit), Arc::clone(&structure), budget);
+    assert!(cache.peek_counting_hit(&at_limit).is_some());
+    let info = cache.info();
+    assert_eq!((info.entries(), info.bypasses()), (1, 1));
+    assert_eq!(info.charged_bytes(), budget);
 
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
@@ -326,11 +320,8 @@ fn complete_homspace_layout_cache_bounds_bind_by_bytes_and_bypass_outliers() {
     reset_core_intern_tables();
     let global = complete_hom_space_structure_cache_info();
     assert_eq!(global.entry_capacity(), 1024);
-    assert_eq!(global.byte_budget(), 4 * 1024 * 1024);
-    assert_eq!(
-        global.max_entry_bytes(),
-        COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES
-    );
+    assert_eq!(global.byte_budget(), 64 * 1024 * 1024);
+    assert_eq!(global.max_entry_bytes(), global.byte_budget());
     assert_eq!(
         (
             global.entries(),

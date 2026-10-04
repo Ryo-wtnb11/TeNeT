@@ -625,7 +625,6 @@ const DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_ENTRIES: usize = 256;
 /// (`caches.jl:DEFAULT_GLOBALCACHE_SIZE`) is the same 10⁴; the byte budget is
 /// the binding limit.
 const DEFAULT_RUNTIME_TREE_TRANSFORM_GROUP_ENTRIES: usize = 10_000;
-const DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 const RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE: usize = 8 * core::mem::size_of::<usize>();
 
 /// One Runtime-owned store for immutable tree-transform data of one
@@ -643,6 +642,15 @@ const RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE: usize = 8 * core::mem::size_of:
 ///
 /// Each tier is charged to its own Runtime-wide ledger account under the same
 /// byte budget, so the store retains at most three times that budget.
+///
+/// Any entry that fits the budget alone is admitted, evicting LRU entries to
+/// make room, as TensorKit's `GlobalLRUCache` retains every
+/// `treetransposer`/`treebraider` (entry-count bound only, `caches.jl:19,162`
+/// @cfaa073); TeNeT keeps the byte bound on top. The ceiling: an entry larger
+/// than the budget bypasses retention and is rebuilt per call. Why no
+/// per-entry limit below the budget (#1993): the former 8 MiB limit bypassed
+/// every rank-5 U(1) `V^5 ← V^5` transform, so each warm call recompiled it;
+/// the transform in use is the one worth keeping.
 #[doc(hidden)]
 pub struct RuntimeTreeTransformStore<T> {
     state: Mutex<RuntimeTreeTransformStoreState<T>>,
@@ -877,7 +885,7 @@ impl<T> RuntimeTreeTransformStore<T> {
         Self::with_limits(
             DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_ENTRIES,
             byte_budget,
-            DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_MAX_ENTRY_BYTES,
+            byte_budget,
         )
     }
 
@@ -896,7 +904,8 @@ impl<T> RuntimeTreeTransformStore<T> {
     /// Builds one typed store charged to a Runtime-wide ledger.
     #[doc(hidden)]
     pub fn with_runtime_ledger(ledger: Arc<RuntimeTreeTransformCacheLedger>) -> Self {
-        Self::with_shared_ledger(ledger, DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_MAX_ENTRY_BYTES)
+        let byte_budget = ledger.byte_budget;
+        Self::with_shared_ledger(ledger, byte_budget)
     }
 
     fn with_shared_ledger(

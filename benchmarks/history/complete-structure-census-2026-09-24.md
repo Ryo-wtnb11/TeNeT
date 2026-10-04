@@ -319,3 +319,33 @@ cap of 5 the sweep loop misses and evicts on all 21 warm lookups of each pass.
 
 The residual scope above still applies. B3 boundary-MPS and PEPS shapes were
 not measured, and the 4 MiB budget comes from this census alone.
+
+## Superseded bounds (#1993, 2026-10-04)
+
+The per-entry limit kept above turned out to be the cliff that the previous
+paragraph warned about, one rank higher. A warm U(1) `V^5 ← V^5` contraction
+(`warm_contract_compile_allocations`, C1p shape) builds a complete HomSpace
+structure charged 13.6 MB. That exceeds 1_650_641, so the structure bypassed
+the cache, and each warm derivation rebuilt it with 35,889 allocations. The
+runtime tree-transform store's 8 MiB per-entry limit did the same to the
+28.2 MB structure entry and the 23.8 MB plan entry. A warm planning call cost
+850,760 allocations, against 10 at rank 4.
+
+TensorKit bounds `sectorstructure` and `treetransposer` by entry count only
+(`GlobalLRUCache`, `DEFAULT_GLOBALCACHE_SIZE = 10^4`, `caches.jl:19,162` at
+cfaa073). It never refuses an entry for its size. Both TeNeT caches now admit
+any entry that fits the byte budget alone, and evict to make room.
+`CompleteHomSpaceStructureCache` moves to a 64 MiB budget, which matches the
+layout cache and the transform store. Retained memory stays bounded by the
+budget. That bound is stricter than TensorKit's.
+
+The ceiling is a structure larger than the budget, which still bypasses and is
+rebuilt per call. At rank 6 the complete structure is 111.4 MB and the
+transform entries are 249 MB and 199 MB, all above 64 MiB.
+
+Replaying this census under the new bounds (FIFO, cap 1024, 64 MiB,
+`max_entry_bytes` = budget) gives output identical to the 4 MiB replay:
+the same warm misses (all compulsory), no evictions and no bypasses. The peak
+retained bytes per workload are unchanged, the largest being 620,518 for
+iTEBD. No recorded workload's entries came near either the old or the new
+limit.

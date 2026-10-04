@@ -247,8 +247,10 @@ fn equal_across_interner_eviction() {
 fn equal_for_oversized_structures_that_bypass_the_interner() {
     let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    // One block per charge; far more block bytes than the 8 MiB entry cap.
-    let leg = u1_leg(-30_000..=30_000, 1);
+    // One block per charge: more block bytes than the interner's 8 MiB entry
+    // cap, and a complete structure (about 74 MB) above the complete-HomSpace
+    // cache's 64 MiB budget, so neither cache retains it (#1993).
+    let leg = u1_leg(-35_000..=35_000, 1);
     let signature = || {
         TensorMap::<_, f64>::zeros(&runtime, [&leg], [&leg])
             .unwrap()
