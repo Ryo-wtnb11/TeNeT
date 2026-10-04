@@ -126,6 +126,7 @@ where
 {
     type Error = OperationError;
 
+    #[inline]
     fn operation(error: OperationError) -> Self::Error {
         error
     }
@@ -183,6 +184,7 @@ where
 {
     type Error = CheckedGenericPlanError<R::Error>;
 
+    #[inline]
     fn operation(error: OperationError) -> Self::Error {
         CheckedGenericPlanError::Operation(error)
     }
@@ -282,6 +284,7 @@ impl TraceLowering<'_> {
     /// keep the rows whose traced trees match, then scale by the channel
     /// factor and address the destination block.
     #[allow(clippy::too_many_arguments)]
+    #[inline]
     fn lower<M, R, I>(
         &self,
         rule: &R,
@@ -375,6 +378,7 @@ where
     type Scalar = R::Scalar;
     type Error = OperationError;
 
+    #[inline]
     fn operation(error: OperationError) -> Self::Error {
         error
     }
@@ -480,6 +484,7 @@ where
         Ok(())
     }
 
+    #[inline]
     fn split(
         rule: &R,
         tree: &FusionTreeKey,
@@ -488,6 +493,7 @@ where
         split_fusion_tree(rule, tree, rank).map_err(OperationError::from_core_preserving_context)
     }
 
+    #[inline]
     fn channel_factor(rule: &R, trace_tree: &FusionTreeKey) -> Result<Self::Scalar, Self::Error> {
         let coupled = trace_tree.coupled();
         let first = trace_tree.uncoupled().first().copied().ok_or(
@@ -519,6 +525,7 @@ where
     type Scalar = R::Scalar;
     type Error = CheckedGenericPlanError<R::Error>;
 
+    #[inline]
     fn operation(error: OperationError) -> Self::Error {
         CheckedGenericPlanError::Operation(error)
     }
