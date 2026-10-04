@@ -179,7 +179,7 @@ where
         >,
     ) -> Result<Lq<Self>, TypedFacadeError<R>>
     where
-        R::Mode: TypedTensorAdjointDispatch<R, D>,
+        R::Mode: TypedAdjointSpace<R>,
     {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
             && R::Mode::adjoint_rule(op) == AdjointRule::Redirect

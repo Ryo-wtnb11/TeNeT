@@ -10,8 +10,8 @@ use tenet_core::{FusionTreeKey, MultiplicityIndex, SectorLeg, TypedSectorAdmissi
 use super::{
     decode_block_fusion_trees, is_diagonal_bond_space, owned_repr, BlockFusionTrees,
     FusionProductSpace, FusionTreeHomSpace, GradedSpace, Runtime, TensorMap, TensorScalar,
-    TypedData, TypedFacadeError, TypedTensorAdjointDispatch, TypedTensorBody,
-    TypedTensorModeDispatch, TypedTensorRepr, TypedTensorRootDispatch,
+    TypedAdjointSpace, TypedData, TypedFacadeError, TypedTensorBody, TypedTensorModeDispatch,
+    TypedTensorRepr, TypedTensorRootDispatch,
 };
 
 const MAGIC: &[u8; 8] = b"TENETTS\0";
@@ -1656,11 +1656,10 @@ fn build_adjoint<R, D, C>(
 ) -> Result<TensorMap<R, D>, DecodeError<C, TypedFacadeError<R>>>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorAdjointDispatch<R, D>,
+    R::Mode: TypedAdjointSpace<R>,
     D: TensorScalar,
 {
-    let tensor = <R::Mode as TypedTensorAdjointDispatch<R, D>>::adjoint(&parent)
-        .map_err(DecodeError::Facade)?;
+    let tensor = parent.adjoint().map_err(DecodeError::Facade)?;
     if !matches!(tensor.repr, TypedTensorRepr::Adjoint(_)) {
         return Err(DecodeError::InvalidFormat(
             "lazy-adjoint record is not lazy for this provider mode".to_string(),
@@ -1677,7 +1676,7 @@ fn decode_tensor<R, D, C>(
 ) -> Result<TensorMap<R, D>, DecodeError<C::Error, TypedFacadeError<R>>>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorRootDispatch<R> + TypedTensorAdjointDispatch<R, D>,
+    R::Mode: TypedTensorRootDispatch<R> + TypedAdjointSpace<R>,
     D: WireScalar,
     C: TypedPersistenceCodec<R>,
 {
@@ -1709,8 +1708,7 @@ where
             // written by an earlier lazy checked-Generic adjoint keeps its
             // meaning but re-encodes as `Diagonal`.
             let parent = build_diagonal(runtime, &provider, parent_space, parent_spectrum, limits)?;
-            <R::Mode as TypedTensorAdjointDispatch<R, D>>::adjoint(&parent)
-                .map_err(DecodeError::Facade)
+            parent.adjoint().map_err(DecodeError::Facade)
         }
     }
 }
@@ -1877,7 +1875,7 @@ macro_rules! tensor_persistence_impl {
         impl<R> TensorMap<R, $scalar>
         where
             R: TypedSectorAdmission,
-            R::Mode: TypedTensorRootDispatch<R> + TypedTensorAdjointDispatch<R, $scalar>,
+            R::Mode: TypedTensorRootDispatch<R> + TypedAdjointSpace<R>,
         {
             /// Returns a fully validated Host `Vec` tensor using the provider
             /// instance returned by the resolver.

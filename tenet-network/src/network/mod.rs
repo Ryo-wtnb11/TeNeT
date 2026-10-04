@@ -27,7 +27,7 @@ use tenet::typed::FusionAlgebraError;
 #[cfg(test)]
 use tenet::typed::OperationError;
 use tenet::typed::{
-    ContractSpec, GradedSpace, TensorMap, TypedSpaceModeDispatch, TypedTensorAdjointDispatch,
+    ContractSpec, GradedSpace, TensorMap, TypedAdjointSpace, TypedSpaceModeDispatch,
     TypedTensorContractDispatch, TypedTensorModeDispatch, TypedTensorRootDispatch,
     TypedTensorTraceDispatch, TypedTensorTransformDispatch,
 };

@@ -215,7 +215,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorRootDispatch<R>,
+    R::Mode: TypedTensorConstructionDispatch<R, D>,
     D: TensorScalar,
 {
     /// Builds a compact diagonal map `bond <- bond` from labelled sector values.
@@ -300,7 +300,7 @@ where
             FusionProductSpace::new([bond.leg().clone()]),
             FusionProductSpace::new([bond.leg().clone()]),
         );
-        let space = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+        let space = <R::Mode as TypedTensorConstructionDispatch<R, D>>::build_construction_root(
             Arc::clone(bond.provider_arc()),
             homspace,
         )?;
@@ -309,7 +309,14 @@ where
             repr: owned_repr(TypedTensorBody::diagonal(space, spectrum)),
         })
     }
+}
 
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorRootDispatch<R>,
+    D: TensorScalar,
+{
     /// The leg of a `bond <- bond` endomorphism, after proving that is what
     /// the receiver is.
     fn bond_endomorphism_leg(&self, operation: &str) -> Result<&SectorLeg, TypedFacadeError<R>> {

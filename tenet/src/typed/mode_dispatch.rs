@@ -126,119 +126,6 @@ where
     }
 }
 
-impl<R, D> TypedTensorReductionDispatch<R, D> for MultiplicityFreeAdmissionMode
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-    D: TensorScalar,
-{
-    fn inner(tensor: &TensorMap<R, D>, other: &TensorMap<R, D>) -> Result<D, Error> {
-        tensor.inner_multiplicity_free(other)
-    }
-    fn norm(tensor: &TensorMap<R, D>, p: f64) -> Result<f64, Error> {
-        tensor.norm_p_multiplicity_free(p)
-    }
-    fn tr(tensor: &TensorMap<R, D>) -> Result<D, Error> {
-        tensor.tr_multiplicity_free()
-    }
-}
-
-impl<R, D> TypedTensorAddScaleDispatch<R, D> for MultiplicityFreeAdmissionMode
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-    D: TensorScalar,
-{
-    fn axpby(
-        tensor: &TensorMap<R, D>,
-        alpha: D,
-        other: &TensorMap<R, D>,
-        beta: D,
-    ) -> Result<TensorMap<R, D>, Error> {
-        tensor.add_multiplicity_free(other, alpha, beta)
-    }
-
-    fn scale(tensor: &TensorMap<R, D>, factor: D) -> TensorMap<R, D> {
-        tensor.scale_multiplicity_free(factor)
-    }
-}
-
-impl<R, D> TypedTensorAddScaleDispatch<R, D> for CheckedGenericAdmissionMode
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericFusion,
-    D: TensorScalar,
-{
-    fn axpby(
-        tensor: &TensorMap<R, D>,
-        alpha: D,
-        other: &TensorMap<R, D>,
-        beta: D,
-    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
-        host_add_impl(tensor, other, alpha, beta).map_err(GenericTensorError::from)
-    }
-
-    fn scale(tensor: &TensorMap<R, D>, factor: D) -> TensorMap<R, D> {
-        host_scale_impl(tensor, factor)
-    }
-}
-
-impl<R, D> TypedTensorAdjointDispatch<R, D> for MultiplicityFreeAdmissionMode
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-    D: TensorScalar,
-{
-    fn adjoint(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
-        tensor.adjoint_multiplicity_free()
-    }
-}
-
-impl<R, D> TypedTensorAdjointDispatch<R, D> for CheckedGenericAdmissionMode
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericFusion,
-    D: TensorScalar,
-{
-    fn adjoint(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
-        // Why not a lazy view: densifying its unstored zeros through
-        // conjugation would publish them as `0-0i`.
-        if let Some(adjoint) = tensor.compact_adjoint() {
-            return Ok(adjoint);
-        }
-        Ok(match &tensor.repr {
-            TypedTensorRepr::Owned(parent) => {
-                let logical_space =
-                    <Self as tenet_tensors::CoefficientAlgebra<R>>::adjoint_space(&parent.space)
-                        .map_err(GenericTensorError::Plan)?;
-                TensorMap {
-                    runtime: tensor.runtime.clone(),
-                    repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView::new(
-                        Arc::clone(parent),
-                        logical_space,
-                    ))),
-                }
-            }
-            TypedTensorRepr::Adjoint(view) => TensorMap {
-                runtime: tensor.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            },
-        })
-    }
-}
-
 pub(super) fn checked_compact_spectrum_layout<R, D>(
     source: &BoundDynamicFusionMapSpace<R>,
     output: &BoundDynamicFusionMapSpace<R>,
@@ -297,185 +184,20 @@ pub(super) fn checked_compact_spectrum_layout<R, D>(
     })
 }
 
-impl<R, D> TypedTensorReductionDispatch<R, D> for CheckedGenericAdmissionMode
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericFusion
-        + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: TensorScalar,
-{
-    fn inner(
-        tensor: &TensorMap<R, D>,
-        other: &TensorMap<R, D>,
-    ) -> Result<D, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
-        if !tensor.runtime.same_runtime(&other.runtime) {
-            return Err(Error::RuntimeMismatch.into());
-        }
-        let _host_pool = tensor.runtime.enter_host_pool();
-        if tensor.logical_space().space() != other.logical_space().space() {
-            return Err(Error::InvalidArgument(
-                "tensors live on different spaces or block layouts".to_string(),
-            )
-            .into());
-        }
-        if matches!(&tensor.repr, TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Diagonal(_)))
-            || matches!(&other.repr, TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Diagonal(_)))
-        {
-            return Err(Error::InvalidArgument(
-                "checked Generic reductions require dense payloads".to_string(),
-            )
-            .into());
-        }
-        // One `dim(c)` query per coupled sector, evaluated in place. The
-        // dense owner asks once per region; the oriented owner asks once per
-        // logical block, and a canonical structure lists each coupled sector
-        // as one contiguous run of blocks, so a one-entry run cache keeps
-        // both at G queries with no allocation and no hashing. Why not a
-        // `Vec<f64>` indexed by region: the oriented owner asks by `SectorId`,
-        // so that would still need a sector-to-index map or a tenet-core
-        // accessor, while the run cache needs neither.
-        let provider = tensor.logical_space().provider();
-        let mut last: Option<(SectorId, f64)> = None;
-        let weight_of = move |sector: SectorId| match last {
-            Some((cached, weight)) if cached == sector => Ok(weight),
-            _ => {
-                let weight = <R::Mode as TypedSpaceModeDispatch<R>>::dim(provider, sector)?;
-                last = Some((sector, weight));
-                Ok(weight)
-            }
-        };
-        if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
-            || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
-        {
-            let (lhs_operand, lhs_data) = tensor.fusion_operand_and_data();
-            let (rhs_operand, rhs_data) = other.fusion_operand_and_data();
-            return tenet_tensors::oriented_fusion_inner_with(
-                tensor.logical_space().space().structure(),
-                lhs_operand,
-                &lhs_data,
-                rhs_operand,
-                &rhs_data,
-                weight_of,
-            );
-        }
-        let value = coupled_region_inner(
-            tensor.logical_space().space().structure(),
-            tensor.logical_space().space().nout(),
-            tensor
-                .owned_body()
-                .expect("owned inner input")
-                .materialized_dense_data()
-                .as_ref(),
-            other
-                .owned_body()
-                .expect("owned inner input")
-                .materialized_dense_data()
-                .as_ref(),
-            weight_of,
-        )?;
-        Ok(D::from_complex64(value))
-    }
-
-    fn norm(
-        tensor: &TensorMap<R, D>,
-        p: f64,
-    ) -> Result<f64, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
-        validate_norm_p(p)?;
-        if p != 2.0 {
-            return Err(Error::InvalidArgument(format!(
-                "checked Generic norm supports only p = 2, got {p}"
-            ))
-            .into());
-        }
-        // The norm is adjoint invariant, so a lazy adjoint reads its parent in
-        // storage order instead of pairing oriented blocks.
-        if let TypedTensorRepr::Adjoint(view) = &tensor.repr {
-            return Self::norm(
-                &TensorMap {
-                    runtime: tensor.runtime.clone(),
-                    repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-                },
-                p,
-            );
-        }
-        let body = tensor.owned_body().expect("owned norm input");
-        if matches!(body.data.as_ref(), TypedData::Diagonal(_)) {
-            return Err(Error::InvalidArgument(
-                "checked Generic reductions require dense payloads".to_string(),
-            )
-            .into());
-        }
-        let payload = body.materialized_dense_data();
-        let data: &[D] = &payload;
-        let structure = tensor.logical_space().space().structure();
-        let nout = tensor.logical_space().space().nout();
-        let provider = tensor.logical_space().provider();
-        let weight_of = |sector| <R::Mode as TypedSpaceModeDispatch<R>>::dim(provider, sector);
-        // Why not `Self::inner(tensor, tensor)`: it narrows the wide sum to
-        // `D`, which for `f32`/`Complex32` rounds `|t|²` to single precision
-        // and can leave it subnormal, above the rescaling threshold.
-        let sum = coupled_region_inner(structure, nout, data, data, weight_of)?.re;
-        rescaled_power_norm(
-            sum,
-            2.0,
-            || max_abs(data.iter().copied()),
-            |max| {
-                coupled_region_weighted_sum(structure, nout, data, weight_of, |value| {
-                    scaled_power(value, max, 2.0)
-                })
-            },
-        )
-    }
-
-    fn tr(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<D, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
-        let hom = tensor.logical_space().space().homspace();
-        if hom.codomain().legs() != hom.domain().legs() {
-            return Err(Error::InvalidArgument(
-                "tr() requires an endomorphism (domain == codomain)".to_string(),
-            )
-            .into());
-        }
-        if matches!(&tensor.repr, TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Diagonal(_)))
-        {
-            return Err(Error::InvalidArgument(
-                "checked Generic reductions require dense payloads".to_string(),
-            )
-            .into());
-        }
-        if let TypedTensorRepr::Adjoint(view) = &tensor.repr {
-            let parent = TensorMap {
-                runtime: tensor.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            };
-            return Ok(FactorScalar::adjoint(Self::tr(&parent)?));
-        }
-        let provider = tensor.logical_space().provider();
-        Ok(D::from_complex64(weighted_trace(
-            tensor.logical_space().space().structure(),
-            tensor.logical_space().space().nout(),
-            tensor
-                .owned_body()
-                .expect("owned trace input")
-                .materialized_dense_data()
-                .as_ref(),
-            |sector| <R::Mode as TypedSpaceModeDispatch<R>>::dim(provider, sector),
-        )?))
-    }
-}
-
 impl<R> TypedTensorModeDispatch<R> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + CheckedFusionAlgebra,
 {
     type FacadeError = Error;
+    const CHECKED_GENERIC: bool = false;
 
     fn map_provider_error(error: <R as TypedSectorAdmission>::Error) -> Self::FacadeError {
         error.into()
+    }
+
+    fn fusion_style(provider: &R) -> tenet_core::FusionStyleKind {
+        tenet_core::FusionRule::fusion_style(provider)
     }
 
     fn facade_error_into_error(error: Error) -> Error {
@@ -557,9 +279,18 @@ where
         > + CheckedGenericFusion,
 {
     type FacadeError = GenericTensorError<<R as CheckedGenericFusion>::Error>;
+    const CHECKED_GENERIC: bool = true;
 
     fn map_provider_error(error: <R as TypedSectorAdmission>::Error) -> Self::FacadeError {
         GenericTensorError::Structure(CheckedGenericStructureError::Provider(error))
+    }
+
+    // Why not ask the provider: admission already required the Generic
+    // style (`validate_checked_generic_style`), so an op on admitted data
+    // never asks again and cannot be swayed by a provider whose answer
+    // changed since.
+    fn fusion_style(_provider: &R) -> tenet_core::FusionStyleKind {
+        tenet_core::FusionStyleKind::Generic
     }
 
     // Why lossy: `TensorRef` is provider-neutral, so its adjoint constructor

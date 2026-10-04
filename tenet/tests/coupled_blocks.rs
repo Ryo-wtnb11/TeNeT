@@ -397,8 +397,7 @@ where
 fn adjoint_case<R, D>(what: &str, t: &TensorMap<R, D>)
 where
     R: TypedSectorAdmission + tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>,
-    R::Mode:
-        tenet::typed::TypedTensorModeDispatch<R> + tenet::typed::TypedTensorAdjointDispatch<R, D>,
+    R::Mode: tenet::typed::TypedTensorModeDispatch<R> + tenet::typed::TypedAdjointSpace<R>,
     D: Val,
 {
     let lazy = t.adjoint().unwrap();
@@ -821,7 +820,7 @@ mod cuda {
         R: TypedSectorAdmission + tenet::sector::MultiplicityFreeRigidSymbols<Scalar = f64>,
         R::Mode: tenet::typed::TypedTensorModeDispatch<R>
             + tenet::typed::TypedTensorConstructionDispatch<R, D>
-            + tenet::typed::TypedTensorAdjointDispatch<R, D>,
+            + tenet::typed::TypedAdjointSpace<R>,
         D: Val + tenet::typed::CudaPayload + tenet::typed::CudaScalar,
     {
         let t = label_case::<R, D>(what, rt, &[v, w], &[v]);

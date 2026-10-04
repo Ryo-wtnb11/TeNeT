@@ -13,7 +13,7 @@
 //! `CheckedGenericRigidSymbols`; the trace needs the twist of
 //! `CheckedGenericPivotal`. Bounding one checked impl by the strongest trait
 //! would narrow the facade dispatch that forwards here (for example
-//! `TypedTensorAdjointDispatch` or `TypedSpaceModeDispatch`) to pivotal
+//! `TypedAdjointSpace` or `TypedSpaceModeDispatch`) to pivotal
 //! providers. So `RigidCoefficientAlgebra` and `PivotalCoefficientAlgebra`
 //! extend `CoefficientAlgebra` along the provider capability hierarchy; they
 //! are not a second mode axis.

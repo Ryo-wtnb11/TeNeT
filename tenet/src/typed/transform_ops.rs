@@ -817,33 +817,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    /// TensorKit `adjoint` (dagger): swaps codomain and domain and
-    /// conjugate-transposes every block. Real payloads are transposed only;
-    /// c64 entries are conjugated as well.
-    ///
-    /// Dense storage is a lazy parent-backed view, matching TensorKit's
-    /// `AdjointTensorMap`: metadata swaps immediately, and only
-    /// [`Self::materialize`] builds the whole logical payload.
-    /// Compact diagonal storage keeps its established `O(Σ_c k_c)` owned
-    /// conjugation path and never becomes a lazy view.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
-    /// straight from the seam, which owns the bend the dagger performs.
-    pub(super) fn adjoint_multiplicity_free(&self) -> Result<Self, Error> {
-        if let Some(adjoint) = self.compact_adjoint() {
-            return Ok(adjoint);
-        }
-        self.dense_adjoint_view()
-    }
-}
-
-impl<R, D> TensorMap<R, D>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: TensorScalar,
-{
     fn insert_unit_multiplicity_free(&self, insertion: UnitLegInsertion) -> Result<Self, Error>
     where
         R: CanonicalUnitFusionRule,
@@ -1205,7 +1178,7 @@ pub(super) fn map_spectrum_dtype<A: Copy, B>(
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorAdjointDispatch<R, D>,
+    R::Mode: TypedAdjointSpace<R>,
     D: TensorScalar,
 {
     /// Returns the adjoint `self^H`, swapping codomain and domain and
@@ -1235,7 +1208,32 @@ where
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn adjoint(&self) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorAdjointDispatch<R, D>>::adjoint(self)
+        // Why not a lazy view of a compact diagonal: densifying its unstored
+        // zeros through conjugation would publish them as `0-0i`.
+        if let Some(adjoint) = self.compact_adjoint() {
+            return Ok(adjoint);
+        }
+        Ok(match &self.repr {
+            TypedTensorRepr::Owned(parent) => {
+                let logical_space =
+                    <R::Mode as TypedAdjointSpace<R>>::adjoint_space(&parent.space)?;
+                debug_assert!(Arc::ptr_eq(
+                    parent.space.provider_arc(),
+                    logical_space.provider_arc()
+                ));
+                Self {
+                    runtime: self.runtime.clone(),
+                    repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView::new(
+                        Arc::clone(parent),
+                        logical_space,
+                    ))),
+                }
+            }
+            TypedTensorRepr::Adjoint(view) => Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            },
+        })
     }
 
     /// Borrowed adjoint view: the operand [`Self::adjoint`] would give,
@@ -1244,7 +1242,8 @@ where
         TensorRef {
             base: self,
             adjoint: Some(|tensor| {
-                <R::Mode as TypedTensorAdjointDispatch<R, D>>::adjoint(tensor)
+                tensor
+                    .adjoint()
                     .map_err(<R::Mode as TypedTensorModeDispatch<R>>::facade_error_into_error)
             }),
         }

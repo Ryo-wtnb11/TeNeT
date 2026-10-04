@@ -1,56 +1,65 @@
 use super::*;
 
+// The `re`/`im` gates are law checks (`re(t) + i·im(t)` rebuilds `t`).
+// TensorKit's real-input
+// branches (`real(t) = t`, `imag(t) = zerovector(t)` for a real scalartype)
+// are statically unrepresentable here: these methods exist on the `Complex64`
+// impl only, and `to_c64().re()` covers the round trip.
+impl<R> TensorMap<R, num_complex::Complex64> {
+    /// The element-wise real part, as an f64 tensor map on the same spaces
+    /// (TensorKit `Base.real`: blockwise element-wise, result scalartype
+    /// real).
+    ///
+    /// A compact spectrum maps spectrum-to-spectrum and stays compact. A cold
+    /// lazy adjoint uses an operation-local payload for the `O(stored_len)`
+    /// output; the logical space is shared.
+    pub fn re(&self) -> TensorMap<R, f64> {
+        self.map_parts(|value| value.re)
+    }
+
+    /// The element-wise imaginary part, as an f64 tensor map on the same
+    /// spaces (TensorKit `Base.imag`).
+    ///
+    /// A compact spectrum maps spectrum-to-spectrum and stays compact. A cold
+    /// lazy adjoint uses an operation-local payload for the `O(stored_len)`
+    /// output; the logical space is shared.
+    pub fn im(&self) -> TensorMap<R, f64> {
+        self.map_parts(|value| value.im)
+    }
+
+    /// The shared owned-input route of [`Self::re`] / [`Self::im`].
+    fn map_parts(&self, part: impl Fn(num_complex::Complex64) -> f64) -> TensorMap<R, f64> {
+        let materialized = self
+            .materialized_tensor_uncached()
+            .expect("a pre-admitted typed adjoint must materialize");
+        let source = materialized
+            .owned_body()
+            .expect("uncached materialization is owned");
+        let body = match source.data.as_ref() {
+            TypedData::Dense(data) => TypedTensorBody::dense(
+                source.space.clone(),
+                data.iter().map(|&value| part(value)).collect(),
+            ),
+            TypedData::Diagonal(spectrum) => {
+                TypedTensorBody::diagonal(source.space.clone(), map_spectrum_dtype(spectrum, part))
+            }
+        };
+        TensorMap {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(body),
+        }
+    }
+}
+
 impl<R, D> TensorMap<R, D>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: TypedAdjointSpace<R>,
     D: TensorScalar,
 {
-    /// The linear combination `alpha * self + beta * other`.
-    ///
-    /// Both operands must live on the same runtime and on the same space —
-    /// identical hom space and block layout — since the combination is
-    /// element-wise on the shared storage order.
-    ///
-    /// # False friend
-    ///
-    /// VectorInterface's `add(y, x, α, β)` is `y * β + x * α`: its **first**
-    /// coefficient belongs to its **second** argument. Here `alpha` belongs to
-    /// `self` and `beta` to `other`. Callers
-    /// arriving from Julia should go by the argument order, not by the
-    /// coefficient names.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::RuntimeMismatch`] when the operands belong to different
-    ///   runtimes, as for [`Self::contract`].
-    /// - [`Error::InvalidArgument`] when they do not live on the same space.
-    ///   The space comparison already covers rule identity, so a separate
-    ///   check would only re-report the same disagreement.
-    ///
-    /// ```
-    /// use std::sync::Arc;
-    ///
-    /// use tenet::sector::{FermionParityFusionRule, Z2Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
-    ///
-    /// let runtime = Runtime::builder().build()?;
-    /// let v = GradedSpace::try_new(
-    ///     Arc::new(FermionParityFusionRule),
-    ///     [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
-    /// )?;
-    /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 10)?;
-    ///
-    /// // `1.0 * t + 1.0 * t` doubles every entry, so the norm doubles too.
-    /// let doubled = t.axpby(1.0, &t, 1.0)?;
-    /// assert!((doubled.norm(2.0)? - 2.0 * t.norm(2.0)?).abs() < 1e-12);
-    /// # Ok::<(), tenet::typed::Error>(())
-    /// ```
-    pub(super) fn add_multiplicity_free(
-        &self,
-        other: &Self,
-        alpha: D,
-        beta: D,
-    ) -> Result<Self, Error> {
+    /// `alpha * self + beta * other`, the one body of [`Self::axpby`] for
+    /// every mode.
+    fn axpby_host(&self, alpha: D, other: &Self, beta: D) -> Result<Self, Error> {
         // Runtime first, exactly as `contract` does: crossing runtimes is a
         // trust-boundary violation rather than an algebra error.
         if !self.runtime.same_runtime(&other.runtime) {
@@ -68,7 +77,12 @@ where
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
             || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
         {
-            if let (Some(spectrum), TypedTensorRepr::Adjoint(_)) = (self.spectrum(), &other.repr) {
+            // Checked Generic densifies a compact operand next to a lazy one
+            // until #1867 gives it these compact arms.
+            let compact_arms = !<R::Mode as TypedTensorModeDispatch<R>>::CHECKED_GENERIC;
+            if let (true, Some(spectrum), TypedTensorRepr::Adjoint(_)) =
+                (compact_arms, self.spectrum(), &other.repr)
+            {
                 let (operand, dense) = other.fusion_operand_and_data();
                 let mut data = tenet_tensors::oriented_fusion_add_owned(
                     self.logical_space().space().structure(),
@@ -82,7 +96,9 @@ where
                 add_spectrum_into(self.logical_space().space(), &mut data, spectrum, alpha)?;
                 return Ok(self.with_data(data));
             }
-            if let (TypedTensorRepr::Adjoint(_), Some(spectrum)) = (&self.repr, other.spectrum()) {
+            if let (true, TypedTensorRepr::Adjoint(_), Some(spectrum)) =
+                (compact_arms, &self.repr, other.spectrum())
+            {
                 let (operand, dense) = self.fusion_operand_and_data();
                 let mut data = tenet_tensors::oriented_fusion_add_owned(
                     self.logical_space().space().structure(),
@@ -184,257 +200,6 @@ where
         ))
     }
 
-    /// `factor * self` (TensorKit `scale`).
-    ///
-    /// Infallible because the host payload dtype is the type parameter `D`;
-    /// `factor` is simply another `D`.
-    ///
-    /// Compact diagonal storage is preserved: scaling a spectrum factor stays
-    /// `Σ_c k_c` values rather than densifying.
-    pub(super) fn scale_multiplicity_free(&self, factor: D) -> Self {
-        if let Some(spectrum) = self.spectrum() {
-            return self.with_spectrum(
-                spectrum
-                    .iter()
-                    .map(|entry| tenet_matrixalgebra::SectorSpectrum {
-                        sector: entry.sector,
-                        values: entry
-                            .values
-                            .iter()
-                            .map(|&value| scale_value(value, factor))
-                            .collect(),
-                    })
-                    .collect(),
-            );
-        }
-        if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            let parent = Self {
-                runtime: self.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            };
-            return parent
-                .scale(FactorScalar::adjoint(factor))
-                .adjoint()
-                .expect("scaling a pre-admitted adjoint must preserve its layout");
-        }
-        self.with_data(
-            self.owned_body()
-                .expect("owned scale input")
-                .materialized_dense_data()
-                .as_ref()
-                .iter()
-                .map(|&value| scale_value(value, factor))
-                .collect(),
-        )
-    }
-}
-
-// The `re`/`im` gates are law checks (`re(t) + i·im(t)` rebuilds `t`).
-// TensorKit's real-input
-// branches (`real(t) = t`, `imag(t) = zerovector(t)` for a real scalartype)
-// are statically unrepresentable here: these methods exist on the `Complex64`
-// impl only, and `to_c64().re()` covers the round trip.
-impl<R> TensorMap<R, num_complex::Complex64> {
-    /// The element-wise real part, as an f64 tensor map on the same spaces
-    /// (TensorKit `Base.real`: blockwise element-wise, result scalartype
-    /// real).
-    ///
-    /// A compact spectrum maps spectrum-to-spectrum and stays compact. A cold
-    /// lazy adjoint uses an operation-local payload for the `O(stored_len)`
-    /// output; the logical space is shared.
-    pub fn re(&self) -> TensorMap<R, f64> {
-        self.map_parts(|value| value.re)
-    }
-
-    /// The element-wise imaginary part, as an f64 tensor map on the same
-    /// spaces (TensorKit `Base.imag`).
-    ///
-    /// A compact spectrum maps spectrum-to-spectrum and stays compact. A cold
-    /// lazy adjoint uses an operation-local payload for the `O(stored_len)`
-    /// output; the logical space is shared.
-    pub fn im(&self) -> TensorMap<R, f64> {
-        self.map_parts(|value| value.im)
-    }
-
-    /// The shared owned-input route of [`Self::re`] / [`Self::im`].
-    fn map_parts(&self, part: impl Fn(num_complex::Complex64) -> f64) -> TensorMap<R, f64> {
-        let materialized = self
-            .materialized_tensor_uncached()
-            .expect("a pre-admitted typed adjoint must materialize");
-        let source = materialized
-            .owned_body()
-            .expect("uncached materialization is owned");
-        let body = match source.data.as_ref() {
-            TypedData::Dense(data) => TypedTensorBody::dense(
-                source.space.clone(),
-                data.iter().map(|&value| part(value)).collect(),
-            ),
-            TypedData::Diagonal(spectrum) => {
-                TypedTensorBody::diagonal(source.space.clone(), map_spectrum_dtype(spectrum, part))
-            }
-        };
-        TensorMap {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(body),
-        }
-    }
-}
-
-pub(super) fn host_add_impl<R, D>(
-    tensor: &TensorMap<R, D>,
-    other: &TensorMap<R, D>,
-    alpha: D,
-    beta: D,
-) -> Result<TensorMap<R, D>, Error>
-where
-    R: TypedSectorAdmission,
-    D: TensorScalar,
-{
-    if !tensor.runtime.same_runtime(&other.runtime) {
-        return Err(Error::RuntimeMismatch);
-    }
-    if tensor.logical_space().space() != other.logical_space().space() {
-        return Err(Error::InvalidArgument(
-            "tensors live on different spaces or block layouts".to_string(),
-        ));
-    }
-    let _host_pool = tensor.runtime.enter_host_pool();
-    if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
-        || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
-    {
-        let (lhs, lhs_data) = tensor.fusion_operand_and_data();
-        let (rhs, rhs_data) = other.fusion_operand_and_data();
-        let data = tenet_tensors::oriented_fusion_add_owned(
-            tensor.logical_space().space().structure(),
-            lhs,
-            &lhs_data,
-            rhs,
-            &rhs_data,
-            alpha,
-            beta,
-        )?;
-        return Ok(tensor.with_data(data));
-    }
-    match (tensor.spectrum(), other.spectrum()) {
-        (Some(lhs), Some(rhs)) => {
-            if lhs.len() != rhs.len() {
-                return Err(spectra_disagree());
-            }
-            let sum = lhs
-                .iter()
-                .zip(rhs)
-                .map(|(left, right)| {
-                    if left.sector != right.sector || left.values.len() != right.values.len() {
-                        return Err(spectra_disagree());
-                    }
-                    Ok(tenet_matrixalgebra::SectorSpectrum {
-                        sector: left.sector,
-                        values: left
-                            .values
-                            .iter()
-                            .zip(&right.values)
-                            .map(|(&x, &y)| scale_value(x, alpha) + scale_value(y, beta))
-                            .collect(),
-                    })
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            return Ok(tensor.with_spectrum(sum));
-        }
-        (Some(diagonal), None) => {
-            return Ok(tensor.with_data(scatter_spectrum(
-                tensor.logical_space().space(),
-                other
-                    .owned_body()
-                    .expect("owned add input")
-                    .materialized_dense_data()
-                    .as_ref(),
-                beta,
-                diagonal,
-                alpha,
-            )?))
-        }
-        (None, Some(diagonal)) => {
-            return Ok(tensor.with_data(scatter_spectrum(
-                tensor.logical_space().space(),
-                tensor
-                    .owned_body()
-                    .expect("owned add input")
-                    .materialized_dense_data()
-                    .as_ref(),
-                alpha,
-                diagonal,
-                beta,
-            )?))
-        }
-        (None, None) => {}
-    }
-    Ok(tensor.with_data(
-        tensor
-            .owned_body()
-            .expect("owned add input")
-            .materialized_dense_data()
-            .as_ref()
-            .iter()
-            .zip(
-                other
-                    .owned_body()
-                    .expect("owned add input")
-                    .materialized_dense_data()
-                    .as_ref(),
-            )
-            .map(|(&x, &y)| scale_value(x, alpha) + scale_value(y, beta))
-            .collect(),
-    ))
-}
-
-pub(super) fn host_scale_impl<R, D>(tensor: &TensorMap<R, D>, factor: D) -> TensorMap<R, D>
-where
-    R: TypedSectorAdmission,
-    R::Mode: TypedTensorAdjointDispatch<R, D>,
-    D: TensorScalar,
-{
-    if let Some(spectrum) = tensor.spectrum() {
-        return tensor.with_spectrum(
-            spectrum
-                .iter()
-                .map(|entry| tenet_matrixalgebra::SectorSpectrum {
-                    sector: entry.sector,
-                    values: entry
-                        .values
-                        .iter()
-                        .map(|&value| scale_value(value, factor))
-                        .collect(),
-                })
-                .collect(),
-        );
-    }
-    if let TypedTensorRepr::Adjoint(view) = &tensor.repr {
-        let parent = TensorMap {
-            runtime: tensor.runtime.clone(),
-            repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-        };
-        return host_scale_impl(&parent, FactorScalar::adjoint(factor))
-            .adjoint()
-            .expect("scaling a pre-admitted adjoint must preserve its layout");
-    }
-    tensor.with_data(
-        tensor
-            .owned_body()
-            .expect("owned scale input")
-            .materialized_dense_data()
-            .as_ref()
-            .iter()
-            .map(|&value| scale_value(value, factor))
-            .collect(),
-    )
-}
-
-impl<R, D> TensorMap<R, D>
-where
-    R: TypedSectorAdmission,
-    R::Mode: TypedTensorAddScaleDispatch<R, D>,
-    D: TensorScalar,
-{
     /// Returns the host-side linear combination
     /// `x.axpby(alpha, &y, beta) == alpha * x + beta * y` on the operands'
     /// common tensor space, where `x` is the receiver.
@@ -469,7 +234,7 @@ where
     ) -> Result<Self, TypedFacadeError<R>> {
         let y = y.into().operand()?;
         let y = &*y;
-        <R::Mode as TypedTensorAddScaleDispatch<R, D>>::axpby(self, alpha, y, beta)
+        self.axpby_host(alpha, y, beta).map_err(Into::into)
     }
 
     /// Returns `factor * self` in host storage.
@@ -479,7 +244,40 @@ where
     /// remains lazy by scaling its parent with the conjugated factor, so no
     /// receiver materialization is cached.
     pub fn scale(&self, factor: D) -> Self {
-        <R::Mode as TypedTensorAddScaleDispatch<R, D>>::scale(self, factor)
+        if let Some(spectrum) = self.spectrum() {
+            return self.with_spectrum(
+                spectrum
+                    .iter()
+                    .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry
+                            .values
+                            .iter()
+                            .map(|&value| scale_value(value, factor))
+                            .collect(),
+                    })
+                    .collect(),
+            );
+        }
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return parent
+                .scale(FactorScalar::adjoint(factor))
+                .adjoint()
+                .expect("scaling a pre-admitted adjoint must preserve its layout");
+        }
+        self.with_data(
+            self.owned_body()
+                .expect("owned scale input")
+                .materialized_dense_data()
+                .as_ref()
+                .iter()
+                .map(|&value| scale_value(value, factor))
+                .collect(),
+        )
     }
 
     /// `self = factor * self` in place, VectorInterface `scale!(t, α)`, on

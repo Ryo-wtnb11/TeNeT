@@ -7,10 +7,22 @@ where
     R: TypedSectorAdmission,
 {
     /// Error returned by the ordinary typed facade.
-    type FacadeError: std::error::Error + From<Error>;
+    type FacadeError: std::error::Error + From<Error> + From<tenet_tensors::OperationError>;
+
+    /// Whether this is the checked Generic mode. Read only by the explicit
+    /// checked-Generic arms of the shared elementwise and reduction bodies
+    /// (compact reductions, `norm(p != 2)`, compact plus lazy `axpby`), which
+    /// #1867 and #1868 remove.
+    #[doc(hidden)]
+    const CHECKED_GENERIC: bool;
 
     /// Preserves a provider-side admission error.
     fn map_provider_error(error: R::Error) -> Self::FacadeError;
+
+    /// The provider's fusion style, which selects TensorKit's
+    /// `UniqueFusion` whole-buffer reductions.
+    #[doc(hidden)]
+    fn fusion_style(provider: &R) -> tenet_core::FusionStyleKind;
 
     /// Lowers a facade error to [`Error`] for the provider-neutral
     /// [`TensorRef`] adjoint constructor.
@@ -241,38 +253,29 @@ where
         V: SpectrumMagnitude;
 }
 
+/// The one coefficient step `adjoint` needs from a mode: the adjoint space
+/// (`tenet_tensors::CoefficientAlgebra::adjoint_space`) with its error in the
+/// facade's type. Implemented for every mode that has both, so `adjoint` and
+/// the operations built on it are one body for every mode.
 #[doc(hidden)]
-pub trait TypedTensorReductionDispatch<R, D>: TypedTensorModeDispatch<R>
+pub trait TypedAdjointSpace<R>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
 {
-    fn inner(tensor: &TensorMap<R, D>, other: &TensorMap<R, D>) -> Result<D, Self::FacadeError>;
-    fn norm(tensor: &TensorMap<R, D>, p: f64) -> Result<f64, Self::FacadeError>;
-    fn tr(tensor: &TensorMap<R, D>) -> Result<D, Self::FacadeError>;
+    fn adjoint_space(
+        space: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError>;
 }
 
-#[doc(hidden)]
-pub trait TypedTensorAddScaleDispatch<R, D>:
-    TypedTensorModeDispatch<R> + TypedTensorAdjointDispatch<R, D>
+impl<R, M> TypedAdjointSpace<R> for M
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    M: TypedTensorModeDispatch<R> + tenet_tensors::CoefficientAlgebra<R>,
+    M::FacadeError: From<<M as tenet_tensors::CoefficientAlgebra<R>>::Error>,
 {
-    fn axpby(
-        tensor: &TensorMap<R, D>,
-        alpha: D,
-        other: &TensorMap<R, D>,
-        beta: D,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
-    fn scale(tensor: &TensorMap<R, D>, factor: D) -> TensorMap<R, D>;
-}
-
-#[doc(hidden)]
-pub trait TypedTensorAdjointDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: TensorScalar,
-{
-    fn adjoint(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
+    fn adjoint_space(
+        space: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError> {
+        <M as tenet_tensors::CoefficientAlgebra<R>>::adjoint_space(space).map_err(Into::into)
+    }
 }
