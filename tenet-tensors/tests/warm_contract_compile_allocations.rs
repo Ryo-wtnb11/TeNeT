@@ -274,3 +274,79 @@ fn warm_contract_compile_allocates_nothing_per_crossing_leg_the_dual_moves() {
         assert_eq!(moved, base, "rank {}", codomain + domain);
     }
 }
+
+/// Allocations of one warm `plan_contract` of `A(V^rank ← V^rank)` with
+/// `B(V^rank ← V^rank)` on A's domain and B's codomain, both reversed, into
+/// each operand's open legs reversed: TensorKit's `copyC` shape (C1p at rank
+/// 2), so the planner builds the temporary space, its core and one permute.
+/// Paired with the same contraction through the core-then-`DynamicTree`
+/// ladder, the device route before #1857.
+fn copy_c_plan_allocations(rank: usize) -> [usize; 2] {
+    let provider = Arc::new(U1FusionRule);
+    let lhs = space(&provider, rank, rank);
+    let rhs = space(&provider, rank, rank);
+    let lhs_axes = (rank..2 * rank).rev().collect::<Vec<_>>();
+    let rhs_axes = (0..rank).rev().collect::<Vec<_>>();
+    let output = (0..rank)
+        .rev()
+        .chain((rank..2 * rank).rev())
+        .collect::<Vec<_>>();
+    let dst = Space::contracted_multiplicity_free_partitioned(
+        &lhs,
+        &rhs,
+        &lhs_axes,
+        &rhs_axes,
+        OutputAxisOrder::from_axes(&output),
+        rank,
+    )
+    .unwrap();
+    let store = Arc::new(RuntimeTreeTransformStore::new(
+        RuntimeTreeTransformStore::<f64>::DEFAULT_BYTE_BUDGET,
+    ));
+    let mut context = runtime_like_context(&store);
+    let copy_c = warm_allocations(|| {
+        let resolution = context
+            .plan_contract(
+                &dst,
+                &lhs,
+                FusionOperand::direct(lhs.space()),
+                &rhs,
+                FusionOperand::direct(rhs.space()),
+                &lhs_axes,
+                &rhs_axes,
+                &output,
+            )
+            .unwrap();
+        assert!(resolution.copy_c().is_some(), "rank {rank} takes CopyC");
+        resolution
+    });
+    let dynamic_tree = warm_allocations(|| {
+        let resolution = storage_ladder(
+            &mut context,
+            &dst,
+            FusionOperand::direct(lhs.space()),
+            FusionOperand::direct(rhs.space()),
+            TensorContractSpec::new(&lhs_axes, &rhs_axes, OutputAxisOrder::from_axes(&output)),
+        );
+        assert!(resolution.is_dynamic_tree(), "rank {rank}");
+        resolution
+    });
+    [copy_c, dynamic_tree]
+}
+
+#[test]
+fn warm_copy_c_planning_is_bounded_and_no_costlier_than_the_dynamic_tree() {
+    let _serial = counting_alloc::serial();
+    for rank in [2, 3, 4] {
+        let [copy_c, dynamic_tree] = copy_c_plan_allocations(rank);
+        eprintln!("rank {rank}: warm CopyC plan {copy_c}, DynamicTree ladder {dynamic_tree}");
+        // What: device-eager CopyC planning stays a small bounded count once
+        // its structures are warm (9-10 at these ranks), and never above
+        // the DynamicTree compile it replaced for this contraction (19-20).
+        assert!(copy_c <= 12, "rank {rank}: {copy_c}");
+        assert!(
+            copy_c <= dynamic_tree,
+            "rank {rank}: {copy_c} > {dynamic_tree}"
+        );
+    }
+}
