@@ -166,10 +166,10 @@ where
     /// # Errors
     ///
     /// [`Error::UnsupportedOnDevice`] for diagonal storage;
-    /// [`Error::PlacementMismatch`] for a payload on another device; the
-    /// expert layer's own [`Error::Operation`] / [`Error::Core`] /
-    /// [`Error::FusionAlgebra`] for malformed axis lists — all before any
-    /// device write.
+    /// [`Error::PlacementMismatch`] for a payload on another device;
+    /// [`Error::Operation`] with
+    /// [`crate::typed::OperationError::InvalidPermutation`] for malformed axis
+    /// lists, as on the Host — all before any device write.
     ///
     /// Checked-Generic, Generic and complex-coefficient providers are excluded
     /// by this impl's bound, so they are a compile-time boundary:
