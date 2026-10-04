@@ -561,6 +561,7 @@ where
     D: FactorScalar,
     M: SectorGeometry,
 {
+    let authority = CheckedAuthority(provider);
     let ranks = pairs
         .iter()
         .map(|pair| SectorRank {
@@ -577,46 +578,36 @@ where
         homspace.codomain().clone(),
         FusionProductSpace::new([new_leg.clone()]),
     );
-    let left_prepared = left_hom
-        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider.as_ref())
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    let mut left_cursor = FactorTreeCursor::new(matricizations, &ranks);
-    let left_ordered = validate_generic_factor_keys(
-        staged_fusion_tree_keys(left_prepared.sector_structure()),
-        FactorSide::Left,
-        Some(&mut left_cursor),
-        matricizations,
-        &mut matrix_by_sector,
-    )
-    .map_err(CheckedGenericFactorPlanError::from)?;
-    let left = BoundDynamicFusionMapSpace::from_prepared_final_homspace_generic_checked(
-        Arc::clone(provider),
-        left_hom,
-        left_prepared,
-    )
-    .map_err(CheckedGenericFactorPlanError::from)?;
+    let left_staged = authority.stage(left_hom)?;
+    let mut left_ordered = false;
+    let left = authority.commit(left_staged, |structure| {
+        let mut cursor = FactorTreeCursor::new(matricizations, &ranks);
+        left_ordered = validate_generic_factor_keys(
+            staged_fusion_tree_keys(structure),
+            FactorSide::Left,
+            Some(&mut cursor),
+            matricizations,
+            &mut matrix_by_sector,
+        )?;
+        Ok(())
+    })?;
     let right_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([new_leg]),
         homspace.domain().clone(),
     );
-    let right_prepared = right_hom
-        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider.as_ref())
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    let mut right_cursor = FactorTreeCursor::new(matricizations, &ranks);
-    let right_ordered = validate_generic_factor_keys(
-        staged_fusion_tree_keys(right_prepared.sector_structure()),
-        FactorSide::Right,
-        Some(&mut right_cursor),
-        matricizations,
-        &mut matrix_by_sector,
-    )
-    .map_err(CheckedGenericFactorPlanError::from)?;
-    let right = BoundDynamicFusionMapSpace::from_prepared_final_homspace_generic_checked(
-        Arc::clone(provider),
-        right_hom,
-        right_prepared,
-    )
-    .map_err(CheckedGenericFactorPlanError::from)?;
+    let right_staged = authority.stage(right_hom)?;
+    let mut right_ordered = false;
+    let right = authority.commit(right_staged, |structure| {
+        let mut cursor = FactorTreeCursor::new(matricizations, &ranks);
+        right_ordered = validate_generic_factor_keys(
+            staged_fusion_tree_keys(structure),
+            FactorSide::Right,
+            Some(&mut cursor),
+            matricizations,
+            &mut matrix_by_sector,
+        )?;
+        Ok(())
+    })?;
     let left_len = left.space().required_len().map_err(|e| {
         CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(e))
     })?;

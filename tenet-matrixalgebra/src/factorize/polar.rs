@@ -403,14 +403,9 @@ where
     R: CheckedGenericFusion,
 {
     let source_space = authority.space();
-    let rows = coupled_sector_block_dimensions_generic_checked(
-        source_space.homspace().codomain(),
-        authority.provider(),
-    )?;
-    let cols = coupled_sector_block_dimensions_generic_checked(
-        source_space.homspace().domain(),
-        authority.provider(),
-    )?;
+    let checked = CheckedAuthority(authority.provider_arc());
+    let rows = checked.coupled_dimensions(source_space.homspace().codomain())?;
+    let cols = checked.coupled_dimensions(source_space.homspace().domain())?;
     for (&sector, &row_count) in &rows {
         if !direction.accepts(row_count, cols.get(&sector).copied().unwrap_or(0)) {
             return Err(CheckedGenericFactorPlanError::Operation(
@@ -437,10 +432,7 @@ where
         ),
     };
     let p_nout = p_homspace.codomain().len();
-    let p_space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
-        Arc::clone(authority.provider_arc()),
-        p_homspace,
-    )?;
+    let p_space = checked.output_space(p_homspace)?;
     let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?
         .ok_or(CheckedGenericFactorPlanError::Operation(
             OperationError::UnsupportedTensorContractScope {
@@ -920,21 +912,17 @@ impl PolarDirection {
     }
 }
 
-pub(super) fn validate_polar_direction(
+pub(super) fn validate_polar_direction<R>(
     acceptance_direction: PolarDirection,
     error_direction: PolarDirection,
-    space: &BoundDynamicFusionMapSpace<impl FusionRule>,
-) -> Result<(), OperationError> {
-    let row_dimensions = space
-        .space()
-        .homspace()
-        .codomain()
-        .coupled_sector_block_dimensions(space.provider())?;
-    let col_dimensions = space
-        .space()
-        .homspace()
-        .domain()
-        .coupled_sector_block_dimensions(space.provider())?;
+    space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let authority = MfAuthority(space);
+    let row_dimensions = authority.coupled_dimensions(space.space().homspace().codomain())?;
+    let col_dimensions = authority.coupled_dimensions(space.space().homspace().domain())?;
     for (&sector, &rows) in &row_dimensions {
         let cols = col_dimensions.get(&sector).copied().unwrap_or(0);
         if !acceptance_direction.accepts(rows, cols) {
