@@ -893,14 +893,14 @@ where
 }
 
 /// Reorder scratch for [`eigh_sector_stage`], sized for the largest sector.
-pub(super) struct EighScratch<D> {
+struct EighScratch<D> {
     order: Vec<usize>,
     visited: Vec<bool>,
     column: Vec<D>,
 }
 
 impl<D: FactorScalar> EighScratch<D> {
-    pub(super) fn for_order(max_n: usize) -> Self {
+    fn for_order(max_n: usize) -> Self {
         Self {
             order: Vec::with_capacity(max_n),
             visited: vec![false; max_n],
@@ -913,7 +913,7 @@ impl<D: FactorScalar> EighScratch<D> {
 /// descending by magnitude (stable on ties), eigenvectors reordered to match
 /// and phase-gauged.
 #[inline]
-pub(super) fn eigh_sector_stage<E, D>(
+fn eigh_sector_stage<E, D>(
     dense: &mut E,
     matrix: &[D],
     n: usize,
@@ -950,7 +950,7 @@ where
 /// to match and phase-gauged. `rank_gate` runs on the raw eigenvectors after
 /// the eigenvalue check; the checked mode passes its diagonalizability gate
 /// there until #1798 decides it, the multiplicity-free mode a no-op.
-pub(super) fn eig_sector_stage<E, D>(
+fn eig_sector_stage<E, D>(
     dense: &mut E,
     matrix: &[D],
     n: usize,
@@ -1000,7 +1000,7 @@ where
 
 /// Hermitian eigenvalues of every sector through the no-vector solver,
 /// descending by magnitude (stable on ties, so LAPACK order breaks them).
-pub(super) fn eigh_vals_spectra<E, D>(
+fn eigh_vals_spectra<E, D>(
     dense: &mut E,
     matrices: &(impl SectorMatrices<D> + ?Sized),
 ) -> Result<Vec<SectorSpectrum>, OperationError>
@@ -1033,7 +1033,7 @@ where
 
 /// General eigenvalues of every sector through the no-vector solver,
 /// descending by magnitude (stable on ties).
-pub(super) fn eig_vals_spectra<E, D>(
+fn eig_vals_spectra<E, D>(
     dense: &mut E,
     matrices: &(impl SectorMatrices<D> + ?Sized),
 ) -> Result<Vec<SectorSpectrum<Complex64>>, OperationError>
