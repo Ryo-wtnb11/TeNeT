@@ -68,8 +68,9 @@ fn measure<T>(f: impl FnOnce() -> T) -> (T, usize, usize, usize) {
 
 const THREADS: usize = 3;
 
-/// The parallel runtime replays on this pool so the effective worker count is
-/// `THREADS` regardless of the host's core count or rayon's global pool.
+/// The caller's pool. The parallel runtime replays on its own pool, pinned
+/// to `THREADS` workers in [`runtimes`], so the effective worker count does not
+/// depend on the host's core count or Rayon's global pool.
 fn pool() -> rayon::ThreadPool {
     rayon::ThreadPoolBuilder::new()
         .num_threads(THREADS)
@@ -81,6 +82,7 @@ fn runtimes() -> (Runtime, Runtime) {
     (
         Runtime::builder().recoupling_threads(1).build().unwrap(),
         Runtime::builder()
+            .dense_threads(THREADS)
             .recoupling_threads(THREADS)
             .build()
             .unwrap(),
@@ -253,8 +255,22 @@ fn parallel_owned_permute_allocates_like_the_serial_owned_path() {
     let pool = pool();
     let warm_parallel = pool.install(|| source_parallel.permute(&[1], &[2, 0]).unwrap());
     assert!(warm_serial.dense_data().unwrap() == warm_parallel.dense_data().unwrap());
+    // This worker waits in a cross-pool install into the runtime's pool. Under
+    // load a wait can be the first to box a lazily created OS lock (macOS std
+    // allocates each Mutex/Condvar on first use, once per process) inside the
+    // window (#1964): this thread's own sleep mutex and condvar, and, through
+    // Rayon's wake of the runtime pool, each of its `THREADS` workers' sleep
+    // mutexes. With at most `THREADS + 2` such allocations, `THREADS + 3`
+    // windows on the same worker include a clean one, and the cleanest is the
+    // steady-state count; a per-call allocation would appear in all of them.
+    // Why not more warm-up: nothing in Rayon's public API forces a sleep.
     let (result_parallel, parallel_allocations, parallel_bytes, parallel_zeroed) =
-        pool.install(|| measure(|| source_parallel.permute(&[1], &[2, 0]).unwrap()));
+        pool.install(|| {
+            (0..THREADS + 3)
+                .map(|_| measure(|| source_parallel.permute(&[1], &[2, 0]).unwrap()))
+                .min_by_key(|&(_, calls, bytes, _)| (calls, bytes))
+                .unwrap()
+        });
     black_box(result_parallel.dense_data().unwrap());
 
     assert!(result_serial.dense_data().unwrap() == result_parallel.dense_data().unwrap());
