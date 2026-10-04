@@ -547,6 +547,17 @@ impl<C> TensorTraceFusionStructure<C> {
         self.descriptor.terms().iter().zip(&self.terms)
     }
 
+    /// The `index`-th pair of [`Self::paired_terms`].
+    pub(crate) fn paired_term(
+        &self,
+        index: usize,
+    ) -> (
+        &TensorTraceDescriptorTerm,
+        &TensorTraceFusionStructureTerm<C>,
+    ) {
+        (&self.descriptor.terms()[index], &self.terms[index])
+    }
+
     #[inline]
     pub fn dst_rank(&self) -> usize {
         self.dst_rank
@@ -2262,8 +2273,7 @@ where
         descriptor.destination_producer_indices(),
         descriptor.destination_producer_offsets(),
         |term_index| {
-            let term = &descriptor.terms()[term_index];
-            let fusion_term = &structure.terms()[term_index];
+            let (term, fusion_term) = structure.paired_term(term_index);
             OwnedTraceTerm::new(
                 term.dst_block,
                 term.src_block,
