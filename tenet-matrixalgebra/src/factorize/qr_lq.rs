@@ -432,6 +432,9 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
+    // Why the checked entry has no direct-region plan: a plan needs both
+    // provider-built factor spaces before any dense work, and the checked
+    // contract reports dense errors before provider errors (#1960).
     if let Some(plan) = compact_factor_plan(input.space())? {
         return qr_compact_direct_regions(dense, input, &plan).map(|(q, r)| Qr { q, r });
     }
@@ -439,39 +442,94 @@ where
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_compact_qr_input_pack(&matricizations);
-    let blocks = matricizations
-        .iter()
-        .map(|matrix| (matrix.data.as_slice(), matrix.rows, matrix.cols))
-        .collect::<Vec<_>>();
+    let mut pairs = compact_qr_pairs(dense, matricizations.as_slice(), |_| {})?;
+    #[cfg(test)]
+    for pair in &pairs {
+        record_compact_qr_output_scatter::<D>(pair.left.len());
+        record_compact_qr_output_scatter::<D>(pair.right.len());
+    }
+    build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &mut pairs)
+        .map(|(q, r)| Qr { q, r })
+}
+
+/// Compact QR of every coupled-sector matrix in one batched dense call, in the
+/// positive-diagonal gauge, as `q` (left) and `r` (right) factor pairs.
+/// `observe` sees each matrix before the dense call.
+pub(super) fn compact_qr_pairs<E, D>(
+    dense: &mut E,
+    matrices: &(impl SectorMatrices<D> + ?Sized),
+    mut observe: impl FnMut(&SectorMatrixRef<'_, D>),
+) -> Result<Vec<FactorPair<D>>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let mut blocks = Vec::with_capacity(matrices.len());
+    for index in 0..matrices.len() {
+        let matrix = matrices.get(index)?;
+        observe(&matrix);
+        blocks.push((matrix.data, matrix.rows, matrix.cols));
+    }
     let factors = compact_qr_owned_batch(dense, &blocks)?;
-    let mut pairs = Vec::with_capacity(matricizations.len());
-    for (matrix, (mut q, mut r)) in matricizations.iter().zip(factors) {
-        let rank = matrix.rows.min(matrix.cols);
-        positive_diagonal_gauge_strided(
-            &mut q,
-            matrix.rows,
-            matrix.rows,
-            &mut r,
-            rank,
-            rank,
-            matrix.cols,
-        );
-        #[cfg(test)]
-        {
-            record_compact_qr_output_scatter::<D>(q.len());
-            record_compact_qr_output_scatter::<D>(r.len());
-        }
+    let mut pairs = Vec::with_capacity(blocks.len());
+    for (index, (mut q, mut r)) in factors.into_iter().enumerate() {
+        let (_, rows, cols) = blocks[index];
+        let rank = rows.min(cols);
+        positive_diagonal_gauge_strided(&mut q, rows, rows, &mut r, rank, rank, cols);
         pairs.push(FactorPair {
-            sector: matrix.sector,
+            sector: matrices.get(index)?.sector,
             kept: rank,
             left: q,
-            left_rows: matrix.rows,
+            left_rows: rows,
             right: r,
             right_leading: rank,
         });
     }
-    build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &mut pairs)
-        .map(|(q, r)| Qr { q, r })
+    Ok(pairs)
+}
+
+/// Compact LQ of every coupled-sector matrix through the adjoint's QR, in the
+/// positive-diagonal gauge, as `l` (left) and `q` (right) factor pairs.
+/// `observe` sees each matrix with its adjoint before the dense call.
+pub(super) fn compact_lq_pairs<E, D>(
+    dense: &mut E,
+    matrices: &(impl SectorMatrices<D> + Sync + ?Sized),
+    mut observe: impl FnMut(&SectorMatrixRef<'_, D>, &[D]) + Send,
+) -> Result<Vec<FactorPair<D>>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let mut pairs = Vec::with_capacity(matrices.len());
+    in_linalg_scope(dense, |dense| {
+        for index in 0..matrices.len() {
+            let matrix = matrices.get(index)?;
+            let rank = matrix.rows.min(matrix.cols);
+            let adjoint = adjoint_col_major(matrix.data, matrix.rows, matrix.cols);
+            observe(&matrix, &adjoint);
+            let (mut q_prime, mut r_prime) =
+                compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)?;
+            positive_diagonal_gauge_strided(
+                &mut q_prime,
+                matrix.cols,
+                matrix.cols,
+                &mut r_prime,
+                rank,
+                rank,
+                matrix.rows,
+            );
+            pairs.push(FactorPair {
+                sector: matrix.sector,
+                kept: rank,
+                left: adjoint_col_major(&r_prime, rank, matrix.rows),
+                left_rows: matrix.rows,
+                right: adjoint_col_major(&q_prime, matrix.cols, rank),
+                right_leading: rank,
+            });
+        }
+        Ok(())
+    })?;
+    Ok(pairs)
 }
 
 pub(super) fn qr_compact_direct_regions<E, R, D>(
@@ -577,38 +635,12 @@ where
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_compact_lq_input_pack(&matricizations);
-    let mut pairs = Vec::with_capacity(matricizations.len());
-    in_linalg_scope(dense, |dense| {
-        for matrix in &matricizations {
-            let rank = matrix.rows.min(matrix.cols);
-            let adjoint = adjoint_col_major(&matrix.data, matrix.rows, matrix.cols);
-            let (mut q_prime, mut r_prime) =
-                compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)?;
-            positive_diagonal_gauge_strided(
-                &mut q_prime,
-                matrix.cols,
-                matrix.cols,
-                &mut r_prime,
-                rank,
-                rank,
-                matrix.rows,
-            );
-            #[cfg(test)]
-            {
-                record_compact_lq_output_scatter::<D>(r_prime.len());
-                record_compact_lq_output_scatter::<D>(q_prime.len());
-            }
-            pairs.push(FactorPair {
-                sector: matrix.sector,
-                kept: rank,
-                left: adjoint_col_major(&r_prime, rank, matrix.rows),
-                left_rows: matrix.rows,
-                right: adjoint_col_major(&q_prime, matrix.cols, rank),
-                right_leading: rank,
-            });
-        }
-        Ok(())
-    })?;
+    let mut pairs = compact_lq_pairs(dense, matricizations.as_slice(), |_, _| {})?;
+    #[cfg(test)]
+    for pair in &pairs {
+        record_compact_lq_output_scatter::<D>(pair.left.len());
+        record_compact_lq_output_scatter::<D>(pair.right.len());
+    }
     build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &mut pairs)
         .map(|(l, q)| Lq { l, q })
 }
@@ -976,41 +1008,12 @@ where
     if let InputMatricizations::Packed(matrices) = &matrices {
         record_compact_qr_input_pack(matrices);
     }
-    let matrix_refs = (0..matrices.len())
-        .map(|index| matrices.get(index))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(CheckedGenericFactorPlanError::from)?;
     #[cfg(test)]
-    for matrix in &matrix_refs {
-        record_checked_compact_input(CheckedCompactOperation::Qr, input.data(), matrix.data, None);
-    }
-    let blocks = matrix_refs
-        .iter()
-        .map(|matrix| (matrix.data, matrix.rows, matrix.cols))
-        .collect::<Vec<_>>();
-    let factors =
-        compact_qr_owned_batch(dense, &blocks).map_err(CheckedGenericFactorPlanError::from)?;
-    let mut pairs = Vec::with_capacity(matrices.len());
-    for (matrix, (mut q, mut r)) in matrix_refs.iter().zip(factors) {
-        let rank = matrix.rows.min(matrix.cols);
-        positive_diagonal_gauge_strided(
-            &mut q,
-            matrix.rows,
-            matrix.rows,
-            &mut r,
-            rank,
-            rank,
-            matrix.cols,
-        );
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: rank,
-            left: q,
-            left_rows: matrix.rows,
-            right: r,
-            right_leading: rank,
-        });
-    }
+    let data = input.data();
+    let pairs = compact_qr_pairs(dense, &matrices, |_matrix| {
+        #[cfg(test)]
+        record_checked_compact_input(CheckedCompactOperation::Qr, data, _matrix.data, None);
+    })?;
     build_checked_pair_from_input(provider, space.homspace(), &matrices, pairs)
         .map(|(q, r)| Qr { q, r })
 }
@@ -1035,46 +1038,20 @@ where
     if let InputMatricizations::Packed(matrices) = &matrices {
         record_compact_lq_input_pack(matrices);
     }
-    let mut pairs = Vec::with_capacity(matrices.len());
     #[cfg(test)]
     let data = input.data();
-    in_linalg_scope(dense, |dense| {
-        for index in 0..matrices.len() {
-            let matrix = matrices.get(index)?;
-            let rank = matrix.rows.min(matrix.cols);
-            #[cfg(test)]
-            record_compact_lq_adjoint_fill::<D>(matrix.data.len());
-            let adjoint = adjoint_col_major(matrix.data, matrix.rows, matrix.cols);
-            #[cfg(test)]
+    let pairs = compact_lq_pairs(dense, &matrices, |_matrix, _adjoint| {
+        #[cfg(test)]
+        {
+            record_compact_lq_adjoint_fill::<D>(_matrix.data.len());
             record_checked_compact_input(
                 CheckedCompactOperation::Lq,
                 data,
-                matrix.data,
-                Some(&adjoint),
+                _matrix.data,
+                Some(_adjoint),
             );
-            let (mut q_prime, mut r_prime) =
-                compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)?;
-            positive_diagonal_gauge_strided(
-                &mut q_prime,
-                matrix.cols,
-                matrix.cols,
-                &mut r_prime,
-                rank,
-                rank,
-                matrix.rows,
-            );
-            pairs.push(FactorPair {
-                sector: matrix.sector,
-                kept: rank,
-                left: adjoint_col_major(&r_prime, rank, matrix.rows),
-                left_rows: matrix.rows,
-                right: adjoint_col_major(&q_prime, matrix.cols, rank),
-                right_leading: rank,
-            });
         }
-        Ok(())
-    })
-    .map_err(CheckedGenericFactorPlanError::from)?;
+    })?;
     build_checked_pair_from_input(provider, space.homspace(), &matrices, pairs)
         .map(|(l, q)| Lq { l, q })
 }
