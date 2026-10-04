@@ -407,10 +407,12 @@ where
     ///
     /// # Errors
     ///
-    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] when
-    /// the axis lists are malformed (out of range, repeated, or not a
-    /// partition of `0..rank`) or the provider cannot support the braiding the
-    /// requested motion needs. The expert layer's own typed errors are the
+    /// [`Error::Operation`] with
+    /// [`crate::typed::OperationError::InvalidPermutation`] when the axis lists
+    /// are malformed (out of range, repeated, or not a partition of `0..rank`),
+    /// as at every axis-taking entry point; [`Error::Operation`] /
+    /// [`Error::Core`] / [`Error::FusionAlgebra`] when the provider cannot
+    /// support the braiding the requested motion needs. The expert layer's own typed errors are the
     /// contract here: re-validating the axes at this layer would be a second
     /// copy of a rule that already exists one call down, free to drift.
     /// Checked Generic providers return [`GenericTensorError::Plan`] with the

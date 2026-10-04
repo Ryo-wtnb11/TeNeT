@@ -56,10 +56,14 @@ fn trace_pair_axes(
     let mut seen = tenet_core::axes::AxisMask::new(rank);
     for &(lhs, rhs) in pairs {
         if seen.insert(lhs).and_then(|()| seen.insert(rhs)).is_err() {
-            return Err(Error::InvalidArgument(format!(
-                "invalid trace pair list {pairs:?} for rank {rank} \
-                 (axes must be in range and distinct)"
-            )));
+            // The traced axes are an axis subset, reported as every other
+            // subset misuse (#1873), with the pairs flattened in order.
+            return Err(tenet_tensors::OperationError::InvalidAxisSet {
+                tensor: "trace pairs",
+                axes: pairs.iter().flat_map(|&(lhs, rhs)| [lhs, rhs]).collect(),
+                rank,
+            }
+            .into());
         }
     }
     if pairs.is_empty() {
@@ -219,7 +223,8 @@ where
     ///
     /// In TensorKit `trace_permute!`'s order: `UnsupportedTensorContractScope`
     /// for a non-symmetric braiding (even with an empty `pairs`), then
-    /// [`Error::InvalidArgument`] for an out-of-range or repeated axis, then
+    /// [`Error::Operation`] with `InvalidAxisSet { tensor: "trace pairs" }`
+    /// for an out-of-range or repeated axis, then
     /// `StructureMismatch { "trace axes" }` for legs that are not mutually
     /// dual, in both admission modes. Trace execution failures return their
     /// corresponding [`Error`] variant. If required pivotal data is unavailable, the original

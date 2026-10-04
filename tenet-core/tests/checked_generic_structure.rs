@@ -221,7 +221,7 @@ fn checked_generic_contract_homspace_keeps_local_errors_before_typed_duality() {
     .unwrap_err();
     assert!(matches!(
         error,
-        CheckedGenericStructureError::Core(CoreError::InvalidPermutation { .. })
+        CheckedGenericStructureError::Core(CoreError::InvalidAxisSet { tensor: "lhs", .. })
     ));
     assert_eq!(invalid.calls.get(), 0);
 

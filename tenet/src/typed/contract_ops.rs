@@ -541,9 +541,13 @@ where
     /// - [`Error::Operation`] with
     ///   [`crate::typed::OperationError::UnsupportedTensorContractScope`] for
     ///   non-symmetric (anyonic or `NoBraiding`) providers, whatever the axes.
+    /// - [`Error::Operation`] with
+    ///   [`crate::typed::OperationError::InvalidAxisSet`] (`tensor` `"lhs"` /
+    ///   `"rhs"`) for a malformed contracted-axis list, and with
+    ///   [`crate::typed::OperationError::InvalidPermutation`] for a
+    ///   `codomain ++ domain` that is not a permutation of the open axes.
     /// - [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] for
-    ///   malformed axis lists, a `codomain ++ domain` that is not a
-    ///   permutation of the open axes, mismatched contracted legs, or operands whose
+    ///   mismatched contracted legs, or operands whose
     ///   providers report different rule identities. Those all come back from
     ///   the expert layer, which owns the rules; re-checking them here would
     ///   be a second copy free to drift.
@@ -1104,7 +1108,8 @@ where
     ///
     /// In TensorKit `trace_permute!`'s order: [`Error::Operation`] with
     /// `UnsupportedTensorContractScope` for a non-symmetric braiding, even with
-    /// an empty `pairs`; [`Error::InvalidArgument`] when the pair list is
+    /// an empty `pairs`; [`Error::Operation`] with
+    /// `InvalidAxisSet { tensor: "trace pairs" }` when the pair list is
     /// malformed — an axis out of range, or one named twice; then
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] from
     /// the seam, whose last check is `StructureMismatch { "trace axes" }` for

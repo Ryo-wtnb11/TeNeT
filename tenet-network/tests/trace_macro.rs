@@ -15,7 +15,7 @@ use tenet::sector::{
     FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::FusionAlgebraError;
-use tenet::typed::{Complex64, Error};
+use tenet::typed::{Complex64, Error, OperationError};
 use tenet::typed::{GradedSpace, Runtime, SectorSpectrum, TensorMap};
 use tenet_network::tensor;
 
@@ -349,12 +349,11 @@ fn trace_error_paths_stay_typed() {
     let endomorphism =
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&domain], [&domain], 252)
             .unwrap();
-    assert!(matches!(
-        endomorphism.trace_pairs(&[(0, 0)]),
-        Err(Error::InvalidArgument(_))
-    ));
-    assert!(matches!(
-        endomorphism.trace_pairs(&[(0, 5)]),
-        Err(Error::InvalidArgument(_))
-    ));
+    for pairs in [[(0, 0)], [(0, 5)]] {
+        assert!(matches!(
+            endomorphism.trace_pairs(&pairs),
+            Err(Error::Operation(operation))
+                if matches!(*operation, OperationError::InvalidAxisSet { tensor: "trace pairs", .. })
+        ));
+    }
 }

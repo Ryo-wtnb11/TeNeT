@@ -29,6 +29,14 @@ pub enum CoreError {
         permutation: Vec<usize>,
         rank: usize,
     },
+    /// `axes` is not a set of distinct axes below `rank` of `tensor` (an axis
+    /// subset such as the contracted legs; a permutation reports
+    /// [`Self::InvalidPermutation`]).
+    InvalidAxisSet {
+        tensor: &'static str,
+        axes: Vec<usize>,
+        rank: usize,
+    },
     /// Derived axis-position metadata disagrees with its source operation.
     InconsistentAxisPosition {
         logical_axis: usize,
@@ -170,6 +178,9 @@ impl fmt::Display for CoreError {
             }
             Self::InvalidPermutation { permutation, rank } => {
                 write!(f, "invalid permutation {permutation:?} for rank {rank}")
+            }
+            Self::InvalidAxisSet { tensor, axes, rank } => {
+                write!(f, "invalid {tensor} axis set {axes:?} for rank {rank}")
             }
             Self::InconsistentAxisPosition {
                 logical_axis,

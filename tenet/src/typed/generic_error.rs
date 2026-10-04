@@ -48,15 +48,41 @@ impl<E> From<tenet_tensors::OperationError> for GenericTensorError<E> {
     }
 }
 
+/// Whether a checked plan error is an axis misuse, which the facade reports
+/// in [`GenericTensorError::Facade`] exactly as the multiplicity-free mode
+/// does (#1873): it is an argument error, not a plan failure.
+fn plan_axis_misuse<E>(error: &CheckedGenericPlanError<E>) -> Option<Error> {
+    match error {
+        CheckedGenericPlanError::Core(core) => crate::error::axis_misuse(core).map(Error::from),
+        CheckedGenericPlanError::Operation(
+            operation @ (OperationError::InvalidPermutation { .. }
+            | OperationError::InvalidAxisSet { .. }),
+        ) => Some(Error::from(operation.clone())),
+        CheckedGenericPlanError::Operation(OperationError::Core(core)) => {
+            crate::error::axis_misuse(core).map(Error::from)
+        }
+        _ => None,
+    }
+}
+
 impl<E> From<CheckedGenericStructureError<E>> for GenericTensorError<E> {
     fn from(error: CheckedGenericStructureError<E>) -> Self {
-        Self::Structure(error)
+        match &error {
+            CheckedGenericStructureError::Core(core) => match crate::error::axis_misuse(core) {
+                Some(axis) => Self::Facade(Error::from(axis)),
+                None => Self::Structure(error),
+            },
+            CheckedGenericStructureError::Provider(_) => Self::Structure(error),
+        }
     }
 }
 
 impl<E> From<CheckedGenericPlanError<E>> for GenericTensorError<E> {
     fn from(error: CheckedGenericPlanError<E>) -> Self {
-        Self::Plan(error)
+        match plan_axis_misuse(&error) {
+            Some(axis) => Self::Facade(axis),
+            None => Self::Plan(error),
+        }
     }
 }
 
@@ -67,7 +93,7 @@ impl<E> From<CheckedGenericFactorPlanError<E>> for GenericTensorError<E> {
                 Self::Plan(CheckedGenericPlanError::Provider(error))
             }
             CheckedGenericFactorPlanError::Operation(error) => {
-                Self::Plan(CheckedGenericPlanError::Operation(error))
+                Self::from(CheckedGenericPlanError::Operation(error))
             }
         }
     }

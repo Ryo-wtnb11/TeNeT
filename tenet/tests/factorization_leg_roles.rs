@@ -17,7 +17,6 @@ use tenet::sector::{
     product_sector, FermionParityFusionRule, MultiplicityFreeAdmissionMode, ProductFusionRuleExt,
     SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::typed::CoreError;
 use tenet::typed::OperationError;
 use tenet::typed::{
     Eig, Eigh, Error, GradedSpace, LeftPolar, Lq, Qr, RightPolar, Runtime, Svd, TensorMap,
@@ -529,11 +528,7 @@ fn malformed_roles_are_rejected_before_the_operation() {
             matches!(
                 &error,
                 Error::Operation(operation)
-                    if matches!(
-                        &**operation,
-                        OperationError::Core(core)
-                            if matches!(core, CoreError::InvalidPermutation { .. })
-                    )
+                    if matches!(&**operation, OperationError::InvalidPermutation { .. })
             ),
             "{error:?}"
         );
