@@ -329,8 +329,14 @@ where
             &inactive_dst_scale_blocks,
             &direct_batch,
         )?;
-        let (direct_batch, direct_batch_alpha): (Vec<_>, Vec<_>) = direct_batch.into_iter().unzip();
-        let direct_batch_runs = strided_batch_runs(&direct_batch);
+        let (direct_batch, direct_batch_alpha, direct_batch_runs) =
+            if direct_batch.iter().all(|&(_, alpha)| alpha == C::one()) {
+                let (jobs, alphas): (Vec<_>, Vec<_>) = direct_batch.into_iter().unzip();
+                let runs = strided_batch_runs(&jobs);
+                (jobs, alphas, runs)
+            } else {
+                group_scaled_direct_batch(&direct_batch)
+            };
         Ok(Some(Self {
             dst_structure: Arc::clone(dst_structure),
             lhs_structure: Arc::clone(lhs_storage_structure),
@@ -613,4 +619,84 @@ fn validate_disjoint_direct_destinations(jobs: &[Rank2GemmBatchJob]) -> Result<(
         }
     }
     Ok(())
+}
+
+/// A scaled (twisted) plan's direct jobs grouped by coefficient, in
+/// first-appearance order and stably within a group, with each group's run
+/// partition: one Host batch per coefficient. O(n·k) for n jobs and k
+/// distinct coefficients (a fermionic θ has two).
+fn group_scaled_direct_batch<C>(
+    pairs: &[(Rank2GemmBatchJob, C)],
+) -> (Vec<Rank2GemmBatchJob>, Vec<C>, Vec<usize>)
+where
+    C: Copy + PartialEq,
+{
+    let mut coefficients: Vec<C> = Vec::new();
+    for &(_, alpha) in pairs {
+        if !coefficients.contains(&alpha) {
+            coefficients.push(alpha);
+        }
+    }
+    let mut jobs = Vec::with_capacity(pairs.len());
+    let mut alphas = Vec::with_capacity(pairs.len());
+    let mut runs = Vec::new();
+    let mut group_runs = Vec::new();
+    for &coefficient in &coefficients {
+        let start = jobs.len();
+        for &(job, alpha) in pairs {
+            if alpha == coefficient {
+                jobs.push(job);
+                alphas.push(alpha);
+            }
+        }
+        strided_batch_runs_into(&jobs[start..], &mut group_runs);
+        runs.extend_from_slice(&group_runs);
+    }
+    (jobs, alphas, runs)
+}
+
+#[cfg(test)]
+mod scaled_group_tests {
+    use super::*;
+
+    fn job(offset: usize, stride: usize) -> Rank2GemmBatchJob {
+        Rank2GemmBatchJob {
+            dst_offset: offset * stride,
+            lhs_offset: offset * stride,
+            rhs_offset: offset * stride,
+            rows: 2,
+            contracted: 2,
+            cols: 2,
+        }
+    }
+
+    /// Interleaved ±1 coefficients group stably, positive first (first
+    /// appearance), and each group's runs are its own partition: a strided
+    /// run never spans the two groups.
+    #[test]
+    fn interleaved_coefficients_group_stably_with_per_group_runs() {
+        let pairs: Vec<_> = (0..6)
+            .map(|i| (job(i, 4), if i % 2 == 0 { 1.0 } else { -1.0 }))
+            .collect();
+        let (jobs, alphas, runs) = group_scaled_direct_batch(&pairs);
+        let order: Vec<_> = jobs.iter().map(|job| job.dst_offset / 4).collect();
+        assert_eq!(order, [0, 2, 4, 1, 3, 5]);
+        assert_eq!(alphas, [1.0, 1.0, 1.0, -1.0, -1.0, -1.0]);
+        // Each group is constant-stride (8 apart): one run per group.
+        assert_eq!(runs, [3, 3]);
+    }
+
+    /// The reviewer's geometry: J0 alone in group A, then J1 and J2 in group
+    /// B with a stride unlike J0→J1. Splitting a whole-list partition at the
+    /// group boundary gives [1, 1, 1]; per-group runs give [1, 2].
+    #[test]
+    fn runs_are_partitioned_per_group_not_split_from_the_whole_list() {
+        let j0 = job(0, 1);
+        let j1 = job(5, 1);
+        let j2 = job(7, 1);
+        let (jobs, _, runs) = group_scaled_direct_batch(&[(j0, 1.0), (j1, -1.0), (j2, -1.0)]);
+        assert_eq!(jobs, [j0, j1, j2]);
+        assert_eq!(runs, [1, 2]);
+        assert_eq!(strided_batch_runs(&jobs), [2, 1]);
+    }
 }

@@ -115,7 +115,6 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
         .unwrap();
     assert_eq!(ordinary_swapped, [0.0, 6.5, 2.0, 13.5]);
     let ordinary_orientation = route_context.last_resolution_orientation();
-    assert!(ordinary_orientation.is_some());
     let mut prelowered_swapped = vec![0.0; swapped_dst_bound.space().required_len().unwrap()];
     route_context
         .tensorcontract_fusion_dyn_prelowered_into(
@@ -292,7 +291,8 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
 }
 
 #[test]
-fn tensorcontract_fusion_prelowered_fermion_twist_declines_core_and_matches_eager() {
+fn tensorcontract_fusion_prelowered_uniform_fermion_twist_takes_the_scaled_core_and_matches_eager()
+{
     use num_complex::Complex64;
 
     let rule = FermionParityFusionRule;
@@ -395,10 +395,9 @@ fn tensorcontract_fusion_prelowered_fermion_twist_declines_core_and_matches_eage
         &no_cache_lazy,
         &lazy,
     );
-    assert!(
-        !context.last_resolution_is_core(),
-        "a nontrivial fermionic RHS twist must stay on a twist-aware fallback route"
-    );
+    // What: a twist uniform per RHS coupled sector rides the core as per-job
+    // GEMM alpha (#1858), where TensorKit copies an operand to twist it.
+    assert!(context.last_resolution_is_core());
 }
 
 #[test]

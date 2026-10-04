@@ -429,42 +429,32 @@ fn execution_layout_primer_runs_only_after_dynamic_space_cache_misses() {
     crate::reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
     reset_execution_primer_calls();
-    let counted_source = source_bound
+    // The DynamicTree artifact compile primes layouts with the destination's
+    // capability (#1858). The typed route takes `copyC` for this
+    // permute-only contraction, so the artifact compile is driven directly.
+    let output_bound = output_bound
         .clone()
         .with_test_layout_primer(counting_su2_primer);
+    let compile =
+        |context: &mut crate::TensorContractFusionExecutionContext<f64, crate::RuleIdentity>,
+         output: &super::super::dynamic_space::BoundDynamicFusionMapSpace<_>,
+         axes| {
+            let resolution = context
+                .compile_storage_contract_resolution(
+                    output,
+                    crate::FusionOperand::direct(source_bound.space()),
+                    crate::FusionOperand::direct(scalar_bound.space()),
+                    axes,
+                )
+                .unwrap();
+            assert!(resolution.is_dynamic_tree());
+        };
     let mut context =
         crate::TensorContractFusionExecutionContext::<f64, crate::RuleIdentity>::default();
-    let mut dst_data = vec![0.0; output_bound.space().required_len().unwrap()];
-    let lhs_data = vec![0.0; counted_source.space().required_len().unwrap()];
-    let rhs_data = vec![0.0; scalar_bound.space().required_len().unwrap()];
-    context
-        .tensorcontract_fusion_dyn_into(
-            &output_bound,
-            &mut dst_data,
-            &counted_source,
-            &lhs_data,
-            &scalar_bound,
-            &rhs_data,
-            axes,
-            1.0,
-            0.0,
-        )
-        .unwrap();
+    compile(&mut context, &output_bound, axes);
     let cold_calls = execution_primer_calls();
     assert!(cold_calls > 0);
-    context
-        .tensorcontract_fusion_dyn_into(
-            &output_bound,
-            &mut dst_data,
-            &counted_source,
-            &lhs_data,
-            &scalar_bound,
-            &rhs_data,
-            axes,
-            1.0,
-            0.0,
-        )
-        .unwrap();
+    compile(&mut context, &output_bound, axes);
     assert_eq!(execution_primer_calls(), cold_calls);
 
     let mut no_cache_context =
@@ -472,19 +462,7 @@ fn execution_layout_primer_runs_only_after_dynamic_space_cache_misses() {
     no_cache_context.set_cache_policy(OperationCachePolicy::NoCache);
     reset_execution_primer_calls();
     for expected_minimum in 1..=2 {
-        no_cache_context
-            .tensorcontract_fusion_dyn_into(
-                &output_bound,
-                &mut dst_data,
-                &counted_source,
-                &lhs_data,
-                &scalar_bound,
-                &rhs_data,
-                axes,
-                1.0,
-                0.0,
-            )
-            .unwrap();
+        compile(&mut no_cache_context, &output_bound, axes);
         assert!(execution_primer_calls() >= expected_minimum);
         assert_eq!(no_cache_context.dynamic_fusion_space_cache_len(), 0);
     }
@@ -497,33 +475,20 @@ fn execution_layout_primer_runs_only_after_dynamic_space_cache_misses() {
         other_axes.rhs_contracting_axes(),
         other_axes.output_permutation(),
     )
-    .unwrap();
-    let mut other_dst_data = vec![0.0; other_output.space().required_len().unwrap()];
+    .unwrap()
+    .with_test_layout_primer(counting_su2_primer);
     let mut lru_context =
         crate::TensorContractFusionExecutionContext::<f64, crate::RuleIdentity>::default();
     lru_context.set_cache_policy(OperationCachePolicy::task_local_lru(1));
     reset_execution_primer_calls();
-    macro_rules! execute_lru {
-        ($output:expr, $data:expr, $axes:expr) => {{
-            lru_context
-                .tensorcontract_fusion_dyn_into(
-                    $output,
-                    $data,
-                    &counted_source,
-                    &lhs_data,
-                    &scalar_bound,
-                    &rhs_data,
-                    $axes,
-                    1.0,
-                    0.0,
-                )
-                .unwrap();
-            assert!(lru_context.dynamic_fusion_space_cache_len() <= 1);
-        }};
+    for (output, axes) in [
+        (&output_bound, axes),
+        (&other_output, other_axes),
+        (&output_bound, axes),
+    ] {
+        compile(&mut lru_context, output, axes);
+        assert!(lru_context.dynamic_fusion_space_cache_len() <= 1);
     }
-    execute_lru!(&output_bound, &mut dst_data, axes);
-    execute_lru!(&other_output, &mut other_dst_data, other_axes);
-    execute_lru!(&output_bound, &mut dst_data, axes);
     assert!(execution_primer_calls() >= 3);
 }
 

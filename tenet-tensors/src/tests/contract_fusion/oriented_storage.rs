@@ -122,7 +122,8 @@ fn fermionic_storage_contract_rejects_nonuniform_twist_before_gemm() {
     assert!(matches!(
         error,
         OperationError::UnsupportedTensorContractScope {
-            message: "fermionic twist is nonuniform within one RHS coupled-sector matrix"
+            message: "storage-direct contraction supports only the canonical fully-direct route; \
+                      this contraction needs tree transforms, which have no device kernels here"
         }
     ));
     assert_eq!(gemm.calls, 0);

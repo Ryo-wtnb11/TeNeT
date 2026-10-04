@@ -57,7 +57,10 @@ pub(crate) use contract::{
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
 };
 #[doc(hidden)]
-pub use contract::{copy_c_output_transform, CopyCRoute, CoreMiss, CoreRoute};
+pub use contract::{
+    copy_c_output_transform, CopyCRoute, CoreMiss, CoreRoute, DirectCoreExecutor, ExecCaps,
+    HostEagerExecutor,
+};
 pub use contract::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,
     tensorcontract_execute_with, tensorcontract_fusion_block_specs, tensorcontract_fusion_into,

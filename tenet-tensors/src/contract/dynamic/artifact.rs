@@ -41,6 +41,11 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn orientation(&self) -> FusionContractOrientation {
+        self.orientation
+    }
+
     pub(crate) fn requires_source_twist(&self) -> bool {
         !self.source_twist.is_empty()
     }

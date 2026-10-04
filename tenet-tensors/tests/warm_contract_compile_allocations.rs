@@ -6,9 +6,9 @@ use std::sync::Arc;
 use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep};
 use tenet_tensors::{
     prepare_tensorcontract_fusion_plan_dyn, try_compile_storage_contract_core_route,
-    BoundDynamicFusionMapSpace, FusionOperand, OperationCachePolicy, OutputAxisOrder, RuleIdentity,
-    RuntimeTreeTransformStore, StorageContractResolution, TensorContractFusionExecutionContext,
-    TensorContractSpec,
+    BoundDynamicFusionMapSpace, DirectCoreExecutor, FusionOperand, OperationCachePolicy,
+    OutputAxisOrder, RuleIdentity, RuntimeTreeTransformStore, StorageContractResolution,
+    TensorContractFusionExecutionContext, TensorContractSpec,
 };
 
 #[path = "../../tests/support/counting_alloc.rs"]
@@ -96,7 +96,7 @@ fn storage_ladder(
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
 ) -> StorageContractResolution<f64> {
-    match try_compile_storage_contract_core_route(dst, lhs, rhs, axes)
+    match try_compile_storage_contract_core_route::<DirectCoreExecutor, _>(dst, lhs, rhs, axes)
         .unwrap()
         .hit()
     {
@@ -126,7 +126,7 @@ fn warm_compile_allocations(codomain: usize, domain: usize) -> [usize; 3] {
     )
     .unwrap();
     let core = warm_allocations(|| {
-        try_compile_storage_contract_core_route(
+        try_compile_storage_contract_core_route::<DirectCoreExecutor, _>(
             &composed,
             FusionOperand::direct(lhs.space()),
             FusionOperand::direct(square.space()),
@@ -310,11 +310,9 @@ fn copy_c_plan_allocations(rank: usize) -> [usize; 2] {
     let mut context = runtime_like_context(&store);
     let copy_c = warm_allocations(|| {
         let resolution = context
-            .plan_contract(
+            .plan_contract::<DirectCoreExecutor, _>(
                 &dst,
-                &lhs,
                 FusionOperand::direct(lhs.space()),
-                &rhs,
                 FusionOperand::direct(rhs.space()),
                 &lhs_axes,
                 &rhs_axes,

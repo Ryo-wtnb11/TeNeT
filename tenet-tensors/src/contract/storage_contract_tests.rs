@@ -1497,9 +1497,9 @@ impl tenet_operations::fusion_replay::StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f
 
 /// Why the device lifts the canonical non-uniform-θ case to DynamicTree: no
 /// per-job GEMM alpha expresses a twist that varies within one coupled-sector
-/// matrix. The device core route declines it; the Host storage-direct entry
-/// keeps its existing error (unchanged); the compiled artifact carries the
-/// twist.
+/// matrix. The core route declines it for every executor, so the
+/// storage-direct entry, which has no other route, reports it unsupported
+/// before any GEMM; the compiled artifact carries the twist.
 #[test]
 fn a_canonical_nonuniform_twist_leaves_the_device_core_route_for_dynamic_tree() {
     let (_, case) = fermionic_cases().remove(2);
@@ -1509,10 +1509,15 @@ fn a_canonical_nonuniform_twist_leaves_the_device_core_route_for_dynamic_tree() 
         FusionOperand::direct(case.rhs.space()),
     );
     assert!(
-        crate::try_compile_storage_contract_core_route(&dst, lhs, rhs, case.axes())
-            .unwrap()
-            .hit()
-            .is_none()
+        crate::try_compile_storage_contract_core_route::<crate::DirectCoreExecutor, _>(
+            &dst,
+            lhs,
+            rhs,
+            case.axes()
+        )
+        .unwrap()
+        .hit()
+        .is_none()
     );
     let resolution = Context::<f64>::default()
         .compile_storage_contract_resolution(&dst, lhs, rhs, case.axes())
@@ -1538,7 +1543,7 @@ fn a_canonical_nonuniform_twist_leaves_the_device_core_route_for_dynamic_tree() 
         matches!(
             error,
             crate::OperationError::UnsupportedTensorContractScope { message }
-                if message.contains("nonuniform")
+                if message.contains("canonical fully-direct")
         ),
         "{error:?}"
     );
@@ -1642,12 +1647,11 @@ fn canonical_axes_keep_the_direct_core_route_and_others_compile_one_dynamic_tree
 }
 
 /// The geometry of `tenet/tests/contract_cases::su2_core_form_lazy_cases`:
-/// the context's prelowered entry, which has no `copyC` predicate in front of
-/// it, resolves it to its dense `Structure` route, the storage compile entry
-/// to the prelowered `DynamicTree` artifact (typed eager and the planner take
-/// `copyC` there).
+/// the Host eager entry takes TensorKit's `copyC` (the planner), where the
+/// Host ladder took its dense `Structure` route before #1858; the
+/// copyC-free storage ladder compiles the prelowered `DynamicTree` artifact.
 #[test]
-fn a_self_dual_core_form_lazy_contraction_is_host_structure_and_device_dynamic_tree() {
+fn a_self_dual_core_form_lazy_contraction_is_host_copy_c_and_storage_dynamic_tree() {
     let provider = Arc::new(SU2FusionRule);
     let s = su2_leg;
     // Lazy lhs: `X^H` against `rhs` over `X^H`'s whole domain, output bent.
@@ -1713,8 +1717,11 @@ fn a_self_dual_core_form_lazy_contraction_is_host_structure_and_device_dynamic_t
                 0.0,
             )
             .unwrap();
-        // What: the Host took its `Structure` route.
-        assert!(context.last_resolution_is_structure(), "{output:?}");
+        // What: the Host took `copyC` (no core, no transformed source).
+        assert!(
+            !context.last_resolution_is_core() && context.last_resolution_orientation().is_none(),
+            "{output:?}"
+        );
         assert!(out.iter().any(|&value| value != 0.0));
         let storage = context
             .compile_storage_contract_resolution(&dst, lhs_operand, rhs_operand, axes)
@@ -2286,37 +2293,26 @@ mod device {
     }
 }
 
-/// One route kind, the same for the planner and the Host ladder.
+/// One route kind of the planner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RouteKind {
     Core,
     CopyC,
-    Structure,
     DynamicTree,
 }
 
 fn planner_route<R>(
     dst: &BoundDynamicFusionMapSpace<R>,
-    (lhs_authority, lhs): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>),
-    (rhs_authority, rhs): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>),
+    (_, lhs): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>),
+    (_, rhs): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>),
     (lhs_axes, rhs_axes, output): (&[usize], &[usize], &[usize]),
 ) -> RouteKind
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_core::CheckedFusionAlgebra
         + crate::tree_transform::TreeTransformRuleCacheKey<Key = RuleIdentity>,
 {
     let resolution = Context::<f64>::default()
-        .plan_contract(
-            dst,
-            lhs_authority,
-            lhs,
-            rhs_authority,
-            rhs,
-            lhs_axes,
-            rhs_axes,
-            output,
-        )
+        .plan_contract::<crate::DirectCoreExecutor, R>(dst, lhs, rhs, lhs_axes, rhs_axes, output)
         .unwrap();
     if resolution.copy_c().is_some() {
         RouteKind::CopyC
@@ -2327,85 +2323,52 @@ where
     }
 }
 
-/// The route today's Host eager contraction takes: the typed `copyC`
-/// predicate, then the owned (`compile_resolution`) or prelowered
-/// (`try_compile_oriented_canonical_core_resolution`,
-/// `compile_prelowered_resolution`) ladder, observed on a real execution.
-fn host_ladder_route<R>(
+/// The route the Host eager entry takes, observed on a real execution.
+fn host_eager_route<R>(
     dst: &BoundDynamicFusionMapSpace<R>,
-    (lhs_authority, lhs): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>),
-    (rhs_authority, rhs): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>),
+    (_, lhs): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>),
+    (_, rhs): (&BoundDynamicFusionMapSpace<R>, FusionOperand<'_>),
     (lhs_axes, rhs_axes, output): (&[usize], &[usize], &[usize]),
 ) -> RouteKind
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + crate::tree_transform::TreeTransformRuleCacheKey<Key = RuleIdentity>,
 {
-    if crate::zero_copy_contract_order_for_output_permute(
-        dst.provider(),
-        dst.space(),
-        lhs,
-        rhs,
-        lhs_axes,
-        rhs_axes,
-        output,
-    )
-    .is_some()
-    {
-        return RouteKind::CopyC;
-    }
     let lhs_data = host_data(lhs.storage_space(), 3);
     let rhs_data = host_data(rhs.storage_space(), 4);
     let mut out = vec![0.0; dst.space().required_len().unwrap()];
     let mut context = Context::<f64>::default();
-    if lhs.storage_conjugate() || rhs.storage_conjugate() {
-        context
-            .tensorcontract_fusion_dyn_prelowered_into(
-                dst,
-                &mut out,
-                lhs,
-                &lhs_data,
-                rhs,
-                &rhs_data,
-                TensorContractSpec::new_with_conjugation(
-                    lhs_axes,
-                    rhs_axes,
-                    OutputAxisOrder::from_axes(output),
-                    lhs.storage_conjugate(),
-                    rhs.storage_conjugate(),
-                ),
-                1.0,
-                0.0,
-            )
-            .unwrap();
-    } else {
-        context
-            .tensorcontract_fusion_dyn_into(
-                dst,
-                &mut out,
-                lhs_authority,
-                &lhs_data,
-                rhs_authority,
-                &rhs_data,
-                TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::from_axes(output)),
-                1.0,
-                0.0,
-            )
-            .unwrap();
-    }
+    context
+        .tensorcontract_fusion_dyn_prelowered_into(
+            dst,
+            &mut out,
+            lhs,
+            &lhs_data,
+            rhs,
+            &rhs_data,
+            TensorContractSpec::new_with_conjugation(
+                lhs_axes,
+                rhs_axes,
+                OutputAxisOrder::from_axes(output),
+                lhs.storage_conjugate(),
+                rhs.storage_conjugate(),
+            ),
+            1.0,
+            0.0,
+        )
+        .unwrap();
     if context.last_resolution_is_core() {
         RouteKind::Core
-    } else if context.last_resolution_is_structure() {
-        RouteKind::Structure
-    } else {
+    } else if context.last_resolution_orientation().is_some() {
         RouteKind::DynamicTree
+    } else {
+        RouteKind::CopyC
     }
 }
 
 fn owned_routes<R>(case: &Case<R>) -> (RouteKind, RouteKind)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_core::CheckedFusionAlgebra
         + crate::tree_transform::TreeTransformRuleCacheKey<Key = RuleIdentity>,
 {
     let dst = case.dst();
@@ -2417,7 +2380,7 @@ where
         &case.output_axes[..],
     );
     (
-        host_ladder_route(&dst, lhs, rhs, axes),
+        host_eager_route(&dst, lhs, rhs, axes),
         planner_route(&dst, lhs, rhs, axes),
     )
 }
@@ -2440,18 +2403,15 @@ fn square_case<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
     }
 }
 
-/// #1858: the planner and the Host eager ladder take the same route on
-/// every bosonic fixture, owned and lazy, Core, CopyC and DynamicTree. The
-/// Host's dense `Structure` route needs core-form sources, which make
-/// `copyC` (cost `dim(C)`) no costlier than any DynamicTree candidate for a
-/// conjugated operand, so typed Host eager never reaches it. The one planned difference is the fermionic twist: where
-/// the twist is uniform within each RHS coupled-sector matrix the planner
-/// consumes it as per-job GEMM alpha (Core), where the Host ladder copies an
-/// operand to twist it (DynamicTree, as TensorKit's `blas_contract!`
-/// `tensoroperations.jl:399-429` @cfaa073 copies). Host eager adopts the
-/// planner's route in the second #1858 PR.
+/// #1858: Host eager and the device planner take the same route on every
+/// fixture, owned and lazy, Core, CopyC and DynamicTree, bosonic and
+/// fermionic (the table pinned the Host ladder's routes before #1858). The
+/// one route change: a fermionic twist uniform within each RHS coupled-sector
+/// matrix rides the core as per-job GEMM alpha, where the Host ladder took
+/// DynamicTree to copy and twist an operand, as TensorKit's `blas_contract!`
+/// (`tensoroperations.jl:399-429` @cfaa073) does.
 #[test]
-fn the_planner_takes_the_host_ladders_route_except_the_uniform_twist() {
+fn host_eager_and_the_device_planner_take_the_same_route() {
     let u1 = Arc::new(U1FusionRule);
     let su2 = Arc::new(SU2FusionRule);
     let u1_v = || u1_leg(false);
@@ -2624,7 +2584,7 @@ fn the_planner_takes_the_host_ladders_route_except_the_uniform_twist() {
         .unwrap();
         let operands = ((lhs_authority, lhs), (rhs_authority, rhs));
         let axes = (&lhs_axes[..], &rhs_axes[..], &output[..]);
-        let host = host_ladder_route(&dst, operands.0, operands.1, axes);
+        let host = host_eager_route(&dst, operands.0, operands.1, axes);
         let planner = planner_route(&dst, operands.0, operands.1, axes);
         assert_eq!((host, planner), (expected, expected), "{name}");
     }
@@ -2647,42 +2607,23 @@ fn the_planner_takes_the_host_ladders_route_except_the_uniform_twist() {
     let axes = (&[1][..], &[0][..], &output[..]);
     assert_eq!(
         (
-            host_ladder_route(&dst, operands.0, operands.1, axes),
+            host_eager_route(&dst, operands.0, operands.1, axes),
             planner_route(&dst, operands.0, operands.1, axes),
         ),
         (RouteKind::DynamicTree, RouteKind::DynamicTree),
         "U1 lazy DynamicTree"
     );
 
-    // Fermionic: equal routes, except that a twisted contraction the planner
-    // serves with the scaled-twist core is DynamicTree on the Host ladder.
-    let mut differences = Vec::new();
+    // Fermionic: the same route, and the uniform-twist `mul!` form (θ the
+    // parity of the coupled sector) takes the scaled core.
     for (name, case) in fermionic_cases() {
         let (host, planner) = owned_routes(&case);
-
-        if host != planner {
-            assert_eq!(
-                (host, planner),
-                (RouteKind::DynamicTree, RouteKind::Core),
-                "{name}"
-            );
-            differences.push(name);
-        }
+        assert_eq!(host, planner, "{name}");
     }
     for (name, case) in fermionic_su2_cases() {
         let (host, planner) = owned_routes(&case);
-
-        if host != planner {
-            assert_eq!(
-                (host, planner),
-                (RouteKind::DynamicTree, RouteKind::Core),
-                "{name}"
-            );
-            differences.push(name);
-        }
+        assert_eq!(host, planner, "{name}");
     }
-    // The `mul!` form over one dual contracted leg: θ is the parity of the
-    // coupled sector, uniform within each RHS matrix.
     let fu1 = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let fsu2 = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
     let uniform = [
@@ -2723,20 +2664,9 @@ fn the_planner_takes_the_host_ladders_route_except_the_uniform_twist() {
             }),
         ),
     ];
-    for (name, (host, planner)) in uniform {
-        assert_eq!(
-            (host, planner),
-            (RouteKind::DynamicTree, RouteKind::Core),
-            "{name}"
-        );
-        differences.push(name);
+    for (name, routes) in uniform {
+        assert_eq!(routes, (RouteKind::Core, RouteKind::Core), "{name}");
     }
-    eprintln!("uniform-twist route changes: {differences:?}");
-    assert_eq!(
-        differences.len(),
-        2,
-        "only the uniform-twist fixtures differ"
-    );
 }
 
 /// #1858: the planner walks the requested order's zero-copy candidates once.

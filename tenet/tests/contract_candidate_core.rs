@@ -448,9 +448,11 @@ where
             "{symmetry} {name}: {calls} calls, {bytes} B, {lookups} transform lookups; \
              contract + permute {budget_calls} / {budget_bytes} / {permute_lookups}"
         );
-        // What: only the output permute transforms; no source is rebuilt.
-        assert_eq!(
-            lookups, permute_lookups,
+        // What: only the output permute transforms; no source is rebuilt. The
+        // planned route looks its one transform up once (the facade `permute`
+        // of the two-step budget takes two lookups for the same structure).
+        assert!(
+            lookups == 1 && lookups <= permute_lookups,
             "{symmetry} {name}: source transforms ran"
         );
         // What: no more than the zero-copy contract plus one permute, so no
@@ -663,10 +665,10 @@ fn uneven_swapped_candidate_with_an_output_permute_runs_one_transform() {
     contract_then_permute(&case, true);
     let before = transform_lookups(&runtime);
     contract_then_permute(&case, true);
-    // What: only the output permute transforms.
-    assert_eq!(
-        lookups,
-        transform_lookups(&runtime) - before,
+    // What: only the output permute transforms: one lookup of its one
+    // structure (the facade `permute` takes two lookups for it).
+    assert!(
+        lookups == 1 && lookups <= transform_lookups(&runtime) - before,
         "S3: source transforms ran"
     );
 }

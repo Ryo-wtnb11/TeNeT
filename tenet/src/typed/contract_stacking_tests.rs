@@ -451,6 +451,47 @@ fn su2_mis_stacked_contractions_match_tree_identity() {
     );
 }
 
+/// #1858: a `mul!`-form contraction of non-canonical tilings is a core with
+/// pack/scatter around the GEMMs on the Host eager executor (its
+/// `IRREGULAR_CORE` capability), as on the Host ladder before: no tree
+/// transform runs, where the device-capable planning would transform both
+/// sources (DynamicTree).
+#[test]
+fn mis_stacked_mul_form_contractions_take_the_irregular_host_core() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let sectors = [
+        (U1Irrep::new(-1).sector_id(), 1),
+        (U1Irrep::new(0).sector_id(), 2),
+        (U1Irrep::new(1).sector_id(), 1),
+    ];
+    let good = endomorphism(&runtime, U1FusionRule, &sectors, Stacking::Canonical);
+    let spec = ContractSpec {
+        lhs: &[2, 3],
+        rhs: &[0, 1],
+        codomain: &[0, 1],
+        domain: &[2, 3],
+    };
+    for stacking in [
+        Stacking::Sorted,
+        Stacking::ColumnsReversed,
+        Stacking::BothReversed,
+    ] {
+        let tensor = endomorphism(&runtime, U1FusionRule, &sectors, stacking);
+        let lookups = || {
+            let info = runtime.tree_transform_cache_info().structures;
+            info.hits() + info.misses()
+        };
+        let before = lookups();
+        let product = tensor.contract(&tensor, &spec).unwrap();
+        assert_eq!(lookups(), before, "{stacking:?}: a tree transform ran");
+        assert_same_operator(
+            &product,
+            &good.contract(&good, &spec).unwrap(),
+            &format!("{stacking:?} irregular core"),
+        );
+    }
+}
+
 /// Column-major einsum over physical-basis arrays: contracts `lhs_axes` with
 /// `rhs_axes` and orders the open axes (lhs then rhs) by `output_axes`.
 fn dense_contract(

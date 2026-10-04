@@ -305,7 +305,7 @@ use crate::tensor_core::{
     tensorcontract_oriented_multiplicity_free_into_slice,
     tensorcontract_owned_multiplicity_free_into_slice, tensorproduct_owned_checked_generic,
     tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
-    tree_transform_owned_multiplicity_free_into, OrientedContractionKind,
+    OrientedContractionKind,
 };
 
 mod batched;

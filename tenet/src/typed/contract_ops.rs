@@ -293,9 +293,6 @@ where
         {
             return Err(Error::DestinationShared);
         }
-        let copy_c =
-            super::checked_generic_contract::CopyC::plan(self, other, spec, expected.space())?;
-
         let mut lease = self.runtime.lease_context()?;
         let context = lease.context().multiplicity_free_lane::<D>()?;
         let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
@@ -303,31 +300,11 @@ where
         };
         let destination_body =
             Arc::get_mut(destination_body).expect("unique destination body checked above");
-        let destination_provider = destination_body.space.provider();
-        let destination_structure = destination_body.space.space().structure();
         let destination_data = Arc::get_mut(&mut destination_body.data)
             .expect("unique destination payload checked above");
         let TypedData::Dense(destination_data) = destination_data else {
             unreachable!("dense destination checked above")
         };
-        if let Some(copy_c) = copy_c {
-            // TensorKit `blas_contract!` with `C` as the destination:
-            // `mul!(Cnew, A, B)`, then `tensoradd!(C, Cnew, pAB, false, α, β)`.
-            // The temporary is written before `destination` is touched.
-            let temporary = copy_c.contract_temporary(context)?;
-            context.tree_context_mut().tree_transform_dyn_into_ref(
-                destination_provider,
-                &copy_c.operation,
-                destination_structure,
-                copy_c.temporary_space.space().structure(),
-                destination_data.as_mut_slice(),
-                temporary.as_slice(),
-                alpha,
-                beta,
-            )?;
-            context.restore_copy_c_scratch(temporary);
-            return Ok(());
-        }
         let (lhs, lhs_data) = self.fusion_operand_and_data();
         let (rhs, rhs_data) = other.fusion_operand_and_data();
         context.tensorcontract_fusion_dyn_prelowered_into(

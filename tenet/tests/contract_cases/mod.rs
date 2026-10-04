@@ -579,6 +579,33 @@ where
     }
 }
 
+/// The `mul!` form with B's whole codomain `(v*, v*)` contracted: θ of a
+/// core-right block is the product of its two uncoupled parities, the parity
+/// of its coupled sector, so it is uniform within each coupled-sector matrix
+/// and the core carries it as per-job GEMM alpha (#1858), where TensorKit's
+/// `blas_contract!` copies an operand to twist it.
+pub fn fermionic_canonical_uniform<R, D>(
+    runtime: &Runtime,
+    v: &GradedSpace<R>,
+    name: &'static str,
+    salt: usize,
+) -> Case<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let v_dual = v.try_dual().unwrap();
+    Case {
+        name,
+        lhs: tensor(runtime, &[v, v], &[&v_dual, &v_dual], salt),
+        rhs: tensor(runtime, &[&v_dual, &v_dual], &[v], salt + 1),
+        lhs_axes: vec![2, 3],
+        rhs_axes: vec![0, 1],
+        output_axes: vec![0, 1, 2],
+        dense: false,
+    }
+}
+
 /// One fixture per operand-copy case of TensorKit's `blas_contract!` twist
 /// choice (tensoroperations.jl:398-409 @cfaa073), each with a dual leg among
 /// B's contracted legs, and A smaller than B where size decides; the cases
@@ -949,6 +976,24 @@ macro_rules! for_each_fermionic_fixture {
                 &fsu2,
                 "fZ2xSU2 canonical nonuniform",
                 41,
+            ),
+            twist_su2,
+        );
+        $check(
+            $crate::contract_cases::fermionic_canonical_uniform(
+                runtime,
+                &fu1,
+                "fZ2xU1 canonical uniform",
+                43,
+            ),
+            twist_u1,
+        );
+        $check(
+            $crate::contract_cases::fermionic_canonical_uniform(
+                runtime,
+                &fsu2,
+                "fZ2xSU2 canonical uniform",
+                45,
             ),
             twist_su2,
         );
