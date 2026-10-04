@@ -138,16 +138,17 @@ where
                 TensorContractSpec::new(spec.lhs, spec.rhs, order)
             },
         )?;
-        let direct = !resolution.is_dynamic_tree();
-        if copy_c.is_some() && (!direct || resolution.admits_stacked_direct_host_replay().is_err())
+        let direct_core = resolution.direct_core();
+        if copy_c.is_some()
+            && direct_core.is_none_or(|(core, _)| core.require_identity_direct_replay().is_err())
         {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "Host copyC batch requires a unit-alpha direct temporary",
             }
             .into());
         }
-        if direct {
-            resolution.admits_stacked_signed_direct_host_replay()?;
+        if let Some((core, _)) = direct_core {
+            core.require_identity_signed_direct_replay()?;
         }
         let copy_c = if let Some(binding) = copy_c {
             let transform = lane.tree_context_mut().compile_tree_pair_structure(
@@ -172,9 +173,10 @@ where
         }
         let member_len = space.space().required_len()?;
         #[cfg(feature = "cuda")]
-        let device_plan = match placement {
-            Placement::Cuda(_) if direct => resolution.signed_direct_core_plan()?,
-            Placement::Cuda(_) => {
+        let device_plan = match (placement, direct_core) {
+            // The exact-sign contract was required above.
+            (Placement::Cuda(_), Some((core, swapped))) => Some((Arc::clone(core), swapped)),
+            (Placement::Cuda(_), None) => {
                 resolution.admit_cuda_dynamic_tree_members()?;
                 None
             }
@@ -288,7 +290,14 @@ where
                 .as_ref()
                 .is_none_or(|(replay, _)| replay.members() != members)
             {
-                workspace.replay = self.resolution.stacked_signed_direct_host_replay(members)?;
+                workspace.replay = self
+                    .resolution
+                    .direct_core()
+                    .map(|(core, swapped)| {
+                        StackedDirectReplay::new_signed(Arc::clone(core), members)
+                            .map(|replay| (replay, swapped))
+                    })
+                    .transpose()?;
             }
             let (replay, swapped) = workspace.replay.as_ref().ok_or_else(|| {
                 Error::InvalidArgument("direct Host replay is not prepared".into())
@@ -959,11 +968,8 @@ mod fermionic_unit_tests {
             assert!(!plan.resolution.is_dynamic_tree(), "{name}");
             let mut jobs_per_member = 0;
             for members in [1, 2, 17] {
-                let (replay, swapped) = plan
-                    .resolution
-                    .stacked_direct_host_replay(members)
-                    .unwrap()
-                    .expect("unit direct core");
+                let (core, swapped) = plan.resolution.direct_core().expect("unit direct core");
+                let replay = StackedDirectReplay::new(Arc::clone(core), members).unwrap();
                 if !copy_c {
                     assert_eq!(swapped, swapped_expected, "{name}");
                 }
@@ -1084,13 +1090,9 @@ mod fermionic_unit_tests {
             domain: &[1],
         };
         let plan = ContractPlan::new(&left, &right, &spec).unwrap();
-        let core = plan
-            .resolution
-            .signed_direct_core_plan()
-            .unwrap()
-            .unwrap()
-            .0;
-        assert!(plan.resolution.unit_direct_core_plan().is_err());
+        let core = plan.resolution.direct_core().unwrap().0;
+        core.require_identity_signed_direct_replay().unwrap();
+        assert!(core.require_identity_direct_replay().is_err());
         assert!(!core.inactive_destination_regions().is_empty());
         assert!(core.distinct_direct_gemm_shapes() > 0);
     }
@@ -1252,20 +1254,11 @@ mod fermionic_unit_tests {
         let plan = ContractPlan::new(&left, &right, &spec).unwrap();
         assert!(plan.copy_c.is_none());
         assert!(!plan.resolution.is_dynamic_tree());
-        assert_eq!(
-            plan.resolution.admits_stacked_direct_host_replay().is_ok(),
-            negative == 0
-        );
-        assert!(plan
-            .resolution
-            .admits_stacked_signed_direct_host_replay()
-            .unwrap());
+        let (core, swapped) = plan.resolution.direct_core().unwrap();
+        assert_eq!(core.require_identity_direct_replay().is_ok(), negative == 0);
+        core.require_identity_signed_direct_replay().unwrap();
         for members in [1, 2, 17] {
-            let (replay, swapped) = plan
-                .resolution
-                .stacked_signed_direct_host_replay(members)
-                .unwrap()
-                .unwrap();
+            let replay = StackedDirectReplay::new_signed(Arc::clone(core), members).unwrap();
             assert_eq!(swapped, swapped_expected);
             let [dst_len, lhs_len, rhs_len] = replay.member_lens();
             let mut dst = vec![f64::NAN; dst_len * members];

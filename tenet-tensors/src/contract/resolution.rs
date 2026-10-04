@@ -16,7 +16,6 @@ use super::structure::TensorContractStructure;
 use crate::{DenseBlockScalar, OperationError};
 use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec};
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
-use tenet_operations::stacked::StackedDirectReplay;
 use tenet_operations::TensorContractFusionProfile;
 
 use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, FusionOperandLayout};
@@ -139,117 +138,19 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
         matches!(self.route, StorageContractRoute::DynamicTree(_))
     }
 
-    /// Checks the B-independent direct Host replay capability.
+    /// The core plan when the core GEMMs read the caller's operands directly
+    /// (the `Core` and `SwappedCore` routes), and whether the plan's left
+    /// operand is the caller's rhs; `None` for a DynamicTree route. Callers
+    /// state the replay contract they need on the plan
+    /// (`require_identity_(signed_)direct_replay`) or build it
+    /// (`StackedDirectReplay::new(_signed)`).
     #[doc(hidden)]
-    pub fn admits_stacked_direct_host_replay(&self) -> Result<bool, OperationError>
-    where
-        C: Copy + PartialEq + num_traits::One,
-    {
-        let plan = match &self.route {
-            StorageContractRoute::Core(plan) | StorageContractRoute::SwappedCore(plan) => plan,
-            StorageContractRoute::DynamicTree(_) => return Ok(false),
-        };
-        plan.require_identity_direct_replay()?;
-        Ok(true)
-    }
-
-    /// The existing unit-alpha direct core, with its physical operand order.
-    #[cfg(feature = "cuda")]
-    #[doc(hidden)]
-    #[expect(
-        clippy::type_complexity,
-        reason = "the result keeps the core and operand orientation together"
-    )]
-    pub fn unit_direct_core_plan(
-        &self,
-    ) -> Result<Option<(Arc<FusionBlockContractPlan<C>>, bool)>, OperationError>
-    where
-        C: Copy + PartialEq + num_traits::One,
-    {
-        let (plan, swapped) = match &self.route {
-            StorageContractRoute::Core(plan) => (plan, false),
-            StorageContractRoute::SwappedCore(plan) => (plan, true),
-            StorageContractRoute::DynamicTree(_) => return Ok(None),
-        };
-        plan.require_identity_direct_replay()?;
-        Ok(Some((Arc::clone(plan), swapped)))
-    }
-
-    /// The exact-sign direct core, with its physical operand order.
-    #[cfg(feature = "cuda")]
-    #[doc(hidden)]
-    #[expect(
-        clippy::type_complexity,
-        reason = "the result keeps the core and operand orientation together"
-    )]
-    pub fn signed_direct_core_plan(
-        &self,
-    ) -> Result<Option<(Arc<FusionBlockContractPlan<C>>, bool)>, OperationError>
-    where
-        C: Copy + PartialEq + num_traits::One + std::ops::Neg<Output = C>,
-    {
-        let (plan, swapped) = match &self.route {
-            StorageContractRoute::Core(plan) => (plan, false),
-            StorageContractRoute::SwappedCore(plan) => (plan, true),
-            StorageContractRoute::DynamicTree(_) => return Ok(None),
-        };
-        plan.require_identity_signed_direct_replay()?;
-        Ok(Some((Arc::clone(plan), swapped)))
-    }
-
-    /// Checks the B-independent exact-sign Host replay capability.
-    #[doc(hidden)]
-    pub fn admits_stacked_signed_direct_host_replay(&self) -> Result<bool, OperationError>
-    where
-        C: Copy + PartialEq + num_traits::One + std::ops::Neg<Output = C>,
-    {
-        let plan = match &self.route {
-            StorageContractRoute::Core(plan) | StorageContractRoute::SwappedCore(plan) => plan,
-            StorageContractRoute::DynamicTree(_) => return Ok(false),
-        };
-        plan.require_identity_signed_direct_replay()?;
-        Ok(true)
-    }
-
-    /// Builds a caller-owned Host replay for a fully direct, unit-alpha core
-    /// route. The boolean means the replay's left source is the caller's rhs.
-    #[doc(hidden)]
-    pub fn stacked_direct_host_replay(
-        &self,
-        members: usize,
-    ) -> Result<Option<(StackedDirectReplay<C>, bool)>, OperationError>
-    where
-        C: Copy + PartialEq + num_traits::One,
-    {
-        let (plan, swapped) = match &self.route {
-            StorageContractRoute::Core(plan) => (plan, false),
-            StorageContractRoute::SwappedCore(plan) => (plan, true),
-            StorageContractRoute::DynamicTree(_) => return Ok(None),
-        };
-        Ok(Some((
-            StackedDirectReplay::new(Arc::clone(plan), members)?,
-            swapped,
-        )))
-    }
-
-    /// Builds a caller-owned exact-sign Host replay; the bool swaps sources.
-    #[doc(hidden)]
-    pub fn stacked_signed_direct_host_replay(
-        &self,
-        members: usize,
-    ) -> Result<Option<(StackedDirectReplay<C>, bool)>, OperationError>
-    where
-        C: Copy + PartialEq + num_traits::One + std::ops::Neg<Output = C>,
-    {
-        let (plan, swapped) = match &self.route {
-            StorageContractRoute::Core(plan) => (plan, false),
-            StorageContractRoute::SwappedCore(plan) => (plan, true),
-            StorageContractRoute::DynamicTree(_) => return Ok(None),
-        };
-        Ok(Some((
-            StackedDirectReplay::new_signed(Arc::clone(plan), members)?,
-            swapped,
-        )))
+    pub fn direct_core(&self) -> Option<(&Arc<FusionBlockContractPlan<C>>, bool)> {
+        match &self.route {
+            StorageContractRoute::Core(plan) => Some((plan, false)),
+            StorageContractRoute::SwappedCore(plan) => Some((plan, true)),
+            StorageContractRoute::DynamicTree(_) => None,
+        }
     }
 
     #[cfg(test)]

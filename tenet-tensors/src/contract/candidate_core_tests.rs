@@ -12,7 +12,7 @@ use tenet_core::{
     U1FusionRule, U1Irrep,
 };
 use tenet_operations::fusion_replay::{Rank2Gemm, Rank2GemmBatchJob};
-use tenet_operations::stacked::{StackedStorageView, StackedStorageViewMut};
+use tenet_operations::stacked::{StackedDirectReplay, StackedStorageView, StackedStorageViewMut};
 use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
 use crate::contract::fusion::FusionContractOrientation;
@@ -68,7 +68,8 @@ fn assert_one_batch_submission(
 ) -> usize {
     let mut jobs_per_member = 0;
     for members in [1, 2, 17] {
-        let (replay, actual_swapped) = route.stacked_direct_host_replay(members).unwrap().unwrap();
+        let (core, actual_swapped) = route.direct_core().unwrap();
+        let replay = StackedDirectReplay::new(Arc::clone(core), members).unwrap();
         assert_eq!(actual_swapped, swapped);
         let mut dst = vec![f64::NAN; dst_len * members];
         let lhs = vec![1.0; lhs_len * members];
@@ -266,7 +267,12 @@ where
             "{name}"
         );
         if name == "C0" {
-            assert!(resolution.admits_stacked_direct_host_replay().unwrap());
+            resolution
+                .direct_core()
+                .unwrap()
+                .0
+                .require_identity_direct_replay()
+                .unwrap();
         }
         if provider.braiding_style() == tenet_core::BraidingStyleKind::Bosonic
             && matches!(name, "C0" | "C2")
