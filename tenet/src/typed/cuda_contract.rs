@@ -99,11 +99,16 @@ where
     /// device is touched: the destination space (by the Host's own derivation
     /// for owned or lazy operands), the route, the orientation and axis-order
     /// candidate, the source and output transform structures, the operand
-    /// borrow decisions and the core plan. The device only replays that
-    /// artifact — each non-identity source transform into device scratch, the
-    /// coupled-sector GEMMs, the output transform — which is TensorKit's
-    /// `blas_contract!` dataflow and QSpace's `contract` dataflow, so FLOPs,
-    /// bytes moved and working set are the Host's. A contraction already in
+    /// borrow decisions and the core plan, chosen by the one contraction
+    /// planner (`plan_contract`) the batched [`crate::typed::ContractPlan`]
+    /// also uses. The device only replays that route — each non-identity
+    /// source transform into device scratch, the coupled-sector GEMMs, the
+    /// output transform — which is TensorKit's `blas_contract!` dataflow and
+    /// QSpace's `contract` dataflow, so FLOPs, bytes moved and working set are
+    /// the Host's. Where TensorKit's `_contract_memcost` takes `copyC` (a
+    /// zero-copy core whose result needs only a permute), the core writes the
+    /// core-destination scratch and one transform writes the output. A
+    /// contraction already in
     /// TensorKit `mul!` form keeps the fully-direct GEMM route over the parent
     /// buffers, with lazy adjoints as GEMM operand flags and no transform; it
     /// takes no Host context lock.
@@ -205,10 +210,11 @@ where
             lhs_operand.storage_conjugate(),
             rhs_operand.storage_conjugate(),
         );
-        // The canonical core route resolves from the operands alone and takes
-        // no lock. Otherwise the Host context lease compiles the artifact and
-        // is dropped before the device lease is taken; nothing under the
-        // device lease leases again.
+        // `plan_contract` in its two halves: the canonical core route resolves
+        // from the operands alone and takes no lock. Otherwise the Host context
+        // lease compiles the `CopyC` or `DynamicTree` route and is dropped
+        // before the device lease is taken; nothing under the device lease
+        // leases again.
         let resolution = match tenet_tensors::try_compile_storage_contract_core_route(
             &dst_space,
             lhs_operand,
@@ -221,11 +227,15 @@ where
                 lease
                     .context()
                     .multiplicity_free_lane::<D>()?
-                    .compile_storage_contract_dynamic_tree(
+                    .plan_contract_beyond_core(
                         &dst_space,
+                        lhs_space,
                         lhs_operand,
+                        rhs_space,
                         rhs_operand,
-                        axes,
+                        lhs_axes,
+                        rhs_axes,
+                        output_axes,
                     )?
             }
         };
@@ -401,8 +411,8 @@ where
         let destination_placement = destination_storage.placement();
 
         // Resolution exactly as the returning `contract`: the lock-free core
-        // route, otherwise the Host artifact under a context lease dropped
-        // before the device lease.
+        // route, otherwise the rest of `plan_contract` under a context lease
+        // dropped before the device lease.
         let axes = tenet_tensors::TensorContractSpec::new_with_conjugation(
             lhs_axes,
             rhs_axes,
@@ -422,11 +432,15 @@ where
                 lease
                     .context()
                     .multiplicity_free_lane::<D>()?
-                    .compile_storage_contract_dynamic_tree(
+                    .plan_contract_beyond_core(
                         &execution_destination,
+                        lhs_space,
                         lhs_operand,
+                        rhs_space,
                         rhs_operand,
-                        axes,
+                        lhs_axes,
+                        rhs_axes,
+                        output_axes,
                     )?
             }
         };

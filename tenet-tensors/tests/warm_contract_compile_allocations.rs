@@ -7,7 +7,8 @@ use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule
 use tenet_tensors::{
     prepare_tensorcontract_fusion_plan_dyn, try_compile_storage_contract_core_route,
     BoundDynamicFusionMapSpace, FusionOperand, OperationCachePolicy, OutputAxisOrder, RuleIdentity,
-    RuntimeTreeTransformStore, TensorContractFusionExecutionContext, TensorContractSpec,
+    RuntimeTreeTransformStore, StorageContractResolution, TensorContractFusionExecutionContext,
+    TensorContractSpec,
 };
 
 #[path = "../../tests/support/counting_alloc.rs"]
@@ -86,6 +87,23 @@ fn runtime_like_context(
     context
 }
 
+/// The storage ladder these rows pin: the lock-free canonical core, then the
+/// `DynamicTree` artifact (the planner's `CopyC` rung is not measured here).
+fn storage_ladder(
+    context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
+    dst: &Space,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    axes: TensorContractSpec<'_>,
+) -> StorageContractResolution<f64> {
+    match try_compile_storage_contract_core_route(dst, lhs, rhs, axes).unwrap() {
+        Some(core) => core,
+        None => context
+            .compile_storage_contract_dynamic_tree(dst, lhs, rhs, axes)
+            .unwrap(),
+    }
+}
+
 /// `A(V^codomain ← V^domain)` composed with `S(V^domain ← V^domain)` in
 /// three ways: the canonical Core route, the same contraction with its two
 /// leading open axes swapped (a DynamicTree route whose source and output
@@ -137,14 +155,13 @@ fn warm_compile_allocations(codomain: usize, domain: usize) -> [usize; 3] {
     ));
     let mut context = runtime_like_context(&store);
     let dynamic_tree = warm_allocations(|| {
-        let resolution = context
-            .compile_storage_contract_resolution(
-                &dst,
-                FusionOperand::direct(lhs.space()),
-                FusionOperand::direct(square.space()),
-                axes(),
-            )
-            .unwrap();
+        let resolution = storage_ladder(
+            &mut context,
+            &dst,
+            FusionOperand::direct(lhs.space()),
+            FusionOperand::direct(square.space()),
+            axes(),
+        );
         assert!(resolution.is_dynamic_tree());
         resolution
     });
@@ -202,14 +219,13 @@ fn crossing_compile_allocations(
     ));
     let mut context = runtime_like_context(&store);
     warm_allocations(|| {
-        context
-            .compile_storage_contract_resolution(
-                &dst,
-                FusionOperand::direct(lhs.space()),
-                FusionOperand::direct(matrix.space()),
-                axes(),
-            )
-            .unwrap()
+        storage_ladder(
+            &mut context,
+            &dst,
+            FusionOperand::direct(lhs.space()),
+            FusionOperand::direct(matrix.space()),
+            axes(),
+        )
     })
 }
 
@@ -256,5 +272,81 @@ fn warm_contract_compile_allocates_nothing_per_crossing_leg_the_dual_moves() {
         // no crossing leg.
         assert_eq!(moved, fixed, "rank {}", codomain + domain);
         assert_eq!(moved, base, "rank {}", codomain + domain);
+    }
+}
+
+/// Allocations of one warm `plan_contract` of `A(V^rank ← V^rank)` with
+/// `B(V^rank ← V^rank)` on A's domain and B's codomain, both reversed, into
+/// each operand's open legs reversed: TensorKit's `copyC` shape (C1p at rank
+/// 2), so the planner builds the temporary space, its core and one permute.
+/// Paired with the same contraction through the core-then-`DynamicTree`
+/// ladder, the device route before #1857.
+fn copy_c_plan_allocations(rank: usize) -> [usize; 2] {
+    let provider = Arc::new(U1FusionRule);
+    let lhs = space(&provider, rank, rank);
+    let rhs = space(&provider, rank, rank);
+    let lhs_axes = (rank..2 * rank).rev().collect::<Vec<_>>();
+    let rhs_axes = (0..rank).rev().collect::<Vec<_>>();
+    let output = (0..rank)
+        .rev()
+        .chain((rank..2 * rank).rev())
+        .collect::<Vec<_>>();
+    let dst = Space::contracted_multiplicity_free_partitioned(
+        &lhs,
+        &rhs,
+        &lhs_axes,
+        &rhs_axes,
+        OutputAxisOrder::from_axes(&output),
+        rank,
+    )
+    .unwrap();
+    let store = Arc::new(RuntimeTreeTransformStore::new(
+        RuntimeTreeTransformStore::<f64>::DEFAULT_BYTE_BUDGET,
+    ));
+    let mut context = runtime_like_context(&store);
+    let copy_c = warm_allocations(|| {
+        let resolution = context
+            .plan_contract(
+                &dst,
+                &lhs,
+                FusionOperand::direct(lhs.space()),
+                &rhs,
+                FusionOperand::direct(rhs.space()),
+                &lhs_axes,
+                &rhs_axes,
+                &output,
+            )
+            .unwrap();
+        assert!(resolution.copy_c().is_some(), "rank {rank} takes CopyC");
+        resolution
+    });
+    let dynamic_tree = warm_allocations(|| {
+        let resolution = storage_ladder(
+            &mut context,
+            &dst,
+            FusionOperand::direct(lhs.space()),
+            FusionOperand::direct(rhs.space()),
+            TensorContractSpec::new(&lhs_axes, &rhs_axes, OutputAxisOrder::from_axes(&output)),
+        );
+        assert!(resolution.is_dynamic_tree(), "rank {rank}");
+        resolution
+    });
+    [copy_c, dynamic_tree]
+}
+
+#[test]
+fn warm_copy_c_planning_is_bounded_and_no_costlier_than_the_dynamic_tree() {
+    let _serial = counting_alloc::serial();
+    for rank in [2, 3, 4] {
+        let [copy_c, dynamic_tree] = copy_c_plan_allocations(rank);
+        eprintln!("rank {rank}: warm CopyC plan {copy_c}, DynamicTree ladder {dynamic_tree}");
+        // What: device-eager CopyC planning stays a small bounded count once
+        // its structures are warm (9-10 at these ranks), and never above
+        // the DynamicTree compile it replaced for this contraction (19-20).
+        assert!(copy_c <= 12, "rank {rank}: {copy_c}");
+        assert!(
+            copy_c <= dynamic_tree,
+            "rank {rank}: {copy_c} > {dynamic_tree}"
+        );
     }
 }

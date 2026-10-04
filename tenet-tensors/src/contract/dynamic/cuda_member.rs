@@ -18,7 +18,7 @@ use tenet_operations::cuda_transform::{CudaMemberZeroRegions, CudaSingleMemberRe
 use tenet_operations::stacked::{StackedStorageView, StackedStorageViewMut};
 
 use super::DynamicTreeExecutionArtifact;
-use crate::contract::resolution::{StorageContractResolution, StorageContractRoute};
+use crate::contract::resolution::{ContractRoute, StorageContractResolution};
 use crate::{OperationError, RecouplingCoefficientAction};
 
 /// Caller-owned device state of one member-batched `DynamicTree` replay at
@@ -57,7 +57,7 @@ fn artifact(
     resolution: &StorageContractResolution<f64>,
 ) -> Result<&Arc<DynamicTreeExecutionArtifact<f64>>, OperationError> {
     match &resolution.route {
-        StorageContractRoute::DynamicTree(artifact) => Ok(artifact),
+        ContractRoute::DynamicTree(artifact) => Ok(artifact),
         _ => Err(OperationError::UnsupportedTensorContractScope {
             message: "CUDA member contraction requires a transformed-tree route",
         }),

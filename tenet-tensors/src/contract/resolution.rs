@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use tenet_core::{
-    FusionSpaceAdmission, FusionTreeHomSpace, FusionTreePairOrientation,
+    BlockStructure, FusionSpaceAdmission, FusionTreeHomSpace, FusionTreePairOrientation,
     MultiplicityFreeRigidSymbols,
 };
 
@@ -16,7 +16,7 @@ use super::structure::TensorContractStructure;
 use crate::{DenseBlockScalar, OperationError};
 use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec};
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
-use tenet_operations::TensorContractFusionProfile;
+use tenet_operations::{TensorContractFusionProfile, TreeTransformStructure};
 
 use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, FusionOperandLayout};
 use super::fusion::{
@@ -57,44 +57,77 @@ pub(crate) enum Resolution<C = f64> {
 /// only replays it.
 ///
 /// Created by
-/// [`TensorContractFusionExecutionContext::compile_storage_contract_resolution`](super::TensorContractFusionExecutionContext::compile_storage_contract_resolution).
+/// [`TensorContractFusionExecutionContext::plan_contract`](super::TensorContractFusionExecutionContext::plan_contract).
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct StorageContractResolution<C = f64> {
-    pub(crate) route: StorageContractRoute<C>,
+    pub(crate) route: ContractRoute<C>,
 }
 
-impl<C: DenseBlockScalar> StorageContractRoute<C> {
-    pub(crate) fn block_plan_is_fully_direct(&self) -> bool {
-        match self {
-            Self::Core(plan) | Self::SwappedCore(plan) => plan.is_fully_direct(),
-            Self::DynamicTree(artifact) => artifact.block_plan_is_fully_direct(),
-        }
-    }
-
+#[cfg(feature = "cuda")]
+impl<C: DenseBlockScalar> ContractRoute<C> {
     /// The core plan whose GEMMs this route runs.
-    #[cfg(feature = "cuda")]
     pub(crate) fn block_plan(&self) -> &FusionBlockContractPlan<C> {
         match self {
-            Self::Core(plan) | Self::SwappedCore(plan) => plan,
+            Self::Core { plan, .. } => plan,
             Self::DynamicTree(artifact) => artifact.block_plan(),
+            Self::CopyC(copy) => &copy.core,
         }
     }
 }
 
+/// The one route vocabulary of a multiplicity-free storage contraction,
+/// chosen by `plan_contract` (TensorKit `contract!` / `blas_contract!`,
+/// `tensoroperations.jl:314-447` @cfaa073).
 #[derive(Clone, Debug)]
-pub(crate) enum StorageContractRoute<C> {
+pub(crate) enum ContractRoute<C> {
     /// Canonical fully-direct coupled-sector GEMM batch over the parent
     /// buffers (lazy adjoints as GEMM operand flags, a uniform fermionic twist
-    /// as per-job alpha).
+    /// as per-job alpha). `swapped` runs the B·A candidate: the plan's left
+    /// operand is the caller's rhs (see [`Resolution::SwappedCore`]).
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-    Core(Arc<FusionBlockContractPlan<C>>),
-    /// [`Self::Core`] of the swapped candidate B·A; replay passes the
-    /// operands swapped (see [`Resolution::SwappedCore`]).
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-    SwappedCore(Arc<FusionBlockContractPlan<C>>),
+    Core {
+        plan: Arc<FusionBlockContractPlan<C>>,
+        swapped: bool,
+    },
     /// Source tree transforms → fully-direct core GEMM → output transform.
     DynamicTree(Arc<super::dynamic::DynamicTreeExecutionArtifact<C>>),
+    /// TensorKit's `copyC` (`blas_contract!`, `tensoroperations.jl:436-446` @cfaa073):
+    /// a zero-copy core into a temporary in its own default output, then one
+    /// tree transform into the destination.
+    CopyC(Arc<CopyCRoute<C>>),
+}
+
+/// The plans of a [`ContractRoute::CopyC`] route.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct CopyCRoute<C> {
+    /// The core into the temporary, over the caller's operands.
+    pub(crate) core: Arc<FusionBlockContractPlan<C>>,
+    /// Whether the core's left operand is the caller's rhs.
+    pub(crate) swapped: bool,
+    pub(crate) temporary: Arc<BlockStructure>,
+    pub(crate) temporary_len: usize,
+    /// Permutes the temporary into the destination's order and split.
+    pub(crate) transform: Arc<TreeTransformStructure<C>>,
+}
+
+impl<C> CopyCRoute<C> {
+    #[doc(hidden)]
+    pub fn temporary_structure(&self) -> &Arc<BlockStructure> {
+        &self.temporary
+    }
+
+    /// Elements of one temporary.
+    #[doc(hidden)]
+    pub fn temporary_len(&self) -> usize {
+        self.temporary_len
+    }
+
+    #[doc(hidden)]
+    pub fn transform(&self) -> &Arc<TreeTransformStructure<C>> {
+        &self.transform
+    }
 }
 
 impl<C: DenseBlockScalar> StorageContractResolution<C> {
@@ -102,7 +135,7 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
     /// resolves identically with and without the `cuda` feature. Device
     /// replays admit the core's inactive blocks themselves
     /// ([`Self::admit_cuda_inactive_regions`]).
-    pub(crate) fn new(route: StorageContractRoute<C>) -> Self {
+    pub(crate) fn new(route: ContractRoute<C>) -> Self {
         Self { route }
     }
 
@@ -126,8 +159,8 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
     /// writes.
     pub fn requires_source_twist(&self) -> bool {
         match &self.route {
-            StorageContractRoute::Core(_) | StorageContractRoute::SwappedCore(_) => false,
-            StorageContractRoute::DynamicTree(artifact) => artifact.requires_source_twist(),
+            ContractRoute::Core { .. } | ContractRoute::CopyC(_) => false,
+            ContractRoute::DynamicTree(artifact) => artifact.requires_source_twist(),
         }
     }
 
@@ -137,38 +170,44 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
     #[cfg(test)]
     pub(crate) fn direct_destination_inactive_blocks(&self) -> Option<usize> {
         match &self.route {
-            StorageContractRoute::Core(plan) | StorageContractRoute::SwappedCore(plan) => {
-                Some(plan.inactive_destination_regions().len())
-            }
-            StorageContractRoute::DynamicTree(artifact) => {
-                artifact.direct_destination_inactive_blocks()
-            }
+            ContractRoute::Core { plan, .. } => Some(plan.inactive_destination_regions().len()),
+            ContractRoute::DynamicTree(artifact) => artifact.direct_destination_inactive_blocks(),
+            ContractRoute::CopyC(_) => None,
         }
     }
 
     /// True when the route runs source/output tree transforms around the core.
     pub fn is_dynamic_tree(&self) -> bool {
-        matches!(self.route, StorageContractRoute::DynamicTree(_))
+        matches!(self.route, ContractRoute::DynamicTree(_))
     }
 
-    /// The core plan when the core GEMMs read the caller's operands directly
-    /// (the `Core` and `SwappedCore` routes), and whether the plan's left
-    /// operand is the caller's rhs; `None` for a DynamicTree route. Callers
-    /// state the replay contract they need on the plan
-    /// (`require_identity_(signed_)direct_replay`) or build it
-    /// (`StackedDirectReplay::new(_signed)`).
+    /// The core plan whose GEMMs read the caller's operands directly (the
+    /// `Core` and `CopyC` routes), and whether the plan's left operand is the
+    /// caller's rhs; `None` for a DynamicTree route. Under `CopyC` the core
+    /// writes the temporary ([`Self::copy_c`]). Callers state the replay
+    /// contract they need on the plan (`require_identity_(signed_)direct_replay`)
+    /// or build it (`StackedDirectReplay::new(_signed)`).
     #[doc(hidden)]
     pub fn direct_core(&self) -> Option<(&Arc<FusionBlockContractPlan<C>>, bool)> {
         match &self.route {
-            StorageContractRoute::Core(plan) => Some((plan, false)),
-            StorageContractRoute::SwappedCore(plan) => Some((plan, true)),
-            StorageContractRoute::DynamicTree(_) => None,
+            ContractRoute::Core { plan, swapped } => Some((plan, *swapped)),
+            ContractRoute::CopyC(copy) => Some((&copy.core, copy.swapped)),
+            ContractRoute::DynamicTree(_) => None,
+        }
+    }
+
+    /// The temporary and output transform of a `CopyC` route.
+    #[doc(hidden)]
+    pub fn copy_c(&self) -> Option<&CopyCRoute<C>> {
+        match &self.route {
+            ContractRoute::CopyC(copy) => Some(copy),
+            ContractRoute::Core { .. } | ContractRoute::DynamicTree(_) => None,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn is_swapped_core(&self) -> bool {
-        matches!(self.route, StorageContractRoute::SwappedCore(_))
+        matches!(self.route, ContractRoute::Core { swapped: true, .. })
     }
 }
 
@@ -698,14 +737,17 @@ where
 
 /// [`try_compile_oriented_storage_contract_plan`] over every zero-copy
 /// TensorKit candidate ([`try_zero_copy_contract_candidates`]); a uniform
-/// twist is consumed as per-job alpha, a nonuniform one declines.
+/// twist is consumed as per-job alpha, a nonuniform one declines, and so does
+/// a candidate whose plan is not fully direct (a storage replay has no
+/// irregular pack/scatter; the next candidate, or `DynamicTree`, applies —
+/// TensorKit's `mul!` takes every candidate, so declining never rejects).
 pub(crate) fn try_compile_oriented_storage_contract_candidate_plan<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
-) -> Result<Option<StorageContractRoute<R::Scalar>>, OperationError>
+) -> Result<Option<ContractRoute<R::Scalar>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
@@ -726,10 +768,12 @@ where
                 core_axes,
                 NonuniformTwist::Decline,
             )?;
-            Ok(plan.map(|plan| match orientation {
-                FusionContractOrientation::LhsRhs => StorageContractRoute::Core(plan),
-                FusionContractOrientation::RhsLhs => StorageContractRoute::SwappedCore(plan),
-            }))
+            Ok(plan
+                .filter(|plan| plan.is_fully_direct())
+                .map(|plan| ContractRoute::Core {
+                    plan,
+                    swapped: orientation == FusionContractOrientation::RhsLhs,
+                }))
         },
     )
 }
@@ -889,6 +933,41 @@ where
     R: MultiplicityFreeRigidSymbols,
 {
     rhs_contract_axes_require_twist(rule, rhs, axes.rhs_contracting_axes())
+}
+
+/// The permute a TensorKit `copyC` (`blas_contract!`,
+/// `tensoroperations.jl:436-446` @cfaa073) applies to its temporary: the temporary is
+/// `first·second` in `orientation` with its own default output (`first`'s
+/// open axes, then `second`'s), and this operation moves those axes into the
+/// caller's `output_axes`, split after `codomain_rank`.
+#[doc(hidden)]
+pub fn copy_c_output_transform(
+    orientation: FusionContractOrientation,
+    lhs_rank: usize,
+    rhs_rank: usize,
+    lhs_contract: &[usize],
+    rhs_contract: &[usize],
+    output_axes: &[usize],
+    codomain_rank: usize,
+) -> crate::TreeTransformOperation {
+    let lhs_open = lhs_rank - lhs_contract.len();
+    let rhs_open = rhs_rank - rhs_contract.len();
+    let (lhs_offset, rhs_offset) = match orientation {
+        FusionContractOrientation::LhsRhs => (0, 0),
+        FusionContractOrientation::RhsLhs => (rhs_open, lhs_open),
+    };
+    let position = |axis: usize| {
+        if axis < lhs_open {
+            axis + lhs_offset
+        } else {
+            axis - rhs_offset
+        }
+    };
+    let (codomain, domain) = output_axes.split_at(codomain_rank);
+    crate::TreeTransformOperation::permute(
+        codomain.iter().copied().map(position),
+        domain.iter().copied().map(position),
+    )
 }
 
 /// Whether a contraction into `dst`, the destination of the requested

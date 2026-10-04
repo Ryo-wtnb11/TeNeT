@@ -3,55 +3,9 @@
 use super::*;
 use tenet_operations::{
     admit_tree_transform_members_overwrite_raw, tree_transform_members_overwrite_raw,
-    StridedHostKernelAdapter, TreeTransformStructure, TreeTransformWorkspace,
+    StridedHostKernelAdapter, TreeTransformWorkspace,
 };
-
-pub(super) struct CopyCGeometryBinding<R> {
-    pub(super) geometry: crate::typed::checked_generic_contract::CopyCGeometry,
-    pub(super) temporary_space: BoundDynamicFusionMapSpace<R>,
-}
-
-impl<R> CopyCGeometryBinding<R>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-{
-    pub(super) fn new<D: TensorScalar, S>(
-        lhs: &StackedTensorMap<R, D, S>,
-        rhs: &StackedTensorMap<R, D, S>,
-        spec: &crate::typed::ContractSpec<'_>,
-        output_axes: &[usize],
-        orientation: tenet_tensors::FusionContractOrientation,
-    ) -> Result<Self, Error> {
-        let geometry = crate::typed::checked_generic_contract::CopyCGeometry::new(
-            orientation,
-            lhs.space.space().rank(),
-            rhs.space.space().rank(),
-            spec.lhs,
-            spec.rhs,
-            output_axes,
-            spec.codomain.len(),
-        );
-        let (first, second, first_axes, second_axes) =
-            geometry.oriented(lhs, rhs, spec.lhs, spec.rhs);
-        let temporary_space = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
-            &first.space,
-            &second.space,
-            first_axes,
-            second_axes,
-            OutputAxisOrder::identity(),
-        )?;
-        Ok(Self {
-            geometry,
-            temporary_space,
-        })
-    }
-}
-
-pub(super) struct CopyCPlan<R> {
-    pub(super) temporary_space: BoundDynamicFusionMapSpace<R>,
-    pub(super) transform: Arc<TreeTransformStructure<f64>>,
-    pub(super) input_swapped: bool,
-}
+use tenet_tensors::CopyCRoute;
 
 pub(super) struct CopyCWorkspace<D> {
     temporary: Vec<D>,
@@ -80,96 +34,90 @@ impl<D> CopyCWorkspace<D> {
     }
 }
 
-impl<R> CopyCPlan<R>
+/// Replays a planned `CopyC` route over Host stacks: the exact-sign direct
+/// core into the workspace temporary, then the output transform into `dst`.
+pub(super) fn run<R, D>(
+    copy_route: &CopyCRoute<f64>,
+    plan: &ContractPlan<R, D>,
+    lhs: &StackedTensorMap<R, D>,
+    rhs: &StackedTensorMap<R, D>,
+    dst: &mut [D],
+    members: usize,
+    workspace: &mut ContractWorkspace<R, D>,
+) -> Result<(), Error>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
 {
-    pub(super) fn run<D: TensorScalar>(
-        &self,
-        plan: &ContractPlan<R, D>,
-        lhs: &StackedTensorMap<R, D>,
-        rhs: &StackedTensorMap<R, D>,
-        dst: &mut [D],
-        members: usize,
-        workspace: &mut ContractWorkspace<R, D>,
-    ) -> Result<(), Error> {
-        let copy = workspace.copy_c.as_mut().ok_or_else(|| {
-            Error::InvalidArgument("copyC workspace belongs to another plan".into())
-        })?;
-        let temporary_len = self.temporary_space.space().required_len()?;
-        let total = plan.total_len(temporary_len, members)?;
-        // Admission includes all transform views, coefficients and packed jobs.
-        // It precedes even the temporary core submission.
-        admit_tree_transform_members_overwrite_raw(
-            &mut copy.transform,
-            &self.transform,
-            plan.space.space().structure(),
-            self.temporary_space.space().structure(),
-            dst.len(),
-            total,
-            members,
-        )?;
-        if workspace
-            .replay
-            .as_ref()
-            .is_none_or(|(replay, _)| replay.members() != members)
-        {
-            workspace.replay = plan
-                .resolution
-                .direct_core()
-                .map(|(core, swapped)| {
-                    StackedDirectReplay::new(Arc::clone(core), members)
-                        .map(|replay| (replay, swapped))
-                })
-                .transpose()?;
-        }
-        let (replay, swapped) = workspace
-            .replay
-            .as_ref()
-            .ok_or_else(|| Error::InvalidArgument("copyC temporary is not a direct core".into()))?;
-        let (left, right) = if self.input_swapped ^ *swapped {
-            (rhs, lhs)
-        } else {
-            (lhs, rhs)
-        };
-        let left =
-            StackedStorageView::new::<D>(&left.storage, left.member_len, members, left.member_len)?;
-        let right = StackedStorageView::new::<D>(
-            &right.storage,
-            right.member_len,
-            members,
-            right.member_len,
-        )?;
-        copy.temporary.resize(total, D::from_real(0.0));
-        let mut temporary = StackedStorageViewMut::new::<D>(
-            &mut copy.temporary,
-            temporary_len,
-            members,
-            temporary_len,
-        )?;
-        let mut lease = plan.runtime.lease_context()?;
-        let lane = lease.context().multiplicity_free_lane::<D>()?;
-        lane.execute_stacked_direct_host(replay, &mut temporary, &left, &right, true)?;
-        let backend = lane.tree_context_mut().backend_mut();
-        let threads = backend.recoupling_threads();
-        tree_transform_members_overwrite_raw(
-            &mut StridedHostKernelAdapter::default(),
-            backend.dense_mut(),
-            &mut copy.transform,
-            &self.transform,
-            plan.space.space().structure(),
-            self.temporary_space.space().structure(),
-            dst,
-            &copy.temporary,
-            members,
-            threads,
-        )?;
-        #[cfg(test)]
-        {
-            copy.completed_transforms += 1;
-        }
-        Ok(())
+    let copy = workspace
+        .copy_c
+        .as_mut()
+        .ok_or_else(|| Error::InvalidArgument("copyC workspace belongs to another plan".into()))?;
+    let temporary_len = copy_route.temporary_len();
+    let total = plan.total_len(temporary_len, members)?;
+    // Admission includes all transform views, coefficients and packed jobs.
+    // It precedes even the temporary core submission.
+    admit_tree_transform_members_overwrite_raw(
+        &mut copy.transform,
+        copy_route.transform(),
+        plan.space.space().structure(),
+        copy_route.temporary_structure(),
+        dst.len(),
+        total,
+        members,
+    )?;
+    if workspace
+        .replay
+        .as_ref()
+        .is_none_or(|(replay, _)| replay.members() != members)
+    {
+        workspace.replay = plan
+            .resolution
+            .direct_core()
+            .map(|(core, swapped)| {
+                StackedDirectReplay::new_signed(Arc::clone(core), members)
+                    .map(|replay| (replay, swapped))
+            })
+            .transpose()?;
     }
+    let (replay, swapped) = workspace
+        .replay
+        .as_ref()
+        .ok_or_else(|| Error::InvalidArgument("copyC temporary is not a direct core".into()))?;
+    let (left, right) = if *swapped { (rhs, lhs) } else { (lhs, rhs) };
+    let left =
+        StackedStorageView::new::<D>(&left.storage, left.member_len, members, left.member_len)?;
+    let right =
+        StackedStorageView::new::<D>(&right.storage, right.member_len, members, right.member_len)?;
+    copy.temporary.resize(total, D::from_real(0.0));
+    let mut temporary = StackedStorageViewMut::new::<D>(
+        &mut copy.temporary,
+        temporary_len,
+        members,
+        temporary_len,
+    )?;
+    let mut lease = plan.runtime.lease_context()?;
+    let lane = lease.context().multiplicity_free_lane::<D>()?;
+    lane.execute_stacked_signed_direct_host(replay, &mut temporary, &left, &right, true)?;
+    let backend = lane.tree_context_mut().backend_mut();
+    let threads = backend.recoupling_threads();
+    tree_transform_members_overwrite_raw(
+        &mut StridedHostKernelAdapter::default(),
+        backend.dense_mut(),
+        &mut copy.transform,
+        copy_route.transform(),
+        plan.space.space().structure(),
+        copy_route.temporary_structure(),
+        dst,
+        &copy.temporary,
+        members,
+        threads,
+    )?;
+    #[cfg(test)]
+    {
+        copy.completed_transforms += 1;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -253,7 +201,7 @@ mod tests {
         let left = StackedTensorMap::pack(&[&a, &a]).unwrap();
         let right = StackedTensorMap::pack(&[&b, &b]).unwrap();
         let plan = ContractPlan::new(&left, &right, &spec).unwrap();
-        assert!(plan.copy_c.is_some());
+        assert!(plan.copy_c().is_some());
         let mut workspace = plan.workspace();
         plan.execute(&left, &right, &mut workspace).unwrap();
         let copy = workspace.copy_c.as_mut().unwrap();
@@ -322,25 +270,25 @@ mod tests {
             .to_cuda()
             .unwrap();
         let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
-        assert!(plan.copy_c.is_some());
+        assert!(plan.copy_c().is_some());
         assert_eq!(plan.core().0.inactive_destination_regions().len(), 1);
         assert_eq!(
             tenet_operations::cuda_transform::CudaSingleMemberRegions::admit(
-                &plan.copy_c.as_ref().unwrap().transform,
+                plan.copy_c().unwrap().transform(),
             )
             .unwrap(),
             0
         );
         let mut workspace = plan.workspace().unwrap();
         plan.execute(&lhs, &rhs, &mut workspace).unwrap();
-        let temporary = workspace.copy_c_temporary.as_mut().unwrap();
-        let total = temporary.members * temporary.member_len;
+        let (temporary, members) = workspace.copy_c_temporary.as_mut().unwrap();
+        let member_len = plan.copy_c().unwrap().temporary_len();
         let lease = runtime.lease_cuda().unwrap();
-        temporary.storage = CudaStorage::upload_members(
+        *temporary = CudaStorage::upload_members(
             &lease,
-            vec![f64::NAN; total],
-            temporary.member_len,
-            temporary.members,
+            vec![f64::NAN; *members * member_len],
+            member_len,
+            *members,
         )
         .unwrap();
         drop(lease);
@@ -411,8 +359,7 @@ mod tests {
                         let left = StackedTensorMap::pack(&vec![&lhs; members]).unwrap();
                         let right = StackedTensorMap::pack(&vec![&rhs; members]).unwrap();
                         let plan = ContractPlan::new(&left, &right, &spec).unwrap();
-                        plan.copy_c
-                            .as_ref()
+                        plan.copy_c()
                             .unwrap_or_else(|| panic!("{name} did not choose CopyC"));
                         let mut workspace = plan.workspace();
                         plan.execute(&left, &right, &mut workspace).unwrap();
@@ -483,11 +430,7 @@ mod tests {
             let lhs = StackedTensorMap::pack(&[&a]).unwrap();
             let rhs = StackedTensorMap::pack(&[&b]).unwrap();
             let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
-            let transform = &plan
-                .copy_c
-                .as_ref()
-                .expect("route must choose CopyC")
-                .transform;
+            let transform = plan.copy_c().expect("route must choose CopyC").transform();
             assert!(!transform.storage_conjugate());
             let coefficients: Vec<_> = transform
                 .blocks()
@@ -534,11 +477,11 @@ mod tests {
             let lhs = StackedTensorMap::pack(&vec![&a; members]).unwrap();
             let rhs = StackedTensorMap::pack(&vec![&b; members]).unwrap();
             let plan = ContractPlan::new(&lhs, &rhs, &spec).unwrap();
-            let copy = plan.copy_c.as_ref().expect("C1p must choose CopyC");
+            let copy = plan.copy_c().expect("C1p must choose CopyC");
             assert!(
-                copy.transform.blocks().iter().any(|block| match *block {
+                copy.transform().blocks().iter().any(|block| match *block {
                     tenet_operations::TreeTransformBlock::Single { coefficient, .. } =>
-                        copy.transform.single_coefficient(coefficient).unwrap() != 1.0,
+                        copy.transform().single_coefficient(coefficient).unwrap() != 1.0,
                     tenet_operations::TreeTransformBlock::Multi { .. } => true,
                 }),
                 "this selected SU2 CopyC route must contain a scaled Single move"
@@ -587,9 +530,9 @@ mod tests {
                 &mut StridedHostKernelAdapter::default(),
                 &mut transform,
                 &mut TreeTransformWorkspace::default(),
-                &copy.transform,
+                copy.transform(),
                 plan.space.space().structure(),
-                copy.temporary_space.space().structure(),
+                copy.temporary_structure(),
                 &mut output,
                 &workspace.copy_c.as_ref().unwrap().temporary,
                 members,
@@ -601,7 +544,7 @@ mod tests {
             }
             assert_eq!(
                 transform_jobs_per_member,
-                copy.transform.recoupling_plan().jobs().len()
+                copy.transform().recoupling_plan().jobs().len()
             );
             assert_eq!(transform_jobs_per_member, 0);
             assert_eq!(

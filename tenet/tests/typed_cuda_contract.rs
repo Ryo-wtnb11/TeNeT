@@ -43,8 +43,8 @@ mod contract_cases;
 
 use common::{DevicePayload, DeviceRule};
 use contract_cases::{
-    blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_su2, fermion_u1,
-    fermionic_blas_contract_oracle, fermionic_general, fz2_tensorkit_loops, lazy_cases,
+    blas_contract_oracle, candidate_core_probes, copy_c_probes, dense_oracle, fermion_su2,
+    fermion_u1, fermionic_blas_contract_oracle, fermionic_general, fz2_tensorkit_loops, lazy_cases,
     poisoned_destination, product_general, su2, su2_bent, su2_reordered, su2_structure_cases,
     u1_inactive_cases, u1_lhs_identity, u1_non_self_dual, u1_rank_five, u1_reordered,
     u1_rhs_identity, Case, FermionU1, TwistRole,
@@ -234,6 +234,86 @@ fn lazy_adjoint_operands_match_the_host_at_every_dtype() {
     lazy_at::<Complex64>(&runtime);
     lazy_at::<f32>(&runtime);
     lazy_at::<Complex32>(&runtime);
+}
+
+/// #1857: device `contract` / `contract_into` take TensorKit's `copyC`
+/// (`blas_contract!`, `tensoroperations.jl:436-446` @cfaa073) where the batched
+/// `ContractPlan` does: the zero-copy core into the core-destination scratch,
+/// then one permute. Traffic: the only scratch is that temporary, `dim(C)`
+/// elements — no operand, owned or lazy adjoint, is materialized (the
+/// pre-#1857 device route copied the lazy adjoint `X`, `≥ |X|` more scratch).
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn copy_c_probes_move_only_c_and_match_the_host_at_every_dtype() {
+    fn at<R: DeviceRule, D: DevicePayload>(
+        v: &tenet::typed::GradedSpace<R>,
+        symmetry: &str,
+        oracle: impl Fn(&Case<R, D>) -> TensorMap<R, D>,
+    ) {
+        for index in 0..copy_c_probes::<R, D>(&Runtime::builder().build().unwrap(), v).len() {
+            // A fresh Runtime per probe: its scratch high-water mark is this
+            // probe's alone.
+            let runtime = Runtime::builder().cuda(0).build().unwrap();
+            let (case, _) = copy_c_probes::<R, D>(&runtime, v).swap_remove(index);
+            let name = format!("{symmetry} {} {}", case.name, D::NAME);
+            let host = case.host();
+            let output_bytes = std::mem::size_of_val(host.dense_data().unwrap());
+            let lhs = case.lhs.to_cuda().unwrap();
+            let rhs = case.rhs.to_cuda().unwrap();
+            let device = lhs.contract(&rhs, &case.spec()).unwrap();
+            assert_eq!(
+                runtime.cuda_contract_scratch_bytes().unwrap(),
+                output_bytes,
+                "{name}: the copyC temporary is the only scratch"
+            );
+            numerics::assert_nonzero_slices_close(
+                &name,
+                device.to_host().unwrap().dense_data().unwrap(),
+                host.dense_data().unwrap(),
+                case.terms(),
+            );
+            numerics::assert_nonzero_slices_close(
+                &name,
+                device.to_host().unwrap().dense_data().unwrap(),
+                oracle(&case).dense_data().unwrap(),
+                case.terms(),
+            );
+            let mut destination = poisoned_destination(&case).to_cuda().unwrap();
+            let (alpha, beta) = (D::entry(0.75, 0.25), D::entry(0.0, 0.0));
+            let (_, warm) = delta(|| {
+                lhs.contract_into(&rhs, &case.spec(), &mut destination, alpha, beta)
+                    .unwrap()
+            });
+            assert_eq!(
+                (warm.h2d_calls, warm.d2h_calls, warm.device_allocs),
+                (0, 0, 0),
+                "{name}: {warm:?}"
+            );
+            assert_eq!(
+                runtime.cuda_contract_scratch_bytes().unwrap(),
+                output_bytes,
+                "{name}: contract_into reuses the temporary"
+            );
+            numerics::assert_nonzero_slices_close(
+                &name,
+                destination.to_host().unwrap().dense_data().unwrap(),
+                host.scale(alpha).dense_data().unwrap(),
+                case.terms(),
+            );
+        }
+    }
+    at::<_, f64>(&u1_non_self_dual(), "U(1)", blas_contract_oracle);
+    at::<_, Complex64>(&u1_non_self_dual(), "U(1)", blas_contract_oracle);
+    at::<_, f32>(&su2(), "SU(2)", blas_contract_oracle);
+    at::<_, Complex32>(&su2(), "SU(2)", blas_contract_oracle);
+    at::<_, f64>(&su2(), "SU(2)", blas_contract_oracle);
+    // The swapped probes' literal sequence twists dual `B` legs the selected
+    // candidate does not, so TensorKit's fermionic sequence is the oracle.
+    at::<_, f64>(&fermion_u1(), "fZ2xU(1)", |case| {
+        fermionic_blas_contract_oracle(case, TwistRole::B, |t, legs| {
+            t.twist(legs, Direction::Forward).unwrap()
+        })
+    });
 }
 
 #[test]
