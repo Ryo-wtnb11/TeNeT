@@ -415,8 +415,10 @@ where
     /// support the braiding the requested motion needs. The expert layer's own typed errors are the
     /// contract here: re-validating the axes at this layer would be a second
     /// copy of a rule that already exists one call down, free to drift.
-    /// Checked Generic providers return [`GenericTensorError::Plan`] with the
-    /// concrete provider error preserved as its source.
+    /// Checked Generic providers report an axis misuse in
+    /// [`GenericTensorError::Facade`] with the same [`Error`], and other
+    /// failures in [`GenericTensorError::Plan`] with the concrete provider error
+    /// preserved as its source.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -501,12 +503,14 @@ where
     /// lists and the levels are validated by different layers and a
     /// mis-lengthed `levels` would otherwise be split silently.
     ///
-    /// Otherwise [`Error::Operation`] / [`Error::Core`] /
-    /// [`Error::FusionAlgebra`] straight from the expert layer for malformed
-    /// axis lists or a provider that cannot support the requested braiding.
-    /// As for [`Self::permute`], those errors are the contract; this layer does
-    /// not re-validate axes.
-    /// Checked Generic failures use [`GenericTensorError::Plan`].
+    /// Otherwise, as for [`Self::permute`]: [`Error::Operation`] with
+    /// [`crate::typed::OperationError::InvalidPermutation`] for malformed axis
+    /// lists, and [`Error::Operation`] / [`Error::Core`] /
+    /// [`Error::FusionAlgebra`] from the expert layer for a provider that
+    /// cannot support the requested braiding; this layer does not re-validate
+    /// axes. Checked Generic reports an axis misuse in
+    /// [`GenericTensorError::Facade`] and other failures in
+    /// [`GenericTensorError::Plan`].
     pub fn braid(
         &self,
         codomain_axes: &[usize],
@@ -551,10 +555,13 @@ where
     /// # Errors
     ///
     /// [`Error::InvalidArgument`] when `num_codomain` exceeds the rank, and
-    /// otherwise [`Error::Operation`] / [`Error::Core`] /
-    /// [`Error::FusionAlgebra`] from the expert layer, which owns the
-    /// validation this facade passes through. Checked Generic failures use
-    /// [`GenericTensorError::Plan`].
+    /// otherwise, as for [`Self::permute`], [`Error::Operation`] /
+    /// [`Error::Core`] / [`Error::FusionAlgebra`] from the expert layer, which
+    /// owns the validation this facade passes through; an axis misuse is
+    /// [`Error::Operation`] with
+    /// [`crate::typed::OperationError::InvalidPermutation`]. Checked Generic
+    /// reports an axis misuse in [`GenericTensorError::Facade`] and other
+    /// failures in [`GenericTensorError::Plan`].
     pub fn repartition(&self, num_codomain: usize) -> Result<Self, TypedFacadeError<R>> {
         if num_codomain == self.codomain_rank() {
             return Ok(self.clone());
