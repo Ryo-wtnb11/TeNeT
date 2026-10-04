@@ -98,13 +98,26 @@ pub(crate) enum StorageContractRoute<C> {
 }
 
 impl<C: DenseBlockScalar> StorageContractResolution<C> {
-    /// A negatively strided inactive core block is rejected here, before the
-    /// device lease; the device replay converts the plan's inactive blocks
-    /// into its lease scratch only when it has to zero them.
-    pub(crate) fn new(route: StorageContractRoute<C>) -> Result<Self, OperationError> {
-        #[cfg(feature = "cuda")]
-        super::dynamic::cuda::validate_inactive_regions(route.block_plan())?;
-        Ok(Self { route })
+    /// Backend-neutral: a Host resolution never runs a device check, so it
+    /// resolves identically with and without the `cuda` feature. Device
+    /// replays admit the core's inactive blocks themselves
+    /// ([`Self::admit_cuda_inactive_regions`]).
+    pub(crate) fn new(route: StorageContractRoute<C>) -> Self {
+        Self { route }
+    }
+
+    /// The CUDA admission of the core plan's inactive destination blocks:
+    /// each must have a device zero region (unsigned strides and offset).
+    /// Run by every CUDA entry before device work.
+    #[cfg(feature = "cuda")]
+    #[doc(hidden)]
+    pub fn admit_cuda_inactive_regions(&self) -> Result<(), OperationError>
+    where
+        C: Copy + PartialEq + num_traits::One,
+    {
+        tenet_operations::cuda_transform::CudaMemberZeroRegions::admit(
+            self.route.block_plan().inactive_destination_regions(),
+        )
     }
 
     /// True when the route needs the fermionic contraction twist of one
