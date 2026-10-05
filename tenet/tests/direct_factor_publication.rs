@@ -153,12 +153,18 @@ fn multiplicity_free_compact_lq_matches_reconstruction_oracle() {
 }
 
 // Byte-traffic contract: TeNeT writes the compact LQ outputs and the adjoint
-// scratch once, so it requests no zeroed storage for them. The only zeroed
-// request left is the dense backend's R factor (Tenferro
-// `faer_linalg::upper_triangle_vec_from_mat`), whose total over sectors is
-// the payload of L. Before #1478 both outputs and the scratch also came from
-// `vec![0.0; len]`, i.e. `alloc_zeroed`, which this counter observes for f64:
-// 16928 zeroed bytes before, 4872 (= L) after.
+// scratch once, so it requests no zeroed storage for them. Before #1478 both
+// outputs and the scratch came from `vec![0.0; len]` (`alloc_zeroed`, which
+// this counter observes for f64). The zeroed requests left are the dense
+// backend's, per coupled sector of the QR of the adjoint (BLAS provider,
+// #2013):
+// - the R factor, `tenferro-linalg 0.7.1
+//   src/cpu/linalg/lapack_linalg/helpers.rs:282`
+//   (`leading_upper_triangle_from_lapack`), whose total is the payload of L;
+// - LAPACK `?geqrf` tau, work-query and work scratch from the CPU buffer pool,
+//   `src/cpu/linalg/lapack_linalg/qr.rs:391,392,407` (`pooled_zeroed`), with
+//   `lwork <= nb * rows` for a blocked QR; nb <= 64 bounds every provider's
+//   block size here.
 #[test]
 fn compact_lq_requests_no_zeroed_output_storage() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -169,9 +175,19 @@ fn compact_lq_requests_no_zeroed_output_storage() {
     let (Lq { l, q }, counts) = measured(|| a.lq_compact(&[0, 1], &[2, 3]).unwrap());
     black_box((&warm, &q));
     let backend_r_bytes = std::mem::size_of_val(l.dense_data().unwrap());
+    // QR of each sector's adjoint (cols x rows): tau = min, query = 1,
+    // work <= 64 * cols.
+    let lapack_scratch_bytes: usize = a
+        .blocks()
+        .unwrap()
+        .map(|(_, block)| {
+            let (rows, cols) = (block.rows(), block.cols());
+            (rows.min(cols) + 1 + 64 * cols) * std::mem::size_of::<f64>()
+        })
+        .sum();
     assert!(
-        counts.zeroed_bytes <= backend_r_bytes,
-        "{counts:?}, L bytes {backend_r_bytes}"
+        counts.zeroed_bytes <= backend_r_bytes + lapack_scratch_bytes,
+        "{counts:?}, L bytes {backend_r_bytes}, LAPACK scratch bound {lapack_scratch_bytes}"
     );
 }
 

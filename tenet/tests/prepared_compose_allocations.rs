@@ -2,10 +2,14 @@
 //! Warm Host compose workspace and compatibility-wrapper allocation contract:
 //! after one call at
 //! a fixed `B`, `execute` and `execute_into` allocate nothing of TeNeT's on
-//! the caller thread. The one remaining allocation is Tenferro 0.7.1's
-//! grouped-GEMM validation (`tenferro-tensor src/backend.rs:
-//! validate_grouped_gemm`), which every grouped submission pays, eager
-//! included. Its own binary, because it installs a counting global allocator.
+//! the caller thread. The remaining allocations are the backend's, and every
+//! grouped submission pays them, eager included (BLAS provider, #2013):
+//! - Tenferro's grouped-GEMM validation, `tenferro-tensor 0.7.1
+//!   src/backend.rs:670` (`validate_grouped_gemm`);
+//! - the BLAS grouped dispatch's batch list, `tenferro-cpu 0.7.1
+//!   src/gemm/mod.rs:1630` (`grouped_gemm_blas_typed`).
+//!
+//! Its own binary, because it installs a counting global allocator.
 
 mod common;
 #[path = "../../tests/support/numerics.rs"]
@@ -36,13 +40,13 @@ fn allocations(f: impl FnOnce()) -> (usize, usize, std::time::Duration) {
 }
 
 #[test]
-fn warm_host_calls_allocate_only_the_backend_grouped_validation() {
+fn warm_host_calls_allocate_only_the_backend_grouped_dispatch() {
     // What: at a fixed B, a second `execute` and a second `execute_into`
     // (whose plan has inactive destination blocks to zero-fill) reuse the
     // handle's output, job list and fill strides, and the Runtime's pooled
     // context. The zero fill adds nothing (`execute_into` == `execute`), and
-    // both stay within the one per-submission allocation of Tenferro's
-    // grouped validator. The cold call's count is the control that shows the
+    // both stay within the per-submission allocations of Tenferro's grouped
+    // validator and BLAS dispatch. The cold call's count is the control that shows the
     // counter sees this thread's allocations.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let (v, w) = u1_legs();
@@ -75,7 +79,8 @@ fn warm_host_calls_allocate_only_the_backend_grouped_validation() {
     let warm_into = allocations(|| {
         handle.execute_into(&lhs, &rhs, &mut dst).unwrap();
     });
-    assert!(warm.0 <= 1, "warm execute allocations: {warm:?}");
+    // Upper bound: the two backend allocations named in the module docs.
+    assert!(warm.0 <= 2, "warm execute allocations: {warm:?}");
     assert_eq!(
         (warm_into.0, warm_into.1),
         (warm.0, warm.1),

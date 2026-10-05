@@ -29,7 +29,7 @@
 //! representable in `f32` and the double-precision twin that measures `kappa`
 //! holds exactly the widening of it.
 //!
-//! Run with `cargo test -p tenet-rs --features cuda,cpu-faer --test \
+//! Run with `cargo test -p tenet-rs --features cuda,blas-openblas --test \
 //! typed_cuda_single_precision_factorizations -- --ignored --test-threads=1`
 //! on a CUDA host. The cost gate reads the process-wide transfer counters,
 //! hence `--test-threads=1`.

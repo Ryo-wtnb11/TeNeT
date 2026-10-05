@@ -21,10 +21,12 @@ For index notation and network planning, add `tenet-network` and run its
 [quickstart](../tenet-network/examples/quickstart.rs). Mathematical conventions
 are in [tensor-map mathematics](src/mathematics.md).
 
-The default host provider is Tenferro's resolved compiled default: BLAS when
-its CPU build enables `cpu-blas`, otherwise `cpu-faer`; see the
-[backend policy](../docs/backend_policy.md) and [`Cargo.toml`](Cargo.toml) for
-alternatives. `cuda` and `racah-generated` add
+TeNeT's CPU kernels are BLAS/LAPACK only. The default feature `blas-openblas`
+links the system OpenBLAS (Homebrew `openblas` on macOS, `libopenblas-dev` on
+Ubuntu). To use another provider, disable the default and name exactly one:
+`--no-default-features --features blas-accelerate` (Apple Accelerate),
+`blas-mkl`, or `provider-inject`.
+See the [backend policy](../docs/backend_policy.md). `cuda` and `racah-generated` add
 the typed CUDA surface and SUN providers. The `opt-path` and `cotengra-python`
 facade markers expose optimizer configuration; the planners themselves are
 enabled in `tenet-network`.

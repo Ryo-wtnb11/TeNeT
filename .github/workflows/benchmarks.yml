@@ -22,6 +22,8 @@ jobs:
       - name: Record source revisions
         run: |
           git -C tenet log -1 --format='TeNeT %H'
+      - name: Install OpenBLAS
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -55,6 +57,8 @@ jobs:
       - name: Record source revisions
         run: |
           git -C tenet log -1 --format='TeNeT %H'
+      - name: Install OpenBLAS
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -76,9 +80,9 @@ jobs:
           CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: 'true'
       - name: checked-Generic public transform measurement (racah-generated)
         if: ${{ !cancelled() }}
-        run: cargo test --locked --release -p tenet-rs --no-default-features --features racah-generated,cpu-faer --test permute_overwrite_allocations -- --ignored --exact checked_generic_public_transform_measurement --nocapture
+        run: cargo test --locked --release -p tenet-rs --no-default-features --features racah-generated,blas-openblas --test permute_overwrite_allocations -- --ignored --exact checked_generic_public_transform_measurement --nocapture
         working-directory: tenet
       - name: checked-Generic transform phase measurement (racah-generated)
         if: ${{ !cancelled() }}
-        run: cargo test --locked --release -p tenet-tensors --no-default-features --features racah-generated,cpu-faer --lib -- --ignored --exact tests::tree_transform_plan::generic::measure_checked_generic_transform_phases --nocapture
+        run: cargo test --locked --release -p tenet-tensors --no-default-features --features racah-generated,blas-openblas --lib -- --ignored --exact tests::tree_transform_plan::generic::measure_checked_generic_transform_phases --nocapture
         working-directory: tenet

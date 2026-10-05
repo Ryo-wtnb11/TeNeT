@@ -2,7 +2,7 @@
 //!
 //! Its own binary, with every test serialized, because `cuda_transfer_stats`
 //! and the plan-cache statistics are process- and context-wide. Run with
-//! `cargo test -p tenet-rs --no-default-features --features cuda,cpu-faer
+//! `cargo test -p tenet-rs --no-default-features --features cuda,blas-openblas
 //! --test prepared_eigh_cuda -- --ignored`.
 //!
 //! The device keeps the raw cuSOLVER gauge, and with `B > 1` the batched

@@ -221,11 +221,10 @@ fn bench<T, E>(
 
 fn benchmark_runtime() -> Result<Runtime, Error> {
     let backend = match std::env::var("OP_MATRIX_GEMM_BACKEND").as_deref() {
-        Ok("blas") => LinalgBackend::Blas,
-        Ok("faer") | Err(_) => LinalgBackend::Faer,
+        Ok("blas") | Err(_) => LinalgBackend::Blas,
         Ok(other) => {
             return Err(Error::InvalidArgument(format!(
-                "OP_MATRIX_GEMM_BACKEND must be `faer` or `blas`, got `{other}`"
+                "OP_MATRIX_GEMM_BACKEND must be `blas`, got `{other}`"
             )))
         }
     };
@@ -238,12 +237,11 @@ fn benchmark_runtime() -> Result<Runtime, Error> {
 
 fn benchmark_dense_executor() -> Result<DefaultDenseExecutor, tenet::expert::DenseError> {
     let kind = match std::env::var("OP_MATRIX_GEMM_BACKEND").as_deref() {
-        Ok("blas") => CpuBackendKind::Blas,
-        Ok("faer") | Err(_) => CpuBackendKind::Faer,
+        Ok("blas") | Err(_) => CpuBackendKind::Blas,
         Ok(other) => {
             return Err(tenet::expert::DenseError::Unsupported {
                 op: "oriented_uniform_run",
-                message: format!("OP_MATRIX_GEMM_BACKEND must be `faer` or `blas`, got `{other}`"),
+                message: format!("OP_MATRIX_GEMM_BACKEND must be `blas`, got `{other}`"),
             })
         }
     };
@@ -3639,8 +3637,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("TENFERRO_AUTHORITY").unwrap_or_else(|_| "unknown".into())
     );
     println!(
-        "# features=cpu-faer:{} blas-provider:{} cuda:{} gemm_backend={}",
-        cfg!(feature = "cpu-faer"),
+        "# features=blas-provider:{} cuda:{} gemm_backend={}",
         cfg!(any(
             feature = "cpu-blas",
             feature = "blas-accelerate",
@@ -3648,7 +3645,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             feature = "blas-mkl"
         )),
         cfg!(feature = "cuda"),
-        std::env::var("OP_MATRIX_GEMM_BACKEND").unwrap_or_else(|_| "faer".into())
+        std::env::var("OP_MATRIX_GEMM_BACKEND").unwrap_or_else(|_| "blas".into())
     );
     println!("# degeneracy={degeneracy}");
     println!("# threads=RAYON_NUM_THREADS:{} OPENBLAS_NUM_THREADS:{} OMP_NUM_THREADS:{} MKL_NUM_THREADS:{}", env_or_unset("RAYON_NUM_THREADS"), env_or_unset("OPENBLAS_NUM_THREADS"), env_or_unset("OMP_NUM_THREADS"), env_or_unset("MKL_NUM_THREADS"));

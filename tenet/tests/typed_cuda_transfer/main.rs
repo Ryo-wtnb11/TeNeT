@@ -1,6 +1,6 @@
 //! Real-device gates for provider-neutral typed ownership transfer.
 //!
-//! Run with `cargo test -p tenet --features cuda,cpu-faer --test \
+//! Run with `cargo test -p tenet --features cuda,blas-openblas --test \
 //! typed_cuda_transfer -- --ignored` on a CUDA host.
 
 #![cfg(feature = "cuda")]

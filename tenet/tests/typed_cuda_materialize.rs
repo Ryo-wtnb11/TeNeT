@@ -7,7 +7,7 @@
 //! rejects a destination aliasing its source, accepts it, and the input is
 //! unchanged.
 //!
-//! Run with `cargo test -p tenet-rs --features cuda,cpu-faer --test \
+//! Run with `cargo test -p tenet-rs --features cuda,blas-openblas --test \
 //! typed_cuda_materialize -- --ignored` on a CUDA host.
 
 #![cfg(feature = "cuda")]

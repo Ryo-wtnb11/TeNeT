@@ -17,4 +17,8 @@ smallvec = { version = "1", features = ["const_generics", "union"] }
 tenet-sectors = { version = "0.1.1", path = "../tenet-sectors" }
 
 [dev-dependencies]
-tenet = { package = "tenet-rs", version = "0.1.1", path = "../tenet" }
+# No default provider: a workspace build selects exactly one BLAS provider
+# through the `tenet-rs` member (default `blas-openblas`, or an explicit
+# `--no-default-features --features blas-*`), and a second default here would
+# collide with it at compile time.
+tenet = { package = "tenet-rs", version = "0.1.1", path = "../tenet", default-features = false, features = ["cpu-blas"] }

@@ -6,7 +6,7 @@
 //! same device kernels on the same bytes), and the Host result for the same
 //! roles, compared under a tolerance through the reconstruction.
 //!
-//! Run with `cargo test -p tenet-rs --features cuda,cpu-faer --test \
+//! Run with `cargo test -p tenet-rs --features cuda,blas-openblas --test \
 //! typed_cuda_leg_roles -- --ignored` on a CUDA host.
 
 #![cfg(feature = "cuda")]

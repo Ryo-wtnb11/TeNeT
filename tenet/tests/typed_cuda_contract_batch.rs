@@ -1,5 +1,5 @@
 //! Public C1/Core and C2/SwappedCore CUDA batch gates. Run on A100 with
-//! `cargo test -p tenet-rs --no-default-features --features cuda,cpu-faer
+//! `cargo test -p tenet-rs --no-default-features --features cuda,blas-openblas
 //! --test typed_cuda_contract_batch -- --ignored --test-threads=1`.
 #![cfg(feature = "cuda")]
 
@@ -1397,8 +1397,8 @@ fn dynamic_tree_release_measurement() {
     let runtime = Runtime::builder()
         .cuda(0)
         .dense_threads(1)
-        .gemm_backend(tenet::typed::LinalgBackend::Faer)
-        .linalg_backend(tenet::typed::LinalgBackend::Faer)
+        .gemm_backend(tenet::typed::LinalgBackend::Blas)
+        .linalg_backend(tenet::typed::LinalgBackend::Blas)
         .build()
         .unwrap();
     run(&u1_inactive_cases::<f64>(&runtime)[1]);
@@ -1476,8 +1476,8 @@ fn direct_core_release_measurement() {
     let runtime = Runtime::builder()
         .cuda(0)
         .dense_threads(1)
-        .gemm_backend(tenet::typed::LinalgBackend::Faer)
-        .linalg_backend(tenet::typed::LinalgBackend::Faer)
+        .gemm_backend(tenet::typed::LinalgBackend::Blas)
+        .linalg_backend(tenet::typed::LinalgBackend::Blas)
         .build()
         .unwrap();
     for (case, _) in candidate_core_probes::<_, f64>(&runtime, &su2()) {
@@ -1579,8 +1579,8 @@ fn signed_core_release_measurement() {
     let runtime = Runtime::builder()
         .cuda(0)
         .dense_threads(1)
-        .gemm_backend(tenet::typed::LinalgBackend::Faer)
-        .linalg_backend(tenet::typed::LinalgBackend::Faer)
+        .gemm_backend(tenet::typed::LinalgBackend::Blas)
+        .linalg_backend(tenet::typed::LinalgBackend::Blas)
         .build()
         .unwrap();
     let space = fermion_u1();

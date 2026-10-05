@@ -3,7 +3,7 @@
 //!
 //! Its own binary with one test, because `cuda_transfer_stats` is
 //! process-wide. Run with `cargo test -p tenet-rs --no-default-features
-//! --features cuda,cpu-faer --test stacked_restrict_leg_cuda -- --ignored`.
+//! --features cuda,blas-openblas --test stacked_restrict_leg_cuda -- --ignored`.
 
 #![cfg(feature = "cuda")]
 

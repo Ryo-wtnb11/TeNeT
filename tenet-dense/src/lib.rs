@@ -53,16 +53,12 @@ pub use tenferro_adapter::{
     cpu_session_stats, reset_cpu_session_stats, CpuSessionStats, DefaultDenseExecutor,
     SharedCpuContext,
 };
-#[cfg(all(
-    test,
-    any(feature = "cpu-faer", feature = "cpu-blas-core"),
-    not(feature = "provider-inject")
-))]
+#[cfg(all(test, feature = "cpu-blas-core", not(feature = "provider-inject")))]
 pub(crate) use tenferro_adapter::{
     owned_full_svd_input_pointers, reset_owned_full_svd_input_pointers,
 };
 
-/// CPU linear-algebra provider selector (faer vs system BLAS/LAPACK), re-exported
+/// CPU linear-algebra provider selector (TeNeT compiles only `Blas`), re-exported
 /// from tenferro so runtimes can pick a backend via
 /// [`DefaultDenseExecutor::with_kind`] without depending on tenferro directly.
 #[cfg(feature = "tenferro")]

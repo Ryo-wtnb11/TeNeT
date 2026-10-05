@@ -2,7 +2,7 @@
 //! first largest-magnitude entry of each `U` column decides, including exact
 //! magnitude ties, a maximum in the last row, and columns longer than a warp.
 //!
-//! Run with `cargo test -p tenet-dense --features cuda,cpu-faer --test
+//! Run with `cargo test -p tenet-dense --features cuda,blas-openblas --test
 //! cuda_svd_gauge -- --ignored` on a CUDA host.
 
 #![cfg(feature = "cuda")]

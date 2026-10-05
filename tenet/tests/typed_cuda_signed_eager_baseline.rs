@@ -24,8 +24,8 @@ fn signed_eager_per_member_baseline() {
     let runtime = Runtime::builder()
         .cuda(0)
         .dense_threads(1)
-        .gemm_backend(LinalgBackend::Faer)
-        .linalg_backend(LinalgBackend::Faer)
+        .gemm_backend(LinalgBackend::Blas)
+        .linalg_backend(LinalgBackend::Blas)
         .build()
         .unwrap();
     let space = fermion_u1();

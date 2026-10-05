@@ -42,11 +42,11 @@ fn contraction_norm(rt: &Runtime) -> f64 {
 }
 
 #[test]
-fn faer_backend_builds_and_computes() {
-    // The explicit Faer provider must build and produce a
+fn blas_backend_builds_and_computes() {
+    // The explicit BLAS provider must build and produce a
     // sane spectrum (descending, all non-negative singular values).
     let rt = Runtime::builder()
-        .linalg_backend(LinalgBackend::Faer)
+        .linalg_backend(LinalgBackend::Blas)
         .build()
         .unwrap();
     let s = spectra(&rt);
@@ -62,7 +62,7 @@ fn linalg_backend_composes_with_dense_threads() {
     // Selecting a provider together with an explicit thread count routes through
     // the threads-and-kind constructor.
     let rt = Runtime::builder()
-        .linalg_backend(LinalgBackend::Faer)
+        .linalg_backend(LinalgBackend::Blas)
         .dense_threads(1)
         .build()
         .unwrap();
@@ -72,9 +72,9 @@ fn linalg_backend_composes_with_dense_threads() {
 #[test]
 fn gemm_backend_builds_and_contracts() {
     // The contraction-GEMM provider is selected independently of the
-    // factorization provider; Faer requested explicitly.
+    // factorization provider; BLAS requested explicitly.
     let rt = Runtime::builder()
-        .gemm_backend(LinalgBackend::Faer)
+        .gemm_backend(LinalgBackend::Blas)
         .build()
         .unwrap();
     assert!(contraction_norm(&rt) > 0.0);
@@ -83,7 +83,7 @@ fn gemm_backend_builds_and_contracts() {
 #[test]
 fn gemm_backend_composes_with_dense_threads() {
     let rt = Runtime::builder()
-        .gemm_backend(LinalgBackend::Faer)
+        .gemm_backend(LinalgBackend::Blas)
         .dense_threads(1)
         .build()
         .unwrap();
@@ -93,54 +93,13 @@ fn gemm_backend_composes_with_dense_threads() {
 #[test]
 fn linalg_and_gemm_backends_are_independent() {
     // Factorization on one provider, contraction GEMM on another — the two
-    // seams are wired separately and must not collide. (Both faer here, but the
-    // call sets each independently.)
+    // seams are wired separately and must not collide (one compiled provider,
+    // but the call sets each independently).
     let rt = Runtime::builder()
-        .linalg_backend(LinalgBackend::Faer)
-        .gemm_backend(LinalgBackend::Faer)
+        .linalg_backend(LinalgBackend::Blas)
+        .gemm_backend(LinalgBackend::Blas)
         .build()
         .unwrap();
     assert!(!spectra(&rt).is_empty());
     assert!(contraction_norm(&rt) > 0.0);
-}
-
-#[test]
-fn faer_and_blas_agree_when_blas_is_available() {
-    // BLAS is only linked under a `blas-*` cargo feature; when absent, building
-    // the Blas provider fails cleanly and there is nothing to compare (CI runs
-    // the default faer-only feature set, so this path exercises the skip).
-    let faer = Runtime::builder()
-        .linalg_backend(LinalgBackend::Faer)
-        .build()
-        .unwrap();
-    let blas = match Runtime::builder()
-        .linalg_backend(LinalgBackend::Blas)
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(_) => return,
-    };
-    let faer_s = spectra(&faer);
-    let blas_s = spectra(&blas);
-    assert_eq!(faer_s.len(), blas_s.len());
-    for (a, b) in faer_s.iter().zip(&blas_s) {
-        assert!((a - b).abs() <= 1e-10, "faer {a} vs blas {b}");
-    }
-}
-
-#[test]
-fn gemm_faer_and_blas_agree_when_blas_is_available() {
-    // Same idea for the contraction-GEMM seam: a contraction on faer and on the
-    // linked BLAS must agree to numerical precision. Skips when no BLAS linked.
-    let faer = Runtime::builder()
-        .gemm_backend(LinalgBackend::Faer)
-        .build()
-        .unwrap();
-    let blas = match Runtime::builder().gemm_backend(LinalgBackend::Blas).build() {
-        Ok(rt) => rt,
-        Err(_) => return,
-    };
-    let f = contraction_norm(&faer);
-    let b = contraction_norm(&blas);
-    assert!((f - b).abs() <= 1e-10, "faer {f} vs blas {b}");
 }

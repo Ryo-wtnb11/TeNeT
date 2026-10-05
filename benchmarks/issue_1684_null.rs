@@ -64,7 +64,7 @@ fn measure(mut f: impl FnMut()) -> (u128, u128, usize, usize) {
 
 fn main() {
     let runtime = Runtime::builder()
-        .linalg_backend(LinalgBackend::Faer)
+        .linalg_backend(LinalgBackend::Blas)
         .dense_threads(1)
         .build()
         .unwrap();

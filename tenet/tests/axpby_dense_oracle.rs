@@ -5,7 +5,7 @@
 //! `Complex64`), so a swapped binding such as VectorInterface's
 //! `add(y, x, α, β) == β·y + α·x` fails every case.
 //!
-//! The CUDA gate runs with `cargo test -p tenet-rs --features cuda,cpu-faer
+//! The CUDA gate runs with `cargo test -p tenet-rs --features cuda,blas-openblas
 //! --test axpby_dense_oracle -- --ignored` on a CUDA host.
 
 use std::collections::HashMap;

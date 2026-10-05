@@ -457,8 +457,8 @@ fn public_copy_c_small_output_winners() {
 fn public_copy_c_batch_measurement() {
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .gemm_backend(tenet::typed::LinalgBackend::Faer)
-        .linalg_backend(tenet::typed::LinalgBackend::Faer)
+        .gemm_backend(tenet::typed::LinalgBackend::Blas)
+        .linalg_backend(tenet::typed::LinalgBackend::Blas)
         .build()
         .unwrap();
     let v = u1(&[(0, 2), (1, 2)]);
@@ -1320,14 +1320,14 @@ fn public_host_swapped_core_release_measurement() {
     );
 }
 
-/// A one-run observation with explicit faer and one dense thread. No timing assertion.
+/// A one-run observation with explicit BLAS and one dense thread. No timing assertion.
 #[test]
 #[ignore = "benchmark: run via benchmarks.yml"]
 fn public_signed_direct_release_measurement() {
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .gemm_backend(tenet::typed::LinalgBackend::Faer)
-        .linalg_backend(tenet::typed::LinalgBackend::Faer)
+        .gemm_backend(tenet::typed::LinalgBackend::Blas)
+        .linalg_backend(tenet::typed::LinalgBackend::Blas)
         .build()
         .unwrap();
     let v = fermion_u1();
@@ -1401,8 +1401,8 @@ fn public_signed_direct_release_measurement() {
 fn public_dynamic_source_twist_release_measurement() {
     let runtime = Runtime::builder()
         .dense_threads(1)
-        .gemm_backend(tenet::typed::LinalgBackend::Faer)
-        .linalg_backend(tenet::typed::LinalgBackend::Faer)
+        .gemm_backend(tenet::typed::LinalgBackend::Blas)
+        .linalg_backend(tenet::typed::LinalgBackend::Blas)
         .build()
         .unwrap();
     let case = fermionic_twist_roles::<_, f64>(

@@ -1,18 +1,77 @@
+//! A warmed prepared rank-4 fusion replay allocates only the BLAS backend's
+//! per-submission vectors. Counted on every thread, not only the caller: the
+//! replay's dense GEMMs may run on the provider's or the context's worker
+//! threads, and a caller-thread counter would miss them (#2013).
+
 use tenet_core::{
     FermionParityFusionRule, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
     MultiplicityFreeRigidSymbols, ProductFusionRule, ProductSectorCodec, SU2Irrep, SectorId,
     SectorLeg, TensorKitProductCodec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
-    OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
-    TreeTransformRuleCacheKey,
+    DenseTreeTransformOperations, OutputAxisOrder, TensorContractFusionExecutionContext,
+    TensorContractSpec, TreeTransformRuleCacheKey,
 };
 
-#[path = "../../tests/support/counting_alloc.rs"]
-mod counting_alloc;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+static COUNTING: AtomicBool = AtomicBool::new(false);
+static CALLS: AtomicU64 = AtomicU64::new(0);
+static BYTES: AtomicU64 = AtomicU64::new(0);
+
+struct ProcessWide;
+
+fn count(size: usize) {
+    if COUNTING.load(Ordering::Relaxed) {
+        CALLS.fetch_add(1, Ordering::Relaxed);
+        BYTES.fetch_add(size as u64, Ordering::Relaxed);
+    }
+}
+
+// SAFETY: forwards every call to `System` unchanged; the counters are atomics.
+unsafe impl GlobalAlloc for ProcessWide {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        count(layout.size());
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        count(layout.size());
+        unsafe { System.alloc_zeroed(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        count(new_size);
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
 
 #[global_allocator]
-static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
+static ALLOCATOR: ProcessWide = ProcessWide;
+
+/// Upper bound on a warmed replay's allocations, all the BLAS backend's per
+/// grouped submission (#2013): Tenferro's grouped-GEMM validation
+/// (`tenferro-tensor 0.7.1 src/backend.rs:670`, `validate_grouped_gemm`) and
+/// the BLAS grouped dispatch's batch list (`tenferro-cpu 0.7.1
+/// src/gemm/mod.rs:1630`, `grouped_gemm_blas_typed`). TeNeT itself allocates
+/// nothing.
+const WARM_REPLAY_CALL_BUDGET: u64 = 2;
+
+/// Allocation calls and bytes made by `f` on all threads.
+fn process_wide<T>(f: impl FnOnce() -> T) -> (T, u64, u64) {
+    CALLS.store(0, Ordering::SeqCst);
+    BYTES.store(0, Ordering::SeqCst);
+    COUNTING.store(true, Ordering::SeqCst);
+    let out = f();
+    COUNTING.store(false, Ordering::SeqCst);
+    (
+        out,
+        CALLS.load(Ordering::SeqCst),
+        BYTES.load(Ordering::SeqCst),
+    )
+}
 
 const WORKLOADS: [([usize; 2], [usize; 2], [usize; 4]); 3] = [
     ([2, 3], [0, 1], [0, 1, 2, 3]),
@@ -40,7 +99,7 @@ fn product_sectors() -> Vec<SectorId> {
         .collect()
 }
 
-fn assert_replay_allocates_nothing<R>(rule: &R, sectors: &[SectorId])
+fn assert_replay_allocates_only_the_backend_dispatch<R>(rule: &R, sectors: &[SectorId])
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
     R::Key: Clone + Eq + std::hash::Hash,
@@ -107,7 +166,12 @@ where
             dst_space,
         )
         .unwrap();
-        let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
+        // One dense thread: a multi-threaded pool's workers allocate while
+        // starting up, racing the process-wide count.
+        let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::new(
+            DenseTreeTransformOperations::with_threads(1).unwrap(),
+            DenseTreeTransformOperations::with_threads(1).unwrap(),
+        );
         context
             .tensorcontract_fusion_into(rule, &mut expected, &lhs, &rhs, axes(), 1.0, 0.0)
             .unwrap();
@@ -128,32 +192,35 @@ where
                 )
                 .unwrap();
         }
-        counting_alloc::start();
-        let result = context.execute_prepared_tensorcontract_fusion(
-            &prepared,
-            rule,
-            &mut actual,
-            &lhs,
-            &rhs,
-            1.0,
-            0.0,
-        );
-        let allocs = counting_alloc::stop();
+        let (result, calls, bytes) = process_wide(|| {
+            context.execute_prepared_tensorcontract_fusion(
+                &prepared,
+                rule,
+                &mut actual,
+                &lhs,
+                &rhs,
+                1.0,
+                0.0,
+            )
+        });
         result.unwrap();
 
         assert_eq!(actual.data(), expected.data());
-        assert_eq!(allocs.calls, 0, "axes={lhs_axes:?}/{output_axes:?}");
+        assert!(
+            calls <= WARM_REPLAY_CALL_BUDGET,
+            "axes={lhs_axes:?}/{output_axes:?}: {calls} calls, {bytes} bytes"
+        );
     }
 }
 
 #[test]
-fn warmed_prepared_rank4_fusion_replay_allocates_nothing() {
-    assert_replay_allocates_nothing(&U1FusionRule, &u1_sectors());
-    assert_replay_allocates_nothing(
+fn warmed_prepared_rank4_fusion_replay_allocates_only_the_backend_dispatch() {
+    assert_replay_allocates_only_the_backend_dispatch(&U1FusionRule, &u1_sectors());
+    assert_replay_allocates_only_the_backend_dispatch(
         &FermionParityFusionRule,
         &[SectorId::new(0), SectorId::new(1)],
     );
-    assert_replay_allocates_nothing(
+    assert_replay_allocates_only_the_backend_dispatch(
         &tenet_core::SU2FusionRule,
         &[
             SU2Irrep::from_twice_spin(0).sector_id(),
@@ -161,7 +228,7 @@ fn warmed_prepared_rank4_fusion_replay_allocates_nothing() {
             SU2Irrep::from_twice_spin(2).sector_id(),
         ],
     );
-    assert_replay_allocates_nothing(
+    assert_replay_allocates_only_the_backend_dispatch(
         &ProductFusionRule::<U1FusionRule, FermionParityFusionRule>::new(
             U1FusionRule,
             FermionParityFusionRule,

@@ -1,6 +1,6 @@
 //! Standalone eager control for #1662. This file also compiles unchanged at
 //! TeNeT main e887fb14. Run with `cargo test -p tenet-rs --release
-//! --no-default-features --features cuda,cpu-faer --test
+//! --no-default-features --features cuda,blas-openblas --test
 //! typed_cuda_eager_batch_baseline -- --ignored --nocapture --test-threads=1`.
 //! Host elapsed times do not include an explicit device synchronization.
 #![cfg(feature = "cuda")]
@@ -28,8 +28,8 @@ fn eager_c1_c2_per_member_baseline() {
     let runtime = Runtime::builder()
         .cuda(0)
         .dense_threads(1)
-        .gemm_backend(LinalgBackend::Faer)
-        .linalg_backend(LinalgBackend::Faer)
+        .gemm_backend(LinalgBackend::Blas)
+        .linalg_backend(LinalgBackend::Blas)
         .build()
         .unwrap();
     for (case, _) in candidate_core_probes::<_, f64>(&runtime, &su2()) {

@@ -9,7 +9,6 @@
 //! strides before kernel execution.
 
 #[cfg(not(any(
-    feature = "cpu-faer",
     feature = "cpu-blas",
     feature = "blas-accelerate",
     feature = "blas-openblas",
@@ -17,7 +16,7 @@
     feature = "provider-inject"
 )))]
 compile_error!(
-    "tenet-operations requires a host execution backend; enable cpu-faer, cpu-blas, a blas-* provider, or provider-inject (cuda still requires host replay)"
+    "tenet-operations requires a host execution backend; enable cpu-blas, a blas-* provider, or provider-inject (cuda still requires host replay)"
 );
 
 pub mod axis;

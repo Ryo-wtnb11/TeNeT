@@ -12,8 +12,7 @@ name = "tenet_network"
 path = "src/lib.rs"
 
 [features]
-default = ["cpu-faer"]
-cpu-faer = ["tenet/cpu-faer"]
+default = ["blas-openblas"]
 cpu-blas = ["tenet/cpu-blas"]
 blas-accelerate = ["tenet/blas-accelerate"]
 blas-openblas = ["tenet/blas-openblas"]

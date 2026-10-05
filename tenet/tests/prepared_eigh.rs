@@ -97,13 +97,12 @@ where
             eager_d.materialize().unwrap().dense_data().unwrap(),
             terms,
         );
-        assert!(
-            output.spectra[member]
-                == input
-                    .eigh_vals(&codomain_axes(input), &domain_axes(input))
-                    .unwrap(),
-            "{what}: spectra"
-        );
+        // Against eager `eigh_full`'s `d`, which runs the same eigenvector
+        // driver: `eigh_vals` uses LAPACK's values-only driver, whose last
+        // bits may differ (#2013).
+        let mut eager_spectra = eager_d.diagview().unwrap();
+        eager_spectra.sort_by(|left, right| left.sector.cmp(&right.sector));
+        assert!(output.spectra[member] == eager_spectra, "{what}: spectra");
         check_member(&what, input, &d, &v, (&eager_d, &eager_v), f64::EPSILON);
     }
 }

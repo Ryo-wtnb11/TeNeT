@@ -34,24 +34,18 @@ Existing execution seams include:
 
 State today:
 
-- The CPU dense provider is selectable at the builder with two independent
-  knobs:
-  - `Runtime::builder().linalg_backend(LinalgBackend::Faer | LinalgBackend::Blas)`
-    picks the provider for the **factorizations** (SVD / QR / eigh / eig / inv /
-    exp — LAPACK-style work).
-  - `Runtime::builder().gemm_backend(LinalgBackend::Faer | LinalgBackend::Blas)`
-    picks the provider for the **contraction GEMM** (`compose` / `contract` and
-    recoupling replays — BLAS-style work). Independent of `linalg_backend`.
+- The CPU dense provider is BLAS/LAPACK only (#2013). Which library is a
+  compile-time choice: the default feature `blas-openblas` links the system
+  OpenBLAS; `--no-default-features --features blas-accelerate` (or `blas-mkl`,
+  `provider-inject`) selects exactly one other. Tenferro rejects two providers
+  at compile time.
+  - `Runtime::builder().linalg_backend(LinalgBackend::Blas)` and
+    `.gemm_backend(LinalgBackend::Blas)` select the built-in provider for the
+    **factorizations** and the **contraction GEMM** independently; unset uses
+    the same compiled provider.
   - `Runtime::builder().with_dense_executor(Box<dyn DenseExecutor + Send>)`
     injects a custom factorization backend (takes precedence over
-    `linalg_backend`). An unset built-in kind follows Tenferro's resolved
-    compiled provider default: BLAS when its CPU build enables `cpu-blas`,
-    otherwise faer.
-  - `Blas` uses the system BLAS/LAPACK linked via a `blas-*` cargo feature and
-    fails at `build()` if none was compiled in. Runtime vs compile-time:
-    OpenBLAS / MKL / Accelerate can't be linked simultaneously, so *which* BLAS
-    is a compile-time `blas-*` feature; at runtime you choose faer vs the one
-    linked BLAS. (MKL, being both BLAS and LAPACK, backs both knobs at once.)
+    `linalg_backend`).
 - Device selection is exposed the same way (`Runtime::builder().cuda`).
 
 ## Rules

@@ -12,16 +12,11 @@ name = "tenet_dense"
 path = "src/lib.rs"
 
 [features]
-default = ["cpu-faer"]
+default = ["blas-openblas"]
 tenferro = [
     "dep:tenferro-cpu",
     "dep:tenferro-linalg",
     "dep:tenferro-tensor",
-]
-cpu-faer = [
-    "tenferro",
-    "tenferro-cpu/cpu-faer",
-    "tenferro-linalg/cpu-faer",
 ]
 cpu-blas-core = [
     "tenferro",

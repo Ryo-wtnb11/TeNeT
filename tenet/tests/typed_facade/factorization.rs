@@ -399,6 +399,23 @@ fn left_and_right_null_spaces_annihilate_the_source() {
         assert_same_legs(&right.domain(), &typed.domain());
         assert!(is_isometric!(left, 1e-12));
         assert!(is_isometric!(right.adjoint().unwrap(), 1e-12));
+        // The annihilation residual is a backward error, so its oracle scales
+        // with the data: eps * max(m, n) * sigma_max (the rank cutoff). An
+        // absolute 1e-12 is the wrong oracle for this fixture's sigma_max of
+        // about 7e3; it held on faer only by rounding luck (#2013).
+        let total = |legs: Vec<GradedSpace<_>>| {
+            legs.iter()
+                .map(|leg| leg.degeneracies().iter().sum::<usize>())
+                .product::<usize>()
+        };
+        let sigma_max = typed
+            .svd_vals(&codomain_axes(&typed), &domain_axes(&typed))
+            .unwrap()
+            .iter()
+            .flat_map(|spectrum| spectrum.values.iter().copied())
+            .fold(0.0f64, f64::max);
+        let bound =
+            f64::EPSILON * total(typed.codomain()).max(total(typed.domain())) as f64 * sigma_max;
         assert!(left
             .adjoint()
             .unwrap()
@@ -407,14 +424,14 @@ fn left_and_right_null_spaces_annihilate_the_source() {
             .dense_data()
             .unwrap()
             .iter()
-            .all(|value| value.abs() < 1e-12));
+            .all(|value| value.abs() <= bound));
         assert!(typed
             .compose(&right.adjoint().unwrap())
             .unwrap()
             .dense_data()
             .unwrap()
             .iter()
-            .all(|value| value.abs() < 1e-12));
+            .all(|value| value.abs() <= bound));
 
         let left_null_dimensions = left.domain()[0].degeneracies().to_vec();
         let right_null_dimensions = right.codomain()[0].degeneracies().to_vec();
@@ -598,8 +615,14 @@ fn truncated_eigh_reports_the_discarded_eigenvalue_norm() {
     let typed = z2_hermitian(&runtime);
     let truncation = Truncation::rank(3);
 
+    // From the untruncated `eigh_full` `d`, the same eigenvector driver the
+    // truncation reads: `eigh_vals` runs LAPACK's values-only driver, whose
+    // last bits may differ (#2013).
     let mut magnitudes: Vec<_> = typed
-        .eigh_vals(&[0], &[1])
+        .eigh_full(&[0], &[1])
+        .unwrap()
+        .d
+        .diagview()
         .unwrap()
         .into_iter()
         .flat_map(|entry| entry.values)

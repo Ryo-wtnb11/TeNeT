@@ -569,9 +569,9 @@ mod tests {
     }
 
     impl CountingDense {
-        fn one_thread_faer() -> Self {
+        fn one_thread_blas() -> Self {
             Self {
-                inner: DefaultDenseExecutor::with_threads_and_kind(1, CpuBackendKind::Faer)
+                inner: DefaultDenseExecutor::with_threads_and_kind(1, CpuBackendKind::Blas)
                     .unwrap(),
                 submissions: 0,
                 jobs: 0,
@@ -931,8 +931,8 @@ mod tests {
             let mut ordinary_destination = batch_destination.clone();
             let mut batch_workspace = TreeTransformWorkspace::<f64>::default();
             let mut ordinary_workspace = TreeTransformWorkspace::<f64>::default();
-            let mut batch_dense = CountingDense::one_thread_faer();
-            let mut ordinary_dense = CountingDense::one_thread_faer();
+            let mut batch_dense = CountingDense::one_thread_blas();
+            let mut ordinary_dense = CountingDense::one_thread_blas();
             let mut batch = || {
                 tree_transform_members_overwrite_raw(
                     &mut StridedHostKernelAdapter::default(),

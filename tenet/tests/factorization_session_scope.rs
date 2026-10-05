@@ -11,7 +11,7 @@
 //! delta means something only when no unrelated test opens a session in the
 //! same process. The mutex serializes the readers inside this binary.
 
-#![cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#![cfg(not(feature = "provider-inject"))]
 
 use std::sync::Mutex;
 

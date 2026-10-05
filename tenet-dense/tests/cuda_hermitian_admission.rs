@@ -9,7 +9,7 @@
 //! [`cuda_transfer_stats`] counters.
 //!
 //! Run with `cargo test -p tenet-dense --no-default-features --features \
-//! cuda,cpu-faer --test cuda_hermitian_admission -- --ignored` on a CUDA host.
+//! cuda,blas-openblas --test cuda_hermitian_admission -- --ignored` on a CUDA host.
 
 #![cfg(feature = "cuda")]
 

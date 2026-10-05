@@ -1,7 +1,7 @@
 //! Real-device gates for #1278: building a CUDA `Runtime` pays the tenferro
 //! backend library initialization, so no user operation does.
 //!
-//! Run with `cargo test -p tenet --features cuda,cpu-faer --test cuda_warm_up \
+//! Run with `cargo test -p tenet --features cuda,blas-openblas --test cuda_warm_up \
 //! -- --ignored` on a CUDA host. These assertions read the process-wide
 //! [`tenet::expert::cuda_transfer_stats`] counters, which is why they live in
 //! their own test binary: another test submitting device work in the same

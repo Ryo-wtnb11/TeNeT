@@ -25,7 +25,7 @@
 //! representable in `f32` and no fixture value is itself a rounding of the
 //! double-precision one.
 //!
-//! Run with `cargo test -p tenet-rs --features cuda,cpu-faer --test \
+//! Run with `cargo test -p tenet-rs --features cuda,blas-openblas --test \
 //! typed_cuda_single_precision -- --ignored --test-threads=1` on a CUDA host.
 //! The counter gate reads the process-wide transfer counters, hence
 //! `--test-threads=1`.

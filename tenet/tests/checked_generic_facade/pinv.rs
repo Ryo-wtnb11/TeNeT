@@ -388,6 +388,20 @@ fn checked_generic_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
                 .map(|_| ()),
         ),
     ] {
+        // Pinned on OpenBLAS; on Accelerate only the typed-error class, as in
+        // `non_finite_spectra.rs` (#1986, #2013).
+        if cfg!(feature = "blas-accelerate") {
+            assert!(
+                matches!(
+                    result,
+                    Err(GenericTensorError::Facade(
+                        tenet::typed::Error::Operation(_) | tenet::typed::Error::InvalidArgument(_)
+                    ))
+                ),
+                "{case}: expected a typed rejection, got {result:?}"
+            );
+            continue;
+        }
         match result {
             Err(GenericTensorError::Facade(tenet::typed::Error::Operation(error))) => {
                 assert!(
@@ -571,11 +585,41 @@ fn checked_compact_diagonal_pinv_nonfinite_keeps_dense_error() {
             }],
         )
         .unwrap();
-        assert!(matches!(
-            input.pinv(&[0], &[1], 0.5),
-            Err(GenericTensorError::Facade(tenet::typed::Error::Operation(error)))
-                if matches!(*error, tenet::typed::OperationError::Dense(_))
-        ));
+        let result = input.pinv(&[0], &[1], 0.5);
+        // The compact pinv densifies (#1800) and takes the dense route's
+        // error. Pinned on OpenBLAS: its LAPACK rejects a NaN input, while an
+        // infinite one yields nonfinite singular values that TeNeT's finite
+        // check refuses. On Accelerate only the typed-error class is asserted
+        // until #1986 makes this provider-independent (#2013).
+        if cfg!(feature = "blas-accelerate") {
+            assert!(
+                matches!(
+                    result,
+                    Err(GenericTensorError::Facade(
+                        tenet::typed::Error::Operation(_) | tenet::typed::Error::InvalidArgument(_)
+                    ))
+                ),
+                "{value}: {result:?}"
+            );
+        } else if value.is_nan() {
+            assert!(
+                matches!(
+                    &result,
+                    Err(GenericTensorError::Facade(tenet::typed::Error::Operation(error)))
+                        if matches!(**error, tenet::typed::OperationError::Dense(_))
+                ),
+                "{value}: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    &result,
+                    Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message)))
+                        if message == "pinv singular values must be finite"
+                ),
+                "{value}: {result:?}"
+            );
+        }
     }
 }
 
@@ -697,7 +741,21 @@ fn checked_compact_diagonal_pinv_precision_limits_match_dense_oracle() {
             "tiny f32 {value}: direct={direct:?}, dense={dense:?}"
         );
         if let (Ok(direct), Ok(dense)) = (direct, dense) {
-            assert_eq!(direct.diagview().unwrap(), dense.diagview().unwrap());
+            // By bits: the subnormal edge yields NaN entries on both routes,
+            // and NaN != NaN (#2013).
+            let bits = |t: &TensorMap<_, f32>| {
+                t.diagview()
+                    .unwrap()
+                    .into_iter()
+                    .map(|entry| {
+                        (
+                            entry.sector,
+                            entry.values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(bits(&direct), bits(&dense));
             if value == f32::from_bits(1) {
                 assert!(direct.dense_data().is_ok());
             }
@@ -728,7 +786,20 @@ fn checked_compact_diagonal_pinv_precision_limits_match_dense_oracle() {
             "tiny f64 {value}: direct={direct:?}, dense={dense:?}"
         );
         if let (Ok(direct), Ok(dense)) = (direct, dense) {
-            assert_eq!(direct.diagview().unwrap(), dense.diagview().unwrap());
+            // By bits, as for f32 above.
+            let bits = |t: &TensorMap<_, f64>| {
+                t.diagview()
+                    .unwrap()
+                    .into_iter()
+                    .map(|entry| {
+                        (
+                            entry.sector,
+                            entry.values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(bits(&direct), bits(&dense));
             if value == f64::from_bits(1) {
                 assert!(direct.dense_data().is_ok());
             }
@@ -760,7 +831,24 @@ fn checked_compact_diagonal_pinv_precision_limits_match_dense_oracle() {
         .pinv(&[0], &[1], 0.0)
         .unwrap();
     assert!(direct.dense_data().is_ok());
-    assert_eq!(direct.diagview().unwrap(), dense.diagview().unwrap());
+    // By bits, as for the real cases above.
+    let bits = |t: &TensorMap<_, Complex32>| {
+        t.diagview()
+            .unwrap()
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry.sector,
+                    entry
+                        .values
+                        .iter()
+                        .map(|v| (v.re.to_bits(), v.im.to_bits()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bits(&direct), bits(&dense));
 }
 
 #[test]

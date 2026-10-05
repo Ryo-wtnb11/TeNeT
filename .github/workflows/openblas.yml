@@ -41,6 +41,8 @@ jobs:
       - name: Record source revisions
         run: |
           git -C tenet log -1 --format='TeNeT %H'
+      - name: Install OpenBLAS
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

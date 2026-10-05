@@ -23,7 +23,7 @@ static ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAl
 fn main() {
     eprintln!(
         "cuda_operation_matrix measures the CUDA device path and is unsupported without the \
-         `cuda` feature; rebuild with `--no-default-features --features cuda,cpu-faer`"
+         `cuda` feature; rebuild with `--no-default-features --features cuda,blas-openblas`"
     );
     std::process::exit(2);
 }

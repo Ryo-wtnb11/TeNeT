@@ -23,7 +23,7 @@
 //! actually moved, or that the transform is not a bare reordering, which is
 //! what proves a coefficient other than `1` or a recoupling block took part.
 //!
-//! Run with `cargo test -p tenet-rs --features cuda,cpu-faer --test \
+//! Run with `cargo test -p tenet-rs --features cuda,blas-openblas --test \
 //! typed_cuda_transform -- --ignored` on a CUDA host.
 
 #![cfg(feature = "cuda")]

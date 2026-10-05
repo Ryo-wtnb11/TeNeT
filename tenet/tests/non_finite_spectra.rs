@@ -228,6 +228,20 @@ fn dense_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
             complex.adjoint().unwrap().pinv(&[0], &[1], 0.1).map(|_| ()),
         ),
     ] {
+        // Pinned on OpenBLAS, whose LAPACK rejects the NaN input. Accelerate
+        // returns NaN singular values instead, which TeNeT's own finite check
+        // then refuses; there only the typed-error class is asserted until
+        // #1986 makes the rejection provider-independent (#2013).
+        if cfg!(feature = "blas-accelerate") {
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::Operation(_)) | Err(Error::InvalidArgument(_))
+                ),
+                "{case}: expected a typed rejection, got {result:?}"
+            );
+            continue;
+        }
         match result {
             Err(Error::Operation(error)) => {
                 assert!(

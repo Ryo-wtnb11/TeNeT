@@ -19,7 +19,7 @@
 //! Every fermionic fixture asserts non-vacuity: at least one block really is
 //! negated, so a device path that copied its source would fail.
 //!
-//! Run with `cargo test -p tenet-rs --features cuda,cpu-faer --test \
+//! Run with `cargo test -p tenet-rs --features cuda,blas-openblas --test \
 //! typed_cuda_twist -- --ignored` on a CUDA host.
 
 #![cfg(feature = "cuda")]

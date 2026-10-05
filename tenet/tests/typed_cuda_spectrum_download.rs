@@ -13,7 +13,7 @@
 //! This file holds a single test because it reads the process-wide
 //! [`cuda_transfer_stats`] counters.
 //!
-//! Run with `cargo test -p tenet-rs --features cuda,cpu-faer --test \
+//! Run with `cargo test -p tenet-rs --features cuda,blas-openblas --test \
 //! typed_cuda_spectrum_download -- --ignored` on a CUDA host.
 
 #![cfg(feature = "cuda")]

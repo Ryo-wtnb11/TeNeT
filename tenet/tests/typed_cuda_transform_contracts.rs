@@ -9,7 +9,7 @@
 //! a device-less Runtime reporting no device state and still clearing its
 //! store — is in the ungated `typed_transform_host_side.rs`.
 //!
-//! Run with `cargo test -p tenet-rs --features cuda,cpu-faer --test \
+//! Run with `cargo test -p tenet-rs --features cuda,blas-openblas --test \
 //! typed_cuda_transform_contracts -- --ignored`.
 
 #![cfg(feature = "cuda")]

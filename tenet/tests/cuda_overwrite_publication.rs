@@ -31,7 +31,7 @@
 //! every write and read runs in enqueue order (0/40 for both after it).
 //!
 //! Run with `cargo test --release -p tenet-rs --no-default-features --features
-//! cuda,cpu-faer --test cuda_overwrite_publication -- --ignored --nocapture
+//! cuda,blas-openblas --test cuda_overwrite_publication -- --ignored --nocapture
 //! --test-threads=1` on a CUDA host (release: the writes must still be in
 //! flight when the reader enqueues).
 

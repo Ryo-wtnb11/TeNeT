@@ -174,7 +174,7 @@ Run the full application with the same pure-Rust CPU backend used by the
 documented example:
 
 ```sh
-cargo run --release -p tenet-network --example itebd_heisenberg --no-default-features --features cpu-faer
+cargo run --release -p tenet-network --example itebd_heisenberg --no-default-features --features blas-openblas
 ```
 
 A stage line has this form (rates and times depend on the machine):

@@ -1533,15 +1533,13 @@ impl std::fmt::Debug for Runtime {
 /// [`RuntimeBuilder::linalg_backend`]. Backend choice changes performance
 /// only — results stay TensorKit-equivalent across providers.
 ///
-/// The *specific* BLAS/LAPACK behind [`LinalgBackend::Blas`] (OpenBLAS, MKL,
-/// Accelerate, or an injected provider) is a compile-time choice via the
-/// `blas-*` cargo features; at runtime you only pick faer vs the linked BLAS.
-/// Selecting `Blas` when no `cpu-blas`/`blas-*` provider was compiled in fails
-/// at [`RuntimeBuilder::build`].
+/// TeNeT's CPU provider is BLAS/LAPACK only (#2013). The specific library
+/// behind [`LinalgBackend::Blas`] is a compile-time choice: the default
+/// feature `blas-openblas` links the system OpenBLAS, and
+/// `--no-default-features --features blas-accelerate` (or `blas-mkl`,
+/// `provider-inject`) selects another.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinalgBackend {
-    /// Pure-Rust faer provider, available with the `cpu-faer` feature.
-    Faer,
     /// System BLAS/LAPACK linked through a `blas-*` cargo feature.
     Blas,
 }
@@ -1549,7 +1547,6 @@ pub enum LinalgBackend {
 impl LinalgBackend {
     fn to_kind(self) -> tenet_dense::CpuBackendKind {
         match self {
-            LinalgBackend::Faer => tenet_dense::CpuBackendKind::Faer,
             LinalgBackend::Blas => tenet_dense::CpuBackendKind::Blas,
         }
     }
@@ -1679,8 +1676,7 @@ impl RuntimeBuilder {
     /// Selects the CPU linear-algebra backend (SVD / QR / eigh / GEMM on the
     /// coupled-sector matrices) by injecting a [`crate::expert::DenseExecutor`].
     /// When no executor is injected, the selected built-in `linalg_backend` is
-    /// used; when it is unset, the provider follows Tenferro's resolved compiled
-    /// default: BLAS when its CPU build enables `cpu-blas`, otherwise faer. This
+    /// used; when it is unset, the compiled BLAS/LAPACK provider is used. This
     /// is the seam for a system BLAS/LAPACK or MKL backend: implement
     /// `DenseExecutor` and pass it here — no operator or decomposition code changes.
     ///
@@ -1696,18 +1692,15 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Selects a built-in CPU provider ([`LinalgBackend::Faer`] or
-    /// [`LinalgBackend::Blas`]) for the dense **factorizations** — SVD / QR /
-    /// eigh / eig / inv / exp (the LAPACK-style work). Unset uses Tenferro's
-    /// resolved compiled provider default: BLAS when its CPU build enables
-    /// `cpu-blas`, otherwise faer. The contraction GEMM (BLAS-style work) is
+    /// Selects the built-in CPU provider ([`LinalgBackend::Blas`]) for the
+    /// dense **factorizations** — SVD / QR / eigh / eig / inv / exp (the
+    /// LAPACK-style work). Unset uses the same compiled provider. The
+    /// contraction GEMM (BLAS-style work) is
     /// chosen separately with [`Self::gemm_backend`].
     ///
     /// This is the ergonomic counterpart to [`Self::with_dense_executor`] for
     /// the shipped providers; setting both makes [`Self::build`] fail with
     /// [`RuntimeConfigError::DenseExecutorWithLinalgBackend`].
-    /// Choosing [`LinalgBackend::Blas`] without a compiled `cpu-blas`/`blas-*`
-    /// provider fails in [`Self::build`].
     ///
     /// # Examples
     ///
@@ -1716,10 +1709,10 @@ impl RuntimeBuilder {
     /// use tenet::sector::{U1FusionRule, U1Irrep};
     /// use tenet::typed::{GradedSpace, LinalgBackend, Runtime, Svd, TensorMap};
     ///
-    /// // Explicit faer provider. Every tensor created from this runtime
-    /// // factorizes on the chosen backend — no per-call argument.
+    /// // Every tensor created from this runtime factorizes on the chosen
+    /// // backend — no per-call argument.
     /// let rt = Runtime::builder()
-    ///     .linalg_backend(LinalgBackend::Faer)
+    ///     .linalg_backend(LinalgBackend::Blas)
     ///     .build()?;
     /// let v = GradedSpace::try_new(
     ///     Arc::new(U1FusionRule),
@@ -1727,16 +1720,6 @@ impl RuntimeBuilder {
     /// )?;
     /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 7)?;
     /// let Svd { u: _u, s: _s, vh: _vh } = t.svd_compact(&[0, 1], &[2, 3])?;
-    ///
-    /// // Switch to the system BLAS/LAPACK linked via a `blas-*` cargo feature
-    /// // (OpenBLAS / MKL / Accelerate). Results are identical to faer up to
-    /// // floating-point rounding; only performance differs. Without a linked
-    /// // provider this returns an error, so return to the compiled default:
-    /// let rt = Runtime::builder()
-    ///     .linalg_backend(LinalgBackend::Blas)
-    ///     .build()
-    ///     .or_else(|_| Runtime::builder().build())?;
-    /// # let _ = rt;
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn linalg_backend(mut self, backend: LinalgBackend) -> Self {
@@ -1744,25 +1727,18 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Selects a built-in CPU provider ([`LinalgBackend::Faer`] or
-    /// [`LinalgBackend::Blas`]) for the coupled-block **contraction GEMM**
-    /// (`compose` / `contract` and the recoupling replays — the BLAS-style
-    /// work). Unset uses Tenferro's resolved compiled provider default: BLAS
-    /// when its CPU build enables `cpu-blas`, otherwise faer. Independent of
-    /// [`Self::linalg_backend`]: the
-    /// factorizations and the contraction GEMM can run on different providers
-    /// (e.g. faer GEMM with BLAS/LAPACK factorizations, or the reverse).
-    /// Choosing [`LinalgBackend::Blas`] without a compiled `cpu-blas`/`blas-*`
-    /// provider fails in [`Self::build`].
+    /// Selects the built-in CPU provider ([`LinalgBackend::Blas`]) for the
+    /// coupled-block **contraction GEMM** (`compose` / `contract` and the
+    /// recoupling replays — the BLAS-style work), independently of
+    /// [`Self::linalg_backend`]. Unset uses the same compiled provider.
     ///
     /// # Examples
     ///
     /// ```
     /// use tenet::typed::{LinalgBackend, Runtime};
     ///
-    /// // This explicitly selects faer, regardless of the compiled default.
     /// let rt = Runtime::builder()
-    ///     .gemm_backend(LinalgBackend::Faer)
+    ///     .gemm_backend(LinalgBackend::Blas)
     ///     .build()?;
     /// # let _ = rt;
     /// # Ok::<(), tenet::typed::Error>(())
@@ -1814,8 +1790,8 @@ impl RuntimeBuilder {
             None => tenet_dense::SharedCpuContext::with_available_parallelism(),
         }
         .map_err(tenet_tensors::OperationError::Dense)?;
-        // Injected backend wins; otherwise build the selected provider (faer by
-        // default) on the shared context.
+        // Injected backend wins; otherwise build the BLAS/LAPACK provider on
+        // the shared context.
         let dense: Box<dyn tenet_dense::DenseExecutor + Send> = match self.dense_executor {
             Some(executor) => executor,
             None => Box::new(
@@ -2122,23 +2098,17 @@ mod tests {
         assert!(!std::ptr::eq(cuda_device_lock(7), cuda_device_lock(8)));
     }
 
-    // The default-feature graph includes faer. This control verifies that its
-    // explicit provider path constructs; the adapter's private route test pins
-    // the unset compiled-default selection separately.
+    // The explicit provider path constructs on every context; the adapter's
+    // private route test pins the unset compiled-default selection separately.
     #[test]
-    fn transform_ops_builds_for_every_faer_config() {
-        let faer = tenet_dense::CpuBackendKind::Faer;
+    fn transform_ops_builds_for_every_explicit_blas_config() {
+        let blas = tenet_dense::CpuBackendKind::Blas;
         let serial = tenet_dense::SharedCpuContext::with_threads(1).expect("serial context");
         let env = tenet_dense::SharedCpuContext::from_env();
         for ctx in [&serial, &env] {
             let ops = make_transform_ops(ctx, None).expect("default transform ops");
             assert!(ops.dense().shares_cpu_context(ctx));
-            // Explicit-kind arm: build must succeed; context sharing holds
-            // whenever the kind IS the compiled default (all-faer builds), but
-            // an explicit non-default kind keeps a private context (see
-            // `DefaultDenseExecutor::with_shared_context`), so no sharing
-            // assert here — it would flip on blas-featured builds.
-            let ops = make_transform_ops(ctx, Some(faer)).expect("faer transform ops");
+            let ops = make_transform_ops(ctx, Some(blas)).expect("blas transform ops");
             drop(ops);
         }
     }

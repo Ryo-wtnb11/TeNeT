@@ -28,7 +28,7 @@
 //! with one shared lock, which forces step 2 after step 3. The no-sync control
 //! keeps two contexts but skips step 2.
 //!
-//! Run with `cargo test -p tenet-dense --features cuda,cpu-faer --test \
+//! Run with `cargo test -p tenet-dense --features cuda,blas-openblas --test \
 //! cuda_multi_context_publication -- --ignored --nocapture --test-threads=1`.
 
 #![cfg(feature = "cuda")]

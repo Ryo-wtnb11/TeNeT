@@ -12,8 +12,7 @@ name = "tenet_tensors"
 path = "src/lib.rs"
 
 [features]
-default = ["cpu-faer"]
-cpu-faer = ["tenet-dense/cpu-faer", "tenet-operations/cpu-faer"]
+default = ["blas-openblas"]
 cpu-blas = ["tenet-dense/cpu-blas", "tenet-operations/cpu-blas"]
 blas-accelerate = ["tenet-dense/blas-accelerate", "tenet-operations/blas-accelerate"]
 blas-openblas = ["tenet-dense/blas-openblas", "tenet-operations/blas-openblas"]

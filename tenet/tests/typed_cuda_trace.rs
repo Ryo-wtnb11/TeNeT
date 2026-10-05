@@ -20,7 +20,7 @@
 //!
 //! The contract tests read the process-wide transfer counters, hence
 //! `--test-threads=1`. Run with `cargo test -p tenet-rs --no-default-features
-//! --features cuda,cpu-faer --test typed_cuda_trace -- --ignored
+//! --features cuda,blas-openblas --test typed_cuda_trace -- --ignored
 //! --test-threads=1` on a CUDA host.
 
 #![cfg(feature = "cuda")]

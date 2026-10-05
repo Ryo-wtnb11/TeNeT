@@ -310,10 +310,7 @@ fn diag_c64_from_real(values: &[f64]) -> Vec<Complex64> {
     }
     out
 }
-#[cfg(all(
-    not(feature = "provider-inject"),
-    any(feature = "cpu-faer", feature = "cpu-blas-core")
-))]
+#[cfg(all(not(feature = "provider-inject"), feature = "cpu-blas-core"))]
 fn assert_values_only_for_explicit_cpu_provider(kind: CpuBackendKind) {
     let mut executor = DefaultDenseExecutor::with_kind(kind).unwrap();
     let data = [2.0_f64, 0.0, 0.0, -1.0];

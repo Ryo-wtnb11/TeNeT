@@ -210,7 +210,7 @@ fn injected_executor_without_eig_reports_unsupported() {
 fn injected_executor_with_linalg_backend_is_a_typed_build_error() {
     let error = Runtime::builder()
         .with_dense_executor(Box::new(DefaultDenseExecutor::default()))
-        .linalg_backend(LinalgBackend::Faer)
+        .linalg_backend(LinalgBackend::Blas)
         .build()
         .unwrap_err();
     assert_eq!(
@@ -221,7 +221,7 @@ fn injected_executor_with_linalg_backend_is_a_typed_build_error() {
     // so it stays compatible with an injected executor.
     Runtime::builder()
         .with_dense_executor(Box::new(DefaultDenseExecutor::default()))
-        .gemm_backend(LinalgBackend::Faer)
+        .gemm_backend(LinalgBackend::Blas)
         .build()
         .unwrap();
 }

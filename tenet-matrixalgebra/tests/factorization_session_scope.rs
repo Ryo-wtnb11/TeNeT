@@ -15,8 +15,6 @@
 //! matricization fallback. The checked-Generic entry has no direct route: it
 //! always factorizes the per-sector matrices of `generic_input_matricizations`.
 
-#![cfg(feature = "cpu-faer")]
-
 use std::sync::{Arc, Mutex};
 
 use tenet_core::{

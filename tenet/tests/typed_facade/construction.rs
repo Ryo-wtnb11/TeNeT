@@ -495,7 +495,7 @@ fn rand_and_isomorphism_build_on_an_external_provider() {
     let f: TensorMap<ExternalZ3, f64> =
         TensorMap::isomorphism(&runtime, [&leg, &dual], [&dual, &leg]).unwrap();
     let roundtrip = f.adjoint().unwrap().compose(&f).unwrap();
-    // Explicit `D`: under cuda,cpu-faer serde_json adds a `PartialEq` impl
+    // Explicit `D`: under cuda,blas-openblas serde_json adds a `PartialEq` impl
     // that makes the `assert_eq!` unable to pin `D` on its own (E0283).
     let id: TensorMap<ExternalZ3, f64> =
         TensorMap::isomorphism(&runtime, [&dual, &leg], [&dual, &leg]).unwrap();
@@ -517,7 +517,7 @@ fn typed_isomorphism_satisfies_the_identity_law_on_a_builtin_rule() {
     let f: TensorMap<tenet::sector::U1FusionRule, f64> =
         TensorMap::isomorphism(&runtime, [&dual, &leg], [&leg, &dual]).unwrap();
     let roundtrip = f.adjoint().unwrap().compose(&f).unwrap();
-    // Explicit `D` for the cuda,cpu-faer feature set (see the ExternalZ3
+    // Explicit `D` for the cuda,blas-openblas feature set (see the ExternalZ3
     // identity-law test above).
     let id: TensorMap<tenet::sector::U1FusionRule, f64> =
         TensorMap::isomorphism(&runtime, [&leg, &dual], [&leg, &dual]).unwrap();
@@ -553,7 +553,7 @@ fn typed_isometry_embeds_and_satisfies_the_identity_law() {
     let w: TensorMap<tenet::sector::U1FusionRule, f64> =
         TensorMap::isometry(&runtime, [&big], [&small]).unwrap();
     let roundtrip = w.adjoint().unwrap().compose(&w).unwrap();
-    // Explicit `D` for the cuda,cpu-faer feature set (see the ExternalZ3
+    // Explicit `D` for the cuda,blas-openblas feature set (see the ExternalZ3
     // identity-law test above).
     let id: TensorMap<tenet::sector::U1FusionRule, f64> =
         TensorMap::isomorphism(&runtime, [&small], [&small]).unwrap();
@@ -812,7 +812,7 @@ fn typed_su2_isomorphism_satisfies_the_identity_law() {
     let f: TensorMap<ExternalSu2, f64> =
         TensorMap::isomorphism(&runtime, [&leg, &leg], [&leg, &leg]).unwrap();
     let roundtrip = f.adjoint().unwrap().compose(&f).unwrap();
-    // Explicit `D` for the cuda,cpu-faer feature set (see the ExternalZ3
+    // Explicit `D` for the cuda,blas-openblas feature set (see the ExternalZ3
     // identity-law test above).
     let id: TensorMap<ExternalSu2, f64> =
         TensorMap::isomorphism(&runtime, [&leg, &leg], [&leg, &leg]).unwrap();

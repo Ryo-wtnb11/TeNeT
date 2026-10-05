@@ -1079,16 +1079,27 @@ fn z2_spectrum_fixture(
         ],
     )
     .unwrap();
-    // A constant block is rank one, so all but one singular value per sector is
-    // zero — the positive *semi*definite fixture `isposdef` must still reject.
-    let source = TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |sectors, indices| {
-        if rank_deficient {
-            1.0
-        } else {
-            typed_fill_value(sectors, indices)
-        }
-    })
-    .unwrap();
+    if rank_deficient {
+        // Positive *semi*definite, which `isposdef` must still reject. Exact
+        // zeros are built directly: a rank-one SVD returns zeros only up to
+        // the provider's rounding (#2013).
+        return TensorMap::diagonal(
+            runtime,
+            &leg,
+            [
+                tenet::typed::SectorSpectrum {
+                    sector: tenet::sector::Z2Irrep::EVEN,
+                    values: vec![2.0, 0.0],
+                },
+                tenet::typed::SectorSpectrum {
+                    sector: tenet::sector::Z2Irrep::ODD,
+                    values: vec![3.0, 0.0, 0.0],
+                },
+            ],
+        )
+        .unwrap();
+    }
+    let source = TensorMap::from_subblock_fn(runtime, [&leg], [&leg], typed_fill_value).unwrap();
     source.svd_compact(&[0], &[1]).unwrap().s
 }
 

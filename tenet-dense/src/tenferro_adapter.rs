@@ -77,36 +77,20 @@ fn note_backend_admission() {
     }
 }
 
-#[cfg(all(
-    test,
-    any(feature = "cpu-faer", feature = "cpu-blas-core"),
-    not(feature = "provider-inject")
-))]
+#[cfg(all(test, feature = "cpu-blas-core", not(feature = "provider-inject")))]
 use std::cell::RefCell;
 
-#[cfg(all(
-    test,
-    any(feature = "cpu-faer", feature = "cpu-blas-core"),
-    not(feature = "provider-inject")
-))]
+#[cfg(all(test, feature = "cpu-blas-core", not(feature = "provider-inject")))]
 thread_local! {
     static OWNED_FULL_SVD_INPUT_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
-#[cfg(all(
-    test,
-    any(feature = "cpu-faer", feature = "cpu-blas-core"),
-    not(feature = "provider-inject")
-))]
+#[cfg(all(test, feature = "cpu-blas-core", not(feature = "provider-inject")))]
 pub(crate) fn reset_owned_full_svd_input_pointers() {
     OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| pointers.borrow_mut().clear());
 }
 
-#[cfg(all(
-    test,
-    any(feature = "cpu-faer", feature = "cpu-blas-core"),
-    not(feature = "provider-inject")
-))]
+#[cfg(all(test, feature = "cpu-blas-core", not(feature = "provider-inject")))]
 pub(crate) fn owned_full_svd_input_pointers() -> Vec<usize> {
     OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| pointers.borrow().clone())
 }
@@ -248,18 +232,15 @@ impl DefaultDenseExecutor {
 
     pub fn with_threads(threads: usize) -> Result<Self, DenseError> {
         // `.into()`: since tenferro #1376 the BLAS-provider builds of these
-        // constructors return `CpuBackendError`, while faer builds return the
-        // crate `Error`; `Into` is identity on the latter, so one spelling
-        // compiles under every provider feature.
+        // constructors return `CpuBackendError`.
         CpuBackend::with_threads(threads)
             .map(Self::from_backend)
             .map_err(|err| tenferro_error("CpuBackend::with_threads", err.into()))
     }
 
-    /// Builds an executor on a specific CPU linear-algebra provider
-    /// ([`CpuBackendKind::Faer`] or [`CpuBackendKind::Blas`]). Fails if the
-    /// requested provider was not compiled in (e.g. `Blas` without a
-    /// `cpu-blas`/`blas-*` feature) — the check happens here, not at first use.
+    /// Builds an executor on a specific CPU linear-algebra provider. TeNeT
+    /// compiles only the BLAS/LAPACK provider ([`CpuBackendKind::Blas`]);
+    /// requesting [`CpuBackendKind::Faer`] fails here, not at first use.
     pub fn with_kind(kind: CpuBackendKind) -> Result<Self, DenseError> {
         CpuBackend::with_kind(kind)
             .map(Self::from_backend)
@@ -273,10 +254,9 @@ impl DefaultDenseExecutor {
             .map_err(|err| tenferro_error("CpuBackend::with_threads_and_kind", err.into()))
     }
 
-    /// Builds an executor with an optional provider kind. `None` uses Tenferro's
-    /// resolved compiled default — BLAS when its CPU build enables `cpu-blas`,
-    /// otherwise faer — on the runtime's shared [`SharedCpuContext`]; an
-    /// explicit nondefault kind uses a private provider context. Each executor
+    /// Builds an executor with an optional provider kind. `None` (or the
+    /// compiled BLAS provider) uses the runtime's shared [`SharedCpuContext`];
+    /// any other kind is not compiled in and fails. Each executor
     /// retains its own backend and buffer pool; this does not promise lock-free
     /// scratch access or a provider thread policy.
     pub fn with_shared_context(
@@ -284,11 +264,8 @@ impl DefaultDenseExecutor {
         kind: Option<CpuBackendKind>,
     ) -> Result<Self, DenseError> {
         match kind {
-            // ponytail: tenferro has no pub context+kind constructor, so the
-            // one non-default-kind combination (explicit Faer while a BLAS
-            // provider is compiled in) keeps a private context/pool exactly as
-            // before this seam existed (`shared_ctx` stays `None`). Lift when
-            // tenferro exposes `from_context` with a kind.
+            // A kind other than the compiled default is not compiled in;
+            // tenferro's constructor reports that error.
             Some(kind) if kind != CpuBackendKind::default_compiled() => {
                 Self::with_threads_and_kind(ctx.num_threads(), kind)
             }
@@ -1052,22 +1029,13 @@ impl Default for DefaultDenseExecutor {
 
 impl DenseExecutor for DefaultDenseExecutor {
     fn supports_svd_full(&self) -> bool {
-        #[cfg(all(
-            any(feature = "cpu-faer", feature = "cpu-blas-core"),
-            not(feature = "provider-inject")
-        ))]
+        #[cfg(all(feature = "cpu-blas-core", not(feature = "provider-inject")))]
         {
-            // Both compiled CPU providers factorize the full matrices
-            // natively, so neither reaches the `[U1 | I]` QR completion.
-            matches!(
-                self.backend.kind(),
-                CpuBackendKind::Faer | CpuBackendKind::Blas
-            )
+            // The compiled BLAS/LAPACK provider factorizes the full matrices
+            // natively, so it never reaches the `[U1 | I]` QR completion.
+            self.backend.kind() == CpuBackendKind::Blas
         }
-        #[cfg(any(
-            not(any(feature = "cpu-faer", feature = "cpu-blas-core")),
-            feature = "provider-inject"
-        ))]
+        #[cfg(any(not(feature = "cpu-blas-core"), feature = "provider-inject"))]
         {
             false
         }
@@ -1134,11 +1102,7 @@ impl DenseExecutor for DefaultDenseExecutor {
                 }
             }
             .map_err(|err| tenferro_error("svd_full_owned", err))?;
-            #[cfg(all(
-                test,
-                any(feature = "cpu-faer", feature = "cpu-blas-core"),
-                not(feature = "provider-inject")
-            ))]
+            #[cfg(all(test, feature = "cpu-blas-core", not(feature = "provider-inject")))]
             OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| {
                 fn slice_ptr<T: tenferro_tensor::TensorScalar>(
                     input: &tenferro_tensor::Tensor,
@@ -1807,11 +1771,7 @@ fn linalg_unavailable(op: &'static str) -> DenseError {
     }
 }
 
-#[cfg(all(
-    test,
-    any(feature = "cpu-faer", feature = "cpu-blas-core"),
-    not(feature = "provider-inject")
-))]
+#[cfg(all(test, feature = "cpu-blas-core", not(feature = "provider-inject")))]
 mod linalg_scope_tests {
     use super::*;
 
