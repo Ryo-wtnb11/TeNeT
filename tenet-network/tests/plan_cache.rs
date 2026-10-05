@@ -6,8 +6,12 @@ use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     clear_plan_cache, configure_plan_cache, load_plan_cache, plan_cache_stats, save_plan_cache,
-    tensor, PlanCacheConfig, ReplanPolicy,
+    PlanCacheConfig, ReplanPolicy,
 };
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{net, op};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -34,7 +38,9 @@ fn typed_static_cache_preserves_hit_clear_and_workspace_stats() {
     let space = space(provider, 3);
     let (a, b) = pair(&runtime, &space, 10);
 
-    let first = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let first = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a, &b])
+        .unwrap();
     let cold = plan_cache_stats(&runtime);
     assert_eq!((cold.misses, cold.hits, cold.entries), (1, 0, 1));
     assert_eq!(cold.topology_materializations, 1);
@@ -52,7 +58,9 @@ fn typed_static_cache_preserves_hit_clear_and_workspace_stats() {
         assert_eq!(cold.dynamic_aliases, 0);
     }
 
-    let second = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let second = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a, &b])
+        .unwrap();
     let warm = plan_cache_stats(&runtime);
     assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
     assert_eq!((warm.misses, warm.hits, warm.entries), (1, 1, 1));
@@ -70,34 +78,22 @@ fn parked_host_workspace_releases_provider_and_rebinds_exact_current_arc() {
     let first_weak = Arc::downgrade(&first_provider);
     let first_space = space(Arc::clone(&first_provider), 2);
     let (a, b) = pair(&runtime, &first_space, 20);
-    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
     drop((a, b, first_space, first_provider));
     assert!(first_weak.upgrade().is_none());
 
     let current_provider = Arc::new(U1FusionRule);
     let current_space = space(Arc::clone(&current_provider), 2);
     let (c, d) = pair(&runtime, &current_space, 30);
-    let output = tensor!([i; k] = c[i; j] * d[j; k]).unwrap();
+    let output = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&c, &d])
+        .unwrap();
     assert!(std::ptr::eq(output.provider(), current_provider.as_ref()));
     assert_eq!(plan_cache_stats(&runtime).workspace_reuses, 1);
-}
-
-#[test]
-fn trace_lowering_and_cache_release_provider_authority() {
-    let runtime = Runtime::builder().build().unwrap();
-    let provider = Arc::new(U1FusionRule);
-    let weak = Arc::downgrade(&provider);
-    let traced_space = space(Arc::clone(&provider), 2);
-    let tensor = TensorMap::<U1FusionRule, f64>::rand_with_seed(
-        &runtime,
-        [&traced_space],
-        [&traced_space],
-        35,
-    )
-    .unwrap();
-    drop(tensor!([] = tensor[i; i]).unwrap());
-    drop((tensor, traced_space, provider));
-    assert!(weak.upgrade().is_none());
 }
 
 #[test]
@@ -114,54 +110,19 @@ fn dimension_drift_replans_without_put_before_residency_recheck() {
     let small = space(Arc::clone(&provider), 2);
     let large = space(provider, 5);
     let (a, b) = pair(&runtime, &small, 40);
-    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
     let (c, d) = pair(&runtime, &large, 50);
-    drop(tensor!([i; k] = c[i; j] * d[j; k]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&c, &d])
+            .unwrap(),
+    );
     let stats = plan_cache_stats(&runtime);
     assert_eq!((stats.misses, stats.replans, stats.entries), (1, 1, 1));
-}
-
-#[test]
-fn drift_is_measured_from_the_planned_dims_across_call_sites() {
-    // Two `tensor!` sites with different written specs lower to one network
-    // topology: site B traces `l` away, leaving the same unsplit `[j, k]`
-    // operand as site A. B's static alias must remember the dims the shared
-    // plan was searched at (10), not the dims B first saw (15), so 28 is a
-    // 2.8x drift and replans under DriftFactor(2).
-    let runtime = Runtime::builder().build().unwrap();
-    configure_plan_cache(
-        &runtime,
-        PlanCacheConfig {
-            replan: ReplanPolicy::DriftFactor(2.0),
-            ..Default::default()
-        },
-    );
-    let provider = Arc::new(U1FusionRule);
-    let traced = space(Arc::clone(&provider), 2);
-    let site_a = |chi: usize, seed: u64| {
-        let (a, b) = pair(&runtime, &space(Arc::clone(&provider), chi), seed);
-        drop(tensor!([i; k] = a[i; j] * b[j, k]).unwrap());
-    };
-    let site_b = |chi: usize, seed: u64| {
-        let leg = space(Arc::clone(&provider), chi);
-        let a =
-            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&leg], [&leg], seed).unwrap();
-        let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(
-            &runtime,
-            [&leg, &traced],
-            [&leg, &traced],
-            seed + 1,
-        )
-        .unwrap();
-        drop(tensor!([i; k] = a[i; j] * t[j, l; k, l]).unwrap());
-    };
-    site_a(10, 45);
-    site_b(15, 46);
-    let stats = plan_cache_stats(&runtime);
-    assert_eq!((stats.misses, stats.hits, stats.replans), (1, 1, 0));
-    site_b(28, 48);
-    let stats = plan_cache_stats(&runtime);
-    assert_eq!((stats.misses, stats.hits, stats.replans), (1, 1, 1));
 }
 
 #[test]
@@ -176,8 +137,16 @@ fn disabled_cache_keeps_entries_and_counters_empty() {
     );
     let space = space(Arc::new(U1FusionRule), 2);
     let (a, b) = pair(&runtime, &space, 60);
-    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
-    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
     assert_eq!(plan_cache_stats(&runtime), Default::default());
 }
 
@@ -193,14 +162,38 @@ fn lru_hit_touches_entry_before_capacity_eviction() {
     );
     let space = space(Arc::new(U1FusionRule), 2);
     let (a, b) = pair(&runtime, &space, 70);
-    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
-    drop(tensor!([k; i] = a[i; j] * b[j; k]).unwrap());
-    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
-    drop(tensor!([k; i] = b[j; k] * a[i; j]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["k"], &["i"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
+    drop(
+        net(&[op(&["j"], &["k"]), op(&["i"], &["j"])], &["k"], &["i"])
+            .contract(&[&b, &a])
+            .unwrap(),
+    );
     let before = plan_cache_stats(&runtime);
-    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
     assert_eq!(plan_cache_stats(&runtime).hits, before.hits + 1);
-    drop(tensor!([k; i] = a[i; j] * b[j; k]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["k"], &["i"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
     let after = plan_cache_stats(&runtime);
     assert_eq!(after.misses, before.misses + 1);
     assert_eq!(after.entries, 2);
@@ -212,7 +205,9 @@ fn persisted_typed_order_roundtrips_into_a_fresh_runtime() {
     assert_eq!(load_plan_cache(&first, ""), 0);
     let first_space = space(Arc::new(U1FusionRule), 2);
     let (a, b) = pair(&first, &first_space, 80);
-    let expected = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let expected = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a, &b])
+        .unwrap();
     let saved = save_plan_cache(&first);
     assert!(saved.contains("TOPO "));
 
@@ -220,7 +215,9 @@ fn persisted_typed_order_roundtrips_into_a_fresh_runtime() {
     assert_eq!(load_plan_cache(&second, &saved), 1);
     let second_space = space(Arc::new(U1FusionRule), 2);
     let (c, d) = pair(&second, &second_space, 80);
-    let actual = tensor!([i; k] = c[i; j] * d[j; k]).unwrap();
+    let actual = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&c, &d])
+        .unwrap();
     assert_eq!(actual.dense_data().unwrap(), expected.dense_data().unwrap());
 }
 
@@ -230,7 +227,11 @@ fn clear_plan_cache_drops_persisted_orders_and_turns_persistence_off() {
     assert_eq!(load_plan_cache(&first, ""), 0);
     let first_space = space(Arc::new(U1FusionRule), 2);
     let (a, b) = pair(&first, &first_space, 82);
-    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
     let saved = save_plan_cache(&first);
 
     let runtime = Runtime::builder().build().unwrap();
@@ -243,7 +244,11 @@ fn clear_plan_cache_drops_persisted_orders_and_turns_persistence_off() {
     // the fresh order is not recorded either.
     let space = space(Arc::new(U1FusionRule), 2);
     let (c, d) = pair(&runtime, &space, 84);
-    drop(tensor!([i; k] = c[i; j] * d[j; k]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&c, &d])
+            .unwrap(),
+    );
     let stats = plan_cache_stats(&runtime);
     assert_eq!((stats.misses, stats.persisted_orders), (1, 0));
     assert!(!save_plan_cache(&runtime).contains("TOPO "));
@@ -262,9 +267,21 @@ fn persisted_orders_are_bounded_by_the_plan_cache_capacity() {
     assert_eq!(load_plan_cache(&runtime, ""), 0);
     let space = space(Arc::new(U1FusionRule), 2);
     let (a, b) = pair(&runtime, &space, 86);
-    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
-    drop(tensor!([k; i] = a[i; j] * b[j; k]).unwrap());
-    drop(tensor!([i, k] = a[i; j] * b[j; k]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["k"], &["i"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i", "k"], &[])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
     assert_eq!(plan_cache_stats(&runtime).persisted_orders, 2);
     let saved = save_plan_cache(&runtime);
     assert_eq!(saved.matches("TOPO ").count(), 2);
@@ -283,7 +300,7 @@ fn persisted_orders_are_bounded_by_the_plan_cache_capacity() {
 }
 
 #[test]
-fn concurrent_macro_calls_share_one_plan_and_bound_idle_pool() {
+fn concurrent_cached_calls_share_one_plan_and_bound_idle_pool() {
     let runtime = Runtime::builder().build().unwrap();
     let space = space(Arc::new(U1FusionRule), 8);
     let (a, b) = pair(&runtime, &space, 90);
@@ -307,15 +324,17 @@ fn concurrent_macro_calls_share_one_plan_and_bound_idle_pool() {
             let b = &b;
             handles.push(scope.spawn(move || {
                 barrier.wait();
-                tensor!([i; k] = a[i; j] * b[j; k]).unwrap()
+                net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+                    .contract(&[a, b])
+                    .unwrap()
             }));
         }
-        // The macro may group the length-8 contraction differently from the
+        // The cached plan may group the length-8 contraction differently from the
         // direct call, so each thread is compared to it under the tolerance
         // rule.
         for handle in handles {
             numerics::assert_slices_close(
-                "macro vs direct contract",
+                "cached vs direct contract",
                 handle.join().unwrap().dense_data().unwrap(),
                 expected.dense_data().unwrap(),
                 8,
@@ -341,11 +360,23 @@ fn a_metadata_rejection_leases_no_workspace_and_the_next_call_reuses_the_idle_on
     let other_space = space(Arc::new(U1FusionRule), 2);
     let (a, b) = pair(&runtime, &local_space, 100);
     let (_, foreign) = pair(&other, &other_space, 110);
-    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
     let warm = plan_cache_stats(&runtime);
-    assert!(tensor!([i; k] = a[i; j] * foreign[j; k]).is_err());
+    assert!(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &foreign])
+            .is_err()
+    );
     assert_eq!(plan_cache_stats(&runtime), warm);
-    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
     let stats = plan_cache_stats(&runtime);
     assert_eq!(stats.workspaces_created, 1);
     assert_eq!(stats.workspace_reuses, 1);
@@ -360,7 +391,15 @@ fn workspace_budget_admits_or_rejects_the_complete_idle_workspace() {
     let (a, b) = pair(&runtime, &space, 130);
     let (c, _) = pair(&runtime, &space, 132);
 
-    drop(tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    drop(
+        net(
+            &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["l"])],
+            &["i"],
+            &["l"],
+        )
+        .contract(&[&a, &b, &c])
+        .unwrap(),
+    );
     let charge = plan_cache_stats(&runtime).retained_workspace_bytes;
     assert!(charge > 8 * 8 * std::mem::size_of::<f64>());
 
@@ -372,7 +411,15 @@ fn workspace_budget_admits_or_rejects_the_complete_idle_workspace() {
             ..Default::default()
         },
     );
-    drop(tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    drop(
+        net(
+            &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["l"])],
+            &["i"],
+            &["l"],
+        )
+        .contract(&[&a, &b, &c])
+        .unwrap(),
+    );
     let rejected = plan_cache_stats(&runtime);
     assert_eq!(rejected.retained_workspace_bytes, 0);
     assert_eq!(rejected.peak_retained_workspace_bytes, 0);
@@ -387,7 +434,15 @@ fn workspace_budget_admits_or_rejects_the_complete_idle_workspace() {
             ..Default::default()
         },
     );
-    drop(tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    drop(
+        net(
+            &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["l"])],
+            &["i"],
+            &["l"],
+        )
+        .contract(&[&a, &b, &c])
+        .unwrap(),
+    );
     let admitted = plan_cache_stats(&runtime);
     assert_eq!(admitted.retained_workspace_bytes, charge);
     assert_eq!(admitted.peak_retained_workspace_bytes, charge);
@@ -406,7 +461,15 @@ fn workspace_budget_admits_or_rejects_the_complete_idle_workspace() {
     assert_eq!(zeroed.retained_workspace_bytes, 0);
     assert_eq!(zeroed.idle_workspaces, 0);
     assert_eq!(zeroed.workspace_byte_evictions, 1);
-    drop(tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    drop(
+        net(
+            &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["l"])],
+            &["i"],
+            &["l"],
+        )
+        .contract(&[&a, &b, &c])
+        .unwrap(),
+    );
     assert_eq!(plan_cache_stats(&runtime).workspace_byte_rejections, 2);
 }
 
@@ -423,8 +486,24 @@ fn configuration_flushes_and_capacity_shrink_release_synchronously() {
     let space = space(Arc::new(U1FusionRule), 8);
     let (a, b) = pair(&runtime, &space, 140);
     let (c, _) = pair(&runtime, &space, 142);
-    drop(tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap());
-    drop(tensor!([l; i] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    drop(
+        net(
+            &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["l"])],
+            &["i"],
+            &["l"],
+        )
+        .contract(&[&a, &b, &c])
+        .unwrap(),
+    );
+    drop(
+        net(
+            &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["l"])],
+            &["l"],
+            &["i"],
+        )
+        .contract(&[&a, &b, &c])
+        .unwrap(),
+    );
     let initial = plan_cache_stats(&runtime);
     assert_eq!((initial.entries, initial.idle_workspaces), (2, 2));
     let two_workspace_budget = initial.retained_workspace_bytes;
@@ -443,8 +522,24 @@ fn configuration_flushes_and_capacity_shrink_release_synchronously() {
     assert_eq!(flushed.retained_workspace_bytes, 0);
     assert_eq!(flushed.workspace_byte_evictions, 2);
 
-    drop(tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap());
-    drop(tensor!([l; i] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    drop(
+        net(
+            &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["l"])],
+            &["i"],
+            &["l"],
+        )
+        .contract(&[&a, &b, &c])
+        .unwrap(),
+    );
+    drop(
+        net(
+            &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["l"])],
+            &["l"],
+            &["i"],
+        )
+        .contract(&[&a, &b, &c])
+        .unwrap(),
+    );
     let repopulated = plan_cache_stats(&runtime);
     assert_eq!(repopulated.idle_workspaces, 2);
     assert_eq!(repopulated.retained_workspace_bytes, two_workspace_budget);
@@ -486,7 +581,9 @@ fn enabled_reconfiguration_retains_plans_and_workspaces() {
     let runtime = Runtime::builder().build().unwrap();
     let space = space(Arc::new(U1FusionRule), 3);
     let (a, b) = pair(&runtime, &space, 150);
-    let cold = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let cold = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a, &b])
+        .unwrap();
     let before = plan_cache_stats(&runtime);
     assert_eq!(
         (before.misses, before.entries, before.idle_workspaces),
@@ -519,7 +616,9 @@ fn enabled_reconfiguration_retains_plans_and_workspaces() {
         (1, 1, before.retained_workspace_bytes)
     );
 
-    let warm = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let warm = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a, &b])
+        .unwrap();
     let after = plan_cache_stats(&runtime);
     assert_eq!((after.misses, after.hits, after.replans), (1, 1, 0));
     assert_eq!(after.workspace_reuses, before.workspace_reuses + 1);
@@ -539,8 +638,12 @@ fn a_foreign_extension_value_coexists_with_the_plan_cache() {
     });
     let space = space(Arc::new(U1FusionRule), 2);
     let (a, b) = pair(&runtime, &space, 130);
-    let first = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
-    let second = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let first = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a, &b])
+        .unwrap();
+    let second = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a, &b])
+        .unwrap();
     let stats = plan_cache_stats(&runtime);
     assert_eq!((stats.misses, stats.hits, stats.entries), (1, 1, 1));
     assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
@@ -556,7 +659,9 @@ fn dropping_warm_runtime_breaks_the_cache_workspace_cycle() {
     let identity = tenet::typed::__network::runtime_identity(&runtime);
     let space = space(Arc::new(U1FusionRule), 2);
     let (a, b) = pair(&runtime, &space, 120);
-    let output = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let output = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a, &b])
+        .unwrap();
     drop((output, a, b, space, runtime));
     assert!(!identity.is_alive());
 }
@@ -589,9 +694,27 @@ fn output_order_and_split_key_separate_cached_step_specs() {
         )
         .unwrap();
     let run = |which: usize| match which {
-        0 => tensor!([p, q; r] = a[p, q; c] * b[c; r]).unwrap(),
-        1 => tensor!([p, r; q] = a[p, q; c] * b[c; r]).unwrap(),
-        _ => tensor!([q, p; r] = a[p, q; c] * b[c; r]).unwrap(),
+        0 => net(
+            &[op(&["p", "q"], &["c"]), op(&["c"], &["r"])],
+            &["p", "q"],
+            &["r"],
+        )
+        .contract(&[&a, &b])
+        .unwrap(),
+        1 => net(
+            &[op(&["p", "q"], &["c"]), op(&["c"], &["r"])],
+            &["p", "r"],
+            &["q"],
+        )
+        .contract(&[&a, &b])
+        .unwrap(),
+        _ => net(
+            &[op(&["p", "q"], &["c"]), op(&["c"], &["r"])],
+            &["q", "p"],
+            &["r"],
+        )
+        .contract(&[&a, &b])
+        .unwrap(),
     };
     let expected = [
         chain.clone(),

@@ -14,10 +14,14 @@ use tenet::typed::FusionAlgebraError;
 use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{ContractSpec, CudaStorage, GradedSpace, Runtime, TensorMap};
 use tenet_network::{
-    clear_plan_cache, configure_plan_cache, plan_cache_stats, tensor, ContractionPlan,
-    ContractionStep, GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, NetworkIR,
+    clear_plan_cache, configure_plan_cache, plan_cache_stats, ContractionPlan, ContractionStep,
+    GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, NetworkIR, NetworkOperand,
     PlanCacheConfig, TemporaryLabel, TensorId,
 };
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{conj, net, op};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -61,10 +65,14 @@ where
     let actual = cuda_plan
         .execute_cuda(&cuda_refs, &mut NetworkExecutionWorkspace::default())
         .unwrap();
-    let before_macro = plan_cache_stats(runtime);
-    let macro_actual = tensor!([a; b] = lhs_cuda[a; k] * rhs_cuda[k; b]).unwrap();
-    let macro_warm = tensor!([a; b] = lhs_cuda[a; k] * rhs_cuda[k; b]).unwrap();
-    let after_macro = plan_cache_stats(runtime);
+    let before_cached = plan_cache_stats(runtime);
+    let cached_actual = net(&[op(&["a"], &["k"]), op(&["k"], &["b"])], &["a"], &["b"])
+        .contract(&[&lhs_cuda, &rhs_cuda])
+        .unwrap();
+    let cached_warm = net(&[op(&["a"], &["k"]), op(&["k"], &["b"])], &["a"], &["b"])
+        .contract(&[&lhs_cuda, &rhs_cuda])
+        .unwrap();
+    let after_cached = plan_cache_stats(runtime);
     let manual = lhs_cuda
         .contract(
             &rhs_cuda,
@@ -109,59 +117,41 @@ where
         host_oracle.dense_data().unwrap(),
     );
     close(
-        "macro vs host",
-        macro_actual.to_host().unwrap().dense_data().unwrap(),
+        "cached vs host",
+        cached_actual.to_host().unwrap().dense_data().unwrap(),
         host_oracle.dense_data().unwrap(),
     );
     close(
-        "warm macro vs host",
-        macro_warm.to_host().unwrap().dense_data().unwrap(),
+        "warm cached vs host",
+        cached_warm.to_host().unwrap().dense_data().unwrap(),
         host_oracle.dense_data().unwrap(),
     );
-    assert_eq!(macro_actual.placement(), lhs_cuda.placement());
+    assert_eq!(cached_actual.placement(), lhs_cuda.placement());
     // The warm device replay reproduces the returning result exactly: identical
     // submissions to the same device kernels, so f64 is bitwise equal.
     assert_eq!(
-        macro_warm.to_host().unwrap().dense_data().unwrap(),
+        cached_warm.to_host().unwrap().dense_data().unwrap(),
         actual.to_host().unwrap().dense_data().unwrap()
     );
     // This provider contributes exactly one device pool for `(R, f64,
     // CudaStorage<f64>)`; the second call leases that pool's idle workspace.
     assert_eq!(
-        after_macro.workspaces_created - before_macro.workspaces_created,
+        after_cached.workspaces_created - before_cached.workspaces_created,
         1,
         "one device workspace per (provider, dtype, storage)"
     );
     assert!(
-        after_macro.workspace_reuses > before_macro.workspace_reuses,
+        after_cached.workspace_reuses > before_cached.workspace_reuses,
         "the warm replay must reuse the leased workspace, not build a new one"
     );
     // Each cached plan keeps at most two typed pools of at most two idle
     // workspaces, so the runtime-wide idle count stays inside that bound.
     assert!(
-        after_macro.idle_workspaces >= 1 && after_macro.idle_workspaces <= 4 * after_macro.entries,
+        after_cached.idle_workspaces >= 1
+            && after_cached.idle_workspaces <= 4 * after_cached.entries,
         "idle workspaces {} outside the plan-wide bound for {} entries",
-        after_macro.idle_workspaces,
-        after_macro.entries
-    );
-}
-
-/// G2c-5 (#1350): a full trace, the network with no contraction step, runs on
-/// the device and equals the Host.
-#[test]
-#[ignore = "requires a real CUDA device"]
-fn cuda_macro_full_trace_equals_host() {
-    let runtime = Runtime::builder().cuda(0).build().unwrap();
-    let space = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
-    let host = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_090).unwrap();
-    let tensor = host.to_cuda().unwrap();
-    let device = tensor!([] = tensor[i; i]).unwrap();
-    assert_eq!(device.placement(), tensor.placement());
-    assert_close_dyn(
-        device.to_host().unwrap().dense_data().unwrap(),
-        tensor!([] = host[i; i]).unwrap().dense_data().unwrap(),
-        f64::EPSILON,
-        "full trace",
+        after_cached.idle_workspaces,
+        after_cached.entries
     );
 }
 
@@ -170,7 +160,7 @@ fn cuda_macro_full_trace_equals_host() {
 /// Host call published (one entry, a hit).
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_noncanonical_cuda_macro_runs_and_shares_the_host_plan() {
+fn a_noncanonical_cuda_network_runs_and_shares_the_host_plan() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let space = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_091).unwrap();
@@ -178,11 +168,15 @@ fn a_noncanonical_cuda_macro_runs_and_shares_the_host_plan() {
     let a_cuda = a.to_cuda().unwrap();
     let b_cuda = b.to_cuda().unwrap();
 
-    let host = tensor!([k; i] = a[i; j] * b[j; k]).unwrap();
+    let host = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["k"], &["i"])
+        .contract(&[&a, &b])
+        .unwrap();
     let published = plan_cache_stats(&runtime);
     assert_eq!(published.entries, 1);
     for _ in 0..2 {
-        let device = tensor!([k; i] = a_cuda[i; j] * b_cuda[j; k]).unwrap();
+        let device = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["k"], &["i"])
+            .contract(&[&a_cuda, &b_cuda])
+            .unwrap();
         assert_eq!(device.codomain(), host.codomain());
         assert_eq!(device.domain(), host.domain());
         assert_close_dyn(
@@ -293,11 +287,16 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
             },
         )
         .unwrap();
-    let chain_macro =
-        tensor!([a; d] = (tensors[0])[a; b] * (tensors[1])[b; c] * (tensors[2])[c; d]).unwrap();
+    let chain_cached = net(
+        &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+        &["a"],
+        &["d"],
+    )
+    .contract(&[&(tensors[0]), &(tensors[1]), &(tensors[2])])
+    .unwrap();
     assert_eq!(actual.codomain(), manual.codomain());
     assert_eq!(actual.domain(), manual.domain());
-    // The planned chain, the macro and the chained device contract may order
+    // The planned chain, the cached contraction and the chained device contract may order
     // the two length-2 contractions differently: path agreement within the
     // tolerance rule over 2 * 2 terms.
     numerics::assert_slices_close(
@@ -307,12 +306,12 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
         4,
     );
     numerics::assert_slices_close(
-        "chain macro vs device contract",
-        chain_macro.to_host().unwrap().dense_data().unwrap(),
+        "chain cached vs device contract",
+        chain_cached.to_host().unwrap().dense_data().unwrap(),
         manual.to_host().unwrap().dense_data().unwrap(),
         4,
     );
-    assert_eq!(chain_macro.placement(), tensors[0].placement());
+    assert_eq!(chain_cached.placement(), tensors[0].placement());
 
     let conj_network = Network::new(
         vec![labels(&["k", "i"]), labels(&["k", "j"])],
@@ -341,7 +340,13 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
             },
         )
         .unwrap();
-    let conj_macro = tensor!([i; j] = conj((tensors[0]))[k; i] * (tensors[1])[k; j]).unwrap();
+    let conj_cached = net(
+        &[conj(op(&["k"], &["i"])), op(&["k"], &["j"])],
+        &["i"],
+        &["j"],
+    )
+    .contract(&[&(tensors[0]), &(tensors[1])])
+    .unwrap();
     assert_eq!(conj_actual.codomain(), conj_manual.codomain());
     assert_eq!(conj_actual.domain(), conj_manual.domain());
     numerics::assert_slices_close(
@@ -351,8 +356,8 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
         2,
     );
     numerics::assert_slices_close(
-        "conj macro vs device contract",
-        conj_macro.to_host().unwrap().dense_data().unwrap(),
+        "conj cached vs device contract",
+        conj_cached.to_host().unwrap().dense_data().unwrap(),
         conj_manual.to_host().unwrap().dense_data().unwrap(),
         2,
     );
@@ -371,7 +376,9 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
         .execute_cuda(&[&tensors[0]], &mut NetworkExecutionWorkspace::default())
         .unwrap();
     let single_expected = tensors[0].adjoint().unwrap();
-    let single_macro = tensor!([i; k] = conj(tensors[0])[k; i]).unwrap();
+    let single_cached = net(&[conj(op(&["k"], &["i"]))], &["i"], &["k"])
+        .contract(&[&(tensors[0])])
+        .unwrap();
     assert!(std::ptr::eq(
         single_actual.provider(),
         tensors[0].provider()
@@ -395,7 +402,7 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
             .unwrap()
     );
     assert_eq!(
-        single_macro
+        single_cached
             .to_host()
             .unwrap()
             .materialize()
@@ -442,7 +449,9 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
         .unwrap()
         .execute_cuda(&[&ket, &bra], &mut NetworkExecutionWorkspace::default())
         .unwrap();
-    let scalar_macro = tensor!([] = ket[; k] * bra[k;]).unwrap();
+    let scalar_cached = net(&[op(&[], &["k"]), op(&["k"], &[])], &[], &[])
+        .contract(&[&ket, &bra])
+        .unwrap();
     assert_eq!(scalar.rank(), 0);
     assert!(scalar.codomain().is_empty());
     assert!(scalar.domain().is_empty());
@@ -450,8 +459,8 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     // Macro and planned network are two device paths for one length-2 inner
     // product; they agree within the tolerance rule.
     numerics::assert_slices_close(
-        "scalar macro vs scalar network",
-        scalar_macro.to_host().unwrap().dense_data().unwrap(),
+        "scalar cached vs scalar network",
+        scalar_cached.to_host().unwrap().dense_data().unwrap(),
         scalar.to_host().unwrap().dense_data().unwrap(),
         2,
     );
@@ -468,7 +477,7 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     );
 }
 
-/// G1a (#1268): canonical `tensor!` device execution with a genuinely complex
+/// G1a (#1268): canonical `Network::contract` device execution with a genuinely complex
 /// payload, including a lazy conjugate operand. Since G2c-3 (#1348) a
 /// reversed output runs, and since G2c-5 (#1350) an intra-operand trace.
 #[test]
@@ -520,8 +529,13 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
         host_oracle.dense_data().unwrap(),
     );
 
-    let chain =
-        tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
+    let chain = net(
+        &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+        &["a"],
+        &["d"],
+    )
+    .contract(&[&(device[0]), &(device[1]), &(device[2])])
+    .unwrap();
     let chain_oracle = host[0]
         .contract(
             &host[1],
@@ -547,14 +561,25 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
         chain.to_host().unwrap().dense_data().unwrap(),
         chain_oracle.dense_data().unwrap(),
     );
-    let chain_warm =
-        tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
+    let chain_warm = net(
+        &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+        &["a"],
+        &["d"],
+    )
+    .contract(&[&(device[0]), &(device[1]), &(device[2])])
+    .unwrap();
     assert_close_c64(
         chain_warm.to_host().unwrap().dense_data().unwrap(),
         chain_oracle.dense_data().unwrap(),
     );
 
-    let conj = tensor!([i; j] = conj((device[0]))[k; i] * (device[1])[k; j]).unwrap();
+    let conj = net(
+        &[conj(op(&["k"], &["i"])), op(&["k"], &["j"])],
+        &["i"],
+        &["j"],
+    )
+    .contract(&[&(device[0]), &(device[1])])
+    .unwrap();
     let conj_oracle = host[0]
         .adjoint()
         .unwrap()
@@ -573,15 +598,19 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
         conj_oracle.dense_data().unwrap(),
     );
 
-    let trace = tensor!([] = (device[0])[i; i]).unwrap();
-    let trace_oracle = tensor!([] = (host[0])[i; i]).unwrap();
+    let trace = device[0].trace_pairs(&[(0, 1)]).unwrap();
+    let trace_oracle = host[0].trace_pairs(&[(0, 1)]).unwrap();
     assert_close_c64(
         trace.to_host().unwrap().dense_data().unwrap(),
         trace_oracle.dense_data().unwrap(),
     );
     // G2c-3 (#1348): the reversed output the canonical predicate refused runs.
-    let reversed = tensor!([k; i] = (device[0])[i; j] * (device[1])[j; k]).unwrap();
-    let reversed_oracle = tensor!([k; i] = (host[0])[i; j] * (host[1])[j; k]).unwrap();
+    let reversed = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["k"], &["i"])
+        .contract(&[&(device[0]), &(device[1])])
+        .unwrap();
+    let reversed_oracle = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["k"], &["i"])
+        .contract(&[&(host[0]), &(host[1])])
+        .unwrap();
     assert_close_c64(
         reversed.to_host().unwrap().dense_data().unwrap(),
         reversed_oracle.dense_data().unwrap(),
@@ -618,14 +647,18 @@ fn u1_pair(
 /// downcast.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn host_and_cuda_macros_of_one_topology_use_separate_workspace_pools() {
+fn host_and_cuda_contractions_of_one_topology_use_separate_workspace_pools() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let u1 = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let (a, a_cuda) = u1_pair(&runtime, &u1, 748_400);
     let (b, b_cuda) = u1_pair(&runtime, &u1, 748_401);
 
-    let host = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
-    let device = tensor!([i; k] = a_cuda[i; j] * b_cuda[j; k]).unwrap();
+    let host = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a, &b])
+        .unwrap();
+    let device = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a_cuda, &b_cuda])
+        .unwrap();
     numerics::assert_slices_close(
         "device vs host",
         device.to_host().unwrap().dense_data().unwrap(),
@@ -656,7 +689,9 @@ fn a_rejected_cuda_call_leases_no_workspace_and_the_next_call_reuses_the_idle_on
     let (_, b_cuda) = u1_pair(&runtime, &u1, 748_411);
     let (_, mismatched) = u1_pair(&runtime, &wrong, 748_412);
 
-    let warm = tensor!([i; k] = a_cuda[i; j] * b_cuda[j; k]).unwrap();
+    let warm = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a_cuda, &b_cuda])
+        .unwrap();
     let after_warm = plan_cache_stats(&runtime);
     assert_eq!(
         after_warm.idle_workspaces, 1,
@@ -665,10 +700,16 @@ fn a_rejected_cuda_call_leases_no_workspace_and_the_next_call_reuses_the_idle_on
 
     // #1371: the contracted-leg mismatch is decided before the plan lookup,
     // so no workspace is leased, let alone quarantined.
-    assert!(tensor!([i; k] = a_cuda[i; j] * mismatched[j; k]).is_err());
+    assert!(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a_cuda, &mismatched])
+            .is_err()
+    );
     assert_eq!(plan_cache_stats(&runtime), after_warm);
 
-    let rebuilt = tensor!([i; k] = a_cuda[i; j] * b_cuda[j; k]).unwrap();
+    let rebuilt = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a_cuda, &b_cuda])
+        .unwrap();
     assert_eq!(
         rebuilt.to_host().unwrap().dense_data().unwrap(),
         warm.to_host().unwrap().dense_data().unwrap()
@@ -703,7 +744,9 @@ fn equal_length_block_layout_drift_discards_the_device_replay_state() {
         a3.dense_data().unwrap().len()
     );
 
-    let first = tensor!([i; k] = a0_cuda[i; j] * b0_cuda[j; k]).unwrap();
+    let first = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a0_cuda, &b0_cuda])
+        .unwrap();
     numerics::assert_slices_close(
         "device vs host",
         first.to_host().unwrap().dense_data().unwrap(),
@@ -723,7 +766,9 @@ fn equal_length_block_layout_drift_discards_the_device_replay_state() {
     );
     let after_first = plan_cache_stats(&runtime);
 
-    let drifted = tensor!([i; k] = a3_cuda[i; j] * b3_cuda[j; k]).unwrap();
+    let drifted = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a3_cuda, &b3_cuda])
+        .unwrap();
     numerics::assert_slices_close(
         "drifted device vs host",
         drifted.to_host().unwrap().dense_data().unwrap(),
@@ -754,7 +799,9 @@ fn equal_length_block_layout_drift_discards_the_device_replay_state() {
 
     // Back to the original charges: the workspace rebuilt for the drifted
     // layout must not leak into this one either.
-    let restored = tensor!([i; k] = a0_cuda[i; j] * b0_cuda[j; k]).unwrap();
+    let restored = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a0_cuda, &b0_cuda])
+        .unwrap();
     assert_eq!(
         restored.to_host().unwrap().dense_data().unwrap(),
         first.to_host().unwrap().dense_data().unwrap()
@@ -836,8 +883,20 @@ where
             },
         )
         .unwrap();
-    let cold = tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
-    let warm = tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
+    let cold = net(
+        &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+        &["a"],
+        &["d"],
+    )
+    .contract(&[&(device[0]), &(device[1]), &(device[2])])
+    .unwrap();
+    let warm = net(
+        &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+        &["a"],
+        &["d"],
+    )
+    .contract(&[&(device[0]), &(device[1]), &(device[2])])
+    .unwrap();
     let terms = space.dim().unwrap().ceil() as usize;
     numerics::assert_slices_close(
         "cold device chain vs host",
@@ -855,7 +914,7 @@ where
     );
 }
 
-/// G3c-2 (#1276): warm `tensor!` reuses its retained device destinations and
+/// G3c-2 (#1276): warm `Network::contract` reuses its retained device destinations and
 /// still returns exactly the returning contraction, for every admitted
 /// categorical structure.
 #[test]
@@ -915,8 +974,22 @@ fn warm_cuda_destination_reuse_matches_the_returning_chain_for_every_provider() 
             },
         )
         .unwrap();
-    drop(tensor!([a; d] = (cuda[0])[a; b] * (cuda[1])[b; c] * (cuda[2])[c; d]).unwrap());
-    let warm = tensor!([a; d] = (cuda[0])[a; b] * (cuda[1])[b; c] * (cuda[2])[c; d]).unwrap();
+    drop(
+        net(
+            &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+            &["a"],
+            &["d"],
+        )
+        .contract(&[&(cuda[0]), &(cuda[1]), &(cuda[2])])
+        .unwrap(),
+    );
+    let warm = net(
+        &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+        &["a"],
+        &["d"],
+    )
+    .contract(&[&(cuda[0]), &(cuda[1]), &(cuda[2])])
+    .unwrap();
     assert_close_c64(
         warm.to_host().unwrap().dense_data().unwrap(),
         oracle.dense_data().unwrap(),
@@ -944,12 +1017,17 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
 
     // Four tensors: three steps, two of them over retained destinations.
     let run = || {
-        tensor!(
-            [a; e] = (device[0])[a; b]
-                * (device[1])[b; c]
-                * (device[2])[c; d]
-                * (extra[0])[d; e]
+        net(
+            &[
+                op(&["a"], &["b"]),
+                op(&["b"], &["c"]),
+                op(&["c"], &["d"]),
+                op(&["d"], &["e"]),
+            ],
+            &["a"],
+            &["e"],
         )
+        .contract(&[&(device[0]), &(device[1]), &(device[2]), &(extra[0])])
         .unwrap()
     };
     // Call 1 has nothing retained yet, so every step returns.
@@ -998,7 +1076,15 @@ fn the_device_workspace_is_charged_to_the_workspace_budget() {
     let u1 = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 8)]).unwrap();
     let (_, device) = cuda_chain_tensors(&runtime, &u1, 761_400);
 
-    drop(tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap());
+    drop(
+        net(
+            &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+            &["a"],
+            &["d"],
+        )
+        .contract(&[&(device[0]), &(device[1]), &(device[2])])
+        .unwrap(),
+    );
     let charge = plan_cache_stats(&runtime).retained_workspace_bytes;
     assert!(
         charge > 0,
@@ -1013,7 +1099,15 @@ fn the_device_workspace_is_charged_to_the_workspace_budget() {
             ..Default::default()
         },
     );
-    drop(tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap());
+    drop(
+        net(
+            &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+            &["a"],
+            &["d"],
+        )
+        .contract(&[&(device[0]), &(device[1]), &(device[2])])
+        .unwrap(),
+    );
     let rejected = plan_cache_stats(&runtime);
     assert_eq!(rejected.retained_workspace_bytes, 0);
     assert_eq!(rejected.idle_workspaces, 0);
@@ -1026,7 +1120,15 @@ fn the_device_workspace_is_charged_to_the_workspace_budget() {
             ..Default::default()
         },
     );
-    drop(tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap());
+    drop(
+        net(
+            &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+            &["a"],
+            &["d"],
+        )
+        .contract(&[&(device[0]), &(device[1]), &(device[2])])
+        .unwrap(),
+    );
     let admitted = plan_cache_stats(&runtime);
     assert_eq!(admitted.retained_workspace_bytes, charge);
     assert_eq!(admitted.idle_workspaces, 1);
@@ -1066,7 +1168,7 @@ where
 }
 
 /// Leaf C2 (#1336), extended in C4 (#1341) to a non-Abelian provider: a
-/// `tensor!` device chain at `f32` and `Complex32` produces the host result of
+/// `Network::contract` device chain at `f32` and `Complex32` produces the host result of
 /// the same dtype, cold and warm, and the warm replay keeps the
 /// retained-destination contract of the `f64` chain.
 #[test]
@@ -1127,10 +1229,20 @@ fn single_precision_device_chains_match_the_host_and_reuse_their_destinations() 
                 },
             )
             .unwrap();
-        let cold =
-            tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
-        let warm =
-            tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
+        let cold = net(
+            &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+            &["a"],
+            &["d"],
+        )
+        .contract(&[&(device[0]), &(device[1]), &(device[2])])
+        .unwrap();
+        let warm = net(
+            &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+            &["a"],
+            &["d"],
+        )
+        .contract(&[&(device[0]), &(device[1]), &(device[2])])
+        .unwrap();
         for (label, result) in [("cold", cold), ("warm", warm)] {
             let actual = result.to_host().unwrap();
             assert_eq!(
@@ -1193,8 +1305,15 @@ fn a_warm_single_precision_chain_costs_the_same_calls_and_half_the_bytes() {
         D: tenet::typed::CudaPayload,
     {
         let (_, device) = cuda_chain_tensors_at::<U1FusionRule, D>(runtime, u1, seed);
-        let run =
-            || tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
+        let run = || {
+            net(
+                &[op(&["a"], &["b"]), op(&["b"], &["c"]), op(&["c"], &["d"])],
+                &["a"],
+                &["d"],
+            )
+            .contract(&[&(device[0]), &(device[1]), &(device[2])])
+            .unwrap()
+        };
         // Two warm-up runs: the first has nothing retained, the second is the
         // first to overwrite retained destinations.
         drop(run());
@@ -1271,20 +1390,20 @@ fn assert_close_dyn<D: tenet::typed::CudaPayload + std::fmt::Debug>(
     }
 }
 
-/// Runs one `tensor!` expression over `$t` bound to the Host operands, then
-/// twice — cold and warm — over `$t` bound to the device operands.
-macro_rules! host_cold_warm {
-    ($t:ident = $host:expr, $device:expr; $($net:tt)*) => {{
-        let host = {
-            let $t = $host;
-            tensor!($($net)*).unwrap()
-        };
-        let (cold, warm) = {
-            let $t = $device;
-            (tensor!($($net)*).unwrap(), tensor!($($net)*).unwrap())
-        };
-        (host, cold, warm)
-    }};
+/// Runs `network` once over the Host operands, then twice — cold and warm —
+/// over the device operands.
+fn host_cold_warm<H, G>(network: &Network, host: &[&H], device: &[&G]) -> (H, G, G)
+where
+    H: NetworkOperand,
+    G: NetworkOperand,
+    H::Error: std::fmt::Debug,
+    G::Error: std::fmt::Debug,
+{
+    (
+        network.contract(host).unwrap(),
+        network.contract(device).unwrap(),
+        network.contract(device).unwrap(),
+    )
 }
 
 /// The operands of the general networks, over three spaces `v`, `w`, `p` of
@@ -1384,26 +1503,104 @@ where
     D: tenet::typed::CudaPayload + Send + Sync + 'static,
 {
     let mut runs = Vec::new();
-    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
-        [x, q; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]);
+    let (host_result, cold, warm) = host_cold_warm(
+        &net(
+            &[
+                op(&["a", "w"], &["p"]),
+                op(&["p", "x"], &["a", "y"]),
+                op(&["q"], &["w"]),
+            ],
+            &["x", "q"],
+            &["y"],
+        ),
+        &[&host.a, &host.b, &host.c],
+        &[&device.a, &device.b, &device.c],
+    );
     runs.push(("xq;y", host_result, cold, warm));
-    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
-        [q, x; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]);
+    let (host_result, cold, warm) = host_cold_warm(
+        &net(
+            &[
+                op(&["a", "w"], &["p"]),
+                op(&["p", "x"], &["a", "y"]),
+                op(&["q"], &["w"]),
+            ],
+            &["q", "x"],
+            &["y"],
+        ),
+        &[&host.a, &host.b, &host.c],
+        &[&device.a, &device.b, &device.c],
+    );
     runs.push(("qx;y", host_result, cold, warm));
-    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
-        [y, q; x] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]);
+    let (host_result, cold, warm) = host_cold_warm(
+        &net(
+            &[
+                op(&["a", "w"], &["p"]),
+                op(&["p", "x"], &["a", "y"]),
+                op(&["q"], &["w"]),
+            ],
+            &["y", "q"],
+            &["x"],
+        ),
+        &[&host.a, &host.b, &host.c],
+        &[&device.a, &device.b, &device.c],
+    );
     runs.push(("yq;x split-changing", host_result, cold, warm));
-    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
-        [x, q; y] = (o.a)[a, w; p] * conj((o.t))[a, y; p, x] * (o.c)[q; w]);
+    let (host_result, cold, warm) = host_cold_warm(
+        &net(
+            &[
+                op(&["a", "w"], &["p"]),
+                conj(op(&["a", "y"], &["p", "x"])),
+                op(&["q"], &["w"]),
+            ],
+            &["x", "q"],
+            &["y"],
+        ),
+        &[&host.a, &host.t, &host.c],
+        &[&device.a, &device.t, &device.c],
+    );
     runs.push(("xq;y lazy conj", host_result, cold, warm));
-    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
-        [x, q; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; u] * (o.e)[u; w]);
+    let (host_result, cold, warm) = host_cold_warm(
+        &net(
+            &[
+                op(&["a", "w"], &["p"]),
+                op(&["p", "x"], &["a", "y"]),
+                op(&["q"], &["u"]),
+                op(&["u"], &["w"]),
+            ],
+            &["x", "q"],
+            &["y"],
+        ),
+        &[&host.a, &host.b, &host.c, &host.e],
+        &[&device.a, &device.b, &device.c, &device.e],
+    );
     runs.push(("xq;y four tensors", host_result, cold, warm));
-    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
-        [z, x;] = (o.f)[a, w; p] * (o.g)[a, x; p] * (o.h)[w, z;]);
+    let (host_result, cold, warm) = host_cold_warm(
+        &net(
+            &[
+                op(&["a", "w"], &["p"]),
+                op(&["a", "x"], &["p"]),
+                op(&["w", "z"], &[]),
+            ],
+            &["z", "x"],
+            &[],
+        ),
+        &[&host.f, &host.g, &host.h],
+        &[&device.f, &device.g, &device.h],
+    );
     runs.push(("zx; dual legs", host_result, cold, warm));
-    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
-        [x; z] = (o.f)[a, w; p] * (o.g)[a, x; p] * (o.h)[w, z;]);
+    let (host_result, cold, warm) = host_cold_warm(
+        &net(
+            &[
+                op(&["a", "w"], &["p"]),
+                op(&["a", "x"], &["p"]),
+                op(&["w", "z"], &[]),
+            ],
+            &["x"],
+            &["z"],
+        ),
+        &[&host.f, &host.g, &host.h],
+        &[&device.f, &device.g, &device.h],
+    );
     runs.push(("x;z dual legs split-changing", host_result, cold, warm));
     runs
 }
@@ -1551,9 +1748,19 @@ fn assert_dense_oracle<R>(
     let cases: [DenseCase<'_, R>; 4] = [
         (
             "xq;y",
-            results(
-                host_cold_warm!(o = &o, &device; [x, q; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]),
-            ),
+            results(host_cold_warm(
+                &net(
+                    &[
+                        op(&["a", "w"], &["p"]),
+                        op(&["p", "x"], &["a", "y"]),
+                        op(&["q"], &["w"]),
+                    ],
+                    &["x", "q"],
+                    &["y"],
+                ),
+                &[&o.a, &o.b, &o.c],
+                &[&device.a, &device.b, &device.c],
+            )),
             vec![
                 (&a, &["a", "w", "p"][..]),
                 (&b, &["p", "x", "a", "y"][..]),
@@ -1563,9 +1770,19 @@ fn assert_dense_oracle<R>(
         ),
         (
             "qx;y",
-            results(
-                host_cold_warm!(o = &o, &device; [q, x; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]),
-            ),
+            results(host_cold_warm(
+                &net(
+                    &[
+                        op(&["a", "w"], &["p"]),
+                        op(&["p", "x"], &["a", "y"]),
+                        op(&["q"], &["w"]),
+                    ],
+                    &["q", "x"],
+                    &["y"],
+                ),
+                &[&o.a, &o.b, &o.c],
+                &[&device.a, &device.b, &device.c],
+            )),
             vec![
                 (&a, &["a", "w", "p"][..]),
                 (&b, &["p", "x", "a", "y"][..]),
@@ -1575,9 +1792,19 @@ fn assert_dense_oracle<R>(
         ),
         (
             "xq;y lazy conj",
-            results(
-                host_cold_warm!(o = &o, &device; [x, q; y] = (o.a)[a, w; p] * conj((o.t))[a, y; p, x] * (o.c)[q; w]),
-            ),
+            results(host_cold_warm(
+                &net(
+                    &[
+                        op(&["a", "w"], &["p"]),
+                        conj(op(&["a", "y"], &["p", "x"])),
+                        op(&["q"], &["w"]),
+                    ],
+                    &["x", "q"],
+                    &["y"],
+                ),
+                &[&o.a, &o.t, &o.c],
+                &[&device.a, &device.t, &device.c],
+            )),
             vec![
                 (&a, &["a", "w", "p"][..]),
                 (&t_adjoint, &["p", "x", "a", "y"][..]),
@@ -1587,9 +1814,20 @@ fn assert_dense_oracle<R>(
         ),
         (
             "xq;y four tensors",
-            results(
-                host_cold_warm!(o = &o, &device; [x, q; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; u] * (o.e)[u; w]),
-            ),
+            results(host_cold_warm(
+                &net(
+                    &[
+                        op(&["a", "w"], &["p"]),
+                        op(&["p", "x"], &["a", "y"]),
+                        op(&["q"], &["u"]),
+                        op(&["u"], &["w"]),
+                    ],
+                    &["x", "q"],
+                    &["y"],
+                ),
+                &[&o.a, &o.b, &o.c, &o.e],
+                &[&device.a, &device.b, &device.c, &device.e],
+            )),
             vec![
                 (&a, &["a", "w", "p"][..]),
                 (&b, &["p", "x", "a", "y"][..]),
@@ -1640,7 +1878,7 @@ fn su2_space(sectors: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
     .unwrap()
 }
 
-/// G2c-3 (#1348): general `tensor!` networks on device equal the Host run of
+/// G2c-3 (#1348): general `Network::contract` networks on device equal the Host run of
 /// the same expression, cold and warm, for U(1), SU(2), U(1)×SU(2),
 /// fZ2×U(1) and fZ2⊠SU(2) at `f64` and `Complex64` (U(1) also at the single
 /// precision payloads); the codomain↔domain networks of U(1) and SU(2) also
@@ -1862,10 +2100,32 @@ fn warm_general_cuda_networks_transfer_only_the_returned_output() {
         let o =
             general_operands::<R, D>(runtime, spaces, seed).map(|tensor| tensor.to_cuda().unwrap());
         let chain = || {
-            tensor!([y, q; x] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; u] * (o.e)[u; w])
-                .unwrap()
+            net(
+                &[
+                    op(&["a", "w"], &["p"]),
+                    op(&["p", "x"], &["a", "y"]),
+                    op(&["q"], &["u"]),
+                    op(&["u"], &["w"]),
+                ],
+                &["y", "q"],
+                &["x"],
+            )
+            .contract(&[&o.a, &o.b, &o.c, &o.e])
+            .unwrap()
         };
-        let dual = || tensor!([x; z] = (o.f)[a, w; p] * (o.g)[a, x; p] * (o.h)[w, z;]).unwrap();
+        let dual = || {
+            net(
+                &[
+                    op(&["a", "w"], &["p"]),
+                    op(&["a", "x"], &["p"]),
+                    op(&["w", "z"], &[]),
+                ],
+                &["x"],
+                &["z"],
+            )
+            .contract(&[&o.f, &o.g, &o.h])
+            .unwrap()
+        };
         type Run<'a, R, D> = (&'a str, &'a dyn Fn() -> TensorMap<R, D, CudaStorage<D>>);
         let runs: [Run<'_, R, D>; 2] = [("four-tensor chain", &chain), ("dual legs", &dual)];
         for (name, run) in runs {
@@ -1962,11 +2222,19 @@ fn rejected_cuda_networks_leave_every_device_state_unchanged() {
         .unwrap();
     // Warm the device context so lazily created state is not attributed to
     // the rejected calls.
-    drop(tensor!([i; k] = a[i; j] * a[j; k]).unwrap());
+    drop(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+            .contract(&[&a, &a])
+            .unwrap(),
+    );
     let before = device_state(&runtime);
 
     // A fresh topology, i.e. the plan-cache miss path only.
-    assert!(tensor!([k; i] = a[i; j] * mismatched[j; k]).is_err());
+    assert!(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["k"], &["i"])
+            .contract(&[&a, &mismatched])
+            .is_err()
+    );
     assert_eq!(
         device_state(&runtime),
         before,
@@ -1974,580 +2242,15 @@ fn rejected_cuda_networks_leave_every_device_state_unchanged() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Device `tensor!` trace pre-step (G2c-5, #1350)
-// ---------------------------------------------------------------------------
-
-/// Traced operands over three spaces `v`, `w`, `p` of one provider:
-///
-/// - `ta: [v, w; v, p]`, `tb: [p, v; p, w]`, `tt: [v, w; v, w]` — traces
-///   between a codomain and a domain leg, so the physical-basis dense
-///   expansion traces by a plain diagonal sum;
-/// - `td: [v, v*, w; p]` (codomain–codomain) and `te: [p; v, w, w*]`
-///   (domain–domain) — dual traced legs;
-/// - `c: [v; w]` untraced.
-struct TraceOperands<T> {
-    ta: T,
-    tb: T,
-    tt: T,
-    td: T,
-    te: T,
-    c: T,
-}
-
-impl<T> TraceOperands<T> {
-    fn map<U>(&self, lift: impl Fn(&T) -> U) -> TraceOperands<U> {
-        TraceOperands {
-            ta: lift(&self.ta),
-            tb: lift(&self.tb),
-            tt: lift(&self.tt),
-            td: lift(&self.td),
-            te: lift(&self.te),
-            c: lift(&self.c),
-        }
-    }
-}
-
-fn trace_operands<R, D>(
-    runtime: &Runtime,
-    [v, w, p]: [&GradedSpace<R>; 3],
-    seed: u64,
-) -> TraceOperands<TensorMap<R, D>>
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-    D: tenet::typed::CudaPayload,
-{
-    let rand = |codomain: &[&GradedSpace<R>], domain: &[&GradedSpace<R>], salt: u64| {
-        TensorMap::<R, D>::rand_with_seed(
-            runtime,
-            codomain.iter().copied(),
-            domain.iter().copied(),
-            seed + salt,
-        )
-        .unwrap()
-    };
-    let (v_dual, w_dual) = (v.try_dual().unwrap(), w.try_dual().unwrap());
-    TraceOperands {
-        ta: rand(&[v, w], &[v, p], 0),
-        tb: rand(&[p, v], &[p, w], 1),
-        tt: rand(&[v, w], &[v, w], 2),
-        td: rand(&[v, &v_dual, w], &[p], 3),
-        te: rand(&[p], &[v, w, &w_dual], 4),
-        c: rand(&[v], &[w], 5),
-    }
-}
-
-/// Every trace-bearing network on Host and device (cold, warm): traces on one,
-/// two and three operands, open outputs on both sides, a split-changing final
-/// permutation, dual traced legs on either side, a lazy conjugate traced
-/// operand, and a full two-pair trace with no contraction step.
-#[allow(clippy::type_complexity)]
-fn trace_networks<R, D>(
-    host: &TraceOperands<TensorMap<R, D>>,
-    device: &TraceOperands<TensorMap<R, D, CudaStorage<D>>>,
-) -> Vec<(
-    &'static str,
-    TensorMap<R, D>,
-    TensorMap<R, D, CudaStorage<D>>,
-    TensorMap<R, D, CudaStorage<D>>,
-)>
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec
-        + Send
-        + Sync,
-    D: tenet::typed::CudaPayload + Send + Sync + 'static,
-{
-    let mut runs = Vec::new();
-    let (h, cold, warm) = host_cold_warm!(o = host, device;
-        [a; x] = (o.tb)[j, a; j, w] * (o.ta)[i, w; i, x]);
-    runs.push(("two traced operands", h, cold, warm));
-    let (h, cold, warm) = host_cold_warm!(o = host, device;
-        [b; x] = (o.c)[b; w] * (o.ta)[i, w; i, x]);
-    runs.push(("traced and untraced", h, cold, warm));
-    let (h, cold, warm) = host_cold_warm!(o = host, device;
-        [x, a;] = (o.tb)[j, a; j, w] * (o.ta)[i, w; i, x]);
-    runs.push(("split-changing final permutation", h, cold, warm));
-    let (h, cold, warm) = host_cold_warm!(o = host, device;
-        [y; x] = (o.td)[k, k, y; p] * (o.te)[p; x, u, u]);
-    runs.push(("dual traced legs", h, cold, warm));
-    let (h, cold, warm) = host_cold_warm!(o = host, device;
-        [a; x] = (o.tb)[j, a; j, w] * (o.ta)[i, w; i, p] * (o.te)[p; x, u, u]);
-    runs.push(("three traced operands", h, cold, warm));
-    let (h, cold, warm) = host_cold_warm!(o = host, device;
-        [y; x] = conj((o.ta))[i, x; i, p] * (o.ta)[j, y; j, p]);
-    runs.push(("lazy conj traced operand", h, cold, warm));
-    let (h, cold, warm) = host_cold_warm!(o = host, device; [] = (o.tt)[i, j; i, j]);
-    runs.push(("full two-pair trace", h, cold, warm));
-    runs
-}
-
-fn assert_trace_networks_match_host<R, D>(
-    runtime: &Runtime,
-    spaces: [&GradedSpace<R>; 3],
-    seed: u64,
-    epsilon: f64,
-    provider: &str,
-) where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec
-        + Send
-        + Sync,
-    D: tenet::typed::CudaPayload + Send + Sync + 'static + std::fmt::Debug,
-{
-    let operands = trace_operands::<R, D>(runtime, spaces, seed);
-    let device = operands.map(|tensor| tensor.to_cuda().unwrap());
-    for (name, host, cold, warm) in trace_networks(&operands, &device) {
-        let what = format!("{provider} {name}");
-        for (phase, result) in [("cold", cold), ("warm", warm)] {
-            assert_eq!(result.placement(), device.ta.placement(), "{what} {phase}");
-            assert!(std::ptr::eq(result.provider(), host.provider()), "{what}");
-            assert_eq!(result.codomain(), host.codomain(), "{what} {phase}");
-            assert_eq!(result.domain(), host.domain(), "{what} {phase}");
-            assert_close_dyn(
-                result.to_host().unwrap().dense_data().unwrap(),
-                host.dense_data().unwrap(),
-                epsilon,
-                &format!("{what} {phase}"),
-            );
-        }
-    }
-}
-
-/// Dense-expansion oracle for the codomain–domain traces: Host, device cold
-/// and device warm each equal the physical-basis einsum, in which a label
-/// written twice on one operand is its diagonal sum.
-fn assert_trace_dense_oracle<R>(
-    runtime: &Runtime,
-    spaces: [&GradedSpace<R>; 3],
-    seed: u64,
-    provider: &str,
-) where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet::sector::PhysicalFusionBasis<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec
-        + Send
-        + Sync,
-{
-    let o = trace_operands::<R, f64>(runtime, spaces, seed);
-    let device = o.map(|tensor| tensor.to_cuda().unwrap());
-    type Runs<R> = (
-        TensorMap<R, f64>,
-        TensorMap<R, f64, CudaStorage>,
-        TensorMap<R, f64, CudaStorage>,
-    );
-    let results =
-        |(host, cold, warm): Runs<R>| [host, cold.to_host().unwrap(), warm.to_host().unwrap()];
-    let dense = |tensor: &TensorMap<R, f64>| widened(tensor.to_physical_dense().unwrap());
-    let (ta, tb, tt, c) = (dense(&o.ta), dense(&o.tb), dense(&o.tt), dense(&o.c));
-    let ta_adjoint = dense(&o.ta.adjoint().unwrap());
-    type DenseOperands<'a> = Vec<(&'a tenet::typed::PhysicalDense<Complex64>, &'a [&'a str])>;
-    type DenseCase<'a, R> = (
-        &'a str,
-        [TensorMap<R, f64>; 3],
-        DenseOperands<'a>,
-        &'a [&'a str],
-    );
-    let cases: [DenseCase<'_, R>; 4] = [
-        (
-            "two traced operands",
-            results(host_cold_warm!(o = &o, &device;
-                [a; x] = (o.tb)[j, a; j, w] * (o.ta)[i, w; i, x])),
-            vec![
-                (&tb, &["j", "a", "j", "w"][..]),
-                (&ta, &["i", "w", "i", "x"][..]),
-            ],
-            &["a", "x"],
-        ),
-        (
-            "traced and untraced",
-            results(host_cold_warm!(o = &o, &device;
-                [b; x] = (o.c)[b; w] * (o.ta)[i, w; i, x])),
-            vec![(&c, &["b", "w"][..]), (&ta, &["i", "w", "i", "x"][..])],
-            &["b", "x"],
-        ),
-        (
-            "lazy conj traced operand",
-            results(host_cold_warm!(o = &o, &device;
-                [y; x] = conj((o.ta))[i, x; i, p] * (o.ta)[j, y; j, p])),
-            vec![
-                (&ta_adjoint, &["i", "p", "i", "x"][..]),
-                (&ta, &["j", "y", "j", "p"][..]),
-            ],
-            &["y", "x"],
-        ),
-        (
-            "full two-pair trace",
-            results(host_cold_warm!(o = &o, &device; [] = (o.tt)[i, j; i, j])),
-            vec![(&tt, &["i", "j", "i", "j"][..])],
-            &[],
-        ),
-    ];
-    for (name, runs, operands, output) in cases {
-        let (shape, expected) = dense_einsum(&operands, output);
-        for (phase, result) in ["host", "device cold", "device warm"]
-            .into_iter()
-            .zip(&runs)
-        {
-            let actual = dense(result);
-            assert_eq!(
-                actual.shape, shape,
-                "{provider} {name} {phase}: dense shape"
-            );
-            assert_close_dyn(
-                &actual.data,
-                &expected,
-                f64::EPSILON,
-                &format!("{provider} {name} {phase} dense"),
-            );
-        }
-    }
-}
-
-fn fermion_u1_trace_spaces(
-) -> [GradedSpace<tenet::sector::ProductFusionRule<FermionParityFusionRule, U1FusionRule>>; 3] {
-    let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
-    let space = |sectors: &[(bool, i32, usize)]| {
-        GradedSpace::try_new(
-            Arc::clone(&rule),
-            sectors.iter().map(|&(odd, charge, degeneracy)| {
-                (
-                    product_sector(
-                        if odd { Z2Irrep::ODD } else { Z2Irrep::EVEN },
-                        U1Irrep::new(charge),
-                    ),
-                    degeneracy,
-                )
-            }),
-        )
-        .unwrap()
-    };
-    // `p` holds the vacuum, so the domain–domain trace of `te` is not empty.
-    [
-        space(&[(false, 0, 2), (true, 1, 1), (true, -1, 1)]),
-        space(&[(false, 0, 1), (true, 1, 2), (true, -1, 1)]),
-        space(&[(false, 0, 1), (true, 1, 2), (false, 1, 1)]),
-    ]
-}
-
-fn fermion_su2_trace_spaces(
-) -> [GradedSpace<tenet::sector::ProductFusionRule<FermionParityFusionRule, SU2FusionRule>>; 3] {
-    let rule = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
-    let space = |sectors: &[(bool, usize, usize)]| {
-        GradedSpace::try_new(
-            Arc::clone(&rule),
-            sectors.iter().map(|&(odd, twice, degeneracy)| {
-                (
-                    product_sector(
-                        if odd { Z2Irrep::ODD } else { Z2Irrep::EVEN },
-                        SU2Irrep::from_twice_spin(twice),
-                    ),
-                    degeneracy,
-                )
-            }),
-        )
-        .unwrap()
-    };
-    [
-        space(&[(false, 0, 2), (true, 1, 1)]),
-        space(&[(true, 1, 2), (false, 2, 1)]),
-        space(&[(false, 0, 1), (true, 1, 2)]),
-    ]
-}
-
-/// G2c-5 (#1350): `tensor!` networks with an intra-operand trace pre-step run
-/// on device and equal the Host run of the same expression, cold and warm,
-/// for U(1) (all four device dtypes), SU(2), fZ2×U(1) and fZ2⊠SU(2) (`f64`
-/// and `Complex64`), dual traced legs included; the codomain–domain traces of
-/// U(1) and SU(2) also equal the physical-basis dense expansion.
-#[test]
-#[ignore = "requires a real CUDA device"]
-fn trace_prestep_cuda_networks_match_host_and_dense_oracles() {
-    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-
-    let (v, w, p) = (
-        u1_space(&[(-1, 2), (0, 1), (1, 2)]),
-        u1_space(&[(0, 2), (1, 1)]),
-        u1_space(&[(-1, 1), (0, 2), (1, 1)]),
-    );
-    let u1 = [&v, &w, &p];
-    assert_trace_networks_match_host::<_, f64>(&runtime, u1, 1_350_000, f64::EPSILON, "U(1)");
-    assert_trace_networks_match_host::<_, Complex64>(&runtime, u1, 1_350_100, f64::EPSILON, "U(1)");
-    let single = f64::from(f32::EPSILON);
-    assert_trace_networks_match_host::<_, f32>(&runtime, u1, 1_350_200, single, "U(1)");
-    assert_trace_networks_match_host::<_, Complex32>(&runtime, u1, 1_350_300, single, "U(1)");
-    assert_trace_dense_oracle(&runtime, u1, 1_350_400, "U(1)");
-
-    let (v, w, p) = (
-        su2_space(&[(0, 2), (1, 1)]),
-        su2_space(&[(1, 2), (2, 1)]),
-        su2_space(&[(0, 1), (1, 2)]),
-    );
-    let su2 = [&v, &w, &p];
-    assert_trace_networks_match_host::<_, f64>(&runtime, su2, 1_351_000, f64::EPSILON, "SU(2)");
-    assert_trace_networks_match_host::<_, Complex64>(
-        &runtime,
-        su2,
-        1_351_100,
-        f64::EPSILON,
-        "SU(2)",
-    );
-    assert_trace_dense_oracle(&runtime, su2, 1_351_200, "SU(2)");
-
-    let [v, w, p] = fermion_u1_trace_spaces();
-    let fu1 = [&v, &w, &p];
-    assert_trace_networks_match_host::<_, f64>(&runtime, fu1, 1_352_000, f64::EPSILON, "fZ2xU(1)");
-    assert_trace_networks_match_host::<_, Complex64>(
-        &runtime,
-        fu1,
-        1_352_100,
-        f64::EPSILON,
-        "fZ2xU(1)",
-    );
-
-    let [v, w, p] = fermion_su2_trace_spaces();
-    let fsu2 = [&v, &w, &p];
-    assert_trace_networks_match_host::<_, f64>(
-        &runtime,
-        fsu2,
-        1_353_000,
-        f64::EPSILON,
-        "fZ2xSU(2)",
-    );
-    assert_trace_networks_match_host::<_, Complex64>(
-        &runtime,
-        fsu2,
-        1_353_100,
-        f64::EPSILON,
-        "fZ2xSU(2)",
-    );
-}
-
-/// G2c-5 (#1350) warm-cost contract: a warm trace-bearing network transfers
-/// exactly one #740 zero upload per traced operand (its trace output, which is
-/// call-local like the Host's) plus, when the network has a contraction step,
-/// the returned output's; it allocates exactly those outputs, downloads
-/// nothing, misses and evicts no cuTENSOR plan, and grows no scratch and no
-/// executor state. A network without a step returns its trace output itself.
-///
-/// The counters are process-wide: run with `--test-threads=1`.
-#[test]
-#[ignore = "requires a real CUDA device"]
-fn warm_trace_prestep_transfers_only_the_trace_and_returned_outputs() {
-    fn bytes<R, D>(tensor: &TensorMap<R, D>) -> u64
-    where
-        D: tenet::typed::CudaPayload,
-    {
-        std::mem::size_of_val(tensor.dense_data().unwrap()) as u64
-    }
-
-    fn warm<R, D>(runtime: &Runtime, spaces: [&GradedSpace<R>; 3], seed: u64, what: &str)
-    where
-        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-            + MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec
-            + Send
-            + Sync,
-        D: tenet::typed::CudaPayload + Send + Sync + 'static,
-    {
-        let h = trace_operands::<R, D>(runtime, spaces, seed);
-        let o = h.map(|tensor| tensor.to_cuda().unwrap());
-        let traced = |tensor: &TensorMap<R, D>, pairs: &[(usize, usize)]| {
-            bytes(&tensor.trace_pairs(pairs).unwrap())
-        };
-        let two = || tensor!([a; x] = (o.tb)[j, a; j, w] * (o.ta)[i, w; i, x]).unwrap();
-        let dual = || tensor!([y; x] = (o.td)[k, k, y; p] * (o.te)[p; x, u, u]).unwrap();
-        let full = || tensor!([] = (o.tt)[i, j; i, j]).unwrap();
-        type Run<'a, R, D> = (
-            &'a str,
-            &'a dyn Fn() -> TensorMap<R, D, CudaStorage<D>>,
-            u64,
-            u64,
-            bool,
-        );
-        let runs: [Run<'_, R, D>; 3] = [
-            (
-                "two traced operands",
-                &two,
-                2,
-                traced(&h.tb, &[(0, 2)]) + traced(&h.ta, &[(0, 2)]),
-                true,
-            ),
-            (
-                "dual traced legs",
-                &dual,
-                2,
-                traced(&h.td, &[(0, 1)]) + traced(&h.te, &[(2, 3)]),
-                true,
-            ),
-            (
-                "full two-pair trace",
-                &full,
-                1,
-                traced(&h.tt, &[(0, 2), (1, 3)]),
-                false,
-            ),
-        ];
-        for (name, run, traces, trace_bytes, steps) in runs {
-            drop(run());
-            drop(run());
-            let before = device_state(runtime);
-            let output = run();
-            let after = device_state(runtime);
-            let output_bytes = bytes(&output.to_host().unwrap());
-            let (calls, h2d_bytes) = if steps {
-                (traces + 1, trace_bytes + output_bytes)
-            } else {
-                (traces, trace_bytes)
-            };
-            let what = format!("{what} {name}");
-            assert_eq!(
-                (
-                    after.transfers.h2d_calls - before.transfers.h2d_calls,
-                    after.transfers.h2d_bytes - before.transfers.h2d_bytes,
-                    after.transfers.d2h_calls - before.transfers.d2h_calls,
-                    after.transfers.device_allocs - before.transfers.device_allocs,
-                ),
-                (calls, h2d_bytes, 0, calls),
-                "{what}: (h2d calls, h2d bytes, d2h calls, device allocations)"
-            );
-            assert_eq!(after.cutensor.misses, before.cutensor.misses, "{what}");
-            assert_eq!(
-                after.cutensor.evictions, before.cutensor.evictions,
-                "{what}"
-            );
-            assert!(
-                after.cutensor.hits > before.cutensor.hits,
-                "{what}: vacuous"
-            );
-            assert_eq!(after.scratch_bytes, before.scratch_bytes, "{what}");
-            assert_eq!(after.transforms, before.transforms, "{what}");
-            assert_eq!(after.plans.entries, before.plans.entries, "{what}");
-            assert_eq!(after.plans.misses, before.plans.misses, "{what}");
-            assert_eq!(
-                after.plans.workspaces_created, before.plans.workspaces_created,
-                "{what}"
-            );
-        }
-    }
-
-    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let (v, w, p) = (
-        u1_space(&[(-1, 2), (0, 1), (1, 2)]),
-        u1_space(&[(0, 2), (1, 1)]),
-        u1_space(&[(-1, 1), (0, 2), (1, 1)]),
-    );
-    warm::<_, f64>(&runtime, [&v, &w, &p], 1_354_000, "U(1) f64");
-    warm::<_, Complex64>(&runtime, [&v, &w, &p], 1_354_100, "U(1) c64");
-    let [v, w, p] = fermion_u1_trace_spaces();
-    warm::<_, f64>(&runtime, [&v, &w, &p], 1_354_200, "fZ2xU(1) f64");
-}
-
-/// G2c-5 (#1350): every trace of an expression is validated and compiled on
-/// the Host before the first one runs, so a trace rejection on a later operand
-/// — mutually non-dual traced legs, a label count that is not the operand's
-/// rank — leaves plan cache, pools, transfer counters, cuTENSOR plans, scratch
-/// and executor state unchanged, with the Host's error. So does a
-/// contracted-leg mismatch between the reduced operands, decided from their
-/// spaces before any trace runs (#1371). A non-symmetric traced operand is
-/// in `anyonic_cuda_trace_prestep_rejects_like_host_before_device_work`.
-#[test]
-#[ignore = "requires a real CUDA device"]
-fn rejected_cuda_trace_prestep_leaves_every_device_state_unchanged() {
-    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let (v, w, p) = (
-        u1_space(&[(-1, 2), (0, 1), (1, 2)]),
-        u1_space(&[(0, 2), (1, 1)]),
-        u1_space(&[(-1, 1), (0, 2), (1, 1)]),
-    );
-    let h = trace_operands::<_, f64>(&runtime, [&v, &w, &p], 1_355_000);
-    let o = h.map(|tensor| tensor.to_cuda().unwrap());
-    let host_bad =
-        TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &w], [&p, &w], 1_355_100).unwrap();
-    let bad = host_bad.to_cuda().unwrap();
-    let host_mismatch =
-        TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &p], [&v, &w], 1_355_200).unwrap();
-    let mismatch = host_mismatch.to_cuda().unwrap();
-    drop(tensor!([a; x] = (o.tb)[j, a; j, w] * (o.ta)[i, w; i, x]).unwrap());
-    let before = device_state(&runtime);
-
-    let host_error = tensor!([a; x] = (h.tb)[j, a; j, w] * host_bad[i, w; i, x]).unwrap_err();
-    let device_error = tensor!([a; x] = (o.tb)[j, a; j, w] * bad[i, w; i, x]).unwrap_err();
-    assert_eq!(device_error.to_string(), host_error.to_string());
-    assert_eq!(device_state(&runtime), before, "non-dual traced legs");
-
-    let host_error = tensor!([a; x] = (h.tb)[j, a; j, w] * (h.c)[i, w; i, x]).unwrap_err();
-    let device_error = tensor!([a; x] = (o.tb)[j, a; j, w] * (o.c)[i, w; i, x]).unwrap_err();
-    assert!(matches!(
-        device_error,
-        tenet::typed::Error::InvalidArgument(_)
-    ));
-    assert_eq!(device_error.to_string(), host_error.to_string());
-    assert_eq!(
-        device_state(&runtime),
-        before,
-        "label count is not the rank"
-    );
-
-    let host_error = tensor!([a; x] = (h.tb)[j, a; j, w] * host_mismatch[i, w; i, x]).unwrap_err();
-    let before = device_state(&runtime);
-    let device_error = tensor!([a; x] = (o.tb)[j, a; j, w] * mismatch[i, w; i, x]).unwrap_err();
-    assert_eq!(device_error.to_string(), host_error.to_string());
-    assert_eq!(
-        device_state(&runtime),
-        before,
-        "reduced contracted-leg mismatch"
-    );
-}
-
 #[path = "../../tenet/tests/braiding_probe/mod.rs"]
 mod braiding_probe;
 use braiding_probe::{ProbeSector, RealBraidingProbe};
 
-/// G2c-5 (#1350): an anyonic traced operand is rejected by the trace compile
-/// with the Host's error before any trace runs, leaving every device state
-/// unchanged.
-#[test]
-#[ignore = "requires a real CUDA device"]
-fn anyonic_cuda_trace_prestep_rejects_like_host_before_device_work() {
-    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let leg =
-        GradedSpace::try_new(Arc::new(RealBraidingProbe::<true>), [(ProbeSector, 2)]).unwrap();
-    let host = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_356_000).unwrap();
-    let device = host.to_cuda().unwrap();
-    let host_error = tensor!([] = host[i; i]).unwrap_err();
-    let before = device_state(&runtime);
-    let device_error = tensor!([] = device[i; i]).unwrap_err();
-    assert!(
-        matches!(
-            &device_error,
-            tenet::typed::Error::Operation(operation)
-                if matches!(
-                    **operation,
-                    tenet::typed::OperationError::UnsupportedTensorContractScope { .. }
-                )
-        ),
-        "{device_error:?}"
-    );
-    assert_eq!(device_error.to_string(), host_error.to_string());
-    assert_eq!(device_state(&runtime), before, "anyonic traced operand");
-}
-
-/// #1372: a device `tensor!` contraction on a non-symmetric (unbraided or
+/// #1372: a device `Network::contract` contraction on a non-symmetric (unbraided or
 /// anyonic) rule is rejected by the network preflight with the typed
-/// `contract`'s error — the Host `tensor!` error — even for the canonical
+/// `contract`'s error — the Host `Network::contract` error — even for the canonical
 /// network, before any device work or plan publication.
-fn assert_cuda_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
+fn assert_cuda_network_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let leg =
         GradedSpace::try_new(Arc::new(RealBraidingProbe::<ANYONIC>), [(ProbeSector, 2)]).unwrap();
@@ -2556,9 +2259,13 @@ fn assert_cuda_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
     let host_rhs =
         TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_372_101).unwrap();
     let (lhs, rhs) = (host_lhs.to_cuda().unwrap(), host_rhs.to_cuda().unwrap());
-    let host_error = tensor!([a; b] = host_lhs[a; k] * host_rhs[k; b]).unwrap_err();
+    let host_error = net(&[op(&["a"], &["k"]), op(&["k"], &["b"])], &["a"], &["b"])
+        .contract(&[&host_lhs, &host_rhs])
+        .unwrap_err();
     let before = device_state(&runtime);
-    let device_error = tensor!([a; b] = lhs[a; k] * rhs[k; b]).unwrap_err();
+    let device_error = net(&[op(&["a"], &["k"]), op(&["k"], &["b"])], &["a"], &["b"])
+        .contract(&[&lhs, &rhs])
+        .unwrap_err();
     assert!(
         matches!(
             &device_error,
@@ -2578,9 +2285,9 @@ fn assert_cuda_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn non_symmetric_cuda_macro_contraction_rejects_like_host_before_device_work() {
-    assert_cuda_macro_contraction_rejects_non_symmetric::<false>();
-    assert_cuda_macro_contraction_rejects_non_symmetric::<true>();
+fn non_symmetric_cuda_network_contraction_rejects_like_host_before_device_work() {
+    assert_cuda_network_contraction_rejects_non_symmetric::<false>();
+    assert_cuda_network_contraction_rejects_non_symmetric::<true>();
 }
 
 #[test]

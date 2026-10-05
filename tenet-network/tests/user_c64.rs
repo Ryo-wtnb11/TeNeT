@@ -12,7 +12,10 @@ use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::FusionAlgebraError;
 use tenet::typed::{Complex64, Runtime};
 use tenet::typed::{GradedSpace, TensorMap};
-use tenet_network::tensor;
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{conj, net, op};
 
 fn i() -> Complex64 {
     Complex64::new(0.0, 1.0)
@@ -121,7 +124,7 @@ fn c64_contract_matches_real_imag_decomposition() {
     assert_complex_contract_identity(&runtime, &su2);
 }
 
-fn assert_typed_macro_conj<R>(runtime: &Runtime, p: &GradedSpace<R>)
+fn assert_typed_network_conj<R>(runtime: &Runtime, p: &GradedSpace<R>)
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -137,14 +140,28 @@ where
         .axpby(one() * 0.5, &h0.adjoint().unwrap(), one() * 0.5)
         .unwrap();
 
-    let expectation = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])
-        .unwrap()
-        .scalar()
-        .unwrap();
-    let norm = tensor!([] = conj(psi)[p; l, r] * psi[p; l, r])
-        .unwrap()
-        .scalar()
-        .unwrap();
+    let expectation = net(
+        &[
+            conj(op(&["p"], &["l", "r"])),
+            op(&["p"], &["q"]),
+            op(&["q"], &["l", "r"]),
+        ],
+        &[],
+        &[],
+    )
+    .contract(&[&psi, &h, &psi])
+    .unwrap()
+    .scalar()
+    .unwrap();
+    let norm = net(
+        &[conj(op(&["p"], &["l", "r"])), op(&["p"], &["l", "r"])],
+        &[],
+        &[],
+    )
+    .contract(&[&psi, &psi])
+    .unwrap()
+    .scalar()
+    .unwrap();
     assert!(norm.re > 0.0);
     assert!(norm.im.abs() <= 1.0e-12 * (1.0 + norm.re));
     assert!(expectation.im.abs() <= 1.0e-10 * (1.0 + expectation.norm()));
@@ -156,7 +173,7 @@ where
 /// The network layer lowers `conj` to typed adjoint, including complex
 /// conjugation: a Hermitian expectation value is real.
 #[test]
-fn tensor_macro_conj_expectation_value_is_real() {
+fn network_conj_expectation_value_is_real() {
     let runtime = Runtime::builder().build().unwrap();
     let u1 = GradedSpace::try_new(
         Arc::new(U1FusionRule),
@@ -167,7 +184,7 @@ fn tensor_macro_conj_expectation_value_is_real() {
         ],
     )
     .unwrap();
-    assert_typed_macro_conj(&runtime, &u1);
+    assert_typed_network_conj(&runtime, &u1);
 
     let su2 = GradedSpace::try_new(
         Arc::new(SU2FusionRule),
@@ -177,5 +194,5 @@ fn tensor_macro_conj_expectation_value_is_real() {
         ],
     )
     .unwrap();
-    assert_typed_macro_conj(&runtime, &su2);
+    assert_typed_network_conj(&runtime, &su2);
 }

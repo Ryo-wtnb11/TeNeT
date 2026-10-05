@@ -53,7 +53,12 @@ mod device {
         ContractSpec, CudaStorage, Eigh, GradedSpace, Qr, Runtime, SpectrumMagnitude, Svd,
         TensorMap, Truncation,
     };
-    use tenet_network::tensor;
+    use tenet_network::{Network, TemporaryLabel};
+
+    /// One operand's or the output's written labels.
+    fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
+        names.iter().copied().map(TemporaryLabel::from).collect()
+    }
 
     /// Fixture families. The parameters are explicit CLI inputs; nothing in
     /// TeNeT or in this harness dispatches on them.
@@ -1357,30 +1362,33 @@ mod device {
             }
         }
 
-        // canonical three-tensor `tensor!` chain
+        // canonical three-tensor network chain
         {
+            let chain = Network::new(
+                vec![
+                    labels(&["p", "q"]),
+                    labels(&["q", "r"]),
+                    labels(&["r", "s"]),
+                ],
+                vec![false, false, false],
+                vec![Some(1), Some(1), Some(1)],
+                labels(&["p", "s"]),
+                Some(1),
+            )
+            .expect("chain network");
             let fixture = fixture::<R, D>(config, space, 3);
             let (a, b, c) = (&fixture.host[0], &fixture.host[1], &fixture.host[2]);
             let (ad, bd, cd) = (&fixture.device[0], &fixture.device[1], &fixture.device[2]);
             let barrier = || {
                 let _ = ad.norm(2.0);
             };
-            match bench(
-                config,
-                "cold",
-                || tensor!([p; s] = ad[p; q] * bd[q; r] * cd[r; s]),
-                barrier,
-            ) {
+            match bench(config, "cold", || chain.contract(&[ad, bd, cd]), barrier) {
                 Err(reason) => skip_row(label("network_chain3"), &reason),
                 Ok((device_first, device_rows)) => {
                     let (host_first, host_rows) = bench(
                         config,
                         "cold",
-                        || {
-                            Ok::<_, Never>(
-                                tensor!([p; s] = a[p; q] * b[q; r] * c[r; s]).expect("Host chain"),
-                            )
-                        },
+                        || Ok::<_, Never>(chain.contract(&[a, b, c]).expect("Host chain")),
                         || {},
                     )
                     .expect("Host chain arm");

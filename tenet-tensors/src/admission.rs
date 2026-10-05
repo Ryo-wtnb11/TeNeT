@@ -54,7 +54,7 @@ pub fn require_symmetric_braiding(
 }
 
 /// The ordinary-contraction boundary of every `contract` entry, returning or
-/// overwriting, Host or device, typed or `tensor!`, as by TensorKit
+/// overwriting, Host or device, typed or network, as by TensorKit
 /// `blas_contract!` before any layout test.
 ///
 /// Why not admit the canonical axes of a `NoBraiding` or `Anyonic` rule:

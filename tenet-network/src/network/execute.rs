@@ -418,8 +418,8 @@ impl PlannedNetwork {
     /// contraction's own remaining boundaries are unreachable from a compiled
     /// schedule: every step passes `alpha = 1`, every retained destination is
     /// a canonical device result of the same step, and schedules are produced
-    /// only by `compile_schedule`. `tensor!` decides the same classes from
-    /// its operand count, before any trace and the plan lookup
+    /// only by `compile_schedule`. [`Network::contract`] decides the same
+    /// classes from its operand count, before the plan lookup
     /// ([`cuda_operand_admission`]).
     #[cfg(feature = "cuda")]
     fn validate_cuda_admission<R, D>(
@@ -434,9 +434,9 @@ impl PlannedNetwork {
     }
 }
 
-/// The operand half of the device network preflight, shared with the
-/// `tensor!` entries, which run it before any trace and the plan lookup: a
-/// Runtime with a device, every operand on it, then
+/// The operand half of the device network preflight, shared with
+/// [`Network::contract`], which runs it before the plan lookup: a Runtime with
+/// a device, every operand on it, then
 /// [`device_operand_admission`].
 #[cfg(feature = "cuda")]
 pub(super) fn cuda_operand_admission<R, D>(

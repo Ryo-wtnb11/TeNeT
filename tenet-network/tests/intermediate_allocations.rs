@@ -9,16 +9,20 @@ use tenet::typed::ContractSpec;
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{Complex32, Complex64, Runtime, TensorScalar};
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap as TypedTensorMap};
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{net, op};
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
 
 use tenet_network::{
-    tensor, ContractionPlan, ContractionStep, Network, NetworkExecutionWorkspace, NetworkIR,
+    ContractionPlan, ContractionStep, Network, NetworkExecutionWorkspace, NetworkIR,
     PlannedNetwork, TemporaryLabel, TensorId,
 };
 
 #[test]
-fn warm_macro_pool_reuses_receiver_sized_dense_payloads() {
+fn warm_cached_pool_reuses_receiver_sized_dense_payloads() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
@@ -40,7 +44,19 @@ fn warm_macro_pool_reuses_receiver_sized_dense_payloads() {
     )
     .unwrap();
     for _ in 0..3 {
-        drop(tensor!([c_out; d] = a[a_leg; b_leg] * b[b_leg; c_out] * c[a_leg; d]).unwrap());
+        drop(
+            net(
+                &[
+                    op(&["a_leg"], &["b_leg"]),
+                    op(&["b_leg"], &["c_out"]),
+                    op(&["a_leg"], &["d"]),
+                ],
+                &["c_out"],
+                &["d"],
+            )
+            .contract(&[&a, &b, &c])
+            .unwrap(),
+        );
     }
 
     // Depending on the greedy tie break, the sole receiver is either 5x11
@@ -54,7 +70,17 @@ fn warm_macro_pool_reuses_receiver_sized_dense_payloads() {
         );
         reset_live_registry();
         ENABLED.store(true, Ordering::SeqCst);
-        let output = tensor!([c_out; d] = a[a_leg; b_leg] * b[b_leg; c_out] * c[a_leg; d]).unwrap();
+        let output = net(
+            &[
+                op(&["a_leg"], &["b_leg"]),
+                op(&["b_leg"], &["c_out"]),
+                op(&["a_leg"], &["d"]),
+            ],
+            &["c_out"],
+            &["d"],
+        )
+        .contract(&[&a, &b, &c])
+        .unwrap();
         assert_eq!(output.dense_data().unwrap().len(), 11 * 11);
         drop(output);
         ENABLED.store(false, Ordering::SeqCst);

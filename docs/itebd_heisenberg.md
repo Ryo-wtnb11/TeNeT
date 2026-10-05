@@ -92,17 +92,33 @@ two-site unit cell.
 
 [`bond_update`](../tenet-network/examples/itebd_heisenberg.rs) absorbs the two
 outer weights, the two-site tensors, the middle weight, and the gate into one
-two-site tensor. This is the complete `tensor!` expression from the example:
+two-site tensor. This is the complete network from the example:
 
 ```rust
-let theta = tensor!([l, pa; pb, r] = l_out[l; x] * g1[x, qa; y] * l_mid[y; z]
-    * g2[z, qb; w] * l_out[w; r] * gate[pa, pb; qa, qb])?;
+let theta = Network::new(
+    vec![
+        labels(&["l", "x"]),              // l_out[l; x]
+        labels(&["x", "qa", "y"]),        // g1[x, qa; y]
+        labels(&["y", "z"]),              // l_mid[y; z]
+        labels(&["z", "qb", "w"]),        // g2[z, qb; w]
+        labels(&["w", "r"]),              // l_out[w; r]
+        labels(&["pa", "pb", "qa", "qb"]), // gate[pa, pb; qa, qb]
+    ],
+    vec![false; 6],
+    vec![Some(1), Some(2), Some(1), Some(2), Some(1), Some(2)],
+    labels(&["l", "pa", "pb", "r"]),
+    Some(2),
+)?
+.contract(&[l_out, g1, l_mid, g2, l_out, gate])?;
 ```
 
-The output split `[l, pa; pb, r]` sets the bipartition for the following SVD:
-the first site and left bond are separated from the second site and right bond.
-Labels that appear
-twice are summed; labels that remain once become output legs.
+Each operand's labels list its codomain legs then its domain legs, and the
+`Some(k)` beside it is how many of them are codomain legs. The output
+`[l, pa; pb, r]` (two codomain legs) sets the bipartition for the following
+SVD: the first site and left bond are separated from the second site and right
+bond. Labels that appear twice are summed; labels that remain once become
+output legs. `Network::contract` runs the network through the Runtime's plan
+cache, so the repeated update reuses one contraction order.
 
 ## 7. Truncate the new bond
 

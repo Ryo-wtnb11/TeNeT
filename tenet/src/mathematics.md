@@ -599,7 +599,7 @@ rank budget.
 
 - `compose` is categorical composition: match the domain of the left tensor
   with the codomain of the right tensor.
-- `contract` and `tensor!` lower arbitrary repeated labels to the same
+- `contract` and `tenet_network::Network` lower arbitrary repeated labels to the same
   dual-pairing rule, then choose a pairwise execution plan.
 - `permute`, `braid`, and `transpose` change the fusion-tree basis as well as
   the apparent axis order. With fermion parity and SU(2), this can introduce

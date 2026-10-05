@@ -15,7 +15,10 @@ use tenet::typed::Direction;
 use tenet::sector::{FermionParityFusionRule, Z2Irrep};
 use tenet::typed::Complex64;
 use tenet::typed::{Eig, GradedSpace, Runtime, Svd, TensorMap};
-use tenet_network::tensor;
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{net, op};
 
 /// FZ2 map `V <- V`, degeneracy 1, with `even`/`odd` block values — the exact
 /// tensor `build(f)` produces in the Julia reference.
@@ -117,23 +120,51 @@ fn fz2_contractions_match_tensorkit() {
     );
 
     // (1) dense supertrace loop tr(A B) = 2 - 6 = -4.
-    let s1 = scalar(tensor!([] = a[i; j] * b[j; i]).unwrap());
+    let s1 = scalar(
+        net(&[op(&["i"], &["j"]), op(&["j"], &["i"])], &[], &[])
+            .contract(&[&a, &b])
+            .unwrap(),
+    );
     assert!((s1 - (-4.0)).abs() < 1e-12, "s1 = {s1}");
 
     // (2) dense three-map loop tr(A B C) = 1 - 15 = -14.
-    let s2 = scalar(tensor!([] = a[i; j] * b[j; k] * c[k; i]).unwrap());
+    let s2 = scalar(
+        net(
+            &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["i"])],
+            &[],
+            &[],
+        )
+        .contract(&[&a, &b, &c])
+        .unwrap(),
+    );
     assert!((s2 - (-14.0)).abs() < 1e-12, "s2 = {s2}");
 
     // (3) diagonal S in a closed fermionic loop A[a;b] S[b;c] B[c;a] = 6 - 12 = -6.
-    let s3 = scalar(tensor!([] = a[i; j] * s[j; k] * b[k; i]).unwrap());
+    let s3 = scalar(
+        net(
+            &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["i"])],
+            &[],
+            &[],
+        )
+        .contract(&[&a, &s, &b])
+        .unwrap(),
+    );
     assert!((s3 - (-6.0)).abs() < 1e-12, "s3 = {s3}");
 
     // (4) S on the leading side: S[a;b] A[b;c] B[c;a] = -6.
-    let s4 = scalar(tensor!([] = s[i; j] * a[j; k] * b[k; i]).unwrap());
+    let s4 = scalar(
+        net(
+            &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["i"])],
+            &[],
+            &[],
+        )
+        .contract(&[&s, &a, &b])
+        .unwrap(),
+    );
     assert!((s4 - (-6.0)).abs() < 1e-12, "s4 = {s4}");
 
     // Force the single-axis diagonal `contract` fast path explicitly (rather than
-    // whatever order the macro picks): A[i;j] · S[j;k] goes through scale+permute
+    // whatever order the planner picks): A[i;j] · S[j;k] goes through scale+permute
     // + the fermionic twist fold, and closing with B must still give TK's -6.
     let as_ = a
         .contract(
@@ -146,7 +177,11 @@ fn fz2_contractions_match_tensorkit() {
             },
         )
         .unwrap();
-    let s3_fast = scalar(tensor!([] = as_[i; k] * b[k; i]).unwrap());
+    let s3_fast = scalar(
+        net(&[op(&["i"], &["k"]), op(&["k"], &["i"])], &[], &[])
+            .contract(&[&as_, &b])
+            .unwrap(),
+    );
     assert!((s3_fast - (-6.0)).abs() < 1e-12, "s3_fast = {s3_fast}");
     // And the leading (D * A) order on `s`.
     let sa = s
@@ -160,6 +195,10 @@ fn fz2_contractions_match_tensorkit() {
             },
         )
         .unwrap();
-    let s4_fast = scalar(tensor!([] = sa[i; k] * b[k; i]).unwrap());
+    let s4_fast = scalar(
+        net(&[op(&["i"], &["k"]), op(&["k"], &["i"])], &[], &[])
+            .contract(&[&sa, &b])
+            .unwrap(),
+    );
     assert!((s4_fast - (-6.0)).abs() < 1e-12, "s4_fast = {s4_fast}");
 }

@@ -1,8 +1,10 @@
 mod u1 {
+    use super::labels;
     use std::{hint::black_box, sync::Arc, time::Instant};
     use tenet::sector::{U1FusionRule, U1Irrep};
     use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
-    use tenet_network::{configure_plan_cache, plan_cache_stats, tensor, PlanCacheConfig};
+    use tenet_network::Network;
+    use tenet_network::{configure_plan_cache, plan_cache_stats, PlanCacheConfig};
 
     fn fixture(runtime: &Runtime) -> (TensorMap<U1FusionRule, f64>, TensorMap<U1FusionRule, f64>) {
         let space = GradedSpace::try_new(
@@ -50,8 +52,16 @@ mod u1 {
             );
         }
         let (a, b) = fixture(&runtime);
+        let network = Network::new(
+            vec![labels(&["i", "j", "k", "l"]), labels(&["k", "l", "m", "n"])],
+            vec![false, false],
+            vec![Some(2), Some(2)],
+            labels(&["i", "j", "m", "n"]),
+            Some(2),
+        )
+        .unwrap();
         let start = Instant::now();
-        let cold = black_box(tensor!([i,j;m,n] = a[i,j;k,l] * b[k,l;m,n]).unwrap());
+        let cold = black_box(network.contract(&[&a, &b]).unwrap());
         let cold_elapsed = start.elapsed().as_secs_f64() * 1e6;
         row(cache, "cold", 1, cold_elapsed, &runtime);
         let cold_stats = plan_cache_stats(&runtime);
@@ -64,14 +74,12 @@ mod u1 {
             assert_eq!(cold_stats, Default::default());
         }
         for _ in 0..2 {
-            black_box(tensor!([i,j;m,n] = a[i,j;k,l] * b[k,l;m,n]).unwrap());
+            black_box(network.contract(&[&a, &b]).unwrap());
         }
         let start = Instant::now();
         let mut warm = None;
         for _ in 0..20 {
-            warm = Some(black_box(
-                tensor!([i,j;m,n] = a[i,j;k,l] * b[k,l;m,n]).unwrap(),
-            ));
+            warm = Some(black_box(network.contract(&[&a, &b]).unwrap()));
         }
         let warm_elapsed = start.elapsed().as_secs_f64() * 1e6;
         row(cache, "warm", 20, warm_elapsed, &runtime);
@@ -113,6 +121,13 @@ mod u1 {
     }
 }
 
+use tenet_network::TemporaryLabel;
+
+/// One operand's or the output's written labels.
+fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
+    names.iter().copied().map(TemporaryLabel::from).collect()
+}
+
 #[cfg(not(feature = "racah-generated"))]
 fn run_u1_medians() {
     let mut rows = std::collections::BTreeMap::<(String, String), Vec<(f64, Vec<String>)>>::new();
@@ -148,14 +163,16 @@ fn run_u1_medians() {
 
 #[cfg(feature = "racah-generated")]
 mod checked_generic {
+    use super::labels;
     use std::hint::black_box;
     use std::process::Command;
     use std::sync::Arc;
     use std::time::Instant;
+    use tenet_network::Network;
 
     use tenet::sector::SUNFusionRule;
     use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
-    use tenet_network::{configure_plan_cache, plan_cache_stats, tensor, PlanCacheConfig};
+    use tenet_network::{configure_plan_cache, plan_cache_stats, PlanCacheConfig};
 
     const ITERATIONS: usize = 20;
 
@@ -239,9 +256,17 @@ mod checked_generic {
             );
         }
         let (a, b) = fixture(&runtime, Arc::clone(&provider), label.clone());
+        let network = Network::new(
+            vec![labels(&["i", "j", "k", "l"]), labels(&["k", "l", "m", "n"])],
+            vec![false, false],
+            vec![Some(2), Some(2)],
+            labels(&["i", "j", "m", "n"]),
+            Some(2),
+        )
+        .unwrap();
 
         let cold_start = Instant::now();
-        let cold = black_box(tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).expect("cold"));
+        let cold = black_box(network.contract(&[&a, &b]).expect("cold"));
         let cold_us = cold_start.elapsed().as_secs_f64() * 1e6;
         print_row(symmetry, cache, "cold", 1, cold_us, &runtime);
         let cold_stats = plan_cache_stats(&runtime);
@@ -256,14 +281,12 @@ mod checked_generic {
         }
 
         for _ in 0..2 {
-            black_box(tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).expect("warmup"));
+            black_box(network.contract(&[&a, &b]).expect("warmup"));
         }
         let warm_start = Instant::now();
         let mut warm_output = None;
         for _ in 0..ITERATIONS {
-            warm_output = Some(black_box(
-                tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).expect("warm"),
-            ));
+            warm_output = Some(black_box(network.contract(&[&a, &b]).expect("warm")));
         }
         let warm_us = warm_start.elapsed().as_secs_f64() * 1e6;
         print_row(symmetry, cache, "warm", ITERATIONS, warm_us, &runtime);

@@ -11,8 +11,8 @@ Executable: `tenet-network/examples/cuda_operation_matrix.rs`
 with status 2).
 
 The example lives in `tenet-network`, not `tenet`, because the canonical
-`tensor!` network row needs the macro, and `tenet-network` depends on `tenet`
-rather than the other way round.
+network row needs `Network`, and `tenet-network` depends on `tenet` rather
+than the other way round.
 
 ## Protocol
 
@@ -104,7 +104,7 @@ device test uses and what the device contract/compose route accepts (whole
 codomain against whole domain, canonical order, identity output order).
 `eigh_full` uses a separately built Hermitian fixture; `svd_trunc_composition`
 uses `Truncation::rank(degeneracy)`; `network_chain3` is the canonical three-tensor
-`tensor!([p; s] = a[p; q] * b[q; r] * c[r; s])` chain.
+`[p; s] = a[p; q] * b[q; r] * c[r; s]` chain, run with `Network::contract`.
 
 `svd_trunc_composition` replaces the `svd_trunc_rank` row of earlier
 revisions (#1297). The truncated SVD is no longer an operation of its own

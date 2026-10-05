@@ -67,13 +67,12 @@ impl Network {
         D: TensorScalar,
         S: TensorStorage<D>,
     {
-        static_operand_preflight(
+        network_operand_preflight(
             tensors,
             &self.inputs,
             &self.conj,
             &self.codomain_splits,
-            &[],
-            Some(&self.contracted),
+            &self.contracted,
         )
     }
 }

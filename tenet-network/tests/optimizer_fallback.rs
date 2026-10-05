@@ -7,7 +7,11 @@ use std::sync::Arc;
 
 use tenet::sector::{SU2FusionRule, SU2Irrep};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
-use tenet_network::{tensor, Optimizer, PlanCacheConfig};
+use tenet_network::{Optimizer, PlanCacheConfig};
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{conj, net, op};
 
 #[test]
 fn mf_optimizers_fall_back_on_all_dim1_gram_topology() {
@@ -47,14 +51,19 @@ fn mf_optimizers_fall_back_on_all_dim1_gram_topology() {
         let cne = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &v], [&v], 1).unwrap();
         let sne = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &v], [&v], 2).unwrap();
         let ev = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 3).unwrap();
-        let out = tensor!(
-            [o1, o2; o3, o4] = cne[n3, n4; o3]
-                * conj(cne)[n3, n5; o1]
-                * ev[n1, n2; n7, n4]
-                * conj(ev)[n1, n2; n8, n5]
-                * sne[n7, n6; o4]
-                * conj(sne)[n8, n6; o2]
-        );
+        let out = net(
+            &[
+                op(&["n3", "n4"], &["o3"]),
+                conj(op(&["n3", "n5"], &["o1"])),
+                op(&["n1", "n2"], &["n7", "n4"]),
+                conj(op(&["n1", "n2"], &["n8", "n5"])),
+                op(&["n7", "n6"], &["o4"]),
+                conj(op(&["n8", "n6"], &["o2"])),
+            ],
+            &["o1", "o2"],
+            &["o3", "o4"],
+        )
+        .contract(&[&cne, &cne, &ev, &ev, &sne, &sne]);
         assert!(out.is_ok(), "{driver}: {:?}", out.err());
     }
 }

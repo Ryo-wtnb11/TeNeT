@@ -1,6 +1,11 @@
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
-use tenet_network::tensor;
+use tenet_network::{Network, TemporaryLabel};
+
+/// One operand's or the output's written labels.
+fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
+    names.iter().copied().map(TemporaryLabel::from).collect()
+}
 
 fn main() -> Result<(), Error> {
     let runtime = Runtime::builder().build()?;
@@ -33,7 +38,14 @@ fn main() -> Result<(), Error> {
         })?;
 
     // The repeated j is contracted, leaving codomain i and domain k.
-    let c = tensor!([i; k] = a[i; j] * b[j; k])?;
+    let c = Network::new(
+        vec![labels(&["i", "j"]), labels(&["j", "k"])],
+        vec![false, false],
+        vec![Some(1), Some(1)],
+        labels(&["i", "k"]),
+        Some(1),
+    )?
+    .contract(&[&a, &b])?;
     assert_eq!((c.codomain_rank(), c.domain_rank()), (1, 1));
     // A tensor's inner product with itself is its squared norm.
     let inner = c.inner(&c)?;

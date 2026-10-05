@@ -7,13 +7,12 @@
 //! `tenet-contract` crate: it is **pure structure** over labels and leg
 //! dimensions and never touches tensor data. Explicit execution uses homogeneous
 //! typed Host [`tenet::typed::TensorMap`] operands and a caller-owned typed
-//! workspace. The `tensor!` macro dispatches directly to that typed Host path
-//! (or, for device operands, to the same schedule on CUDA when enabled).
+//! workspace; device operands run the same schedule on CUDA when enabled.
 //!
 //! ## Pipeline
 //!
 //! ```text
-//! tensor!(...) labels  ->  Network (label lists + conj markers + output)
+//! Network::new(labels) ->  Network (label lists + conj markers + output)
 //!   -> NetworkIR + DenseCostModel        (per-label dimension map)
 //!   -> DenseContractionOptimizer         (greedy by default)
 //!   -> ContractionPlan                   (reusable, serializable)
@@ -21,11 +20,11 @@
 //! ```
 //!
 //! [`Network::contract`] runs the same pipeline eagerly through the
-//! Runtime's topology-keyed plan cache, which the `tensor!` macro also uses.
+//! Runtime's topology-keyed plan cache.
 //!
 //! There is **no public einsum-string parser** (decision 4 in
-//! `docs/user_api_design.md`): labels are identifiers supplied by the
-//! [`tensor!`] macro and lower directly to [`NetworkIR`].
+//! `docs/user_api_design.md`): labels are per-operand identifier lists given
+//! to [`Network::new`] and lower directly to [`NetworkIR`].
 //!
 //! ## Follow-ups (intentionally not in this round)
 //!
@@ -71,10 +70,7 @@ pub use error::{
 pub use ir::{HyperEdge, NetworkIR, TensorNode};
 pub use labels::{LabelOccurrence, TemporaryLabel, TensorAxis, TensorId};
 pub use network::{
-    contract_static_network, contract_static_trace_network, normalize_tensor_operand,
-    static_network_operand_preflight, Network, NetworkExecutionWorkspace, NetworkOperand,
-    PlannedNetwork, StaticNetworkOperand, StaticTopologySpec, StaticTraceNetworkOperand,
-    SymmetricSliceStats,
+    Network, NetworkExecutionWorkspace, NetworkOperand, PlannedNetwork, SymmetricSliceStats,
 };
 pub use optimizer::{
     ContractionStep, DenseContractionOptimizer, DensePlanCostReport, GreedyDenseOptimizer,
@@ -103,9 +99,6 @@ pub use tenet::plancache::{
     CotengraMinimize, CotengraPythonConfig, CotengraPythonMethod, CotengraSlicingConfig,
 };
 pub use tree::ContractionTree;
-
-/// The `tensor!` @tensor-style contraction macro (from `tenet-macros`).
-pub use tenet_macros::tensor;
 
 /// The workspace tolerance rule for arithmetic test comparisons
 /// (`docs/testing_numerics.md`).

@@ -1,13 +1,16 @@
 //! What: a warm contraction whose output codomain takes legs from both
 //! operands costs one output-sized allocation, by the eager `contract(spec)`
-//! and by `tensor!` alike: the network step passes the output split as its
+//! and by `Network::contract` alike: the network step passes the output split as its
 //! `ContractSpec` (TensorOperations `pAB`), so no separate permute pass and no
 //! second output-sized buffer follow the contraction. Spelling the same result
 //! as contract-then-permute still costs two.
 
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
-use tenet_network::tensor;
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{net, op};
 
 #[path = "../../tests/support/counting_alloc.rs"]
 mod counting_alloc;
@@ -97,11 +100,25 @@ fn mixed_output_partition_costs_one_output_sized_allocation() {
 
     let (a, b) = operands();
     assert_eq!(
-        output_sized_allocs(|| tensor!([p, q; r] = a[p, q; c] * b[c; r]).unwrap()),
+        output_sized_allocs(|| net(
+            &[op(&["p", "q"], &["c"]), op(&["c"], &["r"])],
+            &["p", "q"],
+            &["r"]
+        )
+        .contract(&[&a, &b])
+        .unwrap()),
         1
     );
     let (a, b) = operands();
-    let mixed = || tensor!([p, r; q] = a[p, q; c] * b[c; r]).unwrap();
+    let mixed = || {
+        net(
+            &[op(&["p", "q"], &["c"]), op(&["c"], &["r"])],
+            &["p", "r"],
+            &["q"],
+        )
+        .contract(&[&a, &b])
+        .unwrap()
+    };
     // The step's spec is that same contract: cold it pools its temporary,
     // warm only the result is output-sized — no permute pass follows.
     assert_eq!(output_sized_allocs(mixed), 2);

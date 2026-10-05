@@ -16,7 +16,7 @@ optimizable without hiding the algorithm inside a large workflow API.
 
 TeNeT is under active development; the public API is not yet stable. Ordinary
 applications use the `tenet-rs` package (imported as `tenet`). Add
-`tenet-network` for the `tensor!` notation and network planning.
+`tenet-network` for labeled tensor networks and network planning.
 
 ## Start with a tensor
 
@@ -45,7 +45,7 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-For a runnable indexed contraction with `tensor!`, use
+For a runnable labeled contraction with `Network::contract`, use
 [`tenet-network/examples/quickstart.rs`](tenet-network/examples/quickstart.rs):
 
 ```sh

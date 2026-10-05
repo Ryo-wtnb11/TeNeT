@@ -163,8 +163,20 @@ fn assert_rank_four_orientation_replay<D>(
         (&[2][..], &[0, 1, 3][..])
     );
 
-    let execute =
-        |x, y, z| crate::tensor!([e; b] = x[a, f; c] * y[c; b, d] * z[a, f, d; e]).unwrap();
+    let labels = |names: &[&str]| names.iter().copied().map(TemporaryLabel::from).collect();
+    let cached = Network::new(
+        vec![
+            labels(&["a", "f", "c"]),
+            labels(&["c", "b", "d"]),
+            labels(&["a", "f", "d", "e"]),
+        ],
+        vec![false; 3],
+        vec![Some(2), Some(1), Some(3)],
+        labels(&["e", "b"]),
+        Some(1),
+    )
+    .unwrap();
+    let execute = |x, y, z| cached.contract(&[x, y, z]).unwrap();
     for (x, y, z, expected) in [
         (&first.0, &first.1, &first.2, &first.3),
         (&second.0, &second.1, &second.2, &second.3),
@@ -1210,78 +1222,6 @@ fn device_operand_admission_decides_each_class_from_metadata() {
 /// The trace pre-step's decisions come from labels and ranks alone, so
 /// the device can take all of them — and reject — before any trace runs.
 #[test]
-fn static_trace_lowering_is_decided_from_labels_and_ranks() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
-    let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(
-        &runtime,
-        [&space, &space],
-        [&space],
-        1_350_000,
-    )
-    .unwrap();
-    let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 1_350_001)
-        .unwrap();
-    let spec = |inputs, conj, codomain_splits| StaticTopologySpec {
-        inputs,
-        conj,
-        codomain_splits,
-        output: &["k"],
-        output_codomain_rank: None,
-        // The traced lowering pairs from its `StaticTrace`s, not from a
-        // precomputed pairing.
-        contracted: &[],
-    };
-    let owned: Vec<Vec<TemporaryLabel>> = vec![vec![label("j")], vec![label("j"), label("k")]];
-
-    // What: a traced operand loses its pairs and its split, keeps its
-    // open labels in written order; an untraced operand is untouched.
-    let lowering = StaticTraceLowering::new(
-        &[&a, &b],
-        &spec(
-            &[&["i", "j", "i"], &["j", "k"]],
-            &[false, false],
-            &[Some(2), Some(1)],
-        ),
-    )
-    .unwrap();
-    assert_eq!(lowering.inputs, owned);
-    assert_eq!(lowering.conj, [false, false]);
-    assert_eq!(lowering.splits, [None, Some(1)]);
-    assert_eq!(lowering.traces, [Some((false, vec![(0, 2)])), None]);
-
-    // What: a conjugated traced operand is traced through its adjoint,
-    // whose axes are the written labels rotated by the codomain rank.
-    let lowering = StaticTraceLowering::new(
-        &[&a, &b],
-        &spec(
-            &[&["i", "i", "j"], &["j", "k"]],
-            &[true, false],
-            &[Some(2), Some(1)],
-        ),
-    )
-    .unwrap();
-    assert_eq!(lowering.inputs, owned);
-    assert_eq!(lowering.conj, [false, false]);
-    assert_eq!(lowering.traces, [Some((true, vec![(1, 2)])), None]);
-
-    // What: rank and split mismatches and a thrice-written label are
-    // rejected, each from metadata.
-    type Case = (&'static [&'static [&'static str]], &'static [Option<usize>]);
-    const MALFORMED: [Case; 3] = [
-        (&[&["i", "i"], &["j", "k"]], &[None, Some(1)]),
-        (&[&["i", "j", "i"], &["j", "k"]], &[Some(1), Some(1)]),
-        (&[&["i", "i", "i"], &["j", "k"]], &[None, Some(1)]),
-    ];
-    for (inputs, splits) in MALFORMED {
-        assert!(matches!(
-            StaticTraceLowering::new(&[&a, &b], &spec(inputs, &[false, false], splits)),
-            Err(Error::InvalidArgument(_))
-        ));
-    }
-}
-
-#[test]
 fn host_diagonal_operands_classify_as_compact_for_device_admission() {
     // Why: the device preflight reads only `network_reuse_class`; this
     // pins that a diagonal payload reports `Compact` through it.
@@ -2022,7 +1962,19 @@ fn plan_with_rejects_a_plan_that_does_not_cover_the_network() {
     let b = TensorMap::rand_with_seed(&runtime, [&j], [&k], 32).unwrap();
     let c = TensorMap::rand_with_seed(&runtime, [&x], [&y], 33).unwrap();
     let d = TensorMap::rand_with_seed(&runtime, [&y], [&x], 34).unwrap();
-    let s = crate::tensor!([] = c[x; y] * d[y; x]).unwrap();
+    let s = Network::new(
+        vec![
+            vec![TemporaryLabel::from("x"), TemporaryLabel::from("y")],
+            vec![TemporaryLabel::from("y"), TemporaryLabel::from("x")],
+        ],
+        vec![false, false],
+        vec![Some(1), Some(1)],
+        Vec::new(),
+        Some(0),
+    )
+    .unwrap()
+    .contract(&[&c, &d])
+    .unwrap();
     let network = |inputs: Vec<Vec<&str>>, splits: Vec<Option<usize>>| {
         let n = inputs.len();
         Network::new(

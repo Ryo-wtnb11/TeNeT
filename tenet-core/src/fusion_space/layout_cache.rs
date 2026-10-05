@@ -387,7 +387,7 @@ pub(crate) enum CompleteHomSpaceStructureLookup {
 /// entry limit, is what bounds retained memory. The census of #1365
 /// (`benchmarks/history/complete-structure-census-2026-09-24.md`) measured
 /// entries of 2.6-47 KB and warm live sets of up to 53 structures and 301 KB
-/// in MPS sweeps and `tensor!` networks; a single eager op touches at most 3.
+/// in MPS sweeps and labeled-network contractions; a single eager op touches at most 3.
 ///
 /// Eviction is FIFO by admission. `entries` is an `lru::LruCache` used only as
 /// an insertion-ordered map: lookups go through `peek`/`peek_mut`, which never

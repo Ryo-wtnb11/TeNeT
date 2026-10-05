@@ -1,7 +1,7 @@
 //! Public network conformance for representative multiplicity-free providers.
 //!
 //! The direct typed operations are the oracle: this file checks that the
-//! macro and an explicitly planned `Network` preserve their provider and
+//! cached `Network::contract` and an explicitly planned `Network` preserve their provider and
 //! payload, including a static intra-operand trace.
 
 use std::sync::Arc;
@@ -19,9 +19,12 @@ use tenet::typed::FusionAlgebraError;
 use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{
-    plan_cache_stats, tensor, GreedyDenseOptimizer, Network, NetworkExecutionWorkspace,
-    TemporaryLabel,
+    plan_cache_stats, GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, TemporaryLabel,
 };
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{net, op};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -30,7 +33,7 @@ fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
     names.iter().copied().map(TemporaryLabel::from).collect()
 }
 
-/// The network and macro paths may group the contraction differently from the
+/// The planned and cached network paths may group the contraction differently from the
 /// direct typed call, so payloads agree within the workspace tolerance rule
 /// with `terms` bounded by the contracted space's weighted dimension.
 fn assert_same<R>(
@@ -108,30 +111,16 @@ where
     // This is workspace reuse only.  The public contract intentionally makes
     // no promise that output payload allocations themselves are reused.
     let cold = plan_cache_stats(runtime);
-    let macro_first = tensor!([k; i] = lhs[i; j] * rhs[j; k]).unwrap();
-    let macro_second = tensor!([k; i] = lhs[i; j] * rhs[j; k]).unwrap();
-    assert_same(&macro_first, &expected, space.provider(), terms);
-    assert_same(&macro_second, &expected, space.provider(), terms);
+    let cached_first = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["k"], &["i"])
+        .contract(&[&lhs, &rhs])
+        .unwrap();
+    let cached_second = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["k"], &["i"])
+        .contract(&[&lhs, &rhs])
+        .unwrap();
+    assert_same(&cached_first, &expected, space.provider(), terms);
+    assert_same(&cached_second, &expected, space.provider(), terms);
     assert!(plan_cache_stats(runtime).workspace_reuses > cold.workspace_reuses);
 }
-
-fn static_trace_matches_typed_oracle<R>(runtime: &Runtime, space: &GradedSpace<R>, seed: u64)
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec
-        + Send,
-{
-    let dual = space.try_dual().unwrap();
-    let source =
-        TensorMap::<R, f64>::rand_with_seed(runtime, [space, &dual], [space], seed).unwrap();
-    let expected = source.trace_pairs(&[(0, 1)]).unwrap();
-    let terms = space.dim().unwrap().ceil() as usize;
-    let actual = tensor!([; out] = source[i, i; out]).unwrap();
-    assert_same(&actual, &expected, space.provider(), terms);
-}
-
 #[test]
 fn multiplicity_free_public_network_path_matches_typed_oracles() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -142,7 +131,6 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
     )
     .unwrap();
     ordinary_network_and_workspace_reuse(&runtime, &z2, 1002);
-    static_trace_matches_typed_oracle(&runtime, &z2, 1003);
 
     let z3_provider = Arc::new(ZNFusionRule::new(3).unwrap());
     let z3 = GradedSpace::try_new(
@@ -155,7 +143,6 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
     )
     .unwrap();
     ordinary_network_and_workspace_reuse(&runtime, &z3, 1010);
-    static_trace_matches_typed_oracle(&runtime, &z3, 1011);
 
     // A charged CU(1) leg exercises the nontrivial pseudo-scalar provider,
     // rather than a vacuum-only dense block.
@@ -169,7 +156,6 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
     )
     .unwrap();
     ordinary_network_and_workspace_reuse(&runtime, &cu1, 1004);
-    static_trace_matches_typed_oracle(&runtime, &cu1, 1005);
 
     let product_rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let product = GradedSpace::try_new(
@@ -181,7 +167,6 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
     )
     .unwrap();
     ordinary_network_and_workspace_reuse(&runtime, &product, 1006);
-    static_trace_matches_typed_oracle(&runtime, &product, 1007);
     // The odd fZ2 sector contributes with the supertrace sign even after the
     // U(1) factor is attached: (2 + 3) - 7 = -2.  This is intentionally a
     // hand oracle, not another call to `trace_pairs`.
@@ -197,7 +182,8 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
         })
         .unwrap();
     assert_eq!(
-        tensor!([] = product_diagonal[i; i])
+        product_diagonal
+            .trace_pairs(&[(0, 1)])
             .unwrap()
             .scalar()
             .unwrap(),
@@ -230,5 +216,4 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
     )
     .unwrap();
     ordinary_network_and_workspace_reuse(&runtime, &nested, 1008);
-    static_trace_matches_typed_oracle(&runtime, &nested, 1009);
 }

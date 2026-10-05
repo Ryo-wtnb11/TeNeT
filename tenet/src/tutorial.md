@@ -9,7 +9,7 @@ cargo run -p tenet-network --example quickstart
 ```
 
 The package is `tenet-rs`, imported in Rust as `tenet`. The separate
-`tenet-network` package provides `tensor!` and network planning. The Rust
+`tenet-network` package provides labeled networks and network planning. The Rust
 blocks below are doctests; they use the built-in U(1) symmetry, but the tensor
 operations use the same API for other supported providers.
 
@@ -102,9 +102,10 @@ operations have different meanings even when a real U(1) example gives the
 same values. [`mathematics`] gives their precise
 definitions.
 
-For a network, `tenet_network::tensor!` names legs instead of listing axis
-numbers. Its [compiled quickstart](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/quickstart.rs)
-shows the syntax. The caller still decides the algorithm and may choose or
+For a network, `tenet_network::Network` names legs instead of listing axis
+numbers, and `Network::contract` runs it through the Runtime's plan cache. Its
+[compiled quickstart](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/quickstart.rs)
+shows the construction. The caller still decides the algorithm and may choose or
 reuse a network plan; TeNeT handles the symmetry-aware work inside each
 operation.
 

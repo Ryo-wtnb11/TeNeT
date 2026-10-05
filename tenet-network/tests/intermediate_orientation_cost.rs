@@ -15,7 +15,11 @@ use std::sync::Arc;
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
-use tenet_network::{plan_cache_stats, tensor};
+use tenet_network::plan_cache_stats;
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{net, op};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -55,7 +59,19 @@ fn split_moving_intermediate_retains_one_buffer_and_one_transform() {
     let t = Map::rand_with_seed(&runtime, [&y, &z], [&w], 3).unwrap();
     let intermediate_bytes = 11 * 17 * 19 * 23 * size_of::<f64>();
 
-    let run = || tensor!([x, u; w] = a[x; c] * b[c; y, z, u] * t[y, z; w]).unwrap();
+    let run = || {
+        net(
+            &[
+                op(&["x"], &["c"]),
+                op(&["c"], &["y", "z", "u"]),
+                op(&["y", "z"], &["w"]),
+            ],
+            &["x", "u"],
+            &["w"],
+        )
+        .contract(&[&a, &b, &t])
+        .unwrap()
+    };
     let oracle = a
         .contract(
             &b,

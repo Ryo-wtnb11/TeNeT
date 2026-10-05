@@ -38,7 +38,7 @@ Let `d` = per-sector bond degeneracy (the diagonal's essential size, `O(d)`),
 | Path | Required order | TeNeT status |
 |------|----------------|--------------|
 | `compose` / `U*S*Vh` | `O(d·n)` work; `O(d)` compact diagonal payload; unavoidable other operand/output storage is `O(d·n)`; no `O(d²)` diagonal materialization | **compliant** — explicit block scaling (#72) |
-| single-axis composition-equivalent `contract` / `tensor!` with a diagonal | `O(d·n)` work; `O(d)` compact diagonal payload; unavoidable other operand/output storage is `O(d·n)`; no `O(d²)` diagonal materialization | **compliant** — explicit provider-typed block scaling (#584) and typed macro execution (#750) |
+| single-axis composition-equivalent `contract` / network contraction with a diagonal | `O(d·n)` work; `O(d)` compact diagonal payload; unavoidable other operand/output storage is `O(d·n)`; no `O(d²)` diagonal materialization | **compliant** — explicit provider-typed block scaling (#584) and typed network execution (#750) |
 | other accepted diagonal contraction geometries | derive per geometry | **gap / unproved** — the dense fallback may add a factor `d`; no general order-correct claim |
 
 That row was a genuine order regression — densifying to `O(d²)` and GEMMing

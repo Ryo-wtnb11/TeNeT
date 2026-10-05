@@ -1,5 +1,5 @@
 //! The seam `tenet-network` drives: runtime extension state, parked
-//! destinations, and the slicing and replay hooks of `tensor!`.
+//! destinations, and the slicing and replay hooks of `Network` execution.
 //!
 //! Not part of the facade. Every item here exists for `tenet-network`, which
 //! sits above this crate and so cannot reach `pub(crate)` items; keeping them
@@ -12,9 +12,6 @@ pub use super::network_seam::NetworkDegeneracyRestriction;
 pub use super::tensor_repr::{NetworkPayloadStorage, NetworkReuseClass, RuntimeDetachedTensorMap};
 use crate::plancache::PlanCacheConfig;
 pub use crate::runtime::{ExtensionSlot, RuntimeIdentity};
-
-#[cfg(feature = "cuda")]
-pub use super::cuda_contract::CudaTracePairs;
 
 /// Non-owning identity of `runtime`, for state parked outside an execution.
 pub fn runtime_identity(runtime: &Runtime) -> RuntimeIdentity {
@@ -146,18 +143,4 @@ where
 /// The raw logical leg of `space`, for typed network replay admission.
 pub fn network_sector_leg<R>(space: &GradedSpace<R>) -> &SectorLeg {
     space.network_sector_leg()
-}
-
-/// Everything a device `trace_pairs` decides before the device lease, kept
-/// for [`CudaTracePairs::execute`]; `None` for an empty pair list.
-#[cfg(feature = "cuda")]
-pub fn prepare_trace_pairs<'a, R, D>(
-    tensor: &'a TensorMap<R, D, CudaStorage<D>>,
-    pairs: &[(usize, usize)],
-) -> Result<Option<CudaTracePairs<'a, R, D>>, Error>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: CudaPayload,
-{
-    tensor.prepare_trace_pairs(pairs, None)
 }

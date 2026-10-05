@@ -805,7 +805,7 @@ struct CudaHome {
 /// waits on a fresh event) or after it (the event already covers every write
 /// into `O`). No host synchronization is added: the lock orders enqueue only.
 /// A buffer bound in one lease and written in a later one
-/// (`*_into` destinations, `CudaContractScratch`, pooled `tensor!`
+/// (`*_into` destinations, `CudaContractScratch`, pooled
 /// network intermediates) spans two leases and is ordered instead by the
 /// single CubeCL stream `CudaDenseContext::new` pins (#1391).
 ///

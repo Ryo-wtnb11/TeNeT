@@ -323,7 +323,7 @@ impl<R, D, S> AsRef<Self> for TensorMap<R, D, S> {
 
 /// Tensor authority parked without retaining its [`Runtime`].
 ///
-/// This is an internal ownership seam for the Runtime-owned `tensor!` workspace
+/// This is an internal ownership seam for the Runtime-owned network workspace
 /// pool. It retains only a validated provider-neutral layout and an owned dense
 /// payload; detach/attach never copies or materializes tensor data, and attach
 /// binds the layout to the current execution authority's exact provider.
@@ -342,7 +342,7 @@ mod network_payload_sealed {
     pub trait Sealed {}
 }
 
-/// Payload storage whose retained-byte cost the `tensor!` workspace budget can
+/// Payload storage whose retained-byte cost the network workspace budget can
 /// charge.
 ///
 /// Host storage reports the bytes its allocation *holds* ([`Vec::capacity`]),

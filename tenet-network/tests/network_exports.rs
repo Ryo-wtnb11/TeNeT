@@ -157,17 +157,10 @@ fn tenet_network_exports_exactly_the_pinned_names() {
         "TensorAxis",
         "TensorId",
         // network
-        "contract_static_network",
-        "contract_static_trace_network",
-        "normalize_tensor_operand",
-        "static_network_operand_preflight",
         "Network",
         "NetworkExecutionWorkspace",
         "NetworkOperand",
         "PlannedNetwork",
-        "StaticNetworkOperand",
-        "StaticTopologySpec",
-        "StaticTraceNetworkOperand",
         "SymmetricSliceStats",
         // optimizer
         "ContractionStep",
@@ -215,9 +208,8 @@ fn tenet_network_exports_exactly_the_pinned_names() {
         "SymmetricSlicePlan",
         "SymmetricSliceSpec",
         "SymmetricSlicedPlan",
-        // tree / macro
+        // tree
         "ContractionTree",
-        "tensor",
     ]
     .into_iter()
     .map(str::to_owned)

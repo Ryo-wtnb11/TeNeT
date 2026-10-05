@@ -68,7 +68,7 @@ exactly one channel; `Simple` means several channels but no multiplicity;
 `Generic` means multiplicity. Declaring `Unique` when a product has two channels
 selects a lowering that silently drops terms. `Bosonic`/`Fermionic` assert
 symmetric braiding (`R` squares to the identity up to signs); `Anyonic` and
-`NoBraiding` do not, so ordinary `contract` (and `tensor!` contraction) rejects
+`NoBraiding` do not, so ordinary `contract` (and network contraction) rejects
 them, as TensorKit `blas_contract!` does, while `compose` admits every style.
 
 **`fusion_channels` order is part of your convention.** Keep it stable and match

@@ -3624,15 +3624,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tenet-macros"
-version = "0.1.1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "tenet-matrixalgebra"
 version = "0.1.1"
 dependencies = [
@@ -3653,7 +3644,6 @@ dependencies = [
  "lru",
  "opt-einsum-path",
  "serde_json",
- "tenet-macros",
  "tenet-rs",
 ]
 
