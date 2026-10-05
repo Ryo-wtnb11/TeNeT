@@ -352,6 +352,7 @@ where
     factor_from_source(
         lease,
         source,
+        Some(FactorFamily::Svd),
         |space, spectrum| svd_vals_diagonal(&M::authority(space), space, spectrum),
         |dense, input| Ok(svd_vals_dyn(dense, input)?),
     )
@@ -826,6 +827,7 @@ where
         // Stored routes omit side-only sectors, whose logical matrices are
         // rows x 0 or 0 x columns and still constrain the isometry direction.
         validate_polar_direction(acceptance_direction, error_direction, input.space())?;
+        require_finite_factor_input(input.data().iter().copied(), FactorFamily::Polar)?;
     }
     if let Some(plan) = compact_factor_plan(input.space())? {
         let adjoint_spaces = if matches!(gauge, CompactSvdGauge::AdjointLeft) {
@@ -2549,7 +2551,13 @@ where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
-    factor_from_source(lease, source, M::svd_compact_diagonal, M::svd_compact_dense)
+    factor_from_source(
+        lease,
+        source,
+        Some(FactorFamily::Svd),
+        M::svd_compact_diagonal,
+        M::svd_compact_dense,
+    )
 }
 
 /// Compact SVD factors of the lazy adjoint of the dense `parent`, read in place,
@@ -2565,6 +2573,8 @@ where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
+    // The adjoint is finite exactly when its parent is.
+    require_finite_factor_input(parent.data().iter().copied(), FactorFamily::Svd)?;
     lease.run(|dense| M::svd_compact_adjoint_dense(dense, &parent))
 }
 
@@ -2584,7 +2594,13 @@ where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
-    factor_from_source(lease, source, M::svd_full_diagonal, M::svd_full_dense)
+    factor_from_source(
+        lease,
+        source,
+        Some(FactorFamily::Svd),
+        M::svd_full_diagonal,
+        M::svd_full_dense,
+    )
 }
 
 /// Full SVD factors of the lazy adjoint of the dense `parent`, read in place,
@@ -2600,5 +2616,6 @@ where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
+    require_finite_factor_input(parent.data().iter().copied(), FactorFamily::Svd)?;
     lease.run(|dense| M::svd_full_adjoint_dense(dense, &parent))
 }

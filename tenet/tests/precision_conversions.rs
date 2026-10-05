@@ -844,8 +844,14 @@ fn checked_generic_su3_conversions_are_exact_and_keep_structure() {
     assert_all_conversions!("SU(3) lazy adjoint", source.adjoint().unwrap());
     let (_, complex, _, _) = assert_adjoint_conversions!("SU(3) dense adjoint", source);
     // Checked-Generic factorizations reject lazy adjoints, so the converted
-    // adjoint must come out owned and factorizable.
-    complex.qr_compact(&[0, 1], &[2, 3]).unwrap();
+    // adjoint must come out owned: QR gets past that refusal to the
+    // finite-input stage, which refuses the fixture's NaN and infinities
+    // (#1986).
+    let error = complex.qr_compact(&[0, 1], &[2, 3]).unwrap_err();
+    assert!(
+        format!("{error:?}").contains("qr input components must be finite"),
+        "{error:?}"
+    );
 }
 
 /// Checked-Generic compact diagonal adjoint (#1446 review, #1449): the

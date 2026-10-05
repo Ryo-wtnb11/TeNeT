@@ -185,8 +185,9 @@ where
     /// Phase is +1 at zero; work and output storage are `O(sum_c k_c)` after
     /// sector/layout validation. Use [`Self::diagview`] to read the factors,
     /// or [`Self::materialize`] before [`Self::dense_data`] for a dense buffer.
-    /// A nonfinite diagonal entry returns [`Error::InvalidArgument`]
-    /// (`qr`/`lq input components must be finite`) before any work.
+    /// A nonfinite entry, dense or diagonal, returns [`Error::Operation`] (an
+    /// `InvalidArgument`: `qr`/`lq input components must be finite`) before
+    /// any work.
     ///
     /// Other inputs run one dense QR per sector, with cost
     /// `O(sum_c m_c * n_c * min(m_c, n_c))`. Multiplicity-free lazy adjoints
@@ -264,8 +265,9 @@ where
     /// adjoint is handled from its parent without materializing it.
     /// Checked-Generic SVD requires owned input. A compact diagonal uses the
     /// same direct per-sector sorting and factor publication in both modes; a
-    /// nonfinite entry returns [`Error::InvalidArgument`]
-    /// (`svd input components must be finite`) before any work.
+    /// nonfinite entry, here or in dense input, returns
+    /// [`Error::Operation`] (an `InvalidArgument`: `svd input components must be finite`)
+    /// before any work.
     /// Any sector, layout, or provider failure returns no factors.
     ///
     /// ```
@@ -552,8 +554,9 @@ where
     /// Multiplicity-free lazy adjoints are read through their owned parent,
     /// and an owned compact diagonal input is read and sorted directly without
     /// a dense solver for both multiplicity-free and checked-Generic providers;
-    /// a nonfinite entry returns [`Error::InvalidArgument`]
-    /// (`svd input components must be finite`). Checked Generic requires an owned
+    /// a nonfinite entry, here or in dense input, returns
+    /// [`Error::Operation`] (an `InvalidArgument`: `svd input components must be finite`).
+    /// Checked Generic requires an owned
     /// input and returns [`Error::InvalidArgument`] for a lazy adjoint. A dense failure returns
     /// [`Error::Operation`]; if a provider cannot decode a sector label, its
     /// original error is available as the source. See [`Self::svd_compact`] for
@@ -594,8 +597,9 @@ where
     /// endomorphism and every sector must satisfy the same Hermiticity check as
     /// [`Self::eigh_full`]. An owned Host compact diagonal is read directly for
     /// both multiplicity-free and checked-Generic providers: a nonfinite entry
-    /// returns [`Error::InvalidArgument`] (`eigh input components must be
-    /// finite`), the dense route's Hermiticity check is applied to the diagonal,
+    /// returns [`Error::Operation`] (an `InvalidArgument`: `eigh input components must be
+    /// finite`; dense input too, after the endomorphism and stacking checks
+    /// and before the Hermiticity check), the dense route's Hermiticity check is applied to the diagonal,
     /// and the eigenvalues are its real parts. Checked Generic requires owned input and rejects
     /// lazy adjoints for this values-only method. Dense failures return
     /// [`Error::Operation`],
@@ -701,8 +705,9 @@ where
     /// No eigenvector factor or bond space is built. The input must be an
     /// endomorphism. An owned Host compact diagonal is read directly for both
     /// multiplicity-free and checked-Generic providers: a nonfinite entry
-    /// returns [`Error::InvalidArgument`] (`eig input components must be
-    /// finite`), and an eigenvalue of infinite magnitude fails the dense
+    /// returns [`Error::Operation`] (an `InvalidArgument`: `eig input components must be
+    /// finite`; dense input too, after the endomorphism and stacking checks),
+    /// and an eigenvalue of infinite magnitude fails the dense
     /// route's eigenvalue check. For multiplicity-free providers, lazy
     /// adjoints use an operation-local dense payload; checked Generic rejects
     /// lazy adjoints for this values-only method. Unlike
@@ -817,8 +822,9 @@ where
     /// storage, where `k_c` is sector size and `q_c` is nullity: the dense
     /// route's rank cutoff is applied to the magnitudes `|a_i|` directly, and
     /// the null directions are the unit vectors of the magnitudes at or below
-    /// it, in descending magnitude. A nonfinite entry returns
-    /// [`Error::InvalidArgument`] (`null input components must be finite`).
+    /// it, in descending magnitude. A nonfinite entry, dense or diagonal,
+    /// returns [`Error::Operation`] (an `InvalidArgument`: `null input components must be
+    /// finite`).
     /// Lazy adjoints use the opposite null space of their
     /// owned parent and return a detached result without filling the receiver
     /// cache. Checked results use the same provider instance as `self`. TeNeT
@@ -939,6 +945,8 @@ where
     /// detached owned factors without materializing the receiver. Checked factors
     /// use the same provider instance as `self`. If that provider rejects an
     /// output space or any sector computation fails, no factors are returned.
+    /// After the block-shape check, a nonfinite entry returns
+    /// [`Error::Operation`] (an `InvalidArgument`: `polar input components must be finite`).
     ///
     /// ```
     /// use std::sync::Arc;

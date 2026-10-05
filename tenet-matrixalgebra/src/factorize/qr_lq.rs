@@ -61,6 +61,7 @@ where
     factor_from_source(
         lease,
         source,
+        Some(family),
         |space, spectrum| {
             let Qr { q, r } = qr_diagonal_spectra(&M::authority(space), space, spectrum, family)?;
             let on_input = |values| FactorOutput::Diagonal {
@@ -131,6 +132,7 @@ where
     factor_from_source(
         lease,
         source,
+        Some(FactorFamily::Lq),
         |space, spectrum| {
             let Qr { q, r } =
                 qr_diagonal_spectra(&M::authority(space), space, spectrum, FactorFamily::Lq)?;

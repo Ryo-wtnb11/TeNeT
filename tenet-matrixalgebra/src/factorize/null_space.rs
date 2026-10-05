@@ -122,6 +122,7 @@ where
     factor_from_source(
         lease,
         source,
+        Some(FactorFamily::Null),
         |space, spectrum| null_diagonal(&M::authority(space), space, spectrum, side),
         |dense, input| null_dense(dense, &M::authority(input.space()), input, side),
     )

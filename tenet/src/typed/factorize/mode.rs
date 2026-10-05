@@ -54,8 +54,8 @@ where
 
     // Inverse, pseudo-inverse, solve and exponential share their bodies and
     // compact value maps. What stays per mode, until its leaf unifies it:
-    // - D7 (#1994): which compact diagonals take the compact arm; #1800 and
-    //   #1986: the compact pseudo-inverse of a non-finite spectrum;
+    // - D7 (#1994): which compact diagonals take the compact arm; #1800: the
+    //   compact pseudo-inverse of a non-finite spectrum;
     // - D8 (#1995): where the categorical preflight runs, and its order;
     // - D5 (#1996, #1752): the dense and context leases and their timing;
     // - D6 (#1752, #1799): the dense pseudo-inverse and exponential
@@ -69,7 +69,7 @@ where
     ) -> bool;
 
     /// The compact pseudo-inverse of an admitted spectrum, or `None` to take
-    /// the dense route (D7, #1800, #1986).
+    /// the dense route (D7, #1800).
     #[allow(clippy::type_complexity)]
     fn pinv_spectrum<D: AdvancedLinalgScalar>(
         spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],

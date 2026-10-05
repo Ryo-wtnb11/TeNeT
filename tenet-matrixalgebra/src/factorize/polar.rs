@@ -482,9 +482,11 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
+    // The dense route checks values after its direction admission.
     factor_from_source(
         lease,
         source,
+        None,
         |space, spectrum| {
             left_polar_of_diagonal::<CheckedGenericAdmissionMode, R, D>(space, spectrum)
                 .map(|LeftPolar { w, p }| (w, p))
@@ -674,6 +676,7 @@ where
         direction,
         error_direction,
     )?;
+    require_finite_factor_input(input.data().iter().copied(), FactorFamily::Polar)?;
     let p_nout = p_space.space().nout();
     let w_len = w_space
         .space()

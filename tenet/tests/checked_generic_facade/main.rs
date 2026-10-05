@@ -644,6 +644,7 @@ fn lazy_close_f64(a: f64, b: f64) -> bool {
 mod construction;
 mod eig;
 mod matrix_fn;
+mod nonfinite;
 mod null_polar;
 mod pinv;
 mod qr_lq;

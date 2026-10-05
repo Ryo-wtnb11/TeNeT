@@ -62,21 +62,37 @@ impl<E: DenseExecutor + ?Sized> ExecutorLease for &mut E {
 
 /// Runs the diagonal or the dense stage of `source`; only the dense stage
 /// leases an executor.
+///
+/// `dense_finite` names the family whose shared finite-input stage
+/// ([`require_finite_factor_input`], #1986) runs on dense storage here,
+/// before the lease, because that family's dense route has no structural
+/// admission to run first. `None` leaves the check to a dense route that
+/// admits structure first (eig/eigh: endomorphism and stacking; polar: its
+/// block shape), so every route reports structure before values, as the
+/// diagonal route does.
 pub(super) fn factor_from_source<L, E, R, D, T, X>(
     lease: L,
     source: FactorSource<'_, R, D>,
+    dense_finite: Option<FactorFamily>,
     diagonal: impl FnOnce(&BoundDynamicFusionMapSpace<R>, &[SectorSpectrum<D>]) -> Result<T, X>,
     dense: impl FnOnce(&mut E, &BoundDynamicTensorRef<'_, R, D>) -> Result<T, X>,
 ) -> Result<(T, FactorRoute), X>
 where
     L: ExecutorLease<Executor = E>,
     E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+    X: From<OperationError>,
 {
     match source {
-        FactorSource::Dense(input) => Ok((
-            lease.run(|executor| dense(executor, &input))?,
-            FactorRoute::Dense,
-        )),
+        FactorSource::Dense(input) => {
+            if let Some(family) = dense_finite {
+                require_finite_factor_input(input.data().iter().copied(), family)?;
+            }
+            Ok((
+                lease.run(|executor| dense(executor, &input))?,
+                FactorRoute::Dense,
+            ))
+        }
         FactorSource::Diagonal { space, spectrum } => {
             Ok((diagonal(space, spectrum)?, FactorRoute::Diagonal))
         }
