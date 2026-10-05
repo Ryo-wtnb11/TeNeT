@@ -154,6 +154,7 @@ pub(in crate::contract) fn validate_uniform_multi_scales<C: DenseBlockScalar>(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn apply_contract_twist<A, R, D>(
     kernels: &mut A,
     rule: &R,

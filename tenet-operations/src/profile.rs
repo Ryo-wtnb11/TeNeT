@@ -7,8 +7,8 @@ pub enum TensorContractFusionRoute {
     #[default]
     Unset,
     CoreFusionBlocks,
-    DenseFusionStructure,
-    DenseConjugateStructure,
+    /// TensorKit's `copyC`: a core into a temporary, then one permute.
+    CopyC,
     DynamicTreeCore,
 }
 
@@ -18,13 +18,13 @@ pub struct TensorContractFusionProfile {
     pub total: Duration,
     pub typed_space_setup: Duration,
     pub core_route_check: Duration,
-    pub dense_block_specs: Duration,
-    pub dense_structure_lookup: Duration,
-    pub dense_contract: Duration,
     /// Reserved for source compatibility; ordinary contraction no longer
     /// looks up or publishes complete execution artifacts.
     pub prepared_plan: Duration,
-    /// Route preflight and candidate selection for one ordinary eager call.
+    /// Route preflight and candidate selection for one ordinary eager call:
+    /// the declined core walk and the `copyC` order check, and, for the
+    /// `CopyC` route, its temporary space derivation and output-transform
+    /// lookup (its temporary's core plan counts as core block-plan build).
     pub resolution_preflight: Duration,
     /// DynamicTree plan construction after route selection.
     pub dynamic_tree_plan_build: Duration,
@@ -64,9 +64,6 @@ impl TensorContractFusionProfile {
         self.total += other.total;
         self.typed_space_setup += other.typed_space_setup;
         self.core_route_check += other.core_route_check;
-        self.dense_block_specs += other.dense_block_specs;
-        self.dense_structure_lookup += other.dense_structure_lookup;
-        self.dense_contract += other.dense_contract;
         self.prepared_plan += other.prepared_plan;
         self.resolution_preflight += other.resolution_preflight;
         self.dynamic_tree_plan_build += other.dynamic_tree_plan_build;

@@ -4,6 +4,7 @@ use tenet_core::{
     BlockKey, BlockSpec, FusionProductSpace, FusionRule, FusionTensorMapSpace, SU2FusionRule,
     SectorLeg, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
+use tenet_operations::TensorContractSpec;
 
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::{BoundDynamicFusionMapSpace, DenseTreeTransformOperations};

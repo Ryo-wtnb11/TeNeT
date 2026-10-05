@@ -15,7 +15,9 @@ use crate::strided::{
     column_major_strides_isize, column_major_strides_usize, element_count, offset_to_isize,
     strides_to_isize,
 };
-use crate::{DenseBlockScalar, HostKernelAdapter, OperationError, RecouplingCoefficientAction};
+#[cfg(test)]
+use crate::HostKernelAdapter;
+use crate::{DenseBlockScalar, OperationError, RecouplingCoefficientAction};
 use tenet_operations::TensorContractSpec;
 
 #[cfg(test)]
@@ -124,10 +126,6 @@ where
             rhs_homspace,
             axis_plan,
         })
-    }
-
-    pub(super) fn has_conjugation(&self) -> bool {
-        self.axis_plan.lhs_conjugate || self.axis_plan.rhs_conjugate
     }
 
     pub(super) fn validate_core_geometry(
@@ -396,6 +394,7 @@ where
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_core_fusion_blocks_into_raw<A, B, R, D, C>(
     kernels: &mut A,
@@ -426,6 +425,7 @@ where
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_core_fusion_blocks_with_plan_into_raw<A, B, D, C>(
     kernels: &mut A,

@@ -130,7 +130,7 @@ where
     let mut contract_destination =
         TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial.clone(), complete_space)
             .unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         rule,
         &mut contract_destination,
         &source,

@@ -174,10 +174,11 @@ fn tensorcontract_fusion_parallel_replay_keeps_fermion_twist_reference() {
     let mut backend = DenseTreeTransformOperations::default_executor();
     backend.set_recoupling_threads(4);
     backend.set_transform_parallel_min_len(0);
-    let mut workspace = TensorContractWorkspace::default();
-    tensorcontract_fusion_into_with(
-        &mut backend,
-        &mut workspace,
+    TensorContractFusionExecutionContext::<f64, RuleIdentity>::new(
+        DenseTreeTransformOperations::default_executor(),
+        backend,
+    )
+    .tensorcontract_fusion_into(
         &rule,
         &mut dst,
         &lhs,

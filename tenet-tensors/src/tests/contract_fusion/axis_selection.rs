@@ -108,7 +108,7 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
     .unwrap();
     let mut oracle =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], space.clone()).unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut oracle,
         &lhs,
@@ -120,7 +120,7 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
     .unwrap();
     let mut normal =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], space).unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut normal,
         &lhs,
@@ -503,35 +503,6 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
     let explicit_core_dst_before = explicit_core_dst.data().to_vec();
     let explicit_lhs_before = explicit_lhs_core.data().to_vec();
     let explicit_rhs_before = explicit_rhs_core.data().to_vec();
-    assert_eq!(
-        tensorcontract_fusion_prepared_into(
-            &rule,
-            &reverse_plan,
-            &mut explicit_dst,
-            &mut explicit_lhs_core,
-            &mut explicit_rhs_core,
-            &lhs,
-            &rhs,
-            alpha,
-            beta,
-        ),
-        Err(reverse_unsupported.clone())
-    );
-    assert_eq!(
-        tensorcontract_fusion_prepared_into_core_dst(
-            &rule,
-            &reverse_plan,
-            &mut explicit_dst,
-            &mut explicit_core_dst,
-            &mut explicit_lhs_core,
-            &mut explicit_rhs_core,
-            &lhs,
-            &rhs,
-            alpha,
-            beta,
-        ),
-        Err(reverse_unsupported.clone())
-    );
     let mut explicit_context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     assert_eq!(
         explicit_context.tensorcontract_fusion_prepared_into(
@@ -574,51 +545,9 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
 
     crate::contract::reset_candidate_score_calls();
     let mut one_shot_dst = fresh_dst();
-    tensorcontract_fusion_into(&rule, &mut one_shot_dst, &lhs, &rhs, axes(), alpha, beta).unwrap();
+    fusion_contract_into(&rule, &mut one_shot_dst, &lhs, &rhs, axes(), alpha, beta).unwrap();
     assert_eq!(crate::contract::candidate_score_calls(), 4);
     assert_oracle(one_shot_dst.data());
-
-    crate::contract::reset_candidate_score_calls();
-    let mut with_dst = fresh_dst();
-    let mut backend = DenseTreeTransformOperations::default_executor();
-    let mut workspace = TensorContractWorkspace::default();
-    tensorcontract_fusion_into_with(
-        &mut backend,
-        &mut workspace,
-        &rule,
-        &mut with_dst,
-        &lhs,
-        &rhs,
-        axes(),
-        alpha,
-        beta,
-    )
-    .unwrap();
-    assert_eq!(crate::contract::candidate_score_calls(), 4);
-    assert_oracle(with_dst.data());
-
-    crate::contract::reset_candidate_score_calls();
-    let mut with_backends_dst = fresh_dst();
-    let mut tree_backend = HostTensorOperations;
-    let mut tree_workspace = TreeTransformWorkspace::default();
-    let mut contract_backend = DenseTreeTransformOperations::default_executor();
-    let mut contract_workspace = TensorContractWorkspace::default();
-    tensorcontract_fusion_into_with_backends(
-        &mut tree_backend,
-        &mut tree_workspace,
-        &mut contract_backend,
-        &mut contract_workspace,
-        &rule,
-        &mut with_backends_dst,
-        &lhs,
-        &rhs,
-        axes(),
-        alpha,
-        beta,
-    )
-    .unwrap();
-    assert_eq!(crate::contract::candidate_score_calls(), 4);
-    assert_oracle(with_backends_dst.data());
 
     let provider = Arc::new(rule);
     let lhs_bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
@@ -827,23 +756,13 @@ fn paired_axis_selector_rejects_invalid_axes_before_scoring_or_mutation() {
     .unwrap();
     let lhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![2.0], space.clone()).unwrap();
     let rhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![3.0], space.clone()).unwrap();
-    let mut free_dst =
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![5.0], space.clone()).unwrap();
     let axes = TensorContractSpec::with_default_output_order(&[3, 3], &[0, 1]);
-    let mut free_backend = DenseTreeTransformOperations::default_executor();
-    let mut free_workspace = TensorContractWorkspace::default();
-    let error = tensorcontract_fusion_into_with(
-        &mut free_backend,
-        &mut free_workspace,
-        &rule,
-        &mut free_dst,
-        &lhs,
-        &rhs,
-        axes,
-        1.0,
-        0.0,
-    )
-    .unwrap_err();
+    let mut context_dst =
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![5.0], space).unwrap();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+    let error = context
+        .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, 1.0, 0.0)
+        .unwrap_err();
     // What: duplicate axes retain validation precedence and leave all buffers untouched.
     assert_eq!(
         error,
@@ -855,38 +774,6 @@ fn paired_axis_selector_rejects_invalid_axes_before_scoring_or_mutation() {
     );
     assert_eq!(lhs.data(), &[2.0]);
     assert_eq!(rhs.data(), &[3.0]);
-    assert_eq!(free_dst.data(), &[5.0]);
-
-    let mut split_dst =
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![5.0], space.clone()).unwrap();
-    let mut tree_backend = HostTensorOperations;
-    let mut tree_workspace = TreeTransformWorkspace::default();
-    let mut contract_backend = DenseTreeTransformOperations::default_executor();
-    let mut contract_workspace = TensorContractWorkspace::default();
-    let split_error = tensorcontract_fusion_into_with_backends(
-        &mut tree_backend,
-        &mut tree_workspace,
-        &mut contract_backend,
-        &mut contract_workspace,
-        &rule,
-        &mut split_dst,
-        &lhs,
-        &rhs,
-        axes,
-        1.0,
-        0.0,
-    )
-    .unwrap_err();
-    assert_eq!(split_error, error);
-    assert_eq!(split_dst.data(), &[5.0]);
-
-    let mut context_dst =
-        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![5.0], space).unwrap();
-    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    let context_error = context
-        .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, 1.0, 0.0)
-        .unwrap_err();
-    assert_eq!(context_error, error);
     assert_eq!(context_dst.data(), &[5.0]);
 }
 
@@ -1015,7 +902,7 @@ fn crossed_axis_selection_preserves_real_fermion_parity_complex_result() {
         space.clone(),
     )
     .unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut oracle,
         &lhs,
@@ -1030,7 +917,7 @@ fn crossed_axis_selection_preserves_real_fermion_parity_complex_result() {
         space,
     )
     .unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut normal,
         &lhs,
@@ -1225,7 +1112,7 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
         dst_space.clone(),
     )
     .unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut oracle,
         &lhs_permuted,
@@ -1240,7 +1127,7 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
         dst_space,
     )
     .unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut normal,
         &lhs,

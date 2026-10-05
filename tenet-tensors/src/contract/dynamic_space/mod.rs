@@ -308,7 +308,7 @@ impl DynamicFusionMapSpace {
         Self::from_final_homspace_with_primer(rule, homspace, encoded_layout_primer::<R>)
     }
 
-    fn from_final_homspace_with_primer<R>(
+    pub(crate) fn from_final_homspace_with_primer<R>(
         rule: &R,
         homspace: FusionTreeHomSpace,
         primer: LayoutKeyBuilder<R>,
@@ -514,6 +514,7 @@ impl DynamicFusionMapSpace {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn transformed_from_typed<R, const NOUT: usize, const NIN: usize>(
         rule: &R,
         source: &FusionTensorMapSpace<NOUT, NIN>,
@@ -529,6 +530,7 @@ impl DynamicFusionMapSpace {
     /// the hom space is permuted and the full tree set of the result is
     /// enumerated (trees the transform coefficients never reach stay as
     /// structural zeros, keeping every coupled sector grid complete).
+    #[cfg(test)]
     pub(crate) fn transformed<R>(
         &self,
         rule: &R,
@@ -857,6 +859,7 @@ impl DynamicFusionMapSpace {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn core_dst<R>(
         rule: &R,
         lhs: &Self,

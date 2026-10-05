@@ -5,17 +5,14 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockStructure, CategoricalScalar, CoreError, FusionTreeHomSpace, FusionTreePairOrientation,
-    HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols, TensorMap,
-    TensorStorage,
+    BlockStructure, CategoricalScalar, FusionTreeHomSpace, FusionTreePairOrientation,
+    MultiplicityFreeRigidSymbols,
 };
 
 use crate::cache::{
     touch_lru_key, BlockStructureCacheKey, OperationCachePolicy, DEFAULT_OPERATION_CACHE_ENTRIES,
 };
-use crate::lowering::adjoint_fusion_space_view;
 use crate::tree_context::TreeTransformExecutionContext;
-use crate::tree_transform::build_tree_pair_transform_group_plan;
 #[cfg(test)]
 use crate::DenseTreeTransformOperations;
 use crate::{
@@ -24,7 +21,7 @@ use crate::{
     TreeTransformRuleCacheKey, TreeTransformStructure,
 };
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
-use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
+use tenet_operations::TensorContractSpecOwned;
 
 use super::backend::TensorContractBackend;
 #[cfg(test)]
@@ -33,9 +30,7 @@ use super::dynamic_space::{DynamicFusionMapSpace, FusionOperandLayout, LayoutKey
 use super::fusion::{
     contract_twist_on_physical_lhs, FusionContractOrientation, FusionContractPlan,
 };
-use super::fusion_block::{
-    tensorcontract_core_fusion_blocks_into_raw, FusionBlockContractWorkspace,
-};
+use super::fusion_block::FusionBlockContractWorkspace;
 use super::resolution::rhs_contract_requires_twist;
 use super::scratch::{DynamicFusionScratch, DynamicFusionScratchWorkspace};
 use tenet_operations::TensorContractFusionProfile;
@@ -88,12 +83,16 @@ mod test_entry;
 #[cfg(test)]
 mod tests;
 mod twist;
+// Why test-only: the typed plan-level executor is a reference oracle for the
+// planner's DynamicTree artifact; production routes through `plan_contract`.
+#[cfg(test)]
 mod typed_eager;
 pub(crate) use artifact::*;
 pub(crate) use space_cache::*;
 #[cfg(test)]
 pub(crate) use test_entry::*;
 pub(super) use twist::*;
+#[cfg(test)]
 pub(crate) use typed_eager::*;
 
 #[derive(Clone, Copy)]

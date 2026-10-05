@@ -250,7 +250,7 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
     copy_blocks_between_layouts(&mut dst_coupled, &dst_packed);
     let alpha = Complex64::new(0.75, -0.25);
     let beta = Complex64::new(-0.5, 0.125);
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst_packed,
         &lhs_packed,
@@ -260,7 +260,7 @@ fn coupled_layout_complex_contraction_matches_packed_fallback() {
         beta,
     )
     .unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst_coupled,
         &lhs_coupled,
@@ -311,7 +311,7 @@ fn coupled_layout_complex_scalar_contraction_matches_closed_form() {
             .unwrap();
     let mut dst =
         TensorMap::<Complex64, 0, 0>::from_vec_with_fusion_space(vec![initial], space).unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,

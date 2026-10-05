@@ -1,70 +1,15 @@
-use std::sync::Arc;
-
 use tenet_core::{
-    multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CategoricalScalar, CoreError,
+    multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CategoricalScalar,
     FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
     FusionTreePairOrientation, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, SectorId,
-    TensorMap, TensorStorage,
 };
 
-use crate::lowering::lower_tensorcontract_adjoint_axes;
 use crate::{DenseBlockScalar, OperationError};
 use tenet_operations::TensorContractSpec;
 
-use super::super::dynamic_space::{
-    DynamicFusionMapSpace, FusionOperandLayout, LayoutKeyBuilder, MetadataOutput, MetadataRequest,
-};
+use super::super::dynamic_space::{DynamicFusionMapSpace, FusionOperandLayout};
 use super::super::fusion_block::validate_fusion_contract_rule;
-use super::super::structure::{
-    TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure,
-};
-
-/// Every sector on every fusion tree of `space` equals its own dual. Used to
-/// gate the Structure route's conjugate (categorical-adjoint) block matching,
-/// which is only correct for self-dual symmetries.
-fn dual_sector<R>(
-    rule: &R,
-    sector: SectorId,
-    primer: LayoutKeyBuilder<R>,
-) -> Result<SectorId, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    match primer(rule, MetadataRequest::DualSector { sector })? {
-        MetadataOutput::Sector(dual) => Ok(dual),
-        _ => unreachable!("metadata dispatcher returned a non-sector response"),
-    }
-}
-
-fn all_sectors_self_dual<R>(
-    rule: &R,
-    homspace: &FusionTreeHomSpace,
-    primer: Option<LayoutKeyBuilder<R>>,
-) -> Result<bool, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    for key in homspace.fusion_tree_keys(rule).iter() {
-        for tree in [key.codomain_tree(), key.domain_tree()] {
-            for &sector in tree
-                .uncoupled()
-                .iter()
-                .chain(std::iter::once(&tree.coupled()))
-            {
-                let dual = match primer {
-                    Some(primer) => dual_sector(rule, sector, primer)?,
-                    None => rule.dual(sector),
-                };
-                if dual != sector {
-                    return Ok(false);
-                }
-            }
-        }
-    }
-    Ok(true)
-}
+use super::super::structure::{TensorContractAxisPlan, TensorContractBlockSpec};
 
 trait ContractBlockSource {
     fn homspace(&self) -> &FusionTreeHomSpace;
@@ -119,143 +64,6 @@ impl ContractBlockSource for FusionOperandLayout<'_> {
     fn storage_index(&self, logical_index: usize) -> Result<usize, OperationError> {
         self.storage_index(logical_index)
     }
-}
-
-pub fn tensorcontract_fusion_structure<
-    R,
-    TDst,
-    TLhs,
-    TRhs,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
-    rule: &R,
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractSpec<'_>,
-) -> Result<TensorContractStructure<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-    DDst: TensorStorage<TDst>,
-    DLhs: TensorStorage<TLhs>,
-    DRhs: TensorStorage<TRhs>,
-{
-    let dst_fusion = dst
-        .fusion_space()
-        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
-    let lhs_fusion = lhs
-        .fusion_space()
-        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
-    let rhs_fusion = rhs
-        .fusion_space()
-        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
-    tensorcontract_fusion_structure_dyn_raw(
-        rule,
-        &DynamicFusionMapSpace::from_typed(dst_fusion),
-        &DynamicFusionMapSpace::from_typed(lhs_fusion),
-        &DynamicFusionMapSpace::from_typed(rhs_fusion),
-        Arc::clone(lhs.structure()),
-        Arc::clone(rhs.structure()),
-        axes,
-    )
-}
-
-pub(crate) fn tensorcontract_fusion_structure_dyn_raw<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
-    lhs_storage_structure: Arc<tenet_core::BlockStructure>,
-    rhs_storage_structure: Arc<tenet_core::BlockStructure>,
-    axes: TensorContractSpec<'_>,
-) -> Result<TensorContractStructure<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    dst.validate_rule(rule)?;
-    lhs.validate_rule(rule)?;
-    rhs.validate_rule(rule)?;
-    // The categorical-adjoint (conjugate) block matching in this Structure route
-    // is only correct when the conjugated operand's sectors are all self-dual
-    // (a sector equal to its dual). For non-self-dual sectors — e.g. a U(1)
-    // charge q whose dual is -q ≠ q — it mislabels the coupled sector of the
-    // output block (pairing q with -q across codomain/domain), producing an
-    // invalid `MissingBlockKey`. This was only ever exercised on self-dual
-    // symmetries (Z2, fermion parity, SU(2)). Decline to the DynamicTree route.
-    // The prelowered seam keeps logical adjoint geometry separate from parent
-    // storage and maps only referenced blocks; the legacy seam derives the same
-    // logical geometry before execution. Both are verified against the eager
-    // `adjoint_dyn` oracle for U(1).
-    if (axes.lhs_conjugate() && !all_sectors_self_dual(rule, lhs.homspace(), None)?)
-        || (axes.rhs_conjugate() && !all_sectors_self_dual(rule, rhs.homspace(), None)?)
-    {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
-        });
-    }
-    let lowered_axes =
-        lower_tensorcontract_adjoint_axes(lhs.nout(), lhs.nin(), rhs.nout(), rhs.nin(), axes)?;
-    let lhs_adjoint;
-    let lhs = if axes.lhs_conjugate() {
-        lhs_adjoint = lhs.adjoint_view()?;
-        &lhs_adjoint
-    } else {
-        lhs
-    };
-    let rhs_adjoint;
-    let rhs = if axes.rhs_conjugate() {
-        rhs_adjoint = rhs.adjoint_view()?;
-        &rhs_adjoint
-    } else {
-        rhs
-    };
-    tensorcontract_fusion_structure_from_spaces(
-        rule,
-        dst,
-        lhs,
-        rhs,
-        lhs_storage_structure,
-        rhs_storage_structure,
-        lowered_axes.as_spec(),
-    )
-}
-
-fn tensorcontract_fusion_structure_from_spaces<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
-    lhs_storage_structure: std::sync::Arc<tenet_core::BlockStructure>,
-    rhs_storage_structure: std::sync::Arc<tenet_core::BlockStructure>,
-    axes: TensorContractSpec<'_>,
-) -> Result<TensorContractStructure<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    let block_specs = tensorcontract_fusion_block_specs_lowered(rule, dst, lhs, rhs, axes)?;
-    TensorContractStructure::compile_shared_structures_with_block_specs_and_storage(
-        std::sync::Arc::clone(dst.structure()),
-        std::sync::Arc::clone(lhs.structure()),
-        std::sync::Arc::clone(rhs.structure()),
-        lhs_storage_structure,
-        rhs_storage_structure,
-        axes,
-        &block_specs,
-    )
 }
 
 pub fn tensorcontract_fusion_block_specs<

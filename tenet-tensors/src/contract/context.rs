@@ -35,18 +35,16 @@ use super::dynamic_space::{
 use super::fusion::FusionContractOrientation;
 use super::fusion::{
     prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical,
-    prepare_tensorcontract_fusion_plan_dyn_raw_canonical, tensorcontract_fusion_structure,
-    FusionContractPlan, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
-    SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+    prepare_tensorcontract_fusion_plan_dyn_raw_canonical, FusionContractPlan,
+    EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
 };
 use super::fusion_block::{validate_fusion_contract_rule, FusionBlockContractWorkspace};
 #[cfg(test)]
 use super::resolution::try_compile_oriented_storage_contract_plan;
 use super::resolution::{
-    compile_composition_plan, compile_core_plan, compile_resolution,
-    try_compile_oriented_storage_composition_plan,
+    compile_composition_plan, compile_core_plan, try_compile_oriented_storage_composition_plan,
     try_compile_oriented_storage_contract_candidate_plan, ContractRoute, CopyCRoute, CoreMiss,
-    CoreRoute, ExecCaps, Resolution, StorageContractResolution,
+    CoreRoute, ExecCaps, StorageContractResolution,
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
@@ -475,8 +473,6 @@ pub struct TensorContractFusionExecutionContext<
     last_top_level_resolution_was_core: bool,
     #[cfg(test)]
     last_top_level_resolution_orientation: Option<FusionContractOrientation>,
-    #[cfg(test)]
-    last_top_level_resolution_was_structure: bool,
 }
 
 pub type HostTreeFusionExecutionContext<D, RuleKey> = TensorContractFusionExecutionContext<
@@ -561,8 +557,6 @@ where
             last_top_level_resolution_was_core: false,
             #[cfg(test)]
             last_top_level_resolution_orientation: None,
-            #[cfg(test)]
-            last_top_level_resolution_was_structure: false,
         }
     }
 
@@ -747,32 +741,13 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn last_resolution_is_structure(&self) -> bool {
-        self.last_top_level_resolution_was_structure
-    }
-
-    #[cfg(test)]
     fn record_contract_route(&mut self, resolution: &StorageContractResolution<C>) {
         self.last_top_level_resolution_was_core =
             matches!(resolution.route, ContractRoute::Core { .. });
-        self.last_top_level_resolution_was_structure = false;
         self.last_top_level_resolution_orientation = match &resolution.route {
             ContractRoute::DynamicTree(artifact) => Some(artifact.orientation()),
             ContractRoute::Core { swapped: true, .. } => Some(FusionContractOrientation::RhsLhs),
             ContractRoute::Core { swapped: false, .. } | ContractRoute::CopyC(_) => None,
-        };
-    }
-
-    #[cfg(test)]
-    fn record_top_level_resolution(&mut self, resolution: &Resolution<C>) {
-        self.last_top_level_resolution_was_core =
-            matches!(resolution, Resolution::Core(_) | Resolution::SwappedCore(_));
-        self.last_top_level_resolution_was_structure =
-            matches!(resolution, Resolution::Structure(_));
-        self.last_top_level_resolution_orientation = match resolution {
-            Resolution::DynamicTree(plan) => Some(plan.orientation()),
-            Resolution::Core(_) | Resolution::Structure(_) => None,
-            Resolution::SwappedCore(_) => Some(FusionContractOrientation::RhsLhs),
         };
     }
 
@@ -929,46 +904,29 @@ where
         DLhs: HostReadableStorage<D>,
         DRhs: HostReadableStorage<D>,
     {
-        let dst_fusion = dst
-            .fusion_space()
-            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
-        let lhs_fusion = lhs
-            .fusion_space()
-            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
-        let rhs_fusion = rhs
-            .fusion_space()
-            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
-
-        let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
-        let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
-        let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
-        let resolution = compile_resolution(
-            rule,
-            &dst_dynamic,
-            &lhs_dynamic,
-            &rhs_dynamic,
-            axes,
-            || match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
-                Ok(structure) => Ok(Some(std::sync::Arc::new(structure))),
-                Err(OperationError::UnsupportedTensorContractScope {
-                    message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
-                }) => Ok(None),
-                Err(err) => Err(err),
+        let dst_space = typed_dynamic_space(dst)?;
+        let lhs_space = typed_dynamic_space(lhs)?;
+        let rhs_space = typed_dynamic_space(rhs)?;
+        let lowered = lower_legacy_axes(&lhs_space, &rhs_space, axes)?;
+        let axes = lowered.as_spec();
+        let output_axes = spec_output_axes(axes, dst_space.rank());
+        self.tensorcontract_planned_raw_into(
+            PlanTarget {
+                rule,
+                space: &dst_space,
+                primer: encoded_layout_primer::<R>,
             },
-            || {
-                prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                    rule,
-                    &dst_dynamic,
-                    &lhs_dynamic,
-                    &rhs_dynamic,
-                    axes,
-                )
-                .map(std::sync::Arc::new)
-            },
-        )?;
-        #[cfg(test)]
-        self.record_top_level_resolution(&resolution);
-        self.execute_resolution(&resolution, rule, dst, lhs, rhs, alpha, beta)
+            dst.data_mut(),
+            (legacy_operand(&lhs_space, axes.lhs_conjugate()), lhs.data()),
+            (legacy_operand(&rhs_space, axes.rhs_conjugate()), rhs.data()),
+            (
+                axes.lhs_contracting_axes(),
+                axes.rhs_contracting_axes(),
+                &output_axes,
+            ),
+            alpha,
+            ContractDestinationInit::Axpby(beta),
+        )
     }
 
     /// Dynamic-rank `tensorcontract!`: same eager route selection and gates
@@ -1027,9 +985,6 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        // Owned operands are the planner's direct operands. A conjugation flag
-        // on an owned space is the legacy categorical-adjoint request, which
-        // keeps its own route until #1858's last PR.
         if !axes.lhs_conjugate() && !axes.rhs_conjugate() {
             return self.tensorcontract_fusion_dyn_prelowered_into_core(
                 dst_space,
@@ -1043,20 +998,17 @@ where
                 init,
             );
         }
-        // Why not accept a separate rule: the lhs bound space is the authority
-        // used for planning and execution; the raw core only checks identities.
-        self.tensorcontract_fusion_dyn_into_raw_with_primer(
-            lhs_space.provider(),
-            dst_space.space(),
+        let lowered = lower_legacy_axes(lhs_space.space(), rhs_space.space(), axes)?;
+        self.tensorcontract_fusion_dyn_prelowered_into_core(
+            dst_space,
             dst_data,
-            lhs_space.space(),
+            legacy_operand(lhs_space.space(), axes.lhs_conjugate()),
             lhs_data,
-            rhs_space.space(),
+            legacy_operand(rhs_space.space(), axes.rhs_conjugate()),
             rhs_data,
-            axes,
+            lowered.as_spec(),
             alpha,
             init,
-            lhs_space.layout_primer(),
         )
     }
 
@@ -1079,92 +1031,25 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        self.tensorcontract_fusion_dyn_into_raw_with_primer(
-            rule,
-            dst_space,
+        let lowered = lower_legacy_axes(lhs_space, rhs_space, axes)?;
+        let axes = lowered.as_spec();
+        let output_axes = spec_output_axes(axes, dst_space.rank());
+        self.tensorcontract_planned_raw_into(
+            PlanTarget {
+                rule,
+                space: dst_space,
+                primer: encoded_layout_primer::<R>,
+            },
             dst_data,
-            lhs_space,
-            lhs_data,
-            rhs_space,
-            rhs_data,
-            axes,
+            (legacy_operand(lhs_space, axes.lhs_conjugate()), lhs_data),
+            (legacy_operand(rhs_space, axes.rhs_conjugate()), rhs_data),
+            (
+                axes.lhs_contracting_axes(),
+                axes.rhs_contracting_axes(),
+                &output_axes,
+            ),
             alpha,
             ContractDestinationInit::Axpby(beta),
-            encoded_layout_primer::<R>,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn tensorcontract_fusion_dyn_into_raw_with_primer<R>(
-        &mut self,
-        rule: &R,
-        dst_space: &DynamicFusionMapSpace,
-        dst_data: &mut [D],
-        lhs_space: &DynamicFusionMapSpace,
-        lhs_data: &[D],
-        rhs_space: &DynamicFusionMapSpace,
-        rhs_data: &[D],
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        init: ContractDestinationInit<D>,
-        layout_primer: LayoutKeyBuilder<R>,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    {
-        let resolution = compile_resolution(
-            rule,
-            dst_space,
-            lhs_space,
-            rhs_space,
-            axes,
-            || match super::fusion::tensorcontract_fusion_structure_dyn_raw(
-                rule,
-                dst_space,
-                lhs_space,
-                rhs_space,
-                Arc::clone(lhs_space.structure()),
-                Arc::clone(rhs_space.structure()),
-                axes,
-            ) {
-                Ok(structure) => Ok(Some(Arc::new(structure))),
-                Err(OperationError::UnsupportedTensorContractScope {
-                    message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
-                }) => Ok(None),
-                Err(err) => Err(err),
-            },
-            || {
-                prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                    rule, dst_space, lhs_space, rhs_space, axes,
-                )
-                .map(Arc::new)
-            },
-        )?;
-        #[cfg(test)]
-        self.record_top_level_resolution(&resolution);
-        let dynamic_artifact = self.compile_dynamic_execution_artifact::<_, false>(
-            &resolution,
-            rule,
-            Some(dst_space),
-            Some(lhs_space),
-            lhs_space.structure(),
-            Some(rhs_space),
-            rhs_space.structure(),
-            layout_primer,
-            None,
-        )?;
-        self.execute_resolution_dyn(
-            &resolution,
-            dynamic_artifact.as_ref(),
-            dst_space.structure(),
-            dst_data,
-            lhs_space.structure(),
-            lhs_data,
-            rhs_space.structure(),
-            rhs_data,
-            alpha,
-            init,
         )
     }
 
@@ -1246,13 +1131,7 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        let rule = dst_space.provider();
-        validate_fusion_contract_rule(
-            rule,
-            dst_space.space(),
-            lhs.storage_space(),
-            rhs.storage_space(),
-        )?;
+        // The planner rejects operand flags that disagree with `axes`.
         if axes.lhs_conjugate() != lhs.storage_conjugate()
             || axes.rhs_conjugate() != rhs.storage_conjugate()
         {
@@ -1260,14 +1139,7 @@ where
                 message: "prelowered operand flags must match the contraction request",
             });
         }
-        let identity: smallvec::SmallVec<[usize; 16]>;
-        let output_axes = match axes.output_permutation() {
-            tenet_operations::OutputAxisOrder::Axes(axes) => axes,
-            tenet_operations::OutputAxisOrder::Identity => {
-                identity = (0..dst_space.space().rank()).collect();
-                &identity[..]
-            }
-        };
+        let output_axes = spec_output_axes(axes, dst_space.space().rank());
         self.tensorcontract_planned_into(
             dst_space,
             dst_data,
@@ -1275,7 +1147,7 @@ where
             (rhs, rhs_data),
             axes.lhs_contracting_axes(),
             axes.rhs_contracting_axes(),
-            output_axes,
+            &output_axes,
             alpha,
             init,
         )
@@ -1303,19 +1175,40 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        let resolution = self.plan_contract::<super::resolution::HostEagerExecutor, R>(
-            dst_space,
-            lhs,
-            rhs,
-            lhs_axes,
-            rhs_axes,
-            output_axes,
+        self.tensorcontract_planned_raw_into(
+            PlanTarget::bound(dst_space),
+            dst_data,
+            (lhs, lhs_data),
+            (rhs, rhs_data),
+            (lhs_axes, rhs_axes, output_axes),
+            alpha,
+            init,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tensorcontract_planned_raw_into<R>(
+        &mut self,
+        target: PlanTarget<'_, R>,
+        dst_data: &mut [D],
+        (lhs, lhs_data): (FusionOperand<'_>, &[D]),
+        (rhs, rhs_data): (FusionOperand<'_>, &[D]),
+        axes: (&[usize], &[usize], &[usize]),
+        alpha: D,
+        init: ContractDestinationInit<D>,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
+        let resolution = self.plan_contract_raw::<super::resolution::HostEagerExecutor, R>(
+            target, lhs, rhs, axes, None,
         )?;
         #[cfg(test)]
         self.record_contract_route(&resolution);
         self.execute_contract_route_host(
             &resolution,
-            dst_space.space().structure(),
+            target.space.structure(),
             dst_data,
             (lhs.storage_space().structure(), lhs_data),
             (rhs.storage_space().structure(), rhs_data),
@@ -1412,17 +1305,14 @@ where
         {
             self.last_top_level_resolution_was_core = true;
             self.last_top_level_resolution_orientation = None;
-            self.last_top_level_resolution_was_structure = false;
         }
-        self.execute_resolution_dyn(
-            &Resolution::Core(plan),
-            None,
+        self.execute_core_plan_host(
+            &plan,
+            false,
             dst_space.space().structure(),
             dst_data,
-            lhs.storage_space().structure(),
-            lhs_data,
-            rhs.storage_space().structure(),
-            rhs_data,
+            (lhs.storage_space().structure(), lhs_data),
+            (rhs.storage_space().structure(), rhs_data),
             alpha,
             init,
         )
@@ -1609,14 +1499,15 @@ where
         {
             self.last_top_level_resolution_was_core = true;
             self.last_top_level_resolution_orientation = None;
-            self.last_top_level_resolution_was_structure = false;
         }
         plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs, rhs)
     }
 
-    /// The contraction planner of the storage executors (CUDA eager and the
-    /// batched `ContractPlan`, Host and CUDA): TensorKit `contract!`
-    /// (`tensoroperations.jl:314-357` @cfaa073) under `contract_memcost` (`:358-368`).
+    /// The contraction planner: TensorKit `contract!`
+    /// (`tensoroperations.jl:314-357` @cfaa073) under `contract_memcost`
+    /// (`:358-368`), for an executor with the capabilities `X`. Every
+    /// contraction route — Host eager, the device, `ContractPlan`, prepared and
+    /// profiled — is chosen here.
     ///
     /// The ladder: the canonical fully-direct core
     /// ([`try_compile_storage_contract_core_route`]), then
@@ -1639,6 +1530,31 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
+        self.plan_contract_raw::<X, R>(
+            PlanTarget::bound(dst_space),
+            lhs,
+            rhs,
+            (lhs_axes, rhs_axes, output_axes),
+            None,
+        )
+    }
+
+    /// [`Self::plan_contract`] for a destination given as provider, space and
+    /// layout primer, not bound: the static-rank entries plan with their
+    /// caller's rule without binding a space per call. `profile` attributes
+    /// the planning time (see the [`TensorContractFusionProfile`] fields).
+    pub(crate) fn plan_contract_raw<X: ExecCaps, R>(
+        &mut self,
+        target: PlanTarget<'_, R>,
+        lhs: FusionOperand<'_>,
+        rhs: FusionOperand<'_>,
+        (lhs_axes, rhs_axes, output_axes): (&[usize], &[usize], &[usize]),
+        mut profile: Option<&mut TensorContractFusionProfile>,
+    ) -> Result<StorageContractResolution<C>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
         let axes = TensorContractSpec::new_with_conjugation(
             lhs_axes,
             rhs_axes,
@@ -1646,16 +1562,24 @@ where
             lhs.storage_conjugate(),
             rhs.storage_conjugate(),
         );
-        match try_compile_storage_contract_core_route::<X, R>(dst_space, lhs, rhs, axes)? {
+        let start = profile.is_some().then(std::time::Instant::now);
+        let core = try_compile_core_route::<X, R>(target, lhs, rhs, axes)?;
+        if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
+            // A hit is dominated by its core plan compile, a miss by the walk.
+            match core {
+                CoreRoute::Hit(_) => profile.core_block_plan_build += start.elapsed(),
+                CoreRoute::Miss(_) => profile.resolution_preflight += start.elapsed(),
+            }
+        }
+        match core {
             CoreRoute::Hit(core) => Ok(core),
-            CoreRoute::Miss(miss) => self.plan_contract_beyond_core::<X, R>(
+            CoreRoute::Miss(miss) => self.plan_contract_beyond_core_raw::<X, R>(
                 miss,
-                dst_space,
+                target,
                 lhs,
                 rhs,
-                lhs_axes,
-                rhs_axes,
-                output_axes,
+                (lhs_axes, rhs_axes, output_axes),
+                profile,
             ),
         }
     }
@@ -1686,10 +1610,33 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        let rule = dst_space.provider();
-        if let Some(orientation) = super::resolution::copy_c_order(
-            rule,
-            dst_space.space(),
+        self.plan_contract_beyond_core_raw::<X, R>(
+            miss,
+            PlanTarget::bound(dst_space),
+            lhs,
+            rhs,
+            (lhs_axes, rhs_axes, output_axes),
+            None,
+        )
+    }
+
+    fn plan_contract_beyond_core_raw<X: ExecCaps, R>(
+        &mut self,
+        miss: CoreMiss,
+        target: PlanTarget<'_, R>,
+        lhs: FusionOperand<'_>,
+        rhs: FusionOperand<'_>,
+        (lhs_axes, rhs_axes, output_axes): (&[usize], &[usize], &[usize]),
+        mut profile: Option<&mut TensorContractFusionProfile>,
+    ) -> Result<StorageContractResolution<C>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
+        let start = profile.is_some().then(std::time::Instant::now);
+        let order = super::resolution::copy_c_order(
+            target.rule,
+            target.space,
             lhs,
             rhs,
             lhs_axes,
@@ -1697,15 +1644,18 @@ where
             output_axes,
             Some(miss.requested_zero_copy),
             true,
-        ) {
+        );
+        if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
+            profile.resolution_preflight += start.elapsed();
+        }
+        if let Some(orientation) = order {
             if let Some(copy) = self.plan_copy_c::<X, R>(
-                dst_space,
+                target,
                 lhs,
                 rhs,
-                lhs_axes,
-                rhs_axes,
-                output_axes,
+                (lhs_axes, rhs_axes, output_axes),
                 orientation,
+                profile.as_deref_mut(),
             )? {
                 return Ok(copy);
             }
@@ -1717,26 +1667,27 @@ where
             lhs.storage_conjugate(),
             rhs.storage_conjugate(),
         );
-        self.compile_storage_contract_dynamic_tree(dst_space, lhs, rhs, axes)
+        self.compile_dynamic_tree_raw(target, lhs, rhs, axes, X::IRREGULAR_CORE, profile)
     }
 
     /// The `CopyC` route in `orientation`, or `None` when its temporary has
     /// no core the executor runs (the `DynamicTree` artifact then applies).
-    #[allow(clippy::too_many_arguments)]
+    /// Profiled, the temporary's core counts as core plan build and the rest
+    /// (temporary derivation, transform lookup) as route preflight.
     fn plan_copy_c<X: ExecCaps, R>(
         &mut self,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
+        target: PlanTarget<'_, R>,
         lhs: FusionOperand<'_>,
         rhs: FusionOperand<'_>,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
+        (lhs_axes, rhs_axes, output_axes): (&[usize], &[usize], &[usize]),
         orientation: super::fusion::FusionContractOrientation,
+        profile: Option<&mut TensorContractFusionProfile>,
     ) -> Result<Option<StorageContractResolution<C>>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
+        let start = profile.is_some().then(std::time::Instant::now);
         let swapped = orientation == super::fusion::FusionContractOrientation::RhsLhs;
         let ((first, first_axes), (second, second_axes)) = if swapped {
             ((rhs, rhs_axes), (lhs, lhs_axes))
@@ -1745,15 +1696,16 @@ where
         };
         let identity = tenet_operations::OutputAxisOrder::identity();
         // The temporary is `first·second`'s own default-order result over the
-        // oriented HomSpaces, as any contraction result is; `dst_space` is the
-        // layout authority, since the request was validated against its
-        // provider.
+        // oriented HomSpaces, as any contraction result is, laid out with the
+        // destination's primer (the request was validated against its
+        // provider).
         let first_open = first.storage_space().rank() - first_axes.len();
         let default_axes: smallvec::SmallVec<[usize; 16]> =
             (0..first_open + second.storage_space().rank() - second_axes.len()).collect();
-        let temporary = dst_space.derive_from_final_homspace(
+        let temporary = DynamicFusionMapSpace::from_final_homspace_with_primer(
+            target.rule,
             tenet_core::OrientedFusionTreeHomSpace::tensorcontract_homspace(
-                dst_space.provider(),
+                target.rule,
                 first.oriented_homspace(),
                 second.oriented_homspace(),
                 first_axes,
@@ -1762,9 +1714,16 @@ where
                 first_open,
             )
             .map_err(OperationError::from_core_preserving_context)?,
+            target.primer,
         )?;
-        let CoreRoute::Hit(core) = try_compile_storage_contract_core_route::<X, R>(
-            &temporary,
+        let temporary_target = PlanTarget {
+            rule: target.rule,
+            space: &temporary,
+            primer: target.primer,
+        };
+        let core_start = profile.is_some().then(std::time::Instant::now);
+        let core = try_compile_core_route::<X, R>(
+            temporary_target,
             first,
             second,
             TensorContractSpec::new_with_conjugation(
@@ -1774,8 +1733,9 @@ where
                 first.storage_conjugate(),
                 second.storage_conjugate(),
             ),
-        )?
-        else {
+        )?;
+        let core_time = core_start.map(|start| start.elapsed());
+        let CoreRoute::Hit(core) = core else {
             return Ok(None);
         };
         let Some((core, core_swapped)) = core.direct_core() else {
@@ -1788,20 +1748,24 @@ where
             lhs_axes,
             rhs_axes,
             output_axes,
-            dst_space.space().nout(),
+            target.space.nout(),
         );
-        let temporary_structure = Arc::clone(temporary.space().structure());
+        let temporary_structure = Arc::clone(temporary.structure());
         let transform = self.tree_context.compile_tree_pair_structure(
-            dst_space.provider(),
+            target.rule,
             &operation,
-            dst_space.space().structure(),
+            target.space.structure(),
             &temporary_structure,
         )?;
+        if let (Some(start), Some(core_time), Some(profile)) = (start, core_time, profile) {
+            profile.core_block_plan_build += core_time;
+            profile.resolution_preflight += start.elapsed().saturating_sub(core_time);
+        }
         Ok(Some(StorageContractResolution::new(ContractRoute::CopyC(
             CopyCRoute {
                 core: Arc::clone(core),
                 swapped: core_swapped ^ swapped,
-                temporary_len: temporary.space().required_len()?,
+                temporary_len: temporary.required_len()?,
                 temporary: temporary_structure,
                 transform,
             },
@@ -1868,67 +1832,135 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
+        self.compile_dynamic_tree_raw(PlanTarget::bound(dst_space), lhs, rhs, axes, false, None)
+    }
+
+    /// `irregular_core`: the executor packs and scatters a core plan that is
+    /// not fully direct ([`ExecCaps::IRREGULAR_CORE`]), as the artifact's core
+    /// over a non-canonical destination tiling (#1517) is.
+    ///
+    /// Profiled, the `FusionContractPlan` build counts as `DynamicTree` plan
+    /// build and the artifact assembly as artifact prepare (its structure
+    /// lookups and core plan attributed separately, as before).
+    fn compile_dynamic_tree_raw<R>(
+        &mut self,
+        target: PlanTarget<'_, R>,
+        lhs: FusionOperand<'_>,
+        rhs: FusionOperand<'_>,
+        axes: TensorContractSpec<'_>,
+        irregular_core: bool,
+        mut profile: Option<&mut TensorContractFusionProfile>,
+    ) -> Result<StorageContractResolution<C>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
         // Re-run here, not only in the first half: this entry is callable on
         // its own, and the artifact compilers assume a validated request.
-        validate_storage_contract_request(dst_space, lhs, rhs, axes)?;
-        let rule = dst_space.provider();
-        let layout_primer = dst_space.layout_primer();
+        validate_raw_contract_request(target, lhs, rhs, axes)?;
+        let PlanTarget {
+            rule,
+            space: dst_space,
+            primer: layout_primer,
+        } = target;
+        let plan_start = profile.is_some().then(std::time::Instant::now);
         let artifact = if !lhs.storage_conjugate() && !rhs.storage_conjugate() {
             let (lhs_space, rhs_space) = (lhs.storage_space(), rhs.storage_space());
             let plan = prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                rule,
-                dst_space.space(),
-                lhs_space,
-                rhs_space,
-                axes,
+                rule, dst_space, lhs_space, rhs_space, axes,
             )?;
-            super::dynamic::compile_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
-                &mut self.tree_context,
-                &mut self.dynamic_space_cache,
-                rule,
-                layout_primer,
-                &plan,
-                dst_space.space(),
-                lhs_space,
-                lhs_space.structure(),
-                rhs_space,
-                rhs_space.structure(),
-                None,
-            )?
+            let artifact_start = attribute_plan_build(plan_start, profile.as_deref_mut());
+            let before = attributed_artifact_parts(profile.as_deref());
+            let artifact = if profile.is_some() {
+                super::dynamic::compile_dynamic_tree_execution_artifact::<_, _, _, _, _, true>(
+                    &mut self.tree_context,
+                    &mut self.dynamic_space_cache,
+                    rule,
+                    layout_primer,
+                    &plan,
+                    dst_space,
+                    lhs_space,
+                    lhs_space.structure(),
+                    rhs_space,
+                    rhs_space.structure(),
+                    profile.as_deref_mut(),
+                )?
+            } else {
+                super::dynamic::compile_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
+                    &mut self.tree_context,
+                    &mut self.dynamic_space_cache,
+                    rule,
+                    layout_primer,
+                    &plan,
+                    dst_space,
+                    lhs_space,
+                    lhs_space.structure(),
+                    rhs_space,
+                    rhs_space.structure(),
+                    None,
+                )?
+            };
+            attribute_artifact_prepare(artifact_start, before, profile.as_deref_mut());
+            artifact
         } else {
             let lhs_layout = lhs.prepare(rule, layout_primer)?;
             let rhs_layout = rhs.prepare(rule, layout_primer)?;
             let plan = prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical(
                 rule,
-                dst_space.space(),
+                dst_space,
                 &lhs_layout,
                 &rhs_layout,
                 axes,
                 layout_primer,
             )?;
-            super::dynamic::compile_prelowered_dynamic_tree_execution_artifact::<
-                _,
-                _,
-                _,
-                _,
-                _,
-                false,
-            >(
-                &mut self.tree_context,
-                &mut self.dynamic_space_cache,
-                rule,
-                layout_primer,
-                &plan,
-                dst_space.space(),
-                &lhs_layout,
-                &rhs_layout,
-                None,
-            )?
+            let artifact_start = attribute_plan_build(plan_start, profile.as_deref_mut());
+            let before = attributed_artifact_parts(profile.as_deref());
+            let artifact = if profile.is_some() {
+                super::dynamic::compile_prelowered_dynamic_tree_execution_artifact::<
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    true,
+                >(
+                    &mut self.tree_context,
+                    &mut self.dynamic_space_cache,
+                    rule,
+                    layout_primer,
+                    &plan,
+                    dst_space,
+                    &lhs_layout,
+                    &rhs_layout,
+                    profile.as_deref_mut(),
+                )?
+            } else {
+                super::dynamic::compile_prelowered_dynamic_tree_execution_artifact::<
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    false,
+                >(
+                    &mut self.tree_context,
+                    &mut self.dynamic_space_cache,
+                    rule,
+                    layout_primer,
+                    &plan,
+                    dst_space,
+                    &lhs_layout,
+                    &rhs_layout,
+                    None,
+                )?
+            };
+            attribute_artifact_prepare(artifact_start, before, profile);
+            artifact
         };
-        // Transformed sources are canonical coupled layouts, so the core plan
-        // is fully direct for every typed operand; a violation is an internal
-        // inconsistency, reported before any device work.
-        if !artifact.block_plan_is_fully_direct() {
+        // Transformed sources are canonical coupled layouts, so only a
+        // non-canonical destination tiling leaves the core plan not fully
+        // direct; a direct-core executor reports it before any device work.
+        if !irregular_core && !artifact.block_plan_is_fully_direct() {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "dynamic-tree core plan over transformed sources is not fully direct",
             });
@@ -1938,64 +1970,6 @@ where
         )))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn compile_dynamic_execution_artifact<R, const PROFILED: bool>(
-        &mut self,
-        resolution: &Resolution<C>,
-        rule: &R,
-        dst_space: Option<&DynamicFusionMapSpace>,
-        lhs_space: Option<&DynamicFusionMapSpace>,
-        lhs_structure: &Arc<BlockStructure>,
-        rhs_space: Option<&DynamicFusionMapSpace>,
-        rhs_structure: &Arc<BlockStructure>,
-        layout_primer: LayoutKeyBuilder<R>,
-        profile: Option<&mut TensorContractFusionProfile>,
-    ) -> Result<Option<Arc<super::dynamic::DynamicTreeExecutionArtifact<C>>>, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar,
-    {
-        let Resolution::DynamicTree(plan) = resolution else {
-            return Ok(None);
-        };
-        let missing = || OperationError::Core(CoreError::MissingFusionSpace);
-        let dst_space = dst_space.ok_or_else(missing)?;
-        let lhs_space = lhs_space.ok_or_else(missing)?;
-        let rhs_space = rhs_space.ok_or_else(missing)?;
-        let artifact = Arc::new(super::dynamic::compile_dynamic_tree_execution_artifact::<
-            _,
-            _,
-            _,
-            _,
-            _,
-            PROFILED,
-        >(
-            &mut self.tree_context,
-            &mut self.dynamic_space_cache,
-            rule,
-            layout_primer,
-            plan.as_ref(),
-            dst_space,
-            lhs_space,
-            lhs_structure,
-            rhs_space,
-            rhs_structure,
-            profile,
-        )?);
-        Ok(Some(artifact))
-    }
-
-    /// Executes a resolved contraction on raw slices; shared by the
-    /// dynamic-rank entry point and the typed facade / prepared-handle path.
-    ///
-    /// The structures are passed separately from the spaces because the two
-    /// callers replay on different structures: the dynamic entry replays on
-    /// the space's canonical structure, while the typed wrapper replays on
-    /// each tensor's own *storage* structure (which
-    /// `from_storage_with_structure` lets differ from the space's). The
-    /// spaces themselves are consumed only by the dynamic-tree route, so
-    /// they are optional: a typed tensor without a fusion space errors
-    /// there and only there (as before the merge).
     /// The core GEMMs of `plan` on the Host, the operands swapped for the B·A
     /// candidate; a not fully direct plan packs and scatters around them.
     #[allow(clippy::too_many_arguments)]
@@ -2157,39 +2131,40 @@ where
         }
     }
 
+    /// [`Self::execute_contract_route_host`] with each stage timed into
+    /// `profile`; `CopyC`'s permute counts as the output transform.
     #[allow(clippy::too_many_arguments)]
-    fn execute_resolution_dyn(
+    fn execute_contract_route_host_profiled(
         &mut self,
-        resolution: &Resolution<C>,
-        dynamic_artifact: Option<&Arc<super::dynamic::DynamicTreeExecutionArtifact<C>>>,
+        resolution: &StorageContractResolution<C>,
         dst_structure: &Arc<BlockStructure>,
         dst_data: &mut [D],
-        lhs_structure: &Arc<BlockStructure>,
-        lhs_data: &[D],
-        rhs_structure: &Arc<BlockStructure>,
-        rhs_data: &[D],
+        lhs: (&Arc<BlockStructure>, &[D]),
+        rhs: (&Arc<BlockStructure>, &[D]),
         alpha: D,
-        init: ContractDestinationInit<D>,
+        beta: D,
+        profile: &mut TensorContractFusionProfile,
     ) -> Result<(), OperationError>
     where
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
-        // The dynamic-tree and structure routes still run their own inactive
-        // pass with `beta = 0`; only the core replay honours `Zeroed`.
-        let beta = init.active_beta();
-        match resolution {
-            Resolution::Core(block_plan) | Resolution::SwappedCore(block_plan) => self
-                .execute_core_plan_host(
-                    block_plan,
-                    matches!(resolution, Resolution::SwappedCore(_)),
+        match &resolution.route {
+            ContractRoute::Core { plan, swapped } => {
+                profile.route = TensorContractFusionRoute::CoreFusionBlocks;
+                self.execute_core_plan_host_profiled(
+                    plan,
+                    *swapped,
                     dst_structure,
                     dst_data,
-                    (lhs_structure, lhs_data),
-                    (rhs_structure, rhs_data),
+                    lhs,
+                    rhs,
                     alpha,
-                    init,
-                ),
-            Resolution::DynamicTree(_) => {
+                    beta,
+                    profile,
+                )
+            }
+            ContractRoute::DynamicTree(artifact) => {
+                profile.route = TensorContractFusionRoute::DynamicTreeCore;
                 let Self {
                     tree_context,
                     contract_backend,
@@ -2198,12 +2173,7 @@ where
                     fusion_scratch,
                     ..
                 } = self;
-                let artifact = dynamic_artifact.ok_or_else(|| {
-                    OperationError::UnsupportedTensorContractScope {
-                        message: "dynamic-tree resolution requires a compiled execution artifact",
-                    }
-                })?;
-                super::dynamic::execute_dynamic_tree_execution_artifact(
+                super::dynamic::execute_dynamic_tree_execution_artifact_profiled(
                     tree_context,
                     contract_backend,
                     contract_workspace,
@@ -2212,97 +2182,93 @@ where
                     artifact,
                     dst_structure,
                     dst_data,
-                    lhs_data,
-                    rhs_data,
+                    lhs.1,
+                    rhs.1,
                     alpha,
                     beta,
+                    profile,
                 )
             }
-            Resolution::Structure(structure) => {
-                self.contract_backend.tensorcontract_structure_into_raw(
-                    &mut self.contract_workspace,
-                    structure,
-                    dst_structure,
-                    lhs_structure,
-                    rhs_structure,
-                    dst_data,
-                    lhs_data,
-                    rhs_data,
-                    alpha,
-                    beta,
-                )
+            ContractRoute::CopyC(copy) => {
+                profile.route = TensorContractFusionRoute::CopyC;
+                let mut temporary = std::mem::take(&mut self.copy_c_scratch);
+                temporary.resize_filled(copy.temporary_len, D::zero());
+                let result = self
+                    .execute_core_plan_host_profiled(
+                        &copy.core,
+                        copy.swapped,
+                        &copy.temporary,
+                        temporary.as_mut_slice(),
+                        lhs,
+                        rhs,
+                        D::one(),
+                        D::zero(),
+                        profile,
+                    )
+                    .and_then(|()| {
+                        let start = std::time::Instant::now();
+                        let result = self
+                            .tree_context
+                            .tree_transform_structure_into_raw_profiled(
+                                &copy.transform,
+                                dst_structure,
+                                &copy.temporary,
+                                dst_data,
+                                temporary.as_slice(),
+                                alpha,
+                                beta,
+                                &mut profile.tree_replay,
+                            );
+                        profile.output_transform += start.elapsed();
+                        profile.output_transform_calls += 1;
+                        result
+                    });
+                self.copy_c_scratch = temporary;
+                result
             }
         }
     }
 
-    /// Executes a resolved contraction; shared by the facade and the
-    /// prepared-handle path.
     #[allow(clippy::too_many_arguments)]
-    fn execute_resolution<
-        R,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
+    fn execute_core_plan_host_profiled(
         &mut self,
-        resolution: &Resolution<C>,
-        rule: &R,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+        plan: &tenet_operations::FusionBlockContractPlan<C>,
+        swapped: bool,
+        dst_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs: (&Arc<BlockStructure>, &[D]),
+        rhs: (&Arc<BlockStructure>, &[D]),
         alpha: D,
         beta: D,
+        profile: &mut TensorContractFusionProfile,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-        DDst: HostWritableStorage<D>,
-        DLhs: HostReadableStorage<D>,
-        DRhs: HostReadableStorage<D>,
     {
-        let dst_space = dst
-            .fusion_space()
-            .map(|s| DynamicFusionMapSpace::from_typed(s));
-        let lhs_space = lhs
-            .fusion_space()
-            .map(|s| DynamicFusionMapSpace::from_typed(s));
-        let rhs_space = rhs
-            .fusion_space()
-            .map(|s| DynamicFusionMapSpace::from_typed(s));
-        let dst_structure = Arc::clone(dst.structure());
-        let lhs_structure = Arc::clone(lhs.structure());
-        let rhs_structure = Arc::clone(rhs.structure());
-        let dynamic_artifact = self.compile_dynamic_execution_artifact::<_, false>(
-            resolution,
-            rule,
-            dst_space.as_ref(),
-            lhs_space.as_ref(),
-            &lhs_structure,
-            rhs_space.as_ref(),
-            &rhs_structure,
-            encoded_layout_primer::<R>,
-            None,
-        )?;
-        self.execute_resolution_dyn(
-            resolution,
-            dynamic_artifact.as_ref(),
-            &dst_structure,
-            dst.data_mut(),
-            &lhs_structure,
-            lhs.data(),
-            &rhs_structure,
-            rhs.data(),
+        let ((lhs_structure, lhs_data), (rhs_structure, rhs_data)) =
+            if swapped { (rhs, lhs) } else { (lhs, rhs) };
+        let Self {
+            contract_backend,
+            contract_workspace,
+            fusion_block_workspace,
+            ..
+        } = self;
+        let mut kernels = crate::StridedHostKernelAdapter::default();
+        let mut gemm =
+            super::fusion_block::BackendRank2Gemm::new(contract_backend, contract_workspace);
+        plan.execute_raw_profiled(
+            &mut kernels,
+            &mut gemm,
+            fusion_block_workspace,
+            dst_structure,
+            dst_data,
+            lhs_structure,
+            lhs_data,
+            rhs_structure,
+            rhs_data,
             alpha,
-            ContractDestinationInit::Axpby(beta),
+            beta,
+            profile,
         )
     }
 
@@ -2339,53 +2305,29 @@ where
         DLhs: HostReadableStorage<D>,
         DRhs: HostReadableStorage<D>,
     {
-        let dst_fusion = dst
-            .fusion_space()
-            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
-        let lhs_fusion = lhs
-            .fusion_space()
-            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
-        let rhs_fusion = rhs
-            .fusion_space()
-            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
-        let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
-        let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
-        let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
-        let resolution = compile_resolution(
-            rule,
-            &dst_dynamic,
-            &lhs_dynamic,
-            &rhs_dynamic,
-            axes,
-            || match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
-                Ok(structure) => Ok(Some(Arc::new(structure))),
-                Err(OperationError::UnsupportedTensorContractScope {
-                    message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
-                }) => Ok(None),
-                Err(err) => Err(err),
+        let missing = || OperationError::Core(CoreError::MissingFusionSpace);
+        let dst_fusion = dst.fusion_space().ok_or_else(missing)?;
+        let lhs_fusion = lhs.fusion_space().ok_or_else(missing)?;
+        let rhs_fusion = rhs.fusion_space().ok_or_else(missing)?;
+        let dst_space = DynamicFusionMapSpace::from_typed(dst_fusion);
+        let lhs_space = DynamicFusionMapSpace::from_typed(lhs_fusion);
+        let rhs_space = DynamicFusionMapSpace::from_typed(rhs_fusion);
+        let lowered = lower_legacy_axes(&lhs_space, &rhs_space, axes)?;
+        let axes = lowered.as_spec();
+        let output_axes = spec_output_axes(axes, dst_space.rank());
+        let resolution = self.plan_contract_raw::<super::resolution::HostEagerExecutor, R>(
+            PlanTarget {
+                rule,
+                space: &dst_space,
+                primer: encoded_layout_primer::<R>,
             },
-            || {
-                prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                    rule,
-                    &dst_dynamic,
-                    &lhs_dynamic,
-                    &rhs_dynamic,
-                    axes,
-                )
-                .map(Arc::new)
-            },
-        )?;
-        let lhs_structure = Arc::clone(lhs.structure());
-        let rhs_structure = Arc::clone(rhs.structure());
-        let dynamic_artifact = self.compile_dynamic_execution_artifact::<_, false>(
-            &resolution,
-            rule,
-            Some(&dst_dynamic),
-            Some(&lhs_dynamic),
-            &lhs_structure,
-            Some(&rhs_dynamic),
-            &rhs_structure,
-            encoded_layout_primer::<R>,
+            legacy_operand(&lhs_space, axes.lhs_conjugate()),
+            legacy_operand(&rhs_space, axes.rhs_conjugate()),
+            (
+                axes.lhs_contracting_axes(),
+                axes.rhs_contracting_axes(),
+                &output_axes,
+            ),
             None,
         )?;
         Ok(PreparedTensorContractFusion {
@@ -2394,7 +2336,6 @@ where
             lhs_fusion_space: PreparedFusionSpaceWitness::new(lhs_fusion, lhs.structure()),
             rhs_fusion_space: PreparedFusionSpaceWitness::new(rhs_fusion, rhs.structure()),
             resolution,
-            dynamic_artifact,
         })
     }
 
@@ -2465,17 +2406,12 @@ where
             });
         }
         let dst_structure = Arc::clone(dst.structure());
-        let lhs_structure = Arc::clone(lhs.structure());
-        let rhs_structure = Arc::clone(rhs.structure());
-        self.execute_resolution_dyn(
+        self.execute_contract_route_host(
             &prepared.resolution,
-            prepared.dynamic_artifact.as_ref(),
             &dst_structure,
             dst.data_mut(),
-            &lhs_structure,
-            lhs.data(),
-            &rhs_structure,
-            rhs.data(),
+            (lhs.structure(), lhs.data()),
+            (rhs.structure(), rhs.data()),
             alpha,
             ContractDestinationInit::Axpby(beta),
         )
@@ -2517,160 +2453,49 @@ where
         let total_start = std::time::Instant::now();
 
         let start = std::time::Instant::now();
-        let dst_fusion = dst
-            .fusion_space()
-            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
-        let lhs_fusion = lhs
-            .fusion_space()
-            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
-        let rhs_fusion = rhs
-            .fusion_space()
-            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
-        let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
-        let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
-        let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
+        let dst_space = typed_dynamic_space(dst)?;
+        let lhs_space = typed_dynamic_space(lhs)?;
+        let rhs_space = typed_dynamic_space(rhs)?;
+        let lowered = lower_legacy_axes(&lhs_space, &rhs_space, axes)?;
+        let axes = lowered.as_spec();
+        let output_axes = spec_output_axes(axes, dst_space.rank());
+        let (lhs_operand, rhs_operand) = (
+            legacy_operand(&lhs_space, axes.lhs_conjugate()),
+            legacy_operand(&rhs_space, axes.rhs_conjugate()),
+        );
         profile.typed_space_setup += start.elapsed();
 
-        let resolution = super::resolution::compile_resolution_profiled(
-            rule,
-            &dst_dynamic,
-            &lhs_dynamic,
-            &rhs_dynamic,
-            axes,
-            || match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
-                Ok(structure) => Ok(Some(std::sync::Arc::new(structure))),
-                Err(OperationError::UnsupportedTensorContractScope {
-                    message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
-                }) => Ok(None),
-                Err(err) => Err(err),
+        // The eager planner and executor, timed: the profile reports the
+        // route the unprofiled entry takes.
+        let resolution = self.plan_contract_raw::<super::resolution::HostEagerExecutor, R>(
+            PlanTarget {
+                rule,
+                space: &dst_space,
+                primer: encoded_layout_primer::<R>,
             },
-            || {
-                prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                    rule,
-                    &dst_dynamic,
-                    &lhs_dynamic,
-                    &rhs_dynamic,
-                    axes,
-                )
-                .map(std::sync::Arc::new)
-            },
-            profile,
+            lhs_operand,
+            rhs_operand,
+            (
+                axes.lhs_contracting_axes(),
+                axes.rhs_contracting_axes(),
+                &output_axes,
+            ),
+            Some(profile),
         )?;
         #[cfg(test)]
-        self.record_top_level_resolution(&resolution);
-
-        match &resolution {
-            Resolution::Core(block_plan) | Resolution::SwappedCore(block_plan) => {
-                let Self {
-                    contract_backend,
-                    contract_workspace,
-                    fusion_block_workspace,
-                    ..
-                } = self;
-                let dst_structure = std::sync::Arc::clone(dst.structure());
-                let ((lhs_structure, lhs_data), (rhs_structure, rhs_data)) = {
-                    let lhs = (std::sync::Arc::clone(lhs.structure()), lhs.data());
-                    let rhs = (std::sync::Arc::clone(rhs.structure()), rhs.data());
-                    if matches!(resolution, Resolution::SwappedCore(_)) {
-                        (rhs, lhs)
-                    } else {
-                        (lhs, rhs)
-                    }
-                };
-                let mut kernels = crate::StridedHostKernelAdapter::default();
-                let mut gemm = super::fusion_block::BackendRank2Gemm::new(
-                    contract_backend,
-                    contract_workspace,
-                );
-                profile.route = TensorContractFusionRoute::CoreFusionBlocks;
-                let result = block_plan.execute_raw_profiled(
-                    &mut kernels,
-                    &mut gemm,
-                    fusion_block_workspace,
-                    &dst_structure,
-                    dst.data_mut(),
-                    &lhs_structure,
-                    lhs_data,
-                    &rhs_structure,
-                    rhs_data,
-                    alpha,
-                    beta,
-                    profile,
-                );
-                profile.total += total_start.elapsed();
-                result
-            }
-            Resolution::DynamicTree(_) => {
-                profile.route = TensorContractFusionRoute::DynamicTreeCore;
-                let dst_structure = Arc::clone(dst.structure());
-                let lhs_structure = Arc::clone(lhs.structure());
-                let rhs_structure = Arc::clone(rhs.structure());
-                let artifact_start = std::time::Instant::now();
-                let source_before = profile.source_space_lookup;
-                let core_dst_before = profile.core_dst_space_lookup;
-                let block_plan_before = profile.core_block_plan_build;
-                let artifact = self
-                    .compile_dynamic_execution_artifact::<_, true>(
-                        &resolution,
-                        rule,
-                        Some(&dst_dynamic),
-                        Some(&lhs_dynamic),
-                        &lhs_structure,
-                        Some(&rhs_dynamic),
-                        &rhs_structure,
-                        encoded_layout_primer::<R>,
-                        Some(profile),
-                    )?
-                    .expect("dynamic-tree resolution compiles an execution artifact");
-                let separately_attributed = (profile.source_space_lookup - source_before)
-                    + (profile.core_dst_space_lookup - core_dst_before)
-                    + (profile.core_block_plan_build - block_plan_before);
-                profile.dynamic_tree_artifact_prepare += artifact_start
-                    .elapsed()
-                    .saturating_sub(separately_attributed);
-                let Self {
-                    tree_context,
-                    contract_backend,
-                    contract_workspace,
-                    fusion_block_workspace,
-                    fusion_scratch,
-                    ..
-                } = self;
-                let result = super::dynamic::execute_dynamic_tree_execution_artifact_profiled(
-                    tree_context,
-                    contract_backend,
-                    contract_workspace,
-                    fusion_block_workspace,
-                    fusion_scratch,
-                    artifact.as_ref(),
-                    &dst_structure,
-                    dst.data_mut(),
-                    lhs.data(),
-                    rhs.data(),
-                    alpha,
-                    beta,
-                    profile,
-                );
-                profile.total += total_start.elapsed();
-                result
-            }
-            Resolution::Structure(structure) => {
-                profile.route = TensorContractFusionRoute::DenseConjugateStructure;
-                let start = std::time::Instant::now();
-                let result = self.contract_backend.tensorcontract_structure_into(
-                    &mut self.contract_workspace,
-                    structure,
-                    dst,
-                    lhs,
-                    rhs,
-                    alpha,
-                    beta,
-                );
-                profile.dense_contract += start.elapsed();
-                profile.total += total_start.elapsed();
-                result
-            }
-        }
+        self.record_contract_route(&resolution);
+        let result = self.execute_contract_route_host_profiled(
+            &resolution,
+            dst_space.structure(),
+            dst.data_mut(),
+            (lhs_space.structure(), lhs.data()),
+            (rhs_space.structure(), rhs.data()),
+            alpha,
+            beta,
+            profile,
+        );
+        profile.total += total_start.elapsed();
+        result
     }
 
     /// Executes a caller-supplied source-transform plan and compiles its core
@@ -3010,15 +2835,124 @@ pub struct PreparedTensorContractFusion<RuleKey, C = f64> {
     dst_fusion_space: PreparedFusionSpaceWitness,
     lhs_fusion_space: PreparedFusionSpaceWitness,
     rhs_fusion_space: PreparedFusionSpaceWitness,
-    resolution: Resolution<C>,
-    dynamic_artifact: Option<Arc<super::dynamic::DynamicTreeExecutionArtifact<C>>>,
+    resolution: StorageContractResolution<C>,
 }
 
-/// The request checks both halves of the storage contraction route run: the
-/// provider against the three spaces, and the operand conjugation flags
-/// against the request.
-fn validate_storage_contract_request<R>(
-    dst_space: &BoundDynamicFusionMapSpace<R>,
+/// The fusion space of a typed tensor, as the planner's dynamic space.
+fn typed_dynamic_space<D, const NOUT: usize, const NIN: usize, S, DD>(
+    tensor: &TensorMap<D, NOUT, NIN, S, DD>,
+) -> Result<DynamicFusionMapSpace, OperationError>
+where
+    DD: tenet_core::TensorStorage<D>,
+{
+    tensor
+        .fusion_space()
+        .map(|space| DynamicFusionMapSpace::from_typed(space))
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))
+}
+
+/// A legacy conjugation flag on an owned space requests its categorical
+/// adjoint, with `axes` indexing the stored tensor's legs (TensorOperations'
+/// `conjA`): the lazy-adjoint operand of the space ([`legacy_operand`]), its
+/// contracted axes mapped onto the adjoint's legs here. Without a flag the
+/// axes are unchanged.
+fn lower_legacy_axes(
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<crate::lowering::LoweredTensorContractSpec, OperationError> {
+    crate::lowering::lower_tensorcontract_adjoint_axes(
+        lhs.nout(),
+        lhs.nin(),
+        rhs.nout(),
+        rhs.nin(),
+        axes,
+    )
+}
+
+/// The operand an owned space and a legacy conjugation flag request: the flag
+/// asks for the categorical adjoint, which is the lazy adjoint of the space.
+fn legacy_operand(space: &DynamicFusionMapSpace, conjugate: bool) -> FusionOperand<'_> {
+    if conjugate {
+        FusionOperand::adjoint(space)
+    } else {
+        FusionOperand::direct(space)
+    }
+}
+
+/// The output permutation of `axes` over a rank-`rank` destination.
+fn spec_output_axes(axes: TensorContractSpec<'_>, rank: usize) -> smallvec::SmallVec<[usize; 16]> {
+    match axes.output_permutation() {
+        tenet_operations::OutputAxisOrder::Axes(axes) => axes.iter().copied().collect(),
+        tenet_operations::OutputAxisOrder::Identity => (0..rank).collect(),
+    }
+}
+
+/// The destination a contraction is planned for: its provider, its space and
+/// the primer that lays out spaces derived from it. Bound spaces carry all
+/// three; the static-rank entries pass their caller's rule.
+pub(crate) struct PlanTarget<'a, R> {
+    pub(crate) rule: &'a R,
+    pub(crate) space: &'a DynamicFusionMapSpace,
+    pub(crate) primer: LayoutKeyBuilder<R>,
+}
+
+// Why manual: a derive would bound `R: Copy`.
+impl<R> Clone for PlanTarget<'_, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<R> Copy for PlanTarget<'_, R> {}
+
+impl<'a, R> PlanTarget<'a, R> {
+    pub(crate) fn bound(space: &'a BoundDynamicFusionMapSpace<R>) -> Self
+    where
+        R: MultiplicityFreeRigidSymbols,
+    {
+        Self {
+            rule: space.provider(),
+            space: space.space(),
+            primer: space.layout_primer(),
+        }
+    }
+}
+
+/// Adds the plan build since `start` to the profile and starts the artifact
+/// clock.
+fn attribute_plan_build(
+    start: Option<std::time::Instant>,
+    profile: Option<&mut TensorContractFusionProfile>,
+) -> Option<std::time::Instant> {
+    let (start, profile) = (start?, profile?);
+    profile.dynamic_tree_plan_build += start.elapsed();
+    Some(std::time::Instant::now())
+}
+
+fn attributed_artifact_parts(profile: Option<&TensorContractFusionProfile>) -> std::time::Duration {
+    profile.map_or(std::time::Duration::ZERO, |profile| {
+        profile.source_space_lookup + profile.core_dst_space_lookup + profile.core_block_plan_build
+    })
+}
+
+/// The artifact assembly time, less what the artifact compiler attributed to
+/// its structure lookups and core plan.
+fn attribute_artifact_prepare(
+    start: Option<std::time::Instant>,
+    before: std::time::Duration,
+    profile: Option<&mut TensorContractFusionProfile>,
+) {
+    if let (Some(start), Some(profile)) = (start, profile) {
+        let attributed = attributed_artifact_parts(Some(profile)).saturating_sub(before);
+        profile.dynamic_tree_artifact_prepare += start.elapsed().saturating_sub(attributed);
+    }
+}
+
+/// The request checks both halves of the contraction route run: the provider
+/// against the three spaces, and the operand conjugation flags against the
+/// request.
+fn validate_raw_contract_request<R>(
+    target: PlanTarget<'_, R>,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
@@ -3028,8 +2962,8 @@ where
     R::Scalar: DenseBlockScalar,
 {
     validate_fusion_contract_rule(
-        dst_space.provider(),
-        dst_space.space(),
+        target.rule,
+        target.space,
         lhs.storage_space(),
         rhs.storage_space(),
     )?;
@@ -3043,11 +2977,10 @@ where
     Ok(())
 }
 
-/// First half of the storage (device) contraction route: validation and
-/// the canonical fully-direct core over the parent buffers — the
-/// storage-direct route, lazy adjoints as GEMM operand flags and a uniform
-/// fermionic twist folded into per-job alpha. A [`CoreRoute::Miss`] is the
-/// input of the rest of the planner
+/// First half of the contraction route: validation and the canonical core
+/// over the parent buffers — lazy adjoints as GEMM operand flags and a
+/// uniform fermionic twist folded into per-job alpha. A [`CoreRoute::Miss`]
+/// is the input of the rest of the planner
 /// ([`TensorContractFusionExecutionContext::plan_contract_beyond_core`]).
 ///
 /// Free function, not a context method: this half resolves entirely from
@@ -3064,20 +2997,32 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
 {
-    let rule = dst_space.provider();
-    validate_storage_contract_request(dst_space, lhs, rhs, axes)?;
+    try_compile_core_route::<X, R>(PlanTarget::bound(dst_space), lhs, rhs, axes)
+}
+
+fn try_compile_core_route<X: ExecCaps, R>(
+    target: PlanTarget<'_, R>,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    axes: TensorContractSpec<'_>,
+) -> Result<CoreRoute<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
+    validate_raw_contract_request(target, lhs, rhs, axes)?;
     // A twist that is not uniform within one coupled-sector matrix has no
     // per-job alpha; the DynamicTree artifact applies it per block instead.
     let mut requested_zero_copy = false;
     Ok(
         match try_compile_oriented_storage_contract_candidate_plan(
-            rule,
-            dst_space.space(),
+            target.rule,
+            target.space,
             lhs,
             rhs,
             axes,
             &mut requested_zero_copy,
-            X::IRREGULAR_CORE.then(|| dst_space.layout_primer()),
+            X::IRREGULAR_CORE.then_some(target.primer),
         )? {
             Some(route) => CoreRoute::Hit(StorageContractResolution::new(route)),
             None => CoreRoute::Miss(CoreMiss {
@@ -3117,7 +3062,7 @@ where
     DRhs: TensorStorage<D>,
 {
     let rule = dst_space.provider();
-    validate_storage_contract_request(dst_space, lhs, rhs, axes)?;
+    validate_raw_contract_request(PlanTarget::bound(dst_space), lhs, rhs, axes)?;
     let plan =
         try_compile_oriented_storage_contract_plan(rule, dst_space.space(), lhs, rhs, axes, None)?
             .filter(|plan| plan.is_fully_direct())

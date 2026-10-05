@@ -8,10 +8,8 @@ use tenet_core::{
     TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
-    prepare_tensorcontract_fusion_plan, tensorcontract_fusion_into,
-    tensorcontract_fusion_prepared_into, tensorcontract_fusion_prepared_into_core_dst,
-    tree_transform_into_with_context, FusionContractPlan, HostTensorOperations,
-    HostTreeFusionExecutionContext, OutputAxisOrder, RuleIdentity,
+    prepare_tensorcontract_fusion_plan, tree_transform_into_with_context, FusionContractPlan,
+    HostTensorOperations, HostTreeFusionExecutionContext, OutputAxisOrder, RuleIdentity,
     TensorContractFusionExecutionContext, TensorContractFusionProfile, TensorContractSpec,
     TreeTransformExecutionContext, TreeTransformRuleCacheKey,
 };
@@ -325,16 +323,17 @@ impl Su2NoncoreFixture {
         let mut dst = self.dst();
         let elapsed = time_loop(iterations, || {
             dst.data_mut().copy_from_slice(&self.initial_dst);
-            tensorcontract_fusion_into(
-                &rule,
-                &mut dst,
-                &self.lhs,
-                &self.rhs,
-                axes(),
-                self.alpha,
-                self.beta,
-            )
-            .unwrap();
+            TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
+                .tensorcontract_fusion_into(
+                    &rule,
+                    &mut dst,
+                    &self.lhs,
+                    &self.rhs,
+                    axes(),
+                    self.alpha,
+                    self.beta,
+                )
+                .unwrap();
             black_box(checksum(dst.data()));
         });
         (elapsed, dst.data().to_vec())
@@ -613,10 +612,12 @@ impl Su2NoncoreFixture {
         rhs_core: &mut TensorMap<f64, 3, 1>,
     ) {
         let rule = SU2FusionRule;
-        tensorcontract_fusion_prepared_into(
-            &rule, &self.plan, dst, lhs_core, rhs_core, &self.lhs, &self.rhs, self.alpha, self.beta,
-        )
-        .unwrap();
+        TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
+            .tensorcontract_fusion_prepared_into(
+                &rule, &self.plan, dst, lhs_core, rhs_core, &self.lhs, &self.rhs, self.alpha,
+                self.beta,
+            )
+            .unwrap();
     }
 
     fn transform_sources_into(
@@ -949,11 +950,12 @@ impl Su2OutputScratchFixture {
         rhs_core: &mut TensorMap<f64, 0, 0>,
     ) {
         let rule = SU2FusionRule;
-        tensorcontract_fusion_prepared_into_core_dst(
-            &rule, &self.plan, dst, core_dst, lhs_core, rhs_core, &self.lhs, &self.rhs, self.alpha,
-            self.beta,
-        )
-        .unwrap();
+        TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
+            .tensorcontract_fusion_prepared_into_core_dst(
+                &rule, &self.plan, dst, core_dst, lhs_core, rhs_core, &self.lhs, &self.rhs,
+                self.alpha, self.beta,
+            )
+            .unwrap();
     }
 
     fn materialize_core_dst(
@@ -1098,16 +1100,17 @@ impl ProductComplexFixture {
         let mut dst = self.dst();
         let elapsed = time_loop(iterations, || {
             dst.data_mut().copy_from_slice(&self.initial_dst);
-            tensorcontract_fusion_into(
-                &self.rule,
-                &mut dst,
-                &self.lhs,
-                &self.rhs,
-                product_axes(),
-                self.alpha,
-                self.beta,
-            )
-            .unwrap();
+            TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
+                .tensorcontract_fusion_into(
+                    &self.rule,
+                    &mut dst,
+                    &self.lhs,
+                    &self.rhs,
+                    product_axes(),
+                    self.alpha,
+                    self.beta,
+                )
+                .unwrap();
             black_box(checksum_complex(dst.data()));
         });
         (elapsed, dst.data().to_vec())
@@ -1235,11 +1238,12 @@ impl ProductComplexFixture {
         lhs_core: &mut TensorMap<Complex64, 3, 0>,
         rhs_core: &mut TensorMap<Complex64, 0, 0>,
     ) {
-        tensorcontract_fusion_prepared_into_core_dst(
-            &self.rule, &self.plan, dst, core_dst, lhs_core, rhs_core, &self.lhs, &self.rhs,
-            self.alpha, self.beta,
-        )
-        .unwrap();
+        TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
+            .tensorcontract_fusion_prepared_into_core_dst(
+                &self.rule, &self.plan, dst, core_dst, lhs_core, rhs_core, &self.lhs, &self.rhs,
+                self.alpha, self.beta,
+            )
+            .unwrap();
     }
 
     fn dst(&self) -> TensorMap<Complex64, 2, 1> {
@@ -1391,18 +1395,6 @@ fn print_profile_breakdown(profile: &TensorContractFusionProfile, iterations: us
     println!(
         "profile_core_route_check_ns,{:.3}",
         nanos_per(profile.core_route_check, iterations)
-    );
-    println!(
-        "profile_dense_block_specs_ns,{:.3}",
-        nanos_per(profile.dense_block_specs, iterations)
-    );
-    println!(
-        "profile_dense_structure_lookup_ns,{:.3}",
-        nanos_per(profile.dense_structure_lookup, iterations)
-    );
-    println!(
-        "profile_dense_contract_ns,{:.3}",
-        nanos_per(profile.dense_contract, iterations)
     );
     println!(
         "profile_prepared_plan_ns,{:.3}",

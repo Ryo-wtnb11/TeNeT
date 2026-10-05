@@ -102,6 +102,7 @@ where
     )
 }
 
+#[cfg(test)]
 pub(crate) fn compile_fusion_block_contract_plan<R>(
     rule: &R,
     dst_space: &DynamicFusionMapSpace,

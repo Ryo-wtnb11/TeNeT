@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tenet_core::{
     CheckedFusionAlgebra, CheckedFusionSpaceError, FusionRule, FusionTreeHomSpace,
-    FusionTreePairKey, MultiplicityFreeFusionRule, PreparedFusionTreeLayout, SectorId, SectorLeg,
+    FusionTreePairKey, MultiplicityFreeFusionRule, PreparedFusionTreeLayout, SectorLeg,
 };
 
 use super::observe_derived_homspace_build;
@@ -71,9 +71,6 @@ pub(crate) enum MetadataRequest<'a> {
         dst_codomain_rank: usize,
         expected: &'a FusionTreeHomSpace,
     },
-    DualSector {
-        sector: SectorId,
-    },
     Select {
         homspace: &'a FusionTreeHomSpace,
         codomain_axes: &'a [usize],
@@ -94,7 +91,6 @@ pub(crate) enum MetadataOutput {
         prepared: PreparedLayoutKeys,
     },
     Matches(bool),
-    Sector(SectorId),
     Leg(SectorLeg),
 }
 
@@ -336,7 +332,6 @@ where
         )
         .map(MetadataOutput::Matches)
         .map_err(OperationError::from_core_preserving_context),
-        MetadataRequest::DualSector { sector } => Ok(MetadataOutput::Sector(rule.dual(sector))),
         MetadataRequest::Select {
             homspace,
             codomain_axes,
@@ -423,10 +418,6 @@ where
         )
         .map(MetadataOutput::Matches)
         .map_err(checked_metadata_operation_error),
-        MetadataRequest::DualSector { sector } => rule
-            .try_dual_sector(sector)
-            .map(MetadataOutput::Sector)
-            .map_err(|error| OperationError::FusionAlgebra(Box::new(error))),
         MetadataRequest::Select {
             homspace,
             codomain_axes,

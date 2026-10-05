@@ -1,4 +1,5 @@
 use super::*;
+use tenet_core::{CoreError, HostReadableStorage, HostWritableStorage, TensorMap};
 
 // Non-profiled reference contraction path. Its only production caller
 // (`tensorcontract_fusion_dynamic_into_context`) was removed as dead code;
