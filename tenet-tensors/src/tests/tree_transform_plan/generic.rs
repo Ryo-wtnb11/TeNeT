@@ -1253,7 +1253,7 @@ fn measure_checked_generic_transform_case(
 ) {
     use tenet_sectors::SUNFusionRule;
 
-    tenet_sectors::su2_coefficient_cache::reset();
+    racah::cache::reset();
     let inner = SUNFusionRule::new(n).unwrap();
     let adjoint = inner.encode_dynkin(adjoint_labels).unwrap();
     let provider = Arc::new(MeasurementProvider::new(inner));

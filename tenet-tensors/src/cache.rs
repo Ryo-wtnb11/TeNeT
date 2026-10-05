@@ -553,7 +553,7 @@ mod tests {
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        tenet_sectors::su2_coefficient_cache::reset();
+        racah::cache::reset();
 
         let rule = SU2FusionRule;
         let identity = rule.rule_identity();
@@ -568,7 +568,7 @@ mod tests {
             sector(0),
             sector(0),
         );
-        tenet_sectors::su2_coefficient_cache::reset();
+        racah::cache::reset();
         assert_eq!(rule.rule_identity(), identity);
         assert_eq!(
             BlockStructure::trivial(&[700_000_001])
@@ -585,12 +585,9 @@ mod tests {
             sector(0),
             sector(0),
         );
-        let populated = tenet_sectors::su2_coefficient_cache::base_cache_stats();
+        let populated = racah::cache::base_cache_stats();
         assert_ne!(populated.total().entries, 0);
         tenet_core::reset_core_intern_tables();
-        assert_eq!(
-            tenet_sectors::su2_coefficient_cache::base_cache_stats(),
-            populated
-        );
+        assert_eq!(racah::cache::base_cache_stats(), populated);
     }
 }

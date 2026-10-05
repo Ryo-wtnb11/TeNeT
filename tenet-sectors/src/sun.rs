@@ -58,7 +58,7 @@ pub enum SUNFusionRuleError {
         found: [usize; 2],
     },
     MalformedSymbolData(SymbolShapeError),
-    Racah(racah::sun::SunError),
+    Racah(SUNSymbolError),
 }
 
 impl fmt::Display for SUNFusionRuleError {
@@ -116,6 +116,29 @@ impl std::error::Error for SUNFusionRuleError {
             _ => None,
         }
     }
+}
+
+/// Failure reported by the SU(N) symbol authority.
+///
+/// Opaque: the authority's own error is reachable only through
+/// [`std::error::Error::source`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SUNSymbolError(racah::sun::SunError);
+
+impl fmt::Display for SUNSymbolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for SUNSymbolError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+fn racah_error(error: racah::sun::SunError) -> SUNFusionRuleError {
+    SUNFusionRuleError::Racah(SUNSymbolError(error))
 }
 
 impl SUNFusionRule {
@@ -254,7 +277,7 @@ impl SUNFusionRule {
 
     fn irrep(&self, sector: SectorId) -> Result<racah::sun::Irrep, SUNFusionRuleError> {
         let labels = self.decode_dynkin(sector)?;
-        racah::sun::Irrep::from_dynkin(&labels).map_err(SUNFusionRuleError::Racah)
+        racah::sun::Irrep::from_dynkin(&labels).map_err(racah_error)
     }
 
     fn dim_scalar(&self, sector: SectorId) -> Result<f64, SUNFusionRuleError> {
@@ -293,7 +316,7 @@ impl CheckedGenericFusion for SUNFusionRule {
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
         let product = racah::sun::shared_directproduct(&self.irrep(left)?, &self.irrep(right)?)
-            .map_err(SUNFusionRuleError::Racah)?;
+            .map_err(racah_error)?;
         let mut channels: SectorVec = product
             .iter()
             .map(|(irrep, _)| irrep)
@@ -318,7 +341,7 @@ impl CheckedGenericFusion for SUNFusionRule {
         coupled: SectorId,
     ) -> Result<usize, Self::Error> {
         let product = racah::sun::shared_directproduct(&self.irrep(left)?, &self.irrep(right)?)
-            .map_err(SUNFusionRuleError::Racah)?;
+            .map_err(racah_error)?;
         Ok(product.multiplicity(&self.irrep(coupled)?) as usize)
     }
 }
@@ -386,7 +409,7 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
             &self.irrep(e)?,
             &self.irrep(f)?,
         )
-        .map_err(SUNFusionRuleError::Racah)?;
+        .map_err(racah_error)?;
         if block.dims() != expected {
             return Err(SUNFusionRuleError::UnexpectedFShape {
                 expected,
@@ -408,7 +431,7 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
     ) -> Result<GenericRMatrix<f64>, Self::Error> {
         let expected = [self.try_nsymbol(a, b, c)?, self.try_nsymbol(b, a, c)?];
         let block = racah::sun::r_symbol(&self.irrep(a)?, &self.irrep(b)?, &self.irrep(c)?)
-            .map_err(SUNFusionRuleError::Racah)?;
+            .map_err(racah_error)?;
         let found = [block.dim(), block.dim()];
         if found != expected {
             return Err(SUNFusionRuleError::UnexpectedRShape { expected, found });
@@ -833,15 +856,15 @@ mod tests {
         let eight = rule.encode_dynkin(&[1, 1]).unwrap();
         assert!(matches!(
             rule.try_r_symbol_generic(three, three, eight),
-            Err(SUNFusionRuleError::Racah(
+            Err(SUNFusionRuleError::Racah(SUNSymbolError(
                 racah::sun::SunError::ZeroFusionChannel { .. }
-            ))
+            )))
         ));
         assert!(matches!(
             rule.try_f_symbol_generic(three, three, three, three, eight, three),
-            Err(SUNFusionRuleError::Racah(
+            Err(SUNFusionRuleError::Racah(SUNSymbolError(
                 racah::sun::SunError::ZeroFusionChannel { .. }
-            ))
+            )))
         ));
 
         let rule = SUNFusionRule::new(78).unwrap();

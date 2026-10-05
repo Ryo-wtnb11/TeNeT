@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::{Arc, OnceLock};
 
 use crate::{
@@ -226,9 +227,28 @@ impl MultiplicityFreeFusionRule for SU2FusionRule {}
 
 impl CanonicalUnitFusionRule for SU2FusionRule {}
 
+/// Failure reported by the SU(2) coupling-coefficient authority.
+///
+/// Opaque: the authority's own error is reachable only through
+/// [`std::error::Error::source`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SU2CoefficientError(racah::Su2Error);
+
+impl fmt::Display for SU2CoefficientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for SU2CoefficientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 impl PhysicalFusionBasis for SU2FusionRule {
     type Scalar = f64;
-    type Error = PhysicalBasisError<racah::Su2Error>;
+    type Error = PhysicalBasisError<SU2CoefficientError>;
 
     fn try_carrier_dimension(&self, sector: SectorId) -> Result<usize, Self::Error> {
         Ok(checked_irrep(sector)?.twice_spin() + 1)
@@ -292,7 +312,7 @@ impl PhysicalFusionBasis for SU2FusionRule {
             Err(racah::Su2Error::NotAdmissible(racah::AdmissibilityViolation::ProjectionSum {
                 ..
             })) => Ok(0.0),
-            Err(error) => Err(PhysicalBasisError::Coefficient(error)),
+            Err(error) => Err(PhysicalBasisError::Coefficient(SU2CoefficientError(error))),
         }
     }
 }

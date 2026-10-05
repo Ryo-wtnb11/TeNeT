@@ -37,7 +37,8 @@ pub use tenet_core::{
 };
 /// Vocabulary the rule traits' signatures use.
 pub use tenet_core::{
-    PhysicalBasisError, ProductSectorComponent, PromoteCoefficientScalar, SymbolShapeError,
+    PhysicalBasisError, ProductSectorComponent, PromoteCoefficientScalar, SU2CoefficientError,
+    SymbolShapeError,
 };
 #[cfg(feature = "racah-generated")]
-pub use tenet_core::{SUNFusionRule, SUNFusionRuleError};
+pub use tenet_core::{SUNFusionRule, SUNFusionRuleError, SUNSymbolError};
