@@ -328,8 +328,8 @@ jobs:
         with:
           key: host-pool-audit
       - run: |
-          cargo test --locked -p tenet-rs -p tenet-network -p tenet-krylov --tests
-          cargo test --locked -p tenet-rs -p tenet-network -p tenet-krylov --doc
+          cargo test --locked -p tenet-rs -p tenet-network --tests
+          cargo test --locked -p tenet-rs -p tenet-network --doc
         working-directory: tenet
         env:
           RUSTFLAGS: --cfg tenet_scope_audit

@@ -126,7 +126,6 @@ consumer adapts every crate the same way.
 | `tenet-dense` | The only adapter onto tenferro: dense executors, sessions and device placement. |
 | `tenet` (`tenet-rs`) | Typed facade: `TensorMap`, the eager and prepared APIs, and `Runtime`. |
 | `tenet-network`, `tenet-macros` | Network contraction and `tensor!`. |
-| `tenet-krylov` | Matrix-free iterative solvers. |
 
 **Target structure-layer caches.** Four caches, mirroring TensorKit's
 `@cached` set at cfaa073 (#2014):
@@ -197,7 +196,6 @@ flowchart TB
     subgraph backend["Backend adapter"]
         DENSE["<b>tenet-dense</b><br/>dense executors, sessions, placement"]
     end
-    KRY["<b>tenet-krylov</b><br/>matrix-free solvers (standalone)"]
 
     NET --> RS
     NET --> MAC
@@ -231,8 +229,6 @@ flowchart TB
   - `tenet-dense` touches tenferro;
   - strided-rs is used only where structural data movement happens
     (`tenet-operations`, `tenet-tensors`).
-- `tenet-krylov` depends on no TeNeT crate. It works against its own vector
-  traits.
 
 **One operation across the crates**
 

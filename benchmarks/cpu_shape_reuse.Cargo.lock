@@ -3696,10 +3696,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tenet-krylov"
-version = "0.1.1"
-
-[[package]]
 name = "tenet-macros"
 version = "0.1.1"
 dependencies = [
