@@ -318,7 +318,7 @@ fn tensor_contract_fusion_execution_context_reports_host_placement() {
 }
 
 #[test]
-fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
+fn tensorcontract_fusion_block_specs_enumerate_z2_compose_blocks_and_replays() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -377,7 +377,7 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         ]
     );
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -474,7 +474,7 @@ fn tensorcontract_fusion_default_host_api_accepts_custom_host_storage() {
     let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
     let mut dst = test_host_fusion_tensor_map(vec![10.0_f64, 20.0], fusion_space());
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -569,7 +569,7 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
     let mut dst_swap =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], tensor_space.clone())
             .unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst_swap,
         &lhs,
@@ -596,7 +596,7 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
     let mut dst_compose =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], tensor_space.clone())
             .unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst_compose,
         &lhs,

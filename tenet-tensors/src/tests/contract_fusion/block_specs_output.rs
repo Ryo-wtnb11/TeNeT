@@ -193,7 +193,7 @@ fn tensorcontract_fusion_into_absorbs_source_tree_transform_terms() {
     let rhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![5.0], src_space).unwrap();
     let mut dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![7.0], dst_space).unwrap();
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -278,7 +278,7 @@ fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
     assert!((specs[0].coefficient() - 0.5).abs() < 1.0e-12);
     assert!((specs[1].coefficient() - 0.866_025_403_784_438_6).abs() < 1.0e-12);
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -393,18 +393,19 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
 
     let alpha = 2.0;
     let beta = 3.0;
-    let err = tensorcontract_fusion_prepared_into(
-        &rule,
-        &plan,
-        &mut expected_dst,
-        &mut expected_lhs_core,
-        &mut expected_rhs_core,
-        &lhs,
-        &rhs,
-        alpha,
-        beta,
-    )
-    .unwrap_err();
+    let err = TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
+        .tensorcontract_fusion_prepared_into(
+            &rule,
+            &plan,
+            &mut expected_dst,
+            &mut expected_lhs_core,
+            &mut expected_rhs_core,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap_err();
     assert_eq!(
         err,
         OperationError::UnsupportedTensorContractScope {
@@ -430,7 +431,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
         0.0,
     )
     .unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut expected_core_dst,
         &expected_lhs_core,
@@ -450,19 +451,20 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
     )
     .unwrap();
 
-    tensorcontract_fusion_prepared_into_core_dst(
-        &rule,
-        &plan,
-        &mut explicit_dst,
-        &mut core_dst,
-        &mut lhs_core,
-        &mut rhs_core,
-        &lhs,
-        &rhs,
-        alpha,
-        beta,
-    )
-    .unwrap();
+    TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
+        .tensorcontract_fusion_prepared_into_core_dst(
+            &rule,
+            &plan,
+            &mut explicit_dst,
+            &mut core_dst,
+            &mut lhs_core,
+            &mut rhs_core,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
 
     assert_eq!(core_dst.data(), expected_core_dst.data());
     assert_eq!(core_dst.data(), &[100.0]);
@@ -478,7 +480,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
     let mut automatic_dst =
         TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
             .unwrap();
-    tensorcontract_fusion_into(&rule, &mut automatic_dst, &lhs, &rhs, axes, alpha, beta).unwrap();
+    fusion_contract_into(&rule, &mut automatic_dst, &lhs, &rhs, axes, alpha, beta).unwrap();
     for (&actual, &expected) in automatic_dst.data().iter().zip(expected_dst.data()) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
@@ -551,7 +553,6 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
     assert_ne!(profile.core_dst_space_lookup, std::time::Duration::ZERO);
     assert_ne!(profile.core_block_plan_build, std::time::Duration::ZERO);
     assert_eq!(profile.prepared_plan, std::time::Duration::ZERO);
-    assert_eq!(profile.dense_contract, std::time::Duration::ZERO);
     assert_eq!(
         crate::contract::profiled_artifact_compile_phases(),
         (true, true, true)
@@ -690,7 +691,7 @@ fn tensorcontract_fusion_su2_keeps_contracted_tree_basis_with_degeneracy() {
         }
     }
 
-    tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
+    fusion_contract_into(&rule, &mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
 
     for (&actual, expected) in dst.data().iter().zip(expected) {
         assert!(
@@ -915,8 +916,8 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
 
     let alpha = -1.5;
     let beta = 0.25;
-    tensorcontract_fusion_into(&rule, &mut direct_dst, &lhs, &rhs, axes, alpha, beta).unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(&rule, &mut direct_dst, &lhs, &rhs, axes, alpha, beta).unwrap();
+    fusion_contract_into(
         &rule,
         &mut expected_dst,
         &lhs_core,
@@ -939,18 +940,19 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         dst_space.clone(),
     )
     .unwrap();
-    tensorcontract_fusion_prepared_into(
-        &rule,
-        &plan,
-        &mut explicit_dst,
-        &mut lhs_core,
-        &mut rhs_core,
-        &lhs,
-        &rhs,
-        alpha,
-        beta,
-    )
-    .unwrap();
+    TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
+        .tensorcontract_fusion_prepared_into(
+            &rule,
+            &plan,
+            &mut explicit_dst,
+            &mut lhs_core,
+            &mut rhs_core,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
     for (&actual, &expected) in explicit_dst.data().iter().zip(expected_dst.data()) {
         assert!(
             (actual - expected).abs() < 1.0e-10,
@@ -1070,9 +1072,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         );
     }
     assert!(automatic_context.tree_context().cache().structure_len() > 0);
-    assert!(automatic_context.dynamic_fusion_space_cache_len() > 0);
-    assert!(automatic_context.dynamic_fusion_space_cache_misses() > 0);
-    assert_eq!(automatic_context.dynamic_fusion_space_cache_hits(), 0);
     assert!(
         automatic_context
             .tree_context()
@@ -1090,7 +1089,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     .unwrap();
     let mut no_cache_context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     no_cache_context.set_cache_policy(OperationCachePolicy::NoCache);
-    let mut previous_dynamic_misses = 0;
     for _ in 0..2 {
         no_cache_context
             .tensorcontract_fusion_into(&rule, &mut no_cache_dst, &lhs, &rhs, axes, alpha, beta)
@@ -1102,12 +1100,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             );
         }
         assert_eq!(no_cache_context.tree_context().cache().structure_len(), 0);
-        assert_eq!(no_cache_context.dynamic_fusion_space_cache_len(), 0);
-        assert_eq!(no_cache_context.dynamic_fusion_space_cache_hits(), 0);
-        assert_eq!(no_cache_context.dynamic_fusion_space_cache_fast_hits(), 0);
-        let dynamic_misses = no_cache_context.dynamic_fusion_space_cache_misses();
-        assert!(dynamic_misses > previous_dynamic_misses);
-        previous_dynamic_misses = dynamic_misses;
         // What: disabling all execution caches changes reuse only, not the
         // destination reduced-block values or floating-point operation order.
         assert_f64_bits_eq(
@@ -1130,7 +1122,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     warm_policy_context
         .tensorcontract_fusion_into(&rule, &mut warm_policy_dst, &lhs, &rhs, axes, alpha, beta)
         .unwrap();
-    assert!(warm_policy_context.dynamic_fusion_space_cache_len() > 1);
     warm_policy_context.set_cache_policy(OperationCachePolicy::task_local_lru(1));
     assert!(warm_policy_context.tree_context().cache().structure_len() <= 1);
     assert!(warm_policy_context.dynamic_fusion_space_cache_len() <= 1);
@@ -1154,36 +1145,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     assert!(lru_context.tree_context().cache().structure_len() <= 1);
     assert!(lru_context.dynamic_fusion_space_cache_len() <= 1);
 
-    let mut split_backend_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
-        initial_dst_for_context_replay.clone(),
-        context_dst.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
-    let mut tree_backend = HostTensorOperations;
-    let mut tree_workspace = TreeTransformWorkspace::default();
-    let mut contract_backend = DenseTreeTransformOperations::default_executor();
-    let mut contract_workspace = TensorContractWorkspace::default();
-    tensorcontract_fusion_into_with_backends(
-        &mut tree_backend,
-        &mut tree_workspace,
-        &mut contract_backend,
-        &mut contract_workspace,
-        &rule,
-        &mut split_backend_dst,
-        &lhs,
-        &rhs,
-        axes,
-        alpha,
-        beta,
-    )
-    .unwrap();
-    for (&actual, &expected) in split_backend_dst.data().iter().zip(expected_dst.data()) {
-        assert!(
-            (actual - expected).abs() < 1.0e-10,
-            "actual {actual} expected {expected}"
-        );
-    }
-
     let tree_stats_after_first = automatic_context.tree_context().cache().stats();
     automatic_context_dst
         .data_mut()
@@ -1205,19 +1166,21 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             "actual {actual} expected {expected}"
         );
     }
+    // What: the warm call plans its route again, as TensorKit's `contract!`
+    // does; its output permute is one tree-structure cache hit, no miss.
+    let tree_stats = automatic_context.tree_context().cache().stats();
     assert_eq!(
-        automatic_context.tree_context().cache().stats(),
-        tree_stats_after_first
+        tree_stats.structure_misses(),
+        tree_stats_after_first.structure_misses()
     );
-    assert!(automatic_context.dynamic_fusion_space_cache_hits() > 0);
-    assert!(automatic_context.dynamic_fusion_space_cache_fast_hits() > 0);
+    assert_eq!(
+        tree_stats.structure_hits(),
+        tree_stats_after_first.structure_hits() + 1
+    );
 
     automatic_context_dst
         .data_mut()
         .copy_from_slice(&initial_dst_for_context_replay);
-    let artifact_hits_before_profile = automatic_context.dynamic_fusion_space_cache_hits();
-    let artifact_fast_hits_before_profile =
-        automatic_context.dynamic_fusion_space_cache_fast_hits();
     let mut profile = TensorContractFusionProfile::default();
     automatic_context
         .tensorcontract_fusion_into_profiled(
@@ -1231,27 +1194,15 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             &mut profile,
         )
         .unwrap();
-    // What: profiling compiles the eager execution artifact while reusing its
-    // two source transforms and core destination.
-    assert_eq!(
-        automatic_context.dynamic_fusion_space_cache_hits(),
-        artifact_hits_before_profile + 3
-    );
-    assert_eq!(
-        automatic_context.dynamic_fusion_space_cache_fast_hits(),
-        artifact_fast_hits_before_profile + 3
-    );
     for (&actual, &expected) in automatic_context_dst.data().iter().zip(expected_dst.data()) {
         assert!(
             (actual - expected).abs() < 1.0e-10,
             "actual {actual} expected {expected}"
         );
     }
-    assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
-    assert_eq!(
-        automatic_context.last_resolution_orientation(),
-        Some(crate::contract::FusionContractOrientation::RhsLhs)
-    );
+    // What: the profiled entry reports the eager route, TensorKit's copyC:
+    // a core into the temporary, then one output permute.
+    assert_eq!(profile.route, TensorContractFusionRoute::CopyC);
     assert_eq!(profile.lhs_transform_calls, 0);
     assert_eq!(profile.rhs_transform_calls, 0);
     assert_eq!(profile.output_transform_calls, 1);

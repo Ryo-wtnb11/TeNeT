@@ -108,7 +108,7 @@ where
     out
 }
 
-fn assert_adjoint_built_once_and_bitwise_unchanged<R, D>(rule: R, legs: &[(SectorId, usize)])
+fn assert_conjugated_contract_builds_no_adjoint<R, D>(rule: R, legs: &[(SectorId, usize)])
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
@@ -151,8 +151,9 @@ where
         let actual = conjugated_contract(&mut context, &dst, &lhs, &lhs_data, &rhs, &rhs_data);
         assert_eq!(actual, expected);
     }
-    // What: warm conjugated calls reuse the owning space's adjoint structure.
-    assert_eq!(crate::lowering::adjoint_view_build_count(), 1);
+    // What: a conjugation flag is the lazy adjoint of the owned space, which
+    // the planner reads in place: no adjoint structure is built.
+    assert_eq!(crate::lowering::adjoint_view_build_count(), 0);
 
     let memoized = lhs.space().adjoint_view().unwrap();
     let rebuilt = crate::lowering::adjoint_block_structure_view(
@@ -171,17 +172,17 @@ where
 }
 
 #[test]
-fn conjugated_dyn_contract_builds_adjoint_structure_once_per_space() {
+fn conjugated_dyn_contract_builds_no_adjoint_structure() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let fz2_u1 = || Fz2U1::new(FermionParityFusionRule, U1FusionRule);
-    assert_adjoint_built_once_and_bitwise_unchanged::<_, f64>(U1FusionRule, &u1_legs());
-    assert_adjoint_built_once_and_bitwise_unchanged::<_, Complex64>(U1FusionRule, &u1_legs());
-    assert_adjoint_built_once_and_bitwise_unchanged::<_, f64>(SU2FusionRule, &su2_legs());
-    assert_adjoint_built_once_and_bitwise_unchanged::<_, Complex64>(SU2FusionRule, &su2_legs());
-    assert_adjoint_built_once_and_bitwise_unchanged::<_, f64>(fz2_u1(), &fz2_u1_legs());
-    assert_adjoint_built_once_and_bitwise_unchanged::<_, Complex64>(fz2_u1(), &fz2_u1_legs());
+    assert_conjugated_contract_builds_no_adjoint::<_, f64>(U1FusionRule, &u1_legs());
+    assert_conjugated_contract_builds_no_adjoint::<_, Complex64>(U1FusionRule, &u1_legs());
+    assert_conjugated_contract_builds_no_adjoint::<_, f64>(SU2FusionRule, &su2_legs());
+    assert_conjugated_contract_builds_no_adjoint::<_, Complex64>(SU2FusionRule, &su2_legs());
+    assert_conjugated_contract_builds_no_adjoint::<_, f64>(fz2_u1(), &fz2_u1_legs());
+    assert_conjugated_contract_builds_no_adjoint::<_, Complex64>(fz2_u1(), &fz2_u1_legs());
 }
 
 #[test]

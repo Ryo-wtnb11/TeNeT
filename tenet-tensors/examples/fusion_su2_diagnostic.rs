@@ -2,9 +2,9 @@ use tenet_core::{
     BlockKey, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, TensorMap, TensorMapSpace,
 };
 use tenet_tensors::{
-    prepare_tensorcontract_fusion_plan, tensorcontract_fusion_prepared_into,
-    tensorcontract_fusion_prepared_into_core_dst, tree_transform_into_with_context,
-    OutputAxisOrder, RuleIdentity, TensorContractSpec, TreeTransformExecutionContext,
+    prepare_tensorcontract_fusion_plan, tree_transform_into_with_context, OutputAxisOrder,
+    RuleIdentity, TensorContractFusionExecutionContext, TensorContractSpec,
+    TreeTransformExecutionContext,
 };
 
 fn main() {
@@ -141,18 +141,19 @@ fn main() {
     .unwrap();
     println!("lhs_core_data {:?}", lhs_core.data());
     println!("rhs_core_data {:?}", rhs_core.data());
-    tensorcontract_fusion_prepared_into(
-        &rule,
-        &plan,
-        &mut dst,
-        &mut lhs_core,
-        &mut rhs_core,
-        &lhs,
-        &rhs,
-        -1.5,
-        0.25,
-    )
-    .unwrap();
+    TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
+        .tensorcontract_fusion_prepared_into(
+            &rule,
+            &plan,
+            &mut dst,
+            &mut lhs_core,
+            &mut rhs_core,
+            &lhs,
+            &rhs,
+            -1.5,
+            0.25,
+        )
+        .unwrap();
     println!("dst_data {:?}", dst.data());
     println!(
         "dst_checksum {:.12}",
@@ -225,19 +226,20 @@ fn main() {
         core_dst_space,
     )
     .unwrap();
-    tensorcontract_fusion_prepared_into_core_dst(
-        &rule,
-        &tensorkit_order_plan,
-        &mut tensorkit_order_dst,
-        &mut core_dst,
-        &mut lhs_core,
-        &mut rhs_core,
-        &lhs,
-        &rhs,
-        -1.5,
-        0.25,
-    )
-    .unwrap();
+    TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
+        .tensorcontract_fusion_prepared_into_core_dst(
+            &rule,
+            &tensorkit_order_plan,
+            &mut tensorkit_order_dst,
+            &mut core_dst,
+            &mut lhs_core,
+            &mut rhs_core,
+            &lhs,
+            &rhs,
+            -1.5,
+            0.25,
+        )
+        .unwrap();
     println!("tensorkit_order_dst_data {:?}", tensorkit_order_dst.data());
     println!(
         "tensorkit_order_dst_checksum {:.12}",

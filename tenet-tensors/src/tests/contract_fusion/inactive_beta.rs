@@ -63,64 +63,18 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
     .unwrap();
     assert_eq!(specs, vec![TensorContractBlockSpec::new(0, 0, 0)]);
 
-    let mut free_backend = DenseTreeTransformOperations::default_executor();
-    let mut free_workspace = TensorContractWorkspace::default();
-    tensorcontract_fusion_into_with(
-        &mut free_backend,
-        &mut free_workspace,
-        &rule,
-        &mut dst,
-        &lhs,
-        &rhs,
-        axes,
-        alpha,
-        beta,
-    )
-    .unwrap();
-
-    assert_eq!(dst.data(), &[50.0, 60.0]);
-
-    let mut split_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
-        vec![10.0, 20.0],
-        dst.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
-    let mut tree_backend = HostTensorOperations;
-    let mut tree_workspace = TreeTransformWorkspace::default();
-    let mut contract_backend = DenseTreeTransformOperations::default_executor();
-    let mut contract_workspace = TensorContractWorkspace::default();
-    tensorcontract_fusion_into_with_backends(
-        &mut tree_backend,
-        &mut tree_workspace,
-        &mut contract_backend,
-        &mut contract_workspace,
-        &rule,
-        &mut split_dst,
-        &lhs,
-        &rhs,
-        axes,
-        alpha,
-        beta,
-    )
-    .unwrap();
-    assert_eq!(split_dst.data(), dst.data());
-
-    let mut context_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
-        vec![10.0, 20.0],
-        dst.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     context
-        .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
+        .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, alpha, beta)
         .unwrap();
-    // What: an irregular packed Core plan has identical free and context replay.
+    // What: an irregular packed Core plan replays the active block and scales
+    // the inactive one by beta.
     assert!(context.last_resolution_is_core());
-    assert_eq!(context_dst.data(), dst.data());
+    assert_eq!(dst.data(), &[50.0, 60.0]);
 }
 
 #[test]
-fn self_dual_conjugate_structure_scales_inactive_block_like_eager_adjoint_oracle() {
+fn self_dual_conjugate_sparse_source_scales_inactive_block_like_eager_adjoint_oracle() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -141,7 +95,7 @@ fn self_dual_conjugate_structure_scales_inactive_block_like_eager_adjoint_oracle
     };
     let even_key = key_for_sector(even);
     let odd_key = key_for_sector(odd);
-    // What: the production Structure route consumes a sparse physical subset
+    // What: the eager planner consumes a sparse physical subset
     // of the broad Z2 HomSpace, while the eager-adjoint oracle uses its
     // equivalent canonical even-only source.
     let source_leg = || SectorLeg::new([(even, 1)], false);
@@ -234,10 +188,6 @@ fn self_dual_conjugate_structure_scales_inactive_block_like_eager_adjoint_oracle
         TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(initial, dst_space).unwrap();
     let conjugate_axes =
         TensorContractSpec::with_default_output_order_and_conjugation(&[0], &[0], true, false);
-    let structure =
-        tensorcontract_fusion_structure(&rule, &actual, &lhs, &rhs, conjugate_axes).unwrap();
-    assert_eq!(structure.terms().len(), 1);
-
     let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
     for _ in 0..2 {
         actual
@@ -333,7 +283,7 @@ fn assert_fusion_block_scatter_beta_dtype<T>(
     )
     .unwrap();
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,

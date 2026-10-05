@@ -1,5 +1,12 @@
 use super::*;
 
+use tenet_core::{CoreError, HostReadableStorage, HostWritableStorage, TensorMap, TensorStorage};
+use tenet_operations::TensorContractSpec;
+
+use super::super::fusion_block::tensorcontract_core_fusion_blocks_into_raw;
+use crate::lowering::adjoint_fusion_space_view;
+use crate::tree_transform::build_tree_pair_transform_group_plan;
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_fusion_dynamic_plan_into_with<
     BT,

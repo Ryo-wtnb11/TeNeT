@@ -99,7 +99,7 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
             dst_space.clone(),
         )
         .unwrap();
-        tensorcontract_fusion_into(&rule, &mut expected, &lhs, &rhs, axes, alpha, beta).unwrap();
+        fusion_contract_into(&rule, &mut expected, &lhs, &rhs, axes, alpha, beta).unwrap();
 
         let mut actual = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
             initial_dst.clone(),
@@ -206,7 +206,7 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
             TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial_dst.clone(), dst_space)
                 .unwrap();
 
-        tensorcontract_fusion_into(&rule, &mut expected, &lhs, &rhs, axes, alpha, beta).unwrap();
+        fusion_contract_into(&rule, &mut expected, &lhs, &rhs, axes, alpha, beta).unwrap();
         context
             .tensorcontract_fusion_into(&rule, &mut actual, &lhs, &rhs, axes, alpha, beta)
             .unwrap();
@@ -324,7 +324,7 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
         )
         .unwrap();
 
-        tensorcontract_fusion_into(&rule, &mut expected, &lhs, &rhs, axes, alpha, beta).unwrap();
+        fusion_contract_into(&rule, &mut expected, &lhs, &rhs, axes, alpha, beta).unwrap();
         context
             .tensorcontract_fusion_into(&rule, &mut actual, &lhs, &rhs, axes, alpha, beta)
             .unwrap();

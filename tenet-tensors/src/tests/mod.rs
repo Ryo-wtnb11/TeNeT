@@ -23,6 +23,52 @@ where
     )
 }
 
+/// The static-rank eager contraction on a fresh default context: the shape
+/// of the removed free `tensorcontract_fusion_into`, for fixtures that need
+/// no context reuse.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fusion_contract_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    DDst,
+    DLhs,
+    DRhs,
+>(
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    axes: TensorContractSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
+{
+    TensorContractFusionExecutionContext::<
+        D,
+        R::Key,
+        DenseTreeTransformOperations,
+        DenseTreeTransformOperations,
+        R::Scalar,
+    >::default()
+    .tensorcontract_fusion_into(rule, dst, lhs, rhs, axes, alpha, beta)
+}
+
 use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use std::fmt::Debug;

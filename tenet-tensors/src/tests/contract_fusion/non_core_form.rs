@@ -181,7 +181,7 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         Complex64::zero(),
     )
     .unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut expected_dst,
         &lhs_core,
@@ -217,18 +217,19 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         rhs_core_space,
     )
     .unwrap();
-    tensorcontract_fusion_prepared_into(
-        &rule,
-        &plan,
-        &mut explicit_dst,
-        &mut explicit_lhs_core,
-        &mut explicit_rhs_core,
-        &lhs,
-        &rhs,
-        alpha,
-        beta,
-    )
-    .unwrap();
+    TensorContractFusionExecutionContext::<_, RuleIdentity>::default()
+        .tensorcontract_fusion_prepared_into(
+            &rule,
+            &plan,
+            &mut explicit_dst,
+            &mut explicit_lhs_core,
+            &mut explicit_rhs_core,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
 
     for (&actual, &expected) in explicit_dst.data().iter().zip(expected_dst.data()) {
         assert!(
@@ -433,7 +434,7 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
         Complex64::new(0.0, 0.0),
     )
     .unwrap();
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut core_dst,
         &lhs_core,
@@ -453,7 +454,7 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
     )
     .unwrap();
 
-    tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
+    fusion_contract_into(&rule, &mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
 
     for (&actual, &expected) in dst.data().iter().zip(expected_dst.data()) {
         assert!(
@@ -567,7 +568,7 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
     let beta = Complex64::new(-1.0, 0.5);
     let axes = TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 2, 1, 3]));
 
-    tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
+    fusion_contract_into(&rule, &mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
 
     let expected = [
         Complex64::new(-29.12579386826373, -0.7876587736527441),
@@ -614,7 +615,7 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
             dst_space,
         )
         .unwrap();
-        tensorcontract_fusion_into(
+        fusion_contract_into(
             &rule,
             &mut rebuilt_dst,
             &rebuilt_lhs,
@@ -701,9 +702,10 @@ fn tensorcontract_fusion_product_no_twist_identity_rhs_is_borrowed() {
         )
         .unwrap();
 
-    // What: only the output repartitions; the canonical nondual product RHS
-    // is read directly while alpha and beta remain on their original writes.
-    assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+    // What: only the output repartitions (TensorKit's copyC); the canonical
+    // nondual product RHS is read directly while alpha and beta remain on
+    // their original writes.
+    assert_eq!(profile.route, TensorContractFusionRoute::CopyC);
     assert_eq!(profile.rhs_transform_calls, 0);
     assert_eq!(profile.output_transform_calls, 1);
     assert_eq!(dst.data(), &[27.0]);

@@ -52,7 +52,7 @@ fn tensorcontract_fusion_fermion_rhs_dual_codomain_twists_like_tensorkit() {
         vec![TensorContractBlockSpec::with_coefficient(0, 0, 0, -1.0)]
     );
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -135,7 +135,7 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
     );
     assert!(!facts[1].rhs_requires_twist());
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -259,10 +259,11 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         )
         .unwrap();
 
-    // What: an already-core LHS is borrowed while the twist-bearing RHS is materialized.
-    assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+    // What: the eager route folds the uniform twist into the core's per-job
+    // alpha, so neither source is materialized.
+    assert_eq!(profile.route, TensorContractFusionRoute::CoreFusionBlocks);
     assert_eq!(profile.lhs_transform_calls, 0);
-    assert_eq!(profile.rhs_transform_calls, 1);
+    assert_eq!(profile.rhs_transform_calls, 0);
     for (index, (&actual, &want)) in dst.data().iter().zip(expected.iter()).enumerate() {
         assert!(
             (actual - want).abs() < 1.0e-12,
@@ -365,10 +366,10 @@ fn fermion_twist_lands_on_the_smaller_borrowable_operand_by_hand_calculation() {
         TensorMap::<f64, 1, 2>::from_vec_with_fusion_space(initial.to_vec(), dst_space.clone())
             .unwrap()
     };
-    // The plan-level Host path (`tensorcontract_fusion_dynamic_plan_into_with`).
+    // The eager entry.
     let mut plain = new_dst();
-    tensorcontract_fusion_into(&rule, &mut plain, &lhs, &rhs, axes, alpha, beta).unwrap();
-    // The compiled-artifact Host path, profiled for its source transforms.
+    fusion_contract_into(&rule, &mut plain, &lhs, &rhs, axes, alpha, beta).unwrap();
+    // The same entry profiled: it reports the route the eager call takes.
     let mut artifact = new_dst();
     let mut profile = TensorContractFusionProfile::default();
     TensorContractFusionExecutionContext::<f64, _>::default()
@@ -383,9 +384,11 @@ fn fermion_twist_lands_on_the_smaller_borrowable_operand_by_hand_calculation() {
             &mut profile,
         )
         .unwrap();
-    // What: one source transform, of the lhs; the rhs is read in place.
-    assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
-    assert_eq!(profile.lhs_transform_calls, 1);
+    // What: the twist is uniform within each coupled sector, so the eager
+    // route is the canonical core with the twist as per-job alpha: no source
+    // is transformed.
+    assert_eq!(profile.route, TensorContractFusionRoute::CoreFusionBlocks);
+    assert_eq!(profile.lhs_transform_calls, 0);
     assert_eq!(profile.rhs_transform_calls, 0);
     // What: exact (dyadic) agreement with the hand calculation on both paths.
     assert_eq!(plain.data(), &expected);

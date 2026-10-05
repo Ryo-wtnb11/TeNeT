@@ -50,13 +50,7 @@ mod storage_contract_tests;
 mod structure;
 
 pub use api::{
-    tensorcontract_execute_with, tensorcontract_fusion_into, tensorcontract_fusion_into_with,
-    tensorcontract_fusion_into_with_backends, tensorcontract_fusion_prepared_into,
-    tensorcontract_fusion_prepared_into_core_dst,
-    tensorcontract_fusion_prepared_into_core_dst_with, tensorcontract_fusion_prepared_into_with,
-    tensorcontract_fusion_via_tree_pair_transforms_into, tensorcontract_into,
-    tensorcontract_into_with, tensorproduct_fusion_into,
-    tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
+    tensorcontract_execute_with, tensorcontract_into, tensorcontract_into_with, tensorproduct_into,
     tensorproduct_into_with_conjugation,
 };
 #[cfg(test)]
@@ -89,7 +83,6 @@ pub use dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
 };
-pub use fusion::tensorcontract_fusion_structure;
 #[cfg(test)]
 pub(crate) use fusion::{
     contracted_fusion_tree_basis_matches, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,

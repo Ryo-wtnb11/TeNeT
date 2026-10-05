@@ -42,6 +42,7 @@ pub(crate) use cache::{
 };
 #[cfg(test)]
 pub(crate) use contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage;
+pub use contract::tensorcontract_structure;
 #[cfg(test)]
 pub(crate) use contract::TensorContractFusionRoute;
 #[doc(hidden)]
@@ -63,13 +64,8 @@ pub use contract::{
 };
 pub use contract::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,
-    tensorcontract_execute_with, tensorcontract_fusion_block_specs, tensorcontract_fusion_into,
-    tensorcontract_fusion_into_with, tensorcontract_fusion_into_with_backends,
-    tensorcontract_fusion_prepared_into, tensorcontract_fusion_prepared_into_core_dst,
-    tensorcontract_fusion_prepared_into_core_dst_with, tensorcontract_fusion_prepared_into_with,
-    tensorcontract_fusion_via_tree_pair_transforms_into, tensorcontract_into,
-    tensorcontract_into_with, tensorcontract_into_with_context, tensorproduct_fusion_into,
-    tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
+    tensorcontract_execute_with, tensorcontract_fusion_block_specs, tensorcontract_into,
+    tensorcontract_into_with, tensorcontract_into_with_context, tensorproduct_into,
     tensorproduct_into_with_conjugation, zero_copy_contract_order_for_output_permute,
     FusionContractOrientation, FusionContractPlan, HostTensorContractBackend,
     HostTensorContractWorkspace, HostTreeFusionExecutionContext, PreparedTensorContractFusion,
@@ -78,7 +74,6 @@ pub use contract::{
     TensorContractFusionProfile, TensorContractPlanKey, TensorContractStructure,
     TensorContractStructureTerm, TensorContractWorkspace,
 };
-pub use contract::{tensorcontract_fusion_structure, tensorcontract_structure};
 pub use contract::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,

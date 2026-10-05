@@ -6,9 +6,8 @@ use tenet_core::{
     TensorMapSpace, U1FusionRule, Z2FusionRule,
 };
 use tenet_tensors::{
-    adjoint, tensorcontract_fusion_block_specs, tensorcontract_fusion_into,
-    BoundDynamicFusionMapSpace, TensorContractFusionExecutionContext, TensorContractSpec,
-    TreeTransformRuleCacheKey,
+    adjoint, tensorcontract_fusion_block_specs, BoundDynamicFusionMapSpace,
+    TensorContractFusionExecutionContext, TensorContractSpec, TreeTransformRuleCacheKey,
 };
 use tenet_tensors::{DynamicFusionMapSpace, OperationError};
 
@@ -130,12 +129,14 @@ fn scalar_contract_error<R>(
     axes: TensorContractSpec<'_>,
 ) -> OperationError
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
 {
     let mut dst = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![0.0], dst_space).unwrap();
     let lhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![2.0], lhs_space).unwrap();
     let rhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![3.0], rhs_space).unwrap();
-    tensorcontract_fusion_into(rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0).unwrap_err()
+    TensorContractFusionExecutionContext::<f64, R::Key>::default()
+        .tensorcontract_fusion_into(rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
+        .unwrap_err()
 }
 
 fn assert_missing_rule_identity(error: OperationError) {
@@ -266,7 +267,9 @@ fn fusion_contract_bound_same_rule_matches_on_direct_and_fallback_routes() {
         )
         .unwrap();
 
-        tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 2.0, 3.0).unwrap();
+        TensorContractFusionExecutionContext::<f64, _>::default()
+            .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 2.0, 3.0)
+            .unwrap();
 
         assert_eq!(dst.data(), &[41.0]);
     }

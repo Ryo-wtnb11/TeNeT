@@ -266,26 +266,6 @@ where
         )
     }
 
-    pub(crate) fn compile_shared_structures_with_block_specs_and_storage(
-        dst_structure: Arc<BlockStructure>,
-        lhs_structure: Arc<BlockStructure>,
-        rhs_structure: Arc<BlockStructure>,
-        lhs_storage_structure: Arc<BlockStructure>,
-        rhs_storage_structure: Arc<BlockStructure>,
-        axes: TensorContractSpec<'_>,
-        block_specs: &[TensorContractBlockSpec<C>],
-    ) -> Result<Self, OperationError> {
-        Self::compile_shared_structures_with_block_specs(
-            dst_structure,
-            lhs_structure,
-            rhs_structure,
-            lhs_storage_structure,
-            rhs_storage_structure,
-            axes,
-            block_specs,
-        )
-    }
-
     fn compile_shared_structures_with_block_specs(
         dst_structure: Arc<BlockStructure>,
         lhs_structure: Arc<BlockStructure>,

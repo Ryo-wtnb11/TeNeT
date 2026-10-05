@@ -1,8 +1,8 @@
 //! Eager contraction route compilation.
 //!
 //! Ordinary calls resolve per operation, as TensorKit and QSpace do. Explicit
-//! prepared handles own the returned [`Resolution`] and any complete dynamic
-//! execution artifact required for lookup-free replay.
+//! prepared handles own the returned [`StorageContractResolution`] for
+//! lookup-free replay.
 
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -12,11 +12,10 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols,
 };
 
-use super::structure::TensorContractStructure;
 use crate::{DenseBlockScalar, OperationError};
 use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec};
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
-use tenet_operations::{TensorContractFusionProfile, TreeTransformStructure};
+use tenet_operations::TreeTransformStructure;
 
 use super::dynamic_space::{
     DynamicFusionMapSpace, FusionOperand, FusionOperandLayout, LayoutKeyBuilder,
@@ -24,7 +23,7 @@ use super::dynamic_space::{
 use super::fusion::{
     contracted_axis_order_candidates, external_axis_is_dual,
     min_dynamic_tree_materialized_elements, rhs_contract_twist_factor_oriented,
-    FusionContractOrientation, FusionContractPlan, CACHED_ORIENTATIONS,
+    FusionContractOrientation, CACHED_ORIENTATIONS,
 };
 use super::fusion_block::{
     compile_fusion_block_contract_plan_core_geometry,
@@ -32,24 +31,6 @@ use super::fusion_block::{
     compile_fusion_block_contract_plan_validated, try_compile_oriented_canonical_core_plan,
     try_compile_scaled_canonical_core_plan, CoreContractPreflight, ValidatedCoreContract,
 };
-
-/// Resolved execution artifact for one contraction key: the route decision
-/// and its compiled plan are one value, never cached separately.
-#[derive(Clone, Debug)]
-pub(crate) enum Resolution<C = f64> {
-    /// Coupled-sector direct GEMM (TensorKit `mul!` shape).
-    Core(Arc<FusionBlockContractPlan<C>>),
-    /// [`Self::Core`] of the swapped candidate B·A (TensorKit
-    /// `blas_contract!(C, B, reverse(pB), A, reverse(pA), pAB′)`): the plan's
-    /// lhs is the caller's rhs, and replay passes the operands swapped.
-    SwappedCore(Arc<FusionBlockContractPlan<C>>),
-    /// Source/output tree transforms around a core contraction
-    /// (TensorKit `@tensor` shape).
-    DynamicTree(Arc<FusionContractPlan>),
-    /// Dense one-shot structure for source/output transforms (TeNeT
-    /// optimization over the faithful transform-then-contract path).
-    Structure(Arc<TensorContractStructure<C>>),
-}
 
 /// Host-compiled, owned route of one contraction whose payloads are not
 /// host slices (the device path): everything categorical — route choice,
@@ -86,7 +67,8 @@ pub(crate) enum ContractRoute<C> {
     /// Canonical fully-direct coupled-sector GEMM batch over the parent
     /// buffers (lazy adjoints as GEMM operand flags, a uniform fermionic twist
     /// as per-job alpha). `swapped` runs the B·A candidate: the plan's left
-    /// operand is the caller's rhs (see [`Resolution::SwappedCore`]).
+    /// operand is the caller's rhs (TensorKit's
+    /// `blas_contract!(C, B, reverse(pB), A, reverse(pA), pAB′)`).
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     Core {
         plan: Arc<FusionBlockContractPlan<C>>,
@@ -239,177 +221,6 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
     #[cfg(test)]
     pub(crate) fn is_swapped_core(&self) -> bool {
         matches!(self.route, ContractRoute::Core { swapped: true, .. })
-    }
-}
-
-/// Compiles the route and plan for one ordinary contraction.
-pub(crate) fn compile_resolution<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
-    axes: TensorContractSpec<'_>,
-    compile_structure: impl FnOnce() -> Result<
-        Option<Arc<TensorContractStructure<R::Scalar>>>,
-        OperationError,
-    >,
-    compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
-) -> Result<Resolution<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    compile_resolution_with_profile::<R, false>(
-        rule,
-        dst,
-        lhs,
-        rhs,
-        axes,
-        compile_structure,
-        compile_dynamic,
-        None,
-    )
-}
-
-/// Compiles and attributes the ordinary eager route without introducing a
-/// reusable execution artifact.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "profiled resolution keeps three spaces, TensorContractSpec, two lazy compilers, and profile sink explicit"
-)]
-pub(crate) fn compile_resolution_profiled<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
-    axes: TensorContractSpec<'_>,
-    compile_structure: impl FnOnce() -> Result<
-        Option<Arc<TensorContractStructure<R::Scalar>>>,
-        OperationError,
-    >,
-    compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
-    profile: &mut TensorContractFusionProfile,
-) -> Result<Resolution<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    compile_resolution_with_profile::<R, true>(
-        rule,
-        dst,
-        lhs,
-        rhs,
-        axes,
-        compile_structure,
-        compile_dynamic,
-        Some(profile),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compile_resolution_with_profile<R, const PROFILED: bool>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
-    axes: TensorContractSpec<'_>,
-    compile_structure: impl FnOnce() -> Result<
-        Option<Arc<TensorContractStructure<R::Scalar>>>,
-        OperationError,
-    >,
-    compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
-    mut profile: Option<&mut TensorContractFusionProfile>,
-) -> Result<Resolution<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseBlockScalar,
-{
-    let preflight_start = PROFILED.then(std::time::Instant::now);
-    let preflight = CoreContractPreflight::compile(rule, dst, lhs, rhs, axes)?;
-    if !preflight.has_conjugation() {
-        if let Some(validated) = preflight.validate_core_geometry()? {
-            if !validated_rhs_contract_requires_twist(&validated)? {
-                record_resolution_preflight(&mut profile, preflight_start);
-                let block_plan_start = profile.as_ref().map(|_| std::time::Instant::now());
-                let plan = compile_fusion_block_contract_plan_validated(validated, dst, lhs, rhs)?;
-                if let Some(start) = block_plan_start {
-                    profile
-                        .as_deref_mut()
-                        .expect("profiled route compilation carries a profile")
-                        .core_block_plan_build += start.elapsed();
-                }
-                return Ok(Resolution::Core(Arc::new(plan)));
-            }
-        }
-        let candidate = try_zero_copy_contract_candidates(
-            rule,
-            dst.nout(),
-            FusionOperand::direct(lhs),
-            FusionOperand::direct(rhs),
-            axes,
-            false,
-            &mut false,
-            |core_lhs, core_rhs, core_axes, orientation| {
-                let (core_lhs, core_rhs) = (core_lhs.storage_space(), core_rhs.storage_space());
-                let Some(validated) =
-                    CoreContractPreflight::compile(rule, dst, core_lhs, core_rhs, core_axes)?
-                        .validate_core_geometry()?
-                else {
-                    return Ok(None);
-                };
-                let plan = compile_fusion_block_contract_plan_validated(
-                    validated, dst, core_lhs, core_rhs,
-                )?;
-                Ok(Some(Resolution::core(plan, orientation)))
-            },
-        )?;
-        record_resolution_preflight(&mut profile, preflight_start);
-        if let Some(resolution) = candidate {
-            return Ok(resolution);
-        }
-        return compile_dynamic_tree_plan::<R::Scalar, PROFILED>(compile_dynamic, &mut profile);
-    }
-    if let Some(structure) = compile_structure()? {
-        record_resolution_preflight(&mut profile, preflight_start);
-        return Ok(Resolution::Structure(structure));
-    }
-    record_resolution_preflight(&mut profile, preflight_start);
-    compile_dynamic_tree_plan::<R::Scalar, PROFILED>(compile_dynamic, &mut profile)
-}
-
-fn record_resolution_preflight(
-    profile: &mut Option<&mut TensorContractFusionProfile>,
-    start: Option<std::time::Instant>,
-) {
-    if let Some(start) = start {
-        profile
-            .as_deref_mut()
-            .expect("profiled route compilation carries a profile")
-            .resolution_preflight += start.elapsed();
-    }
-}
-
-fn compile_dynamic_tree_plan<C, const PROFILED: bool>(
-    compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
-    profile: &mut Option<&mut TensorContractFusionProfile>,
-) -> Result<Resolution<C>, OperationError> {
-    let start = PROFILED.then(std::time::Instant::now);
-    let plan = compile_dynamic()?;
-    if let Some(start) = start {
-        profile
-            .as_deref_mut()
-            .expect("profiled route compilation carries a profile")
-            .dynamic_tree_plan_build += start.elapsed();
-    }
-    Ok(Resolution::DynamicTree(plan))
-}
-
-impl<C> Resolution<C> {
-    fn core(plan: FusionBlockContractPlan<C>, orientation: FusionContractOrientation) -> Self {
-        match orientation {
-            FusionContractOrientation::LhsRhs => Self::Core(Arc::new(plan)),
-            FusionContractOrientation::RhsLhs => Self::SwappedCore(Arc::new(plan)),
-        }
     }
 }
 
@@ -1190,34 +1001,6 @@ mod tests {
             TensorContractSpec::with_default_output_order(&[0], &[0]),
         )
         .unwrap());
-    }
-
-    #[test]
-    fn core_resolution_derives_geometry_once() {
-        let rule = U1FusionRule;
-        let zero = U1Irrep::new(0).sector_id();
-        let lhs = single_sector_matrix_space(&rule, zero, false, false);
-        let rhs = single_sector_matrix_space(&rule, zero, false, false);
-        let dst = single_sector_matrix_space(&rule, zero, false, false);
-        super::super::fusion_block::reset_core_contract_derivations();
-
-        let resolution = compile_resolution(
-            &rule,
-            &dst,
-            &lhs,
-            &rhs,
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            || panic!("core contraction must not compile a dense structure"),
-            || panic!("core contraction must not compile tree transforms"),
-        )
-        .unwrap();
-
-        // What: one core compiler invocation derives each geometry authority once.
-        assert!(matches!(resolution, Resolution::Core(_)));
-        assert_eq!(
-            super::super::fusion_block::core_contract_derivations(),
-            (1, 1)
-        );
     }
 
     #[test]

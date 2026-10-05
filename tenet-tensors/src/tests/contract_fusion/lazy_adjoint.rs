@@ -34,7 +34,7 @@ fn tensorcontract_fusion_lowers_lhs_categorical_adjoint_lazily() {
     let axes =
         TensorContractSpec::with_default_output_order_and_conjugation(&[0], &[0], true, false);
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -102,7 +102,7 @@ fn tensorcontract_fusion_lowers_rhs_categorical_adjoint_lazily() {
     )
     .unwrap();
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -174,7 +174,7 @@ fn tensorcontract_fusion_lowers_both_categorical_adjoint_inputs_lazily() {
     let axes =
         TensorContractSpec::with_default_output_order_and_conjugation(&[0], &[1], true, true);
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -242,7 +242,7 @@ fn tensorcontract_fusion_lhs_adjoint_uses_degeneracy_matrix_contract() {
     )
     .unwrap();
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -322,7 +322,7 @@ fn tensorcontract_fusion_fermion_lhs_adjoint_uses_degeneracy_matrix_contract() {
     )
     .unwrap();
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -400,7 +400,7 @@ fn tensorcontract_fusion_rhs_adjoint_uses_degeneracy_matrix_contract() {
     )
     .unwrap();
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -479,7 +479,7 @@ fn tensorcontract_fusion_fermion_rhs_adjoint_uses_degeneracy_matrix_contract() {
     )
     .unwrap();
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -558,7 +558,7 @@ fn tensorcontract_fusion_both_adjoint_uses_degeneracy_matrix_contract() {
     )
     .unwrap();
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -638,7 +638,7 @@ fn tensorcontract_fusion_fermion_both_adjoint_uses_degeneracy_matrix_contract() 
     )
     .unwrap();
 
-    tensorcontract_fusion_into(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
@@ -706,14 +706,18 @@ fn tensorproduct_fusion_lowers_lhs_adjoint_through_source_transform() {
     let mut dst: TensorMap<Complex64, 1, 1> =
         TensorMap::from_vec_with_fusion_space(vec![Complex64::new(0.0, 0.0)], dst_space).unwrap();
 
-    tensorproduct_fusion_into_with_conjugation(
+    fusion_contract_into(
         &rule,
         &mut dst,
         &lhs,
         &rhs,
-        OutputAxisOrder::identity(),
-        true,
-        false,
+        TensorContractSpec::new_with_conjugation(
+            &[],
+            &[],
+            OutputAxisOrder::identity(),
+            true,
+            false,
+        ),
         Complex64::one(),
         Complex64::zero(),
     )
@@ -747,10 +751,8 @@ fn tensorproduct_fusion_lowers_lhs_adjoint_through_source_transform() {
 // symmetry must equal the eager conjugate-transpose composed plainly. The other
 // conjugate recipe tests are all self-dual (Z2 / fermion parity), where a charge
 // equals its dual, so a sector-dualization mislabel is invisible; here charge +1
-// and -1 are distinct duals. The Structure route mislabels the output coupled
-// sector for this case, so it declines (`all_sectors_self_dual`) to the
-// DynamicTree route for non-core shapes. This rank-(1,1) compose is core form,
-// so the parent-storage matrix is consumed through the op-bearing Core batch.
+// and -1 are distinct duals. This rank-(1,1) compose is core form, so the
+// parent-storage matrix is consumed through the op-bearing Core batch.
 #[test]
 fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
@@ -892,10 +894,9 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
             )
             .unwrap();
             assert_eq!(ordinary, oracle);
-            assert!(
-                !ctx.last_resolution_is_core(),
-                "ordinary conjugation must not alias the parent-storage Core resolution"
-            );
+            // What: a conjugation flag on an owned space is that space's lazy
+            // adjoint, so the ordinary call takes the parent-storage core.
+            assert!(ctx.last_resolution_is_core());
             crate::lowering::reset_adjoint_view_build_count();
 
             let mut folded_again =
