@@ -21,9 +21,6 @@ package is packaged and inspected before it is published.
 9. `tenet-network`
 10. `tenet-category-data`
 
-`tenet-krylov` is outside this publication closure and remains unpublished
-until the facade uses it.
-
 ## Checks for each package
 
 Run from a clean checkout with the intended lockfile and toolchain:
