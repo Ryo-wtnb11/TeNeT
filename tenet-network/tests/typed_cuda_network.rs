@@ -15,8 +15,8 @@ use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{ContractSpec, CudaStorage, GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     clear_plan_cache, configure_plan_cache, plan_cache_stats, tensor, ContractionPlan,
-    ContractionStep, GreedyDenseOptimizer, Network, NetworkIR, PlanCacheConfig, TemporaryLabel,
-    TensorId,
+    ContractionStep, GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, NetworkIR,
+    PlanCacheConfig, TemporaryLabel, TensorId,
 };
 
 #[path = "../../tests/support/numerics.rs"]
@@ -58,7 +58,9 @@ where
         .plan(&cuda_refs, &GreedyDenseOptimizer)
         .unwrap();
     assert_eq!(host_plan.plan().steps(), cuda_plan.plan().steps());
-    let actual = cuda_plan.execute_cuda(&cuda_refs).unwrap();
+    let actual = cuda_plan
+        .execute_cuda(&cuda_refs, &mut NetworkExecutionWorkspace::default())
+        .unwrap();
     let before_macro = plan_cache_stats(runtime);
     let macro_actual = tensor!([a; b] = lhs_cuda[a; k] * rhs_cuda[k; b]).unwrap();
     let macro_warm = tensor!([a; b] = lhs_cuda[a; k] * rhs_cuda[k; b]).unwrap();
@@ -267,7 +269,9 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     )
     .unwrap();
     let planned = chain.plan_with(&refs, chain_order).unwrap();
-    let actual = planned.execute_cuda(&refs).unwrap();
+    let actual = planned
+        .execute_cuda(&refs, &mut NetworkExecutionWorkspace::default())
+        .unwrap();
     let manual = tensors[0]
         .contract(
             &tensors[1],
@@ -322,7 +326,7 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let conj_actual = conj_network
         .plan(&conj_refs, &GreedyDenseOptimizer)
         .unwrap()
-        .execute_cuda(&conj_refs)
+        .execute_cuda(&conj_refs, &mut NetworkExecutionWorkspace::default())
         .unwrap();
     let conj_manual = tensors[0]
         .adjoint()
@@ -364,7 +368,7 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let single_actual = single
         .plan(&[&tensors[0]], &GreedyDenseOptimizer)
         .unwrap()
-        .execute_cuda(&[&tensors[0]])
+        .execute_cuda(&[&tensors[0]], &mut NetworkExecutionWorkspace::default())
         .unwrap();
     let single_expected = tensors[0].adjoint().unwrap();
     let single_macro = tensor!([i; k] = conj(tensors[0])[k; i]).unwrap();
@@ -436,7 +440,7 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let scalar = scalar_network
         .plan(&[&ket, &bra], &GreedyDenseOptimizer)
         .unwrap()
-        .execute_cuda(&[&ket, &bra])
+        .execute_cuda(&[&ket, &bra], &mut NetworkExecutionWorkspace::default())
         .unwrap();
     let scalar_macro = tensor!([] = ket[; k] * bra[k;]).unwrap();
     assert_eq!(scalar.rank(), 0);
@@ -496,7 +500,9 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
     let refs: [&TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>; 2] =
         [&device[0], &device[1]];
     let planned = pair_network().plan(&refs, &GreedyDenseOptimizer).unwrap();
-    let executed = planned.execute_cuda(&refs).unwrap();
+    let executed = planned
+        .execute_cuda(&refs, &mut NetworkExecutionWorkspace::default())
+        .unwrap();
     let host_oracle = host[0]
         .contract(
             &host[1],
@@ -2575,4 +2581,83 @@ fn assert_cuda_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
 fn non_symmetric_cuda_macro_contraction_rejects_like_host_before_device_work() {
     assert_cuda_macro_contraction_rejects_non_symmetric::<false>();
     assert_cuda_macro_contraction_rejects_non_symmetric::<true>();
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn cuda_execution_reuses_a_caller_owned_workspace_and_network_contract_caches() {
+    // What (#2022): `execute_cuda` takes a caller-owned workspace that
+    // repeated calls can pass again with the same result, and
+    // `Network::contract` runs device operands through the Runtime's plan
+    // cache like Host ones, leasing its pooled workspace on a hit.
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let space = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(-1), 2),
+            (U1Irrep::new(0), 3),
+            (U1Irrep::new(1), 2),
+        ],
+    )
+    .unwrap();
+    let host = (0..3)
+        .map(|seed| {
+            TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 60 + seed).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let host_refs = host.iter().collect::<Vec<_>>();
+    let device = host
+        .iter()
+        .map(|tensor| tensor.to_cuda().unwrap())
+        .collect::<Vec<_>>();
+    let device_refs = device.iter().collect::<Vec<_>>();
+    let network = Network::new(
+        vec![
+            labels(&["i", "j"]),
+            labels(&["j", "k"]),
+            labels(&["k", "m"]),
+        ],
+        vec![false; 3],
+        vec![Some(1); 3],
+        labels(&["i", "m"]),
+        Some(1),
+    )
+    .unwrap();
+    let expected = network
+        .contract(&host_refs)
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .to_vec();
+
+    let planned = network.plan(&device_refs, &GreedyDenseOptimizer).unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
+    for call in 0..3 {
+        let actual = planned
+            .execute_cuda(&device_refs, &mut workspace)
+            .unwrap()
+            .to_host()
+            .unwrap();
+        numerics::assert_slices_close(
+            &format!("workspace call {call}"),
+            actual.dense_data().unwrap(),
+            &expected,
+            7 * 7,
+        );
+    }
+
+    clear_plan_cache(&runtime);
+    let first = network.contract(&device_refs).unwrap();
+    let second = network.contract(&device_refs).unwrap();
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!((stats.misses, stats.hits, stats.entries), (1, 1, 1));
+    assert_eq!(stats.workspace_reuses, 1);
+    for result in [first, second] {
+        numerics::assert_slices_close(
+            "Network::contract on device",
+            result.to_host().unwrap().dense_data().unwrap(),
+            &expected,
+            7 * 7,
+        );
+    }
 }

@@ -52,12 +52,45 @@ impl Network {
         // reduction rejection) on the WRITTEN labels; conj rotation is a
         // cyclic per-operand relabeling that does not change the structure.
         NetworkIR::from_labels(inputs.clone(), output.clone()).map_err(invalid)?;
+        let mut first = HashMap::new();
+        let contracted = inputs
+            .iter()
+            .enumerate()
+            .map(|(operand, labels)| {
+                labels
+                    .iter()
+                    .enumerate()
+                    .map(|(axis, label)| match first.get(label) {
+                        Some(&pair) => Some(pair),
+                        None => {
+                            first.insert(label, (operand, axis));
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let topology_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (
+                &inputs,
+                &conj,
+                &codomain_splits,
+                &output,
+                output_codomain_rank,
+            )
+                .hash(&mut hasher);
+            hasher.finish()
+        };
         Ok(Self {
             inputs,
             conj,
             codomain_splits,
             output,
             output_codomain_rank,
+            contracted,
+            topology_hash,
         })
     }
 
@@ -522,7 +555,7 @@ impl Network {
             &self.conj,
             &self.codomain_splits,
             &[],
-            None,
+            Some(&self.contracted),
         )?;
         let mut lowered_labels = Vec::with_capacity(tensors.len());
         let mut infos = Vec::with_capacity(tensors.len());

@@ -163,6 +163,7 @@ fn tenet_network_exports_exactly_the_pinned_names() {
         "static_network_operand_preflight",
         "Network",
         "NetworkExecutionWorkspace",
+        "NetworkOperand",
         "PlannedNetwork",
         "StaticNetworkOperand",
         "StaticTopologySpec",

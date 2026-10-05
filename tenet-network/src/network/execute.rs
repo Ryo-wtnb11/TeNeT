@@ -378,35 +378,20 @@ impl PlannedNetwork {
         &self.plan
     }
 
-    /// Executes the compiled schedule on device tensors: the Host step
+    /// Executes the compiled schedule on device tensors with reusable private
+    /// replay state, the device twin of [`Self::execute`]: the Host step
     /// sequence, each step through the device twin of the Host typed
     /// operation. Every device rejection — another placement, a compact
     /// operand, non-symmetric braiding — is decided before any allocation or
-    /// kernel, and
-    /// nothing falls back to Host or transfers.
-    #[cfg(feature = "cuda")]
-    pub fn execute_cuda<R, D>(
-        &self,
-        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
-    ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error>
-    where
-        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-            + MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec,
-        D: CudaPayload,
-    {
-        self.execute_cuda_with_workspace(tensors, &mut NetworkExecutionWorkspace::default())
-    }
-
-    /// Device execution with reusable private replay state.
+    /// kernel, and nothing falls back to Host or transfers.
     ///
     /// Device admission is checked here; everything after it — operand count,
     /// Runtime and rule identity, topology drift, contracted-leg spaces,
     /// replay-state revalidation, the step loop and the workspace lifecycle —
-    /// is the same storage-generic body Host runs.
+    /// is the same storage-generic body Host runs. Pass the same `workspace`
+    /// to repeated calls to reuse its device intermediates.
     #[cfg(feature = "cuda")]
-    pub(crate) fn execute_cuda_with_workspace<R, D>(
+    pub fn execute_cuda<R, D>(
         &self,
         tensors: &[&TensorMap<R, D, CudaStorage<D>>],
         workspace: &mut NetworkExecutionWorkspace<R, D, CudaStorage<D>>,

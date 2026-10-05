@@ -418,7 +418,7 @@ impl StaticTraceLowering {
             &self.conj,
             &self.splits,
             &self.traces,
-            None,
+            None::<&[&[Option<(usize, usize)>]]>,
         )
     }
 
