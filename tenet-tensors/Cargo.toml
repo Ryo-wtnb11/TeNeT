@@ -46,3 +46,5 @@ smallvec = { version = "1", features = ["const_generics", "union"] }
 # Plan tests compare against tenet-core's one-shot tree-pair oracles (#1805).
 tenet-core = { version = "0.1.1", path = "../tenet-core", features = ["testing"] }
 tenet-sectors = { version = "0.1.1", path = "../tenet-sectors" }
+# Tests reset racah's process-global caches as an application would.
+racah = { version = "0.2.4" }

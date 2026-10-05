@@ -1,14 +1,12 @@
 #![forbid(unsafe_code)]
 
 //! Category vocabulary shared by TeNeT's sector and tensor layers.
+//!
+//! The process-global racah coefficient caches are application policy: only
+//! the application calls `racah::cache::{reset, trim_to, configure_cache_budgets}`,
+//! never TeNeT.
 
 use smallvec::SmallVec;
-
-/// Process-global SU(2) coefficient cache controls owned by `racah`.
-///
-/// TeNeT does not reset or mirror this cache. Applications that choose a
-/// process-wide reset policy may invoke racah's public controls directly.
-pub use racah::cache as su2_coefficient_cache;
 
 mod rule_identity;
 pub use rule_identity::RuleIdentity;
@@ -28,12 +26,12 @@ mod fibonacci;
 pub use fibonacci::{FibonacciFusionRule, FibonacciSector};
 
 mod su2;
-pub use su2::{SU2FusionRule, SU2Irrep, SU2_MAX_DOUBLED_SPIN};
+pub use su2::{SU2CoefficientError, SU2FusionRule, SU2Irrep, SU2_MAX_DOUBLED_SPIN};
 
 #[cfg(feature = "racah-generated")]
 mod sun;
 #[cfg(feature = "racah-generated")]
-pub use sun::{SUNFusionRule, SUNFusionRuleError};
+pub use sun::{SUNFusionRule, SUNFusionRuleError, SUNSymbolError};
 
 mod product_rule;
 pub use product_rule::{

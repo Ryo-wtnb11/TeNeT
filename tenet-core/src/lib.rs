@@ -30,15 +30,15 @@ pub use tenet_sectors::{
     MultiplicityFreeRigidSymbols, PackedProductCodec, PackedSectorLayout, PhysicalBasisError,
     PhysicalFusionBasis, ProductFusionRule, ProductFusionRuleExt, ProductSector,
     ProductSectorCodec, ProductSectorCodecError, ProductSectorComponent, ProductSectorLayout,
-    PromoteCoefficientScalar, RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId,
-    SectorOrderKey, SectorVec, Su2SectorLayout, SymbolShapeError, TensorKitProductCodec,
-    TypedSectorAdmission, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
-    ZNFusionRule, ZNIrrep, CU1_MAX_TWICE_CHARGE, SU2_MAX_DOUBLED_SPIN,
+    PromoteCoefficientScalar, RuleIdentity, SU2CoefficientError, SU2FusionRule, SU2Irrep,
+    SectorCodec, SectorId, SectorOrderKey, SectorVec, Su2SectorLayout, SymbolShapeError,
+    TensorKitProductCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, U1SectorLayout,
+    Z2FusionRule, Z2Irrep, ZNFusionRule, ZNIrrep, CU1_MAX_TWICE_CHARGE, SU2_MAX_DOUBLED_SPIN,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use tenet_sectors::{GenericFusionSymbols, GenericRigidSymbols};
 #[cfg(feature = "racah-generated")]
-pub use tenet_sectors::{SUNFusionRule, SUNFusionRuleError};
+pub use tenet_sectors::{SUNFusionRule, SUNFusionRuleError, SUNSymbolError};
 
 pub mod axes;
 mod storage;
