@@ -381,7 +381,6 @@ const TYPED: &[&str] = &[
 /// `tenet::typed::__network`: the hidden seam `tenet-network` drives. It is
 /// pinned like a public module so a new seam item is reviewed, not slipped in.
 const NETWORK: &[&str] = &[
-    "CudaTracePairs",
     "ExtensionSlot",
     "NetworkDegeneracyRestriction",
     "NetworkPayloadStorage",
@@ -399,7 +398,6 @@ const NETWORK: &[&str] = &[
     "network_sector_leg",
     "network_source_leg",
     "network_zeros_from_effective_legs",
-    "prepare_trace_pairs",
     "replace_plan_cache_config",
     "runtime_identity",
     "with_extension_slot",

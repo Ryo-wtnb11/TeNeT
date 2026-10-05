@@ -27,31 +27,28 @@ where
     Ok(Some(identity))
 }
 
-/// The metadata preflight of a network, run by `tensor!` before any trace,
-/// plan lookup, lease or transfer and by every typed lowering: each operand's
-/// written rank and `;` split, then every contracted leg against the dual of
-/// its partner. A traced operand (`traces[i]`) enters with its reduced labels
-/// and its adjoint-read legs without the traced axes, which are the trace
-/// output's legs; `StaticTraceLowering::new` checked its rank and split. The
-/// caller decides braiding and on the device placement first.
+/// The metadata preflight of a network, run by [`Network::contract`] before
+/// the plan lookup, lease or transfer and by every typed lowering: each
+/// operand's written rank and `;` split, then every contracted leg against the
+/// dual of its partner. The caller decides braiding and on the device
+/// placement first.
 ///
 /// Allocation-free, because a warm plan-cache hit runs it on every call and
 /// the cache key holds no sectors: legs are borrowed from the operands and
 /// compared through the dual map, and no label map is built.
 ///
-/// `contracted` is the pairing resolved once per topology — by
-/// [`Network::new`] (its `contracted` field) or at `tensor!` expansion
-/// ([`StaticTopologySpec::contracted`]) — which makes the pass O(N) in the
-/// total lowered legs N. Without it — a traced lowering, whose pairs are not
-/// static — each axis rediscovers its partner by a scan over the earlier
-/// axes, which is O(N²) overall.
-pub(super) fn static_operand_preflight<R, D, S, L, C>(
+/// `contracted` is the pairing [`Network::new`] resolved once (its
+/// `contracted` field): for each operand and written axis, the earlier
+/// `(operand, written axis)` with the same label. It makes the pass O(N) in
+/// the total legs N, where rediscovering each partner by a scan would be
+/// O(N²). `Network::new` rejects a label written twice on one operand, so
+/// every pair spans two operands.
+pub(super) fn network_operand_preflight<R, D, S, L, C>(
     tensors: &[&TensorMap<R, D, S>],
     inputs: &[impl AsRef<[L]>],
     conj: &[bool],
     splits: &[Option<usize>],
-    traces: &[Option<StaticTrace>],
-    contracted: Option<&[C]>,
+    contracted: &[C],
 ) -> Result<(), HostNetworkError<R>>
 where
     R: TypedSectorAdmission,
@@ -62,11 +59,7 @@ where
     C: AsRef<[Option<(usize, usize)>]>,
 {
     typed_operand_identity(tensors)?;
-    let trace = |operand: usize| traces.get(operand).and_then(Option::as_ref);
     for (index, &tensor) in tensors.iter().enumerate() {
-        if trace(index).is_some() {
-            continue;
-        }
         let labels = inputs[index].as_ref();
         if labels.len() != tensor.rank() {
             return Err(invalid(format!(
@@ -89,18 +82,12 @@ where
     let Some(first) = tensors.first() else {
         return Ok(());
     };
-    // Lowered (conj-rotated, trace-reduced) axis `axis` of `operand`: its label,
-    // and the stored leg with whether the lowered leg is that leg's dual.
-    let rank = |operand: usize| {
-        trace(operand).map_or(tensors[operand].rank(), |_| inputs[operand].as_ref().len())
-    };
     // A lowered axis and its written axis are the same, except on a `conj`
     // operand, which is read through its adjoint: lowered axis `axis` is
     // written axis `(axis + codomain_rank) % rank`.
-    let rotated = |operand: usize| trace(operand).is_none() && conj[operand];
     let written_axis = |operand: usize, axis: usize| {
         let tensor = tensors[operand];
-        if rotated(operand) {
+        if conj[operand] {
             (axis + tensor.codomain_rank()) % tensor.rank()
         } else {
             axis
@@ -108,7 +95,7 @@ where
     };
     let lowered_axis = |operand: usize, written: usize| {
         let tensor = tensors[operand];
-        if rotated(operand) {
+        if conj[operand] {
             (written + tensor.rank() - tensor.codomain_rank()) % tensor.rank()
         } else {
             written
@@ -116,9 +103,24 @@ where
     };
     let label =
         |operand: usize, axis: usize| &inputs[operand].as_ref()[written_axis(operand, axis)];
-    // The partner of a lowered axis found by scanning the earlier axes: the
-    // fallback when the caller has no precomputed pairing, and the
-    // cross-check of one that it has.
+    // Lowered axis `axis` of `operand`: the stored leg, and whether the
+    // lowered leg is that leg's dual.
+    let leg = |operand: usize, axis: usize| {
+        let tensor = tensors[operand];
+        let adjoint = conj[operand];
+        let codomain_rank = tensor.codomain_rank();
+        let source = if adjoint {
+            (axis + codomain_rank) % tensor.rank()
+        } else {
+            axis
+        };
+        let stored = __network::network_source_leg(tensor, source).ok_or_else(|| {
+            HostNetworkError::<R>::from(invalid(format!("operand {operand} has no leg")))
+        })?;
+        Ok::<_, HostNetworkError<R>>((stored, (source >= codomain_rank) != adjoint))
+    };
+    // The cross-check of the pairing in debug builds: the partner a scan over
+    // the earlier axes finds.
     let scan = |operand: usize, axis: usize| {
         let written = label(operand, axis);
         (0..=operand)
@@ -126,68 +128,19 @@ where
                 let end = if previous == operand {
                     axis
                 } else {
-                    rank(previous)
+                    tensors[previous].rank()
                 };
                 (0..end).map(move |previous_axis| (previous, previous_axis))
             })
             .find(|&(previous, previous_axis)| label(previous, previous_axis) == written)
     };
-    let leg = |operand: usize, axis: usize| {
-        let tensor = tensors[operand];
-        let (adjoint, axis) = match trace(operand) {
-            Some((adjoint, pairs)) => (
-                *adjoint,
-                (0..tensor.rank())
-                    .filter(|&kept| !pairs.iter().any(|&(a, b)| kept == a || kept == b))
-                    .nth(axis),
-            ),
-            None => (conj[operand], Some(axis)),
-        };
-        let codomain_rank = tensor.codomain_rank();
-        let missing =
-            || HostNetworkError::<R>::from(invalid(format!("operand {operand} has no leg")));
-        let axis = axis.ok_or_else(missing)?;
-        let source = if adjoint {
-            (axis + codomain_rank) % tensor.rank()
-        } else {
-            axis
-        };
-        let stored = __network::network_source_leg(tensor, source).ok_or_else(missing)?;
-        Ok::<_, HostNetworkError<R>>((stored, (source >= codomain_rank) != adjoint))
-    };
-    // A pairing this pass does not accept would skip a space check or panic,
-    // so it is dropped for the scan here rather than indexed blindly below.
-    // Rejected in one O(N) sweep: a shape that is not the operands', an
-    // endpoint outside the pairing, and a pair inside one operand — which
-    // the written and the lowered order of a `conj` operand enumerate from
-    // opposite ends, so its endpoints would not be the scan's. An operand
-    // with an intra-operand pair is a trace, and `tensor!` lowers it through
-    // `StaticTrace`s and no static pairing.
-    let contracted = contracted.filter(|pairs| {
-        traces.is_empty()
-            && pairs.len() == tensors.len()
-            && pairs
-                .iter()
-                .zip(inputs)
-                .enumerate()
-                .all(|(operand, (operand_pairs, labels))| {
-                    let operand_pairs = operand_pairs.as_ref();
-                    operand_pairs.len() == labels.as_ref().len()
-                        && operand_pairs.iter().flatten().all(|&(previous, written)| {
-                            previous < operand && written < pairs[previous].as_ref().len()
-                        })
-                })
-    });
     for operand in 0..tensors.len() {
-        for axis in 0..rank(operand) {
-            let pair = match contracted {
-                Some(pairs) => pairs[operand].as_ref()[written_axis(operand, axis)]
-                    .map(|(previous, written)| (previous, lowered_axis(previous, written))),
-                None => scan(operand, axis),
-            };
+        for axis in 0..tensors[operand].rank() {
+            let pair = contracted[operand].as_ref()[written_axis(operand, axis)]
+                .map(|(previous, written)| (previous, lowered_axis(previous, written)));
             debug_assert!(
-                contracted.is_none() || pair == scan(operand, axis),
-                "precomputed pairing {pair:?} of operand {operand} lowered axis {axis} \
+                pair == scan(operand, axis),
+                "pairing {pair:?} of operand {operand} lowered axis {axis} \
                  disagrees with the label scan {:?}",
                 scan(operand, axis)
             );
@@ -267,30 +220,6 @@ where
         }
     }
     Ok(true)
-}
-
-/// [`static_operand_preflight`] of an untraced `tensor!` network, as both
-/// placements run it before the plan-cache lookup; public only so its
-/// allocation-free contract can be tested from a counting-allocator binary.
-#[doc(hidden)]
-pub fn static_network_operand_preflight<R, D, S>(
-    tensors: &[&TensorMap<R, D, S>],
-    spec: &StaticTopologySpec,
-) -> Result<(), HostNetworkError<R>>
-where
-    R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
-    D: TensorScalar,
-    S: TensorStorage<D>,
-{
-    static_operand_preflight(
-        tensors,
-        spec.inputs,
-        spec.conj,
-        spec.codomain_splits,
-        &[],
-        Some(spec.contracted),
-    )
 }
 
 /// The typed `contract`'s braiding boundary (TensorKit `blas_contract!`

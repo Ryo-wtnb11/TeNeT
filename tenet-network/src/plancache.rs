@@ -1,4 +1,4 @@
-//! Topology-keyed contraction-plan cache behind [`tenet_macros::tensor`].
+//! Topology-keyed contraction-plan cache behind [`Network::contract`].
 //!
 //! The cache key is the network *topology*: per-operand label lists, conj
 //! flags, codomain ranks and written `;` splits, plus the output labels and
@@ -47,7 +47,6 @@ pub use tenet::plancache::{
 use crate::labels::TemporaryLabel;
 use crate::network::{
     HostNetworkError, HostNetworkModeDispatch, Network, NetworkExecutionWorkspace, PlannedNetwork,
-    StaticTopologySpec,
 };
 use crate::optimizer::GreedyDenseOptimizer;
 use tenet::typed::__network::{self, ExtensionSlot, NetworkPayloadStorage};
@@ -538,7 +537,6 @@ struct PlanCache {
     /// `GlobalLRUCache`. Capacity tracks `PlanCacheConfig::capacity`, resized on
     /// insert if the configured capacity changed.
     map: LruCache<Arc<NetworkTopology>, CacheEntry>,
-    static_aliases: LruCache<StaticTopologyKey, Vec<StaticAlias>>,
     /// [`Network::contract`]'s aliases, keyed by the network's precomputed
     /// topology hash combined with the optimizer's. Each alias holds its full
     /// [`NetworkTopology`], which a lookup compares against the network, the
@@ -560,29 +558,6 @@ struct PlanCache {
     persist: bool,
     /// One Runtime-wide owner shared by every resident typed workspace pool.
     workspace_budget: Arc<WorkspaceBudget>,
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct StaticTopologyKey {
-    spec: &'static StaticTopologySpec,
-    optimizer: Optimizer,
-}
-
-struct StaticAlias {
-    codomain_ranks: Vec<usize>,
-    dims_snapshot: Vec<Vec<usize>>,
-    topology: Arc<NetworkTopology>,
-    planned: Weak<PlannedNetwork>,
-    workspaces: Weak<WorkspacePools>,
-}
-
-impl StaticAlias {
-    fn cached(&self) -> Option<CachedPlan> {
-        Some(CachedPlan {
-            planned: self.planned.upgrade()?,
-            workspaces: self.workspaces.upgrade()?,
-        })
-    }
 }
 
 struct NetworkAlias {
@@ -643,10 +618,16 @@ fn network_alias_hash(network: &Network, optimizer: &Optimizer) -> u64 {
 }
 
 /// [`Network::contract`]'s plan lookup: the network's alias, else the
-/// shared topology entry (where the `tensor!` path's plans live too), else a
-/// persisted or fresh plan. Like [`get_or_plan_static`], it records the
-/// lookup, not the execution, so the caller decides every metadata rejection
-/// of its operands first (#1371).
+/// shared topology entry, else a persisted or fresh plan.
+///
+/// Hits, misses, promotions and aliases record the lookup, not the
+/// execution, so the caller decides every metadata rejection of its operands
+/// first (#1371). A later execution failure is then a runtime fault of a plan
+/// that stays valid for these operands: the lookup stays counted, and only
+/// the workspace leased for that call is quarantined. Why not count a hit
+/// only after a successful execution: a miss publishes the fresh plan before
+/// it runs, and withdrawing a valid plan (or its hit) on a provider or device
+/// fault would only cost the next call a search.
 pub(crate) fn get_or_plan_network<R, D, S>(
     network: &Network,
     tensors: &[&TensorMap<R, D, S>],
@@ -749,7 +730,6 @@ impl PlanCache {
             replans: 0,
             topology_materializations: 0,
             map: LruCache::new(lru_capacity(DEFAULT_PLAN_CACHE_CAPACITY)),
-            static_aliases: LruCache::new(lru_capacity(DEFAULT_PLAN_CACHE_CAPACITY)),
             network_aliases: LruCache::new(lru_capacity(DEFAULT_PLAN_CACHE_CAPACITY)),
             disk: LruCache::new(lru_capacity(DEFAULT_PLAN_CACHE_CAPACITY)),
             persist: false,
@@ -840,7 +820,6 @@ pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
 
         if previous.enabled && !next.enabled {
             cache.map.clear();
-            cache.static_aliases.clear();
             cache.network_aliases.clear();
         } else {
             if next.workspace_budget_bytes < previous.workspace_budget_bytes {
@@ -859,7 +838,6 @@ pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
             if next.capacity < previous.capacity {
                 let capacity = lru_capacity(next.capacity);
                 cache.map.resize(capacity);
-                cache.static_aliases.resize(capacity);
                 cache.network_aliases.resize(capacity);
                 cache.disk.resize(capacity);
             }
@@ -929,7 +907,6 @@ pub fn clear_plan_cache(runtime: &Runtime) {
     __network::with_plan_cache(runtime, |config, slot| {
         let cache = cache_mut(slot, config.workspace_budget_bytes);
         cache.map.clear();
-        cache.static_aliases.clear();
         cache.network_aliases.clear();
         cache.disk.clear();
         cache.persist = false;
@@ -1087,12 +1064,9 @@ where
     D: TensorScalar,
     S: TensorStorage<D>,
 {
-    // The per-operand rank guard must run for every policy: a cache hit can
-    // arrive via `static_alias_matches`, which compares codomain rank only, so a
-    // tensor whose full rank differs from the snapshot reaches here and must
-    // force a replan. Hoisting an early-out above this loop would reuse a plan
-    // built for a different rank — the reason a naive top-level early-out is
-    // unsafe.
+    // The per-operand rank guard runs for every policy: the snapshot is only
+    // comparable leg by leg when the ranks agree, and a tensor of another rank
+    // must force a replan rather than reuse a plan built for a different rank.
     for (operand, dims) in snapshot.iter().enumerate() {
         if tensors[operand].rank() != dims.len() {
             return Ok(true);
@@ -1133,10 +1107,6 @@ where
         ReplanPolicy::BakeOnce => snapshot_is_degenerate(snapshot) && changed,
         ReplanPolicy::DriftFactor(_) => exceeds_factor,
     })
-}
-
-fn static_alias_matches(alias: &StaticAlias, codomain_ranks: &[usize]) -> bool {
-    alias.codomain_ranks == codomain_ranks
 }
 
 enum Lookup {
@@ -1282,134 +1252,6 @@ where
     })
 }
 
-fn install_static_alias(
-    cache: &mut PlanCache,
-    key: StaticTopologyKey,
-    codomain_ranks: Vec<usize>,
-    dims_snapshot: Vec<Vec<usize>>,
-    topology: Arc<NetworkTopology>,
-    cached: &CachedPlan,
-    capacity: NonZeroUsize,
-) {
-    if cache.static_aliases.cap() != capacity {
-        cache.static_aliases.resize(capacity);
-    }
-    let alias = StaticAlias {
-        codomain_ranks: codomain_ranks.clone(),
-        dims_snapshot,
-        topology,
-        planned: Arc::downgrade(&cached.planned),
-        workspaces: Arc::downgrade(&cached.workspaces),
-    };
-    if let Some(aliases) = cache.static_aliases.get_mut(&key) {
-        if let Some(existing) = aliases
-            .iter_mut()
-            .find(|existing| static_alias_matches(existing, &codomain_ranks))
-        {
-            *existing = alias;
-        } else {
-            aliases.push(alias);
-        }
-    } else {
-        cache.static_aliases.put(key, vec![alias]);
-    }
-}
-
-/// Static macro planning over reduced typed operands. `codomain_ranks` are
-/// from the original expressions and guard trace/conj lowering; dimensions
-/// and the structural plan come from `tensors` after call-local trace lowering.
-///
-/// Hits, misses, promotions and static aliases record the lookup, not the
-/// execution, so every caller decides each metadata rejection of its operands
-/// before calling this (#1371). A later execution failure is then a runtime
-/// fault of a plan that stays valid for these operands: the lookup stays
-/// counted, and only the workspace leased for that call is quarantined.
-///
-/// Why not count a hit only after a successful execution: a miss publishes
-/// the fresh plan before it runs, and withdrawing a valid plan (or its hit)
-/// on a provider or device fault would only cost the next call a search.
-pub(crate) fn get_or_plan_static<R, D, S>(
-    spec: &'static StaticTopologySpec,
-    tensors: &[&TensorMap<R, D, S>],
-    codomain_ranks: &[usize],
-    optimizer: &Optimizer,
-    make_network: impl FnOnce() -> Result<Network, Error>,
-) -> Result<CachedPlan, HostNetworkError<R>>
-where
-    R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
-    D: TensorScalar,
-    S: TensorStorage<D>,
-{
-    let Some(runtime) = tensors.first().map(|tensor| tensor.runtime()) else {
-        return Err(Error::InvalidArgument(
-            "network execution requires at least one operand".to_string(),
-        )
-        .into());
-    };
-    let key = StaticTopologyKey {
-        spec,
-        optimizer: topology_optimizer(optimizer),
-    };
-    let lookup = __network::with_plan_cache(
-        runtime,
-        |config, slot| -> Result<Lookup, HostNetworkError<R>> {
-            if !config.enabled {
-                return Ok(Lookup::Disabled);
-            }
-            let Some(cache) = existing_cache_mut(slot) else {
-                return Ok(Lookup::Miss);
-            };
-            let Some(aliases) = cache.static_aliases.peek(&key) else {
-                return Ok(Lookup::Miss);
-            };
-            let Some(alias) = aliases
-                .iter()
-                .find(|alias| static_alias_matches(alias, codomain_ranks))
-            else {
-                return Ok(Lookup::Miss);
-            };
-            if needs_replan_tensors(config.replan, &alias.dims_snapshot, tensors)? {
-                return Ok(Lookup::Miss);
-            }
-            let Some(cached) = alias.cached() else {
-                return Ok(Lookup::Miss);
-            };
-            let topology = alias.topology.clone();
-            cache.static_aliases.promote(&key);
-            Ok(match promote_if_resident(cache, &topology, cached) {
-                Some(cached) => Lookup::Hit(cached),
-                None => Lookup::Miss,
-            })
-        },
-    )?;
-    if let Lookup::Hit(cached) = lookup {
-        return Ok(cached);
-    }
-
-    let network = make_network().map_err(HostNetworkError::<R>::from)?;
-    if matches!(lookup, Lookup::Disabled) {
-        return plan_uncached(&network, tensors, optimizer);
-    }
-    plan_through_topology(
-        runtime,
-        &network,
-        tensors,
-        optimizer,
-        |cache, snapshot, topology, cached, capacity| {
-            install_static_alias(
-                cache,
-                key.clone(),
-                codomain_ranks.to_vec(),
-                snapshot,
-                topology,
-                cached,
-                capacity,
-            )
-        },
-    )
-}
-
 /// One uncached plan, for a Runtime whose plan cache is disabled.
 fn plan_uncached<R, D, S>(
     network: &Network,
@@ -1457,10 +1299,10 @@ where
         .collect::<Result<_, _>>()?;
     let topology = topology_for(network, tensors, optimizer);
 
-    // A hit carries the entry's planning-time dims: the static alias must
-    // measure drift from them, not from this caller's dims, or each site that
+    // A hit carries the entry's planning-time dims: the alias must measure
+    // drift from them, not from this caller's dims, or each network that
     // reaches the entry through a topology hit would re-base the snapshot and
-    // let drift compound to factor² across sites (#1740).
+    // let drift compound to factor² across networks (#1740).
     enum Outcome {
         Hit(CachedPlan, Vec<Vec<usize>>),
         Replan,
@@ -1633,7 +1475,7 @@ mod tests {
     }
 
     /// Plan-cache state a metadata rejection must leave as it was: every
-    /// counter and workspace statistic, and the static aliases.
+    /// counter and workspace statistic, and the network aliases.
     #[derive(Debug, PartialEq)]
     struct CacheState {
         stats: super::PlanCacheStats,
@@ -1847,20 +1689,15 @@ mod tests {
         let runtime = tenet::typed::Runtime::builder().build().unwrap();
         let o = rejections(&runtime);
         let tensors = [&o.a, &o.b];
-        let spec: &'static super::StaticTopologySpec =
-            Box::leak(Box::new(super::StaticTopologySpec {
-                inputs: &[&["i", "j"], &["j", "k"]],
-                conj: &[false, false],
-                codomain_splits: &[Some(1), Some(1)],
-                output: &["i", "k"],
-                output_codomain_rank: Some(1),
-                contracted: &[&[None, None], &[Some((0, 1)), None]],
-            }));
-        let cached =
-            super::get_or_plan_static(spec, &tensors, &[1, 1], &Default::default(), || {
-                spec.network()
-            })
-            .unwrap();
+        let network = Network::new(
+            vec![labels(&["i", "j"]), labels(&["j", "k"])],
+            vec![false, false],
+            vec![Some(1), Some(1)],
+            labels(&["i", "k"]),
+            Some(1),
+        )
+        .unwrap();
+        let cached = super::get_or_plan_network(&network, &tensors, &Default::default()).unwrap();
         cached.execute_host(&tensors).unwrap();
         let warm = super::plan_cache_stats(&runtime);
         assert_eq!(warm.idle_workspaces, 1, "a success recycles its lease");
@@ -1887,7 +1724,7 @@ mod tests {
     /// inadmissible from metadata alone — a contracted leg of another sector
     /// structure or of the wrong duality, or a non-symmetric braiding that
     /// contracts — is rejected before the plan-cache lookup on the miss,
-    /// topology-hit and alias-hit paths: counters, workspaces and static
+    /// topology-hit and alias-hit paths: counters, workspaces and network
     /// aliases stay as they were, and the error is one text on every path,
     /// the typed `contract`'s for braiding.
     #[test]

@@ -16,10 +16,9 @@ package is packaged and inspected before it is published.
 4. `tenet-operations`
 5. `tenet-tensors`
 6. `tenet-matrixalgebra`
-7. `tenet-macros`
-8. `tenet-rs`
-9. `tenet-network`
-10. `tenet-category-data`
+7. `tenet-rs`
+8. `tenet-network`
+9. `tenet-category-data`
 
 ## Checks for each package
 

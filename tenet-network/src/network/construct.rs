@@ -549,13 +549,12 @@ impl Network {
             unreachable!("a validated Network has at least one operand")
         };
 
-        static_operand_preflight(
+        network_operand_preflight(
             tensors,
             &self.inputs,
             &self.conj,
             &self.codomain_splits,
-            &[],
-            Some(&self.contracted),
+            &self.contracted,
         )?;
         let mut lowered_labels = Vec::with_capacity(tensors.len());
         let mut infos = Vec::with_capacity(tensors.len());

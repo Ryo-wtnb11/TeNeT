@@ -682,8 +682,7 @@ where
     /// Everything [`Self::trace_pairs`] decides before the device lease — the
     /// pair list, duality, storage kind, the Host compile and placement —
     /// with the compiled structure kept for [`CudaTracePairs::execute`];
-    /// `None` for an empty pair list. Lets `tensor!` decide every trace of a
-    /// network before the first one allocates, at no second compile.
+    /// `None` for an empty pair list.
     pub(crate) fn prepare_trace_pairs(
         &self,
         pairs: &[(usize, usize)],

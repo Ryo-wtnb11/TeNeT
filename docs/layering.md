@@ -125,7 +125,7 @@ consumer adapts every crate the same way.
 | `tenet-matrixalgebra` | Per-sector factorization stages over a mode-generic factor-space authority. |
 | `tenet-dense` | The only adapter onto tenferro: dense executors, sessions and device placement. |
 | `tenet` (`tenet-rs`) | Typed facade: `TensorMap`, the eager and prepared APIs, and `Runtime`. |
-| `tenet-network`, `tenet-macros` | Network contraction and `tensor!`. |
+| `tenet-network` | Labeled network contraction (`Network::contract`), planning and the plan cache. |
 
 **Target structure-layer caches.** Four caches, mirroring TensorKit's
 `@cached` set at cfaa073 (#2014):
@@ -179,7 +179,6 @@ flowchart TB
     subgraph facade["Facade"]
         RS["<b>tenet-rs</b> (tenet)<br/>TensorMap, eager and prepared APIs, Runtime"]
         NET["<b>tenet-network</b><br/>network contraction"]
-        MAC["<b>tenet-macros</b><br/>tensor!"]
     end
     subgraph exec["Execution"]
         MA["<b>tenet-matrixalgebra</b><br/>per-sector factorization stages"]
@@ -198,7 +197,6 @@ flowchart TB
     end
 
     NET --> RS
-    NET --> MAC
     RS --> MA
     RS --> TT
     RS --> OP

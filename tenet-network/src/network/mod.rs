@@ -3,8 +3,9 @@
 //! This is the execution half rewritten for the current user layer: the
 //! planner ([`NetworkIR`], [`DenseCostModel`], [`ContractionPlan`]) is pure
 //! structure, and each planned pairwise step lowers to
-//! typed contraction plus orientation/final permutation calls. The `tensor!`
-//! macro enters the same typed schedule directly.
+//! typed contraction plus orientation/final permutation calls.
+//! [`Network::contract`] runs the same typed schedule through the Runtime's
+//! plan cache.
 
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
@@ -29,7 +30,7 @@ use tenet::typed::OperationError;
 use tenet::typed::{
     ContractSpec, GradedSpace, TensorMap, TypedAdjointSpace, TypedSpaceModeDispatch,
     TypedTensorContractDispatch, TypedTensorModeDispatch, TypedTensorRootDispatch,
-    TypedTensorTraceDispatch, TypedTensorTransformDispatch,
+    TypedTensorTransformDispatch,
 };
 #[cfg(feature = "cuda")]
 use tenet::typed::{CudaPayload, CudaStorage};
@@ -54,7 +55,6 @@ mod execute;
 mod leg_contract_tests;
 mod preflight;
 mod schedule;
-mod static_contract;
 #[cfg(test)]
 mod typed_replay_tests;
 
@@ -69,7 +69,6 @@ mod typed_replay_tests;
 use execute::*;
 use preflight::*;
 use schedule::*;
-use static_contract::*;
 
 // `HostNetworkModeDispatch` was directly in this module before the split and
 // `crate::plancache` names it at `crate::network::HostNetworkModeDispatch`;
@@ -79,60 +78,12 @@ pub(crate) use dispatch::HostNetworkModeDispatch;
 
 pub use eager::NetworkOperand;
 pub use execute::{NetworkExecutionWorkspace, PlannedNetwork};
-pub use preflight::static_network_operand_preflight;
-pub use static_contract::{
-    contract_static_network, contract_static_trace_network, normalize_tensor_operand,
-    StaticNetworkOperand, StaticTraceNetworkOperand,
-};
-
-/// Compile-time topology emitted by [`tensor!`].
-#[doc(hidden)]
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub struct StaticTopologySpec {
-    pub inputs: &'static [&'static [&'static str]],
-    pub conj: &'static [bool],
-    pub codomain_splits: &'static [Option<usize>],
-    pub output: &'static [&'static str],
-    pub output_codomain_rank: Option<usize>,
-    /// The contracted leg pairing, resolved once at macro expansion: for each
-    /// operand and each *written* axis, the earlier `(operand, written axis)`
-    /// carrying the same label, or `None` when this axis is the label's first
-    /// occurrence. Shaped exactly like `inputs`.
-    ///
-    /// Written, not lowered, coordinates: the lowering rotates a `conj`
-    /// operand by its codomain rank, which is a runtime property of the
-    /// tensor, so the preflight applies that rotation per pair in O(1).
-    pub contracted: &'static [&'static [Option<(usize, usize)>]],
-}
-
-impl StaticTopologySpec {
-    pub(crate) fn network(&self) -> Result<Network, Error> {
-        Network::new(
-            self.inputs
-                .iter()
-                .map(|labels| {
-                    labels
-                        .iter()
-                        .map(|label| TemporaryLabel::from(*label))
-                        .collect()
-                })
-                .collect(),
-            self.conj.to_vec(),
-            self.codomain_splits.to_vec(),
-            self.output
-                .iter()
-                .map(|label| TemporaryLabel::from(*label))
-                .collect(),
-            self.output_codomain_rank,
-        )
-    }
-}
 
 /// A labeled tensor network: per-operand label lists (+ conj markers) and
 /// the requested output labels with their codomain/domain split.
 ///
-/// Labels are expression-local identifiers supplied by a caller (or by the
-/// `tensor!` macro); there is no public einsum-string parser. Build with
+/// Labels are caller-supplied strings, one list per operand; there is no
+/// public einsum-string parser. Build with
 /// [`Network::new`], then either contract eagerly through the Runtime's plan
 /// cache with [`Network::contract`], or plan explicitly with
 /// [`Network::plan`] / [`Network::plan_with`] and run

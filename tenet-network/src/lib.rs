@@ -70,10 +70,7 @@ pub use error::{
 pub use ir::{HyperEdge, NetworkIR, TensorNode};
 pub use labels::{LabelOccurrence, TemporaryLabel, TensorAxis, TensorId};
 pub use network::{
-    contract_static_network, contract_static_trace_network, normalize_tensor_operand,
-    static_network_operand_preflight, Network, NetworkExecutionWorkspace, NetworkOperand,
-    PlannedNetwork, StaticNetworkOperand, StaticTopologySpec, StaticTraceNetworkOperand,
-    SymmetricSliceStats,
+    Network, NetworkExecutionWorkspace, NetworkOperand, PlannedNetwork, SymmetricSliceStats,
 };
 pub use optimizer::{
     ContractionStep, DenseContractionOptimizer, DensePlanCostReport, GreedyDenseOptimizer,
@@ -102,9 +99,6 @@ pub use tenet::plancache::{
     CotengraMinimize, CotengraPythonConfig, CotengraPythonMethod, CotengraSlicingConfig,
 };
 pub use tree::ContractionTree;
-
-/// The `tensor!` @tensor-style contraction macro (from `tenet-macros`).
-pub use tenet_macros::tensor;
 
 /// The workspace tolerance rule for arithmetic test comparisons
 /// (`docs/testing_numerics.md`).
