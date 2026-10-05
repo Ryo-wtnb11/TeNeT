@@ -6,6 +6,7 @@ operation examples and function-level contracts.
 
 | Read for | Document |
 | --- | --- |
+| Layer ownership (symbols, tensors, dense backend) | [Layering and ownership](layering.md) |
 | Architecture and ownership | [TeNeT design](design.md) |
 | Mathematical conventions | [Tensor-map mathematics](../tenet/src/mathematics.md) |
 | Implementing a symmetry provider | [Provider interface](provider_interface.md) |
