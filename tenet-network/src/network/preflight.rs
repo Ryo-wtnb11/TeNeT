@@ -27,9 +27,6 @@ where
     Ok(Some(identity))
 }
 
-/// [`StaticTopologySpec::contracted`] as the preflight borrows it.
-type ContractedAxisPairs<'a> = &'a [&'a [Option<(usize, usize)>]];
-
 /// The metadata preflight of a network, run by `tensor!` before any trace,
 /// plan lookup, lease or transfer and by every typed lowering: each operand's
 /// written rank and `;` split, then every contracted leg against the dual of
@@ -42,18 +39,19 @@ type ContractedAxisPairs<'a> = &'a [&'a [Option<(usize, usize)>]];
 /// the cache key holds no sectors: legs are borrowed from the operands and
 /// compared through the dual map, and no label map is built.
 ///
-/// `contracted` is the pairing a `tensor!` spec resolved at macro expansion
-/// ([`StaticTopologySpec::contracted`]), which makes the pass O(N) in the
-/// total lowered legs N. Without it — a runtime [`Network`], or a traced
-/// lowering, whose pairs are not static — each axis rediscovers its partner
-/// by a scan over the earlier axes, which is O(N²) overall.
-pub(super) fn static_operand_preflight<R, D, S, L>(
+/// `contracted` is the pairing resolved once per topology — by
+/// [`Network::new`] (its `contracted` field) or at `tensor!` expansion
+/// ([`StaticTopologySpec::contracted`]) — which makes the pass O(N) in the
+/// total lowered legs N. Without it — a traced lowering, whose pairs are not
+/// static — each axis rediscovers its partner by a scan over the earlier
+/// axes, which is O(N²) overall.
+pub(super) fn static_operand_preflight<R, D, S, L, C>(
     tensors: &[&TensorMap<R, D, S>],
     inputs: &[impl AsRef<[L]>],
     conj: &[bool],
     splits: &[Option<usize>],
     traces: &[Option<StaticTrace>],
-    contracted: Option<ContractedAxisPairs<'_>>,
+    contracted: Option<&[C]>,
 ) -> Result<(), HostNetworkError<R>>
 where
     R: TypedSectorAdmission,
@@ -61,6 +59,7 @@ where
     D: TensorScalar,
     S: TensorStorage<D>,
     L: PartialEq + std::fmt::Display,
+    C: AsRef<[Option<(usize, usize)>]>,
 {
     typed_operand_identity(tensors)?;
     let trace = |operand: usize| traces.get(operand).and_then(Option::as_ref);
@@ -172,16 +171,17 @@ where
                 .zip(inputs)
                 .enumerate()
                 .all(|(operand, (operand_pairs, labels))| {
+                    let operand_pairs = operand_pairs.as_ref();
                     operand_pairs.len() == labels.as_ref().len()
                         && operand_pairs.iter().flatten().all(|&(previous, written)| {
-                            previous < operand && written < pairs[previous].len()
+                            previous < operand && written < pairs[previous].as_ref().len()
                         })
                 })
     });
     for operand in 0..tensors.len() {
         for axis in 0..rank(operand) {
             let pair = match contracted {
-                Some(pairs) => pairs[operand][written_axis(operand, axis)]
+                Some(pairs) => pairs[operand].as_ref()[written_axis(operand, axis)]
                     .map(|(previous, written)| (previous, lowered_axis(previous, written))),
                 None => scan(operand, axis),
             };

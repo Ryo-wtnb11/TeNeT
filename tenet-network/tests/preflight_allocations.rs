@@ -179,6 +179,35 @@ fn the_warm_preflight_allocates_nothing() {
     eprintln!("warm tensor! call: {count} allocation calls");
 }
 
+/// #2022: a warm `Network::contract` hit costs no more allocations than the
+/// warm `tensor!` call of the same topology: the network's alias lookup
+/// hashes a precomputed topology hash and compares the alias's topology in
+/// place, and its preflight reads the pairing `Network::new` resolved.
+#[test]
+fn a_warm_network_contract_allocates_no_more_than_the_macro() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let [a, b, _] = u1_operands(&runtime);
+    let labels = |names: &[&str]| names.iter().copied().map(TemporaryLabel::from).collect();
+    let network = Network::new(
+        vec![labels(&["i", "j", "m"]), labels(&["m", "k", "l"])],
+        vec![false, false],
+        vec![Some(2), Some(1)],
+        labels(&["i", "j", "k", "l"]),
+        Some(2),
+    )
+    .unwrap();
+    for _ in 0..3 {
+        drop(tensor!([i, j; k, l] = a[i, j; m] * b[m; k, l]).unwrap());
+        drop(network.contract(&[&a, &b]).unwrap());
+    }
+    let (by_macro, output) = allocations(|| tensor!([i, j; k, l] = a[i, j; m] * b[m; k, l]));
+    drop(output.unwrap());
+    let (by_network, output) = allocations(|| network.contract(&[&a, &b]));
+    drop(output.unwrap());
+    eprintln!("warm call: tensor! {by_macro}, Network::contract {by_network} allocation calls");
+    assert!(by_network <= by_macro, "{by_network} > {by_macro}");
+}
+
 /// #1371 / #1372 review P2-1: `PlannedNetwork::execute` and the sliced path
 /// reject a non-symmetric braiding before their first step or accumulator:
 /// with the typed `contract`'s error, allocating no more than the typed

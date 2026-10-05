@@ -20,6 +20,9 @@
 //!   -> PlannedNetwork::execute(&[&TensorMap<R, D>], &mut workspace) -> TensorMap<R, D>
 //! ```
 //!
+//! [`Network::contract`] runs the same pipeline eagerly through the
+//! Runtime's topology-keyed plan cache, which the `tensor!` macro also uses.
+//!
 //! There is **no public einsum-string parser** (decision 4 in
 //! `docs/user_api_design.md`): labels are identifiers supplied by the
 //! [`tensor!`] macro and lower directly to [`NetworkIR`].
@@ -69,8 +72,9 @@ pub use ir::{HyperEdge, NetworkIR, TensorNode};
 pub use labels::{LabelOccurrence, TemporaryLabel, TensorAxis, TensorId};
 pub use network::{
     contract_static_network, contract_static_trace_network, normalize_tensor_operand,
-    static_network_operand_preflight, Network, NetworkExecutionWorkspace, PlannedNetwork,
-    StaticNetworkOperand, StaticTopologySpec, StaticTraceNetworkOperand, SymmetricSliceStats,
+    static_network_operand_preflight, Network, NetworkExecutionWorkspace, NetworkOperand,
+    PlannedNetwork, StaticNetworkOperand, StaticTopologySpec, StaticTraceNetworkOperand,
+    SymmetricSliceStats,
 };
 pub use optimizer::{
     ContractionStep, DenseContractionOptimizer, DensePlanCostReport, GreedyDenseOptimizer,

@@ -1552,7 +1552,11 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
         let host = host_edited
             .execute(&host_refs, &mut Default::default())
             .unwrap();
-        let device = cuda_edited.execute_cuda(&refs).unwrap().to_host().unwrap();
+        let device = cuda_edited
+            .execute_cuda(&refs, &mut NetworkExecutionWorkspace::default())
+            .unwrap()
+            .to_host()
+            .unwrap();
         assert_eq!(device.codomain(), host.codomain(), "{what}");
         assert_eq!(device.domain(), host.domain(), "{what}");
         assert_eq!(
@@ -1587,7 +1591,12 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
         .plan(&[&tensors[0], &tensors[1]], &GreedyDenseOptimizer)
         .unwrap();
     CUDA_NETWORK_CONTRACT_CALLS.with(|calls| calls.set(0));
-    assert!(planned.execute_cuda(&[&tensors[0], &bad_rhs]).is_err());
+    assert!(planned
+        .execute_cuda(
+            &[&tensors[0], &bad_rhs],
+            &mut NetworkExecutionWorkspace::default()
+        )
+        .is_err());
     assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.with(std::cell::Cell::get), 0);
 
     let other_runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
@@ -1602,7 +1611,12 @@ fn cuda_rejections_happen_before_the_first_network_contract() {
     .to_cuda()
     .unwrap();
     CUDA_NETWORK_CONTRACT_CALLS.with(|calls| calls.set(0));
-    assert!(planned.execute_cuda(&[&tensors[0], &foreign]).is_err());
+    assert!(planned
+        .execute_cuda(
+            &[&tensors[0], &foreign],
+            &mut NetworkExecutionWorkspace::default()
+        )
+        .is_err());
     assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.with(std::cell::Cell::get), 0);
 }
 

@@ -48,6 +48,7 @@ use crate::slice::{
 
 mod construct;
 mod dispatch;
+mod eager;
 mod execute;
 #[cfg(test)]
 mod leg_contract_tests;
@@ -76,6 +77,7 @@ use static_contract::*;
 // (not just intra-`network`) path back to it.
 pub(crate) use dispatch::HostNetworkModeDispatch;
 
+pub use eager::NetworkOperand;
 pub use execute::{NetworkExecutionWorkspace, PlannedNetwork};
 pub use preflight::static_network_operand_preflight;
 pub use static_contract::{
@@ -129,12 +131,50 @@ impl StaticTopologySpec {
 /// A labeled tensor network: per-operand label lists (+ conj markers) and
 /// the requested output labels with their codomain/domain split.
 ///
-/// Labels are expression-local identifiers supplied by the [`tensor!`]
-/// macro (or directly by a caller); there is no public einsum-string
-/// parser. Build with [`Network::new`], then [`Network::plan`] +
-/// [`PlannedNetwork::execute`].
+/// Labels are expression-local identifiers supplied by a caller (or by the
+/// `tensor!` macro); there is no public einsum-string parser. Build with
+/// [`Network::new`], then either contract eagerly through the Runtime's plan
+/// cache with [`Network::contract`], or plan explicitly with
+/// [`Network::plan`] / [`Network::plan_with`] and run
+/// [`PlannedNetwork::execute`] (Host) or `PlannedNetwork::execute_cuda`
+/// (device) with a caller-owned [`NetworkExecutionWorkspace`].
 ///
-/// [`tensor!`]: https://docs.rs/tenet-macros
+/// # Intra-operand traces
+///
+/// A label written twice on one operand is rejected by [`Network::new`]:
+/// a network only contracts legs of different operands. Trace first, then
+/// build the network over the traced tensor — `t.trace_pairs(&[(i, j)])`
+/// (read through `t.adjoint()?` first when the operand is conjugated, with
+/// the pairs in the adjoint's leg order) — and label only its remaining
+/// legs:
+///
+/// ```
+/// use std::sync::Arc;
+/// use tenet::sector::{U1FusionRule, U1Irrep};
+/// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+/// use tenet_network::{Network, TemporaryLabel};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let runtime = Runtime::builder().build()?;
+/// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)])?;
+/// // a[i, k; i, l] traced over its first codomain and domain legs, then
+/// // contracted with b[l; m] over `l`.
+/// let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&v, &v], 1)?;
+/// let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v], [&v], 2)?;
+/// let traced = a.trace_pairs(&[(0, 2)])?; // legs [k; l]
+/// let label = |name: &str| TemporaryLabel::new(name);
+/// let network = Network::new(
+///     vec![vec![label("k"), label("l")], vec![label("l"), label("m")]],
+///     vec![false, false],
+///     vec![Some(1), Some(1)],
+///     vec![label("k"), label("m")],
+///     Some(1),
+/// )?;
+/// let result = network.contract(&[&traced, &b])?;
+/// assert_eq!(result.rank(), 2);
+/// # Ok(())
+/// # }
+/// ```
 pub struct Network {
     pub(crate) inputs: Vec<Vec<TemporaryLabel>>,
     pub(crate) conj: Vec<bool>,
@@ -143,6 +183,15 @@ pub struct Network {
     /// Number of output labels on the codomain side (`;` position);
     /// `None` = all-codomain output.
     pub(crate) output_codomain_rank: Option<usize>,
+    /// The contracted leg pairing, resolved once here: for each operand and
+    /// each written axis, the earlier `(operand, written axis)` carrying the
+    /// same label, or `None` for the label's first occurrence. It keeps
+    /// [`Network::contract`]'s per-call metadata preflight linear in the legs.
+    pub(crate) contracted: Vec<Vec<Option<(usize, usize)>>>,
+    /// Hash of every field above except `contracted`, which they determine:
+    /// the [`Network::contract`] plan-cache lookup hashes it with the
+    /// optimizer instead of rehashing the labels on every call.
+    pub(crate) topology_hash: u64,
 }
 
 static NEXT_PLAN_OWNER_TOKEN: AtomicU64 = AtomicU64::new(1);
