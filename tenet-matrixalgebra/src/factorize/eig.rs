@@ -111,6 +111,8 @@ where
         });
     }
     if let Some(plan) = compact_factor_plan(input.space())? {
+        // The plan proves the stacking.
+        require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eigh)?;
         return eigh_full_direct_regions(dense, input, &plan);
     }
     let matricizations =
@@ -120,6 +122,7 @@ where
         record_eigh_input_pack(matrices);
     }
     matricizations.validate_endomorphism_stacking(EIGH_FULL_STACKING)?;
+    require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eigh)?;
     matricizations.validate_hermitian()?;
     with_input_geometry!(&matricizations, |geometry| eigh_full_scattered(
         dense,
@@ -477,6 +480,7 @@ where
     matricizations.validate_endomorphism_stacking(
         "eig_full requires identical endomorphism row/column fusion-tree stacking",
     )?;
+    require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eig)?;
 
     let mut pairs: Vec<FactorPair<D::Eig>> = Vec::with_capacity(matricizations.len());
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
@@ -819,6 +823,7 @@ where
     matricizations.validate_endomorphism_stacking(
         "eigh_vals requires identical endomorphism row/column fusion-tree stacking",
     )?;
+    require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eigh)?;
     matricizations.validate_hermitian()?;
     eigh_vals_spectra(dense, &matricizations)
 }
@@ -863,6 +868,7 @@ where
     matricizations.validate_endomorphism_stacking(
         "eig_vals requires identical endomorphism row/column fusion-tree stacking",
     )?;
+    require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eig)?;
     eig_vals_spectra(dense, &matricizations)
 }
 
@@ -1401,6 +1407,7 @@ where
     matrices
         .validate_endomorphism_stacking(EIGH_FULL_STACKING)
         .map_err(CheckedGenericFactorPlanError::from)?;
+    require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eigh)?;
     matrices
         .validate_hermitian()
         .map_err(CheckedGenericFactorPlanError::from)?;
@@ -1602,6 +1609,7 @@ where
     factor_from_source(
         lease,
         source,
+        None,
         |space, spectrum| eigh_vals_diagonal(&M::authority(space), space, spectrum),
         |dense, input| Ok(eigh_vals_dyn(dense, input)?),
     )
@@ -1625,6 +1633,7 @@ where
     factor_from_source(
         lease,
         source,
+        None,
         |space, spectrum| eig_vals_diagonal(&M::authority(space), space, spectrum),
         |dense, input| Ok(eig_vals_dyn(dense, input)?),
     )
@@ -1644,7 +1653,13 @@ where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
-    factor_from_source(lease, source, M::eigh_full_diagonal, M::eigh_full_dense)
+    factor_from_source(
+        lease,
+        source,
+        None,
+        M::eigh_full_diagonal,
+        M::eigh_full_dense,
+    )
 }
 
 /// General eigendecomposition of `source` in fusion mode `M`, with the route that produced it;
@@ -1660,7 +1675,7 @@ where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
-    factor_from_source(lease, source, M::eig_full_diagonal, M::eig_full_dense)
+    factor_from_source(lease, source, None, M::eig_full_diagonal, M::eig_full_dense)
 }
 
 /// The dense route's eigenvalue check (`validate_complex_eigenvalues`) on a

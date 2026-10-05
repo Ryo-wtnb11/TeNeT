@@ -457,8 +457,8 @@ fn assert_overflow_phase_magnitude(phase: Complex64, magnitude: Complex64, toler
 
 #[test]
 fn compact_diagonal_qr_lq_refuse_nonfinite_and_are_direct_when_overflowing() {
-    // A nonfinite value is refused by the shared finite-input stage (stricter
-    // than the dense QR until #1986). A finite overflowing value is MAK
+    // A nonfinite value is refused by the shared finite-input stage, as on
+    // the dense route (#1986). A finite overflowing value is MAK
     // `_diagonal_qr!` / `lq_diagonal!` (`positive = true`): `q` the phase,
     // `r` (`l`) the magnitude. No materialization and no dense QR.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();

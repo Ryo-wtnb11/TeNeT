@@ -289,12 +289,16 @@ pub(crate) enum FactorFamily {
 }
 
 /// The one finite-input stage of every factorization (#1986): a NaN or an
-/// infinite component is refused before any work, with the same typed error
-/// in both modes.
+/// infinite component is refused with the same typed error in both modes and
+/// on dense and diagonal storage, after the route's structural admission
+/// (bond, endomorphism, stacking, polar shape) and before any numerical work.
 ///
-/// Why stricter than TensorKit, which accepts nonfinite input: TeNeT's dense
-/// routes already fail on it (in the dense backend), so a route that accepted
-/// it would be more lenient than the dense route for the same operation.
+/// Why stricter than TensorKit and MatrixAlgebraKit, which have no uniform
+/// finite-input stage: there, dense eig/eigh refuse it through
+/// backend-specific errors (LAPACK `chkfinite`, or the Hermiticity check),
+/// dense SVD fails in LAPACK only for NaN, and QR/LQ/polar/null and the
+/// diagonal routes propagate it. One typed error costs an `O(n)` scan,
+/// negligible next to the `O(n³)` factorization.
 pub(crate) fn require_finite_factor_input<D: FactorScalar>(
     values: impl IntoIterator<Item = D>,
     family: FactorFamily,
