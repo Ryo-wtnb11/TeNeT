@@ -388,10 +388,7 @@ pub use dispatch::{
     TypedTensorTransformDispatch, TypedTensorTwistDispatch, TypedTruncationDispatch,
 };
 mod factorize;
-pub use factorize::{
-    FusionMode, TypedTensorExpDispatch, TypedTensorInvDispatch, TypedTensorPinvDispatch,
-    TypedTensorSolveDispatch,
-};
+pub use factorize::FusionMode;
 mod checked_generic_contract;
 mod mode_dispatch;
 pub(crate) use checked_generic_contract::TypedFacadeError;

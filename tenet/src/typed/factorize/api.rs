@@ -3,7 +3,7 @@ use super::*;
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorSolveDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: AdvancedLinalgScalar,
 {
     /// Solves `self * x = rhs` independently in every coupled sector, without
@@ -81,9 +81,7 @@ where
             refusal?;
         }
         self.with_leg_roles(rows, cols, |lhs| {
-            rhs.with_leg_roles(rhs_rows, rhs_cols, |right| {
-                <R::Mode as TypedTensorSolveDispatch<R, D>>::solve(lhs, right)
-            })
+            rhs.with_leg_roles(rhs_rows, rhs_cols, |right| lhs.factor_solve(right))
         })
     }
 }
@@ -91,7 +89,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorPinvDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedAdjointSpace<R> + TypedTensorTransformDispatch<R, D>,
     D: AdvancedLinalgScalar,
 {
     /// TensorKit 0.17 / MatrixAlgebraKit `pinv`: the Moore-Penrose
@@ -158,9 +156,7 @@ where
         cols: &[usize],
         rcond: f64,
     ) -> Result<Self, TypedFacadeError<R>> {
-        self.with_leg_roles(rows, cols, |t| {
-            <R::Mode as TypedTensorPinvDispatch<R, D>>::pinv(t, rcond)
-        })
+        self.with_leg_roles(rows, cols, |t| t.factor_pinv(rcond))
     }
 }
 
@@ -994,7 +990,7 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorInvDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedAdjointSpace<R> + TypedTensorTransformDispatch<R, D>,
     D: AdvancedLinalgScalar,
 {
     /// TensorKit 0.17 / MatrixAlgebraKit `inv`: the true inverse `t^-1` of a
@@ -1047,14 +1043,14 @@ where
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn inv(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
-        self.with_leg_roles(rows, cols, <R::Mode as TypedTensorInvDispatch<R, D>>::inv)
+        self.with_leg_roles(rows, cols, Self::factor_inv)
     }
 }
 
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorExpDispatch<R, D> + TypedTensorTransformDispatch<R, D>,
+    R::Mode: FusionMode<R> + TypedTensorTransformDispatch<R, D>,
     D: AdvancedLinalgScalar,
 {
     /// The matrix exponential `exp(t) = Σ_k t^k / k!`, evaluated per coupled
@@ -1125,6 +1121,6 @@ where
     /// view `self.permute(rows, cols)`, and the current split costs nothing
     /// extra (see [`Self::svd_compact`]'s *Leg roles*).
     pub fn exp(&self, rows: &[usize], cols: &[usize]) -> Result<Self, TypedFacadeError<R>> {
-        self.with_leg_roles(rows, cols, <R::Mode as TypedTensorExpDispatch<R, D>>::exp)
+        self.with_leg_roles(rows, cols, Self::factor_exp)
     }
 }

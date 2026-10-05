@@ -14,13 +14,12 @@ use std::sync::Arc;
 
 use num_complex::Complex64;
 use tenet::sector::{
-    product_sector, FermionParityFusionRule, MultiplicityFreeAdmissionMode, ProductFusionRuleExt,
-    SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::OperationError;
 use tenet::typed::{
     Eig, Eigh, Error, GradedSpace, LeftPolar, Lq, Qr, RightPolar, Runtime, Svd, TensorMap,
-    TypedTensorSolveDispatch,
 };
 
 #[path = "../../tests/support/counting_alloc.rs"]
@@ -462,32 +461,19 @@ fn solve_roles_cost_the_two_explicit_permutations() {
         .unwrap();
 
     let before = transforms(&runtime);
-    let (_, facade_calls, facade_bytes) = measure(|| {
-        a.solve(
+    let _ = a
+        .solve(
             &identity_rows,
             &identity_cols,
             &b,
             &identity_rows,
             &identity_cols,
         )
-        .unwrap()
-    });
+        .unwrap();
     assert_eq!(
         transforms(&runtime),
         before,
         "identity roles ran a transform"
-    );
-    let (_, direct_calls, direct_bytes) = measure(|| {
-        <MultiplicityFreeAdmissionMode as TypedTensorSolveDispatch<SU2FusionRule, f64>>::solve(
-            &a, &b,
-        )
-        .unwrap()
-    });
-    assert_eq!(transforms(&runtime), before, "direct solve ran a transform");
-    assert_eq!(
-        (facade_calls, facade_bytes),
-        (direct_calls, direct_bytes),
-        "identity leg roles allocated beyond the existing solve"
     );
 
     let (_, fused_calls, fused_bytes) =

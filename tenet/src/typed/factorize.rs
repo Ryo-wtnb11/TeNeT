@@ -5,11 +5,8 @@ mod exp_solve;
 mod inverse;
 mod mode;
 
+pub use mode::FusionMode;
 use mode::{AdjointRule, FactorOp};
-pub use mode::{
-    FusionMode, TypedTensorExpDispatch, TypedTensorInvDispatch, TypedTensorPinvDispatch,
-    TypedTensorSolveDispatch,
-};
 
 /// The runtime as the seam's executor lease: the checked entries lease a
 /// dense executor only for a dense stage, so a compact diagonal never takes
@@ -473,14 +470,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    /// Wraps one factor the matrix-algebra seam produced into a typed tensor
-    /// map. `BoundDynFactor::into_parts` hands back exactly the pair
-    /// [`TypedTensorBody`] stores, so there is nothing to validate here — the
-    /// seam already certified the space against its own data.
-    fn wrap_bound_factor(&self, factor: BoundDynFactor<R, D>) -> Self {
-        wrap_factor_on(&self.runtime, factor)
-    }
-
     /// The bound space and dense payload of this owned tensor map; a compact
     /// diagonal is densified operation-locally.
     #[allow(clippy::type_complexity)]

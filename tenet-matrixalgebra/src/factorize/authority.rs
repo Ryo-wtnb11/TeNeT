@@ -71,10 +71,13 @@ pub trait FactorSpaceAuthority<R>: sealed::Sealed {
 pub trait FactorMode<R>: sealed::Sealed {
     type Error: From<OperationError>;
 
+    /// The error of [`FactorSpaceAuthority::output_space`].
+    type RootError;
+
     /// The factor-space authority of `space`'s provider.
     fn authority(
         space: &BoundDynamicFusionMapSpace<R>,
-    ) -> impl FactorSpaceAuthority<R, Error = Self::Error> + '_;
+    ) -> impl FactorSpaceAuthority<R, Error = Self::Error, RootError = Self::RootError> + '_;
 
     // The dense QR/LQ stages publish through this mode's own factor-space
     // builders. Why not one builder generic over the authority: #1830
@@ -215,10 +218,11 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     type Error = OperationError;
+    type RootError = OperationError;
 
     fn authority(
         space: &BoundDynamicFusionMapSpace<R>,
-    ) -> impl FactorSpaceAuthority<R, Error = Self::Error> + '_ {
+    ) -> impl FactorSpaceAuthority<R, Error = Self::Error, RootError = Self::RootError> + '_ {
         MfAuthority(space)
     }
 
@@ -389,10 +393,11 @@ where
     R: CheckedGenericFusion,
 {
     type Error = CheckedGenericFactorPlanError<R::Error>;
+    type RootError = CheckedGenericStructureError<R::Error>;
 
     fn authority(
         space: &BoundDynamicFusionMapSpace<R>,
-    ) -> impl FactorSpaceAuthority<R, Error = Self::Error> + '_ {
+    ) -> impl FactorSpaceAuthority<R, Error = Self::Error, RootError = Self::RootError> + '_ {
         CheckedAuthority(space.provider_arc())
     }
 
@@ -695,26 +700,6 @@ pub(super) fn solve_homspace(
     rhs: &FusionTreeHomSpace,
 ) -> FusionTreeHomSpace {
     FusionTreeHomSpace::new(divisor.domain().clone(), rhs.domain().clone())
-}
-
-/// Checked inverse and solve admission: whether `space`'s codomain and domain
-/// have equal coupled-sector dimensions under its provider, queried codomain
-/// first.
-#[doc(hidden)]
-pub fn factor_isomorphic_checked_generic<R: CheckedGenericFusion>(
-    space: &BoundDynamicFusionMapSpace<R>,
-) -> Result<bool, CheckedGenericFactorPlanError<R::Error>> {
-    CheckedAuthority(space.provider_arc()).isomorphic(space)
-}
-
-/// A checked inverse, pseudo-inverse or solve output space over `provider`,
-/// built by the checked factor-space authority.
-#[doc(hidden)]
-pub fn factor_output_space_checked_generic<R: CheckedGenericFusion>(
-    provider: &Arc<R>,
-    homspace: FusionTreeHomSpace,
-) -> Result<BoundDynamicFusionMapSpace<R>, CheckedGenericStructureError<R::Error>> {
-    CheckedAuthority(provider).output_space(homspace)
 }
 
 #[cfg(test)]
