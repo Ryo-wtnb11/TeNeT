@@ -23,7 +23,7 @@ testing = []
 smallvec = { version = "1", features = ["const_generics", "union"] }
 num-complex = "0.4"
 num-traits = "0.2"
-racah = { version = "0.2.3" }
+racah = { version = "0.2.4" }
 
 [dev-dependencies]
 # Enables `testing` for this crate's own integration tests.

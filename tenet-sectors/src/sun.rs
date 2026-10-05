@@ -58,10 +58,6 @@ pub enum SUNFusionRuleError {
         found: [usize; 2],
     },
     MalformedSymbolData(SymbolShapeError),
-    InvalidPivotalPhase {
-        sector: SectorId,
-        value: f64,
-    },
     Racah(racah::sun::SunError),
 }
 
@@ -106,11 +102,6 @@ impl fmt::Display for SUNFusionRuleError {
                 write!(f, "Racah R shape {found:?} does not match {expected:?}")
             }
             Self::MalformedSymbolData(error) => write!(f, "malformed Racah symbol data: {error}"),
-            Self::InvalidPivotalPhase { sector, value } => write!(
-                f,
-                "F-derived pivotal phase for SectorId {} is invalid ({value})",
-                sector.id()
-            ),
             Self::Racah(error) => write!(f, "Racah SU(N) error: {error}"),
         }
     }
@@ -293,9 +284,7 @@ impl CheckedGenericFusion for SUNFusionRule {
     }
 
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
-        let mut labels = self.decode_dynkin(sector)?;
-        labels.reverse();
-        self.encode_dynkin(&labels)
+        self.encode_dynkin(&self.irrep(sector)?.dual().dynkin())
     }
 
     fn try_fusion_channels(
@@ -371,25 +360,7 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
     }
 
     fn try_frobenius_schur_phase_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
-        let a = self.irrep(sector)?;
-        let dual = a.dual();
-        let unit = racah::sun::Irrep::trivial(self.n).map_err(SUNFusionRuleError::Racah)?;
-        let block = racah::sun::f_symbol(&a, &dual, &a, &a, &unit, &unit)
-            .map_err(SUNFusionRuleError::Racah)?;
-        if block.dims() != [1, 1, 1, 1] {
-            return Err(SUNFusionRuleError::UnexpectedFShape {
-                expected: [1, 1, 1, 1],
-                found: block.dims(),
-            });
-        }
-        let coefficient = block.at(0, 0, 0, 0);
-        if !coefficient.is_finite() || coefficient == 0.0 {
-            return Err(SUNFusionRuleError::InvalidPivotalPhase {
-                sector,
-                value: coefficient,
-            });
-        }
-        Ok(coefficient.signum())
+        Ok(self.irrep(sector)?.frobenius_schur_phase())
     }
 
     fn try_f_symbol_generic(
@@ -449,8 +420,7 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
 
 impl CheckedGenericPivotal for SUNFusionRule {
     fn try_twist_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
-        self.irrep(sector)?;
-        Ok(1.0)
+        Ok(self.irrep(sector)?.twist())
     }
 }
 
@@ -543,6 +513,55 @@ const fn gcd_u128(mut left: u128, mut right: u128) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The 0.2.3 adapter derived the FS phase as sign F[a,ā,a,a;1,1], the dual
+    /// by Dynkin reversal, and the twist as a constant; racah 0.2.4 owns all
+    /// three. The racah APIs must reproduce those derivations bit for bit.
+    #[test]
+    fn racah_rigid_data_matches_former_adapter_derivations() {
+        for (n, max_total) in [(2, 6), (3, 3), (4, 2)] {
+            let rule = SUNFusionRule::new(n).unwrap();
+            let unit = racah::sun::Irrep::trivial(n).unwrap();
+            let mut swept = 0;
+            for id in 0.. {
+                let sector = SectorId::new(id);
+                let mut labels = rule.decode_dynkin(sector).unwrap();
+                if labels.iter().sum::<i64>() > max_total {
+                    break;
+                }
+                let a = racah::sun::Irrep::from_dynkin(&labels).unwrap();
+                let dual = a.dual();
+                let block = racah::sun::f_symbol(&a, &dual, &a, &a, &unit, &unit).unwrap();
+                assert_eq!(block.dims(), [1, 1, 1, 1]);
+                let f_sign = block.at(0, 0, 0, 0).signum();
+                assert_eq!(
+                    rule.try_frobenius_schur_phase_scalar(sector)
+                        .unwrap()
+                        .to_bits(),
+                    f_sign.to_bits(),
+                    "SU({n}) {labels:?}"
+                );
+                labels.reverse();
+                assert_eq!(
+                    rule.try_dual(sector).unwrap(),
+                    rule.encode_dynkin(&labels).unwrap()
+                );
+                assert_eq!(
+                    rule.try_twist_scalar(sector).unwrap().to_bits(),
+                    1.0f64.to_bits()
+                );
+                swept += 1;
+            }
+            assert!(swept > n);
+        }
+        // A complex irrep whose phase is not +1 in this gauge.
+        let su4 = SUNFusionRule::new(4).unwrap();
+        let fundamental = su4.encode_dynkin(&[1, 0, 0]).unwrap();
+        assert_eq!(
+            su4.try_frobenius_schur_phase_scalar(fundamental).unwrap(),
+            -1.0
+        );
+    }
 
     #[test]
     fn codec_is_graded_lexicographic_and_roundtrips() {
