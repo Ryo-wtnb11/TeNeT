@@ -363,8 +363,8 @@ impl MultiplicityFreeRigidSymbols for SU2FusionRule {
         1.0 / self.sqrt_dim_scalar(sector)
     }
 
-    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
-        1.0
+    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+        racah::su2_twist(SU2Irrep::from_sector_id(sector).twice_spin() as u32)
     }
 
     fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
@@ -375,6 +375,16 @@ impl MultiplicityFreeRigidSymbols for SU2FusionRule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn racah_twist_matches_former_constant() {
+        for dj in 0..=40 {
+            assert_eq!(
+                SU2FusionRule.twist_scalar(SectorId::new(dj)).to_bits(),
+                1.0f64.to_bits()
+            );
+        }
+    }
 
     #[test]
     fn frozen_su2_symbol_and_channel_oracle() {
