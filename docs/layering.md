@@ -170,6 +170,97 @@ strided copy.
 - Backend gaps are filed as tenferro issues. They are not worked around with
   TeNeT-local kernels.
 
+## Inside TeNeT
+
+TeNeT's crates form tiers. Arrows mean "depends on". The edges come from
+`cargo metadata` (normal dependencies only).
+
+```mermaid
+flowchart TB
+    subgraph facade["Facade"]
+        RS["<b>tenet-rs</b> (tenet)<br/>TensorMap, eager and prepared APIs, Runtime"]
+        NET["<b>tenet-network</b><br/>network contraction"]
+        MAC["<b>tenet-macros</b><br/>tensor!"]
+    end
+    subgraph exec["Execution"]
+        MA["<b>tenet-matrixalgebra</b><br/>per-sector factorization stages"]
+        TT["<b>tenet-tensors</b><br/>contract / trace / transform planning and execution,<br/>tree-transform caches"]
+        OP["<b>tenet-operations</b><br/>tree-transform plans, replay, dense-job descriptions"]
+    end
+    subgraph structure["Structure"]
+        CORE["<b>tenet-core</b><br/>spaces, HomSpaces, fusion trees, checked fusion algebra,<br/>block structure, HomSpace-level caches"]
+    end
+    subgraph provider["Providers"]
+        SEC["<b>tenet-sectors</b><br/>fusion rules, racah adapter"]
+        CAT["<b>tenet-category-data</b><br/>pinned category tables"]
+    end
+    subgraph backend["Backend adapter"]
+        DENSE["<b>tenet-dense</b><br/>dense executors, sessions, placement"]
+    end
+    KRY["<b>tenet-krylov</b><br/>matrix-free solvers (standalone)"]
+
+    NET --> RS
+    NET --> MAC
+    RS --> MA
+    RS --> TT
+    RS --> OP
+    RS --> CORE
+    RS --> DENSE
+    MA --> TT
+    MA --> CORE
+    MA --> DENSE
+    TT --> OP
+    TT --> CORE
+    TT --> DENSE
+    OP --> CORE
+    OP --> DENSE
+    CORE --> SEC
+    CAT --> SEC
+    SEC --> RACAH(["racah"])
+    DENSE --> TF(["tenferro"])
+    OP --> STR(["strided-kernel"])
+    TT --> STR
+```
+
+**Rules inside TeNeT**
+- Dependencies point down the tiers: facade, then execution, then structure,
+  then providers. The structure tier (`tenet-core`) never depends on
+  execution, dense or device code.
+- Exactly one crate touches each external layer:
+  - `tenet-sectors` touches the symbol layer;
+  - `tenet-dense` touches tenferro;
+  - strided-rs is used only where structural data movement happens
+    (`tenet-operations`, `tenet-tensors`).
+- `tenet-krylov` depends on no TeNeT crate. It works against its own vector
+  traits.
+
+**One operation across the crates**
+
+```text
+contract (tenet-rs facade)
+  -> admit and represent (tenet-rs, tenet-core spaces and fusion trees)
+  -> plan_contract: route Core / CopyC / DynamicTree (tenet-tensors)
+  -> tree-transform plan and replay for operands or output (tenet-operations, cached in tenet-tensors)
+  -> grouped GEMM over reduced blocks (tenet-dense -> tenferro)
+
+svd / qr / eigh (tenet-rs facade, one body over FusionMode)
+  -> with_leg_roles and input (tenet-rs)
+  -> per-family `*_from_source::<Mode>` entry and per-sector stages (tenet-matrixalgebra)
+  -> per-sector factorization requests (tenet-dense -> tenferro)
+  -> factor spaces published through the mode's FactorSpaceAuthority (tenet-matrixalgebra, tenet-core)
+```
+
+**Who owns which cache**
+
+| Cache | Crate | Scope |
+| --- | --- | --- |
+| Layout, intern tables, complete-HomSpace structure | `tenet-core` | process-global |
+| Tree-transform structures, plans and contents | `tenet-tensors` | per `Runtime` |
+| Operation-cache policy | `tenet-tensors` | process-global |
+| Elementary symbols (F, CGC, ...) | racah, not TeNeT | process-global |
+
+The target is four caches behind one wrapper (#2014).
+
 ## Interfaces between layers
 
 | From → to | Through | Shape |
