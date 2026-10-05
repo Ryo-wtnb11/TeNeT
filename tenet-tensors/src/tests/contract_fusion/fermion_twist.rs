@@ -273,7 +273,7 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
 }
 
 #[test]
-fn fermion_twist_lands_on_the_smaller_borrowable_operand_by_hand_calculation() {
+fn fermion_twist_folds_into_core_alpha_by_hand_calculation() {
     // Both operands are already in core form, so TensorKit's `blas_contract!`
     // (tensoroperations.jl:398-409 @cfaa073) copies and twists the smaller
     // one, A (5 elements), not B (10): C[a; b w] = sum_k A[a; k] θ_k

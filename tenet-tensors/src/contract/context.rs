@@ -1757,9 +1757,7 @@ where
             target.space.structure(),
             &temporary_structure,
         )?;
-        if let (Some(start), Some(core_time), Some(profile)) =
-            (start, core_time, profile)
-        {
+        if let (Some(start), Some(core_time), Some(profile)) = (start, core_time, profile) {
             profile.core_block_plan_build += core_time;
             profile.resolution_preflight += start.elapsed().saturating_sub(core_time);
         }
