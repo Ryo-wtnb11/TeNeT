@@ -2700,10 +2700,7 @@ fn checked_factor_isomorphism_queries_codomain_then_domain_without_shortcut() {
         let space =
             BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), spy(usize::MAX))
                 .unwrap();
-        assert_eq!(
-            crate::factorize::factor_isomorphic_checked_generic(&space).unwrap(),
-            expected
-        );
+        assert_eq!(factor_isomorphic_checked_generic(&space).unwrap(), expected);
         let total = space.provider().calls.get();
         assert!(total > 0);
 
@@ -2723,7 +2720,7 @@ fn checked_factor_isomorphism_queries_codomain_then_domain_without_shortcut() {
         )
         .unwrap();
         assert!(matches!(
-            crate::factorize::factor_isomorphic_checked_generic(&failing),
+            factor_isomorphic_checked_generic(&failing),
             Err(CheckedGenericFactorPlanError::Provider(LateGenericError(call)))
                 if call == codomain_calls + 1
         ));

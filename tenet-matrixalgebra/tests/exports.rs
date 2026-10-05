@@ -212,7 +212,6 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              eig_vals_dyn eig_vals_from_source \
              eigh_full_dyn eigh_full_from_source \
              eigh_vals_dyn eigh_vals_from_source \
-             factor_isomorphic_checked_generic factor_output_space_checked_generic \
              left_null_from_source \
              left_polar_adjoint_parent_dyn left_polar_adjoint_parent_dyn_checked_generic \
              left_polar_checked_generic left_polar_dyn left_polar_of_diagonal \
@@ -226,7 +225,7 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
              svd_compact_from_source svd_full_adjoint_from_parent svd_full_from_source \
              svd_vals_dyn svd_vals_from_source validate_endomorphism_region_stacking validate_hermitian_regions \
              BoundDynamicTensorRef CheckedGenericFactorPlanError EigFullDyn EighFullDyn \
-             EIGH_FULL_STACKING ExecutorLease FactorMode FactorOutput FactorRoute FactorSource Routed \
+             EIGH_FULL_STACKING ExecutorLease FactorMode FactorOutput FactorRoute FactorSpaceAuthority FactorSource Routed \
              SvdFactorsDyn SvdFullFactorsDyn \
              sector_matricization_diagnostic SectorMatricizationDiagnostic \
              exp_dyn exp_pade13_direct_into_dyn inv_direct_dyn inv_direct_into_dyn \

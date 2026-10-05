@@ -61,6 +61,15 @@ where
     svd_vals_from_source::<CheckedGenericAdmissionMode, _, _, _, _>(lease, source)
 }
 
+// The checked inverse and solve admission, read through the mode's
+// factor-space authority.
+fn factor_isomorphic_checked_generic<R: CheckedGenericFusion>(
+    space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<bool, CheckedGenericFactorPlanError<R::Error>> {
+    use crate::factorize::{FactorMode, FactorSpaceAuthority};
+    <CheckedGenericAdmissionMode as FactorMode<R>>::authority(space).isomorphic(space)
+}
+
 fn eig_vals_checked_generic<L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,

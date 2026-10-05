@@ -754,8 +754,9 @@ pub(super) fn full_svd_compact_layout<R>(
     true
 }
 
-/// [`TensorMap::wrap_bound_factor`]'s body, free for the same reason as
-/// [`diagonal_factor_on`].
+/// Wraps one factor the matrix-algebra seam produced into a typed tensor map
+/// on `runtime`. `BoundDynFactor::into_parts` hands back exactly the pair
+/// [`TypedTensorBody`] stores, so the seam's own certification suffices.
 pub(super) fn wrap_factor_on<R, E>(
     runtime: &Runtime,
     factor: BoundDynFactor<R, E>,

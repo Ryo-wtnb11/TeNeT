@@ -1370,7 +1370,7 @@ fn compact_reciprocal_32_matches_julia_bitwise() {
 
 /// `inv`/`pinv` of a singular (exactly zero) compact entry is still the
 /// caller-mistake `InvalidArgument` the compact arm has always reported
-/// (`tenet/src/typed.rs::inv_multiplicity_free`), unaffected by which
+/// (`tenet/src/typed/fusion_tree.rs::inv_spectrum`), unaffected by which
 /// reciprocal algorithm the nonzero branch uses. The literal Julia port is
 /// never reached for a zero entry because of this preflight, so it is not
 /// itself required to special-case zero (Julia's own `inv(0.0+0.0im)` is

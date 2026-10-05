@@ -44,7 +44,6 @@ pub mod seam {
         diagonal_bond_bound_space_like, diagonal_bond_bound_space_on_source_checked_generic,
         diagonal_bond_data, eig_full_dyn, eig_full_from_source, eig_vals_dyn, eig_vals_from_source,
         eigh_full_dyn, eigh_full_from_source, eigh_vals_dyn, eigh_vals_from_source,
-        factor_isomorphic_checked_generic, factor_output_space_checked_generic,
         left_null_from_source, left_polar_adjoint_parent_dyn,
         left_polar_adjoint_parent_dyn_checked_generic, left_polar_checked_generic, left_polar_dyn,
         left_polar_of_diagonal, lq_compact_from_source, lq_full_from_source,
@@ -57,8 +56,8 @@ pub mod seam {
         svd_full_from_source, svd_vals_dyn, svd_vals_from_source,
         validate_endomorphism_region_stacking, validate_hermitian_regions, BoundDynamicTensorRef,
         CheckedGenericFactorPlanError, EigFullDyn, EighFullDyn, ExecutorLease, FactorMode,
-        FactorOutput, FactorRoute, FactorSource, Routed, SvdFactorsDyn, SvdFullFactorsDyn,
-        EIGH_FULL_STACKING,
+        FactorOutput, FactorRoute, FactorSource, FactorSpaceAuthority, Routed, SvdFactorsDyn,
+        SvdFullFactorsDyn, EIGH_FULL_STACKING,
     };
     #[cfg(feature = "diagnostics")]
     pub use crate::factorize::{sector_matricization_diagnostic, SectorMatricizationDiagnostic};
