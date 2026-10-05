@@ -112,8 +112,8 @@ are the right choice. A persistent Python worker to remove the ~50 ms spawn is
 - **Deployment**: opting in requires a Python environment (uv + cotengra)
   alongside the Rust binary. Built-in greedy has no such requirement.
 - **Sliced execution is explicit**: a cotengra sliced plan is lowered and
-  executed through the Host dense `Network` APIs. `tensor!` does not
-  automatically lower or execute slices.
+  executed through the Host dense `Network` APIs. `Network::contract` does
+  not automatically lower or execute slices.
 - **Windows process-group creation errors**: `command-group` 5.0.1 can fail
   after spawning a suspended child but before returning its handle if Job
   assignment or thread resumption fails. TeNeT's timeout and unwind guarantees

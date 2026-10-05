@@ -268,7 +268,7 @@ pub enum ReplanPolicy {
     /// genuinely flips between dimension regimes.
     ///
     /// The drift is measured from the dimensions the cached order was
-    /// searched at, whichever `tensor!` call site reaches it. With plan
+    /// searched at, whichever call site reaches it. With plan
     /// persistence enabled (`tenet-network`'s `load_plan_cache`), a
     /// drift-replan of a topology that has a persisted order replays that
     /// order rather than searching a new one.
@@ -315,7 +315,7 @@ pub struct PlanCacheConfig {
     pub workspace_budget_bytes: usize,
     /// When to re-plan on dimension drift.
     pub replan: ReplanPolicy,
-    /// Default optimizer for network contraction (the `tensor!` path).
+    /// Default optimizer for network contraction (`Network::contract`).
     pub optimizer: Optimizer,
 }
 

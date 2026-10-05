@@ -95,7 +95,7 @@ for the current selection and resource contract.
 | Fusion-tree spaces and block structure | [`tenet-core`](../tenet-core/) |
 | Structural operations and replay | [`tenet-operations`](../tenet-operations/) and [`tenet-tensors`](../tenet-tensors/) |
 | Dense backend boundary | [`tenet-dense`](../tenet-dense/) |
-| Network planning and `tensor!` | [`tenet-network`](../tenet-network/) |
+| Network planning and contraction | [`tenet-network`](../tenet-network/) |
 
 This page describes the ownership boundary, not a claim that every operation
 works for every provider, scalar, or placement. The current API, method docs,

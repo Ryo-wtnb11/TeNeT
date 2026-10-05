@@ -1,6 +1,6 @@
 //! iTEBD ground-state search for the spin-1/2 antiferromagnetic Heisenberg
 //! chain, U(1)-symmetric (Sz conservation), through the typed `TensorMap` API
-//! and the `tensor!` macro.
+//! and the explicit `Network` API.
 //!
 //! Charge convention: the physical leg has U(1) sectors `[(+1, 1), (-1, 1)]`
 //! with charge `q = 2 Sz` (so `+1` = up, `-1` = down). Total charge is
@@ -28,7 +28,7 @@ use std::time::Instant;
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::Svd;
 use tenet::typed::{Error, GradedSpace, Runtime, TensorMap, Truncation};
-use tenet_network::tensor;
+use tenet_network::{Network, TemporaryLabel};
 
 const E_EXACT: f64 = 0.25 - std::f64::consts::LN_2;
 /// Relative cutoff on kept singular values: values this small get inverted
@@ -37,6 +37,11 @@ const BOND_RTOL: f64 = 1e-8;
 /// `pinv` cutoff (relative to the largest singular value of λ).
 const PINV_RCOND: f64 = 1e-12;
 type Map = TensorMap<U1FusionRule, f64>;
+
+/// One operand's or the output's written labels.
+fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
+    names.iter().copied().map(TemporaryLabel::from).collect()
+}
 
 fn space<const N: usize>(sectors: [(i32, usize); N]) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
@@ -78,8 +83,21 @@ fn bond_update(
     g2: &Map,
     trunc: &Truncation,
 ) -> Result<(Map, Map, Map, f64), Error> {
-    let theta = tensor!([l, pa; pb, r] = l_out[l; x] * g1[x, qa; y] * l_mid[y; z]
-        * g2[z, qb; w] * l_out[w; r] * gate[pa, pb; qa, qb])?;
+    let theta = Network::new(
+        vec![
+            labels(&["l", "x"]),
+            labels(&["x", "qa", "y"]),
+            labels(&["y", "z"]),
+            labels(&["z", "qb", "w"]),
+            labels(&["w", "r"]),
+            labels(&["pa", "pb", "qa", "qb"]),
+        ],
+        vec![false, false, false, false, false, false],
+        vec![Some(1), Some(2), Some(1), Some(2), Some(1), Some(2)],
+        labels(&["l", "pa", "pb", "r"]),
+        Some(2),
+    )?
+    .contract(&[l_out, g1, l_mid, g2, l_out, gate])?;
     // Truncated SVD: factorize, decide the kept bond from the spectrum, then
     // restrict every factor to it.
     let Svd { u, s, vh } = theta.svd_compact(&[0, 1], &[2, 3])?;
@@ -90,18 +108,55 @@ fn bond_update(
     let l_new = s.scale(1.0 / s.norm(2.0)?);
     // Divide the outer λ back out: diagonal inverse via pinv.
     let l_out_inv = l_out.pinv(&[0], &[1], PINV_RCOND)?;
-    let g1_new = tensor!([l, pa; m] = l_out_inv[l; x] * u[x, pa; m])?;
-    let g2_new = tensor!([m, pb; r] = vh[m; pb, x] * l_out_inv[x; r])?;
+    let g1_new = Network::new(
+        vec![labels(&["l", "x"]), labels(&["x", "pa", "m"])],
+        vec![false, false],
+        vec![Some(1), Some(2)],
+        labels(&["l", "pa", "m"]),
+        Some(2),
+    )?
+    .contract(&[&l_out_inv, &u])?;
+    let g2_new = Network::new(
+        vec![labels(&["m", "pb", "x"]), labels(&["x", "r"])],
+        vec![false, false],
+        vec![Some(1), Some(1)],
+        labels(&["m", "pb", "r"]),
+        Some(2),
+    )?
+    .contract(&[&vh, &l_out_inv])?;
     Ok((g1_new, l_new, g2_new, found.error))
 }
 
 /// Energy of one bond, `<θ|h|θ> / <θ|θ>`, on the two-site wavefunction
 /// `θ = λ_out Γ1 λ_mid Γ2 λ_out` (no gate).
 fn bond_energy(h: &Map, l_out: &Map, g1: &Map, l_mid: &Map, g2: &Map) -> Result<f64, Error> {
-    let theta = tensor!([l, pa, pb; r] = l_out[l; x] * g1[x, pa; y] * l_mid[y; z]
-        * g2[z, pb; w] * l_out[w; r])?;
-    let num = tensor!([] = conj(theta)[l, pa, pb; r] * h[pa, pb; qa, qb] * theta[l, qa, qb; r])?
-        .scalar()?;
+    let theta = Network::new(
+        vec![
+            labels(&["l", "x"]),
+            labels(&["x", "pa", "y"]),
+            labels(&["y", "z"]),
+            labels(&["z", "pb", "w"]),
+            labels(&["w", "r"]),
+        ],
+        vec![false, false, false, false, false],
+        vec![Some(1), Some(2), Some(1), Some(2), Some(1)],
+        labels(&["l", "pa", "pb", "r"]),
+        Some(3),
+    )?
+    .contract(&[l_out, g1, l_mid, g2, l_out])?;
+    let num = Network::new(
+        vec![
+            labels(&["l", "pa", "pb", "r"]),
+            labels(&["pa", "pb", "qa", "qb"]),
+            labels(&["l", "qa", "qb", "r"]),
+        ],
+        vec![true, false, false],
+        vec![Some(3), Some(2), Some(3)],
+        labels(&[]),
+        Some(0),
+    )?
+    .contract(&[&theta, h, &theta])?
+    .scalar()?;
     Ok(num / theta.inner(&theta)?)
 }
 

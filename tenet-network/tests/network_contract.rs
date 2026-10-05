@@ -1,6 +1,7 @@
 //! `Network::contract`: eager contraction through the Runtime's plan cache
-//! (#2022 step 1), checked against an independent pairwise oracle, explicit
-//! `plan` + `execute`, and the `tensor!` path it shares the cache with.
+//! (#2022), checked against an independent pairwise oracle, explicit
+//! `plan` + `execute`, and an equal network built anew, which shares its
+//! cached plan.
 
 use std::sync::Arc;
 
@@ -10,9 +11,12 @@ use tenet::sector::{
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     clear_plan_cache, configure_plan_cache, load_plan_cache, plan_cache_stats, save_plan_cache,
-    tensor, GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, PlanCacheConfig,
-    TemporaryLabel,
+    GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, PlanCacheConfig, TemporaryLabel,
 };
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{conj, net, op};
 
 fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
     names.iter().copied().map(TemporaryLabel::from).collect()
@@ -90,14 +94,23 @@ macro_rules! paths {
                 .execute(&[&a, &b, &c], &mut NetworkExecutionWorkspace::default())
                 .unwrap();
             let eager = network.contract(&[&a, &b, &c]).unwrap();
-            let macro_result = tensor!([i; m] = a[i; j] * b[j; k] * c[k; m]).unwrap();
+            let cached_result = net(
+                &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["m"])],
+                &["i"],
+                &["m"],
+            )
+            .contract(&[&a, &b, &c])
+            .unwrap();
             assert_eq!(eager.codomain(), oracle.codomain());
             assert_eq!(eager.domain(), oracle.domain());
             close(&eager.dense_data().unwrap(), &oracle.dense_data().unwrap());
-            close(&planned.dense_data().unwrap(), &oracle.dense_data().unwrap());
+            close(
+                &planned.dense_data().unwrap(),
+                &oracle.dense_data().unwrap(),
+            );
             assert_eq!(
                 eager.dense_data().unwrap(),
-                macro_result.dense_data().unwrap()
+                cached_result.dense_data().unwrap()
             );
 
             // The expectation value, with a conjugated operand: the oracle
@@ -135,7 +148,11 @@ macro_rules! paths {
                 .scalar()
                 .unwrap();
             let network = expectation();
-            let eager = network.contract(&[&psi, &h, &psi]).unwrap().scalar().unwrap();
+            let eager = network
+                .contract(&[&psi, &h, &psi])
+                .unwrap()
+                .scalar()
+                .unwrap();
             let planned = network
                 .plan(&[&psi, &h, &psi], &GreedyDenseOptimizer)
                 .unwrap()
@@ -143,13 +160,22 @@ macro_rules! paths {
                 .unwrap()
                 .scalar()
                 .unwrap();
-            let macro_result = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])
-                .unwrap()
-                .scalar()
-                .unwrap();
+            let cached_result = net(
+                &[
+                    conj(op(&["p"], &["l", "r"])),
+                    op(&["p"], &["q"]),
+                    op(&["q"], &["l", "r"]),
+                ],
+                &[],
+                &[],
+            )
+            .contract(&[&psi, &h, &psi])
+            .unwrap()
+            .scalar()
+            .unwrap();
             close(&[eager], &[oracle]);
             close(&[planned], &[oracle]);
-            assert_eq!(eager.to_bits(), macro_result.to_bits());
+            assert_eq!(eager.to_bits(), cached_result.to_bits());
         }
     };
 }
@@ -218,10 +244,16 @@ fn contract_shares_the_topology_cache_and_counts_hits() {
     assert_eq!(warm.workspace_reuses, 1);
     assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
 
-    // An equal network built anew, and `tensor!` over the same topology,
+    // Equal networks built anew over the same topology
     // reach the same entry.
     chain().contract(&[&a, &b, &c]).unwrap();
-    tensor!([i; m] = a[i; j] * b[j; k] * c[k; m]).unwrap();
+    net(
+        &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["m"])],
+        &["i"],
+        &["m"],
+    )
+    .contract(&[&a, &b, &c])
+    .unwrap();
     let shared = plan_cache_stats(&runtime);
     assert_eq!((shared.misses, shared.hits, shared.entries), (1, 3, 1));
 
@@ -322,6 +354,6 @@ fn contract_orders_round_trip_through_save_and_load() {
     // The second runtime keeps exactly the loaded order under the same
     // topology text. (Greedy search is deterministic, so this does not by
     // itself show the order was read back rather than searched again; the
-    // disk path is the one `tensor!` shares, covered in `plan_cache.rs`.)
+    // disk path is covered in `plan_cache.rs`.)
     assert_eq!(save_plan_cache(&second), saved);
 }

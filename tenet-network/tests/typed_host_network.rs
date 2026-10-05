@@ -1,4 +1,7 @@
-use std::cell::Cell;
+//! Typed Host network contraction through `Network::contract` (#2022):
+//! provider and dtype matrix, high-rank and permuted outputs, `conj`
+//! operands, rejections, and the typed workspace pools of the plan cache.
+
 use std::sync::Arc;
 use tenet::typed::ContractSpec;
 
@@ -13,17 +16,17 @@ use tenet::sector::{
 use tenet::typed::FusionAlgebraError;
 use tenet::typed::{Complex32, Complex64, Error, TensorScalar};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
-use tenet_network::{plan_cache_stats, tensor};
+use tenet_network::plan_cache_stats;
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{conj, net, op};
 
 #[path = "../../tenet/tests/braiding_probe/mod.rs"]
 mod braiding_probe;
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
-
-fn space() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap()
-}
 
 fn u1_space() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
@@ -59,16 +62,6 @@ fn assert_close(lhs: &[f64], rhs: &[f64], tol: f64) {
     }
 }
 
-fn pair<D: TensorScalar>(
-    runtime: &Runtime,
-) -> (TensorMap<U1FusionRule, D>, TensorMap<U1FusionRule, D>) {
-    let space = space();
-    (
-        TensorMap::rand_with_seed(runtime, [&space], [&space], 11).unwrap(),
-        TensorMap::rand_with_seed(runtime, [&space], [&space], 12).unwrap(),
-    )
-}
-
 fn assert_pair<R, D>(a: &TensorMap<R, D>, b: &TensorMap<R, D>)
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -78,11 +71,13 @@ where
         + Send,
     D: TensorScalar + Send + Sync + numerics::Numeric + 'static,
 {
-    // The macro may group the contraction differently from the direct call,
+    // The cached plan may group the contraction differently from the direct call,
     // so the payloads agree under the tolerance rule; the contracted length is
     // bounded by the weighted dimension of the shared leg.
     let terms = a.domain()[0].dim().unwrap().ceil() as usize;
-    let actual = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let actual = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[a, b])
+        .unwrap();
     let expected = a
         .contract(
             b,
@@ -95,7 +90,7 @@ where
         )
         .unwrap();
     numerics::assert_slices_close(
-        "macro vs direct contract",
+        "cached vs direct contract",
         actual.dense_data().unwrap(),
         expected.dense_data().unwrap(),
         terms,
@@ -117,7 +112,7 @@ where
 }
 
 #[test]
-fn typed_host_macro_provider_dtype_matrix_matches_direct_contract() {
+fn typed_host_network_provider_dtype_matrix_matches_direct_contract() {
     let runtime = Runtime::builder().build().unwrap();
     let u1 = u1_space();
     assert_pair_case::<_, f64>(&runtime, &u1, 750_100);
@@ -179,183 +174,6 @@ fn typed_workspace_pool_registry_evicts_cold_types_and_recreates_them() {
     assert!(stats.idle_workspaces <= 2);
 }
 
-#[test]
-fn owned_operands_infer_the_typed_host_path() {
-    let runtime = Runtime::builder().build().unwrap();
-    let (a, b) = pair::<f64>(&runtime);
-    let actual = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
-    let expected = a
-        .contract(
-            &b,
-            &ContractSpec {
-                lhs: &[1],
-                rhs: &[0],
-                codomain: &[0],
-                domain: &[1],
-            },
-        )
-        .unwrap();
-    // Length-2 contraction of random payloads: the macro and the direct call
-    // may round differently, so compare under the tolerance rule.
-    numerics::assert_slices_close(
-        "macro vs direct contract",
-        actual.dense_data().unwrap(),
-        expected.dense_data().unwrap(),
-        2,
-    );
-}
-
-#[test]
-fn borrowed_first_operand_is_normalized_once() {
-    let runtime = Runtime::builder().build().unwrap();
-    let (a, b) = pair::<f64>(&runtime);
-    let a_ref = &a;
-    let actual = tensor!([i; k] = a_ref[i; j] * b[j; k]).unwrap();
-    let expected = a
-        .contract(
-            &b,
-            &ContractSpec {
-                lhs: &[1],
-                rhs: &[0],
-                codomain: &[0],
-                domain: &[1],
-            },
-        )
-        .unwrap();
-    // Length-2 contraction of random payloads: the macro and the direct call
-    // may round differently, so compare under the tolerance rule.
-    numerics::assert_slices_close(
-        "macro vs direct contract",
-        actual.dense_data().unwrap(),
-        expected.dense_data().unwrap(),
-        2,
-    );
-}
-
-#[test]
-fn borrowed_later_operand_is_normalized_once() {
-    let runtime = Runtime::builder().build().unwrap();
-    let (a, b) = pair::<f64>(&runtime);
-    let b_ref = &b;
-    let actual = tensor!([i; k] = a[i; j] * b_ref[j; k]).unwrap();
-    let expected = a
-        .contract(
-            &b,
-            &ContractSpec {
-                lhs: &[1],
-                rhs: &[0],
-                codomain: &[0],
-                domain: &[1],
-            },
-        )
-        .unwrap();
-    // Length-2 contraction of random payloads: the macro and the direct call
-    // may round differently, so compare under the tolerance rule.
-    numerics::assert_slices_close(
-        "macro vs direct contract",
-        actual.dense_data().unwrap(),
-        expected.dense_data().unwrap(),
-        2,
-    );
-}
-
-#[test]
-fn field_operands_are_normalized_without_moving_the_owner() {
-    struct Pair {
-        lhs: TensorMap<U1FusionRule, f64>,
-        rhs: TensorMap<U1FusionRule, f64>,
-    }
-
-    let runtime = Runtime::builder().build().unwrap();
-    let (lhs, rhs) = pair::<f64>(&runtime);
-    let operands = Pair { lhs, rhs };
-    let actual = tensor!([i; k] = operands.lhs[i; j] * operands.rhs[j; k]).unwrap();
-    let expected = operands
-        .lhs
-        .contract(
-            &operands.rhs,
-            &ContractSpec {
-                lhs: &[1],
-                rhs: &[0],
-                codomain: &[0],
-                domain: &[1],
-            },
-        )
-        .unwrap();
-    // Length-2 contraction of random payloads: the macro and the direct call
-    // may round differently, so compare under the tolerance rule.
-    numerics::assert_slices_close(
-        "macro vs direct contract",
-        actual.dense_data().unwrap(),
-        expected.dense_data().unwrap(),
-        2,
-    );
-}
-
-#[test]
-fn operand_expressions_are_evaluated_exactly_once_in_left_to_right_order() {
-    let runtime = Runtime::builder().build().unwrap();
-    let (a, b) = pair::<f64>(&runtime);
-    let order = Cell::new(0);
-    let left = || {
-        assert_eq!(order.get(), 0);
-        order.set(1);
-        a.clone()
-    };
-    let right = || {
-        assert_eq!(order.get(), 1);
-        order.set(2);
-        b.clone()
-    };
-    let actual = tensor!([i; k] = (left())[i; j] * (right())[j; k]).unwrap();
-    assert_eq!(order.get(), 2);
-    let expected = a
-        .contract(
-            &b,
-            &ContractSpec {
-                lhs: &[1],
-                rhs: &[0],
-                codomain: &[0],
-                domain: &[1],
-            },
-        )
-        .unwrap();
-    // Length-2 contraction of random payloads: the macro and the direct call
-    // may round differently, so compare under the tolerance rule.
-    numerics::assert_slices_close(
-        "macro vs direct contract",
-        actual.dense_data().unwrap(),
-        expected.dense_data().unwrap(),
-        2,
-    );
-}
-
-#[test]
-fn parenthesized_temporary_lives_through_execution() {
-    let runtime = Runtime::builder().build().unwrap();
-    let (a, b) = pair::<f64>(&runtime);
-    let actual = tensor!([i; k] = (a.clone())[i; j] * (b.clone())[j; k]).unwrap();
-    let expected = a
-        .contract(
-            &b,
-            &ContractSpec {
-                lhs: &[1],
-                rhs: &[0],
-                codomain: &[0],
-                domain: &[1],
-            },
-        )
-        .unwrap();
-    // Length-2 contraction of random payloads: the macro and the direct call
-    // may round differently, so compare under the tolerance rule.
-    numerics::assert_slices_close(
-        "macro vs direct contract",
-        actual.dense_data().unwrap(),
-        expected.dense_data().unwrap(),
-        2,
-    );
-}
-
 fn assert_high_rank_pairwise<R>(runtime: &Runtime, space: &GradedSpace<R>)
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -368,7 +186,13 @@ where
         TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 101).unwrap();
     let rhs =
         TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 102).unwrap();
-    let actual = tensor!([i, j; m, n] = lhs[i, j; k, l] * rhs[k, l; m, n]).unwrap();
+    let actual = net(
+        &[op(&["i", "j"], &["k", "l"]), op(&["k", "l"], &["m", "n"])],
+        &["i", "j"],
+        &["m", "n"],
+    )
+    .contract(&[&lhs, &rhs])
+    .unwrap();
     let expected = lhs
         .contract(
             &rhs,
@@ -390,7 +214,7 @@ where
 }
 
 #[test]
-fn pairwise_macro_matches_direct_high_rank_contract() {
+fn pairwise_network_matches_direct_high_rank_contract() {
     let runtime = Runtime::builder().build().unwrap();
     assert_high_rank_pairwise(&runtime, &u1_space());
     assert_high_rank_pairwise(&runtime, &su2_space());
@@ -408,7 +232,13 @@ where
         TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 111).unwrap();
     let rhs =
         TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 112).unwrap();
-    let actual = tensor!([j, i; m, n] = lhs[i, j; k, l] * rhs[k, l; m, n]).unwrap();
+    let actual = net(
+        &[op(&["i", "j"], &["k", "l"]), op(&["k", "l"], &["m", "n"])],
+        &["j", "i"],
+        &["m", "n"],
+    )
+    .contract(&[&lhs, &rhs])
+    .unwrap();
     let expected = lhs
         .contract(
             &rhs,
@@ -443,7 +273,9 @@ where
         + Send,
 {
     let tensor = TensorMap::<R, f64>::rand_with_seed(runtime, [space], [space], 121).unwrap();
-    let actual = tensor!([j; i] = tensor[i; j]).unwrap();
+    let actual = net(&[op(&["i"], &["j"])], &["j"], &["i"])
+        .contract(&[&tensor])
+        .unwrap();
     let expected = tensor.permute(&[1], &[0]).unwrap();
     assert_close(
         actual.dense_data().unwrap(),
@@ -453,7 +285,7 @@ where
 }
 
 #[test]
-fn single_tensor_macro_is_a_permute() {
+fn single_tensor_network_is_a_permute() {
     let runtime = Runtime::builder().build().unwrap();
     assert_single_permute(&runtime, &u1_space());
     assert_single_permute(&runtime, &su2_space());
@@ -469,10 +301,18 @@ where
 {
     let tensor =
         TensorMap::<R, f64>::rand_with_seed(runtime, [space, space], [space, space], 131).unwrap();
-    let actual = tensor!([] = conj(tensor)[i, j; k, l] * tensor[i, j; k, l])
-        .unwrap()
-        .scalar()
-        .unwrap();
+    let actual = net(
+        &[
+            conj(op(&["i", "j"], &["k", "l"])),
+            op(&["i", "j"], &["k", "l"]),
+        ],
+        &[],
+        &[],
+    )
+    .contract(&[&tensor, &tensor])
+    .unwrap()
+    .scalar()
+    .unwrap();
     let norm = tensor.norm(2.0).unwrap();
     assert!((actual - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
 }
@@ -494,10 +334,19 @@ where
 {
     let psi = TensorMap::<R, f64>::rand_with_seed(runtime, [space], [space, space], 141).unwrap();
     let h = TensorMap::<R, f64>::rand_with_seed(runtime, [space], [space], 142).unwrap();
-    let actual = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])
-        .unwrap()
-        .scalar()
-        .unwrap();
+    let actual = net(
+        &[
+            conj(op(&["p"], &["l", "r"])),
+            op(&["p"], &["q"]),
+            op(&["q"], &["l", "r"]),
+        ],
+        &[],
+        &[],
+    )
+    .contract(&[&psi, &h, &psi])
+    .unwrap()
+    .scalar()
+    .unwrap();
     let h_psi = h
         .contract(
             &psi,
@@ -542,7 +391,8 @@ fn wrong_input_codomain_split_is_rejected() {
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 161).unwrap();
     let rhs =
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 162).unwrap();
-    let result = tensor!([i; k] = lhs[i, j;] * rhs[j; k]);
+    let result =
+        net(&[op(&["i", "j"], &[]), op(&["j"], &["k"])], &["i"], &["k"]).contract(&[&lhs, &rhs]);
     assert!(matches!(result, Err(Error::InvalidArgument(_))));
 }
 
@@ -574,7 +424,8 @@ fn contracted_leg_degeneracy_mismatch_spells_out_both_legs() {
     let rhs =
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&rhs_space], [&rhs_space], 164)
             .unwrap();
-    let message = tensor!([i; k] = lhs[i; j] * rhs[j; k])
+    let message = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&lhs, &rhs])
         .unwrap_err()
         .to_string();
     assert!(
@@ -585,50 +436,11 @@ fn contracted_leg_degeneracy_mismatch_spells_out_both_legs() {
     assert!(message.contains("operand 1 leg 0"), "{message}");
 }
 
-#[test]
-fn factorization_fields_and_tuple_fields_contract_without_parentheses() {
-    let runtime = Runtime::builder().build().unwrap();
-    let space = u1_space();
-    let tensor =
-        TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space, &space], [&space], 401)
-            .unwrap();
-    let svd = tensor.svd_compact(&[0, 1], &[2]).unwrap();
-    let bare = tensor!([i, j; m] = svd.u[i, j; k] * svd.s[k; l] * svd.vh[l; m]).unwrap();
-    let parenthesized =
-        tensor!([i, j; m] = (svd.u)[i, j; k] * (svd.s)[k; l] * (svd.vh)[l; m]).unwrap();
-    assert_close(
-        bare.dense_data().unwrap(),
-        parenthesized.dense_data().unwrap(),
-        1e-15,
-    );
-    assert_close(
-        bare.dense_data().unwrap(),
-        tensor.dense_data().unwrap(),
-        1e-10,
-    );
-
-    let norm_squared = tensor!([] = conj(svd.u)[i, j; k] * svd.u[i, j; k])
-        .unwrap()
-        .scalar()
-        .unwrap();
-    let norm = svd.u.norm(2.0).unwrap();
-    assert!((norm_squared - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
-
-    let tenet::typed::Qr { q, r } = tensor.qr_compact(&[0, 1], &[2]).unwrap();
-    let qr = (q, r);
-    let recomposed = tensor!([i, j; m] = qr.0[i, j; k] * qr.1[k; m]).unwrap();
-    assert_close(
-        recomposed.dense_data().unwrap(),
-        tensor.dense_data().unwrap(),
-        1e-10,
-    );
-}
-
-/// #1372: the Host `tensor!` pairwise step is the typed `contract`, so a
+/// #1372: the Host `Network::contract` pairwise step is the typed `contract`, so a
 /// non-symmetric (unbraided or anyonic) rule is rejected with its one error
 /// even for the canonical, crossing-free network, which is exactly `compose`
 /// (still admitted).
-fn assert_host_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
+fn assert_host_network_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
     let runtime = Runtime::builder().build().unwrap();
     let leg = GradedSpace::try_new(
         Arc::new(braiding_probe::RealBraidingProbe::<ANYONIC>),
@@ -637,7 +449,9 @@ fn assert_host_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
     .unwrap();
     let lhs = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_372_000).unwrap();
     let rhs = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_372_001).unwrap();
-    let error = tensor!([a; b] = lhs[a; k] * rhs[k; b]).unwrap_err();
+    let error = net(&[op(&["a"], &["k"]), op(&["k"], &["b"])], &["a"], &["b"])
+        .contract(&[&lhs, &rhs])
+        .unwrap_err();
     assert!(
         matches!(
             &error,
@@ -669,7 +483,7 @@ fn assert_host_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
 }
 
 #[test]
-fn host_tensor_macro_contraction_requires_symmetric_braiding() {
-    assert_host_macro_contraction_rejects_non_symmetric::<false>();
-    assert_host_macro_contraction_rejects_non_symmetric::<true>();
+fn host_network_contraction_requires_symmetric_braiding() {
+    assert_host_network_contraction_rejects_non_symmetric::<false>();
+    assert_host_network_contraction_rejects_non_symmetric::<true>();
 }

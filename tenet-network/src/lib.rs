@@ -7,13 +7,12 @@
 //! `tenet-contract` crate: it is **pure structure** over labels and leg
 //! dimensions and never touches tensor data. Explicit execution uses homogeneous
 //! typed Host [`tenet::typed::TensorMap`] operands and a caller-owned typed
-//! workspace. The `tensor!` macro dispatches directly to that typed Host path
-//! (or, for device operands, to the same schedule on CUDA when enabled).
+//! workspace; device operands run the same schedule on CUDA when enabled.
 //!
 //! ## Pipeline
 //!
 //! ```text
-//! tensor!(...) labels  ->  Network (label lists + conj markers + output)
+//! Network::new(labels) ->  Network (label lists + conj markers + output)
 //!   -> NetworkIR + DenseCostModel        (per-label dimension map)
 //!   -> DenseContractionOptimizer         (greedy by default)
 //!   -> ContractionPlan                   (reusable, serializable)
@@ -21,11 +20,11 @@
 //! ```
 //!
 //! [`Network::contract`] runs the same pipeline eagerly through the
-//! Runtime's topology-keyed plan cache, which the `tensor!` macro also uses.
+//! Runtime's topology-keyed plan cache.
 //!
 //! There is **no public einsum-string parser** (decision 4 in
-//! `docs/user_api_design.md`): labels are identifiers supplied by the
-//! [`tensor!`] macro and lower directly to [`NetworkIR`].
+//! `docs/user_api_design.md`): labels are per-operand identifier lists given
+//! to [`Network::new`] and lower directly to [`NetworkIR`].
 //!
 //! ## Follow-ups (intentionally not in this round)
 //!

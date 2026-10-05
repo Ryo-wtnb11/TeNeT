@@ -20,12 +20,16 @@ use tenet::typed::{Complex64, ContractSpec, Error, Runtime, TensorScalar};
 #[cfg(feature = "opt-path")]
 use tenet_network::Optimizer;
 use tenet_network::{
-    configure_plan_cache, plan_cache_stats, slice_plan_for, tensor, DegeneracyRange,
-    DenseCostModel, DenseTensorInfo, GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network,
+    configure_plan_cache, plan_cache_stats, slice_plan_for, DegeneracyRange, DenseCostModel,
+    DenseTensorInfo, GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network,
     NetworkExecutionWorkspace, NetworkIR, PlanCacheConfig, PlannedNetwork, SectorSlice, SlicedPlan,
     SymmetricSliceExecutionError, SymmetricSlicePlan, SymmetricSliceSpec, SymmetricSlicedPlan,
     TemporaryLabel, TensorId,
 };
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{net, op};
 
 fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
     names.iter().copied().map(TemporaryLabel::from).collect()
@@ -147,42 +151,6 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
             .iter()
             .any(|vertex| vertex.get() == 2)
     }));
-    // What: the trace-only macro entrypoint matches the ordinary checked trace
-    // for a tensor that contains a nontrivial multiplicity vertex. Repeated
-    // calls reuse only the reduced plan and workspace.
-    let direct_trace = lhs.trace_pairs(&[(0, 2)]).unwrap();
-    let before_trace_macro = plan_cache_stats(&runtime);
-    let macro_trace = tensor!([b;] = lhs[a, b; a]).unwrap();
-    let after_first_trace_macro = plan_cache_stats(&runtime);
-    let macro_trace_replay = tensor!([b;] = lhs[a, b; a]).unwrap();
-    let after_trace_macro_replay = plan_cache_stats(&runtime);
-    assert_eq!(
-        after_first_trace_macro.entries,
-        before_trace_macro.entries + 1
-    );
-    assert_eq!(
-        after_trace_macro_replay.entries,
-        after_first_trace_macro.entries
-    );
-    assert!(after_trace_macro_replay.hits > after_first_trace_macro.hits);
-    assert_eq!(
-        after_trace_macro_replay.workspaces_created,
-        after_first_trace_macro.workspaces_created
-    );
-    assert_eq!(
-        direct_trace.provider() as *const _,
-        lhs.provider() as *const _
-    );
-    assert_eq!(
-        macro_trace.provider() as *const _,
-        lhs.provider() as *const _
-    );
-    assert_eq!(
-        macro_trace_replay.provider() as *const _,
-        lhs.provider() as *const _
-    );
-    assert_same(&macro_trace, &direct_trace);
-    assert_same(&macro_trace_replay, &direct_trace);
     let middle: TensorMap<_, D> =
         TensorMap::from_subblock_fn(&runtime, [&rhs_leg], [&rhs_leg], |_, _| D::value(17)).unwrap();
     let tail: TensorMap<_, D> =
@@ -288,17 +256,47 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
     );
     assert_same(&drift, &expected);
 
-    let macro_first = tensor!([b, a; e] = lhs[a, b; c] * middle[c; d] * tail[d; e]).unwrap();
-    let macro_replay = tensor!([b, a; e] = lhs[a, b; c] * middle[c; d] * tail[d; e]).unwrap();
+    let cached_first = net(
+        &[
+            op(&["a", "b"], &["c"]),
+            op(&["c"], &["d"]),
+            op(&["d"], &["e"]),
+        ],
+        &["b", "a"],
+        &["e"],
+    )
+    .contract(&[&lhs, &middle, &tail])
+    .unwrap();
+    let cached_replay = net(
+        &[
+            op(&["a", "b"], &["c"]),
+            op(&["c"], &["d"]),
+            op(&["d"], &["e"]),
+        ],
+        &["b", "a"],
+        &["e"],
+    )
+    .contract(&[&lhs, &middle, &tail])
+    .unwrap();
     assert_eq!(
-        macro_first.provider() as *const _,
+        cached_first.provider() as *const _,
         authority_provider(&greedy, &tensors)
     );
-    assert_same(&macro_first, &expected);
-    assert_same(&macro_replay, &expected);
+    assert_same(&cached_first, &expected);
+    assert_same(&cached_replay, &expected);
     // An output that moves `a` across the split is the last step's own
     // ContractSpec; it equals the chain followed by that permute.
-    let moved = tensor!([b; a, e] = lhs[a, b; c] * middle[c; d] * tail[d; e]).unwrap();
+    let moved = net(
+        &[
+            op(&["a", "b"], &["c"]),
+            op(&["c"], &["d"]),
+            op(&["d"], &["e"]),
+        ],
+        &["b"],
+        &["a", "e"],
+    )
+    .contract(&[&lhs, &middle, &tail])
+    .unwrap();
     assert_same(&moved, &chain.permute(&[1], &[0, 2]).unwrap());
 
     let planned = Arc::new(greedy);
@@ -323,7 +321,7 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
 }
 
 #[test]
-fn sun_checked_generic_network_matches_manual_explicit_greedy_macro_and_replay() {
+fn sun_checked_generic_network_matches_manual_explicit_greedy_cached_and_replay() {
     // What: provider-neutral SU(N) conformance over μ=2 keys, both payload
     // dtypes, three operands, nontrivial final order, replay, and concurrency.
     for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
@@ -555,12 +553,17 @@ fn assert_optimizer_does_not_retry_provider_failure(
     let second = &tensors[1];
     let third = &tensors[2];
     let fourth = &tensors[3];
-    let error = tensor!(
-        [a, b; f] = first[a, b; c]
-            * second[c; d]
-            * third[d; e]
-            * fourth[e; f]
+    let error = net(
+        &[
+            op(&["a", "b"], &["c"]),
+            op(&["c"], &["d"]),
+            op(&["d"], &["e"]),
+            op(&["e"], &["f"]),
+        ],
+        &["a", "b"],
+        &["f"],
     )
+    .contract(&[first, second, third, fourth])
     .unwrap_err();
     match failure {
         PlanningFailure::Dual => {
@@ -924,16 +927,17 @@ fn checked_generic_sliced_late_provider_failure_is_typed_and_recovers() {
 }
 
 #[test]
-fn checked_generic_static_trace_failure_stays_typed_and_does_not_publish_cache_state() {
-    // What: a provider error during trace lowering returns before a static plan
-    // or replay workspace is published, and the same expression can recover.
+fn checked_generic_trace_provider_failure_stays_typed_and_recovers() {
+    // What: a provider error inside `trace_pairs`, the first step of the
+    // two-step trace-then-network form, returns the typed provider error,
+    // and the same trace succeeds once the provider recovers.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(InjectedGeneric::new());
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
     let tensor: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
     provider.arm_symbol(1);
-    let error = tensor!([;] = tensor[a; a]).unwrap_err();
+    let error = tensor.trace_pairs(&[(0, 1)]).unwrap_err();
     assert!(
         matches!(
             error,
@@ -941,12 +945,9 @@ fn checked_generic_static_trace_failure_stays_typed_and_does_not_publish_cache_s
         ),
         "{error:?}"
     );
-    let stats = plan_cache_stats(&runtime);
-    assert_eq!(stats.entries, 0);
-    assert_eq!(stats.workspaces_created, 0);
 
     provider.reset_symbols();
-    let traced = tensor!([;] = tensor[a; a]).unwrap();
+    let traced = tensor.trace_pairs(&[(0, 1)]).unwrap();
     assert_eq!(traced.provider() as *const _, provider.as_ref() as *const _);
 }
 
@@ -1072,9 +1073,15 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
     let bc: TensorMap<_, Complex64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| Complex64::new(3.0, -1.0))
             .unwrap();
-    let first = tensor!([i; k] = a64[i; j] * b64[j; k]).unwrap();
-    let second = tensor!([i; k] = a64[i; j] * b64[j; k]).unwrap();
-    let complex = tensor!([i; k] = ac[i; j] * bc[j; k]).unwrap();
+    let first = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a64, &b64])
+        .unwrap();
+    let second = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a64, &b64])
+        .unwrap();
+    let complex = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&ac, &bc])
+        .unwrap();
     assert_eq!(first.dense_data().unwrap(), second.dense_data().unwrap());
     assert_eq!(
         complex.dense_data().unwrap(),
@@ -1103,7 +1110,9 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
             ..runtime.plan_cache_config()
         },
     );
-    let uncached = tensor!([i; k] = a64[i; j] * b64[j; k]).unwrap();
+    let uncached = net(&[op(&["i"], &["j"]), op(&["j"], &["k"])], &["i"], &["k"])
+        .contract(&[&a64, &b64])
+        .unwrap();
     assert_eq!(uncached.dense_data().unwrap(), first.dense_data().unwrap());
 
     let lazy = a64.adjoint().unwrap();

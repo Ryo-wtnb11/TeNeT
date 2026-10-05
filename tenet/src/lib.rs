@@ -19,12 +19,12 @@
 //! A [`typed::Runtime`] owns the shared execution state: the per-rule
 //! contraction/tree-transform contexts, the dense backend (selectable per
 //! [`typed::LinalgBackend`]), and the
-//! contraction-plan cache the `tensor!` frontend keys by network topology.
+//! contraction-plan cache `tenet-network` keys by network topology.
 //!
 //! **Parallelism.** A `Runtime` is cheap to clone across threads. Standalone
 //! operations normally lease independent per-rule contexts and, for
 //! factorizations, dense executors instead of holding the Runtime's coarse state
-//! mutex for the full operation. The `tensor!` path uses plan-local workspace
+//! mutex for the full operation. Cached network contraction uses plan-local workspace
 //! pools. Pool checkout and return, plan-cache and structural-store access, and
 //! dense providers may still synchronize; an injected non-mintable executor
 //! serializes factorization through the Runtime state lock. Device operations

@@ -9,7 +9,7 @@
 //!   (b) `perthread` — each thread builds its own `Runtime`. No shared lock;
 //!       the expected ~linear arm, the throughput ceiling to compare against.
 //!   (c) `network` — shared `Runtime`, with the same typed operands through the
-//!       `tensor!` cached-plan path.
+//!       `Network::contract` cached-plan path.
 //!
 //! **Why a fixed CPU budget.** Scaling numbers only mean something if the
 //! outer threads are the ONLY source of parallelism — otherwise inner BLAS /
@@ -36,7 +36,25 @@ use tenet::typed::ContractSpec;
 
 use tenet::sector::{SU2FusionRule, SU2Irrep};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
-use tenet_network::tensor;
+use tenet_network::{Network, TemporaryLabel};
+
+/// One operand's or the output's written labels.
+fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
+    names.iter().copied().map(TemporaryLabel::from).collect()
+}
+
+/// `[i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]`, built once per measured
+/// loop so the loop times only the cached contraction.
+fn pair_network() -> Network {
+    Network::new(
+        vec![labels(&["i", "j", "k", "l"]), labels(&["k", "l", "m", "n"])],
+        vec![false, false],
+        vec![Some(2), Some(2)],
+        labels(&["i", "j", "m", "n"]),
+        Some(2),
+    )
+    .expect("network")
+}
 
 fn env_usizes(key: &str, default: &[usize]) -> Vec<usize> {
     match std::env::var(key) {
@@ -111,9 +129,10 @@ fn build_runtime() -> Runtime {
 /// given runtime, single-threaded, before any timed region.
 fn warm(rt: &Runtime, d: usize) {
     let (a, b) = make_pair(rt, d, 1);
+    let network = pair_network();
     for _ in 0..8 {
         black_box(contract_once(&a, &b));
-        black_box(tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).expect("warm net"));
+        black_box(network.contract(&[&a, &b]).expect("warm net"));
     }
 }
 
@@ -191,12 +210,10 @@ fn main() {
                             }
                             if arm == "network" {
                                 let (a, b) = make_pair(&rt, d, seed);
+                                let network = pair_network();
                                 let start = Instant::now();
                                 for _ in 0..m {
-                                    black_box(
-                                        tensor!([i, j; p, q] = a[i, j; k, l] * b[k, l; p, q])
-                                            .expect("net"),
-                                    );
+                                    black_box(network.contract(&[&a, &b]).expect("net"));
                                 }
                                 start.elapsed()
                             } else {

@@ -1,7 +1,9 @@
 # tenet-network
 
-The user-facing home of `tensor!` and explicit tensor-network planning.
-`NetworkIR`, `Network`, `PlannedNetwork`, `ContractionPlan`, `Network::plan`,
+The user-facing home of labeled tensor networks: build a `Network` from
+per-operand labels and contract it with `Network::contract`, which plans
+through the Runtime's cache. `NetworkIR`, `PlannedNetwork`,
+`ContractionPlan`, `Network::plan`,
 optimizer traits, and slicing types let expert users inspect or reuse structural plans;
 TeNeT executes the resulting plan locally.
 

@@ -8,7 +8,7 @@ use super::*;
 /// contraction/`compose`/`otimes`/`cat`, the structural transforms
 /// (`permute`, `braid`, `transpose`, `repartition`, `twist`, `flip`),
 /// `restrict_leg`/`embed_leg`/`diagview`, trace, and
-/// `tensor!` network execution.
+/// network execution.
 ///
 /// Factorizations need [`FactorizationScalar`]; matrix functions, inverses,
 /// solves and the general eigendecomposition need [`AdvancedLinalgScalar`].

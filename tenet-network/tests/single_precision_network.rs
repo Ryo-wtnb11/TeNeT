@@ -1,7 +1,7 @@
-//! `tensor!` network execution on single-precision payloads (#1315).
+//! `Network::contract` network execution on single-precision payloads (#1315).
 //!
 //! Admitting `f32`/`Complex32` to `TensorScalar` opens every `D: TensorScalar`
-//! bound in `tenet-network` at once, so the macro path needs its own oracle.
+//! bound in `tenet-network` at once, so the cached network path needs its own oracle.
 //! It is the same one the typed base suite uses: the `f64`/`Complex64` result
 //! of the same network on the widened input, where the twin is filled from one
 //! 24-bit stream so the widening is exact.
@@ -15,7 +15,10 @@ use std::sync::Arc;
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
-use tenet_network::tensor;
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{net, op};
 
 const K: f64 = 32.0;
 
@@ -131,24 +134,49 @@ macro_rules! network_suite {
                 let (c, wc) = twin!(&runtime, $narrow, $wide, [&leg], [&leg], 7_003);
                 let terms = wa.dense_data().unwrap().len();
 
-                let got = tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap();
-                let expected = tensor!([i; l] = wa[i; j] * wb[j; k] * wc[k; l]).unwrap();
-                assert_payloads_agree("u1 chain", got.dense_data().unwrap(), expected.dense_data().unwrap(), terms);
+                let got = net(
+                    &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["l"])],
+                    &["i"],
+                    &["l"],
+                )
+                .contract(&[&a, &b, &c])
+                .unwrap();
+                let expected = net(
+                    &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["l"])],
+                    &["i"],
+                    &["l"],
+                )
+                .contract(&[&wa, &wb, &wc])
+                .unwrap();
+                assert_payloads_agree(
+                    "u1 chain",
+                    got.dense_data().unwrap(),
+                    expected.dense_data().unwrap(),
+                    terms,
+                );
 
                 // The plan cache is keyed by structure, not payload dtype; a
                 // second execution must therefore still produce the same
                 // result at this precision.
-                let again = tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap();
+                let again = net(
+                    &[op(&["i"], &["j"]), op(&["j"], &["k"]), op(&["k"], &["l"])],
+                    &["i"],
+                    &["l"],
+                )
+                .contract(&[&a, &b, &c])
+                .unwrap();
                 assert_eq!(again.dense_data().unwrap(), got.dense_data().unwrap());
 
-                // Full trace through the macro, on the single-precision lane.
-                let traced = tensor!([] = a[i; i]).unwrap().scalar().unwrap();
-                let wide_traced = tensor!([] = wa[i; i]).unwrap().scalar().unwrap();
-                let tolerance =
-                    K * (terms as f64).sqrt() * f64::from(f32::EPSILON) * wide_traced.wide().norm().max(1.0);
+                // Full trace, on the single-precision lane.
+                let traced = a.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
+                let wide_traced = wa.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
+                let tolerance = K
+                    * (terms as f64).sqrt()
+                    * f64::from(f32::EPSILON)
+                    * wide_traced.wide().norm().max(1.0);
                 assert!(
                     (traced.wide() - wide_traced.wide()).norm() <= tolerance,
-                    "u1 macro trace: {:?} against {:?}",
+                    "u1 trace: {:?} against {:?}",
                     traced.wide(),
                     wide_traced.wide()
                 );
@@ -169,11 +197,31 @@ macro_rules! network_suite {
                 let (b, wb) = twin!(&runtime, $narrow, $wide, [&leg], [&leg, &leg], 7_102);
                 let terms = wa.dense_data().unwrap().len();
 
-                let got = tensor!([i, j; l, m] = a[i, j; k] * b[k; l, m]).unwrap();
-                let expected = tensor!([i, j; l, m] = wa[i, j; k] * wb[k; l, m]).unwrap();
-                assert_payloads_agree("su2 network", got.dense_data().unwrap(), expected.dense_data().unwrap(), terms);
+                let got = net(
+                    &[op(&["i", "j"], &["k"]), op(&["k"], &["l", "m"])],
+                    &["i", "j"],
+                    &["l", "m"],
+                )
+                .contract(&[&a, &b])
+                .unwrap();
+                let expected = net(
+                    &[op(&["i", "j"], &["k"]), op(&["k"], &["l", "m"])],
+                    &["i", "j"],
+                    &["l", "m"],
+                )
+                .contract(&[&wa, &wb])
+                .unwrap();
+                assert_payloads_agree(
+                    "su2 network",
+                    got.dense_data().unwrap(),
+                    expected.dense_data().unwrap(),
+                    terms,
+                );
                 assert!(
-                    got.dense_data().unwrap().iter().any(|&value| value.wide().norm() > 1e-3),
+                    got.dense_data()
+                        .unwrap()
+                        .iter()
+                        .any(|&value| value.wide().norm() > 1e-3),
                     "the SU(2) fixture must produce a nonzero result"
                 );
             }

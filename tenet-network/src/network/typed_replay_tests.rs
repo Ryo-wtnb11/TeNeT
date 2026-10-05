@@ -163,8 +163,20 @@ fn assert_rank_four_orientation_replay<D>(
         (&[2][..], &[0, 1, 3][..])
     );
 
-    let execute =
-        |x, y, z| crate::tensor!([e; b] = x[a, f; c] * y[c; b, d] * z[a, f, d; e]).unwrap();
+    let labels = |names: &[&str]| names.iter().copied().map(TemporaryLabel::from).collect();
+    let cached = Network::new(
+        vec![
+            labels(&["a", "f", "c"]),
+            labels(&["c", "b", "d"]),
+            labels(&["a", "f", "d", "e"]),
+        ],
+        vec![false; 3],
+        vec![Some(2), Some(1), Some(3)],
+        labels(&["e", "b"]),
+        Some(1),
+    )
+    .unwrap();
+    let execute = |x, y, z| cached.contract(&[x, y, z]).unwrap();
     for (x, y, z, expected) in [
         (&first.0, &first.1, &first.2, &first.3),
         (&second.0, &second.1, &second.2, &second.3),
@@ -2022,7 +2034,19 @@ fn plan_with_rejects_a_plan_that_does_not_cover_the_network() {
     let b = TensorMap::rand_with_seed(&runtime, [&j], [&k], 32).unwrap();
     let c = TensorMap::rand_with_seed(&runtime, [&x], [&y], 33).unwrap();
     let d = TensorMap::rand_with_seed(&runtime, [&y], [&x], 34).unwrap();
-    let s = crate::tensor!([] = c[x; y] * d[y; x]).unwrap();
+    let s = Network::new(
+        vec![
+            vec![TemporaryLabel::from("x"), TemporaryLabel::from("y")],
+            vec![TemporaryLabel::from("y"), TemporaryLabel::from("x")],
+        ],
+        vec![false, false],
+        vec![Some(1), Some(1)],
+        Vec::new(),
+        Some(0),
+    )
+    .unwrap()
+    .contract(&[&c, &d])
+    .unwrap();
     let network = |inputs: Vec<Vec<&str>>, splits: Vec<Option<usize>>| {
         let n = inputs.len();
         Network::new(

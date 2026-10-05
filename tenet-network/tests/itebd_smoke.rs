@@ -8,7 +8,10 @@ use std::sync::Arc;
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::Truncation;
 use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap};
-use tenet_network::tensor;
+
+#[path = "../../tests/support/network.rs"]
+mod network_support;
+use network_support::{conj, net, op};
 
 const E_EXACT: f64 = 0.25 - std::f64::consts::LN_2;
 type Map = TensorMap<U1FusionRule, f64>;
@@ -50,8 +53,19 @@ fn bond_update(
     g2: &Map,
     trunc: &Truncation,
 ) -> (Map, Map, Map) {
-    let theta = tensor!([l, pa; pb, r] = l_out[l; x] * g1[x, qa; y] * l_mid[y; z]
-        * g2[z, qb; w] * l_out[w; r] * gate[pa, pb; qa, qb])
+    let theta = net(
+        &[
+            op(&["l"], &["x"]),
+            op(&["x", "qa"], &["y"]),
+            op(&["y"], &["z"]),
+            op(&["z", "qb"], &["w"]),
+            op(&["w"], &["r"]),
+            op(&["pa", "pb"], &["qa", "qb"]),
+        ],
+        &["l", "pa"],
+        &["pb", "r"],
+    )
+    .contract(&[l_out, g1, l_mid, g2, l_out, gate])
     .unwrap();
     let Svd { u, s, vh } = theta.svd_compact(&[0, 1], &[2, 3]).unwrap();
     let found = s.domain()[0]
@@ -66,19 +80,50 @@ fn bond_update(
     let vh = vh.restrict_leg(&[(0, &found.selection)]).unwrap();
     let l_new = s.scale(1.0 / s.norm(2.0).unwrap());
     let l_out_inv = l_out.pinv(&[0], &[1], 1e-12).unwrap();
-    let g1_new = tensor!([l, pa; m] = l_out_inv[l; x] * u[x, pa; m]).unwrap();
-    let g2_new = tensor!([m, pb; r] = vh[m; pb, x] * l_out_inv[x; r]).unwrap();
+    let g1_new = net(
+        &[op(&["l"], &["x"]), op(&["x", "pa"], &["m"])],
+        &["l", "pa"],
+        &["m"],
+    )
+    .contract(&[&l_out_inv, &u])
+    .unwrap();
+    let g2_new = net(
+        &[op(&["m"], &["pb", "x"]), op(&["x"], &["r"])],
+        &["m", "pb"],
+        &["r"],
+    )
+    .contract(&[&vh, &l_out_inv])
+    .unwrap();
     (g1_new, l_new, g2_new)
 }
 
 fn bond_energy(h: &Map, l_out: &Map, g1: &Map, l_mid: &Map, g2: &Map) -> f64 {
-    let theta = tensor!([l, pa, pb; r] = l_out[l; x] * g1[x, pa; y] * l_mid[y; z]
-        * g2[z, pb; w] * l_out[w; r])
+    let theta = net(
+        &[
+            op(&["l"], &["x"]),
+            op(&["x", "pa"], &["y"]),
+            op(&["y"], &["z"]),
+            op(&["z", "pb"], &["w"]),
+            op(&["w"], &["r"]),
+        ],
+        &["l", "pa", "pb"],
+        &["r"],
+    )
+    .contract(&[l_out, g1, l_mid, g2, l_out])
     .unwrap();
-    let num = tensor!([] = conj(theta)[l, pa, pb; r] * h[pa, pb; qa, qb] * theta[l, qa, qb; r])
-        .unwrap()
-        .scalar()
-        .unwrap();
+    let num = net(
+        &[
+            conj(op(&["l", "pa", "pb"], &["r"])),
+            op(&["pa", "pb"], &["qa", "qb"]),
+            op(&["l", "qa", "qb"], &["r"]),
+        ],
+        &[],
+        &[],
+    )
+    .contract(&[&theta, h, &theta])
+    .unwrap()
+    .scalar()
+    .unwrap();
     num / theta.inner(&theta).unwrap()
 }
 
@@ -137,19 +182,44 @@ fn neel_product_state_contracts_with_the_full_gate() {
     assert_eq!(a.leg_dims().unwrap(), vec![1, 2, 1]);
     assert_eq!(a.codomain()[1], p);
 
-    let psi = tensor!([l, pa, pb; r] = a[l, pa; m] * b[m, pb; r]).unwrap();
+    let psi = net(
+        &[op(&["l", "pa"], &["m"]), op(&["m", "pb"], &["r"])],
+        &["l", "pa", "pb"],
+        &["r"],
+    )
+    .contract(&[&a, &b])
+    .unwrap();
     assert!((psi.norm(2.0).unwrap() - 1.0).abs() < 1e-12);
 
     // theta = h |psi>: this contraction used to be rejected with a leg
     // dimension mismatch against the gate's full physical leg.
-    let theta = tensor!([l, pa, pb; r] = a[l, qa; m] * b[m, qb; r] * h[pa, pb; qa, qb]).unwrap();
+    let theta = net(
+        &[
+            op(&["l", "qa"], &["m"]),
+            op(&["m", "qb"], &["r"]),
+            op(&["pa", "pb"], &["qa", "qb"]),
+        ],
+        &["l", "pa", "pb"],
+        &["r"],
+    )
+    .contract(&[&a, &b, &h])
+    .unwrap();
 
     // h |up dn> = -1/4 |up dn> + 1/2 |dn up>, so <psi|h|psi> = -1/4 and
     // |h psi|^2 = 1/16 + 1/4 = 5/16.
-    let energy = tensor!([] = conj(psi)[l, pa, pb; r] * h[pa, pb; qa, qb] * psi[l, qa, qb; r])
-        .unwrap()
-        .scalar()
-        .unwrap();
+    let energy = net(
+        &[
+            conj(op(&["l", "pa", "pb"], &["r"])),
+            op(&["pa", "pb"], &["qa", "qb"]),
+            op(&["l", "qa", "qb"], &["r"]),
+        ],
+        &[],
+        &[],
+    )
+    .contract(&[&psi, &h, &psi])
+    .unwrap()
+    .scalar()
+    .unwrap();
     assert!((energy - (-0.25)).abs() < 1e-12, "energy = {energy}");
     let theta_norm = theta.norm(2.0).unwrap();
     assert!(

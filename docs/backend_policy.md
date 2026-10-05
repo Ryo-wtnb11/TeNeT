@@ -136,7 +136,7 @@ written within one lease, which is every operation that returns a new tensor.
 
 A buffer bound in an earlier lease and written again later — a
 `*_into` destination, or reused scratch (`CudaContractScratch`,
-pooled `tensor!` network intermediates) — spans two leases, so the lock alone
+pooled network intermediates) — spans two leases, so the lock alone
 cannot order it: another thread that synced past its bind in between would
 read the later write unfinished, or overwrite it while an earlier read is
 still in flight (#1391; reproduced on an A100 for overwrite destinations).

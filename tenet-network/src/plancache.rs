@@ -1600,6 +1600,7 @@ mod tests {
     #[cfg(feature = "cotengra-python")]
     use super::{topology_optimizer, Optimizer};
     use crate::network::NetworkExecutionWorkspace;
+    use crate::{Network, TemporaryLabel};
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Barrier};
     #[cfg(feature = "cotengra-python")]
@@ -1643,7 +1644,7 @@ mod tests {
             aliases: super::__network::with_extension_slot(runtime, |slot| {
                 super::existing_cache_mut(slot).map(|cache| {
                     cache
-                        .static_aliases
+                        .network_aliases
                         .iter()
                         .map(|(_, aliases)| aliases.len())
                         .sum::<usize>()
@@ -1655,7 +1656,7 @@ mod tests {
     type Call<'a> = &'a dyn Fn() -> Result<(), String>;
 
     /// #1371: `reject` is rejected on the plan-cache miss, topology-hit and
-    /// static-alias-hit paths of the `tensor!` site that `accept` publishes,
+    /// alias-hit paths of the `Network::contract` call that `accept` publishes,
     /// leaving [`CacheState`] and `extra` (device transfers) unchanged, with
     /// one error on every path, which is returned.
     fn assert_rejected_before_the_lookup<X: PartialEq + std::fmt::Debug>(
@@ -1669,7 +1670,7 @@ mod tests {
             super::__network::with_extension_slot(runtime, |slot| {
                 super::existing_cache_mut(slot)
                     .unwrap()
-                    .static_aliases
+                    .network_aliases
                     .clear();
             })
         };
@@ -1702,39 +1703,49 @@ mod tests {
         error
     }
 
-    /// The two `tensor!` sites of the #1371 tests, one untraced and one with a
-    /// trace pre-step whose reduced network is `[i; m] * [m; k]`. Each is one
-    /// spec for every provider and storage, so a probe operand meets the plan
-    /// a U(1) operand of the same leg dimensions published.
-    fn pair<R, S>(a: &TensorMap<R, f64, S>, b: &TensorMap<R, f64, S>) -> Result<(), String>
-    where
-        TensorMap<R, f64, S>: crate::StaticNetworkOperand,
-        <TensorMap<R, f64, S> as crate::StaticNetworkOperand>::Error: std::fmt::Display,
-    {
-        crate::tensor!([i; k] = a[i; j] * b[j; k])
-            .map(drop)
-            .map_err(|error| error.to_string())
+    fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
+        names.iter().copied().map(TemporaryLabel::from).collect()
     }
 
-    fn traced<R, S>(t: &TensorMap<R, f64, S>, u: &TensorMap<R, f64, S>) -> Result<(), String>
+    /// The two networks of the #1371 tests: `[i; k] = a[i; j] * b[j; k]`, and
+    /// a contraction of two codomain legs, neither read as a dual,
+    /// `[i; k] = a[i, j;] * b[j, k;]`. Each is one topology for every
+    /// provider and storage, so a probe operand meets the plan a U(1) operand
+    /// of the same leg dimensions published.
+    fn pair<T>(a: &T, b: &T) -> Result<(), String>
     where
-        TensorMap<R, f64, S>: crate::StaticTraceNetworkOperand,
-        <TensorMap<R, f64, S> as crate::StaticNetworkOperand>::Error: std::fmt::Display,
+        T: crate::NetworkOperand,
+        T::Error: std::fmt::Display,
     {
-        crate::tensor!([i; k] = t[j, i; j, m] * u[m; k])
-            .map(drop)
-            .map_err(|error| error.to_string())
+        Network::new(
+            vec![labels(&["i", "j"]), labels(&["j", "k"])],
+            vec![false, false],
+            vec![Some(1), Some(1)],
+            labels(&["i", "k"]),
+            Some(1),
+        )
+        .unwrap()
+        .contract(&[a, b])
+        .map(drop)
+        .map_err(|error| error.to_string())
     }
 
-    /// A contraction of two codomain legs, neither read as a dual.
-    fn codomain_pair<R, S>(a: &TensorMap<R, f64, S>, b: &TensorMap<R, f64, S>) -> Result<(), String>
+    fn codomain_pair<T>(a: &T, b: &T) -> Result<(), String>
     where
-        TensorMap<R, f64, S>: crate::StaticNetworkOperand,
-        <TensorMap<R, f64, S> as crate::StaticNetworkOperand>::Error: std::fmt::Display,
+        T: crate::NetworkOperand,
+        T::Error: std::fmt::Display,
     {
-        crate::tensor!([i; k] = a[i, j;] * b[j, k;])
-            .map(drop)
-            .map_err(|error| error.to_string())
+        Network::new(
+            vec![labels(&["i", "j"]), labels(&["j", "k"])],
+            vec![false, false],
+            vec![Some(2), Some(2)],
+            labels(&["i", "k"]),
+            Some(1),
+        )
+        .unwrap()
+        .contract(&[a, b])
+        .map(drop)
+        .map_err(|error| error.to_string())
     }
 
     /// The operands of the #1371 tests, every leg of dimension 2: `v` has two
@@ -1744,12 +1755,8 @@ mod tests {
         b: T,
         b_sector: T,
         b_dual: T,
-        t: T,
-        u_sector: T,
-        u_dual: T,
         probe_a: P,
         probe_b: P,
-        probe_t: P,
         /// `[x, x;]`, `[x*, x;]` and its two impostors for a contraction of
         /// two undualised codomain legs, `x = {0: 1, 1: 2}`.
         cc_a: T,
@@ -1819,12 +1826,8 @@ mod tests {
             b: u1(&[&v], &[&v], 1_371_001),
             b_sector: u1(&[&w], &[&v], 1_371_002),
             b_dual: u1(&[&v_dual], &[&v], 1_371_003),
-            t: u1(&[&v, &v], &[&v, &v], 1_371_004),
-            u_sector: u1(&[&w], &[&v], 1_371_005),
-            u_dual: u1(&[&v_dual], &[&v], 1_371_006),
             probe_a: probe(1, 1_371_007),
             probe_b: probe(1, 1_371_008),
-            probe_t: probe(2, 1_371_009),
             cc_a: u1(&[&x, &x], &[], 1_371_010),
             cc_b: u1(&[&x_dual, &x], &[], 1_371_011),
             cc_degeneracy: u1(&[&x_degeneracy, &x], &[], 1_371_012),
@@ -1878,21 +1881,19 @@ mod tests {
         );
     }
 
-    /// #1371: a Host `tensor!` whose operands after any trace pre-step are
+    /// #1371: a Host `Network::contract` whose operands are
     /// inadmissible from metadata alone — a contracted leg of another sector
     /// structure or of the wrong duality, or a non-symmetric braiding that
     /// contracts — is rejected before the plan-cache lookup on the miss,
     /// topology-hit and alias-hit paths: counters, workspaces and static
     /// aliases stay as they were, and the error is one text on every path,
-    /// the typed `contract`'s for braiding. A traced network is rejected
-    /// before its trace runs.
+    /// the typed `contract`'s for braiding.
     #[test]
     fn host_metadata_rejections_leave_the_plan_cache_untouched_on_every_path() {
         let runtime = tenet::typed::Runtime::builder().build().unwrap();
         let o = rejections(&runtime);
         let none = || ();
         let accept_pair = || pair(&o.a, &o.b);
-        let accept_traced = || traced(&o.t, &o.b);
         let accept_codomain = || codomain_pair(&o.cc_a, &o.cc_b);
         for (what, accept, reject, label) in [
             (
@@ -1914,18 +1915,6 @@ mod tests {
                 "j",
             ),
             ("duality", &accept_pair, &|| pair(&o.a, &o.b_dual), "j"),
-            (
-                "traced sector",
-                &accept_traced,
-                &|| traced(&o.t, &o.u_sector),
-                "m",
-            ),
-            (
-                "traced duality",
-                &accept_traced,
-                &|| traced(&o.t, &o.u_dual),
-                "m",
-            ),
         ] {
             let error = assert_rejected_before_the_lookup(&runtime, what, accept, reject, &none);
             assert!(
@@ -1949,23 +1938,18 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-        for (what, accept, reject) in [
-            (
-                "non-symmetric",
-                &accept_pair as Call<'_>,
-                &(|| pair(&o.probe_a, &o.probe_b)) as Call<'_>,
-            ),
-            ("traced non-symmetric", &accept_traced, &|| {
-                traced(&o.probe_t, &o.probe_b)
-            }),
-        ] {
-            let error = assert_rejected_before_the_lookup(&runtime, what, accept, reject, &none);
-            assert_eq!(error, contract_error, "{what}");
-        }
+        let error = assert_rejected_before_the_lookup(
+            &runtime,
+            "non-symmetric",
+            &accept_pair,
+            &|| pair(&o.probe_a, &o.probe_b),
+            &none,
+        );
+        assert_eq!(error, contract_error, "non-symmetric");
     }
 
-    /// #1371 on the device: the same rejections, before any trace upload,
-    /// lease or plan lookup, with the Host's error.
+    /// #1371 on the device: the same rejections, before any lease or plan
+    /// lookup, with the Host's error.
     ///
     /// The transfer counters are process-wide: run with `--test-threads=1`.
     #[cfg(feature = "cuda")]
@@ -1980,15 +1964,9 @@ mod tests {
         let h = rejections(&runtime);
         let lift = |tensor: &TensorMap<U1FusionRule, f64>| tensor.to_cuda().unwrap();
         let (a, b, b_sector, b_dual) = (lift(&h.a), lift(&h.b), lift(&h.b_sector), lift(&h.b_dual));
-        let (t, u_sector, u_dual) = (lift(&h.t), lift(&h.u_sector), lift(&h.u_dual));
-        let (probe_a, probe_b, probe_t) = (
-            h.probe_a.to_cuda().unwrap(),
-            h.probe_b.to_cuda().unwrap(),
-            h.probe_t.to_cuda().unwrap(),
-        );
+        let (probe_a, probe_b) = (h.probe_a.to_cuda().unwrap(), h.probe_b.to_cuda().unwrap());
         let transfers = tenet::expert::cuda_transfer_stats;
         let accept_pair = || pair(&a, &b);
-        let accept_traced = || traced(&t, &b);
         let (cc_a, cc_b, cc_degeneracy, cc_flag) = (
             lift(&h.cc_a),
             lift(&h.cc_b),
@@ -1999,7 +1977,6 @@ mod tests {
         // Warm the device context so lazily created state is not attributed
         // to the rejected calls.
         accept_pair().unwrap();
-        accept_traced().unwrap();
         for (what, accept, reject, host) in [
             (
                 "degeneracy",
@@ -2026,28 +2003,10 @@ mod tests {
                 pair(&h.a, &h.b_dual),
             ),
             (
-                "traced sector",
-                &accept_traced,
-                &|| traced(&t, &u_sector),
-                traced(&h.t, &h.u_sector),
-            ),
-            (
-                "traced duality",
-                &accept_traced,
-                &|| traced(&t, &u_dual),
-                traced(&h.t, &h.u_dual),
-            ),
-            (
                 "non-symmetric",
                 &accept_pair,
                 &|| pair(&probe_a, &probe_b),
                 pair(&h.probe_a, &h.probe_b),
-            ),
-            (
-                "traced non-symmetric",
-                &accept_traced,
-                &|| traced(&probe_t, &probe_b),
-                traced(&h.probe_t, &h.probe_b),
             ),
         ] {
             let error =

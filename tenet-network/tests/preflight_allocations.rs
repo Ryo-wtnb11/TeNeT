@@ -10,8 +10,8 @@ use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, TensorMap};
 use tenet_network::{
-    slice_plan_for, static_network_operand_preflight, tensor, DenseCostModel, DenseTensorInfo,
-    GreedyDenseOptimizer, Network, NetworkIR, SlicedPlan, StaticTopologySpec, TemporaryLabel,
+    slice_plan_for, DenseCostModel, DenseTensorInfo, GreedyDenseOptimizer, Network,
+    NetworkExecutionWorkspace, NetworkIR, SlicedPlan, TemporaryLabel,
 };
 
 #[path = "../../tenet/tests/braiding_probe/mod.rs"]
@@ -49,163 +49,79 @@ fn u1_operands(runtime: &Runtime) -> [TensorMap<U1FusionRule, f64>; 3] {
     ]
 }
 
-static PAIR: StaticTopologySpec = StaticTopologySpec {
-    inputs: &[&["i", "j", "m"], &["m", "k", "l"]],
-    conj: &[false, false],
-    codomain_splits: &[Some(2), Some(1)],
-    output: &["i", "j", "k", "l"],
-    output_codomain_rank: Some(2),
-    contracted: &[&[None, None, None], &[Some((0, 2)), None, None]],
-};
-
-/// `conj(b)` is `[v, v; w]`, so it contracts with `b` over all three legs.
-static CONJ_PAIR: StaticTopologySpec = StaticTopologySpec {
-    inputs: &[&["m", "i", "j"], &["m", "i", "j"]],
-    conj: &[true, false],
-    codomain_splits: &[Some(1), Some(1)],
-    output: &[],
-    output_codomain_rank: Some(0),
-    contracted: &[
-        &[None, None, None],
-        &[Some((0, 0)), Some((0, 1)), Some((0, 2))],
-    ],
-};
-
-/// `PAIR` with no precomputed pairing, which a runtime `Network` and a traced
-/// lowering also have: the preflight must fall back to the label scan rather
-/// than skip the space check.
-static UNPAIRED: StaticTopologySpec = StaticTopologySpec {
-    contracted: &[],
-    ..PAIR
-};
-
-/// A pairing that puts both ends of a pair inside one `conj` operand. That
-/// is a trace, which `tensor!` lowers through `StaticTrace`s instead, and the
-/// written order the pairing is in runs opposite to the lowered order the
-/// preflight walks a `conj` operand in, so its endpoints are not the scan's.
-static INTRA_OPERAND: StaticTopologySpec = StaticTopologySpec {
-    inputs: &[&["i", "j", "m"], &["t", "t", "m"]],
-    conj: &[false, true],
-    codomain_splits: &[Some(2), Some(1)],
-    output: &["i", "j"],
-    output_codomain_rank: Some(2),
-    contracted: &[&[None, None, None], &[None, Some((1, 0)), Some((0, 2))]],
-};
-
-/// `PAIR` with an endpoint outside its own pairing, which would panic if it
-/// were indexed.
-static OUT_OF_RANGE: StaticTopologySpec = StaticTopologySpec {
-    contracted: &[&[None, None, None], &[Some((0, 7)), None, None]],
-    ..PAIR
-};
-
-/// #1394: a spec whose pairing does not describe its operands is not trusted.
-/// Skipping a space check is a silent wrong answer, so the preflight falls
-/// back to the scan and still rejects `c`'s `m` leg.
-#[test]
-fn a_spec_without_a_pairing_still_checks_every_contracted_leg() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let [a, b, c] = u1_operands(&runtime);
-    static_network_operand_preflight(&[&a, &b], &UNPAIRED).unwrap();
-    let error = static_network_operand_preflight(&[&a, &c], &UNPAIRED).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("space mismatch for contracted label `m`"),
-        "{error}"
-    );
-
-    // An endpoint outside the pairing is dropped the same way, instead of
-    // panicking where it would be indexed.
-    static_network_operand_preflight(&[&a, &b], &OUT_OF_RANGE).unwrap();
-    let error = static_network_operand_preflight(&[&a, &c], &OUT_OF_RANGE).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("space mismatch for contracted label `m`"),
-        "{error}"
-    );
-
-    // A pair inside one `conj` operand: the preflight walks that operand's
-    // axes in the opposite order, so trusting the pairing would pair the
-    // mirror axes — the `debug_assert!` fires if this one is trusted. It
-    // scans instead, and still rejects `conj(b)`'s `m` leg, whose duality is
-    // the one `b` contracts with, not `conj(b)`.
-    let error = static_network_operand_preflight(&[&a, &b], &INTRA_OPERAND).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("space mismatch for contracted label `m`"),
-        "{error}"
-    );
-}
-
-/// #1371: the preflight a warm plan-cache hit runs on every call allocates
-/// nothing, with and without a `conj` operand, and still rejects a leg of the
-/// wrong duality. It would allocate if it built dualised spaces, label lists
-/// or a label map.
-#[test]
-fn the_warm_preflight_allocates_nothing() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let [a, b, c] = u1_operands(&runtime);
-    // Any lazily created provider or runtime state is built here, not below.
-    static_network_operand_preflight(&[&a, &b], &PAIR).unwrap();
-    static_network_operand_preflight(&[&b, &b], &CONJ_PAIR).unwrap();
-
-    let (count, result) = allocations(|| static_network_operand_preflight(&[&a, &b], &PAIR));
-    assert!(result.is_ok());
-    assert_eq!(count, 0, "untraced preflight");
-    let (count, result) = allocations(|| static_network_operand_preflight(&[&b, &b], &CONJ_PAIR));
-    assert!(result.is_ok());
-    assert_eq!(count, 0, "conj preflight");
-
-    // Non-vacuity: the same check rejects `c`, whose `m` leg has the wrong
-    // duality, and allocates only for that error.
-    let error = static_network_operand_preflight(&[&a, &c], &PAIR).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("space mismatch for contracted label `m`"),
-        "{error}"
-    );
-
-    // Whole warm call, reported for the review ledger (not asserted: it is
-    // dominated by the contraction itself).
-    for _ in 0..3 {
-        drop(tensor!([i, j; k, l] = a[i, j; m] * b[m; k, l]).unwrap());
-    }
-    let (count, output) = allocations(|| tensor!([i, j; k, l] = a[i, j; m] * b[m; k, l]));
-    drop(output.unwrap());
-    eprintln!("warm tensor! call: {count} allocation calls");
-}
-
-/// #2022: a warm `Network::contract` hit costs no more allocations than the
-/// warm `tensor!` call of the same topology: the network's alias lookup
-/// hashes a precomputed topology hash and compares the alias's topology in
-/// place, and its preflight reads the pairing `Network::new` resolved.
-#[test]
-fn a_warm_network_contract_allocates_no_more_than_the_macro() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let [a, b, _] = u1_operands(&runtime);
+fn pair_network() -> Network {
     let labels = |names: &[&str]| names.iter().copied().map(TemporaryLabel::from).collect();
-    let network = Network::new(
+    Network::new(
         vec![labels(&["i", "j", "m"]), labels(&["m", "k", "l"])],
         vec![false, false],
         vec![Some(2), Some(1)],
         labels(&["i", "j", "k", "l"]),
         Some(2),
     )
-    .unwrap();
+    .unwrap()
+}
+
+/// #1371 / #2022: a warm `Network::contract` hit adds no allocation to the
+/// replay it runs. Its alias lookup hashes the topology hash `Network::new`
+/// computed and compares the cached topology in place, and its metadata
+/// preflight reads the pairing `Network::new` resolved: it would allocate if
+/// it built dualised spaces, label lists or a label map. The same replay with
+/// a caller-owned workspace is the baseline.
+#[test]
+fn a_warm_network_contract_allocates_no_more_than_its_replay() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let [a, b, c] = u1_operands(&runtime);
+    let network = pair_network();
+    let planned = network.plan(&[&a, &b], &GreedyDenseOptimizer).unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
     for _ in 0..3 {
-        drop(tensor!([i, j; k, l] = a[i, j; m] * b[m; k, l]).unwrap());
         drop(network.contract(&[&a, &b]).unwrap());
+        drop(planned.execute(&[&a, &b], &mut workspace).unwrap());
     }
-    let (by_macro, output) = allocations(|| tensor!([i, j; k, l] = a[i, j; m] * b[m; k, l]));
+    let (by_replay, output) = allocations(|| planned.execute(&[&a, &b], &mut workspace));
     drop(output.unwrap());
-    let (by_network, output) = allocations(|| network.contract(&[&a, &b]));
+    let (by_contract, output) = allocations(|| network.contract(&[&a, &b]));
     drop(output.unwrap());
-    eprintln!("warm call: tensor! {by_macro}, Network::contract {by_network} allocation calls");
-    assert!(by_network <= by_macro, "{by_network} > {by_macro}");
+    eprintln!("warm call: replay {by_replay}, Network::contract {by_contract} allocation calls");
+    assert!(by_contract <= by_replay, "{by_contract} > {by_replay}");
+
+    // A `conj` operand: the preflight reads its legs through the reversed
+    // written/lowered axis map, still without allocating. `conj(b)` is
+    // `[v, v; w]`, so it contracts with `b` over all three legs.
+    let labels = |names: &[&str]| names.iter().copied().map(TemporaryLabel::from).collect();
+    let conj_pair = Network::new(
+        vec![labels(&["m", "i", "j"]), labels(&["m", "i", "j"])],
+        vec![true, false],
+        vec![Some(1), Some(1)],
+        Vec::new(),
+        Some(0),
+    )
+    .unwrap();
+    let planned = conj_pair.plan(&[&b, &b], &GreedyDenseOptimizer).unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
+    for _ in 0..3 {
+        drop(conj_pair.contract(&[&b, &b]).unwrap());
+        drop(planned.execute(&[&b, &b], &mut workspace).unwrap());
+    }
+    let (by_replay, output) = allocations(|| planned.execute(&[&b, &b], &mut workspace));
+    drop(output.unwrap());
+    let (by_contract, output) = allocations(|| conj_pair.contract(&[&b, &b]));
+    drop(output.unwrap());
+    eprintln!("warm conj call: replay {by_replay}, Network::contract {by_contract}");
+    assert!(
+        by_contract <= by_replay,
+        "conj: {by_contract} > {by_replay}"
+    );
+
+    // Non-vacuity: the same preflight rejects `c`, whose `m` leg has the
+    // wrong duality.
+    let error = network.contract(&[&a, &c]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("space mismatch for contracted label `m`"),
+        "{error}"
+    );
 }
 
 /// #1371 / #1372 review P2-1: `PlannedNetwork::execute` and the sliced path
