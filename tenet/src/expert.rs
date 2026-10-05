@@ -11,9 +11,9 @@
 /// Process-wide structural layout and intern caches: bounded, observable and
 /// resettable between workloads.
 pub use tenet_core::{
-    block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
-    fusion_tree_layout_cache_info, reset_core_intern_tables, BlockStructureInternCacheInfo,
-    CompleteHomSpaceStructureCacheInfo, FusionTreeLayoutCacheInfo,
+    block_structure_intern_cache_info, reset_core_intern_tables, set_structure_cache_byte_budget,
+    structure_cache_info, structure_cache_infos, BlockStructureInternCacheInfo, StructureCacheInfo,
+    StructureCacheKind,
 };
 /// Block views returned by `TensorMap::subblock(s)`, and the placement and
 /// storage contracts of a tensor's buffer.

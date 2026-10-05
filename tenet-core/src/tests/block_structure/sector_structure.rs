@@ -211,20 +211,13 @@ fn expert_cantor_product_keeps_the_encoded_fallback() {
 }
 
 #[test]
-fn fusion_layout_lookup_and_reset_are_concurrent_safe_after_poison() {
-    // What: a poisoned layout lock and concurrent lookup/reset cannot publish
-    // partial layout content or return a structure with the wrong keys/shapes.
+fn fusion_layout_lookup_and_reset_are_concurrent_safe() {
+    // What: concurrent lookup/reset cannot publish partial layout content or
+    // return a structure with the wrong keys/shapes.
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     reset_core_intern_tables();
-    let poisoned = std::panic::catch_unwind(|| {
-        let _write = fusion_tree_layout_cache()
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        panic!("poison fusion layout cache for recovery test");
-    });
-    assert!(poisoned.is_err());
 
     let workers = (0..4)
         .map(|worker| {

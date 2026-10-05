@@ -54,7 +54,7 @@ impl BlockStructure {
 /// [`Self::commit`] only after all later validation has succeeded.
 #[doc(hidden)]
 pub struct PreparedBlockStructure {
-    sector: SectorStructure,
+    sector: Arc<SectorStructure>,
     degeneracy: DegeneracyStructure,
     required_len: usize,
     preview: OnceLock<BlockStructure>,
@@ -78,6 +78,13 @@ impl PreparedBlockStructure {
 
     pub(crate) fn from_parts(
         sector: SectorStructure,
+        degeneracy: DegeneracyStructure,
+    ) -> Result<Self, CoreError> {
+        Self::from_shared_parts(Arc::new(sector), degeneracy)
+    }
+
+    pub(crate) fn from_shared_parts(
+        sector: Arc<SectorStructure>,
         degeneracy: DegeneracyStructure,
     ) -> Result<Self, CoreError> {
         if sector.rank() != degeneracy.rank() {
@@ -116,7 +123,7 @@ impl PreparedBlockStructure {
         self.preview.get_or_init(|| {
             let preview = BlockStructure::from_content(Arc::new(BlockStructureContent {
                 id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
-                sector: self.sector.clone(),
+                sector: Arc::clone(&self.sector),
                 degeneracy: self.degeneracy.clone(),
                 required_len: self.required_len,
                 storage_tiling: StorageTilingProof::default(),
@@ -179,7 +186,7 @@ impl BlockStructure {
     }
 
     pub fn empty(rank: usize) -> Self {
-        let sector = SectorStructure::empty(rank);
+        let sector = Arc::new(SectorStructure::empty(rank));
         let degeneracy = DegeneracyStructure::empty(rank);
         Self::from_content(intern_block_structure_content(sector, degeneracy, 0))
     }
@@ -199,6 +206,16 @@ impl BlockStructure {
         degeneracy: DegeneracyStructure,
     ) -> Result<Self, CoreError> {
         PreparedBlockStructure::from_parts(sector, degeneracy).map(|prepared| prepared.commit())
+    }
+
+    /// [`Self::from_parts`] over a sector structure shared with other
+    /// structures of the same sector layout.
+    pub(crate) fn from_shared_parts(
+        sector: Arc<SectorStructure>,
+        degeneracy: DegeneracyStructure,
+    ) -> Result<Self, CoreError> {
+        PreparedBlockStructure::from_shared_parts(sector, degeneracy)
+            .map(|prepared| prepared.commit())
     }
 
     pub fn into_shared(self) -> Arc<Self> {

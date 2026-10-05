@@ -443,7 +443,7 @@ where
 
     let direct_parts = coupled_subblock_parts_from_leg_degeneracies(homspace, &direct).unwrap();
     let reconstructed_parts = legacy_leg_degeneracy_structure(rule, homspace);
-    assert_eq!(direct_parts.0, *reconstructed_parts.sector_structure());
+    assert_eq!(*direct_parts.0, *reconstructed_parts.sector_structure());
     assert_eq!(direct_parts.1, *reconstructed_parts.degeneracy_structure());
     assert_eq!(
         direct_parts.1.required_len().unwrap(),

@@ -9,6 +9,5 @@ mod layout_caches;
 mod layout_identity;
 mod tensorkit_tree_order;
 
-use checked_layout_builder::*;
 use coupled_dimensions_and_codecs::*;
 use homspace_derivation::*;

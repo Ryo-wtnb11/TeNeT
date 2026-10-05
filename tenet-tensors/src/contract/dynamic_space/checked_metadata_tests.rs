@@ -2,10 +2,10 @@ use super::*;
 use crate::test_support::CACHE_TEST_LOCK;
 use std::cell::Cell;
 use tenet_core::{
-    complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info,
-    FermionParityFusionRule, FusionAlgebraError, FusionProductSpace, Fz2SectorLayout,
-    PackedProductCodec, ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule,
-    SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
+    structure_cache_info, FermionParityFusionRule, FusionAlgebraError, FusionProductSpace,
+    Fz2SectorLayout, PackedProductCodec, ProductFusionRule, ProductSectorCodec,
+    ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, StructureCacheKind,
+    Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
 };
 
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
@@ -750,8 +750,8 @@ fn encoded_cold_invalid_count_does_not_publish_layouts() {
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
     let before = (
-        fusion_tree_layout_cache_info(),
-        complete_hom_space_structure_cache_info(),
+        structure_cache_info(StructureCacheKind::SectorStructure),
+        structure_cache_info(StructureCacheKind::DegeneracyStructure),
     );
 
     let error = DynamicFusionMapSpace::from_degeneracy_shapes(
@@ -770,8 +770,8 @@ fn encoded_cold_invalid_count_does_not_publish_layouts() {
     );
     assert_eq!(
         (
-            fusion_tree_layout_cache_info(),
-            complete_hom_space_structure_cache_info(),
+            structure_cache_info(StructureCacheKind::SectorStructure),
+            structure_cache_info(StructureCacheKind::DegeneracyStructure),
         ),
         before
     );
@@ -804,8 +804,8 @@ fn encoded_existing_candidate_invalid_shape_does_not_publish_again() {
     )
     .unwrap();
     let before = (
-        fusion_tree_layout_cache_info(),
-        complete_hom_space_structure_cache_info(),
+        structure_cache_info(StructureCacheKind::SectorStructure),
+        structure_cache_info(StructureCacheKind::DegeneracyStructure),
     );
 
     let error = DynamicFusionMapSpace::from_degeneracy_shapes(&U1FusionRule, homspace, [vec![1]])
@@ -818,13 +818,17 @@ fn encoded_existing_candidate_invalid_shape_does_not_publish_again() {
             actual: 1,
         })
     );
-    assert_eq!(
-        (
-            fusion_tree_layout_cache_info(),
-            complete_hom_space_structure_cache_info(),
-        ),
-        before
+    // The rejected call looks its layout up (one hit) and publishes nothing.
+    let after = (
+        structure_cache_info(StructureCacheKind::SectorStructure),
+        structure_cache_info(StructureCacheKind::DegeneracyStructure),
     );
+    assert_eq!(after.0.hits(), before.0.hits() + 1);
+    assert_eq!(
+        (after.0.entries(), after.0.misses(), after.0.admissions()),
+        (before.0.entries(), before.0.misses(), before.0.admissions())
+    );
+    assert_eq!(after.1, before.1);
 }
 
 #[test]
@@ -851,8 +855,8 @@ fn encoded_cold_extent_overflow_does_not_publish_layouts() {
         FusionProductSpace::new([SectorLeg::new([(vacuum, 2)], false)]),
     );
     let before = (
-        fusion_tree_layout_cache_info(),
-        complete_hom_space_structure_cache_info(),
+        structure_cache_info(StructureCacheKind::SectorStructure),
+        structure_cache_info(StructureCacheKind::DegeneracyStructure),
     );
 
     let error = DynamicFusionMapSpace::from_degeneracy_shapes(
@@ -865,8 +869,8 @@ fn encoded_cold_extent_overflow_does_not_publish_layouts() {
     assert_eq!(error, OperationError::Core(CoreError::ElementCountOverflow));
     assert_eq!(
         (
-            fusion_tree_layout_cache_info(),
-            complete_hom_space_structure_cache_info(),
+            structure_cache_info(StructureCacheKind::SectorStructure),
+            structure_cache_info(StructureCacheKind::DegeneracyStructure),
         ),
         before
     );
@@ -905,8 +909,8 @@ fn encoded_and_lowered_explicit_layouts_share_checked_frozen_content() {
         DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace.clone(), shapes.clone())
             .unwrap();
     let after_encoded = (
-        fusion_tree_layout_cache_info(),
-        complete_hom_space_structure_cache_info(),
+        structure_cache_info(StructureCacheKind::SectorStructure),
+        structure_cache_info(StructureCacheKind::DegeneracyStructure),
     );
     assert_eq!(after_encoded.0.entries(), 1);
     assert_eq!(after_encoded.0.misses(), 1);
@@ -923,7 +927,7 @@ fn encoded_and_lowered_explicit_layouts_share_checked_frozen_content() {
     assert_eq!(layout_snapshot(&encoded), layout_snapshot(&lowered));
     assert_eq!(encoded.required_len(), lowered.required_len());
     assert_eq!(
-        complete_hom_space_structure_cache_info().admissions(),
+        structure_cache_info(StructureCacheKind::DegeneracyStructure).admissions(),
         after_encoded.1.admissions()
     );
 }
@@ -1229,7 +1233,9 @@ fn fz2_lowered_transform_contract_and_mixed_plan_match_encoded_oracle() {
         shapes.clone(),
     )
     .unwrap();
-    let hits_before_repeated_lowered = tenet_core::complete_hom_space_structure_cache_info().hits();
+    let hits_before_repeated_lowered =
+        tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+            .hits();
     let repeated_lowered = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
         Arc::clone(&provider),
         homspace.clone(),
@@ -1241,7 +1247,9 @@ fn fz2_lowered_transform_contract_and_mixed_plan_match_encoded_oracle() {
         repeated_lowered.space().structure().content_id()
     );
     assert!(
-        tenet_core::complete_hom_space_structure_cache_info().hits() > hits_before_repeated_lowered,
+        tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+            .hits()
+            > hits_before_repeated_lowered,
         "same-content lowered construction must reuse the complete layout"
     );
     let encoded =

@@ -11,8 +11,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use tenet::expert::{
-    block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
-    reset_core_intern_tables,
+    block_structure_intern_cache_info, reset_core_intern_tables, set_structure_cache_byte_budget,
+    structure_cache_info, StructureCacheKind,
 };
 use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep,
@@ -222,14 +222,12 @@ fn equal_across_interner_eviction() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let before = u1_signature(&runtime, &u1_leg(-3..=3, 5));
     let evictions = block_structure_intern_cache_info().pressure_evictions();
-    // Push the space out of the complete-structure cache, then its content
-    // out of the block-structure interner, with more distinct entries than
-    // each holds.
-    for degeneracy in 1..=complete_hom_space_structure_cache_info().entry_capacity() + 16 {
-        let leg =
-            GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), degeneracy)]).unwrap();
-        TensorMap::<_, f64>::zeros(&runtime, [&leg], [&leg]).unwrap();
-    }
+    // Push the space out of the degeneracy-structure cache (a zero budget
+    // evicts everything), then its content out of the block-structure
+    // interner, with more distinct entries than it holds.
+    let budget = structure_cache_info(StructureCacheKind::DegeneracyStructure).byte_budget();
+    set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, 0);
+    set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, budget);
     for extent in 1..=block_structure_intern_cache_info().entry_capacity() + 16 {
         BlockStructure::trivial(&[extent]).unwrap();
     }

@@ -2632,6 +2632,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick_cache"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "403c1a912fec895cafb223201e368234842acb9220aaf08ab042ae89ba5f135c"
+dependencies = [
+ "equivalent",
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3605,6 +3615,7 @@ dependencies = [
  "criterion",
  "lru",
  "num-complex",
+ "quick_cache",
  "rustc-hash 2.1.3",
  "smallvec",
  "tenet-core",

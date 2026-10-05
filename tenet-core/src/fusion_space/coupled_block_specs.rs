@@ -105,7 +105,7 @@ fn degeneracy_shape_for_tree_side(
 pub(crate) fn coupled_subblock_parts_from_leg_degeneracies(
     homspace: &FusionTreeHomSpace,
     layout: &FusionTreeHomSpaceLayoutData,
-) -> Result<(SectorStructure, DegeneracyStructure), CoreError> {
+) -> Result<(Arc<SectorStructure>, DegeneracyStructure), CoreError> {
     let rank = homspace.rank();
     let mut degeneracy_blocks = Vec::with_capacity(layout.keys.len());
     visit_coupled_leg_blocks(homspace, layout, |block| {
@@ -113,8 +113,7 @@ pub(crate) fn coupled_subblock_parts_from_leg_degeneracies(
         Ok(())
     })?;
 
-    let sector_structure =
-        SectorStructure::from_keys(rank, layout.keys.iter().cloned().map(BlockKey::from))?;
+    let sector_structure = Arc::clone(&layout.sector);
     let degeneracy_structure = DegeneracyStructure::from_blocks_with_rank(rank, degeneracy_blocks)?;
     Ok((sector_structure, degeneracy_structure))
 }

@@ -53,6 +53,11 @@ mod fusion_tree;
 pub use fusion_tree::*;
 mod block_structure;
 pub use block_structure::*;
+mod cache;
+pub use cache::{
+    set_structure_cache_byte_budget, structure_cache_info, structure_cache_infos,
+    StructureCacheInfo, StructureCacheKind,
+};
 mod tensor_map;
 pub use tensor_map::*;
 mod error;

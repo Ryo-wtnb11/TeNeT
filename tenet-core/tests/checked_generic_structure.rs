@@ -1,10 +1,10 @@
 use std::{cell::Cell, error::Error, fmt};
 
 use tenet_core::{
-    block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
-    fusion_tree_layout_cache_info, BraidingStyleKind, CheckedGenericFusion,
-    CheckedGenericStructureError, CoreError, CoupledSectorFold, FusionProductSpace,
-    FusionStyleKind, FusionTreeHomSpace, RuleIdentity, SectorId, SectorLeg, SectorVec,
+    block_structure_intern_cache_info, structure_cache_info, BraidingStyleKind,
+    CheckedGenericFusion, CheckedGenericStructureError, CoreError, CoupledSectorFold,
+    FusionProductSpace, FusionStyleKind, FusionTreeHomSpace, RuleIdentity, SectorId, SectorLeg,
+    SectorVec, StructureCacheKind,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -293,8 +293,8 @@ fn checked_generic_structure_preserves_order_and_never_publishes_on_provider_fai
         Failure::Multiplicity,
     ] {
         let before = (
-            fusion_tree_layout_cache_info(),
-            complete_hom_space_structure_cache_info(),
+            structure_cache_info(StructureCacheKind::SectorStructure),
+            structure_cache_info(StructureCacheKind::DegeneracyStructure),
             block_structure_intern_cache_info(),
         );
         let error = hom()
@@ -312,8 +312,8 @@ fn checked_generic_structure_preserves_order_and_never_publishes_on_provider_fai
         assert_eq!(
             before,
             (
-                fusion_tree_layout_cache_info(),
-                complete_hom_space_structure_cache_info(),
+                structure_cache_info(StructureCacheKind::SectorStructure),
+                structure_cache_info(StructureCacheKind::DegeneracyStructure),
                 block_structure_intern_cache_info()
             )
         );

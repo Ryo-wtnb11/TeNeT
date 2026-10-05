@@ -1,10 +1,9 @@
 use super::*;
 use crate::test_support::CACHE_TEST_LOCK;
 use tenet_core::{
-    complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info,
-    reset_core_intern_tables, BraidingStyleKind, FusionAlgebraError, FusionProductSpace,
-    FusionStyleKind, MultiplicityFreeFusionSymbols, RuleIdentity, SU2FusionRule, SU2Irrep,
-    SectorId, SectorLeg, SectorVec,
+    reset_core_intern_tables, structure_cache_info, BraidingStyleKind, FusionAlgebraError,
+    FusionProductSpace, FusionStyleKind, MultiplicityFreeFusionSymbols, RuleIdentity,
+    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorVec, StructureCacheKind,
 };
 
 #[derive(Clone, Copy)]
@@ -353,8 +352,8 @@ fn checked_final_root_stage_failures_publish_no_layout_or_admission() {
         reset_core_intern_tables();
         reset_scratch_publication_observations();
         let before = (
-            fusion_tree_layout_cache_info(),
-            complete_hom_space_structure_cache_info(),
+            structure_cache_info(StructureCacheKind::SectorStructure),
+            structure_cache_info(StructureCacheKind::DegeneracyStructure),
         );
 
         let error = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
@@ -366,8 +365,8 @@ fn checked_final_root_stage_failures_publish_no_layout_or_admission() {
         assert_eq!(error, OperationError::FusionAlgebra(Box::new(expected)));
         assert_eq!(
             (
-                fusion_tree_layout_cache_info(),
-                complete_hom_space_structure_cache_info(),
+                structure_cache_info(StructureCacheKind::SectorStructure),
+                structure_cache_info(StructureCacheKind::DegeneracyStructure),
             ),
             before
         );
@@ -468,8 +467,8 @@ fn checked_bind_failure_preserves_subset_admission_and_caches() {
 
         reset_scratch_publication_observations();
         let before = (
-            fusion_tree_layout_cache_info(),
-            complete_hom_space_structure_cache_info(),
+            structure_cache_info(StructureCacheKind::SectorStructure),
+            structure_cache_info(StructureCacheKind::DegeneracyStructure),
         );
 
         let error = BoundDynamicFusionMapSpace::bind_multiplicity_free_checked(
@@ -485,8 +484,8 @@ fn checked_bind_failure_preserves_subset_admission_and_caches() {
         ));
         assert_eq!(
             (
-                fusion_tree_layout_cache_info(),
-                complete_hom_space_structure_cache_info(),
+                structure_cache_info(StructureCacheKind::SectorStructure),
+                structure_cache_info(StructureCacheKind::DegeneracyStructure),
             ),
             before
         );

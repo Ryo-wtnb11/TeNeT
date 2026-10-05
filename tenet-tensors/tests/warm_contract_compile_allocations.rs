@@ -349,8 +349,12 @@ fn warm_copy_c_planning_is_bounded_and_no_costlier_than_the_dynamic_tree() {
     // used to exceed the 64 MiB budgets or the 8 MiB entry limits, so each
     // warm call rebuilt them (#1993).
     for rank in [2, 3, 4, 5, 6] {
-        let complete_bypasses = tenet_core::complete_hom_space_structure_cache_info().bypasses();
-        let layout_bypasses = tenet_core::fusion_tree_layout_cache_info().admission_bypasses();
+        let complete_bypasses =
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .rejections();
+        let layout_bypasses =
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::SectorStructure)
+                .rejections();
         let intern_bypasses =
             tenet_core::block_structure_intern_cache_info().oversized_admission_bypasses();
         let [copy_c, dynamic_tree] = copy_c_plan_allocations(rank);
@@ -366,12 +370,14 @@ fn warm_copy_c_planning_is_bounded_and_no_costlier_than_the_dynamic_tree() {
             "rank {rank}: {copy_c} > {dynamic_tree}"
         );
         assert_eq!(
-            tenet_core::complete_hom_space_structure_cache_info().bypasses(),
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .rejections(),
             complete_bypasses,
             "rank {rank}: a complete HomSpace structure bypassed the cache"
         );
         assert_eq!(
-            tenet_core::fusion_tree_layout_cache_info().admission_bypasses(),
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::SectorStructure)
+                .rejections(),
             layout_bypasses,
             "rank {rank}: a fusion-tree layout bypassed the cache"
         );

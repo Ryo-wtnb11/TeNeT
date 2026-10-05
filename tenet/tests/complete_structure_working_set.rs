@@ -2,32 +2,29 @@
 //! ledger and of a sweep-like loop, so warm iterations never evict (#1365).
 //! One test per process keeps the global cache statistics isolated.
 
-use tenet::expert::{complete_hom_space_structure_cache_info, CompleteHomSpaceStructureCacheInfo};
+use tenet::expert::{structure_cache_info, StructureCacheInfo, StructureCacheKind};
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{ContractSpec, GradedSpace, Runtime, TensorMap};
 
 /// Activity between two snapshots: (hits, misses, admissions, evictions, bypasses).
-fn delta(
-    before: CompleteHomSpaceStructureCacheInfo,
-    after: CompleteHomSpaceStructureCacheInfo,
-) -> (usize, usize, usize, usize, usize) {
+fn delta(before: StructureCacheInfo, after: StructureCacheInfo) -> (u64, u64, u64, u64, u64) {
     (
         after.hits() - before.hits(),
         after.misses() - before.misses(),
         after.admissions() - before.admissions(),
         after.evictions() - before.evictions(),
-        after.bypasses() - before.bypasses(),
+        after.rejections() - before.rejections(),
     )
 }
 
 /// Runs `call` cold once, then three warm times, each warm call exactly
 /// `hits` hits and no other activity.
-fn assert_warm(label: &str, hits: usize, mut call: impl FnMut()) {
+fn assert_warm(label: &str, hits: u64, mut call: impl FnMut()) {
     call();
     for _ in 0..3 {
-        let before = complete_hom_space_structure_cache_info();
+        let before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
         call();
-        let after = complete_hom_space_structure_cache_info();
+        let after = structure_cache_info(StructureCacheKind::DegeneracyStructure);
         assert_eq!(delta(before, after), (hits, 0, 0, 0, 0), "{label}");
     }
 }
@@ -115,12 +112,12 @@ fn warm_working_sets_never_evict() {
         }
     };
     sweep();
-    let cold = complete_hom_space_structure_cache_info();
+    let cold = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     assert!(cold.entries() > 5, "sweep live set {}", cold.entries());
     for _ in 0..3 {
-        let before = complete_hom_space_structure_cache_info();
+        let before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
         sweep();
-        let after = complete_hom_space_structure_cache_info();
+        let after = structure_cache_info(StructureCacheKind::DegeneracyStructure);
         assert_eq!(delta(before, after), (7 * 3, 0, 0, 0, 0));
     }
 }

@@ -30,7 +30,7 @@ fn local_block_structure_intern(
 ) -> Arc<BlockStructureContent> {
     let (sector, degeneracy) = local_parts(key.index);
     if let Some(content) = table.lookup(&key.key, |content| {
-        content.sector == sector && content.degeneracy == degeneracy
+        *content.sector == sector && content.degeneracy == degeneracy
     }) {
         return content;
     }
@@ -41,7 +41,7 @@ fn local_block_structure_intern(
         || {
             Arc::new(BlockStructureContent {
                 id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
-                sector,
+                sector: Arc::new(sector),
                 degeneracy,
                 required_len,
                 storage_tiling: Default::default(),
@@ -63,7 +63,7 @@ fn block_structure_intern_hash_collision_never_aliases() {
 
     let (sector, degeneracy) = local_parts(51);
     let matches_colliding = |content: &BlockStructureContent| {
-        content.sector == sector && content.degeneracy == degeneracy
+        *content.sector == sector && content.degeneracy == degeneracy
     };
     assert!(table.lookup(&key0.key, matches_colliding).is_none());
     let required_len = degeneracy.required_len().unwrap();
@@ -73,7 +73,7 @@ fn block_structure_intern_hash_collision_never_aliases() {
         || {
             Arc::new(BlockStructureContent {
                 id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
-                sector: sector.clone(),
+                sector: Arc::new(sector.clone()),
                 degeneracy: degeneracy.clone(),
                 required_len,
                 storage_tiling: Default::default(),

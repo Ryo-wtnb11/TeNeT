@@ -295,7 +295,7 @@ pub(crate) fn block_structure_intern_calls() -> usize {
 }
 
 pub(super) fn intern_block_structure_content(
-    sector: SectorStructure,
+    sector: Arc<SectorStructure>,
     degeneracy: DegeneracyStructure,
     required_len: usize,
 ) -> Arc<BlockStructureContent> {
@@ -381,15 +381,14 @@ pub(super) fn canonicalize_block_structure_arc(
 /// table is published after it. A build that straddles a reset still returns a correct result,
 /// but the result is not cached. The two intern tables uphold this by
 /// construction, because each mints its identity inside the write-locked
-/// insert, so whatever lands in a cleared table is new. The complete-HomSpace
-/// cache publishes a structure built earlier, so its admission checks
-/// `may_publish_since` under its write lock, and its hit-path refresh only
-/// repoints an entry that still holds the content it looked up.
+/// insert, so whatever lands in a cleared table is new. The structure caches
+/// publish values built earlier, so their admission checks
+/// `may_publish_since` under a lock that their clear takes exclusively
+/// (`StructureCache::publish`).
 ///
-/// Why not the arc dedup table or the fusion-tree layout cache: an arc-table
-/// entry is keyed by its own never-reused content id, so a straddling insert
-/// can only be found again by a holder of that same content. A layout is pure
-/// data under a semantic key and carries no identity.
+/// Why not the arc dedup table: an arc-table entry is keyed by its own
+/// never-reused content id, so a straddling insert can only be found again by
+/// a holder of that same content.
 pub fn reset_core_intern_tables() {
     // Resets are serialized, so odd parity means exactly "a reset is in
     // progress". Why not let them overlap: a second reset would turn the
@@ -403,7 +402,7 @@ pub fn reset_core_intern_tables() {
     CORE_RESET_EPOCH.fetch_add(1, Ordering::SeqCst);
     // Clear the sole strong complete-layout owner before weak canonicalizers.
     // Live wrappers keep their own content and region state through reset.
-    reset_complete_hom_space_structure_cache();
+    crate::fusion_space::reset_structure_caches();
     #[cfg(test)]
     MID_RESET_HOOK.with(|hook| {
         if let Some(hook) = hook.take() {
@@ -417,7 +416,6 @@ pub fn reset_core_intern_tables() {
     if let Ok(mut table) = block_structure_arc_table().write() {
         table.clear();
     }
-    reset_fusion_tree_layout_caches();
     CORE_RESET_EPOCH.fetch_add(1, Ordering::SeqCst);
 }
 

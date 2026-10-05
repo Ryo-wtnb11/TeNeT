@@ -591,10 +591,7 @@ fn checked_generic_adjoint_late_provider_failure_does_not_publish_cache() {
 #[test]
 #[allow(clippy::arc_with_non_send_sync)] // The API requires Arc; this single-threaded spy uses Cells for deterministic failures.
 fn checked_generic_owned_failure_does_not_publish_destination_state() {
-    use tenet_core::{
-        block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
-        fusion_tree_layout_cache_info,
-    };
+    use tenet_core::{block_structure_intern_cache_info, structure_cache_info, StructureCacheKind};
 
     const ISOLATED: &str = "TENET_CHECKED_GENERIC_OWNED_FAILURE_ISOLATED";
     // What: exact global-cache snapshots run outside the parallel unit-test process.
@@ -646,8 +643,8 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
             provider.fusion_style.set(Some(FusionStyleKind::Unique));
         }
         provider.fail.set(Some((CheckedPlanCall::N, 1)));
-        let layout_before = fusion_tree_layout_cache_info();
-        let complete_before = complete_hom_space_structure_cache_info();
+        let layout_before = structure_cache_info(StructureCacheKind::SectorStructure);
+        let complete_before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
         let interner_before = block_structure_intern_cache_info();
         let runtime_before = store.info();
 
@@ -670,8 +667,14 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
             ));
         }
         assert_eq!(provider.calls.get(), [0; CheckedPlanCall::COUNT]);
-        assert_eq!(fusion_tree_layout_cache_info(), layout_before);
-        assert_eq!(complete_hom_space_structure_cache_info(), complete_before);
+        assert_eq!(
+            structure_cache_info(StructureCacheKind::SectorStructure),
+            layout_before
+        );
+        assert_eq!(
+            structure_cache_info(StructureCacheKind::DegeneracyStructure),
+            complete_before
+        );
         assert_eq!(block_structure_intern_cache_info(), interner_before);
         assert_eq!(store.info(), runtime_before);
         assert_eq!(src_space, source_before);
@@ -699,8 +702,8 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
             Err((call, nth)) => provider.fail.set(Some((call, nth))),
             Ok(symbol) => provider.malformed.set(Some(symbol)),
         }
-        let layout_before = fusion_tree_layout_cache_info();
-        let complete_before = complete_hom_space_structure_cache_info();
+        let layout_before = structure_cache_info(StructureCacheKind::SectorStructure);
+        let complete_before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
         let interner_before = block_structure_intern_cache_info();
         let runtime_before = store.info();
 
@@ -725,8 +728,14 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
                 CheckedGenericPlanError::SymbolShape { symbol: "R", .. }
             )),
         }
-        assert_eq!(fusion_tree_layout_cache_info(), layout_before);
-        assert_eq!(complete_hom_space_structure_cache_info(), complete_before);
+        assert_eq!(
+            structure_cache_info(StructureCacheKind::SectorStructure),
+            layout_before
+        );
+        assert_eq!(
+            structure_cache_info(StructureCacheKind::DegeneracyStructure),
+            complete_before
+        );
         assert_eq!(block_structure_intern_cache_info(), interner_before);
         assert_eq!(store.info(), runtime_before);
         assert_eq!(src_space, source_before);
@@ -749,8 +758,8 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
     .unwrap();
     let dense_data = vec![1.0; dense_space.space().required_len().unwrap()];
     provider.calls.set([0; CheckedPlanCall::COUNT]);
-    let layout_before = fusion_tree_layout_cache_info();
-    let complete_before = complete_hom_space_structure_cache_info();
+    let layout_before = structure_cache_info(StructureCacheKind::SectorStructure);
+    let complete_before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     let interner_before = block_structure_intern_cache_info();
     provider
         .fail
@@ -766,8 +775,14 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         error,
         CheckedGenericPlanError::Provider(CheckedPlanSpyError(CheckedPlanCall::FrobeniusSchur))
     ));
-    assert_eq!(fusion_tree_layout_cache_info(), layout_before);
-    assert_eq!(complete_hom_space_structure_cache_info(), complete_before);
+    assert_eq!(
+        structure_cache_info(StructureCacheKind::SectorStructure),
+        layout_before
+    );
+    assert_eq!(
+        structure_cache_info(StructureCacheKind::DegeneracyStructure),
+        complete_before
+    );
     assert_eq!(block_structure_intern_cache_info(), interner_before);
 }
 
