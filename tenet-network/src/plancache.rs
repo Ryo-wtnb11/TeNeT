@@ -762,12 +762,13 @@ impl PlanCache {
 /// optimizer's order search changes so that a stale on-disk file (which would
 /// otherwise replay a now-suboptimal order and silently drift truncation) is
 /// rejected on load rather than trusted.
-const PLAN_CACHE_FILE_VERSION: &str = "TENET_PLANCACHE 2";
+const PLAN_CACHE_FILE_VERSION: &str = "TENET_PLANCACHE 3";
 
 /// Stable one-line text key for a network topology: optimizer, output split
 /// and labels, then each operand's conj / codomain rank / written split /
-/// labels. Labels are `tensor!` identifiers (no separators), so the packed
-/// form round-trips by construction and is stable across processes.
+/// labels. Each label is written as a quoted, escaped string (`{:?}`), so a
+/// label holding a separator or a line break cannot make two topologies
+/// share one key: `Network` labels are arbitrary strings, not identifiers.
 fn topology_text(topology: &NetworkTopology) -> String {
     let mut text = format!("{:?}|", topology.optimizer);
     match topology.output_codomain_rank {
@@ -779,7 +780,7 @@ fn topology_text(topology: &NetworkTopology) -> String {
         if i > 0 {
             text.push(',');
         }
-        text.push_str(label.as_str());
+        text.push_str(&format!("{:?}", label.as_str()));
     }
     for operand in &topology.operands {
         text.push('|');
@@ -796,7 +797,7 @@ fn topology_text(topology: &NetworkTopology) -> String {
             if i > 0 {
                 text.push(',');
             }
-            text.push_str(label.as_str());
+            text.push_str(&format!("{:?}", label.as_str()));
         }
     }
     text
@@ -1596,9 +1597,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{needs_replan, ReplanPolicy, WorkspaceBudget, WorkspacePools};
     #[cfg(feature = "cotengra-python")]
-    use super::{topology_optimizer, Optimizer};
+    use super::topology_optimizer;
+    use super::Optimizer;
+    use super::{needs_replan, ReplanPolicy, WorkspaceBudget, WorkspacePools};
     use crate::network::NetworkExecutionWorkspace;
     use crate::{Network, TemporaryLabel};
     use std::sync::atomic::Ordering;
@@ -2013,6 +2015,30 @@ mod tests {
                 assert_rejected_before_the_lookup(&runtime, what, accept, reject, &transfers);
             assert_eq!(Err(error), host, "{what}");
         }
+    }
+
+    /// #2022 review: `Network` labels are arbitrary strings, so a label
+    /// holding the key's separators must not make two topologies share a
+    /// persisted key. Under the unescaped format both of these were
+    /// `0:1:1:a,b`.
+    #[test]
+    fn topology_text_keeps_separator_labels_distinct() {
+        let topology = |labels: &[&str]| super::NetworkTopology {
+            operands: vec![super::OperandTopology {
+                labels: labels.iter().copied().map(TemporaryLabel::from).collect(),
+                conj: false,
+                codomain_rank: 1,
+                written_split: Some(1),
+            }],
+            output: Vec::new(),
+            output_codomain_rank: Some(0),
+            optimizer: Optimizer::default(),
+        };
+        let joined = super::topology_text(&topology(&["a,b"]));
+        let split = super::topology_text(&topology(&["a", "b"]));
+        assert_ne!(joined, split);
+        let line_break = super::topology_text(&topology(&["a\nTOPO x"]));
+        assert!(!line_break.contains('\n'), "{line_break}");
     }
 
     #[test]
