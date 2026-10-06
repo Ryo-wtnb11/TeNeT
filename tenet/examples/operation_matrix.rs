@@ -16,8 +16,7 @@ use tenet::typed::{
 use tenet::expert::CpuBackendKind;
 use tenet::expert::DefaultDenseExecutor;
 use tenet::expert::{
-    complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BlockRef,
-    CompleteHomSpaceStructureCacheInfo, FusionTreeLayoutCacheInfo, SectorLeg,
+    structure_cache_info, BlockRef, SectorLeg, StructureCacheInfo, StructureCacheKind,
 };
 use tenet::expert::{DenseExecutor, DenseGemmBatchJob, MatrixOp};
 use tenet::expert::{DenseView, DenseViewMut};
@@ -70,15 +69,15 @@ fn measure_allocations<T, E>(
 #[derive(Clone, Copy)]
 struct Counters {
     runtime: RuntimeTreeTransformCacheInfo,
-    fusion_layout: FusionTreeLayoutCacheInfo,
-    complete_hom: CompleteHomSpaceStructureCacheInfo,
+    fusion_layout: StructureCacheInfo,
+    complete_hom: StructureCacheInfo,
 }
 
 fn counters(runtime: &Runtime) -> Counters {
     Counters {
         runtime: runtime.tree_transform_cache_info().structures,
-        fusion_layout: fusion_tree_layout_cache_info(),
-        complete_hom: complete_hom_space_structure_cache_info(),
+        fusion_layout: structure_cache_info(StructureCacheKind::SectorStructure),
+        complete_hom: structure_cache_info(StructureCacheKind::DegeneracyStructure),
     }
 }
 
@@ -130,23 +129,21 @@ fn print_sample(
         ),
         layout_misses = layout_after.misses() - layout_before.misses(),
         layout_evictions = layout_after.evictions() - layout_before.evictions(),
-        layout_bypasses = layout_after.admission_bypasses() - layout_before.admission_bypasses(),
+        layout_bypasses = layout_after.rejections() - layout_before.rejections(),
         layout_entries_delta = delta(layout_after.entries(), layout_before.entries()),
-        layout_bytes_before = layout_before.charged_payload_bytes(),
-        layout_bytes_after = layout_after.charged_payload_bytes(),
-        layout_bytes_delta = delta(
-            layout_after.charged_payload_bytes(),
-            layout_before.charged_payload_bytes(),
-        ),
+        layout_bytes_before = layout_before.charged_bytes(),
+        layout_bytes_after = layout_after.charged_bytes(),
+        layout_bytes_delta =
+            layout_after.charged_bytes() as i128 - layout_before.charged_bytes() as i128,
         hom_hits = hom_after.hits() - hom_before.hits(),
         hom_misses = hom_after.misses() - hom_before.misses(),
         hom_admissions = hom_after.admissions() - hom_before.admissions(),
         hom_evictions = hom_after.evictions() - hom_before.evictions(),
-        hom_bypasses = hom_after.bypasses() - hom_before.bypasses(),
+        hom_bypasses = hom_after.rejections() - hom_before.rejections(),
         hom_entries_delta = delta(hom_after.entries(), hom_before.entries()),
         hom_bytes_before = hom_before.charged_bytes(),
         hom_bytes_after = hom_after.charged_bytes(),
-        hom_bytes_delta = delta(hom_after.charged_bytes(), hom_before.charged_bytes()),
+        hom_bytes_delta = hom_after.charged_bytes() as i128 - hom_before.charged_bytes() as i128,
         allocation_calls = allocations.calls,
         requested_bytes = allocations.requested_bytes,
     );

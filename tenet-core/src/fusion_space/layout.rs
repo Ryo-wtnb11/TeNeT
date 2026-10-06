@@ -18,6 +18,12 @@ pub(crate) struct FusionTreeCoupledSectorLayout {
 pub(crate) struct FusionTreeHomSpaceLayoutData {
     pub(crate) keys: Arc<[FusionTreePairKey]>,
     pub(crate) sectors: Vec<FusionTreeCoupledSectorLayout>,
+    /// The block keys as a sector structure, built once per sector layout
+    /// and shared by every block structure over it, whatever its
+    /// degeneracies (TensorKit `sectorstructure`, `structure.jl:41`). An
+    /// error (duplicate keys from a provider with repeated fusion channels)
+    /// is reported where a block structure is built, as before.
+    pub(crate) sector: Result<Arc<SectorStructure>, CoreError>,
 }
 
 pub(super) fn generic_keys_for_coupled_from_groups(
@@ -136,7 +142,7 @@ impl PreparedFusionTreeLayout {
         // HomSpace is their authority, while sectors and duality select keys.
         let (sector, degeneracy) =
             coupled_subblock_parts_from_leg_degeneracies(homspace, self.layout_data())?;
-        let structure = BlockStructure::from_parts(sector, degeneracy)?;
+        let structure = BlockStructure::from_shared_parts(sector, degeneracy)?;
         structure.record_storage_tiling();
         Ok(structure.into_shared())
     }
@@ -178,40 +184,39 @@ impl PreparedFusionTreeLayout {
     }
 
     pub(crate) fn commit_layout(self) -> Arc<FusionTreeHomSpaceLayout> {
-        let cache = fusion_tree_layout_cache();
-        // Why a read lock first: a warm commit only re-finds an entry that is
-        // already published, and taking the process-global write lock for that
-        // serializes concurrent warm calls. The admitting branches keep their
-        // own lookup, which still closes the race against a concurrent admit
-        // between this read lock and theirs.
-        if let Some(existing) = cache
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .lookup(self.cache_key())
-        {
-            return existing;
-        }
-        match self.state {
+        let cache = sector_structure_cache();
+        let (key, layout, cold) = match self.state {
             PreparedFusionTreeLayoutState::Cached { key, layout } => {
-                let mut write = fusion_tree_layout_cache_write();
-                if let Some(existing) = write.lookup(&key) {
-                    return existing;
+                // The warm path: still resident, nothing to publish.
+                if cache.contains(&key) {
+                    return layout;
                 }
-                let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
-                write.admit(Arc::new(key), layout, charged_bytes)
+                (key, layout, false)
             }
             PreparedFusionTreeLayoutState::Cold { key, data } => {
-                let mut write = fusion_tree_layout_cache_write();
-                if let Some(existing) = write.lookup(&key) {
-                    return existing;
-                }
-                #[cfg(test)]
-                FUSION_TREE_LAYOUT_BUILDS.set(FUSION_TREE_LAYOUT_BUILDS.get() + 1);
-                let computed = Arc::new(FusionTreeHomSpaceLayout { data });
-                let charged_bytes = charged_fusion_tree_layout_bytes(&key, &computed);
-                write.admit(Arc::new(key), computed, charged_bytes)
+                (key, Arc::new(FusionTreeHomSpaceLayout { data }), true)
             }
+        };
+        let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
+        // A layout is pure data under a semantic key and carries no
+        // identity, so any epoch outside a reset may publish it.
+        let published = cache.publish(&key, Arc::clone(&layout), charged_bytes, core_reset_epoch());
+        #[cfg(test)]
+        if Arc::ptr_eq(&published, &layout) {
+            if cold {
+                FUSION_TREE_LAYOUT_BUILDS.set(FUSION_TREE_LAYOUT_BUILDS.get() + 1);
+            }
+            FUSION_TREE_LAYOUT_ADMISSIONS.set(FUSION_TREE_LAYOUT_ADMISSIONS.get() + 1);
         }
+        #[cfg(not(test))]
+        let _ = cold;
+        published
+    }
+}
+
+impl FusionTreeHomSpaceLayout {
+    pub(crate) fn new(data: FusionTreeHomSpaceLayoutData) -> Self {
+        Self { data }
     }
 }
 
@@ -228,10 +233,7 @@ std::thread_local! {
     static FUSION_TREE_LAYOUT_BUILDS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
-    pub(super) static FUSION_TREE_LAYOUT_ADMISSIONS: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
-    pub(super) static FUSION_TREE_LAYOUT_WRITE_LOCKS: std::cell::Cell<usize> = const {
+    static FUSION_TREE_LAYOUT_ADMISSIONS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     static COUPLED_GRID_BUILD_OBSERVATIONS: std::cell::Cell<(usize, usize)> =
@@ -276,13 +278,6 @@ pub(super) fn observe_coupled_grid_side_derivation() {
         let (reconstruction_inserts, side_derivations) = COUPLED_GRID_BUILD_OBSERVATIONS.get();
         (reconstruction_inserts, side_derivations + 1)
     });
-}
-
-#[cfg(test)]
-pub(crate) fn fusion_tree_layout_from_data(
-    data: FusionTreeHomSpaceLayoutData,
-) -> FusionTreeHomSpaceLayout {
-    FusionTreeHomSpaceLayout { data }
 }
 
 #[cfg(test)]
@@ -384,6 +379,7 @@ fn fusion_tree_layout_capacities(
 }
 
 pub(super) fn fusion_tree_layout_data_from_groups(
+    rank: usize,
     codomain: &[CoupledFusionTrees],
     domain: &[CoupledFusionTrees],
 ) -> FusionTreeHomSpaceLayoutData {
@@ -429,8 +425,10 @@ pub(super) fn fusion_tree_layout_data_from_groups(
             }
         }
     }
+    let sector = SectorStructure::from_fusion_tree_keys(rank, &keys).map(Arc::new);
     FusionTreeHomSpaceLayoutData {
         keys: Arc::from(keys),
         sectors,
+        sector,
     }
 }

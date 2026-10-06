@@ -246,14 +246,35 @@ svd / qr / eigh (tenet-rs facade, one body over FusionMode)
 
 **Who owns which cache**
 
-| Cache | Crate | Scope |
-| --- | --- | --- |
-| Layout, intern tables, complete-HomSpace structure | `tenet-core` | process-global |
-| Tree-transform structures, plans and contents | `tenet-tensors` | per `Runtime` |
-| Operation-cache policy | `tenet-tensors` | process-global |
-| Elementary symbols (F, CGC, ...) | racah, not TeNeT | process-global |
+The target is four structure caches behind one `quick_cache` wrapper
+(`tenet-core/src/cache.rs`, #2014), mirroring TensorKit's `@cached`
+functions. Clearing and sizing them belongs to the application
+(`reset_core_intern_tables`, `set_structure_cache_byte_budget`), never to
+library code.
 
-The target is four caches behind one wrapper (#2014).
+Structure caches (`structure_cache_infos` reports them):
+
+| Cache | Key | Crate | Scope | TensorKit cfaa073 |
+| --- | --- | --- | --- | --- |
+| Sector structure: fusion-tree keys and the shared `SectorStructure` | rule, sectors and duality per leg (no degeneracies); MF and Generic apart; checked Generic builds join in #2030 | `tenet-core` | process-global | `sectorstructure` |
+| Degeneracy structure: complete `BlockStructure` | rule and the full HomSpace | `tenet-core` | process-global | `degeneracystructure` |
+| Tree transformer | dst, src, operation | `tenet-tensors` (`RuntimeTreeTransformStore` structures tier, `TreeTransformCache`) | per `Runtime` today; process-global in #2014 PR 3 | `treetransposer` / `treebraider` |
+| Transformation coefficients, Simple and Generic only | fusion-tree group | `tenet-tensors` (`RuntimeTreeTransformStore` plans and groups tiers) | per `Runtime` today; process-global in #2014 PR 4 | `fstranspose` / `fsbraid` (`NoCache` for Unique) |
+
+Still to be absorbed or removed by #2014: the block-structure and HomSpace
+intern tables (`tenet-core`, PR 2), the `DynamicFusionSpaceCache` of derived
+spaces (`tenet-tensors`, PR 3), and the operation-cache policy of the
+standalone contexts.
+
+Outside the four, by design:
+
+| Cache | Crate | Why separate |
+| --- | --- | --- |
+| `TensorContractCache` (dense contraction structure) | `tenet-tensors` | non-symmetric dense path |
+| Network plan cache | `tenet-network` | execution level: keyed by network topology |
+| CUDA prepared tree-transform structures | `tenet-operations` | execution level: device copies of cached structures |
+| cuTENSOR plan ledger | `tenet-dense` | execution level: tenferro's plan cache |
+| Elementary symbols (F, R, CGC, ...) | racah, not TeNeT | symbol layer |
 
 ## Interfaces between layers
 
@@ -286,7 +307,6 @@ The target is four caches behind one wrapper (#2014).
 - **racah leaking through `tenet-sectors`.** It re-exports racah's cache
   module and embeds racah error types (#2015 items 2–3). The A/B default
   derivations also live there.
-- **Duplicate F/R shape checks** in `tenet-sectors` and `tenet-core` (#2014).
 - **Structure caches** are more than four, have no shared wrapper or stats
   API, and the transform stores are per-`Runtime` (#2014). Their per-block
   metadata is about 2× TensorKit's (#2011).

@@ -122,7 +122,9 @@ pub(super) type CoupledRegionCache = Arc<[OnceLock<CoupledRegionResult>]>;
 #[derive(Clone, Eq)]
 pub struct BlockStructureContent {
     pub(crate) id: usize,
-    pub(crate) sector: SectorStructure,
+    /// Shared with every structure of the same sector layout: a
+    /// degeneracy-only change reuses it (TensorKit `sectorstructure`).
+    pub(crate) sector: Arc<SectorStructure>,
     pub(crate) degeneracy: DegeneracyStructure,
     pub(crate) required_len: usize,
     pub(crate) storage_tiling: StorageTilingProof,
@@ -228,6 +230,17 @@ impl BlockStructureContent {
 
     #[doc(hidden)]
     pub fn charged_retained_bytes(&self) -> usize {
+        std::mem::size_of::<BlockStructureContent>()
+            .saturating_add(2 * std::mem::size_of::<usize>())
+            .saturating_add(std::mem::size_of::<SectorStructure>())
+            .saturating_add(self.sector.charged_heap_bytes())
+            .saturating_add(self.degeneracy.charged_heap_bytes())
+    }
+}
+
+impl SectorStructure {
+    /// Conservative heap bytes this sector structure retains.
+    pub(crate) fn charged_heap_bytes(&self) -> usize {
         fn key_bytes(key: &BlockKey, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {
             match key {
                 BlockKey::Dense => 0,
@@ -240,44 +253,33 @@ impl BlockStructureContent {
         }
 
         let mut frozen_backings = rustc_hash::FxHashSet::default();
-        let sector_blocks = self.sector.blocks.iter().fold(0usize, |bytes, block| {
+        let sector_blocks = self.blocks.iter().fold(0usize, |bytes, block| {
             bytes.saturating_add(key_bytes(block.key(), &mut frozen_backings))
         });
-        let groups = self
-            .sector
-            .fusion_tree_groups
-            .iter()
-            .fold(0usize, |bytes, group| {
-                bytes
-                    .saturating_add(spilled_smallvec_heap_bytes(&group.block_indices))
-                    .saturating_add(charge_fusion_tree_group_key_backings(
-                        &mut frozen_backings,
-                        &group.group_key,
-                    ))
-            });
+        let groups = self.fusion_tree_groups.iter().fold(0usize, |bytes, group| {
+            bytes
+                .saturating_add(spilled_smallvec_heap_bytes(&group.block_indices))
+                .saturating_add(charge_fusion_tree_group_key_backings(
+                    &mut frozen_backings,
+                    &group.group_key,
+                ))
+        });
         let compact_lookup = self
-            .sector
             .compact_lookup
             .as_ref()
             .map_or(0, |lookup| spilled_smallvec_heap_bytes(&lookup.indices));
 
-        std::mem::size_of::<BlockStructureContent>()
-            .saturating_add(
-                self.sector
-                    .blocks
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<SectorBlock>()),
-            )
+        self.blocks
+            .capacity()
+            .saturating_mul(std::mem::size_of::<SectorBlock>())
             .saturating_add(sector_blocks)
             .saturating_add(
-                self.sector
-                    .fusion_tree_groups
+                self.fusion_tree_groups
                     .capacity()
                     .saturating_mul(std::mem::size_of::<FusionTreeBlockGroup>()),
             )
             .saturating_add(groups)
-            .saturating_add(spilled_smallvec_heap_bytes(&self.sector.sorted_indices))
+            .saturating_add(spilled_smallvec_heap_bytes(&self.sorted_indices))
             .saturating_add(compact_lookup)
-            .saturating_add(self.degeneracy.charged_heap_bytes())
     }
 }

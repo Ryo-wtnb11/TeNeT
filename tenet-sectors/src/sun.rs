@@ -49,14 +49,6 @@ pub enum SUNFusionRuleError {
     DimensionNotRepresentable {
         sector: SectorId,
     },
-    UnexpectedFShape {
-        expected: [usize; 4],
-        found: [usize; 4],
-    },
-    UnexpectedRShape {
-        expected: [usize; 2],
-        found: [usize; 2],
-    },
     MalformedSymbolData(SymbolShapeError),
     Racah(SUNSymbolError),
 }
@@ -95,12 +87,6 @@ impl fmt::Display for SUNFusionRuleError {
                 "exact dimension for SectorId {} is not a finite positive f64",
                 sector.id()
             ),
-            Self::UnexpectedFShape { expected, found } => {
-                write!(f, "Racah F shape {found:?} does not match {expected:?}")
-            }
-            Self::UnexpectedRShape { expected, found } => {
-                write!(f, "Racah R shape {found:?} does not match {expected:?}")
-            }
             Self::MalformedSymbolData(error) => write!(f, "malformed Racah symbol data: {error}"),
             Self::Racah(error) => write!(f, "Racah SU(N) error: {error}"),
         }
@@ -386,6 +372,10 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
         Ok(self.irrep(sector)?.frobenius_schur_phase())
     }
 
+    // Why no N-shape check here: the block's shape against the fusion
+    // multiplicities is validated once, at the tenet-core checked boundary
+    // (`checked_generic_f_symbol` / `checked_generic_r_symbol`) every
+    // consumer of these symbols goes through (#2014).
     fn try_f_symbol_generic(
         &self,
         a: SectorId,
@@ -395,12 +385,6 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
         e: SectorId,
         f: SectorId,
     ) -> Result<GenericFArray<f64>, Self::Error> {
-        let expected = [
-            self.try_nsymbol(a, b, e)?,
-            self.try_nsymbol(e, c, d)?,
-            self.try_nsymbol(b, c, f)?,
-            self.try_nsymbol(a, f, d)?,
-        ];
         let block = racah::sun::f_symbol(
             &self.irrep(a)?,
             &self.irrep(b)?,
@@ -410,17 +394,9 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
             &self.irrep(f)?,
         )
         .map_err(racah_error)?;
-        if block.dims() != expected {
-            return Err(SUNFusionRuleError::UnexpectedFShape {
-                expected,
-                found: block.dims(),
-            });
-        }
-        GenericFArray::try_new(
-            block.data().to_vec(),
-            (expected[0], expected[1], expected[2], expected[3]),
-        )
-        .map_err(SUNFusionRuleError::MalformedSymbolData)
+        let [mu, nu, kappa, lambda] = block.dims();
+        GenericFArray::try_new(block.data().to_vec(), (mu, nu, kappa, lambda))
+            .map_err(SUNFusionRuleError::MalformedSymbolData)
     }
 
     fn try_r_symbol_generic(
@@ -429,14 +405,9 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
         b: SectorId,
         c: SectorId,
     ) -> Result<GenericRMatrix<f64>, Self::Error> {
-        let expected = [self.try_nsymbol(a, b, c)?, self.try_nsymbol(b, a, c)?];
         let block = racah::sun::r_symbol(&self.irrep(a)?, &self.irrep(b)?, &self.irrep(c)?)
             .map_err(racah_error)?;
-        let found = [block.dim(), block.dim()];
-        if found != expected {
-            return Err(SUNFusionRuleError::UnexpectedRShape { expected, found });
-        }
-        GenericRMatrix::try_new(block.data().to_vec(), expected[0], expected[1])
+        GenericRMatrix::try_new(block.data().to_vec(), block.dim(), block.dim())
             .map_err(SUNFusionRuleError::MalformedSymbolData)
     }
 }

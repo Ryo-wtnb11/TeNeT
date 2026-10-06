@@ -26,6 +26,10 @@ smallvec = { version = "1", features = ["const_generics", "union"] }
 # analog of Julia's fast `Dict` hash; std's SipHash is needlessly slow here.
 rustc-hash = "2"
 lru = "0.12"
+# The one bounded concurrent cache behind TeNeT's four structure caches
+# (#2014): byte-weighted, sharded, single-flight misses. Default features off:
+# the caches pass their own hasher, and std locks suffice.
+quick_cache = { version = "0.7", default-features = false }
 # Anyonic fusion-rule providers (e.g. FibonacciAnyon) need a genuine complex
 # `Scalar` for the recoupling engine's F/R symbols — version matches the
 # other workspace crates that already depend on it (tenet, tenet-dense, ...).

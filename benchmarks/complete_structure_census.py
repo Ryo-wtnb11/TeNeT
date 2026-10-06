@@ -12,10 +12,12 @@ same run. The script
    byte budget, max entry bytes) and checks every step's predicted hits,
    misses, evictions and bypasses against the observed counters;
 3. replays it against FIFO and LRU at larger caps, and prints the tables;
-4. replays it against the current bounds (FIFO, cap 1024, 64 MiB, max entry
-   = budget since #1993; #1365 chose 4 MiB with max entry 1_650_641) and exits
-   non-zero if any warm miss is not compulsory or any E1/conj row evicts in a
-   warm call.
+4. replays it against the current bounds (the degeneracy-structure cache of
+   #2014: no entry cap, 64 MiB over 2 shards, so the largest entry is 32 MiB;
+   before it, FIFO with cap 1024 and 64 MiB since #1993, and 4 MiB with max
+   entry 1_650_641 at #1365) and exits non-zero if any warm miss is not
+   compulsory or any E1/conj row evicts in a warm call. The FIFO model is
+   exact here because no warm call evicts.
 """
 
 import collections
@@ -26,10 +28,9 @@ import sys
 
 # The bounds the trace was recorded under; the exact-model check uses these.
 CAP, BUDGET, MAX_ENTRY = 5, 1_764_237, 1_650_641
-# The current bounds: cap and FIFO sized from this census (#1365); budget
-# 64 MiB and no per-entry limit below it since #1993.
-NEW_CAP, NEW_BUDGET = 1024, 64 * 1024 * 1024
-NEW_MAX_ENTRY = NEW_BUDGET
+# The current bounds (#2014): byte budget only, 64 MiB over two shards.
+NEW_CAP, NEW_BUDGET = 1 << 62, 64 * 1024 * 1024
+NEW_MAX_ENTRY = NEW_BUDGET // 2
 CAPS = (5, 8, 16, 32, 64)
 UNBOUNDED = 1 << 62
 

@@ -1,21 +1,5 @@
 use super::*;
 
-pub(super) fn local_u1_layout(
-    charge: i32,
-) -> (
-    Arc<FusionTreeHomSpaceCacheKey>,
-    Arc<FusionTreeHomSpaceLayout>,
-) {
-    let rule = U1FusionRule;
-    let hom =
-        FusionTreeHomSpace::from_sectors([(U1Irrep::new(charge), 1)], [(U1Irrep::new(charge), 1)]);
-    let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
-    let layout = Arc::new(fusion_tree_layout_from_data(
-        hom.fusion_tree_layout_data_uncached(&rule),
-    ));
-    (key, layout)
-}
-
 fn assert_checked_keys_match_encoded_oracle<R>(rule: &R, hom: &FusionTreeHomSpace)
 where
     R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
@@ -161,22 +145,21 @@ fn checked_and_encoded_entries_share_the_same_layout_cache() {
 }
 
 #[test]
-fn warm_layout_commit_takes_no_write_lock() {
-    // What: publishing a layout takes the process-global writer exactly
-    // once; committing the same layout again re-finds it under the read
-    // lock, so concurrent warm calls do not serialize on that writer.
+fn warm_layout_commit_publishes_nothing() {
+    // What: publishing a layout admits it once; a warm call finds it in the
+    // prepare lookup and publishes nothing.
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     reset_core_intern_tables();
     let hom = singleton_rank_hom(su2(1), 5);
 
-    let before_cold = fusion_tree_layout_write_locks();
+    reset_fusion_tree_layout_probe_side_effect_calls();
     let cold = hom.cached_fusion_tree_layout(&SU2FusionRule);
-    assert_eq!(fusion_tree_layout_write_locks(), before_cold + 1);
+    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (1, 1));
 
     let warm = hom.cached_fusion_tree_layout(&SU2FusionRule);
-    assert_eq!(fusion_tree_layout_write_locks(), before_cold + 1);
+    assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (1, 1));
     assert!(Arc::ptr_eq(&cold, &warm));
 }
 
@@ -262,7 +245,7 @@ fn prepared_complete_structure_hits_without_rebuilding_layout() {
         .build_complete_from_leg_degeneracies(&hom)
         .unwrap();
     first_prepared.commit();
-    let after_first = complete_hom_space_structure_cache_info();
+    let after_first = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     assert_eq!(after_first.admissions(), 1);
 
     let second_prepared = hom
@@ -272,7 +255,7 @@ fn prepared_complete_structure_hits_without_rebuilding_layout() {
         .build_complete_from_leg_degeneracies(&hom)
         .unwrap();
     second_prepared.commit();
-    let after_second = complete_hom_space_structure_cache_info();
+    let after_second = structure_cache_info(StructureCacheKind::DegeneracyStructure);
 
     assert_eq!(first.content_id(), second.content_id());
     assert_eq!(after_second.hits(), after_first.hits() + 1);
@@ -317,8 +300,8 @@ fn complete_structure_hit_skips_extent_walk_until_evicted() {
         return;
     }
     // What: the miss walks the per-block extents exactly once (inside the
-    // builder); a hit walks none; after FIFO eviction the next call is a
-    // miss that walks exactly once again.
+    // builder); a hit walks none; after an eviction the next call is a miss
+    // that walks exactly once again.
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -334,37 +317,32 @@ fn complete_structure_hit_skips_extent_walk_until_evicted() {
     reset_coupled_grid_build_observations();
     let first = finalize_complete(&U1FusionRule, &hom).unwrap();
     assert_eq!(coupled_grid_build_observations().1, walk);
-    let after_miss = complete_hom_space_structure_cache_info();
+    let after_miss = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     assert_eq!((after_miss.misses(), after_miss.admissions()), (1, 1));
 
     reset_coupled_grid_build_observations();
     let second = finalize_complete(&U1FusionRule, &hom).unwrap();
     assert_eq!(coupled_grid_build_observations().1, 0);
     assert!(Arc::ptr_eq(&first, &second));
-    let after_hit = complete_hom_space_structure_cache_info();
+    let after_hit = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     assert_eq!(after_hit.hits(), after_miss.hits() + 1);
     assert_eq!(after_hit.misses(), after_miss.misses());
 
-    // Admit distinct neighbours until the first eviction, whichever bound
-    // binds; FIFO makes `hom`, the oldest admission, its victim.
-    let mut degeneracy = 10;
-    while complete_hom_space_structure_cache_info().evictions() == after_hit.evictions() {
-        let other = FusionTreeHomSpace::from_sectors([(u1(0), degeneracy)], [(u1(0), 1)]);
-        finalize_complete(&U1FusionRule, &other).unwrap();
-        degeneracy += 1;
-        assert!(degeneracy <= after_hit.entry_capacity() + 10);
-    }
-    let filled = complete_hom_space_structure_cache_info();
-    assert_eq!(filled.evictions(), after_hit.evictions() + 1);
-
+    // An eviction (a zero budget evicts everything) makes the next call a
+    // miss that walks once again and is admitted again.
     drop((first, second));
+    let budget = after_hit.byte_budget();
+    crate::set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, 0);
+    crate::set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, budget);
+    let evicted = structure_cache_info(StructureCacheKind::DegeneracyStructure);
+    assert_eq!(evicted.entries(), 0);
     reset_coupled_grid_build_observations();
     finalize_complete(&U1FusionRule, &hom).unwrap();
     assert_eq!(coupled_grid_build_observations().1, walk);
-    let rewalked = complete_hom_space_structure_cache_info();
-    assert_eq!(rewalked.misses(), filled.misses() + 1);
-    assert_eq!(rewalked.admissions(), filled.admissions() + 1);
-    assert_eq!(rewalked.hits(), filled.hits());
+    let rewalked = structure_cache_info(StructureCacheKind::DegeneracyStructure);
+    assert_eq!(rewalked.misses(), evicted.misses() + 1);
+    assert_eq!(rewalked.admissions(), evicted.admissions() + 1);
+    assert_eq!(rewalked.hits(), evicted.hits());
 }
 
 #[test]
@@ -395,9 +373,9 @@ fn complete_structure_split_and_fermionic_rule_force_misses() {
         )
     };
     let two_one = finalize_complete(&U1FusionRule, &split(2)).unwrap();
-    let before = complete_hom_space_structure_cache_info();
+    let before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     let one_two = finalize_complete(&U1FusionRule, &split(1)).unwrap();
-    let after = complete_hom_space_structure_cache_info();
+    let after = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     assert_ne!(two_one.content_id(), one_two.content_id());
     assert_eq!(after.misses(), before.misses() + 1);
     assert_eq!(after.admissions(), before.admissions() + 1);
@@ -409,10 +387,10 @@ fn complete_structure_split_and_fermionic_rule_force_misses() {
         FusionProductSpace::new([parity_leg]),
     );
     let bosonic = finalize_complete(&Z2FusionRule, &parity_hom).unwrap();
-    let before = complete_hom_space_structure_cache_info();
+    let before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     reset_coupled_grid_build_observations();
     let fermionic = finalize_complete(&FermionParityFusionRule, &parity_hom).unwrap();
-    let after = complete_hom_space_structure_cache_info();
+    let after = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     // Equal content ids are expected: the block-structure interner keys
     // on rank and blocks only, so the rule shows up in the cache key.
     assert_eq!(bosonic.content_id(), fermionic.content_id());
@@ -454,18 +432,21 @@ fn complete_structure_overflow_is_rejected_beside_cached_neighbour() {
     let neighbour = hom(3);
     let cached = finalize_complete(&U1FusionRule, &neighbour).unwrap();
     let overflow = hom(usize::MAX);
-    let before = complete_hom_space_structure_cache_info();
+    let before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
 
     let error = finalize_complete(&U1FusionRule, &overflow).unwrap_err();
     assert_eq!(error, CoreError::ElementCountOverflow);
-    assert_eq!(complete_hom_space_structure_cache_info(), before);
+    assert_eq!(
+        structure_cache_info(StructureCacheKind::DegeneracyStructure),
+        before
+    );
 
     reset_coupled_grid_build_observations();
     let hit = finalize_complete(&U1FusionRule, &neighbour).unwrap();
     assert!(Arc::ptr_eq(&cached, &hit));
     assert_eq!(coupled_grid_build_observations().1, 0);
     assert_eq!(
-        complete_hom_space_structure_cache_info().hits(),
+        structure_cache_info(StructureCacheKind::DegeneracyStructure).hits(),
         before.hits() + 1
     );
 }

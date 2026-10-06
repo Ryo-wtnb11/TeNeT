@@ -723,16 +723,11 @@ impl FusionTreeHomSpace {
         F: FnOnce() -> Result<FusionTreeHomSpaceLayoutData, E>,
     {
         let key = FusionTreeHomSpaceCacheKey::new(rule, self);
-        let cache = fusion_tree_layout_cache();
-        let read = cache
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(layout) = read.lookup(&key) {
+        if let Some(layout) = sector_structure_cache().get(&key) {
             return Ok(PreparedFusionTreeLayout {
                 state: PreparedFusionTreeLayoutState::Cached { key, layout },
             });
         }
-        drop(read);
 
         let data = build()?;
         Ok(PreparedFusionTreeLayout {
@@ -824,7 +819,7 @@ impl FusionTreeHomSpace {
 
         let layout = self.cached_fusion_tree_layout(rule);
         let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
-        let built = BlockStructure::from_parts(sector, degeneracy)?;
+        let built = BlockStructure::from_shared_parts(sector, degeneracy)?;
         built.record_storage_tiling();
         Ok(admit_complete_hom_space_structure(
             key,
@@ -847,16 +842,16 @@ impl FusionTreeHomSpace {
         let required_len = degeneracy.required_len()?;
         Ok((
             required_len,
-            source.sector_structure() == &sector && source.degeneracy_structure() == &degeneracy,
+            source.sector_structure() == &*sector && source.degeneracy_structure() == &degeneracy,
         ))
     }
 
     /// Multiplicity-aware sibling of
     /// [`Self::coupled_subblock_structure_from_leg_degeneracies`].
     ///
-    /// Generic layouts are intentionally not published in the
-    /// multiplicity-free layout cache. Their vertex-resolved keys are grouped
-    /// ephemerally and fed through the same single-pass degeneracy builder.
+    /// Generic layouts share the sector-structure cache under their own key
+    /// (vertex-resolved keys differ from multiplicity-free ones) and feed the
+    /// same single-pass degeneracy builder.
     pub fn coupled_subblock_structure_from_leg_degeneracies_generic<R>(
         &self,
         rule: &R,
@@ -864,9 +859,11 @@ impl FusionTreeHomSpace {
     where
         R: FusionRule,
     {
-        let layout = self.fusion_tree_layout_data_generic(rule)?;
+        let layout = self.generic_sector_layout(rule.rule_identity(), || {
+            self.fusion_tree_layout_data_generic(rule)
+        })?;
         let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
-        let built = BlockStructure::from_parts(sector, degeneracy)?;
+        let built = BlockStructure::from_shared_parts(sector, degeneracy)?;
         built.record_storage_tiling();
         Ok(built.into_shared())
     }
@@ -898,9 +895,11 @@ impl FusionTreeHomSpace {
     where
         R: CheckedGenericFusion,
     {
+        // Why not through the sector-structure cache: the checked transaction
+        // consults no structure cache before its provider walk succeeds.
         let layout = self.fusion_tree_layout_data_generic_checked(rule)?;
         let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
-        PreparedBlockStructure::from_parts(sector, degeneracy)
+        PreparedBlockStructure::from_shared_parts(sector, degeneracy)
             .map(PreparedBlockStructure::with_storage_tiling)
             .map_err(Into::into)
     }
@@ -984,7 +983,7 @@ impl FusionTreeHomSpace {
     {
         let codomain = fusion_trees_by_coupled_for_space(rule, self.codomain());
         let domain = fusion_trees_by_coupled_for_space(rule, self.domain());
-        fusion_tree_layout_data_from_groups(&codomain, &domain)
+        fusion_tree_layout_data_from_groups(self.rank(), &codomain, &domain)
     }
 
     pub(crate) fn try_fusion_tree_layout_data_uncached_checked<R>(
@@ -996,7 +995,11 @@ impl FusionTreeHomSpace {
     {
         let codomain = try_fusion_trees_by_coupled_for_space_checked(rule, self.codomain())?;
         let domain = try_fusion_trees_by_coupled_for_space_checked(rule, self.domain())?;
-        Ok(fusion_tree_layout_data_from_groups(&codomain, &domain))
+        Ok(fusion_tree_layout_data_from_groups(
+            self.rank(),
+            &codomain,
+            &domain,
+        ))
     }
 
     /// Generic-fusion (outer-multiplicity) sibling of [`Self::fusion_tree_keys`]:
@@ -1038,6 +1041,23 @@ impl FusionTreeHomSpace {
             .to_vec())
     }
 
+    /// The Generic layout through the sector-structure cache: a pure
+    /// function of the rule identity and the sector signature, so a hit
+    /// proves that an equal provider walk succeeded. A failed walk is not
+    /// cached.
+    fn generic_sector_layout<E>(
+        &self,
+        rule: RuleIdentity,
+        build: impl FnOnce() -> Result<FusionTreeHomSpaceLayoutData, E>,
+    ) -> Result<Arc<FusionTreeHomSpaceLayout>, E> {
+        let key = FusionTreeHomSpaceCacheKey::generic(rule, self);
+        sector_structure_cache().get_or_try_build(&key, core_reset_epoch(), || {
+            let data = build()?;
+            let bytes = charged_fusion_tree_layout_bytes(&key, &data);
+            Ok((Arc::new(FusionTreeHomSpaceLayout::new(data)), bytes))
+        })
+    }
+
     fn fusion_tree_layout_data_generic<R>(
         &self,
         rule: &R,
@@ -1072,7 +1092,11 @@ impl FusionTreeHomSpace {
                 .into());
             }
         }
-        Ok(fusion_tree_layout_data_from_groups(&codomain, &domain))
+        Ok(fusion_tree_layout_data_from_groups(
+            self.rank(),
+            &codomain,
+            &domain,
+        ))
     }
 
     /// Block keys of ONE coupled sector, for spaces whose full enumeration is

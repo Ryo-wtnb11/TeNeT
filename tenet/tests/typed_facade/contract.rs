@@ -738,16 +738,16 @@ fn typed_deligne_product_prepares_both_embeddings_before_publishing_either() {
         tenet::sector::U1FusionRule, tenet::sector::U1FusionRule
     ));
     let before = (
-        fusion_tree_layout_cache_info(),
-        complete_hom_space_structure_cache_info(),
+        structure_cache_info(StructureCacheKind::SectorStructure),
+        structure_cache_info(StructureCacheKind::DegeneracyStructure),
     );
 
     assert!(lhs.deligne_product(&rhs, product).is_err());
 
     assert_eq!(
         (
-            fusion_tree_layout_cache_info(),
-            complete_hom_space_structure_cache_info(),
+            structure_cache_info(StructureCacheKind::SectorStructure),
+            structure_cache_info(StructureCacheKind::DegeneracyStructure),
         ),
         before
     );

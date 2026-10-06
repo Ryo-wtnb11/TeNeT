@@ -23,7 +23,7 @@ include!("../common/predicate_chain_coefficients.rs");
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tenet::typed::{ContractSpec, Direction, Duality, Side};
 
-use tenet::expert::{complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info};
+use tenet::expert::{structure_cache_info, StructureCacheKind};
 use tenet::sector::{
     BraidingStyleKind, CheckedFusionAlgebra, FusionRule, FusionStyleKind,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
@@ -724,8 +724,8 @@ fn a_failing_typed_operation_publishes_no_cache_state() {
     let provider = Arc::new(ExternalZ3::new());
     let tensor = z3_rank_four(&runtime, &provider);
     let before = (
-        fusion_tree_layout_cache_info(),
-        complete_hom_space_structure_cache_info(),
+        structure_cache_info(StructureCacheKind::SectorStructure),
+        structure_cache_info(StructureCacheKind::DegeneracyStructure),
     );
     let runtime_before = runtime.tree_transform_cache_info().structures;
 
@@ -744,8 +744,8 @@ fn a_failing_typed_operation_publishes_no_cache_state() {
 
     assert_eq!(
         (
-            fusion_tree_layout_cache_info(),
-            complete_hom_space_structure_cache_info(),
+            structure_cache_info(StructureCacheKind::SectorStructure),
+            structure_cache_info(StructureCacheKind::DegeneracyStructure),
         ),
         before
     );

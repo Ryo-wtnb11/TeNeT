@@ -3,13 +3,12 @@ use crate::tests::GenericMultiplicityRule;
 use crate::BoundDynamicTensorRef;
 use std::cell::Cell;
 use tenet_core::{
-    block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
-    fusion_tree_layout_cache_info, reset_core_intern_tables, BlockSpec, BraidingStyleKind,
-    CoupledSectorFold, FermionParityFusionRule, FusionAlgebraError, FusionProductSpace,
-    FusionTreePairKey, Fz2SectorLayout, InfallibleGeneric, PackedProductCodec, ProductFusionRule,
-    ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
-    SectorVec, Su2SectorLayout, TensorMapSpace, U1FusionRule, U1Irrep, U1SectorLayout,
-    Z2FusionRule, Z2Irrep,
+    block_structure_intern_cache_info, reset_core_intern_tables, structure_cache_info, BlockSpec,
+    BraidingStyleKind, CoupledSectorFold, FermionParityFusionRule, FusionAlgebraError,
+    FusionProductSpace, FusionTreePairKey, Fz2SectorLayout, InfallibleGeneric, PackedProductCodec,
+    ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId,
+    SectorLeg, SectorVec, StructureCacheKind, Su2SectorLayout, TensorMapSpace, U1FusionRule,
+    U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
 };
 
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
@@ -482,8 +481,8 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
     let final_hom = || FusionTreeHomSpace::from_sector_ids([(0, 2), (0, 3)], [(0, 5)]);
     let snapshots = || {
         (
-            fusion_tree_layout_cache_info(),
-            complete_hom_space_structure_cache_info(),
+            structure_cache_info(StructureCacheKind::SectorStructure),
+            structure_cache_info(StructureCacheKind::DegeneracyStructure),
             block_structure_intern_cache_info(),
         )
     };

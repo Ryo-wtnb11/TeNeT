@@ -1290,9 +1290,14 @@ mod tests {
         ));
         assert_eq!(right.algebra_calls(), 0);
         assert!(left.algebra_calls() > 0);
-        assert_eq!(tenet_core::fusion_tree_layout_cache_info().entries(), 0);
         assert_eq!(
-            tenet_core::complete_hom_space_structure_cache_info().entries(),
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::SectorStructure)
+                .entries(),
+            0
+        );
+        assert_eq!(
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .entries(),
             0
         );
         assert_eq!(tenet_core::block_structure_intern_cache_info().entries(), 0);

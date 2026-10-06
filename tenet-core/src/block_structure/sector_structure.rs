@@ -180,9 +180,7 @@ impl SectorStructure {
             }
             blocks.push(SectorBlock::new(key));
         }
-        let mut sorted_indices = (0..blocks.len()).collect::<DimVec>();
-        sorted_indices
-            .sort_unstable_by(|&left, &right| blocks[left].key().cmp(blocks[right].key()));
+        let sorted_indices = sorted_block_indices(&blocks);
         for pair in sorted_indices.windows(2) {
             let left = blocks[pair[0]].key();
             let right = blocks[pair[1]].key();
@@ -192,6 +190,50 @@ impl SectorStructure {
                 });
             }
         }
+        Ok(Self::from_checked_blocks(
+            rank,
+            expected_kind,
+            blocks,
+            sorted_indices,
+        ))
+    }
+
+    /// [`Self::from_keys`] over the fusion-tree keys of an enumerated
+    /// layout, borrowing them. Why a `Result`: the keys are distinct only if
+    /// the provider's fusion channels are, which no fusion-rule trait
+    /// promises, so a duplicate stays the typed error it is in `from_keys`.
+    pub(crate) fn from_fusion_tree_keys(
+        rank: usize,
+        keys: &[crate::FusionTreePairKey],
+    ) -> Result<Self, CoreError> {
+        let blocks = keys
+            .iter()
+            .map(|key| SectorBlock::new(BlockKey::from(key.clone())))
+            .collect::<Vec<_>>();
+        let sorted_indices = sorted_block_indices(&blocks);
+        if let Some(pair) = sorted_indices
+            .windows(2)
+            .find(|pair| blocks[pair[0]].key() == blocks[pair[1]].key())
+        {
+            return Err(CoreError::DuplicateBlockKey {
+                key: Box::new(blocks[pair[0]].key().clone()),
+            });
+        }
+        let kind = blocks.first().map(|block| block.key().kind());
+        Ok(Self::from_checked_blocks(
+            rank,
+            kind,
+            blocks,
+            sorted_indices,
+        ))
+    }
+
+    fn from_checked_blocks(
+        rank: usize,
+        expected_kind: Option<BlockKeyKind>,
+        blocks: Vec<SectorBlock>,
+        sorted_indices: DimVec,
+    ) -> Self {
         let mut fusion_tree_groups = Vec::<FusionTreeBlockGroup>::new();
         let mut fusion_tree_group_indices = FxHashMap::<FusionTreeGroupKey, usize>::default();
         for (index, block) in blocks.iter().enumerate() {
@@ -206,14 +248,14 @@ impl SectorStructure {
             }
         }
         let compact_lookup = CompactBlockLookup::from_blocks(&blocks);
-        Ok(Self {
+        Self {
             rank,
             key_kind: expected_kind,
             blocks,
             fusion_tree_groups,
             sorted_indices,
             compact_lookup,
-        })
+        }
     }
 
     #[inline]
@@ -453,4 +495,10 @@ impl CompactBlockLookup {
             .copied()
             .filter(|&index| index != Self::MISSING)
     }
+}
+
+fn sorted_block_indices(blocks: &[SectorBlock]) -> DimVec {
+    let mut sorted_indices = (0..blocks.len()).collect::<DimVec>();
+    sorted_indices.sort_unstable_by(|&left, &right| blocks[left].key().cmp(blocks[right].key()));
+    sorted_indices
 }

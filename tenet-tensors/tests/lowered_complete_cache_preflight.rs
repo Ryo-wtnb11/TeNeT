@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    complete_hom_space_structure_cache_info, CoreError, FermionParityFusionRule,
-    FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep, Z2Irrep,
+    structure_cache_info, CoreError, FermionParityFusionRule, FusionProductSpace,
+    FusionTreeHomSpace, SectorLeg, StructureCacheKind, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet_tensors::{reset_global_operation_caches, BoundDynamicFusionMapSpace, OperationError};
 
@@ -17,7 +17,7 @@ fn lowered_complete_cache_preflight_preserves_statistics_and_hits() {
         FusionProductSpace::new([SectorLeg::new([(vacuum, usize::MAX)], false)]),
         FusionProductSpace::new([SectorLeg::new([(vacuum, 2)], false)]),
     );
-    let before = complete_hom_space_structure_cache_info();
+    let before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
 
     let error = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
         Arc::new(U1FusionRule),
@@ -26,7 +26,10 @@ fn lowered_complete_cache_preflight_preserves_statistics_and_hits() {
     .unwrap_err();
 
     assert_eq!(error, OperationError::Core(CoreError::ElementCountOverflow));
-    assert_eq!(complete_hom_space_structure_cache_info(), before);
+    assert_eq!(
+        structure_cache_info(StructureCacheKind::DegeneracyStructure),
+        before
+    );
 
     let provider = Arc::new(FermionParityFusionRule);
     let odd = Z2Irrep::ODD.sector_id();
@@ -39,14 +42,14 @@ fn lowered_complete_cache_preflight_preserves_statistics_and_hits() {
         homspace.clone(),
     )
     .unwrap();
-    let after_first = complete_hom_space_structure_cache_info();
+    let after_first = structure_cache_info(StructureCacheKind::DegeneracyStructure);
     assert_eq!(after_first.admissions(), 1);
 
     let second = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
         provider, homspace,
     )
     .unwrap();
-    let after_second = complete_hom_space_structure_cache_info();
+    let after_second = structure_cache_info(StructureCacheKind::DegeneracyStructure);
 
     assert_eq!(
         first.space().structure().content_id(),

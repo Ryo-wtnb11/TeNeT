@@ -47,8 +47,8 @@ fn tensor_map_rejects_distinct_rule_identities_before_provider_work() {
     assert_ne!(first.rule_identity(), second.rule_identity());
     let runtime = runtime();
     let before = (
-        fusion_tree_layout_cache_info(),
-        complete_hom_space_structure_cache_info(),
+        structure_cache_info(StructureCacheKind::SectorStructure),
+        structure_cache_info(StructureCacheKind::DegeneracyStructure),
     );
 
     let error = TensorMap::<ExternalZ3, f64>::zeros(
@@ -61,8 +61,8 @@ fn tensor_map_rejects_distinct_rule_identities_before_provider_work() {
     assert!(matches!(error, tenet::typed::Error::RuleMismatch));
     assert_eq!(
         (
-            fusion_tree_layout_cache_info(),
-            complete_hom_space_structure_cache_info(),
+            structure_cache_info(StructureCacheKind::SectorStructure),
+            structure_cache_info(StructureCacheKind::DegeneracyStructure),
         ),
         before
     );
@@ -97,8 +97,8 @@ fn checked_construction_failure_publishes_no_cache_state() {
     .unwrap();
     let runtime = runtime();
     let before = (
-        fusion_tree_layout_cache_info(),
-        complete_hom_space_structure_cache_info(),
+        structure_cache_info(StructureCacheKind::SectorStructure),
+        structure_cache_info(StructureCacheKind::DegeneracyStructure),
     );
     let runtime_before = runtime.tree_transform_cache_info().structures;
 
@@ -110,8 +110,8 @@ fn checked_construction_failure_publishes_no_cache_state() {
     ));
     assert_eq!(
         (
-            fusion_tree_layout_cache_info(),
-            complete_hom_space_structure_cache_info(),
+            structure_cache_info(StructureCacheKind::SectorStructure),
+            structure_cache_info(StructureCacheKind::DegeneracyStructure),
         ),
         before
     );
