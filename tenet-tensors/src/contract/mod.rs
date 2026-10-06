@@ -78,11 +78,12 @@ pub(crate) use dynamic_space::{
     reset_scratch_publication_observations, scratch_publication_observations, MetadataOutput,
     MetadataRequest,
 };
-pub(crate) use dynamic_space::{dispatch_prepare, LayoutKeyBuilder};
+pub(crate) use dynamic_space::{dispatch_prepare, FusionOperandLayout, LayoutKeyBuilder};
 pub use dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
 };
+pub(crate) use fusion::rhs_contract_twist_factor_oriented;
 #[cfg(test)]
 pub(crate) use fusion::{
     contracted_fusion_tree_basis_matches, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,

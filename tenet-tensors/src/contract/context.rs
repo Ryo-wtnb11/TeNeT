@@ -13,6 +13,7 @@ use crate::cache::{
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
 };
 use crate::lowering::adjoint_fusion_space_view;
+use crate::mode::TreeStructureSource;
 #[cfg(test)]
 use crate::storage_scratch::StorageTensorContractWorkspace;
 use crate::tree_context::TreeTransformExecutionContext;
@@ -1751,11 +1752,14 @@ where
             target.space.nout(),
         );
         let temporary_structure = Arc::clone(temporary.structure());
-        let transform = self.tree_context.compile_tree_pair_structure(
+        let transform = self.tree_context.tree_structure(
             target.rule,
             &operation,
             target.space.structure(),
-            &temporary_structure,
+            TreeStructureSource::Stored {
+                structure: &temporary_structure,
+                storage_conjugate: false,
+            },
         )?;
         if let (Some(start), Some(core_time), Some(profile)) = (start, core_time, profile) {
             profile.core_block_plan_build += core_time;
@@ -2764,15 +2768,15 @@ where
             Arc::clone(src.structure())
         };
         let dst_structure = Arc::clone(dst.structure());
-        let structure = self
-            .tree_context
-            .get_or_compile_tree_pair_structure_with_storage_conjugation(
-                rule,
-                operation,
-                &dst_structure,
-                &src_replay_structure,
-                source_conjugate,
-            )?;
+        let structure = self.tree_context.tree_structure(
+            rule,
+            &operation,
+            &dst_structure,
+            TreeStructureSource::Stored {
+                structure: &src_replay_structure,
+                storage_conjugate: source_conjugate,
+            },
+        )?;
         self.tree_context
             .tree_transform_structure_overwrite_into_raw(
                 structure.as_ref(),

@@ -12,6 +12,7 @@ use tenet_core::{
 use crate::cache::{
     touch_lru_key, BlockStructureCacheKey, OperationCachePolicy, DEFAULT_OPERATION_CACHE_ENTRIES,
 };
+use crate::mode::TreeStructureSource;
 use crate::tree_context::TreeTransformExecutionContext;
 #[cfg(test)]
 use crate::DenseTreeTransformOperations;

@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockStructure, FusionSpaceAdmission, FusionTreeHomSpace, FusionTreePairOrientation,
-    MultiplicityFreeRigidSymbols,
+    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols,
 };
 
+use crate::mode::PlanningAlgebra;
 use crate::{DenseBlockScalar, OperationError};
 use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec};
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
@@ -22,8 +23,7 @@ use super::dynamic_space::{
 };
 use super::fusion::{
     contracted_axis_order_candidates, external_axis_is_dual,
-    min_dynamic_tree_materialized_elements, rhs_contract_twist_factor_oriented,
-    FusionContractOrientation, CACHED_ORIENTATIONS,
+    min_dynamic_tree_materialized_elements, FusionContractOrientation, CACHED_ORIENTATIONS,
 };
 use super::fusion_block::{
     compile_fusion_block_contract_plan_core_geometry,
@@ -372,33 +372,19 @@ where
     };
     let mut alpha_by_coupled = Vec::with_capacity(regions.len());
     for region in regions.iter() {
-        let mut row_trees = match rhs_orientation {
+        let row_trees = match rhs_orientation {
             FusionTreePairOrientation::Direct => region.row_trees(),
             FusionTreePairOrientation::Adjoint => region.col_trees(),
-        }
-        .iter();
-        let Some(first) = row_trees.next() else {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "canonical RHS coupled region has no row fusion tree",
-            });
         };
-        let alpha = rhs_contract_twist_factor_oriented(
+        let Some(alpha) = <MultiplicityFreeAdmissionMode as PlanningAlgebra<R>>::core_alpha(
             rule,
             validated.rhs_homspace(),
             validated.rhs_contracting_axes(),
-            first.tree(),
-        )?;
-        for extent in row_trees {
-            if rhs_contract_twist_factor_oriented(
-                rule,
-                validated.rhs_homspace(),
-                validated.rhs_contracting_axes(),
-                extent.tree(),
-            )? != alpha
-            {
-                return Ok(None);
-            }
-        }
+            row_trees.iter().map(|extent| extent.tree()),
+        )?
+        else {
+            return Ok(None);
+        };
         alpha_by_coupled.push((region.coupled(), alpha));
     }
     try_compile_scaled_canonical_core_plan(validated, dst, lhs, rhs, &alpha_by_coupled)
