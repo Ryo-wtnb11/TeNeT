@@ -136,6 +136,13 @@ pub(crate) struct StructureCache<K, V> {
     /// write-held by [`Self::clear`]. A build that straddles a reset is
     /// therefore either wiped by the clear or refused by the epoch check.
     publication: RwLock<()>,
+    /// The last admitted entry, also resident in `entries`: a repeated hit
+    /// compares keys (an `Arc` pointer first) instead of hashing one. The
+    /// former layout cache kept the same front for the same reason. Replaced
+    /// on admission, cleared with the cache and on a budget change, so it
+    /// never holds an entry the budget evicted for longer than until the
+    /// next admission.
+    last: RwLock<Option<(K, Arc<V>)>>,
     hits: AtomicU64,
     misses: AtomicU64,
     admissions: AtomicU64,
@@ -167,6 +174,7 @@ where
                 CountEvictions(Arc::clone(&evictions)),
             ),
             publication: RwLock::new(()),
+            last: RwLock::new(None),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             admissions: AtomicU64::new(0),
@@ -180,9 +188,25 @@ where
     where
         Q: Hash + Equivalent<K> + ?Sized,
     {
+        if let Some(value) = self.last_hit(key) {
+            return Some(value);
+        }
         let found = self.entries.get(key)?;
         self.hits.fetch_add(1, Ordering::Relaxed);
         Some(found.value)
+    }
+
+    fn last_hit<Q>(&self, key: &Q) -> Option<Arc<V>>
+    where
+        Q: Equivalent<K> + ?Sized,
+    {
+        let last = self
+            .last
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_, value) = last.as_ref().filter(|(last, _)| key.equivalent(last))?;
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        Some(Arc::clone(value))
     }
 
     /// Whether `key` is resident; counts no hit.
@@ -190,7 +214,13 @@ where
     where
         Q: Hash + Equivalent<K> + ?Sized,
     {
-        self.entries.contains_key(key)
+        let is_last = self
+            .last
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|(last, _)| key.equivalent(last));
+        is_last || self.entries.contains_key(key)
     }
 
     /// Publishes a value built since reset epoch `epoch`, or returns the
@@ -199,7 +229,7 @@ where
     pub(crate) fn publish(&self, key: &K, value: Arc<V>, bytes: u64, epoch: usize) -> Arc<V> {
         match self.entries.get_value_or_guard(key, None) {
             GuardResult::Value(existing) => existing.value,
-            GuardResult::Guard(guard) => self.admit(value, bytes, epoch, |charged| {
+            GuardResult::Guard(guard) => self.admit(key, value, bytes, epoch, |charged| {
                 let _ = guard.insert(charged);
             }),
             GuardResult::Timeout => unreachable!("a lookup without a timeout never times out"),
@@ -214,6 +244,9 @@ where
         epoch: usize,
         build: impl FnOnce() -> Result<(Arc<V>, u64), E>,
     ) -> Result<Arc<V>, E> {
+        if let Some(value) = self.last_hit(key) {
+            return Ok(value);
+        }
         match self.entries.get_value_or_guard(key, None) {
             GuardResult::Value(existing) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
@@ -221,7 +254,7 @@ where
             }
             GuardResult::Guard(guard) => {
                 let (value, bytes) = build()?;
-                Ok(self.admit(value, bytes, epoch, |charged| {
+                Ok(self.admit(key, value, bytes, epoch, |charged| {
                     let _ = guard.insert(charged);
                 }))
             }
@@ -231,6 +264,7 @@ where
 
     fn admit(
         &self,
+        key: &K,
         value: Arc<V>,
         bytes: u64,
         epoch: usize,
@@ -254,6 +288,11 @@ where
             value: Arc::clone(&value),
             bytes,
         });
+        *self
+            .last
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((key.clone(), Arc::clone(&value)));
         self.admissions.fetch_add(1, Ordering::Relaxed);
         value
     }
@@ -264,6 +303,7 @@ where
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.entries.clear();
+        self.forget_last();
         for counter in [&self.hits, &self.misses, &self.admissions, &self.rejections] {
             counter.store(0, Ordering::Relaxed);
         }
@@ -272,6 +312,14 @@ where
 
     pub(crate) fn set_byte_budget(&self, bytes: u64) {
         self.entries.set_capacity(bytes);
+        self.forget_last();
+    }
+
+    fn forget_last(&self) {
+        *self
+            .last
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     pub(crate) fn info(&self) -> StructureCacheInfo {
