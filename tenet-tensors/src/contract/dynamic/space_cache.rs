@@ -424,14 +424,15 @@ where
                 src_space.transformed_with_primer(rule, operation, layout_primer)?
             };
             let dst_structure = Arc::clone(space.structure());
-            let transform_structure = tree_context
-                .get_or_compile_tree_pair_structure_with_storage_conjugation(
-                    rule,
-                    operation.clone(),
-                    &dst_structure,
-                    &replay_structure,
-                    source_conjugate,
-                )?;
+            let transform_structure = tree_context.tree_structure(
+                rule,
+                operation,
+                &dst_structure,
+                TreeStructureSource::Stored {
+                    structure: &replay_structure,
+                    storage_conjugate: source_conjugate,
+                },
+            )?;
             return Ok(DynamicFusionTransformedSourceEntry {
                 space: Arc::new(space),
                 replay_structure,
@@ -518,14 +519,15 @@ where
             src_space.transformed_with_primer(rule, operation, layout_primer)?
         };
         let dst_structure = Arc::clone(space.structure());
-        let transform_structure = tree_context
-            .get_or_compile_tree_pair_structure_with_storage_conjugation(
-                rule,
-                operation.clone(),
-                &dst_structure,
-                &replay_structure,
-                source_conjugate,
-            )?;
+        let transform_structure = tree_context.tree_structure(
+            rule,
+            operation,
+            &dst_structure,
+            TreeStructureSource::Stored {
+                structure: &replay_structure,
+                storage_conjugate: source_conjugate,
+            },
+        )?;
         let entry = DynamicFusionTransformedSourceEntry {
             space: Arc::new(space),
             replay_structure,
@@ -599,19 +601,11 @@ where
         self.stats.misses += 1;
         let space = source.transformed_space(rule, operation, layout_primer)?;
         let dst_structure = Arc::clone(space.structure());
-        let logical_keys = source
-            .adjoint_logical_keys()
-            .expect("only adjoint sources use the oriented transform compiler");
-        let transform_structure = tree_context.get_or_compile_tree_pair_structure_oriented(
+        let transform_structure = tree_context.tree_structure(
             rule,
             operation,
             &dst_structure,
-            logical_keys,
-            || source.adjoint_storage_indices(),
-            source.storage_space().structure(),
-            source.orientation(),
-            source.rank(),
-            |axis| source.storage_axis(axis),
+            TreeStructureSource::Oriented(source),
         )?;
         let entry = DynamicFusionTransformedSourceEntry {
             space: Arc::new(space),
@@ -650,14 +644,15 @@ where
                 DynamicFusionMapSpace::core_dst_with_primer(rule, lhs, rhs, plan, layout_primer)?;
             let dst_structure = Arc::clone(output_dst.structure());
             let src_structure = Arc::clone(space.structure());
-            let output_transform_structure = tree_context
-                .get_or_compile_tree_pair_structure_with_storage_conjugation(
-                    rule,
-                    plan.output_transform().clone(),
-                    &dst_structure,
-                    &src_structure,
-                    false,
-                )?;
+            let output_transform_structure = tree_context.tree_structure(
+                rule,
+                plan.output_transform(),
+                &dst_structure,
+                TreeStructureSource::Stored {
+                    structure: &src_structure,
+                    storage_conjugate: false,
+                },
+            )?;
             return Ok(DynamicFusionCoreDstEntry {
                 space: Arc::new(space),
                 output_transform_structure,
@@ -764,14 +759,15 @@ where
             DynamicFusionMapSpace::core_dst_with_primer(rule, lhs, rhs, plan, layout_primer)?;
         let dst_structure = Arc::clone(output_dst.structure());
         let src_structure = Arc::clone(space.structure());
-        let output_transform_structure = tree_context
-            .get_or_compile_tree_pair_structure_with_storage_conjugation(
-                rule,
-                plan.output_transform().clone(),
-                &dst_structure,
-                &src_structure,
-                false,
-            )?;
+        let output_transform_structure = tree_context.tree_structure(
+            rule,
+            plan.output_transform(),
+            &dst_structure,
+            TreeStructureSource::Stored {
+                structure: &src_structure,
+                storage_conjugate: false,
+            },
+        )?;
         let entry = DynamicFusionCoreDstEntry {
             space: Arc::new(space),
             output_transform_structure,

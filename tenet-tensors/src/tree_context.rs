@@ -7,20 +7,21 @@ use num_traits::Zero;
 use tenet_core::GenericRigidSymbols;
 use tenet_core::{
     BlockKey, BlockStructure, CategoricalScalar, CheckedGenericRigidSymbols, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, Placement,
-    RuleIdentity, TensorMap,
+    HostWritableStorage, MultiplicityFreeAdmissionMode, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, Placement, RuleIdentity, TensorMap,
 };
 
 use crate::cache::OperationCachePolicy;
 use crate::contract::{BoundDynamicFusionMapSpace, FusionOperand};
+use crate::mode::{PlanningAlgebra, TreeStructureSource};
 use crate::tree_transform::{
     build_checked_generic_tree_pair_transform_group_plan_validated,
     validate_checked_generic_tree_pair_plan_preflight, CheckedGenericPlanError, TreeTransformCache,
     TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use crate::{
-    validate_oriented_fusion_layout, RecouplingCoefficientAction, ReportsPlacement,
-    TreeTransformReplayProfile, TreeTransformStructure,
+    validate_oriented_fusion_layout, DenseBlockScalar, RecouplingCoefficientAction,
+    ReportsPlacement, TreeTransformReplayProfile, TreeTransformStructure,
 };
 use tenet_dense::DefaultDenseExecutor;
 use tenet_operations::OperationError;
@@ -823,72 +824,40 @@ where
     ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        C: DenseBlockScalar,
     {
-        self.cache
-            .set_recoupling_threads(self.backend.recoupling_threads());
-        self.cache
-            .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
-                rule,
-                operation,
-                dst_structure,
-                src_structure,
-                false,
-            )
+        self.tree_structure(
+            rule,
+            operation,
+            dst_structure,
+            TreeStructureSource::Stored {
+                structure: src_structure,
+                storage_conjugate: false,
+            },
+        )
     }
 
-    pub(crate) fn get_or_compile_tree_pair_structure_with_storage_conjugation<R>(
-        &mut self,
-        rule: &R,
-        operation: TreeTransformOperation,
-        dst_structure: &Arc<BlockStructure>,
-        src_structure: &Arc<BlockStructure>,
-        storage_conjugate: bool,
-    ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    {
-        self.cache
-            .set_recoupling_threads(self.backend.recoupling_threads());
-        self.cache
-            .get_or_compile_tree_pair_structures_with_storage_conjugation(
-                rule,
-                operation,
-                dst_structure,
-                src_structure,
-                storage_conjugate,
-            )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_or_compile_tree_pair_structure_oriented<'p, R, FIndices, FAxis>(
+    /// The planner's one tree-structure compile: the multiplicity-free
+    /// [`PlanningAlgebra::tree_structure`] through this context's cache.
+    pub(crate) fn tree_structure<R>(
         &mut self,
         rule: &R,
         operation: &TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
-        logical_keys: &[tenet_core::FusionTreePairKey],
-        storage_indices: FIndices,
-        storage_src_structure: &Arc<BlockStructure>,
-        orientation: tenet_core::FusionTreePairOrientation,
-        logical_rank: usize,
-        logical_to_storage_axis: FAxis,
+        src: TreeStructureSource<'_>,
     ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        FIndices: FnOnce() -> Result<&'p [usize], OperationError>,
-        FAxis: Fn(usize) -> Result<usize, OperationError>,
+        C: DenseBlockScalar,
     {
         self.cache
             .set_recoupling_threads(self.backend.recoupling_threads());
-        self.cache.get_or_compile_tree_pair_oriented(
+        <MultiplicityFreeAdmissionMode as PlanningAlgebra<R>>::tree_structure(
+            &mut self.cache,
             rule,
             operation,
             dst_structure,
-            logical_keys,
-            storage_indices,
-            storage_src_structure,
-            orientation,
-            logical_rank,
-            logical_to_storage_axis,
+            src,
         )
     }
 

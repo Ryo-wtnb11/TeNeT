@@ -2,23 +2,24 @@ use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
-    BraidingStyleKind, CheckedGenericRigidSymbols, CoreError, FusionTreeHomSpace, RuleIdentity,
-    StructurallyValidatedFusionTreeSubset,
+    CheckedGenericAdmissionMode, CheckedGenericRigidSymbols, CoreError, FusionTreeHomSpace,
+    RuleIdentity, StructurallyValidatedFusionTreeSubset,
 };
 #[cfg(test)]
 use tenet_operations::DenseTreeTransformOperations;
 use tenet_operations::{TensorContractSpec, TreeTransformBackend};
 
-use crate::tree_transform::{
-    build_checked_generic_tree_pair_transform_group_plan, CheckedGenericPlanError,
-};
+use crate::mode::{PlanningAlgebra, TreeStructureSource};
+use crate::tree_transform::CheckedGenericPlanError;
 use crate::{
     zeroed_payload, ConjugateValue, DenseRecouplingScalar, OperationError,
     RecouplingCoefficientAction, ZeroBytes,
 };
 
 use super::context::TensorContractFusionExecutionContext;
-use super::dynamic_space::{BoundDynamicFusionMapSpace, PreparedCheckedGenericDynamicSpace};
+use super::dynamic_space::{
+    BoundDynamicFusionMapSpace, FusionOperand, PreparedCheckedGenericDynamicSpace,
+};
 use super::fusion::{
     compile_tensorcontract_fusion_plan_from_ranks, orient_fusion_contract_plan,
     select_complete_bosonic_contract_candidate, ContractAxisOrderCandidate,
@@ -148,30 +149,6 @@ where
     })
 }
 
-/// General-axis contraction may braid, twist, and (for fermions) insert the
-/// supertrace sign; the checked Generic engine implements only the Bosonic
-/// case. Canonical composition crosses no legs and skips this boundary.
-fn require_bosonic_contract_braiding<P>(
-    lhs_space: &BoundDynamicFusionMapSpace<P>,
-    rhs_space: &BoundDynamicFusionMapSpace<P>,
-) -> Result<(), CheckedGenericPlanError<P::Error>>
-where
-    P: CheckedGenericRigidSymbols<Scalar = f64>,
-{
-    for actual in [
-        lhs_space.provider().braiding_style(),
-        rhs_space.provider().braiding_style(),
-    ] {
-        if actual != BraidingStyleKind::Bosonic {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "checked Generic contraction requires Bosonic braiding",
-            }
-            .into());
-        }
-    }
-    Ok(())
-}
-
 fn staged_transform<'a, P>(
     authority: &BoundDynamicFusionMapSpace<P>,
     provider: &P,
@@ -191,12 +168,16 @@ where
     )?;
     let prepared = authority.prepare_final_homspace_generic_with_checked(provider, homspace)?;
     let destination = Arc::new(prepared.structure().clone());
-    let plan = build_checked_generic_tree_pair_transform_group_plan(
+    let replay = <CheckedGenericAdmissionMode as PlanningAlgebra<P>>::tree_structure(
+        &mut (),
         provider,
-        operation.clone(),
-        source.space().structure(),
+        operation,
+        &destination,
+        TreeStructureSource::Stored {
+            structure: source.space().structure(),
+            storage_conjugate: false,
+        },
     )?;
-    let replay = plan.compile_structures(&destination, source.space().structure())?;
     Ok(CheckedStagedOperand::Transformed {
         prepared,
         replay,
@@ -380,7 +361,15 @@ where
         axis_plan,
     } = validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, dst_nout)?;
     let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
-    require_bosonic_contract_braiding(lhs_space, rhs_space)?;
+    // General-axis contraction may braid, twist and insert the fermionic
+    // supertrace sign; the checked Generic core is Bosonic only. Canonical
+    // composition crosses no legs and skips this boundary.
+    <CheckedGenericAdmissionMode as PlanningAlgebra<P>>::core_alpha(
+        provider,
+        FusionOperand::direct(rhs_space.space()).oriented_homspace(),
+        axes.rhs_contracting_axes(),
+        [],
+    )?;
     let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
         provider,
         lhs_space.space().homspace(),
@@ -590,7 +579,15 @@ where
         dst_nout,
     )?;
     let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
-    require_bosonic_contract_braiding(lhs_space, rhs_space)?;
+    // General-axis contraction may braid, twist and insert the fermionic
+    // supertrace sign; the checked Generic core is Bosonic only. Canonical
+    // composition crosses no legs and skips this boundary.
+    <CheckedGenericAdmissionMode as PlanningAlgebra<P>>::core_alpha(
+        provider,
+        FusionOperand::direct(rhs_space.space()).oriented_homspace(),
+        candidate.rhs(),
+        [],
+    )?;
     let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
         provider,
         lhs_space.space().homspace(),
@@ -715,12 +712,18 @@ where
     let output_replay = if plan.output_transform_is_identity() {
         None
     } else {
-        let output_plan = build_checked_generic_tree_pair_transform_group_plan(
-            provider,
-            plan.output_transform().clone(),
-            &core_structure,
-        )?;
-        Some(output_plan.compile_structures(&destination_structure, &core_structure)?)
+        Some(
+            <CheckedGenericAdmissionMode as PlanningAlgebra<P>>::tree_structure(
+                &mut (),
+                provider,
+                plan.output_transform(),
+                &destination_structure,
+                TreeStructureSource::Stored {
+                    structure: &core_structure,
+                    storage_conjugate: false,
+                },
+            )?,
+        )
     };
 
     let lhs_transformed = execute_staged_transform(
