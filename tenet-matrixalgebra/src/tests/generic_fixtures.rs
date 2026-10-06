@@ -537,9 +537,7 @@ where
         calls: Cell::new(0),
         identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let mut data = vec![D::zero(); checked.space().required_len().unwrap()];
     let structure = checked.space().structure();
     for index in 0..structure.block_count() {
@@ -591,9 +589,7 @@ where
         calls: Cell::new(0),
         identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let mut data = vec![D::zero(); checked.space().required_len().unwrap()];
     let structure = checked.space().structure();
     for index in 0..structure.block_count() {
@@ -632,7 +628,7 @@ pub(super) fn bind_checked_layout(
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
-        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
+        identity: FactorGenericRule.rule_identity(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(space.space().clone(), Arc::clone(&provider))

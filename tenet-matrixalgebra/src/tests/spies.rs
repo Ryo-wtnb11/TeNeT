@@ -652,7 +652,7 @@ impl Observer for FullQrInputSpy {
 
 impl FusionRule for LateGenericSpy {
     fn rule_identity(&self) -> RuleIdentity {
-        self.rule.rule_identity()
+        self.identity.clone()
     }
     fn fusion_style(&self) -> FusionStyleKind {
         self.rule.fusion_style()
@@ -816,4 +816,50 @@ pub(super) fn matrix_function_spy(
         );
     }
     spy
+}
+
+/// A spy whose never-failing twin shares its identity.
+pub(super) trait SpyTwin: CheckedGenericFusion + FusionRule + Sized {
+    fn twin(&self) -> Self;
+}
+
+impl SpyTwin for LateGenericSpy {
+    fn twin(&self) -> Self {
+        Self {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            calls: Cell::new(0),
+            identity: self.identity.clone(),
+        }
+    }
+}
+
+/// `source`'s layout bound to `spy`. Why not `bind_generic(source, spy)`:
+/// each spy has its own identity (a spy that counts or fails its calls is
+/// not `FactorGenericRule` to a structure cache), so the space is admitted
+/// for the spy, by a twin that neither fails nor counts. That admission
+/// walks the source layout once, outside the spy's own counts.
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while the spies use Cell"
+)]
+pub(super) fn bind_to_spy<P>(
+    source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
+    spy: &Arc<P>,
+) -> BoundDynamicFusionMapSpace<P>
+where
+    P: SpyTwin + 'static,
+    P::Error: std::fmt::Debug,
+{
+    let admitted = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::new(spy.twin()),
+        source.space().homspace().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        admitted.space().structure().as_ref(),
+        source.space().structure().as_ref(),
+        "the spy admits the source layout"
+    );
+    BoundDynamicFusionMapSpace::bind_generic(admitted.space().clone(), Arc::clone(spy)).unwrap()
 }

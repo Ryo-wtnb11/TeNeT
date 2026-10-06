@@ -78,8 +78,7 @@ fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
         calls: Cell::new(0),
         identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), failing).unwrap();
+    let checked = bind_to_spy(&source, &failing);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<CountingDense>::default();
     assert!(matches!(
@@ -95,9 +94,7 @@ fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
         calls: Cell::new(0),
         identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&complete))
-            .unwrap();
+    let checked = bind_to_spy(&source, &complete);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<CountingDense>::default();
     let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
@@ -134,9 +131,7 @@ fn checked_generic_eigh_late_dense_failure_publishes_no_factors() {
         calls: Cell::new(0),
         identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     provider.calls.set(0);
     let mut dense = ScriptedExecutor::new(FailAfterObservingEighInput {
@@ -186,9 +181,7 @@ fn checked_generic_eigh_uses_owned_dense_output() {
         calls: Cell::new(0),
         identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<RejectEighInto>::default();
 
@@ -223,9 +216,7 @@ fn checked_generic_eigh_keeps_owned_vectors_in_live_pairs_before_publication() {
         calls: Cell::new(0),
         identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<RejectEighInto>::default();
     crate::factorize::reset_checked_eigh_pair_pointers();
@@ -262,9 +253,7 @@ fn assert_checked_generic_eigh_live_pair_owners<D: crate::factorize::FactorScala
         calls: Cell::new(0),
         identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<RejectEighInto>::default();
     crate::factorize::reset_checked_eigh_pair_pointers();
@@ -390,7 +379,7 @@ fn checked_generic_eigh_reconstructs_padded_reordered_complex_input() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
-        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
+        identity: FactorGenericRule.rule_identity(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(expert.space().clone(), Arc::clone(&provider))
@@ -490,8 +479,7 @@ fn checked_generic_eig_stages_dense_work_before_checked_factor_admission() {
         calls: Cell::new(0),
         identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), failing).unwrap();
+    let checked = bind_to_spy(&source, &failing);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<CountingDense>::default();
     assert!(matches!(

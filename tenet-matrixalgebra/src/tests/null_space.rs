@@ -31,11 +31,7 @@ fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authori
             calls: Cell::new(0),
             identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         });
-        let complete_space = BoundDynamicFusionMapSpace::bind_generic(
-            source.space().clone(),
-            Arc::clone(&complete_provider),
-        )
-        .unwrap();
+        let complete_space = bind_to_spy(&source, &complete_provider);
         let complete_input = BoundDynamicTensorRef::try_new(&complete_space, &data).unwrap();
         let mut complete_dense = ScriptedExecutor::<CountingDense>::default();
         let factor = checked_spy_null(left, &mut complete_dense, &complete_input).unwrap();
@@ -53,11 +49,7 @@ fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authori
             calls: Cell::new(0),
             identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         });
-        let failing_space = BoundDynamicFusionMapSpace::bind_generic(
-            source.space().clone(),
-            Arc::clone(&failing_provider),
-        )
-        .unwrap();
+        let failing_space = bind_to_spy(&source, &failing_provider);
         let failing_input = BoundDynamicTensorRef::try_new(&failing_space, &data).unwrap();
         let before = failing_input.data().to_vec();
         let mut failing_dense = ScriptedExecutor::<CountingDense>::default();
@@ -96,9 +88,7 @@ fn checked_generic_null_dense_failure_never_reaches_output_admission() {
             calls: Cell::new(0),
             identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         });
-        let checked =
-            BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-                .unwrap();
+        let checked = bind_to_spy(&source, &provider);
         let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
         let before = input.data().to_vec();
         let expected_preflight = {
@@ -156,9 +146,7 @@ fn checked_generic_disjoint_null_is_identity_without_dense_calls() {
         calls: Cell::new(0),
         identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let data = vec![0.0; checked.space().required_len().unwrap()];
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let left =
@@ -1117,7 +1105,7 @@ fn assert_checked_factor_generic_full_family_borrows_input<D: FactorScalar>() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
-        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
+        identity: FactorGenericRule.rule_identity(),
     });
     let rebind = |space: &BoundDynamicFusionMapSpace<FactorGenericRule>| {
         BoundDynamicFusionMapSpace::bind_generic(space.space().clone(), Arc::clone(&provider))
@@ -1166,7 +1154,7 @@ fn checked_generic_full_null_ops_keep_packing_padded_input() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
-        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
+        identity: FactorGenericRule.rule_identity(),
     });
     let expert_space =
         BoundDynamicFusionMapSpace::bind_generic(expert_space.space().clone(), provider).unwrap();
