@@ -163,7 +163,10 @@ macro_rules! assert_sun_polar_laws {
         // admission is the Hermitian (real scalar) test there.
         let assert_hermitian = |tensor: &TensorMap<_, _>, what: &str| {
             if tensor.rank() == 0 {
-                assert!(tensor.eigh_vals(&[], &[]).is_ok(), "{what}");
+                assert!(
+                    tensor.eigh_vals(&[], &[], HermitianTol::DEFAULT).is_ok(),
+                    "{what}"
+                );
             } else {
                 assert_close(&owned_adjoint(tensor), tensor, what);
             }
@@ -213,7 +216,7 @@ macro_rules! assert_sun_polar_laws {
             assert_close(&gram, &identity, "W isometry");
         }
         assert!(p
-            .eigh_vals(&codomain_axes(&p), &domain_axes(&p))
+            .eigh_vals(&codomain_axes(&p), &domain_axes(&p), HermitianTol::DEFAULT)
             .unwrap()
             .iter()
             .flat_map(|entry| &entry.values)

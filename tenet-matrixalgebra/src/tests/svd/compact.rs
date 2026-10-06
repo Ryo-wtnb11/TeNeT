@@ -1494,7 +1494,7 @@ fn noncanonical_mf_svd_and_eigh_scatter_each_output_block_once() {
     let adjoint_space = bound.space().adjoint_view().unwrap();
     let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
     reset_scatter_visit_probe();
-    let full = eigh_full_dyn(&mut dense, &input).unwrap();
+    let full = eigh_full_dyn(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
     let b_v = full.v().space().space().structure().block_count();
     assert_eq!(b_v, 16);
     let probe = scatter_visit_probe();

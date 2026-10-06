@@ -10,7 +10,8 @@ fn hermitian_region_validation_rejects_short_storage_without_panicking() {
         .unwrap()
         .unwrap();
 
-    let error = validate_hermitian_regions(&tensor.data()[..3], &regions).unwrap_err();
+    let error = validate_hermitian_regions(&tensor.data()[..3], &regions, HermitianTol::DEFAULT)
+        .unwrap_err();
 
     assert_eq!(
         error,

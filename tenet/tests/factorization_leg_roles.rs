@@ -11,6 +11,7 @@
 //! wrong permutation cannot hide behind an equally wrong oracle.
 
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use num_complex::Complex64;
 use tenet::sector::{
@@ -243,8 +244,8 @@ macro_rules! check_square {
         let (ir, ic): (Vec<usize>, Vec<usize>) = ((0..nout).collect(), (nout..p.rank()).collect());
         let (ir, ic) = (&ir[..], &ic[..]);
 
-        let Eigh { d, v } = h.eigh_full(rows, cols).unwrap();
-        let expected = hp.eigh_full(ir, ic).unwrap();
+        let Eigh { d, v } = h.eigh_full(rows, cols, HermitianTol::DEFAULT).unwrap();
+        let expected = hp.eigh_full(ir, ic, HermitianTol::DEFAULT).unwrap();
         assert_same!(d, expected.d, format!("{} eigh d", $label));
         assert_same!(v, expected.v, format!("{} eigh v", $label));
         assert_close!(
@@ -257,8 +258,8 @@ macro_rules! check_square {
             $label
         );
         assert_eq!(
-            h.eigh_vals(rows, cols).unwrap(),
-            hp.eigh_vals(ir, ic).unwrap()
+            h.eigh_vals(rows, cols, HermitianTol::DEFAULT).unwrap(),
+            hp.eigh_vals(ir, ic, HermitianTol::DEFAULT).unwrap()
         );
 
         let Eig { d, v } = t.eig_full(rows, cols).unwrap();

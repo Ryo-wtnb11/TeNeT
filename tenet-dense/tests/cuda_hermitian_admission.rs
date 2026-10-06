@@ -26,7 +26,12 @@ fn cuda_is_hermitian_region<D: CudaScalar>(
     offset: usize,
     n: usize,
 ) -> Result<bool, tenet_dense::DenseError> {
-    Ok(cuda_hermitian_regions::<D>(ctx, src, &[(offset, n)])?[0])
+    Ok(cuda_hermitian_regions::<D>(
+        ctx,
+        src,
+        &[(offset, n)],
+        <D::Real as tenet_dense::CudaRealScalar>::EPSILON.powf(0.75),
+    )?[0])
 }
 
 trait Payload: CudaScalar + Copy {
@@ -163,7 +168,13 @@ fn case<D: Payload>(ctx: &mut CudaDenseContext, name: &str) {
         let src = CudaDenseStorage::upload::<D>(ctx, &data).expect("upload");
 
         let before = cuda_transfer_stats().d2h_calls;
-        let batched = cuda_hermitian_regions::<D>(ctx, &src, &regions).expect("batched");
+        let batched = cuda_hermitian_regions::<D>(
+            ctx,
+            &src,
+            &regions,
+            <D::Real as tenet_dense::CudaRealScalar>::EPSILON.powf(0.75),
+        )
+        .expect("batched");
         downloads.push(cuda_transfer_stats().d2h_calls - before);
 
         assert_eq!(batched, expected, "{name}: batched decisions x{copies}");
@@ -197,7 +208,8 @@ fn batched_admission_matches_the_per_region_rule_with_bounded_downloads() {
     let empty = CudaDenseStorage::upload::<f64>(&ctx, &[0.0]).expect("upload");
     let before = cuda_transfer_stats().d2h_calls;
     assert_eq!(
-        cuda_hermitian_regions::<f64>(&mut ctx, &empty, &[]).expect("no regions"),
+        cuda_hermitian_regions::<f64>(&mut ctx, &empty, &[], f64::EPSILON.powf(0.75))
+            .expect("no regions"),
         Vec::<bool>::new()
     );
     assert_eq!(

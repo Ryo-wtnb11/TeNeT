@@ -21,6 +21,7 @@ mod prepared;
 
 use std::collections::BTreeSet;
 use std::fmt::Debug;
+use tenet::typed::HermitianTol;
 
 use num_complex::{Complex32, Complex64};
 use tenet::expert::cuda_transfer_stats;
@@ -53,8 +54,13 @@ where
     let _ = (Complex32::new(0.0, 0.0), Complex64::new(0.0, 0.0));
     let device: Vec<_> = inputs.iter().map(|t| t.to_cuda().unwrap()).collect();
     let stack = StackedTensorMap::pack(inputs).unwrap().to_cuda().unwrap();
-    let plan =
-        EighFullPlan::new(&stack, &codomain_axes(&inputs[0]), &domain_axes(&inputs[0])).unwrap();
+    let plan = EighFullPlan::new(
+        &stack,
+        &codomain_axes(&inputs[0]),
+        &domain_axes(&inputs[0]),
+        HermitianTol::DEFAULT,
+    )
+    .unwrap();
     let mut workspace = plan.workspace().unwrap();
     let output = plan.execute(&stack, &mut workspace).unwrap();
     let d_stack = output.d.to_host().unwrap();
@@ -65,7 +71,11 @@ where
             d: eager_d,
             v: eager_v,
         } = device_input
-            .eigh_full(&codomain_axes(device_input), &domain_axes(device_input))
+            .eigh_full(
+                &codomain_axes(device_input),
+                &domain_axes(device_input),
+                HermitianTol::DEFAULT,
+            )
             .unwrap();
         let (eager_d, eager_v) = (eager_d.to_host().unwrap(), eager_v.to_host().unwrap());
         let d = d_stack.member(member).unwrap();
@@ -102,7 +112,11 @@ where
             d: host_d,
             v: host_v,
         } = input
-            .eigh_full(&codomain_axes(input), &domain_axes(input))
+            .eigh_full(
+                &codomain_axes(input),
+                &domain_axes(input),
+                HermitianTol::DEFAULT,
+            )
             .unwrap();
         check_member(
             &format!("{what} vs Host"),
@@ -150,7 +164,11 @@ fn plus_minus_lambda_and_degenerate_groups_compare_by_value() {
         let pm = single_leg(&runtime, &leg, count, plus_minus_entry);
         assert!(has_plus_minus_tie(
             &pm[0]
-                .eigh_full(&codomain_axes(&pm[0]), &domain_axes(&pm[0]))
+                .eigh_full(
+                    &codomain_axes(&pm[0]),
+                    &domain_axes(&pm[0]),
+                    HermitianTol::DEFAULT
+                )
                 .unwrap()
                 .d
         ));
@@ -158,7 +176,11 @@ fn plus_minus_lambda_and_degenerate_groups_compare_by_value() {
         let degenerate = single_leg(&runtime, &su2, count, degenerate_entry);
         assert!(has_degenerate_group(
             &degenerate[0]
-                .eigh_full(&codomain_axes(&degenerate[0]), &domain_axes(&degenerate[0]))
+                .eigh_full(
+                    &codomain_axes(&degenerate[0]),
+                    &domain_axes(&degenerate[0]),
+                    HermitianTol::DEFAULT
+                )
                 .unwrap()
                 .d
         ));
@@ -192,8 +214,13 @@ fn submissions_transfers_and_the_ledger_do_not_depend_on_b() {
         let sum_n: usize = sizes.iter().sum();
         let stack = StackedTensorMap::pack(&inputs).unwrap().to_cuda().unwrap();
         let reserved = plans(&runtime).reserved_entries;
-        let plan = EighFullPlan::new(&stack, &codomain_axes(&inputs[0]), &domain_axes(&inputs[0]))
-            .unwrap();
+        let plan = EighFullPlan::new(
+            &stack,
+            &codomain_axes(&inputs[0]),
+            &domain_axes(&inputs[0]),
+            HermitianTol::DEFAULT,
+        )
+        .unwrap();
         let mut workspace = plan.workspace().unwrap();
         assert_eq!(
             plans(&runtime).reserved_entries,
@@ -291,9 +318,13 @@ fn non_hermitian_members_are_named_before_any_solver_launch() {
         inputs[1] = x.clone();
         inputs[count - 1] = x;
         let stack = StackedTensorMap::pack(&inputs).unwrap().to_cuda().unwrap();
-        let mut handle =
-            PreparedEighFull::new(&stack, &codomain_axes(&inputs[0]), &domain_axes(&inputs[0]))
-                .unwrap();
+        let mut handle = PreparedEighFull::new(
+            &stack,
+            &codomain_axes(&inputs[0]),
+            &domain_axes(&inputs[0]),
+            HermitianTol::DEFAULT,
+        )
+        .unwrap();
         let before = cuda_transfer_stats();
         let got = rejected(handle.execute(&stack).map(|_| ()));
         let counts = delta(cuda_transfer_stats(), before);
@@ -330,7 +361,11 @@ fn mixed_scale_admission_verdicts_equal_device_eager_per_member() {
             input
                 .to_cuda()
                 .unwrap()
-                .eigh_full(&codomain_axes(input), &domain_axes(input))
+                .eigh_full(
+                    &codomain_axes(input),
+                    &domain_axes(input),
+                    HermitianTol::DEFAULT,
+                )
                 .is_err()
         })
         .map(|(member, _)| (member, MemberFault::NotHermitian))
@@ -340,9 +375,13 @@ fn mixed_scale_admission_verdicts_equal_device_eager_per_member() {
         "{expected:?}"
     );
     let stack = StackedTensorMap::pack(&inputs).unwrap().to_cuda().unwrap();
-    let mut handle =
-        PreparedEighFull::new(&stack, &codomain_axes(&inputs[0]), &domain_axes(&inputs[0]))
-            .unwrap();
+    let mut handle = PreparedEighFull::new(
+        &stack,
+        &codomain_axes(&inputs[0]),
+        &domain_axes(&inputs[0]),
+        HermitianTol::DEFAULT,
+    )
+    .unwrap();
     assert_eq!(rejected(handle.execute(&stack).map(|_| ())), expected);
 }
 
@@ -355,9 +394,13 @@ fn non_finite_entries_and_eigenvalues_reject_their_members() {
     let mut inputs = single_leg(&runtime, &leg, 5, |_, _, _| 1.0);
     inputs[1] = inputs[1].scale(f64::NAN);
     let stack = StackedTensorMap::pack(&inputs).unwrap().to_cuda().unwrap();
-    let mut handle =
-        PreparedEighFull::new(&stack, &codomain_axes(&inputs[0]), &domain_axes(&inputs[0]))
-            .unwrap();
+    let mut handle = PreparedEighFull::new(
+        &stack,
+        &codomain_axes(&inputs[0]),
+        &domain_axes(&inputs[0]),
+        HermitianTol::DEFAULT,
+    )
+    .unwrap();
     assert_eq!(
         rejected(handle.execute(&stack).map(|_| ())),
         vec![(1, MemberFault::NotHermitian)]
@@ -374,7 +417,11 @@ fn non_finite_entries_and_eigenvalues_reject_their_members() {
             input
                 .to_cuda()
                 .unwrap()
-                .eigh_full(&codomain_axes(input), &domain_axes(input))
+                .eigh_full(
+                    &codomain_axes(input),
+                    &domain_axes(input),
+                    HermitianTol::DEFAULT,
+                )
                 .is_err()
         })
         .collect();
@@ -384,9 +431,13 @@ fn non_finite_entries_and_eigenvalues_reject_their_members() {
         "eager rejects the overflow"
     );
     let stack = StackedTensorMap::pack(&inputs).unwrap().to_cuda().unwrap();
-    let mut handle =
-        PreparedEighFull::new(&stack, &codomain_axes(&inputs[0]), &domain_axes(&inputs[0]))
-            .unwrap();
+    let mut handle = PreparedEighFull::new(
+        &stack,
+        &codomain_axes(&inputs[0]),
+        &domain_axes(&inputs[0]),
+        HermitianTol::DEFAULT,
+    )
+    .unwrap();
     let fault = MemberFault::NonFiniteEigenvalue;
     assert_eq!(
         rejected(handle.execute(&stack).map(|_| ())),
@@ -403,7 +454,7 @@ fn complex_device_payloads_are_unsupported() {
     let complex = members::<_, Complex64>(&runtime, &[&leg], &[&leg], 2, 1);
     let stack = StackedTensorMap::pack(&complex).unwrap().to_cuda().unwrap();
     assert!(matches!(
-        PreparedEighFull::new(&stack, &codomain_axes(&complex[0]), &domain_axes(&complex[0])),
+        PreparedEighFull::new(&stack, &codomain_axes(&complex[0]), &domain_axes(&complex[0]), HermitianTol::DEFAULT),
         Err(Error::Operation(error)) if format!("{error:?}").contains("real payloads")
     ));
 }
@@ -459,6 +510,7 @@ fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
         &stack(&good),
         &codomain_axes(&good[0]),
         &domain_axes(&good[0]),
+        HermitianTol::DEFAULT,
     )
     .unwrap();
     let check = |what: &str,
@@ -473,7 +525,11 @@ fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
                 d: host_d,
                 v: host_v,
             } = input
-                .eigh_full(&codomain_axes(input), &domain_axes(input))
+                .eigh_full(
+                    &codomain_axes(input),
+                    &domain_axes(input),
+                    HermitianTol::DEFAULT,
+                )
                 .unwrap();
             let (d, v) = (d.member(member).unwrap(), v.member(member).unwrap());
             check_member(what, input, &d, &v, (&host_d, &host_v), f64::EPSILON);
@@ -481,7 +537,11 @@ fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
                 let Eigh { v: eager_v, .. } = input
                     .to_cuda()
                     .unwrap()
-                    .eigh_full(&codomain_axes(input), &domain_axes(input))
+                    .eigh_full(
+                        &codomain_axes(input),
+                        &domain_axes(input),
+                        HermitianTol::DEFAULT,
+                    )
                     .unwrap();
                 assert!(
                     v.dense_data().unwrap() == eager_v.to_host().unwrap().dense_data().unwrap(),

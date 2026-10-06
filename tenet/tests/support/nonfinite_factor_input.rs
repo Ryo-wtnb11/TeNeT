@@ -20,8 +20,20 @@ macro_rules! nonfinite_factor_errors {
             ("null", text(t.right_null(rows, cols).map(drop))),
             ("polar", text(t.left_polar(rows, cols).map(drop))),
             ("polar", text(t.right_polar(rows, cols).map(drop))),
-            ("eigh", text(t.eigh_vals(rows, cols).map(drop))),
-            ("eigh", text(t.eigh_full(rows, cols).map(drop))),
+            (
+                "eigh",
+                text(
+                    t.eigh_vals(rows, cols, tenet::typed::HermitianTol::DEFAULT)
+                        .map(drop),
+                ),
+            ),
+            (
+                "eigh",
+                text(
+                    t.eigh_full(rows, cols, tenet::typed::HermitianTol::DEFAULT)
+                        .map(drop),
+                ),
+            ),
             ("eig", text(t.eig_vals(rows, cols).map(drop))),
             ("eig", text(t.eig_full(rows, cols).map(drop))),
         ]

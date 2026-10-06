@@ -10,6 +10,7 @@ include!("../common/predicate_chain_coefficients.rs");
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use num_complex::{Complex32, Complex64};
 

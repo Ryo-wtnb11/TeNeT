@@ -252,7 +252,7 @@ fn checked_generic_polar_completes_rank_deficient_and_zero_sectors() {
                 }
             }
             assert!(p
-                .eigh_vals(&[0], &[1])
+                .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
                 .unwrap()
                 .iter()
                 .flat_map(|entry| &entry.values)

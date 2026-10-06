@@ -18,7 +18,11 @@ where
     D: tenet::typed::FactorizationScalar + tenet::typed::SpectrumMagnitude,
 {
     let Eigh { d, v } = source
-        .eigh_full(&codomain_axes(source), &domain_axes(source))
+        .eigh_full(
+            &codomain_axes(source),
+            &domain_axes(source),
+            HermitianTol::DEFAULT,
+        )
         .unwrap();
     let found = d.domain()[0]
         .find_truncated(&d.diagview().unwrap(), truncation)
@@ -748,7 +752,11 @@ fn assert_c64_eigh_trunc_composition_matches_host<R>(
         d: d_device,
         v: v_device,
     } = device
-        .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+        .eigh_full(
+            &codomain_axes(&device),
+            &domain_axes(&device),
+            HermitianTol::DEFAULT,
+        )
         .unwrap();
     assert_device_factor_handles(source, [&d_device, &v_device]);
     let d = d_device.to_host().unwrap();
@@ -818,7 +826,11 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
     let Eigh { d, v } = hermitian
         .to_cuda()
         .unwrap()
-        .eigh_full(&codomain_axes(&hermitian), &domain_axes(&hermitian))
+        .eigh_full(
+            &codomain_axes(&hermitian),
+            &domain_axes(&hermitian),
+            HermitianTol::DEFAULT,
+        )
         .unwrap();
     let d = d.to_host().unwrap();
     let v = v.to_host().unwrap();
@@ -865,7 +877,8 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
         complex_symmetric
             .eigh_full(
                 &codomain_axes(&complex_symmetric),
-                &domain_axes(&complex_symmetric)
+                &domain_axes(&complex_symmetric),
+                HermitianTol::DEFAULT
             )
             .is_err(),
         "the Host oracle rejects a complex-symmetric non-Hermitian input"
@@ -876,6 +889,7 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
         .eigh_full(
             &codomain_axes(&complex_symmetric),
             &domain_axes(&complex_symmetric),
+            HermitianTol::DEFAULT,
         )
         .expect_err("device EIGH must reject a complex-symmetric non-Hermitian input");
     assert!(
@@ -908,6 +922,7 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
         .eigh_full(
             &codomain_axes(&hand_hermitian),
             &domain_axes(&hand_hermitian),
+            HermitianTol::DEFAULT,
         )
         .unwrap();
     let mut values: Vec<f64> = d
@@ -935,7 +950,8 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
         .unwrap()
         .eigh_full(
             &codomain_axes(&hand_symmetric),
-            &domain_axes(&hand_symmetric)
+            &domain_axes(&hand_symmetric),
+            HermitianTol::DEFAULT
         )
         .is_err());
 }

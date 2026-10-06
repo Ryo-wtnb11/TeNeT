@@ -36,7 +36,12 @@ fn cuda_is_hermitian_region<D: CudaScalar>(
     offset: usize,
     n: usize,
 ) -> Result<bool, tenet_dense::DenseError> {
-    Ok(cuda_hermitian_regions::<D>(ctx, src, &[(offset, n)])?[0])
+    Ok(cuda_hermitian_regions::<D>(
+        ctx,
+        src,
+        &[(offset, n)],
+        <D::Real as tenet_dense::CudaRealScalar>::EPSILON.powf(0.75),
+    )?[0])
 }
 
 /// The payload dtypes under test, with just enough host arithmetic for a

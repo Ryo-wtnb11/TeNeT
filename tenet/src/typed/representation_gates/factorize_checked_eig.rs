@@ -33,7 +33,7 @@ fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
     )
     .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let got = input.eigh_vals(&[0], &[1]).unwrap();
+    let got = input.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert_eq!(
         got,
         vec![
@@ -50,12 +50,20 @@ fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(calls.total(), 0);
 
-    let swapped = input.eigh_vals(&[1], &[0]).unwrap();
+    let swapped = input.eigh_vals(&[1], &[0], HermitianTol::DEFAULT).unwrap();
     assert_eq!(calls.total(), 2);
     let swapped_dense = input.permute(&[1], &[0]).unwrap().materialize().unwrap();
-    assert_eq!(swapped, swapped_dense.eigh_vals(&[0], &[1]).unwrap());
+    assert_eq!(
+        swapped,
+        swapped_dense
+            .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap()
+    );
     let dense = input.materialize().unwrap();
-    assert_eq!(got, dense.eigh_vals(&[0], &[1]).unwrap());
+    assert_eq!(
+        got,
+        dense.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap()
+    );
 
     let real: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
@@ -75,8 +83,10 @@ fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
     let dense_real = real.materialize().unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert_eq!(
-        real.eigh_vals(&[0], &[1]).unwrap(),
-        dense_real.eigh_vals(&[0], &[1]).unwrap()
+        real.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap(),
+        dense_real
+            .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap()
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 
@@ -105,8 +115,10 @@ fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
     let dense_narrow = narrow.materialize().unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert_eq!(
-        narrow.eigh_vals(&[0], &[1]).unwrap(),
-        dense_narrow.eigh_vals(&[0], &[1]).unwrap()
+        narrow.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap(),
+        dense_narrow
+            .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap()
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     calls.reset();
@@ -127,7 +139,7 @@ fn checked_compact_diagonal_eigh_vals_reads_stored_real_spectrum() {
     .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert_eq!(
-        dual.eigh_vals(&[0], &[1]).unwrap(),
+        dual.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap(),
         vec![SectorSpectrum {
             sector: dual_sector,
             values: vec![-2.0, 2.0],
@@ -169,6 +181,7 @@ fn checked_compact_diagonal_eigh_vals_rejects_inconsistent_spectrum_admission() 
                 space: input.logical_space(),
                 spectrum: entries,
             },
+            HermitianTol::DEFAULT,
         )
     };
     assert!(admit(spectrum).is_ok());
@@ -208,7 +221,10 @@ fn checked_compact_diagonal_eigh_vals_applies_the_dense_hermiticity_check_direct
     // The dense route's relative Hermiticity check, applied to the diagonal
     // directly: within tolerance the eigenvalue is the real part.
     DIAGONAL_MATERIALIZATIONS.set(0);
-    assert_eq!(near.eigh_vals(&[0], &[1]).unwrap()[0].values, [1.0]);
+    assert_eq!(
+        near.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap()[0].values,
+        [1.0]
+    );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(calls.total(), 0);
 
@@ -223,7 +239,9 @@ fn checked_compact_diagonal_eigh_vals_applies_the_dense_hermiticity_check_direct
     .unwrap();
     // NaN is refused first by the shared finite-input stage (#1986).
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let compact_error = nonfinite.eigh_vals(&[0], &[1]).unwrap_err();
+    let compact_error = nonfinite
+        .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+        .unwrap_err();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert!(compact_error
         .to_string()
@@ -654,7 +672,7 @@ fn checked_compact_diagonal_eigh_full_avoids_input_materialization_and_solver() 
             .unwrap();
             DIAGONAL_MATERIALIZATIONS.set(0);
             calls.reset();
-            let Eigh { d, v } = input.eigh_full(&[0], &[1]).unwrap();
+            let Eigh { d, v } = input.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
             assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
             assert_eq!(calls.total(), 0);
             assert!(std::ptr::eq(d.provider(), provider.as_ref()));
@@ -750,9 +768,9 @@ fn checked_compact_diagonal_eigh_full_matches_independent_dense_oracle() {
                 // Oracle: an independently materialized dense payload through
                 // the dense checked EIGH route.
                 let dense = input.materialize().unwrap();
-                let expected = dense.eigh_full(&[0], &[1]).unwrap();
+                let expected = dense.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
                 DIAGONAL_MATERIALIZATIONS.set(0);
-                let got = input.eigh_full(&[0], &[1]).unwrap();
+                let got = input.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
                 assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
                 assert_eq!(got.v.codomain(), expected.v.codomain());
                 assert_eq!(got.v.domain(), expected.v.domain());
@@ -772,13 +790,13 @@ fn checked_compact_diagonal_eigh_full_matches_independent_dense_oracle() {
                 assert!(distance(&got.v, &expected.v) <= tol);
 
                 // Changed leg roles go through an explicit permute.
-                let swapped = input.eigh_full(&[1], &[0]).unwrap();
+                let swapped = input.eigh_full(&[1], &[0], HermitianTol::DEFAULT).unwrap();
                 let swapped_oracle = input
                     .permute(&[1], &[0])
                     .unwrap()
                     .materialize()
                     .unwrap()
-                    .eigh_full(&[0], &[1])
+                    .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
                     .unwrap();
                 assert_eq!(
                     swapped.d.diagview().unwrap().len(),
@@ -807,9 +825,9 @@ fn checked_compact_diagonal_eigh_full_matches_independent_dense_oracle() {
                 [vec![1.0, 1.0], vec![2.0, -2.0, 2.0]],
             );
             let dense = input.materialize().unwrap();
-            let oracle = dense.eigh_full(&[0], &[1]).unwrap();
+            let oracle = dense.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
             DIAGONAL_MATERIALIZATIONS.set(0);
-            let Eigh { d, v } = input.eigh_full(&[0], &[1]).unwrap();
+            let Eigh { d, v } = input.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
             assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
             assert_eq!(
                 d.diagview().unwrap(),
@@ -1376,7 +1394,7 @@ fn checked_compact_diagonal_eigh_full_applies_the_dense_hermiticity_check_direct
     // applied to the diagonal directly.
     let near = complex([Complex64::new(1.0, 1e-15), Complex64::new(-1.0, 0.0)]);
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let Eigh { d, .. } = near.eigh_full(&[0], &[1]).unwrap();
+    let Eigh { d, .. } = near.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(calls.total(), 0);
     assert_eq!(d.diagview().unwrap()[0].values, [Complex64::new(1.0, 0.0)]);
@@ -1385,10 +1403,12 @@ fn checked_compact_diagonal_eigh_full_applies_the_dense_hermiticity_check_direct
     let dense_error = non_hermitian
         .materialize()
         .unwrap()
-        .eigh_full(&[0], &[1])
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
         .unwrap_err();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let compact_error = non_hermitian.eigh_full(&[0], &[1]).unwrap_err();
+    let compact_error = non_hermitian
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+        .unwrap_err();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(compact_error.to_string(), dense_error.to_string());
 
@@ -1408,7 +1428,10 @@ fn checked_compact_diagonal_eigh_full_applies_the_dense_hermiticity_check_direct
     )
     .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let compact_error = nonfinite.eigh_full(&[0], &[1]).map(drop).unwrap_err();
+    let compact_error = nonfinite
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+        .map(drop)
+        .unwrap_err();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert!(compact_error
         .to_string()
@@ -1448,6 +1471,7 @@ fn checked_compact_diagonal_eigh_full_rejects_inconsistent_spectrum_admission() 
                 space: input.logical_space(),
                 spectrum: entries,
             },
+            HermitianTol::DEFAULT,
         )
         .is_ok()
     };

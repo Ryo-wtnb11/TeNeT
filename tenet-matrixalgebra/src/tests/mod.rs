@@ -134,7 +134,11 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
-    eigh_vals_from_source::<CheckedGenericAdmissionMode, _, _, _, _>(dense, dense_source(input))
+    eigh_vals_from_source::<CheckedGenericAdmissionMode, _, _, _, _>(
+        dense,
+        dense_source(input),
+        HermitianTol::DEFAULT,
+    )
 }
 
 fn eig_vals_dyn_checked_generic<E, R, D>(

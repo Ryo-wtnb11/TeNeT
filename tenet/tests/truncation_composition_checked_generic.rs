@@ -20,6 +20,7 @@
 #![cfg(feature = "racah-generated")]
 
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use num_complex::{Complex32, Complex64};
 use tenet::sector::SUNFusionRule;
@@ -195,7 +196,7 @@ macro_rules! assert_su3_eigh_composition {
         let terms = source.dense_data().unwrap().len();
         for (name, truncation, policy) in policies!($target) {
             let case = format!("{} {name}", $tag);
-            let Eigh { d, v } = source.eigh_full(&[0], &[1]).unwrap();
+            let Eigh { d, v } = source.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
             let bond = d.domain()[0].clone();
             let found = bond
                 .find_truncated(&d.diagview().unwrap(), &truncation)

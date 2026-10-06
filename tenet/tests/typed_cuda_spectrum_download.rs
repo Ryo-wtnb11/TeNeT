@@ -19,6 +19,7 @@
 #![cfg(feature = "cuda")]
 
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use tenet::expert::{cuda_transfer_stats, CudaTransferStats};
 use tenet::sector::{U1FusionRule, U1Irrep};
@@ -105,7 +106,11 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
         let device = hermitian.to_cuda().unwrap();
         let before = cuda_transfer_stats();
         let Eigh { d, v } = device
-            .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+            .eigh_full(
+                &codomain_axes(&device),
+                &domain_axes(&device),
+                HermitianTol::DEFAULT,
+            )
             .unwrap();
         let eigh = delta(before);
         let (d, v) = (d.to_host().unwrap(), v.to_host().unwrap());
@@ -124,7 +129,11 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
             "{charges}: {eigh:?}"
         );
         let Eigh { d: expected, .. } = hermitian
-            .eigh_full(&codomain_axes(&hermitian), &domain_axes(&hermitian))
+            .eigh_full(
+                &codomain_axes(&hermitian),
+                &domain_axes(&hermitian),
+                HermitianTol::DEFAULT,
+            )
             .unwrap();
         for (device, host) in d
             .materialize()

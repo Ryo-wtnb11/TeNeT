@@ -12,15 +12,23 @@ fn solve_spy(counts: &Arc<SpyCounts>, failure: Option<&'static str>) -> SpyExecu
 
 fn assert_eigh_uses_a_cold_logical_copy(source: &TensorMap<U1FusionRule, f64>) {
     let eager = eager_adjoint_oracle(source);
-    let expected_vals = eager.eigh_vals(&[0], &[1]).unwrap();
-    let expected_full = eager.eigh_full(&[0], &[1]).unwrap();
+    let expected_vals = eager.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
+    let expected_full = eager.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     let parent_body = Arc::clone(owned(source));
     let parent_data = Arc::clone(&parent_body.data);
     let lazy = source.adjoint().unwrap();
 
     for _ in 0..2 {
-        assert_eq!(lazy.clone().eigh_vals(&[0], &[1]).unwrap(), expected_vals);
-        let full = lazy.clone().eigh_full(&[0], &[1]).unwrap();
+        assert_eq!(
+            lazy.clone()
+                .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+                .unwrap(),
+            expected_vals
+        );
+        let full = lazy
+            .clone()
+            .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap();
         assert_eq!(
             full.d.materialize().unwrap().dense_data().unwrap(),
             expected_full.d.materialize().unwrap().dense_data().unwrap()
@@ -42,8 +50,8 @@ fn assert_eigh_uses_a_cold_logical_copy(source: &TensorMap<U1FusionRule, f64>) {
         .map(|_| {
             let clone = lazy.clone();
             std::thread::spawn(move || {
-                let vals = clone.eigh_vals(&[0], &[1]).unwrap();
-                let full = clone.eigh_full(&[0], &[1]).unwrap();
+                let vals = clone.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
+                let full = clone.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
                 (
                     vals,
                     full.d.materialize().unwrap().dense_data().unwrap().to_vec(),
@@ -80,8 +88,10 @@ fn eigh_dense_lazy_near_hermitian_uses_logical_triangle_and_stays_cold() {
     })
     .unwrap();
     let logical = eager_adjoint_oracle(&source);
-    let logical_vals = logical.eigh_vals(&[0], &[1]).unwrap();
-    let parent_vals = source.eigh_vals(&[0], &[1]).unwrap();
+    let logical_vals = logical
+        .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+        .unwrap();
+    let parent_vals = source.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert!(logical_vals[0]
         .values
         .iter()
@@ -107,9 +117,9 @@ fn eigh_dense_lazy_complex_orientation_and_failures_match_logical_oracles() {
     })
     .unwrap();
     let eager = eager_adjoint_oracle(&hermitian);
-    let expected = eager.eigh_full(&[0], &[1]).unwrap();
+    let expected = eager.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     let lazy = hermitian.adjoint().unwrap();
-    let actual = lazy.eigh_full(&[0], &[1]).unwrap();
+    let actual = lazy.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert_eq!(
         actual.d.materialize().unwrap().dense_data().unwrap(),
         expected.d.materialize().unwrap().dense_data().unwrap()
@@ -140,17 +150,27 @@ fn eigh_dense_lazy_complex_orientation_and_failures_match_logical_oracles() {
     .unwrap();
     let eager = eager_adjoint_oracle(&nonhermitian);
     let expected = [
-        eager.eigh_vals(&[0], &[1]).unwrap_err().to_string(),
-        eager.eigh_full(&[0], &[1]).unwrap_err().to_string(),
+        eager
+            .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap_err()
+            .to_string(),
+        eager
+            .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap_err()
+            .to_string(),
     ];
     let lazy = nonhermitian.adjoint().unwrap();
     for _ in 0..2 {
         assert_eq!(
-            lazy.eigh_vals(&[0], &[1]).unwrap_err().to_string(),
+            lazy.eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+                .unwrap_err()
+                .to_string(),
             expected[0]
         );
         assert_eq!(
-            lazy.eigh_full(&[0], &[1]).unwrap_err().to_string(),
+            lazy.eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+                .unwrap_err()
+                .to_string(),
             expected[1]
         );
     }

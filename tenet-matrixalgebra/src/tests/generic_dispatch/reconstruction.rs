@@ -323,7 +323,7 @@ fn spectral_outputs_retain_the_exact_input_provider_allocation() {
     let general_input = BoundDynamicTensorRef::try_new(&general_space, general.data()).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    let eigh = eigh_full_dyn(&mut dense, &hermitian_input).unwrap();
+    let eigh = eigh_full_dyn(&mut dense, &hermitian_input, HermitianTol::DEFAULT).unwrap();
     assert!(Arc::ptr_eq(&provider, eigh.v().space().provider_arc()));
 
     let eig = eig_full_dyn(&mut dense, &general_input).unwrap();
@@ -598,13 +598,23 @@ fn assert_value_region_paths_match<R, D>(
 
     crate::factorize::reset_values_matricization_fallbacks();
     let direct_svd = svd_vals_dyn(&mut dense, &general_bound.as_ref().dynamic()).unwrap();
-    let direct_eigh = eigh_vals_dyn(&mut dense, &hermitian_bound.as_ref().dynamic()).unwrap();
+    let direct_eigh = eigh_vals_dyn(
+        &mut dense,
+        &hermitian_bound.as_ref().dynamic(),
+        HermitianTol::DEFAULT,
+    )
+    .unwrap();
     let direct_eig = eig_vals_dyn(&mut dense, &general_bound.as_ref().dynamic()).unwrap();
     assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
 
     crate::factorize::reset_values_matricization_fallbacks();
     let packed_svd = svd_vals_dyn(&mut dense, &general_fallback.as_ref().dynamic()).unwrap();
-    let packed_eigh = eigh_vals_dyn(&mut dense, &hermitian_fallback.as_ref().dynamic()).unwrap();
+    let packed_eigh = eigh_vals_dyn(
+        &mut dense,
+        &hermitian_fallback.as_ref().dynamic(),
+        HermitianTol::DEFAULT,
+    )
+    .unwrap();
     let packed_eig = eig_vals_dyn(&mut dense, &general_fallback.as_ref().dynamic()).unwrap();
     assert_eq!(crate::factorize::values_matricization_fallbacks(), 3);
 
@@ -743,7 +753,7 @@ fn ordinary_factorizations_and_composition_inherit_lowered_layout_strategy() {
     let Qr { q, r } = qr_compact_dyn(&mut dense, &input).unwrap();
     assert!(q.space().prime_derived_homspace(&malformed).is_err());
     assert!(r.space().prime_derived_homspace(&malformed).is_err());
-    let eigh = eigh_full_dyn(&mut dense, &input).unwrap();
+    let eigh = eigh_full_dyn(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
     assert!(eigh.v().space().prime_derived_homspace(&malformed).is_err());
 
     let adjoint = crate::factorize::adjoint_bound_factor(svd.u()).unwrap();

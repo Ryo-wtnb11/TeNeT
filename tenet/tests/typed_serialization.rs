@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use tenet::sector::TypedSectorAdmission;
 use tenet::sector::{
@@ -362,7 +363,10 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         }));
 
     let hermitian = source.axpby(1.0, &source.adjoint().unwrap(), 1.0).unwrap();
-    let factor = hermitian.eigh_full(&[0, 1], &[2, 3]).unwrap().d;
+    let factor = hermitian
+        .eigh_full(&[0, 1], &[2, 3], HermitianTol::DEFAULT)
+        .unwrap()
+        .d;
     assert!(matches!(
         tenet::typed::__network::network_reuse_class(&factor, false),
         NetworkReuseClass::Compact
@@ -405,7 +409,10 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
             Complex64::new(1.0, 0.0),
         )
         .unwrap();
-    let complex_factor = complex_hermitian.eigh_full(&[0, 1], &[2, 3]).unwrap().d;
+    let complex_factor = complex_hermitian
+        .eigh_full(&[0, 1], &[2, 3], HermitianTol::DEFAULT)
+        .unwrap()
+        .d;
     assert!(matches!(
         tenet::typed::__network::network_reuse_class(&complex_factor, false),
         NetworkReuseClass::Compact

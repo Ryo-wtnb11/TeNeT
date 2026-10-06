@@ -1321,7 +1321,7 @@ mod device {
                     match bench(
                         config,
                         "cold",
-                        || source_device.eigh_full(&[0], &[1]),
+                        || source_device.eigh_full(&[0], &[1], tenet::typed::HermitianTol::DEFAULT),
                         barrier,
                     ) {
                         Err(reason) => skip_row(label("eigh_full"), &reason),
@@ -1331,7 +1331,13 @@ mod device {
                                 "cold",
                                 || {
                                     Ok::<_, Never>(
-                                        source.eigh_full(&[0], &[1]).expect("Host eigh_full"),
+                                        source
+                                            .eigh_full(
+                                                &[0],
+                                                &[1],
+                                                tenet::typed::HermitianTol::DEFAULT,
+                                            )
+                                            .expect("Host eigh_full"),
                                     )
                                 },
                                 || {},

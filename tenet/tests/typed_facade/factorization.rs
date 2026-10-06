@@ -549,7 +549,7 @@ fn eigh_full_reconstructs_the_source_through_compose() {
     let runtime = runtime();
     let typed = z2_hermitian(&runtime);
 
-    let Eigh { d, v } = typed.eigh_full(&[0], &[1]).unwrap();
+    let Eigh { d, v } = typed.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     let recon = v
         .compose(&d)
         .unwrap()
@@ -579,7 +579,7 @@ fn eigh_vals_follow_the_provider_label_order() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_hermitian(&runtime);
-    let spectrum = typed.eigh_vals(&[0], &[1]).unwrap();
+    let spectrum = typed.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
 
     assert_eq!(
         spectrum
@@ -599,7 +599,7 @@ fn truncated_eigh_reports_the_discarded_eigenvalue_norm() {
     let truncation = Truncation::rank(3);
 
     let mut magnitudes: Vec<_> = typed
-        .eigh_vals(&[0], &[1])
+        .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
         .unwrap()
         .into_iter()
         .flat_map(|entry| entry.values)
@@ -611,7 +611,10 @@ fn truncated_eigh_reports_the_discarded_eigenvalue_norm() {
         .map(|value| value * value)
         .sum::<f64>()
         .sqrt();
-    let (d, _, error) = truncated_eigen!(typed.eigh_full(&[0], &[1]), truncation);
+    let (d, _, error) = truncated_eigen!(
+        typed.eigh_full(&[0], &[1], HermitianTol::DEFAULT),
+        truncation
+    );
 
     assert_eq!(
         d.diagview()
@@ -629,7 +632,7 @@ fn truncated_eigh_reports_the_discarded_eigenvalue_norm() {
     assert!(
         d.materialize().unwrap().dense_data().unwrap().len()
             < typed
-                .eigh_full(&[0], &[1])
+                .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
                 .unwrap()
                 .d
                 .materialize()
@@ -646,8 +649,8 @@ fn eigh_reports_a_non_hermitian_input_rather_than_a_wrong_answer() {
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
 
-    assert!(typed.eigh_full(&[0], &[1]).is_err());
-    assert!(typed.eigh_vals(&[0], &[1]).is_err());
+    assert!(typed.eigh_full(&[0], &[1], HermitianTol::DEFAULT).is_err());
+    assert!(typed.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -895,7 +898,7 @@ fn isometry_and_posdef_see_their_positive_cases() {
     .unwrap();
     assert!(is_hermitian!(semidefinite, 0.0));
     assert!(semidefinite
-        .eigh_vals(&[0], &[1])
+        .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
         .unwrap()
         .iter()
         .any(|entry| entry.values.contains(&0.0)));
@@ -991,7 +994,7 @@ fn typed_polar_factor_laws_hold() {
         id.dense_data().unwrap(),
     );
     assert!(is_hermitian!(p, 1e-12));
-    for entry in p.eigh_vals(&[0], &[1]).unwrap() {
+    for entry in p.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap() {
         assert!(entry.values.iter().all(|&value| value >= -1e-12));
     }
 
@@ -1010,7 +1013,7 @@ fn typed_polar_factor_laws_hold() {
         id.dense_data().unwrap(),
     );
     assert!(is_hermitian!(p, 1e-12));
-    for entry in p.eigh_vals(&[0], &[1]).unwrap() {
+    for entry in p.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap() {
         assert!(entry.values.iter().all(|&value| value >= -1e-12));
     }
 }

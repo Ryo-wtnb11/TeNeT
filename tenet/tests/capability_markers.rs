@@ -15,6 +15,7 @@
 
 use tenet::sector::U1FusionRule;
 use tenet::typed::Direction;
+use tenet::typed::HermitianTol;
 use tenet::typed::{AdvancedLinalgScalar, FactorizationScalar, TensorMap, TensorScalar};
 
 /// Base family: everything admitted by [`TensorScalar`] alone.
@@ -45,8 +46,8 @@ fn factorization_family<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule,
     let _ = tensor.svd_compact(&[0], &[1]);
     let _ = tensor.svd_full(&[0], &[1]);
     let _ = tensor.svd_vals(&[0], &[1]);
-    let _ = tensor.eigh_full(&[0], &[1]);
-    let _ = tensor.eigh_vals(&[0], &[1]);
+    let _ = tensor.eigh_full(&[0], &[1], HermitianTol::DEFAULT);
+    let _ = tensor.eigh_vals(&[0], &[1], HermitianTol::DEFAULT);
     let _ = tensor.left_null(&[0], &[1]);
     let _ = tensor.right_null(&[0], &[1]);
     let _ = tensor.left_polar(&[0], &[1]);

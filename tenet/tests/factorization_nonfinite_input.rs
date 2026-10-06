@@ -4,6 +4,7 @@
 //! `checked_generic_facade/nonfinite.rs`.
 
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use num_complex::Complex64;
 use tenet::sector::{U1FusionRule, U1Irrep};
@@ -124,8 +125,16 @@ fn structural_admission_precedes_the_finite_input_stage() {
     let wide: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&row], [&col], |_, _| f64::NAN).unwrap();
     for error in [
-        format!("{:?}", wide.eigh_vals(&[0], &[1]).unwrap_err()),
-        format!("{:?}", wide.eigh_full(&[0], &[1]).unwrap_err()),
+        format!(
+            "{:?}",
+            wide.eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+                .unwrap_err()
+        ),
+        format!(
+            "{:?}",
+            wide.eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+                .unwrap_err()
+        ),
         format!("{:?}", wide.eig_vals(&[0], &[1]).unwrap_err()),
         format!("{:?}", wide.eig_full(&[0], &[1]).unwrap_err()),
     ] {
@@ -164,7 +173,7 @@ fn finite_extreme_input_passes_the_finite_input_stage() {
             t.lq_compact(rows, cols).map(drop),
             t.left_null(rows, cols).map(drop),
             t.left_polar(rows, cols).map(drop),
-            t.eigh_vals(rows, cols).map(drop),
+            t.eigh_vals(rows, cols, HermitianTol::DEFAULT).map(drop),
             t.eig_vals(rows, cols).map(drop),
         ];
         for outcome in outcomes {

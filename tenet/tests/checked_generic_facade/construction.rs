@@ -626,7 +626,7 @@ macro_rules! assert_sun_compact_laws {
                 .svd_vals(&codomain_axes(&source), &domain_axes(&source))
                 .unwrap(),
         );
-        let diagonal = by_sector(s.eigh_vals(&[0], &[1]).unwrap());
+        let diagonal = by_sector(s.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap());
         assert_eq!(singular.len(), diagonal.len());
         for (sector, values) in &singular {
             assert_eq!(find(&diagonal, sector).len(), values.len());
@@ -638,8 +638,12 @@ macro_rules! assert_sun_compact_laws {
             .map(|(sector, values)| (sector.clone(), values.iter().map(|v| v * v).collect()))
             .collect::<Vec<_>>();
         for (sector, values) in by_sector(
-            gram.eigh_vals(&codomain_axes(&gram), &domain_axes(&gram))
-                .unwrap(),
+            gram.eigh_vals(
+                &codomain_axes(&gram),
+                &domain_axes(&gram),
+                HermitianTol::DEFAULT,
+            )
+            .unwrap(),
         ) {
             assert_values(&values, &find(&squared, &sector), "eigh_vals(A Aᴴ) = s²");
         }

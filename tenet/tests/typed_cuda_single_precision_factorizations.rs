@@ -37,6 +37,7 @@
 #![cfg(feature = "cuda")]
 
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use num_complex::{Complex32, Complex64};
 
@@ -721,14 +722,22 @@ fn assert_device_eigh_matches_host<R, D>(
         d: host_d,
         v: _host_v,
     } = source
-        .eigh_full(&codomain_axes(&source), &domain_axes(&source))
+        .eigh_full(
+            &codomain_axes(&source),
+            &domain_axes(&source),
+            HermitianTol::DEFAULT,
+        )
         .unwrap();
     let device = source.to_cuda().unwrap();
     let Eigh {
         d: device_d,
         v: device_v,
     } = device
-        .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+        .eigh_full(
+            &codomain_axes(&device),
+            &domain_axes(&device),
+            HermitianTol::DEFAULT,
+        )
         .unwrap();
     let d = device_d.to_host().unwrap();
     let v = device_v.to_host().unwrap();
@@ -840,19 +849,19 @@ fn device_eigh_admits_a_nearly_hermitian_single_precision_block() {
 
     assert!(
         perturbed::<f32>(&runtime, &leg, skew)
-            .eigh_full(&[0], &[1])
+            .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
             .is_ok(),
         "an f32 block within 64*eps(f32) must be admitted"
     );
     assert!(
         perturbed::<Complex32>(&runtime, &leg, skew)
-            .eigh_full(&[0], &[1])
+            .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
             .is_ok(),
         "a Complex32 block within 64*eps(f32) must be admitted"
     );
     assert!(
         perturbed::<f64>(&runtime, &leg, skew)
-            .eigh_full(&[0], &[1])
+            .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
             .is_err(),
         "the same numbers at f64 exceed 64*eps(f64) and must be rejected"
     );
@@ -864,25 +873,25 @@ fn device_eigh_admits_a_nearly_hermitian_single_precision_block() {
         (
             "f64",
             perturbed::<f64>(&runtime, &leg, gross)
-                .eigh_full(&[0], &[1])
+                .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
                 .err(),
         ),
         (
             "c64",
             perturbed::<Complex64>(&runtime, &leg, gross)
-                .eigh_full(&[0], &[1])
+                .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
                 .err(),
         ),
         (
             "f32",
             perturbed::<f32>(&runtime, &leg, gross)
-                .eigh_full(&[0], &[1])
+                .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
                 .err(),
         ),
         (
             "c32",
             perturbed::<Complex32>(&runtime, &leg, gross)
-                .eigh_full(&[0], &[1])
+                .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
                 .err(),
         ),
     ] {
@@ -918,8 +927,12 @@ fn device_factorization_rejections_do_not_depend_on_the_payload() {
             ),
             (
                 "eigh_full",
-                lazy.eigh_full(&codomain_axes(&lazy), &domain_axes(&lazy))
-                    .err(),
+                lazy.eigh_full(
+                    &codomain_axes(&lazy),
+                    &domain_axes(&lazy),
+                    HermitianTol::DEFAULT,
+                )
+                .err(),
             ),
         ] {
             assert!(
@@ -1161,7 +1174,11 @@ fn device_factorizations_cost_the_same_calls_and_half_the_bytes() {
         );
         drop(
             device
-                .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+                .eigh_full(
+                    &codomain_axes(&device),
+                    &domain_axes(&device),
+                    HermitianTol::DEFAULT,
+                )
                 .unwrap(),
         );
         drop(
@@ -1178,7 +1195,11 @@ fn device_factorizations_cost_the_same_calls_and_half_the_bytes() {
         );
         drop(
             device
-                .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+                .eigh_full(
+                    &codomain_axes(&device),
+                    &domain_axes(&device),
+                    HermitianTol::DEFAULT,
+                )
                 .unwrap(),
         );
         drop(

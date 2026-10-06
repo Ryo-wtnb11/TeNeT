@@ -12,6 +12,7 @@
 #![cfg(feature = "cuda")]
 
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use num_complex::Complex64;
 
@@ -100,11 +101,13 @@ macro_rules! check {
             .unwrap();
         let device = hermitian.to_cuda().unwrap();
         let (rows, cols) = ([1, 0], [3, 2]);
-        let Eigh { d, v: vectors } = device.eigh_full(&rows, &cols).unwrap();
+        let Eigh { d, v: vectors } = device
+            .eigh_full(&rows, &cols, HermitianTol::DEFAULT)
+            .unwrap();
         let expected = device
             .permute(&rows, &cols)
             .unwrap()
-            .eigh_full(&[0, 1], &[2, 3])
+            .eigh_full(&[0, 1], &[2, 3], HermitianTol::DEFAULT)
             .unwrap();
         same!(d.to_host().unwrap(), expected.d.to_host().unwrap(), $label);
         same!(

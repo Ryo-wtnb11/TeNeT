@@ -30,6 +30,7 @@ use std::{
     hint::black_box,
     time::{Duration, Instant},
 };
+use tenet::typed::HermitianTol;
 
 use tenet::sector::{
     FermionParityFusionRule, ProductFusionRule, ProductSector, SU2FusionRule, SU2Irrep,
@@ -307,7 +308,7 @@ macro_rules! ledger {
             });
             run_op(config, &prefix, "eigh_full", || {
                 black_box(&hermitian)
-                    .eigh_full(&square_rows, &square_cols)
+                    .eigh_full(&square_rows, &square_cols, HermitianTol::DEFAULT)
                     .unwrap()
             });
             run_op(config, &prefix, "restrict_leg", || {

@@ -1154,7 +1154,10 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
     let hermitian = square.repartition(2).unwrap();
     assert!(is_hermitian!(hermitian, 1e-10));
 
-    let d = hermitian.eigh_full(&[0, 1], &[2, 3]).unwrap().d;
+    let d = hermitian
+        .eigh_full(&[0, 1], &[2, 3], HermitianTol::DEFAULT)
+        .unwrap()
+        .d;
 
     // The Hermiticity gate is load-bearing and is checked here, because every
     // other fixture in this file answers the same with or without it. Rotating

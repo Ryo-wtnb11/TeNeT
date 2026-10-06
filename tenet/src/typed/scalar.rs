@@ -199,7 +199,7 @@ impl TensorScalar for num_complex::Complex32 {}
 /// `f64` by calling a factorization on it, because `f64` and
 /// [`num_complex::Complex64`] were the only implementors. With four, inference
 /// waits for the end-of-function fallback, which is too late for a method call
-/// on the result — `t.eigh_full(&[0], &[1])?.d.diagview()?[0].values[0].abs()` on an
+/// on the result — `t.eigh_full(&[0], &[1], HermitianTol::DEFAULT)?.d.diagview()?[0].values[0].abs()` on an
 /// un-annotated `from_subblock_fn` tensor now needs the payload dtype written
 /// down. The same holds for [`GradedSpace::find_truncated`], whose spectrum
 /// type is `SpectrumMagnitude` and now has four implementors.

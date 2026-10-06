@@ -15,6 +15,7 @@ use num_complex::{Complex32, Complex64};
 use numerics::Numeric;
 use std::sync::Arc;
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::typed::HermitianTol;
 use tenet::typed::{Eigh, LeftPolar, Qr};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
@@ -193,11 +194,15 @@ macro_rules! pin_family {
         let Eigh {
             d: compact_positive,
             ..
-        } = positive.eigh_full(&[0], &[1]).unwrap();
+        } = positive
+            .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap();
         let Eigh {
             d: compact_negative,
             ..
-        } = negative.eigh_full(&[0], &[1]).unwrap();
+        } = negative
+            .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap();
 
         let tol: f64 = $tol;
         let dense = [

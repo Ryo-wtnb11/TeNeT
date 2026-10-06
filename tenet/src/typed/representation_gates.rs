@@ -458,7 +458,7 @@ fn assert_polar_factors<R, D>(
     });
     assert!(is_hermitian!(positive, 1e-11));
     assert!(positive
-        .eigh_vals(&[0], &[1])
+        .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
         .unwrap()
         .iter()
         .all(|entry| entry.values.iter().all(|&value| value >= -1e-11)));

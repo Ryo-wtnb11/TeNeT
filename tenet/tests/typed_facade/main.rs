@@ -21,6 +21,7 @@ include!("../common/predicate_chains.rs");
 include!("../common/predicate_chain_coefficients.rs");
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use tenet::typed::HermitianTol;
 use tenet::typed::{ContractSpec, Direction, Duality, Side};
 
 use tenet::expert::{structure_cache_info, StructureCacheKind};
