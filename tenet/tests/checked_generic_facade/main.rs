@@ -269,6 +269,13 @@ fn reset_provider_queries(provider: &CheckedOnlyToy) {
     }
 }
 
+/// Empties the process-wide structure caches, so that the next walk queries
+/// its provider again. Tests that change a provider's answers mid-test call
+/// it, under an identity tag no other test uses.
+fn forget_cached_structures() {
+    tenet::expert::reset_core_intern_tables();
+}
+
 fn assert_no_provider_queries(provider: &CheckedOnlyToy) {
     for counter in [
         &provider.algebra_queries,

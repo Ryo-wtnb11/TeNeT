@@ -835,14 +835,11 @@ impl SpyTwin for LateGenericSpy {
 }
 
 /// `source`'s layout bound to `spy`. Why not `bind_generic(source, spy)`:
-/// each spy has its own identity (a spy that counts or fails its calls is
-/// not `FactorGenericRule` to a structure cache), so the space is admitted
-/// for the spy, by a twin that neither fails nor counts. That admission
-/// walks the source layout once, outside the spy's own counts.
-#[expect(
-    clippy::arc_with_non_send_sync,
-    reason = "the checked Generic API requires Arc identity while the spies use Cell"
-)]
+/// a spy that fails, or whose call counts a test compares against a cold
+/// walk, has its own identity (to a structure cache it is not
+/// `FactorGenericRule`, #2030), so the space is admitted for the spy by a
+/// twin that neither fails nor counts. That admission walks the source layout
+/// once, outside the spy's own counts.
 pub(super) fn bind_to_spy<P>(
     source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
     spy: &Arc<P>,

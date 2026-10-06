@@ -532,6 +532,19 @@ fn a_degeneracy_only_change_reuses_the_sector_structure() {
         &large.content_key().sector
     ));
     assert_ne!(small.required_len(), large.required_len());
+
+    // So does the checked Generic builder (#2030), once a walk succeeded.
+    let checked = InfallibleGeneric::new(&SU2FusionRule);
+    let checked_small = su2_hom(2)
+        .coupled_subblock_structure_from_leg_degeneracies_generic_checked(&checked)
+        .unwrap();
+    let checked_large = su2_hom(5)
+        .coupled_subblock_structure_from_leg_degeneracies_generic_checked(&checked)
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &checked_small.content_key().sector,
+        &checked_large.content_key().sector
+    ));
 }
 
 /// A provider whose fusion channels repeat: `1 ⊗ 1` lists the vacuum twice.

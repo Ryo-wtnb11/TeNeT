@@ -406,8 +406,8 @@ fn sun_checked_generic_unit_insert_remove_preserves_authority_and_payload() {
 #[test]
 fn checked_only_contract_and_compose_keep_left_authority() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let left_provider = Arc::new(CheckedOnlyToy::new(0));
-    let right_provider = Arc::new(CheckedOnlyToy::new(0));
+    let left_provider = Arc::new(CheckedOnlyToy::new(124));
+    let right_provider = Arc::new(CheckedOnlyToy::new(124));
     let left_leg = GradedSpace::try_new(Arc::clone(&left_provider), [(Label::X, 1)]).unwrap();
     let right_leg = GradedSpace::try_new(Arc::clone(&right_provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
@@ -487,6 +487,8 @@ fn checked_only_contract_and_compose_keep_left_authority() {
     assert_eq!(left_provider.algebra_queries.load(Ordering::Relaxed), 0);
     assert_eq!(wrong_provider.algebra_queries.load(Ordering::Relaxed), 0);
 
+    // See `forget_cached_structures`: this tag is this test's alone.
+    forget_cached_structures();
     left_provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = nontrivial
         .contract(
@@ -689,7 +691,9 @@ fn checked_only_otimes_matches_fixed_heterogeneous_nonunit_oracle() {
     }
     let output = lhs.otimes(&rhs).unwrap();
     assert!(std::ptr::eq(output.provider(), first.as_ref()));
-    assert_eq!(first.identity_queries.load(Ordering::Relaxed), 3);
+    // One identity query more than the walks themselves: the
+    // sector-structure cache key (#2030).
+    assert_eq!(first.identity_queries.load(Ordering::Relaxed), 4);
     assert_eq!(second.identity_queries.load(Ordering::Relaxed), 1);
     assert_eq!(first.commit_count.load(Ordering::Relaxed), 1);
     assert_eq!(second.commit_count.load(Ordering::Relaxed), 0);
@@ -908,8 +912,8 @@ fn checked_generic_cat_precedence_and_admission_failure_are_typed_nonpublishing(
     // reject in order; every failure leaves both admitted input payloads alone.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let provider = Arc::new(CheckedOnlyToy::new(0));
-    let equal = Arc::new(CheckedOnlyToy::new(0));
+    let provider = Arc::new(CheckedOnlyToy::new(123));
+    let equal = Arc::new(CheckedOnlyToy::new(123));
     let wrong = Arc::new(CheckedOnlyToy::new(1));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let equal_leg = GradedSpace::try_new(Arc::clone(&equal), [(Label::X, 1)]).unwrap();
@@ -938,6 +942,8 @@ fn checked_generic_cat_precedence_and_admission_failure_are_typed_nonpublishing(
         TensorMap::zeros(&runtime, [&equal_leg, &equal_leg], [&equal_leg, &equal_leg]).unwrap();
     let lhs_before = lhs.dense_data().unwrap().to_vec();
     let rhs_before = valid_rhs.dense_data().unwrap().to_vec();
+    // See `forget_cached_structures`: this tag is this test's alone.
+    forget_cached_structures();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     for counter in [
         &provider.identity_queries,
