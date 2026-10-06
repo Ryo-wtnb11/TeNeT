@@ -20,8 +20,10 @@ pub(crate) struct FusionTreeHomSpaceLayoutData {
     pub(crate) sectors: Vec<FusionTreeCoupledSectorLayout>,
     /// The block keys as a sector structure, built once per sector layout
     /// and shared by every block structure over it, whatever its
-    /// degeneracies (TensorKit `sectorstructure`, `structure.jl:41`).
-    pub(crate) sector: Arc<SectorStructure>,
+    /// degeneracies (TensorKit `sectorstructure`, `structure.jl:41`). An
+    /// error (duplicate keys from a provider with repeated fusion channels)
+    /// is reported where a block structure is built, as before.
+    pub(crate) sector: Result<Arc<SectorStructure>, CoreError>,
 }
 
 pub(super) fn generic_keys_for_coupled_from_groups(
@@ -423,7 +425,7 @@ pub(super) fn fusion_tree_layout_data_from_groups(
             }
         }
     }
-    let sector = Arc::new(SectorStructure::from_distinct_fusion_tree_keys(rank, &keys));
+    let sector = SectorStructure::from_fusion_tree_keys(rank, &keys).map(Arc::new);
     FusionTreeHomSpaceLayoutData {
         keys: Arc::from(keys),
         sectors,

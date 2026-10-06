@@ -288,19 +288,20 @@ where
 }
 
 #[test]
-fn complete_structure_hit_skips_extent_walk() {
+fn complete_structure_hit_skips_extent_walk_until_evicted() {
     // Isolated like prepared_complete_structure_hits_without_rebuilding_layout:
     // this asserts process-global complete-structure cache counters, which
     // CACHE_TEST_LOCK does not protect from the crate's many ordinary,
     // unlocked complete-structure builds landing between two reads (#1903).
     if test_support::run_isolated_or_return(
         "TENET_CORE_COMPLETE_STRUCTURE_HIT_SKIPS_WALK_ISOLATED",
-        "tests::fusion_space::checked_layout_builder::complete_structure_hit_skips_extent_walk",
+        "tests::fusion_space::checked_layout_builder::complete_structure_hit_skips_extent_walk_until_evicted",
     ) {
         return;
     }
     // What: the miss walks the per-block extents exactly once (inside the
-    // builder); a hit walks none.
+    // builder); a hit walks none; after an eviction the next call is a miss
+    // that walks exactly once again.
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -327,7 +328,21 @@ fn complete_structure_hit_skips_extent_walk() {
     assert_eq!(after_hit.hits(), after_miss.hits() + 1);
     assert_eq!(after_hit.misses(), after_miss.misses());
 
+    // An eviction (a zero budget evicts everything) makes the next call a
+    // miss that walks once again and is admitted again.
     drop((first, second));
+    let budget = after_hit.byte_budget();
+    crate::set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, 0);
+    crate::set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, budget);
+    let evicted = structure_cache_info(StructureCacheKind::DegeneracyStructure);
+    assert_eq!(evicted.entries(), 0);
+    reset_coupled_grid_build_observations();
+    finalize_complete(&U1FusionRule, &hom).unwrap();
+    assert_eq!(coupled_grid_build_observations().1, walk);
+    let rewalked = structure_cache_info(StructureCacheKind::DegeneracyStructure);
+    assert_eq!(rewalked.misses(), evicted.misses() + 1);
+    assert_eq!(rewalked.admissions(), evicted.admissions() + 1);
+    assert_eq!(rewalked.hits(), evicted.hits());
 }
 
 #[test]

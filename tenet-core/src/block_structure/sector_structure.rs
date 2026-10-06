@@ -198,23 +198,34 @@ impl SectorStructure {
         ))
     }
 
-    /// The sector structure of an enumerated fusion-tree layout. Why no
-    /// `Result`: an enumeration yields distinct keys of the one fusion-tree
-    /// kind, the two facts [`Self::from_keys`] checks.
-    pub(crate) fn from_distinct_fusion_tree_keys(
+    /// [`Self::from_keys`] over the fusion-tree keys of an enumerated
+    /// layout, borrowing them. Why a `Result`: the keys are distinct only if
+    /// the provider's fusion channels are, which no fusion-rule trait
+    /// promises, so a duplicate stays the typed error it is in `from_keys`.
+    pub(crate) fn from_fusion_tree_keys(
         rank: usize,
         keys: &[crate::FusionTreePairKey],
-    ) -> Self {
+    ) -> Result<Self, CoreError> {
         let blocks = keys
             .iter()
             .map(|key| SectorBlock::new(BlockKey::from(key.clone())))
             .collect::<Vec<_>>();
         let sorted_indices = sorted_block_indices(&blocks);
-        debug_assert!(sorted_indices
+        if let Some(pair) = sorted_indices
             .windows(2)
-            .all(|pair| blocks[pair[0]].key() != blocks[pair[1]].key()));
+            .find(|pair| blocks[pair[0]].key() == blocks[pair[1]].key())
+        {
+            return Err(CoreError::DuplicateBlockKey {
+                key: Box::new(blocks[pair[0]].key().clone()),
+            });
+        }
         let kind = blocks.first().map(|block| block.key().kind());
-        Self::from_checked_blocks(rank, kind, blocks, sorted_indices)
+        Ok(Self::from_checked_blocks(
+            rank,
+            kind,
+            blocks,
+            sorted_indices,
+        ))
     }
 
     fn from_checked_blocks(

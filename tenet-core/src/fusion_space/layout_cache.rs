@@ -174,7 +174,12 @@ pub(crate) fn charged_fusion_tree_layout_bytes(
         .saturating_add(tree_bytes)
         .saturating_add(sector_bytes)
         .saturating_add(std::mem::size_of::<SectorStructure>())
-        .saturating_add(layout.sector.charged_heap_bytes())
+        .saturating_add(
+            layout
+                .sector
+                .as_ref()
+                .map_or(0, |sector| sector.charged_heap_bytes()),
+        )
         // Map node and the retained Arc control allocations.
         .saturating_add(10 * std::mem::size_of::<usize>()) as u64
 }

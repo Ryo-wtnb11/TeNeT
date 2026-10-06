@@ -113,7 +113,7 @@ pub(crate) fn coupled_subblock_parts_from_leg_degeneracies(
         Ok(())
     })?;
 
-    let sector_structure = Arc::clone(&layout.sector);
+    let sector_structure = layout.sector.clone()?;
     let degeneracy_structure = DegeneracyStructure::from_blocks_with_rank(rank, degeneracy_blocks)?;
     Ok((sector_structure, degeneracy_structure))
 }

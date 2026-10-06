@@ -533,3 +533,51 @@ fn a_degeneracy_only_change_reuses_the_sector_structure() {
     ));
     assert_ne!(small.required_len(), large.required_len());
 }
+
+/// A provider whose fusion channels repeat: `1 ⊗ 1` lists the vacuum twice.
+#[derive(Clone, Copy, Debug)]
+struct RepeatedChannelRule;
+
+impl FusionRule for RepeatedChannelRule {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        let fused = SectorId::new((left.id() + right.id()) % 2);
+        if left.id() == 1 && right.id() == 1 {
+            smallvec![fused, fused]
+        } else {
+            smallvec![fused]
+        }
+    }
+}
+
+impl MultiplicityFreeFusionRule for RepeatedChannelRule {}
+
+#[test]
+fn repeated_fusion_channels_are_a_typed_error_not_a_duplicate_block() {
+    // What (#2014 review F1): duplicate tree keys from a provider with
+    // repeated channels stay `DuplicateBlockKey`, as before the sector
+    // structure was shared, instead of a structure with two equal keys.
+    let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg(), leg()]),
+        FusionProductSpace::new([leg()]),
+    );
+    let error = hom
+        .coupled_subblock_structure_from_leg_degeneracies(&RepeatedChannelRule)
+        .unwrap_err();
+    assert!(
+        matches!(error, CoreError::DuplicateBlockKey { .. }),
+        "{error:?}"
+    );
+}

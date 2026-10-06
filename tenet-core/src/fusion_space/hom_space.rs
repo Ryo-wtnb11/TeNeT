@@ -849,9 +849,9 @@ impl FusionTreeHomSpace {
     /// Multiplicity-aware sibling of
     /// [`Self::coupled_subblock_structure_from_leg_degeneracies`].
     ///
-    /// Generic layouts are intentionally not published in the
-    /// multiplicity-free layout cache. Their vertex-resolved keys are grouped
-    /// ephemerally and fed through the same single-pass degeneracy builder.
+    /// Generic layouts share the sector-structure cache under their own key
+    /// (vertex-resolved keys differ from multiplicity-free ones) and feed the
+    /// same single-pass degeneracy builder.
     pub fn coupled_subblock_structure_from_leg_degeneracies_generic<R>(
         &self,
         rule: &R,

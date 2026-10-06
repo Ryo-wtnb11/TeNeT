@@ -7,12 +7,16 @@
 //! sizes them (as racah does for its symbol caches).
 //!
 //! Why `quick_cache` and not one `RwLock<LruCache>` per cache: a warm hit is
-//! one shard read with a borrowed key, misses of the same key are
-//! single-flight, and eviction weighs entries by their charged bytes.
+//! one shard read with a borrowed key, eviction weighs entries by their
+//! charged bytes, and [`StructureCache::get_or_try_build`] makes concurrent
+//! misses of one key build once. ([`StructureCache::publish`] admits a value
+//! built outside the cache, for transactions that stage a build before
+//! publishing it; racing builders of one key there all build, and the first
+//! admission wins.)
 
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 
 use quick_cache::sync::{Cache, GuardResult};
 use quick_cache::{Equivalent, Lifecycle, OptionsBuilder, Weighter};
@@ -66,14 +70,17 @@ impl StructureCacheInfo {
     pub fn byte_budget(self) -> u64 {
         self.byte_budget
     }
-    /// The largest entry the cache admits: one shard's share of the budget.
+    /// The largest entry the cache admits: quick_cache's hot-queue share of
+    /// one shard's budget.
     pub fn max_entry_bytes(self) -> u64 {
         self.max_entry_bytes
     }
     pub fn hits(self) -> u64 {
         self.hits
     }
-    /// Completed builds offered for admission, rejected ones included.
+    /// Completed builds offered for admission: admitted, rejected as
+    /// oversize, or refused because a reset ran during the build. A build
+    /// that loses a publication race to an equal key is not counted.
     pub fn misses(self) -> u64 {
         self.misses
     }
@@ -103,6 +110,10 @@ impl<V> Clone for Charged<V> {
         }
     }
 }
+
+/// quick_cache's default hot-queue share, set explicitly because the
+/// largest admissible entry depends on it (`StructureCache::max_entry_bytes`).
+const HOT_ALLOCATION: f64 = 0.97;
 
 #[derive(Clone)]
 struct ChargeWeighter;
@@ -136,13 +147,12 @@ pub(crate) struct StructureCache<K, V> {
     /// write-held by [`Self::clear`]. A build that straddles a reset is
     /// therefore either wiped by the clear or refused by the epoch check.
     publication: RwLock<()>,
-    /// The last admitted entry, also resident in `entries`: a repeated hit
-    /// compares keys (an `Arc` pointer first) instead of hashing one. The
-    /// former layout cache kept the same front for the same reason. Replaced
-    /// on admission, cleared with the cache and on a budget change, so it
-    /// never holds an entry the budget evicted for longer than until the
-    /// next admission.
-    last: RwLock<Option<(K, Arc<V>)>>,
+    /// The last admitted entry: a repeated hit compares keys (an `Arc`
+    /// pointer first) instead of hashing one. The former layout cache kept
+    /// the same front for the same reason. Why weak: the front must not keep
+    /// an entry alive once the budget evicted it, so it retains no charged
+    /// bytes; an evicted entry no caller holds simply misses here.
+    last: RwLock<Option<(K, Weak<V>)>>,
     hits: AtomicU64,
     misses: AtomicU64,
     admissions: AtomicU64,
@@ -161,6 +171,7 @@ where
         let evictions = Arc::new(AtomicU64::new(0));
         let options = OptionsBuilder::new()
             .shards(shards)
+            .hot_allocation(HOT_ALLOCATION)
             .weight_capacity(byte_budget)
             .estimated_items_capacity(1024)
             .build()
@@ -205,8 +216,9 @@ where
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (_, value) = last.as_ref().filter(|(last, _)| key.equivalent(last))?;
+        let value = value.upgrade()?;
         self.hits.fetch_add(1, Ordering::Relaxed);
-        Some(Arc::clone(value))
+        Some(value)
     }
 
     /// Whether `key` is resident; counts no hit.
@@ -219,7 +231,7 @@ where
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .is_some_and(|(last, _)| key.equivalent(last));
+            .is_some_and(|(last, value)| key.equivalent(last) && value.strong_count() > 0);
         is_last || self.entries.contains_key(key)
     }
 
@@ -273,7 +285,7 @@ where
         self.misses.fetch_add(1, Ordering::Relaxed);
         // quick_cache drops an item heavier than its shard without a trace;
         // the rejection is counted here instead.
-        if bytes > self.entries.shard_capacity() {
+        if bytes > self.max_entry_bytes() {
             self.rejections.fetch_add(1, Ordering::Relaxed);
             return value;
         }
@@ -292,7 +304,7 @@ where
             .last
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some((key.clone(), Arc::clone(&value)));
+            Some((key.clone(), Arc::downgrade(&value)));
         self.admissions.fetch_add(1, Ordering::Relaxed);
         value
     }
@@ -311,8 +323,22 @@ where
     }
 
     pub(crate) fn set_byte_budget(&self, bytes: u64) {
+        // Exclusive, as in `clear`: an admission in flight finishes before
+        // the budget changes, so it cannot republish the front afterwards.
+        let _publication = self
+            .publication
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.entries.set_capacity(bytes);
         self.forget_last();
+    }
+
+    /// quick_cache admits an entry only up to the hot-queue target of its
+    /// shard (`shard.rs` `replace_placeholder`), not the whole shard; this is
+    /// that target, computed as quick_cache computes it.
+    fn max_entry_bytes(&self) -> u64 {
+        let shard = self.entries.shard_capacity();
+        ((shard as f64 * HOT_ALLOCATION) as u64).clamp(shard.min(1), shard)
     }
 
     fn forget_last(&self) {
@@ -328,7 +354,7 @@ where
             entries: self.entries.len(),
             charged_bytes: self.entries.weight(),
             byte_budget: self.entries.capacity(),
-            max_entry_bytes: self.entries.shard_capacity(),
+            max_entry_bytes: self.max_entry_bytes(),
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
             admissions: self.admissions.load(Ordering::Relaxed),
@@ -410,9 +436,10 @@ mod tests {
     #[test]
     fn an_entry_over_one_shard_is_rejected_and_counted() {
         let cache = cache(1 << 20);
-        let shard = cache.info().max_entry_bytes();
-        assert_eq!(shard, (1 << 20) / 2);
-        let value = cache.publish(&5, Arc::new(9), shard + 1, core_reset_epoch());
+        let max_entry = cache.info().max_entry_bytes();
+        // The hot-queue share of one of the two shards, as quick_cache admits.
+        assert_eq!(max_entry, ((1u64 << 19) as f64 * HOT_ALLOCATION) as u64);
+        let value = cache.publish(&5, Arc::new(9), max_entry + 1, core_reset_epoch());
         // What: the caller still gets its value; the cache keeps nothing and
         // says so (quick_cache alone would drop it silently).
         assert_eq!(*value, 9);
