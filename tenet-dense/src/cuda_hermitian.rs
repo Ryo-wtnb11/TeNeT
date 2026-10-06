@@ -4,28 +4,6 @@
 //! CI — which merely `cargo check`s that feature — still executes the rule
 //! that decides whether a device block is offered to `eigh`.
 
-/// How many machine epsilons of the payload's **real lane** the relative
-/// anti-Hermitian residual may reach.
-///
-/// The constant is the host twin's, not a device-specific one: the CPU rule is
-/// `||(A - A†)/2||_F <= 64 * eps(R) * ||A||_F` with
-/// `R::relative_tolerance() == 64 * R::EPSILON` for `R` in `{f32, f64}`
-/// (`tenet-matrixalgebra/src/factorize.rs:6796` `normwise_hermitian`, `:177`
-/// and `:187`). TensorKit agrees on the *shape*, not on the number: its
-/// `ishermitian` (`TensorKit.jl` `cfaa073e`
-/// `src/factorizations/factorizations.jl:67`) forwards each block to
-/// MatrixAlgebraKit 0.6.9 `ishermitian`
-/// (`src/common/matrixproperties.jl:72`), which is exact equality by default
-/// and, when a tolerance is asked for, takes it from the payload's own
-/// epsilon — `default_hermitian_tol(A) = eps(norm(A, Inf))^(3/4)`
-/// (`src/common/defaults.jl:43`), used by `strided_ishermitian_approx`
-/// (`matrixproperties.jl:150`). Neither reference ever compares a
-/// single-precision block against a double-precision epsilon, which is
-/// exactly what the device rule did before C1: `64 * eps(f64) = 1.4e-14`
-/// against the `64 * eps(f32) = 7.6e-6` an `f32` block is entitled to, a
-/// factor of ~5e8 that rejects every genuinely rounded `f32` block.
-pub(crate) const HERMITIAN_TOLERANCE_EPSILONS: f64 = 64.0;
-
 /// Decides `0.5 * ||A - A†||_F <= tolerance * ||A||_F` from the *scaled*
 /// device reductions.
 ///
@@ -38,9 +16,10 @@ pub(crate) const HERMITIAN_TOLERANCE_EPSILONS: f64 = 64.0;
 /// (the reciprocal of its own normalizer) remains. A non-finite or negative part
 /// rejects: it can only come from a non-finite block.
 ///
-/// `relative_tolerance` is `HERMITIAN_TOLERANCE_EPSILONS * eps(real(D))` for
-/// the payload under test; it is a parameter so this rule is one authority for
-/// all four payload dtypes rather than four copies.
+/// `relative_tolerance` is the caller's resolved eigh admission tolerance for
+/// the payload under test (TeNeT's `HermitianTol`, whose default is
+/// `eps(real(D))^(3/4)`); it is a parameter so this rule is one authority for
+/// all four payload dtypes and every tolerance.
 pub(crate) fn scaled_hermitian_residual_accepts(
     input_ss: f64,
     residual_scale: f64,
@@ -93,8 +72,9 @@ pub(crate) fn power_of_two_normalizer(scale: f64, max_exp: i32) -> f64 {
 mod tests {
     use super::*;
 
+    // TeNeT's default eigh admission tolerance, `eps^(3/4)`.
     fn tolerance(epsilon: f64) -> f64 {
-        HERMITIAN_TOLERANCE_EPSILONS * epsilon
+        epsilon.powf(0.75)
     }
 
     #[test]
@@ -137,8 +117,8 @@ mod tests {
     fn a_single_precision_rounding_residual_needs_the_single_precision_lane() {
         let input_ss: f64 = 1.0;
         // Half the anti-Hermitian residual sits at 8 f32 epsilons of the input
-        // norm: well inside `64 * eps(f32)`, and ~4.7e8 times outside
-        // `64 * eps(f64)`.
+        // norm: inside `eps(f32)^(3/4)`, and ~5e5 times outside
+        // `eps(f64)^(3/4)`.
         let residual_scale = 2.0 * 8.0 * f64::from(f32::EPSILON);
         assert!(scaled_hermitian_residual_accepts(
             input_ss,
@@ -164,9 +144,8 @@ mod tests {
         ));
     }
 
-    /// The `f64` decisions the rule made before the tolerance became a
-    /// parameter are unchanged: the threshold is still exactly
-    /// `64 * eps(f64) * ||A||_F` on the half-residual.
+    /// The threshold on the half-residual is exactly
+    /// `tolerance * ||A||_F` at every input scale.
     #[test]
     fn the_double_precision_decisions_are_unchanged() {
         let tolerance = tolerance(f64::EPSILON);

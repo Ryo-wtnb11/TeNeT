@@ -594,8 +594,8 @@ where
     /// provider-labelled coupled sector and descending by absolute value.
     ///
     /// No eigenvector factor or bond space is built. The input must be an
-    /// endomorphism and every sector must satisfy the same Hermiticity check as
-    /// [`Self::eigh_full`]. An owned Host compact diagonal is read directly for
+    /// endomorphism and every sector must pass the same Hermiticity admission
+    /// at `hermitian_tol` as [`Self::eigh_full`]. An owned Host compact diagonal is read directly for
     /// both multiplicity-free and checked-Generic providers: a nonfinite entry
     /// returns [`Error::Operation`] (an `InvalidArgument`: `eigh input components must be
     /// finite`; dense input too, after the endomorphism and stacking checks
@@ -614,12 +614,15 @@ where
         &self,
         rows: &[usize],
         cols: &[usize],
+        hermitian_tol: HermitianTol,
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
     {
         self.with_leg_roles(rows, cols, |t| {
             t.factor_values(FactorOp::EighVals, |lease, source| {
                 tenet_matrixalgebra::seam::eigh_vals_from_source::<R::Mode, _, _, _, _>(
-                    lease, source,
+                    lease,
+                    source,
+                    hermitian_tol,
                 )
             })
         })
@@ -635,7 +638,12 @@ where
     /// Returns the Hermitian eigendecomposition `self = v * d * v^H` as an
     /// [`Eigh`], which states the spectrum order and the storage routes of `d`.
     ///
-    /// The input must be an endomorphism. In each coupled sector,
+    /// The input must be an endomorphism whose every coupled-sector block `A`
+    /// is Hermitian to `hermitian_tol` (MatrixAlgebraKit's `hermitian_tol`):
+    /// `‖(A − Aᴴ)/2‖_F ≤ tol · ‖A‖_F`, where [`HermitianTol::DEFAULT`] is
+    /// `eps(real(D))^(3/4)`, MatrixAlgebraKit's level at unit norm. Unlike
+    /// MatrixAlgebraKit's absolute `atol`, the tolerance is relative, so the
+    /// decision does not change when `self` is rescaled. In each coupled sector,
     /// `v : codomain(self) <- W` is unitary and `d : W <- W` holds the signed
     /// real eigenvalues. Eigenvalues are stable-sorted by
     /// descending absolute value; each eigenvector's phase is fixed by making
@@ -666,12 +674,12 @@ where
     /// ```
     /// use std::sync::Arc;
     /// use tenet::sector::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{Eigh, GradedSpace, Runtime, TensorMap};
+    /// use tenet::typed::{Eigh, GradedSpace, HermitianTol, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?.scale(2.0);
-    /// let Eigh { d, v: eigenvectors } = a.eigh_full(&[0], &[1])?;
+    /// let Eigh { d, v: eigenvectors } = a.eigh_full(&[0], &[1], HermitianTol::DEFAULT)?;
     /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.adjoint()?)?;
     /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
@@ -684,8 +692,9 @@ where
         &self,
         rows: &[usize],
         cols: &[usize],
+        hermitian_tol: HermitianTol,
     ) -> Result<Eigh<Self>, TypedFacadeError<R>> {
-        self.with_leg_roles(rows, cols, Self::factor_eigh_full)
+        self.with_leg_roles(rows, cols, |t| t.factor_eigh_full(hermitian_tol))
     }
 }
 

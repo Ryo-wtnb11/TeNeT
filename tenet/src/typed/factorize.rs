@@ -280,7 +280,10 @@ where
 
     /// The one body of the Hermitian eigendecomposition: `d` is a compact
     /// diagonal on the bond the mode chooses for the route (D3, #1994).
-    fn factor_eigh_full(&self) -> Result<Eigh<Self>, TypedFacadeError<R>>
+    fn factor_eigh_full(
+        &self,
+        hermitian_tol: HermitianTol,
+    ) -> Result<Eigh<Self>, TypedFacadeError<R>>
     where
         D: FactorizationScalar,
     {
@@ -289,6 +292,7 @@ where
         let (out, route) = tenet_matrixalgebra::seam::eigh_full_from_source::<R::Mode, _, _, _, _>(
             RuntimeDense(&self.runtime),
             source,
+            hermitian_tol,
         )
         .map_err(R::Mode::map_factor_error)?;
         let (v, mut eigenvalues) = out.into_parts();

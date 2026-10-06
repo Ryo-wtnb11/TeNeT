@@ -124,11 +124,11 @@ use super::*;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
 /// fn c32_device_eigh(tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>) {
-///     let _ = tensor.eigh_full(&[0], &[1]);
+///     let _ = tensor.eigh_full(&[0], &[1], HermitianTol::DEFAULT);
 /// }
 ///
 /// fn c64_device_eigh(tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>) {
-///     let _ = tensor.eigh_full(&[0], &[1]);
+///     let _ = tensor.eigh_full(&[0], &[1], HermitianTol::DEFAULT);
 /// }
 /// ```
 impl<R, D> TensorMap<R, D, CudaStorage<D>>
@@ -437,11 +437,16 @@ where
     /// `rows` and `cols` are the leg roles, as for the Host operation: it
     /// acts on the matrix view `self.permute(rows, cols)` (one device
     /// permute), and the current split borrows `self` without a transform.
-    pub fn eigh_full(&self, rows: &[usize], cols: &[usize]) -> Result<Eigh<Self>, Error> {
-        self.with_cuda_leg_roles(rows, cols, Self::eigh_full_matrix)
+    pub fn eigh_full(
+        &self,
+        rows: &[usize],
+        cols: &[usize],
+        hermitian_tol: HermitianTol,
+    ) -> Result<Eigh<Self>, Error> {
+        self.with_cuda_leg_roles(rows, cols, |t| t.eigh_full_matrix(hermitian_tol))
     }
 
-    fn eigh_full_matrix(&self) -> Result<Eigh<Self>, Error> {
+    fn eigh_full_matrix(&self, hermitian_tol: HermitianTol) -> Result<Eigh<Self>, Error> {
         let source = self.direct_cuda_storage("eigh_full")?;
         let source_space = self.logical_space().space();
         if source_space.homspace().codomain() != source_space.homspace().domain() {
@@ -493,7 +498,8 @@ where
                 .iter()
                 .map(|region| (region.range().start, region.rows()))
                 .collect();
-            if cuda_hermitian_regions::<D>(cuda, &source.0, &regions)?.contains(&false) {
+            let tol = hermitian_tol.resolve(<D as FactorScalar>::epsilon());
+            if cuda_hermitian_regions::<D>(cuda, &source.0, &regions, tol)?.contains(&false) {
                 return Err(
                     tenet_tensors::OperationError::UnsupportedTensorContractScope {
                         message: "eigh requires every coupled-sector block to be Hermitian",

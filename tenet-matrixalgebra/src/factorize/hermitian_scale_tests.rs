@@ -24,13 +24,14 @@ fn hermitian_block<D: FactorScalar>(n: usize, scale: f64) -> Vec<D> {
 /// the lane's smallest normal and `2^(MAX_EXP - 4)` — as it does at 1.
 fn extremes_case<D: FactorScalar>(tiny: f64, huge: f64) {
     let n = 4;
+    let tol = HermitianTol::DEFAULT.resolve(D::epsilon());
     for scale in [tiny, 1.0, huge] {
         let hermitian = hermitian_block::<D>(n, scale);
-        assert!(hermitian_matrix_contents(&hermitian, n), "{scale:e}");
+        assert!(hermitian_matrix_contents(&hermitian, n, tol), "{scale:e}");
         let mut asymmetric = hermitian;
         asymmetric[1] =
             D::from_complex64(asymmetric[1].widen_complex() + Complex64::new(scale, 0.0));
-        assert!(!hermitian_matrix_contents(&asymmetric, n), "{scale:e}");
+        assert!(!hermitian_matrix_contents(&asymmetric, n, tol), "{scale:e}");
     }
 }
 

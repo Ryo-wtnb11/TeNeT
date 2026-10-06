@@ -17,7 +17,7 @@ use crate::factorize::{
     is_hermitian_endomorphism_dyn, map_square_sectors_dyn, map_square_sectors_dyn_into,
     pinv_by_sector_dyn_into, pinv_cutoff, scale_axis_by_spectrum, solve_left_by_sector_dyn,
     solve_left_by_sector_dyn_into, svd_compact_factors_dyn, BoundDynFactor, BoundDynamicTensorRef,
-    FactorScalar, SectorSpectrum, SvdFactorsDyn,
+    FactorScalar, HermitianTol, SectorSpectrum, SvdFactorsDyn,
 };
 #[cfg(test)]
 use crate::factorize::{typed_from_bound_factor, BoundTensorMap, BoundTensorMapRef};
@@ -810,7 +810,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    let (v, eigenvalues) = eigh_full_dyn(dense, input)?.into_parts();
+    // exp's spectral-route predicate is stricter than the default admission.
+    let (v, eigenvalues) = eigh_full_dyn(dense, input, HermitianTol::DEFAULT)?.into_parts();
     let mapped: Vec<SectorSpectrum> = eigenvalues
         .iter()
         .map(|entry| SectorSpectrum {

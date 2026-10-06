@@ -203,8 +203,9 @@ pub(crate) fn cuda_hermitian_regions<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
     source: &CudaDenseStorage,
     regions: &[(usize, usize)],
+    relative_tolerance: f64,
 ) -> Result<Vec<bool>, Error> {
-    dense_cuda_hermitian_regions::<D>(cuda, source, regions).map_err(dense_err)
+    dense_cuda_hermitian_regions::<D>(cuda, source, regions, relative_tolerance).map_err(dense_err)
 }
 
 #[cfg(feature = "cuda")]

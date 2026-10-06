@@ -9,7 +9,12 @@ fn cuda_is_hermitian_region<D: CudaScalar>(
     offset: usize,
     n: usize,
 ) -> Result<bool, DenseError> {
-    Ok(cuda_hermitian_regions::<D>(ctx, src, &[(offset, n)])?[0])
+    Ok(cuda_hermitian_regions::<D>(
+        ctx,
+        src,
+        &[(offset, n)],
+        <D::Real as CudaRealScalar>::EPSILON.powf(0.75),
+    )?[0])
 }
 
 #[test]
@@ -109,20 +114,6 @@ fn eigh_factor_shapes_must_match_the_requested_square_problem() {
     assert!(validate_eigh_factor_shapes(3, &[3, 3], 3).is_ok());
     assert!(validate_eigh_factor_shapes(2, &[3, 3], 3).is_err());
     assert!(validate_eigh_factor_shapes(3, &[3, 2], 3).is_err());
-}
-
-/// The tolerance the Hermitian rule is given is the payload's own lane:
-/// unchanged for the double-precision payloads, ~5e8 wider for the
-/// single-precision ones. The rule itself is tested in `cuda_hermitian`,
-/// which ordinary CI runs.
-#[test]
-fn the_hermitian_tolerance_follows_the_payload_real_lane() {
-    assert_eq!(hermitian_tolerance::<f64>(), 64.0 * f64::EPSILON);
-    assert_eq!(hermitian_tolerance::<Complex64>(), 64.0 * f64::EPSILON);
-    let single = 64.0 * f64::from(f32::EPSILON);
-    assert_eq!(hermitian_tolerance::<f32>(), single);
-    assert_eq!(hermitian_tolerance::<Complex32>(), single);
-    assert!(hermitian_tolerance::<f32>() > hermitian_tolerance::<f64>());
 }
 
 /// Each admitted dtype owns its own scalar-operand slot, so a context used

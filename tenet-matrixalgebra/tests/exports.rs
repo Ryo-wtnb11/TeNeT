@@ -195,7 +195,7 @@ fn crate_root_and_seam_export_exactly_the_consumed_items() {
     assert_eq!(
         root,
         names(
-            "BoundDynFactor FactorScalar SectorSpectrum SpectrumMagnitude \
+            "BoundDynFactor FactorScalar HermitianTol SectorSpectrum SpectrumMagnitude \
              Eig Eigh LeftPolar Lq Qr RightPolar Svd \
              select_truncation Truncation TruncationDecision TruncationError TruncationSpace \
              WeightedSpectrum truncation seam"

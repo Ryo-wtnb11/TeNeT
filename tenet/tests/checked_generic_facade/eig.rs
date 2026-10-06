@@ -54,7 +54,9 @@ fn assert_sun_checked_generic_eigh<D>(
                 == off_diagonal
     }));
 
-    let Eigh { d, v } = source.eigh_full(&[0, 1], &[2, 3]).unwrap();
+    let Eigh { d, v } = source
+        .eigh_full(&[0, 1], &[2, 3], HermitianTol::DEFAULT)
+        .unwrap();
     assert!(std::ptr::eq(d.provider(), provider.as_ref()));
     assert!(std::ptr::eq(v.provider(), provider.as_ref()));
     let dense_len = d.materialize().unwrap().dense_data().unwrap().len();
@@ -309,13 +311,18 @@ fn checked_generic_eigh_vals_preserves_spectrum_and_dtype() {
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 2.5).unwrap();
 
-    let spectra = source.eigh_vals(&[0], &[1]).unwrap();
+    let spectra = source.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert_eq!(spectra.len(), 1);
     assert_eq!(spectra[0].sector, Label::X);
     assert_eq!(spectra[0].values, vec![2.5]);
 
     let complex = source.convert::<Complex64>();
-    assert_eq!(complex.eigh_vals(&[0], &[1]).unwrap(), spectra);
+    assert_eq!(
+        complex
+            .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap(),
+        spectra
+    );
 
     let compact: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
@@ -326,10 +333,15 @@ fn checked_generic_eigh_vals_preserves_spectrum_and_dtype() {
         }],
     )
     .unwrap();
-    assert_eq!(compact.eigh_vals(&[0], &[1]).unwrap(), spectra);
+    assert_eq!(
+        compact
+            .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap(),
+        spectra
+    );
     provider.fail_decode.store(true, Ordering::Relaxed);
     assert!(matches!(
-        compact.eigh_vals(&[0], &[1]),
+        compact.eigh_vals(&[0], &[1], HermitianTol::DEFAULT),
         Err(GenericTensorError::Plan(
             tenet::typed::CheckedGenericPlanError::Provider(ToyError::Decode)
         ))
@@ -344,7 +356,7 @@ fn assert_checked_generic_eigh_factors<D>(
 ) where
     D: tenet::typed::FactorizationScalar + tenet::typed::SpectrumMagnitude + fmt::Debug,
 {
-    let Eigh { d, v } = source.eigh_full(&[0], &[1]).unwrap();
+    let Eigh { d, v } = source.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert!(std::ptr::eq(d.provider(), source.provider()));
     assert!(std::ptr::eq(v.provider(), source.provider()));
     assert!(tenet::typed::__network::runtime_identity(d.runtime()).matches(source.runtime()));
@@ -432,7 +444,9 @@ fn checked_generic_eigh_full_and_trunc_preserve_contract_for_both_dtypes() {
         |actual, expected| (actual - expected).norm(),
         |value| value.conj(),
     );
-    let Eigh { d: complex_d, .. } = complex.eigh_full(&[0], &[1]).unwrap();
+    let Eigh { d: complex_d, .. } = complex
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+        .unwrap();
     assert!(complex_d
         .materialize()
         .unwrap()
@@ -457,7 +471,7 @@ fn checked_generic_eigh_lazy_success_and_failure_leave_the_view_lazy() {
         tenet::typed::__network::network_reuse_class(&lazy, false)
             == tenet::typed::__network::NetworkReuseClass::LazyAdjoint
     );
-    assert!(lazy.eigh_full(&[0], &[1]).is_ok());
+    assert!(lazy.eigh_full(&[0], &[1], HermitianTol::DEFAULT).is_ok());
     assert!(
         tenet::typed::__network::network_reuse_class(&lazy, false)
             == tenet::typed::__network::NetworkReuseClass::LazyAdjoint
@@ -469,7 +483,7 @@ fn checked_generic_eigh_lazy_success_and_failure_leave_the_view_lazy() {
         })
         .unwrap();
     let lazy = nonhermitian.adjoint().unwrap();
-    assert!(lazy.eigh_full(&[0], &[1]).is_err());
+    assert!(lazy.eigh_full(&[0], &[1], HermitianTol::DEFAULT).is_err());
     assert!(
         tenet::typed::__network::network_reuse_class(&lazy, false)
             == tenet::typed::__network::NetworkReuseClass::LazyAdjoint
@@ -484,14 +498,18 @@ fn checked_generic_eigh_rejects_invalid_inputs_before_publication() {
     let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let nonendomorphism: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&wide], [&narrow], |_, _| 1.0).unwrap();
-    assert!(nonendomorphism.eigh_full(&[0], &[1]).is_err());
+    assert!(nonendomorphism
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+        .is_err());
 
     let nonhermitian: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&wide], [&wide], |_, index| {
             [[0.0, 1.0], [0.0, 0.0]][index[0]][index[1]]
         })
         .unwrap();
-    assert!(nonhermitian.eigh_full(&[0], &[1]).is_err());
+    assert!(nonhermitian
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+        .is_err());
     let nonfinite: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&wide], [&wide], |_, index| {
             if index[0] == index[1] {
@@ -501,7 +519,9 @@ fn checked_generic_eigh_rejects_invalid_inputs_before_publication() {
             }
         })
         .unwrap();
-    assert!(nonfinite.eigh_full(&[0], &[1]).is_err());
+    assert!(nonfinite
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+        .is_err());
 }
 
 /// Owned EIGH entries; the destination form is refused, so a checked
@@ -571,7 +591,9 @@ fn checked_generic_eigh_preflights_all_sectors_and_runs_once_per_sector() {
             }
         })
         .unwrap();
-    hermitian.eigh_full(&[0], &[1]).unwrap();
+    hermitian
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+        .unwrap();
     assert_eq!(calls.of(EIGH_OWNED), 2);
 
     calls.reset();
@@ -584,7 +606,9 @@ fn checked_generic_eigh_preflights_all_sectors_and_runs_once_per_sector() {
             }
         })
         .unwrap();
-    assert!(nonhermitian.eigh_full(&[0], &[1]).is_err());
+    assert!(nonhermitian
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+        .is_err());
     assert_eq!(calls.of(EIGH_OWNED), 0);
     assert_eq!(calls.total(), 0);
 }
@@ -605,7 +629,7 @@ fn checked_generic_eigh_dense_failure_preserves_the_source() {
         })
         .unwrap();
     let before = source.dense_data().unwrap().to_vec();
-    assert!(source.eigh_full(&[0], &[1]).is_err());
+    assert!(source.eigh_full(&[0], &[1], HermitianTol::DEFAULT).is_err());
     assert_eq!(calls.of(EIGH_OWNED), 1);
     assert_eq!(source.dense_data().unwrap(), before);
     assert!(std::ptr::eq(source.provider(), provider.as_ref()));
@@ -647,7 +671,7 @@ fn checked_generic_eigh_qdim_and_decode_failures_publish_no_pair() {
 
     // The truncation composition decodes labels in `diagview` and reads the
     // quantum dimension in `find_truncated`; both surface the provider error.
-    let Eigh { d, .. } = source.eigh_full(&[0], &[1]).unwrap();
+    let Eigh { d, .. } = source.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     provider.fail_decode.store(true, Ordering::Relaxed);
     assert!(matches!(
         d.diagview(),
@@ -721,7 +745,7 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
             [-2.0, 2.0, 1.0][index[0]] * f64::from(index[0] == index[1])
         })
         .unwrap();
-    let Eigh { d, .. } = tied.eigh_full(&[0], &[1]).unwrap();
+    let Eigh { d, .. } = tied.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     // The order of the tied magnitudes is the contract; the values carry the
     // eigensolver's rounding (`terms` = the block size 3).
     numerics::assert_slices_close(
@@ -740,7 +764,9 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
             [2.0, 2.0, -1.0][index[0]] * f64::from(index[0] == index[1])
         })
         .unwrap();
-    let Eigh { d, v } = degenerate.eigh_full(&[0], &[1]).unwrap();
+    let Eigh { d, v } = degenerate
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+        .unwrap();
     let selector_codomain = d.codomain();
     let selector_domain = d.domain();
     let selector: TensorMap<_, f64> = TensorMap::from_subblock_fn(
@@ -1482,9 +1508,57 @@ fn checked_nondual_compact_diagonal_eigh_full_makes_no_provider_query() {
             _ => provider.invalid_style.store(true, Ordering::Relaxed),
         }
         reset_provider_queries(&provider);
-        let Eigh { d, v } = diagonal.eigh_full(&[0], &[1]).unwrap();
+        let Eigh { d, v } = diagonal
+            .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap();
         assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 0);
         assert_eq!(d.codomain(), diagonal.codomain());
         assert_eq!(v.codomain(), diagonal.codomain());
+    }
+}
+
+/// The checked Generic eigh admission is the same shared check at the same
+/// tolerance (#1987): `[[1, δ], [0, 2]]` passes exactly when `δ ≤ tol·√10`,
+/// and `diag(1 + iδ, 2)` exactly when `δ ≤ tol·√5`.
+#[test]
+fn checked_generic_eigh_admits_at_the_given_hermitian_tolerance() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    for (tol, hermitian_tol) in [
+        (f64::EPSILON.powf(0.75), HermitianTol::DEFAULT),
+        (1.0e-3, HermitianTol::relative(1.0e-3).unwrap()),
+    ] {
+        for (factor, admitted) in [(0.97, true), (1.03, false)] {
+            let delta = factor * tol * 10.0_f64.sqrt();
+            let dense: TensorMap<_, f64> =
+                TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| match index {
+                    [0, 0] => 1.0,
+                    [1, 0] => delta,
+                    [1, 1] => 2.0,
+                    _ => 0.0,
+                })
+                .unwrap();
+            assert_eq!(dense.eigh_vals(&[0], &[1], hermitian_tol).is_ok(), admitted);
+            assert_eq!(dense.eigh_full(&[0], &[1], hermitian_tol).is_ok(), admitted);
+            let delta = factor * tol * 5.0_f64.sqrt();
+            let diagonal: TensorMap<_, Complex64> = TensorMap::diagonal(
+                &runtime,
+                &leg,
+                [SectorSpectrum {
+                    sector: Label::X,
+                    values: vec![Complex64::new(1.0, delta), Complex64::new(2.0, 0.0)],
+                }],
+            )
+            .unwrap();
+            assert_eq!(
+                diagonal.eigh_vals(&[0], &[1], hermitian_tol).is_ok(),
+                admitted
+            );
+            assert_eq!(
+                diagonal.eigh_full(&[0], &[1], hermitian_tol).is_ok(),
+                admitted
+            );
+        }
     }
 }

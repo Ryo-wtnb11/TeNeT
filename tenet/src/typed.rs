@@ -277,6 +277,7 @@ pub use tenet_dense::{CudaRealScalar, CudaScalar};
 /// The dense-scalar supertrait of the payload traits; its `Eig` is the
 /// payload of [`TensorMap::eig_full`].
 pub use tenet_matrixalgebra::FactorScalar;
+pub use tenet_matrixalgebra::HermitianTol;
 /// The spectrum-magnitude bound of [`GradedSpace::find_truncated`]. Concrete
 /// `f64`/`Complex64` callers never name it, but a caller generic over the
 /// payload must, so it is re-exported here rather than left unnameable

@@ -186,11 +186,13 @@ pub trait FactorMode<R>: sealed::Sealed {
     fn eigh_full_diagonal<D: FactorScalar>(
         space: &BoundDynamicFusionMapSpace<R>,
         spectrum: &[SectorSpectrum<D>],
+        hermitian_tol: HermitianTol,
     ) -> Result<EighFullDyn<R, D>, Self::Error>;
 
     fn eigh_full_dense<E, D>(
         dense: &mut E,
         input: &BoundDynamicTensorRef<'_, R, D>,
+        hermitian_tol: HermitianTol,
     ) -> Result<EighFullDyn<R, D>, Self::Error>
     where
         E: DenseExecutor + ?Sized,
@@ -354,19 +356,21 @@ where
     fn eigh_full_diagonal<D: FactorScalar>(
         space: &BoundDynamicFusionMapSpace<R>,
         spectrum: &[SectorSpectrum<D>],
+        hermitian_tol: HermitianTol,
     ) -> Result<EighFullDyn<R, D>, Self::Error> {
-        eigh_full_diagonal_dyn(space, spectrum)
+        eigh_full_diagonal_dyn(space, spectrum, hermitian_tol)
     }
 
     fn eigh_full_dense<E, D>(
         dense: &mut E,
         input: &BoundDynamicTensorRef<'_, R, D>,
+        hermitian_tol: HermitianTol,
     ) -> Result<EighFullDyn<R, D>, Self::Error>
     where
         E: DenseExecutor + ?Sized,
         D: FactorScalar,
     {
-        eigh_full_dyn(dense, input)
+        eigh_full_dyn(dense, input, hermitian_tol)
     }
 
     fn eig_full_diagonal<D: FactorScalar>(
@@ -547,19 +551,21 @@ where
     fn eigh_full_diagonal<D: FactorScalar>(
         space: &BoundDynamicFusionMapSpace<R>,
         spectrum: &[SectorSpectrum<D>],
+        hermitian_tol: HermitianTol,
     ) -> Result<EighFullDyn<R, D>, Self::Error> {
-        eigh_full_diagonal_dyn_checked_generic(space, spectrum)
+        eigh_full_diagonal_dyn_checked_generic(space, spectrum, hermitian_tol)
     }
 
     fn eigh_full_dense<E, D>(
         dense: &mut E,
         input: &BoundDynamicTensorRef<'_, R, D>,
+        hermitian_tol: HermitianTol,
     ) -> Result<EighFullDyn<R, D>, Self::Error>
     where
         E: DenseExecutor + ?Sized,
         D: FactorScalar,
     {
-        eigh_full_dyn_checked_generic(dense, input)
+        eigh_full_dyn_checked_generic(dense, input, hermitian_tol)
     }
 
     fn eig_full_diagonal<D: FactorScalar>(
