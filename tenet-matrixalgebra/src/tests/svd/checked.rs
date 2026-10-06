@@ -134,6 +134,7 @@ fn checked_generic_svd_compact_empty_input_skips_dense_execution() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -192,6 +193,7 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked = BoundDynamicFusionMapSpace::bind_generic(
         source.space().clone(),
@@ -259,6 +261,7 @@ fn checked_compact_diagonal_full_svd_has_no_post_preflight_provider_query() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let successful = BoundDynamicFusionMapSpace::bind_generic(
         source.space().clone(),
@@ -293,6 +296,7 @@ fn checked_generic_full_svd_failure_publishes_no_factors() {
         rule: FactorGenericRule,
         fail_at: 2,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), failing).unwrap();
@@ -373,6 +377,7 @@ fn checked_generic_full_svd_completes_unmatched_columns_and_disjoint_space() {
             rule: FactorGenericRule,
             fail_at: usize::MAX,
             calls: Cell::new(0),
+            identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         }),
     )
     .unwrap();
@@ -399,6 +404,7 @@ fn checked_generic_full_svd_completes_unmatched_columns_and_disjoint_space() {
             rule: FactorGenericRule,
             fail_at: usize::MAX,
             calls: Cell::new(0),
+            identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         }),
     )
     .unwrap();
@@ -418,6 +424,7 @@ fn assert_checked_full_svd_builder_failure(fail_at: usize) {
         rule: FactorGenericRule,
         fail_at,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -484,6 +491,7 @@ fn checked_generic_full_svd_enumerates_each_output_layout_once() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -498,6 +506,7 @@ fn checked_generic_full_svd_enumerates_each_output_layout_once() {
             rule: FactorGenericRule,
             fail_at: usize::MAX,
             calls: Cell::new(0),
+            identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         };
         run(&probe);
         probe.calls.get()
@@ -540,6 +549,7 @@ fn checked_native_full_svd_stages_before_unchanged_provider_admission() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -571,6 +581,7 @@ fn checked_generic_full_svd_local_shape_error_precedes_provider_query() {
         rule: FactorGenericRule,
         fail_at: 1,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -599,6 +610,7 @@ fn checked_native_full_svd_reconstructs_complex_interleaved_square_trees() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let space = BoundDynamicFusionMapSpace::bind_generic(
         interleaved_space.space().clone(),
@@ -858,6 +870,7 @@ fn checked_generic_svd_compact_enumerates_each_factor_layout_once() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -901,6 +914,7 @@ fn compact_diagonal_on_an_expert_bond_layout_is_normalized_not_refused() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let canonical =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))

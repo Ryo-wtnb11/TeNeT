@@ -232,6 +232,7 @@ fn staged_generic_pair_callers_publish_canonical_owned_payloads() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -367,6 +368,7 @@ fn checked_generic_compact_pair_builder_failure_preserves_provider_context() {
             rule: FactorGenericRule,
             fail_at,
             calls: Cell::new(0),
+            identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         });
         let checked =
             BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -387,6 +389,7 @@ fn checked_generic_compact_pair_builder_failure_preserves_provider_context() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))

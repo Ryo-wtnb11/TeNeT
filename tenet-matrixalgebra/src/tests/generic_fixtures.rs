@@ -535,6 +535,7 @@ where
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -588,6 +589,7 @@ where
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -630,6 +632,7 @@ pub(super) fn bind_checked_layout(
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(space.space().clone(), Arc::clone(&provider))

@@ -29,6 +29,7 @@ fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authori
             rule: FactorGenericRule,
             fail_at: usize::MAX,
             calls: Cell::new(0),
+            identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         });
         let complete_space = BoundDynamicFusionMapSpace::bind_generic(
             source.space().clone(),
@@ -50,6 +51,7 @@ fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authori
             rule: FactorGenericRule,
             fail_at: final_call,
             calls: Cell::new(0),
+            identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         });
         let failing_space = BoundDynamicFusionMapSpace::bind_generic(
             source.space().clone(),
@@ -92,6 +94,7 @@ fn checked_generic_null_dense_failure_never_reaches_output_admission() {
             rule: FactorGenericRule,
             fail_at: usize::MAX,
             calls: Cell::new(0),
+            identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         });
         let checked =
             BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -103,6 +106,7 @@ fn checked_generic_null_dense_failure_never_reaches_output_admission() {
                 rule: FactorGenericRule,
                 fail_at: usize::MAX,
                 calls: Cell::new(0),
+                identity: RuleIdentity::new_unique::<LateGenericSpy>(),
             };
             let side = if left {
                 source.space().homspace().codomain()
@@ -150,6 +154,7 @@ fn checked_generic_disjoint_null_is_identity_without_dense_calls() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -1112,6 +1117,7 @@ fn assert_checked_factor_generic_full_family_borrows_input<D: FactorScalar>() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let rebind = |space: &BoundDynamicFusionMapSpace<FactorGenericRule>| {
         BoundDynamicFusionMapSpace::bind_generic(space.space().clone(), Arc::clone(&provider))
@@ -1160,6 +1166,7 @@ fn checked_generic_full_null_ops_keep_packing_padded_input() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let expert_space =
         BoundDynamicFusionMapSpace::bind_generic(expert_space.space().clone(), provider).unwrap();

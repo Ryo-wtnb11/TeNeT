@@ -555,6 +555,10 @@ pub(super) struct LateGenericSpy {
     pub(super) rule: FactorGenericRule,
     pub(super) fail_at: usize,
     pub(super) calls: Cell<usize>,
+    /// Its own identity: a spy that counts and fails its calls does not
+    /// answer as `rule` does, so structure caches must not share entries
+    /// between spies (or with `rule`).
+    pub(super) identity: RuleIdentity,
 }
 
 /// Forwards the factorization entries and counts them; see [`CountingDense`]
@@ -686,7 +690,7 @@ impl CheckedGenericFusion for LateGenericSpy {
     type Error = LateGenericError;
 
     fn rule_identity(&self) -> RuleIdentity {
-        self.rule.rule_identity()
+        self.identity.clone()
     }
 
     fn fusion_style(&self) -> FusionStyleKind {
@@ -776,6 +780,7 @@ pub(super) fn late_spy_calls(run: &dyn Fn(&LateGenericSpy)) -> usize {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     };
     run(&probe);
     probe.calls.get()

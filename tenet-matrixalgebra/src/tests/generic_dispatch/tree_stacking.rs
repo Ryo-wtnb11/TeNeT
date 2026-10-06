@@ -60,6 +60,7 @@ fn checked_generic_facade_layouts_take_the_direct_region_path() {
             rule: FactorGenericRule,
             fail_at: usize::MAX,
             calls: Cell::new(0),
+            identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         });
         let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
             Arc::clone(&provider),
@@ -200,6 +201,7 @@ fn checked_generic_mis_stacked_tiling_scatters_factors_and_refuses_eigenvalues()
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let relayout = |source: &[Complex64]| {
         let typed_space = FusionTensorMapSpace::new_unbound(

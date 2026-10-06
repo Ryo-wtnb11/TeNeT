@@ -449,6 +449,7 @@ fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution(
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let source =
         BoundDynamicFusionMapSpace::bind_generic(base.space().clone(), Arc::clone(&provider))
@@ -464,6 +465,7 @@ fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution(
             rule: FactorGenericRule,
             fail_at: usize::MAX,
             calls: Cell::new(0),
+            identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         }),
         expected.clone(),
     )
@@ -2692,6 +2694,7 @@ fn checked_factor_isomorphism_queries_codomain_then_domain_without_shortcut() {
             rule: FactorGenericRule,
             fail_at,
             calls: Cell::new(0),
+            identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         })
     };
     let (square, _, _) = generic_values_endomorphism_input();

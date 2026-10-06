@@ -407,6 +407,7 @@ fn checked_generic_compact_factors_keep_padded_reordered_input_pack() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let expert_space = BoundDynamicFusionMapSpace::bind_generic(
         expert_space.space().clone(),
@@ -469,6 +470,7 @@ fn checked_generic_compact_interleaved_fallback_keeps_literal_matrix_order() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let expert_space = BoundDynamicFusionMapSpace::bind_generic(
         expert_space.space().clone(),
@@ -694,6 +696,7 @@ fn checked_generic_values_keep_padded_reordered_fallback() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let canonical_space = BoundDynamicFusionMapSpace::bind_generic(
         canonical_space.space().clone(),

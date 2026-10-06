@@ -76,6 +76,7 @@ fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
         rule: FactorGenericRule,
         fail_at: 1,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), failing).unwrap();
@@ -92,6 +93,7 @@ fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&complete))
@@ -130,6 +132,7 @@ fn checked_generic_eigh_late_dense_failure_publishes_no_factors() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -181,6 +184,7 @@ fn checked_generic_eigh_uses_owned_dense_output() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -217,6 +221,7 @@ fn checked_generic_eigh_keeps_owned_vectors_in_live_pairs_before_publication() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -255,6 +260,7 @@ fn assert_checked_generic_eigh_live_pair_owners<D: crate::factorize::FactorScala
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
@@ -384,6 +390,7 @@ fn checked_generic_eigh_reconstructs_padded_reordered_complex_input() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(expert.space().clone(), Arc::clone(&provider))
@@ -481,6 +488,7 @@ fn checked_generic_eig_stages_dense_work_before_checked_factor_admission() {
         rule: FactorGenericRule,
         fail_at: 1,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let checked =
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), failing).unwrap();

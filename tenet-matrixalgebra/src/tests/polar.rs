@@ -14,6 +14,7 @@ fn checked_generic_polar_covers_scalar_maps() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let empty = FusionProductSpace::new(std::iter::empty::<SectorLeg>());
     let homspace = FusionTreeHomSpace::new(empty.clone(), empty);
@@ -97,6 +98,7 @@ fn checked_generic_polar_and_pinv_reject_a_tiled_source_whose_tree_order_differs
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
     let source = BoundDynamicFusionMapSpace::bind_generic(
         DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap()),
