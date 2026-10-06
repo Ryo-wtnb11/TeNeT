@@ -1293,11 +1293,8 @@ mod tests {
         ));
         assert_eq!(right.algebra_calls(), 0);
         assert!(left.algebra_calls() > 0);
-        assert_eq!(
-            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::SectorStructure)
-                .entries(),
-            0
-        );
+        // The layout walks succeeded before the backend failed, so their
+        // pure-data layouts may be published (#2030); no block structure is.
         assert_eq!(
             tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
                 .entries(),

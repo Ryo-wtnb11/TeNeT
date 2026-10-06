@@ -667,10 +667,11 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
             ));
         }
         assert_eq!(provider.calls.get(), [0; CheckedPlanCall::COUNT]);
-        assert_eq!(
-            structure_cache_info(StructureCacheKind::SectorStructure),
-            layout_before
-        );
+        // A layout walk that succeeded before the failure may publish its
+        // pure-data layout (#2030); nothing else is published.
+        let layout_after = structure_cache_info(StructureCacheKind::SectorStructure);
+        assert!(layout_after.admissions() <= layout_before.admissions() + 1);
+        assert_eq!(layout_after.rejections(), layout_before.rejections());
         assert_eq!(
             structure_cache_info(StructureCacheKind::DegeneracyStructure),
             complete_before
@@ -728,10 +729,11 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
                 CheckedGenericPlanError::SymbolShape { symbol: "R", .. }
             )),
         }
-        assert_eq!(
-            structure_cache_info(StructureCacheKind::SectorStructure),
-            layout_before
-        );
+        // A layout walk that succeeded before the failure may publish its
+        // pure-data layout (#2030); nothing else is published.
+        let layout_after = structure_cache_info(StructureCacheKind::SectorStructure);
+        assert!(layout_after.admissions() <= layout_before.admissions() + 1);
+        assert_eq!(layout_after.rejections(), layout_before.rejections());
         assert_eq!(
             structure_cache_info(StructureCacheKind::DegeneracyStructure),
             complete_before
@@ -775,10 +777,11 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         error,
         CheckedGenericPlanError::Provider(CheckedPlanSpyError(CheckedPlanCall::FrobeniusSchur))
     ));
-    assert_eq!(
-        structure_cache_info(StructureCacheKind::SectorStructure),
-        layout_before
-    );
+    // The destination layout walk succeeded before the failure and may
+    // publish its pure-data layout (#2030); nothing else is published.
+    let layout_after = structure_cache_info(StructureCacheKind::SectorStructure);
+    assert!(layout_after.admissions() <= layout_before.admissions() + 1);
+    assert_eq!(layout_after.rejections(), layout_before.rejections());
     assert_eq!(
         structure_cache_info(StructureCacheKind::DegeneracyStructure),
         complete_before

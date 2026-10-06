@@ -67,6 +67,14 @@ struct FailAtCallRule {
 }
 
 impl FailAtCallRule {
+    /// A rule answering under `identity`, so that one test's instances share
+    /// it and no other test's structure-cache entries can answer for them.
+    fn with_identity(identity: RuleIdentity) -> Self {
+        let mut rule = Self::new();
+        rule.identity = identity;
+        rule
+    }
+
     fn new() -> Self {
         Self {
             identity: RuleIdentity::of_type::<Self>(),
@@ -218,8 +226,15 @@ fn checked_generic_equal_identity_checker_commits_under_source_arc() {
 #[allow(clippy::arc_with_non_send_sync)] // The bound API requires Arc; these local guard spies use Cell counters.
 fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
     let homspace = || FusionTreeHomSpace::from_sector_ids([(0, 1), (0, 1)], [(0, 1)]);
+    // A fresh identity for this test's rules. Why not `of_type`: a
+    // successful walk may answer later ones from the sector-structure cache
+    // (#2030), so the failing checker gets a HomSpace no walk under this
+    // identity has published.
+    let identity = RuleIdentity::new_unique::<FailAtCallRule>();
+    let failing_homspace =
+        || FusionTreeHomSpace::from_sector_ids([(0, 1), (0, 1), (0, 1)], [(0, 1)]);
 
-    let wrong_root_style = Arc::new(FailAtCallRule::new());
+    let wrong_root_style = Arc::new(FailAtCallRule::with_identity(identity.clone()));
     wrong_root_style.style.set(FusionStyleKind::Unique);
     let error = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         Arc::clone(&wrong_root_style),
@@ -235,7 +250,7 @@ fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
     ));
     assert_eq!(wrong_root_style.calls.get(), 0);
 
-    let mut failing_root = FailAtCallRule::new();
+    let mut failing_root = FailAtCallRule::with_identity(identity.clone());
     failing_root.fail_at = Some(1);
     let failing_root = Arc::new(failing_root);
     let error = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
@@ -248,14 +263,14 @@ fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
         CheckedGenericStructureError::Provider(FailAtCallError(1))
     ));
 
-    let source_provider = Arc::new(FailAtCallRule::new());
+    let source_provider = Arc::new(FailAtCallRule::with_identity(identity.clone()));
     let source = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         Arc::clone(&source_provider),
         homspace(),
     )
     .unwrap();
 
-    let mut wrong_identity = FailAtCallRule::new();
+    let mut wrong_identity = FailAtCallRule::with_identity(identity.clone());
     wrong_identity.identity = RuleIdentity::of_type::<Z2FusionRule>();
     let error = source
         .prepare_final_homspace_generic_with_checked(&wrong_identity, homspace())
@@ -267,7 +282,7 @@ fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
     ));
     assert_eq!(wrong_identity.calls.get(), 0);
 
-    let wrong_checker_style = FailAtCallRule::new();
+    let wrong_checker_style = FailAtCallRule::with_identity(identity.clone());
     wrong_checker_style.style.set(FusionStyleKind::Unique);
     let error = source
         .prepare_final_homspace_generic_with_checked(&wrong_checker_style, homspace())
@@ -282,10 +297,10 @@ fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
     ));
     assert_eq!(wrong_checker_style.calls.get(), 0);
 
-    let mut failing_checker = FailAtCallRule::new();
+    let mut failing_checker = FailAtCallRule::with_identity(identity.clone());
     failing_checker.fail_at = Some(1);
     let error = source
-        .prepare_final_homspace_generic_with_checked(&failing_checker, homspace())
+        .prepare_final_homspace_generic_with_checked(&failing_checker, failing_homspace())
         .err()
         .unwrap();
     assert!(matches!(
@@ -293,12 +308,12 @@ fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
         CheckedGenericStructureError::Provider(FailAtCallError(1))
     ));
 
-    let checker = FailAtCallRule::new();
+    let checker = FailAtCallRule::with_identity(identity.clone());
     let prepared = source
         .prepare_final_homspace_generic_with_checked(&checker, homspace())
         .unwrap();
     let legacy = BoundDynamicFusionMapSpace::from_final_homspace_generic(
-        Arc::new(FailAtCallRule::new()),
+        Arc::new(FailAtCallRule::with_identity(identity.clone())),
         homspace(),
     )
     .unwrap();
@@ -432,7 +447,11 @@ fn checked_generic_prepared_structure_constructor_matches_root_constructor() {
         .prepare_final_homspace_generic_with_checked(provider.as_ref(), homspace)
         .unwrap();
 
-    let spy = Arc::new(FailAtCallRule::new());
+    // A fresh identity, so the walk counted here is not answered by another
+    // test's published layout.
+    let spy = Arc::new(FailAtCallRule::with_identity(RuleIdentity::new_unique::<
+        FailAtCallRule,
+    >()));
     let vacuum_hom = FusionTreeHomSpace::from_sector_ids([(0, 2)], [(0, 3)]);
     let prepared = vacuum_hom
         .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(spy.as_ref())
@@ -526,7 +545,17 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
     assert_eq!(provider.calls.get(), 0);
     let preview = prepared.structure().clone();
     let required_len = prepared.required_len();
-    assert_eq!(snapshots(), before_prepare);
+    // The successful walk publishes its layout to the sector-structure cache
+    // (#2030); no block structure is admitted before the commit.
+    let after_prepare = snapshots();
+    assert_eq!(
+        after_prepare.0.admissions(),
+        before_prepare.0.admissions() + 1
+    );
+    assert_eq!(
+        (after_prepare.1, after_prepare.2),
+        (before_prepare.1, before_prepare.2)
+    );
 
     let before_commit = snapshots();
     let committed = source
@@ -547,6 +576,8 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
         before_commit.2.entries() + 1
     );
 
+    // Both walks below are cold: each must query the provider in full.
+    reset_core_intern_tables();
     let complete = FailAtCallRule::new();
     let complete_calls = {
         let _staged = source
@@ -556,6 +587,7 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
     };
     let mut failing = FailAtCallRule::new();
     failing.fail_at = Some(complete_calls);
+    reset_core_intern_tables();
     let before_failure = snapshots();
     let error = source
         .prepare_final_homspace_generic_checked(&failing, final_hom())
