@@ -21,9 +21,11 @@ impl HermitianReal for f64 {
 /// `‖(A − Aᴴ)/2‖_F ≤ tol · ‖A‖_F` at the payload's working precision.
 ///
 /// Why relative where MAK's `hermitian_tol` is an absolute `atol` against
-/// `eps(norm(A, Inf))^(3/4)` (`common/defaults.jl:default_hermitian_tol`):
-/// TeNeT's measure is invariant under rescaling `A`, so the default is
-/// MAK's level at unit norm (#1987).
+/// `eps(norm(A, Inf))^(3/4)` (`common/defaults.jl:default_hermitian_tol`,
+/// `norm(A, Inf)` the largest entry modulus `m`): TeNeT's decision is
+/// invariant under rescaling `A` (#1983, #1987). The two thresholds agree
+/// when `‖A‖_F = m ∈ [1, 2)`; otherwise TeNeT's is `‖A‖_F / 2^⌊log₂ m⌋`
+/// times MAK's, looser for large blocks and stricter for tiny ones.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HermitianTol {
     relative: Option<f64>,
@@ -52,6 +54,7 @@ impl HermitianTol {
 
     /// The relative tolerance at a payload precision with machine epsilon
     /// `epsilon`.
+    #[doc(hidden)]
     pub fn resolve(self, epsilon: f64) -> f64 {
         self.relative.unwrap_or_else(|| epsilon.powf(0.75))
     }
@@ -62,7 +65,7 @@ impl HermitianTol {
 /// spectral route exponentiates the Hermitian part, so a looser threshold
 /// would trade Padé's accuracy for a projection error of up to
 /// `tol · ‖A‖_F` on nearly-Hermitian input.
-const EXP_SPECTRAL_ROUTE_EPSILONS: f64 = 64.0;
+pub(crate) const EXP_SPECTRAL_ROUTE_EPSILONS: f64 = 64.0;
 
 #[cfg(test)]
 /// Full (untruncated) Hermitian eigendecomposition `t = V * D * Vh`.

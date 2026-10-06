@@ -811,12 +811,11 @@ fn device_eigh_full_matches_the_host_at_every_payload() {
 
 /// The device Hermitian admission rule at the payload's own epsilon (#1326).
 ///
-/// The perturbed fixture's relative anti-Hermitian residual sits between
-/// `64 * eps(f64)` and `64 * eps(f32)`: an `f32` block is entitled to it and is
-/// admitted, and the `f64` twin of the *same numbers* is not — which is the
-/// whole point of typing the tolerance by the real lane. Before C1 the rule
-/// compared every payload against `64 * eps(f64)` and would have rejected the
-/// single-precision block.
+/// The perturbed fixture's relative anti-Hermitian residual sits between the
+/// default thresholds `eps(f64)^(3/4)` and `eps(f32)^(3/4)`: an `f32` block is
+/// entitled to it and is admitted, and the `f64` twin of the *same numbers*
+/// is not — which is the whole point of resolving the tolerance in the real
+/// lane.
 ///
 /// The perturbation is a power of two added to a power of two, so it is exact
 /// in `f32` and the `f64` twin holds its widening.
@@ -844,26 +843,27 @@ fn device_eigh_admits_a_nearly_hermitian_single_precision_block() {
     let runtime = cuda_runtime();
     let leg = u1_leg([2, 3, 2]);
     // 2^-20 against a fixture of Frobenius norm >= 8: a relative residual near
-    // 6e-8, inside 64*eps(f32) = 7.6e-6 and far outside 64*eps(f64) = 1.4e-14.
+    // 6e-8, inside eps(f32)^(3/4) = 6.4e-6 and far outside
+    // eps(f64)^(3/4) = 1.8e-12.
     let skew = (-20.0_f64).exp2();
 
     assert!(
         perturbed::<f32>(&runtime, &leg, skew)
             .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
             .is_ok(),
-        "an f32 block within 64*eps(f32) must be admitted"
+        "an f32 block within eps(f32)^(3/4) must be admitted"
     );
     assert!(
         perturbed::<Complex32>(&runtime, &leg, skew)
             .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
             .is_ok(),
-        "a Complex32 block within 64*eps(f32) must be admitted"
+        "a Complex32 block within eps(f32)^(3/4) must be admitted"
     );
     assert!(
         perturbed::<f64>(&runtime, &leg, skew)
             .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
             .is_err(),
-        "the same numbers at f64 exceed 64*eps(f64) and must be rejected"
+        "the same numbers at f64 exceed eps(f64)^(3/4) and must be rejected"
     );
 
     // A genuinely non-Hermitian block is rejected at every payload, and the

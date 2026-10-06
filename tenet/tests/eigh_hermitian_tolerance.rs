@@ -106,3 +106,32 @@ fn a_prepared_plan_fixes_its_tolerance() {
         Err(BatchError::MemberRejected { members }) if members == [(0, MemberFault::NotHermitian)]
     ));
 }
+
+/// exp's spectral-route predicate (64·eps) is looser than eigh's default
+/// admission in single precision (`eps^(3/4) < 64·eps` for f32), so a block
+/// in between takes the spectral route and must still be admitted there.
+#[test]
+fn single_precision_exp_admits_what_its_route_predicate_sends_to_eigh() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = leg();
+    // Relative residual 7e-6: above eps(f32)^(3/4) = 6.4e-6, below
+    // 64·eps(f32) = 7.6e-6.
+    let delta = (7.0e-6 * 10.0_f64.sqrt()) as f32;
+    let t: TensorMap<_, f32> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| match index {
+            [0, 0] => 1.0,
+            [1, 0] => delta,
+            [1, 1] => 2.0,
+            _ => 0.0,
+        })
+        .unwrap();
+    assert!(t.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).is_err());
+    let exp = t.exp(&[0], &[1]).unwrap();
+    assert!(exp
+        .materialize()
+        .unwrap()
+        .dense_data()
+        .unwrap()
+        .iter()
+        .all(|value| value.is_finite()));
+}

@@ -4,7 +4,7 @@
 //!
 //! The decisions are asserted against hand-known truth values (exactly
 //! Hermitian, asymmetric by a whole unit, zero, empty, non-finite, and
-//! residuals just inside and far outside `64 * eps(real(D))`), at both ends
+//! residuals inside and outside the default `eps(real(D))^(3/4)`), at both ends
 //! of each lane's normal range. The deltas read the calling thread's
 //! [`cuda_transfer_stats`] counters.
 //!
@@ -111,12 +111,14 @@ fn asymmetric(n: usize, scale: f64) -> Vec<Complex64> {
     block
 }
 
-/// `[[1, delta], [0, 1]]` with `delta = epsilons * eps(real(D))`: admitted
-/// below `128 * eps`, rejected above.
-fn skewed<D: Payload>(epsilons: f64) -> Vec<Complex64> {
+/// `[[1, delta], [0, 1]]`, relative residual `delta / 2`, with `delta` the
+/// fraction `of_threshold` of `2 * eps(real(D))^(3/4)`: admitted below 1,
+/// rejected above.
+fn skewed<D: Payload>(of_threshold: f64) -> Vec<Complex64> {
     let one = Complex64::new(1.0, 0.0);
     let zero = Complex64::new(0.0, 0.0);
-    vec![one, zero, Complex64::new(epsilons * D::EPSILON, 0.0), one]
+    let delta = of_threshold * 2.0 * D::EPSILON.powf(0.75);
+    vec![one, zero, Complex64::new(delta, 0.0), one]
 }
 
 fn poisoned(bad: f64) -> Vec<Complex64> {
@@ -138,8 +140,8 @@ fn cases<D: Payload>() -> Vec<(Vec<Complex64>, bool)> {
         (asymmetric(4, D::TINY), false),
         (poisoned(f64::NAN), false),
         (poisoned(f64::INFINITY), false),
-        (skewed::<D>(120.0), true),
-        (skewed::<D>(4096.0), false),
+        (skewed::<D>(0.5), true),
+        (skewed::<D>(2.0), false),
         (hermitian(33, 1.0), true),
     ]
 }

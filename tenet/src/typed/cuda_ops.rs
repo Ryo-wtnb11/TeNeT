@@ -121,7 +121,7 @@ use super::*;
 /// ```
 /// use num_complex::{Complex32, Complex64};
 /// use tenet::sector::U1FusionRule;
-/// use tenet::typed::{CudaStorage, TensorMap};
+/// use tenet::typed::{CudaStorage, HermitianTol, TensorMap};
 ///
 /// fn c32_device_eigh(tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>) {
 ///     let _ = tensor.eigh_full(&[0], &[1], HermitianTol::DEFAULT);

@@ -872,9 +872,9 @@ fn hermitian_chain_case<D: ProbeScalar>(probe: &mut Probe) {
         D::NAME
     );
 
-    // The production Hermitian admission constant is `64 * f64::EPSILON`
-    // (`cuda_adapter.rs:731`). Record what it would do to this block's
-    // residual at single precision: survey hazard T1.
+    // Survey hazard T1, as recorded when the device admission constant was
+    // `64 * f64::EPSILON`. Production now resolves the caller's
+    // `HermitianTol` in the payload's own lane (#1987).
     println!(
         "  residual_scale {residual_scale:e}, input_ss {got:e}; \
          64*f64::EPSILON = {:e}, 64*f32::EPSILON = {:e}",
