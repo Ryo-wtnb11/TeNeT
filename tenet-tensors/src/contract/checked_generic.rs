@@ -1095,7 +1095,26 @@ mod tests {
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
     fn preselected_checked_generic_uses_left_authority_and_commits_left_owner() {
+        const ISOLATED: &str = "TENET_CHECKED_GENERIC_CONTRACT_AUTHORITY_ISOLATED";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "contract::checked_generic::tests::preselected_checked_generic_uses_left_authority_and_commits_left_owner",
+                ])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated authority test failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
         let (left, lhs, right, rhs) = bound_pair(1, 1);
+        tenet_core::reset_core_intern_tables();
         let candidate = contracted_axis_order_candidates(&[1], &[0]).remove(0);
         let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
         let rhs_data = vec![2.0; rhs.space().required_len().unwrap()];
@@ -1117,6 +1136,28 @@ mod tests {
         assert_eq!(right.algebra_calls(), 0);
         assert!(left.algebra_calls() > 0);
         assert_eq!(data.len(), output.space().required_len().unwrap());
+        assert!(left
+            .events
+            .borrow()
+            .ends_with(&[Event::Identity, Event::Style]));
+
+        left.reset();
+        right.reset();
+        let (warm_output, warm_data) = tensorcontract_owned_checked_generic_preselected(
+            &lhs,
+            &lhs_data,
+            &rhs,
+            &rhs_data,
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+            1,
+            &candidate,
+            FusionContractOrientation::LhsRhs,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(warm_output.provider_arc(), &left));
+        assert!(!Arc::ptr_eq(warm_output.provider_arc(), &right));
+        assert_eq!(right.algebra_calls(), 0);
+        assert_eq!(warm_data, data);
         assert!(left
             .events
             .borrow()
