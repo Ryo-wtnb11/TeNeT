@@ -419,18 +419,68 @@ where
     prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
     if prepared.is_identity() {
         return Ok((0..group.source_len)
-            .map(|index| {
-                let key = group
-                    .projection
-                    .pair_at(index)
-                    .expect("validated projection covers every source")
-                    .materialize();
-                vec![(key, R::Scalar::one())]
-            })
+            .map(|index| vec![validated_identity_tree_pair_row(&group, index)])
             .collect());
     }
     multiplicity_free_braid_tree_pair_block_compact_validated(group, prepared)
         .map(scatter_compact_tree_pair_block)
+}
+
+fn validated_identity_tree_pair_row<R>(
+    group: &ValidatedTreePairBlockGroup<'_, R>,
+    index: usize,
+) -> (FusionTreePairKey, R::Scalar)
+where
+    R: MultiplicityFreeRigidSymbols,
+{
+    let key = group
+        .projection
+        .pair_at(index)
+        .expect("validated projection covers every source")
+        .materialize();
+    (key, R::Scalar::one())
+}
+
+fn validated_identity_tree_pair_block_ordered<R>(
+    group: ValidatedTreePairBlockGroup<'_, R>,
+) -> OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>
+where
+    R: MultiplicityFreeRigidSymbols,
+{
+    // TensorKit's zero-move repartition returns the source with coefficient one:
+    // https://github.com/QuantumKitHub/TensorKit.jl/blob/cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91/src/fusiontrees/duality_manipulations.jl#L477-L491
+    // QSpace likewise avoids permutation staging for unchanged axes:
+    // https://bitbucket.org/qspace4u/qspace-v4-pub/src/d2d3d7da6a59a2e8f2cb7dc8f33e7c345af59371/Source/QSpace.hh#lines-2837:2851
+    // Validated singleton columns retain scalar conversion and repeated source
+    // columns without constructing the nonidentity compact repartition state.
+    let mut destinations = Vec::with_capacity(group.source_len);
+    let mut destination_rows = Vec::with_capacity(group.source_len);
+    let mut coefficients = Vec::with_capacity(group.source_len);
+    let unique = group.projection.has_strictly_ordered_structure_indices();
+    let mut rows = FxHashMap::default();
+    for index in 0..group.source_len {
+        let (key, coefficient) = validated_identity_tree_pair_row(&group, index);
+        let next = destinations.len();
+        let row = if unique {
+            destinations.push(key);
+            next
+        } else {
+            *rows.entry(key.clone()).or_insert_with(|| {
+                destinations.push(key);
+                next
+            })
+        };
+        destination_rows.push(row);
+        coefficients.push(coefficient);
+    }
+    OrderedBlockLinearMap {
+        destinations,
+        source_count: group.source_len,
+        storage: OrderedBlockLinearStorage::SingletonColumns {
+            destination_rows,
+            coefficients,
+        },
+    }
 }
 
 fn multiplicity_free_braid_tree_pair_block_ordered_validated<R>(
@@ -442,6 +492,10 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
+    if prepared.is_identity() {
+        return Ok(validated_identity_tree_pair_block_ordered(group));
+    }
+
     multiplicity_free_braid_tree_pair_block_compact_validated(group, prepared)
         .map(order_compact_tree_pair_block)
 }
@@ -741,6 +795,10 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
+    if prepared.is_identity() {
+        return Ok(validated_identity_tree_pair_block_ordered(group));
+    }
+
     multiplicity_free_transpose_tree_pair_block_compact_validated(group, prepared)
         .map(order_compact_tree_pair_block)
 }

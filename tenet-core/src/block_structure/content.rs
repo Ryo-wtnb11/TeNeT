@@ -312,3 +312,24 @@ impl SectorStructure {
             .saturating_add(compact_lookup)
     }
 }
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+
+    #[test]
+    fn unequal_content_with_equal_semantic_hash_remains_distinct() {
+        let left = BlockStructure::packed_column_major(2, [vec![2, 3]]).unwrap();
+        let right = BlockStructure::packed_column_major(2, [vec![3, 2]]).unwrap();
+        let left = left.content_key();
+        let mut right = (*right.content_key()).clone();
+        right.semantic_hash = left.semantic_hash;
+        assert_ne!(left.as_ref(), &right);
+        let mut map = rustc_hash::FxHashMap::default();
+        map.insert((*left).clone(), 1);
+        map.insert(right.clone(), 2);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[left.as_ref()], 1);
+        assert_eq!(map[&right], 2);
+    }
+}

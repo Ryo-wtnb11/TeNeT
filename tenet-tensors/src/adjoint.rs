@@ -414,31 +414,32 @@ pub fn adjoint_bound_space_dyn_generic_checked<R>(
 where
     R: CheckedGenericFusion,
 {
-    let homspace = space.space().homspace();
-    let adjoint_hom =
-        FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
-    let structure = Arc::clone(space.space().structure());
-    let keys = adjoint_hom
-        .fusion_tree_keys_generic_checked(space.provider())
-        .map_err(CheckedGenericPlanError::from)?;
-    for key in keys {
-        let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
-            key.domain_tree().clone(),
-            key.codomain_tree().clone(),
-        ));
-        if structure.find_block_index_by_key(&source_key).is_none() {
-            return Err(CheckedGenericPlanError::Operation(
-                OperationError::MissingBlockKey {
-                    key: Box::new(source_key),
-                },
-            ));
-        }
-    }
-    BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+    BoundDynamicFusionMapSpace::from_final_homspace_generic_checked_with(
         Arc::clone(space.provider_arc()),
-        adjoint_hom,
+        || {
+            let homspace = space.space().homspace();
+            let adjoint_hom =
+                FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
+            let structure = Arc::clone(space.space().structure());
+            let keys = adjoint_hom
+                .fusion_tree_keys_generic_checked(space.provider())
+                .map_err(CheckedGenericPlanError::from)?;
+            for key in keys {
+                let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
+                    key.domain_tree().clone(),
+                    key.codomain_tree().clone(),
+                ));
+                if structure.find_block_index_by_key(&source_key).is_none() {
+                    return Err(CheckedGenericPlanError::Operation(
+                        OperationError::MissingBlockKey {
+                            key: Box::new(source_key),
+                        },
+                    ));
+                }
+            }
+            Ok(adjoint_hom)
+        },
     )
-    .map_err(CheckedGenericPlanError::from)
 }
 
 #[cfg(test)]

@@ -247,6 +247,16 @@ where
         )
         .map_err(Into::into)
     }
+
+    fn build_root_with(
+        provider: Arc<R>,
+        build_homspace: impl FnOnce() -> Result<FusionTreeHomSpace, Self::FacadeError>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError> {
+        BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked_with(
+            provider,
+            build_homspace,
+        )
+    }
 }
 
 impl<R, D> TypedTensorConstructionDispatch<R, D> for MultiplicityFreeAdmissionMode
@@ -346,6 +356,16 @@ where
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError> {
         BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, homspace)
             .map_err(Into::into)
+    }
+
+    fn build_root_with(
+        provider: Arc<R>,
+        build_homspace: impl FnOnce() -> Result<FusionTreeHomSpace, Self::FacadeError>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError> {
+        BoundDynamicFusionMapSpace::from_final_homspace_generic_checked_with(
+            provider,
+            build_homspace,
+        )
     }
 }
 

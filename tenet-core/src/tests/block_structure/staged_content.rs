@@ -97,6 +97,10 @@ fn removed_interner_compatibility_snapshot_is_zero_state() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn uncached_generic_preview_keeps_its_coupled_region_geometry() {
+    if test_support::run_isolated_or_return(
+        "TENET_GENERIC_PREVIEW_COLD", "tests::block_structure::staged_content::uncached_generic_preview_keeps_its_coupled_region_geometry",
+    ) { return; }
+    reset_core_intern_tables();
     let rule = SUNFusionRule::new(3).unwrap();
     let adjoint = rule.encode_dynkin(&[1, 1]).unwrap();
     let trivial = rule.encode_dynkin(&[0, 0]).unwrap();

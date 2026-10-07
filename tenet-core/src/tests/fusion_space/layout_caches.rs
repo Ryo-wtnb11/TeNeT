@@ -708,3 +708,107 @@ fn repeated_fusion_channels_are_a_typed_error_not_a_duplicate_block() {
         "{error:?}"
     );
 }
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn generic_complete_owner_keeps_canonical_identity_regions_and_budget() {
+    if test_support::run_isolated_or_return(
+        "TENET_GENERIC_OWNER_CANONICAL_BUDGET",
+        "tests::fusion_space::layout_caches::generic_complete_owner_keeps_canonical_identity_regions_and_budget",
+    ) { return; }
+    reset_core_intern_tables();
+    let rule = SUNFusionRule::new(3).unwrap();
+    let adjoint = rule.encode_dynkin(&[1, 1]).unwrap();
+    let vacuum = rule.encode_dynkin(&[0, 0]).unwrap();
+    let hom = || {
+        let leg = || SectorLeg::new([(adjoint, 2), (vacuum, 3)], false);
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        )
+    };
+    let first_hom = hom();
+    let first_id = first_hom.id();
+    let other_hom = hom();
+    let other_id = other_hom.id();
+    assert_eq!(first_id, other_id);
+    assert!(!first_id.downgrade().matches(&other_id));
+    let prepare = |hom: FusionTreeHomSpace| {
+        hom.prepare_complete_coupled_subblock_structure_generic_checked_after(&rule, || Ok(()))
+            .unwrap()
+    };
+    let first = prepare(first_hom);
+    let raced = prepare(other_hom);
+    let preview_regions = first
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    assert!(!preview_regions.is_empty());
+    assert_eq!(degeneracy_cache_info().entries(), 0);
+    let (canonical_hom, winner) = first.commit_with_complete_homspace();
+    let canonical_hom = canonical_hom.unwrap();
+    let (raced_hom, second) = raced.commit_with_complete_homspace();
+    assert!(Arc::ptr_eq(&winner, &second));
+    assert!(canonical_hom
+        .id()
+        .downgrade()
+        .matches(&raced_hom.unwrap().id()));
+    assert!(Arc::ptr_eq(
+        &preview_regions,
+        &winner.coupled_sector_regions(2).unwrap().unwrap()
+    ));
+    let key = CompleteHomSpaceStructureCacheKey::generic(
+        CheckedGenericFusion::rule_identity(&rule),
+        &canonical_hom,
+    );
+    let charge = charged_complete_hom_space_structure_bytes(&key, &winner.content_key());
+    let info = degeneracy_cache_info();
+    assert_eq!(info.entries(), 1);
+    assert_eq!(info.charged_bytes(), charge);
+    assert!(
+        charge
+            >= std::mem::size_of_val(key.homspace.as_ref()) as u64
+                + winner.content_key().charged_retained_bytes() as u64
+    );
+    // Independently count the dynamic arrays reachable from the one retained
+    // HomSpace backing; the entry's id and semantic key share those arrays.
+    let leg_backing_floor = canonical_hom
+        .codomain()
+        .legs()
+        .iter()
+        .chain(canonical_hom.domain().legs())
+        .map(|leg| {
+            leg.sectors().len() * std::mem::size_of::<SectorId>()
+                + leg.degeneracies().len() * std::mem::size_of::<usize>()
+        })
+        .sum::<usize>()
+        + canonical_hom.rank() * std::mem::size_of::<SectorLeg>();
+    assert!(
+        charge
+            >= winner.content_key().charged_retained_bytes() as u64
+                + std::mem::size_of_val(key.homspace.as_ref()) as u64
+                + leg_backing_floor as u64
+    );
+    let content_id = winner.content_id();
+    drop((winner, second, preview_regions));
+    let (revived_hom, revived) = prepare(hom()).commit_with_complete_homspace();
+    assert_eq!(revived.content_id(), content_id);
+    assert!(canonical_hom
+        .id()
+        .downgrade()
+        .matches(&revived_hom.unwrap().id()));
+    let (_, again) = prepare(hom()).commit_with_complete_homspace();
+    assert!(Arc::ptr_eq(&revived, &again));
+    assert_eq!(degeneracy_cache_info().charged_bytes(), charge);
+
+    let budget = info.byte_budget();
+    set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, 0);
+    let (_, uncached) = prepare(hom()).commit_with_complete_homspace();
+    assert_eq!(*uncached, *revived);
+    assert_ne!(uncached.content_id(), content_id);
+    assert_eq!(degeneracy_cache_info().entries(), 0);
+    assert_eq!(degeneracy_cache_info().charged_bytes(), 0);
+    assert!(degeneracy_cache_info().rejections() > 0);
+    set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, budget);
+}

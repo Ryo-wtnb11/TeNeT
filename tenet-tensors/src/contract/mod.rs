@@ -78,8 +78,7 @@ pub(crate) use dynamic_space::{
     scratch_publication_observations, MetadataOutput, MetadataRequest,
 };
 pub(crate) use dynamic_space::{
-    dispatch_prepare, encoded_layout_primer, tree_transform_operation_axes, FusionOperandLayout,
-    LayoutKeyBuilder,
+    dispatch_prepare, tree_transform_operation_axes, FusionOperandLayout, LayoutKeyBuilder,
 };
 pub use dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
@@ -103,3 +102,6 @@ pub use structure::{
 pub use tenet_operations::TensorContractFusionProfile;
 #[cfg(test)]
 pub use tenet_operations::TensorContractFusionRoute;
+
+#[cfg(test)]
+pub(crate) use dynamic_space::encoded_layout_primer;

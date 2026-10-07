@@ -397,6 +397,7 @@ fn direct_homspace_derivation_matches_old_sequence_for_supported_rules() {
 pub(super) struct DualCountingRule<R> {
     inner: R,
     dual_calls: Arc<AtomicUsize>,
+    reset_on_dual: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl<R> DualCountingRule<R>
@@ -407,6 +408,7 @@ where
         Self {
             inner,
             dual_calls: Arc::new(AtomicUsize::new(0)),
+            reset_on_dual: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -454,6 +456,9 @@ where
     R: CheckedFusionAlgebra,
 {
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        if self.reset_on_dual.swap(false, Ordering::SeqCst) {
+            reset_core_intern_tables();
+        }
         self.dual_calls.fetch_add(1, Ordering::Relaxed);
         self.inner.try_dual_sector(sector)
     }
@@ -788,4 +793,49 @@ fn generic_select_matches_old_sequence() {
     let expected = legacy_select(&rule, &hom, &[3, 0], &[2, 1]);
     let actual = hom.select(&rule, &[3, 0], &[2, 1]).unwrap();
     assert_eq!(actual, expected);
+}
+
+impl<R: MultiplicityFreeFusionRule> MultiplicityFreeFusionRule for DualCountingRule<R> {}
+
+#[test]
+fn checked_mf_complete_epoch_precedes_provider_and_homspace_derivation() {
+    if test_support::run_isolated_or_return(
+        "TENET_MF_PRODUCER_RESET", "tests::fusion_space::homspace_derivation::checked_mf_complete_epoch_precedes_provider_and_homspace_derivation",
+    ) { return; }
+    let rule = DualCountingRule::new(U1FusionRule);
+    let hom = FusionTreeHomSpace::from_sectors([(u1(1), 2)], [(u1(1), 3)]);
+    for derive in [false, true] {
+        reset_core_intern_tables();
+        rule.reset_on_dual.store(true, Ordering::SeqCst);
+        let (hom, prepared) = if derive {
+            FusionTreeHomSpace::prepare_fusion_tree_layout_checked_with(&rule, || {
+                rule.try_dual_sector(u1(1))?;
+                Ok::<_, FusionAlgebraError>(hom.clone())
+            })
+            .unwrap()
+        } else {
+            (
+                hom.clone(),
+                hom.prepare_fusion_tree_layout_checked(&rule).unwrap(),
+            )
+        };
+        assert!(!rule.reset_on_dual.load(Ordering::SeqCst));
+        let (_, stale) = prepared
+            .build_complete_homspace_from_leg_degeneracies(hom.clone())
+            .unwrap();
+        assert_eq!(
+            structure_cache_info(StructureCacheKind::DegeneracyStructure).entries(),
+            0
+        );
+        let fresh = hom.prepare_fusion_tree_layout_checked(&rule).unwrap();
+        let (_, fresh) = fresh
+            .build_complete_homspace_from_leg_degeneracies(hom)
+            .unwrap();
+        assert_eq!(*stale, *fresh);
+        assert_ne!(stale.content_id(), fresh.content_id());
+        assert_eq!(
+            structure_cache_info(StructureCacheKind::DegeneracyStructure).entries(),
+            1
+        );
+    }
 }

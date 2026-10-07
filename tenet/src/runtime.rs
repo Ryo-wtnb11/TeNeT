@@ -1929,6 +1929,154 @@ mod tests {
         SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorLeg, SectorVec,
     };
 
+    #[test]
+    fn network_destination_dual_stays_inside_complete_publication_epoch() {
+        const FILTER: &str =
+            "runtime::tests::network_destination_dual_stays_inside_complete_publication_epoch";
+        if std::env::var_os("TENET_NETWORK_PRODUCER_RESET").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", FILTER])
+                .env("TENET_NETWORK_PRODUCER_RESET", "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+                "{stdout} {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(NetworkResetU1 {
+            reset_on_dual: std::sync::atomic::AtomicBool::new(false),
+        });
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(tenet_core::U1Irrep::new(1), 2)])
+            .unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
+        tenet_core::reset_core_intern_tables();
+        provider.reset_on_dual.store(true, Ordering::SeqCst);
+        let stale = source
+            .network_zeros_from_effective_legs(
+                std::slice::from_ref(&leg),
+                std::slice::from_ref(&leg),
+            )
+            .unwrap();
+        assert!(!provider.reset_on_dual.load(Ordering::SeqCst));
+        assert_eq!(
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .entries(),
+            0
+        );
+        let fresh = source
+            .network_zeros_from_effective_legs(
+                std::slice::from_ref(&leg),
+                std::slice::from_ref(&leg),
+            )
+            .unwrap();
+        assert_eq!(stale.dense_data().unwrap(), fresh.dense_data().unwrap());
+        assert_eq!(
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .entries(),
+            1
+        );
+    }
+
+    struct NetworkResetU1 {
+        reset_on_dual: std::sync::atomic::AtomicBool,
+    }
+    impl FusionRule for NetworkResetU1 {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+        fn fusion_style(&self) -> FusionStyleKind {
+            tenet_core::U1FusionRule.fusion_style()
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            tenet_core::U1FusionRule.braiding_style()
+        }
+        fn vacuum(&self) -> SectorId {
+            tenet_core::U1FusionRule.vacuum()
+        }
+        fn dual(&self, s: SectorId) -> SectorId {
+            tenet_core::U1FusionRule.dual(s)
+        }
+        fn fusion_channels(&self, a: SectorId, b: SectorId) -> SectorVec {
+            tenet_core::U1FusionRule.fusion_channels(a, b)
+        }
+    }
+    impl MultiplicityFreeFusionRule for NetworkResetU1 {}
+    impl CheckedFusionAlgebra for NetworkResetU1 {
+        fn try_dual_sector(&self, s: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            if self.reset_on_dual.swap(false, Ordering::SeqCst) {
+                tenet_core::reset_core_intern_tables();
+            }
+            tenet_core::U1FusionRule.try_dual_sector(s)
+        }
+        fn try_fusion_channels(
+            &self,
+            a: SectorId,
+            b: SectorId,
+        ) -> Result<SectorVec, FusionAlgebraError> {
+            tenet_core::U1FusionRule.try_fusion_channels(a, b)
+        }
+        fn try_nsymbol(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> Result<usize, FusionAlgebraError> {
+            tenet_core::U1FusionRule.try_nsymbol(a, b, c)
+        }
+    }
+    impl SectorCodec for NetworkResetU1 {
+        type Sector = tenet_core::U1Irrep;
+        fn encode_sector(&self, s: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
+            tenet_core::U1FusionRule.encode_sector(s)
+        }
+        fn decode_sector(&self, s: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+            tenet_core::U1FusionRule.decode_sector(s)
+        }
+    }
+    impl MultiplicityFreeFusionSymbols for NetworkResetU1 {
+        type Scalar = f64;
+        fn f_symbol_scalar(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> f64 {
+            tenet_core::U1FusionRule.f_symbol_scalar(a, b, c, d, e, f)
+        }
+        fn r_symbol_scalar(&self, a: SectorId, b: SectorId, c: SectorId) -> f64 {
+            tenet_core::U1FusionRule.r_symbol_scalar(a, b, c)
+        }
+    }
+    impl MultiplicityFreeRigidSymbols for NetworkResetU1 {
+        fn dim_scalar(&self, s: SectorId) -> f64 {
+            tenet_core::U1FusionRule.dim_scalar(s)
+        }
+        fn inv_dim_scalar(&self, s: SectorId) -> f64 {
+            tenet_core::U1FusionRule.inv_dim_scalar(s)
+        }
+        fn sqrt_dim_scalar(&self, s: SectorId) -> f64 {
+            tenet_core::U1FusionRule.sqrt_dim_scalar(s)
+        }
+        fn inv_sqrt_dim_scalar(&self, s: SectorId) -> f64 {
+            tenet_core::U1FusionRule.inv_sqrt_dim_scalar(s)
+        }
+        fn twist_scalar(&self, s: SectorId) -> f64 {
+            tenet_core::U1FusionRule.twist_scalar(s)
+        }
+        fn frobenius_schur_phase_scalar(&self, s: SectorId) -> f64 {
+            tenet_core::U1FusionRule.frobenius_schur_phase_scalar(s)
+        }
+    }
+
     #[derive(Clone)]
     struct CountingFibonacci {
         structural_calls: Arc<AtomicUsize>,

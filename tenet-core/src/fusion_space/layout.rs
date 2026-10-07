@@ -85,6 +85,7 @@ pub(super) enum PreparedFusionTreeLayoutState {
 #[derive(Debug)]
 pub struct PreparedFusionTreeLayout {
     pub(super) state: PreparedFusionTreeLayoutState,
+    pub(super) complete_epoch: usize,
 }
 
 impl PreparedFusionTreeLayout {
@@ -155,7 +156,7 @@ impl PreparedFusionTreeLayout {
         homspace: &FusionTreeHomSpace,
     ) -> Result<Arc<BlockStructure>, CoreError> {
         self.validate_homspace_signature(homspace)?;
-        let epoch = core_reset_epoch();
+        let epoch = self.complete_epoch;
         let key = CompleteHomSpaceStructureCacheKey {
             rule: self.cache_key().rule.clone(),
             mode: CompleteFusionMode::MultiplicityFree,
@@ -183,7 +184,7 @@ impl PreparedFusionTreeLayout {
         homspace: FusionTreeHomSpace,
     ) -> Result<(FusionTreeHomSpace, Arc<BlockStructure>), CoreError> {
         self.validate_homspace_signature(&homspace)?;
-        let epoch = core_reset_epoch();
+        let epoch = self.complete_epoch;
         let key = CompleteHomSpaceStructureCacheKey {
             rule: self.cache_key().rule.clone(),
             mode: CompleteFusionMode::MultiplicityFree,

@@ -105,6 +105,7 @@ where
             logical_keys,
             storage_src_structure,
             orientation,
+            basis_order,
             logical_rank,
             projection,
             threads,

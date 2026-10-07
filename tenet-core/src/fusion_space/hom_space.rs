@@ -689,7 +689,7 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
-        self.prepare_fusion_tree_layout_with(rule, || {
+        self.prepare_fusion_tree_layout_with(rule, core_reset_epoch(), || {
             Ok::<_, std::convert::Infallible>(self.fusion_tree_layout_data_uncached(rule))
         })
         .unwrap_or_else(|error| match error {})
@@ -711,12 +711,39 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
     {
+        self.prepare_fusion_tree_layout_checked_at(rule, core_reset_epoch())
+    }
+
+    /// Derives a HomSpace and prepares its checked MF layout in one publication epoch.
+    #[doc(hidden)]
+    pub fn prepare_fusion_tree_layout_checked_with<R, E>(
+        rule: &R,
+        build_homspace: impl FnOnce() -> Result<Self, E>,
+    ) -> Result<(Self, PreparedFusionTreeLayout), E>
+    where
+        R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
+        E: From<FusionAlgebraError>,
+    {
+        let epoch = core_reset_epoch();
+        let homspace = build_homspace()?;
+        let prepared = homspace.prepare_fusion_tree_layout_checked_at(rule, epoch)?;
+        Ok((homspace, prepared))
+    }
+
+    fn prepare_fusion_tree_layout_checked_at<R>(
+        &self,
+        rule: &R,
+        epoch: usize,
+    ) -> Result<PreparedFusionTreeLayout, FusionAlgebraError>
+    where
+        R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
+    {
         for leg in self.codomain().legs().iter().chain(self.domain().legs()) {
             for &sector in leg.sectors() {
                 rule.try_dual_sector(sector)?;
             }
         }
-        self.prepare_fusion_tree_layout_with(rule, || {
+        self.prepare_fusion_tree_layout_with(rule, epoch, || {
             self.try_fusion_tree_layout_data_uncached_checked(rule)
         })
     }
@@ -724,6 +751,7 @@ impl FusionTreeHomSpace {
     fn prepare_fusion_tree_layout_with<R, E, F>(
         &self,
         rule: &R,
+        complete_epoch: usize,
         build: F,
     ) -> Result<PreparedFusionTreeLayout, E>
     where
@@ -733,12 +761,14 @@ impl FusionTreeHomSpace {
         let key = FusionTreeHomSpaceCacheKey::new(rule, self);
         if let Some(layout) = sector_structure_cache().get(&key) {
             return Ok(PreparedFusionTreeLayout {
+                complete_epoch,
                 state: PreparedFusionTreeLayoutState::Cached { key, layout },
             });
         }
 
         let data = build()?;
         Ok(PreparedFusionTreeLayout {
+            complete_epoch,
             state: PreparedFusionTreeLayoutState::Cold { key, data },
         })
     }

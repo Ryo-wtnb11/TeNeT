@@ -64,6 +64,7 @@ struct FailAtCallRule {
     style: Cell<FusionStyleKind>,
     calls: Cell<usize>,
     fail_at: Option<usize>,
+    reset_on_query: Cell<bool>,
 }
 
 impl FailAtCallRule {
@@ -81,10 +82,14 @@ impl FailAtCallRule {
             style: Cell::new(FusionStyleKind::Generic),
             calls: Cell::new(0),
             fail_at: None,
+            reset_on_query: Cell::new(false),
         }
     }
 
     fn hit(&self) -> Result<(), FailAtCallError> {
+        if self.reset_on_query.replace(false) {
+            reset_core_intern_tables();
+        }
         let call = self.calls.get() + 1;
         self.calls.set(call);
         if self.fail_at == Some(call) {
@@ -1240,4 +1245,37 @@ fn memoized_adjoint_view_reads_the_current_admission() {
     assert_eq!(first.admission(), complete.admission());
     assert!(Arc::ptr_eq(second.structure(), first.structure()));
     assert!(Arc::ptr_eq(second.homspace_arc(), first.homspace_arc()));
+}
+
+#[test]
+fn checked_adjoint_provider_derivation_cannot_republish_after_reset() {
+    if crate::test_support::run_isolated_or_return(
+        "TENET_CHECKED_ADJOINT_PRODUCER_RESET", "contract::dynamic_space::bound_invariant_tests::checked_adjoint_provider_derivation_cannot_republish_after_reset",
+    ) { return; }
+    let provider = Arc::new(FailAtCallRule::new());
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new((0..2).map(|_| SectorLeg::new([(SectorId::new(0), 2)], true))),
+        FusionProductSpace::new((0..2).map(|_| SectorLeg::new([(SectorId::new(0), 3)], true))),
+    );
+    let source =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(Arc::clone(&provider), hom)
+            .unwrap();
+    reset_core_intern_tables();
+    provider.reset_on_query.set(true);
+    let stale = crate::adjoint_bound_space_dyn_generic_checked(&source).unwrap();
+    assert!(!provider.reset_on_query.get());
+    assert_eq!(
+        structure_cache_info(StructureCacheKind::DegeneracyStructure).entries(),
+        0
+    );
+    let fresh = crate::adjoint_bound_space_dyn_generic_checked(&source).unwrap();
+    assert_eq!(stale.space().structure(), fresh.space().structure());
+    assert_ne!(
+        stale.space().structure().content_id(),
+        fresh.space().structure().content_id()
+    );
+    assert_eq!(
+        structure_cache_info(StructureCacheKind::DegeneracyStructure).entries(),
+        1
+    );
 }

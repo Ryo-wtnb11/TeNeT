@@ -188,16 +188,33 @@ where
         provider: Arc<R>,
         homspace: FusionTreeHomSpace,
     ) -> Result<Self, CheckedGenericStructureError<R::Error>> {
-        let nout = homspace.codomain().len();
-        let nin = homspace.domain().len();
-        let structure = homspace
-            .prepare_complete_coupled_subblock_structure_generic_checked_after(
-                provider.as_ref(),
-                || Self::validate_checked_generic_style(provider.as_ref()),
-            )?;
+        Self::from_final_homspace_generic_checked_with(provider, || Ok(homspace))
+    }
+
+    /// Builds a checked root after deriving its HomSpace within the same reset epoch.
+    #[doc(hidden)]
+    pub fn from_final_homspace_generic_checked_with<E>(
+        provider: Arc<R>,
+        build_homspace: impl FnOnce() -> Result<FusionTreeHomSpace, E>,
+    ) -> Result<Self, E>
+    where
+        E: From<CheckedGenericStructureError<R::Error>>,
+    {
+        let structure =
+            FusionTreeHomSpace::prepare_complete_coupled_subblock_structure_generic_checked_with::<
+                R,
+                E,
+                _,
+            >(provider.as_ref(), || {
+                let homspace = build_homspace()?;
+                Self::validate_checked_generic_style(provider.as_ref())?;
+                Ok(homspace)
+            })?;
         let identity = provider.rule_identity();
         let (homspace, subblock_structure) = structure.commit_with_complete_homspace();
         let homspace = homspace.expect("complete checked builder retains its HomSpace");
+        let nout = homspace.codomain().len();
+        let nin = homspace.domain().len();
         Ok(Self {
             space: DynamicFusionMapSpace {
                 nout,
@@ -265,16 +282,34 @@ where
     where
         P: CheckedGenericFusion,
     {
+        self.prepare_final_homspace_generic_from_checked(provider, || Ok(homspace))
+    }
+
+    pub(crate) fn prepare_final_homspace_generic_from_checked<P, E>(
+        &self,
+        provider: &P,
+        build_homspace: impl FnOnce() -> Result<FusionTreeHomSpace, E>,
+    ) -> Result<PreparedCheckedGenericDynamicSpace, E>
+    where
+        P: CheckedGenericFusion,
+        E: From<CheckedGenericStructureError<P::Error>>,
+    {
         let actual = std::cell::OnceCell::new();
-        let nout = homspace.codomain().len();
-        let nin = homspace.domain().len();
-        let structure = homspace
-            .clone()
-            .prepare_complete_coupled_subblock_structure_generic_checked_after(provider, || {
+        let destination = std::cell::OnceCell::new();
+        let structure =
+            FusionTreeHomSpace::prepare_complete_coupled_subblock_structure_generic_checked_with::<
+                P,
+                E,
+                _,
+            >(provider, || {
+                let homspace = build_homspace()?;
                 if !matches!(self.layout_build, LayoutBuildCapability::CheckedGeneric) {
-                    return Err(CoreError::MalformedFusionTree {
-                        message: "checked Generic preparation requires a checked provider binding",
-                    }
+                    return Err(CheckedGenericStructureError::from(
+                        CoreError::MalformedFusionTree {
+                            message:
+                                "checked Generic preparation requires a checked provider binding",
+                        },
+                    )
                     .into());
                 }
                 let expected = self
@@ -288,15 +323,22 @@ where
                     &expected,
                     &provider_identity,
                     [provider.fusion_style()],
-                )?;
+                )
+                .map_err(CheckedGenericStructureError::from)?;
                 actual
                     .set(provider_identity)
                     .expect("checked admission runs exactly once");
-                Ok(())
+                destination
+                    .set(homspace.clone())
+                    .expect("destination is derived once");
+                Ok(homspace)
             })?;
+        let homspace = destination
+            .into_inner()
+            .expect("successful derivation records destination");
         Ok(PreparedCheckedGenericDynamicSpace {
-            nout,
-            nin,
+            nout: homspace.codomain().len(),
+            nin: homspace.domain().len(),
             homspace,
             structure,
             identity: actual
@@ -799,6 +841,29 @@ where
             prepared,
         )?;
         Self::from_derived_with_capability(provider, space, layout_build)
+    }
+
+    /// Derives a checked MF root inside its complete-layout publication epoch.
+    #[doc(hidden)]
+    pub fn from_final_homspace_multiplicity_free_checked_with<E>(
+        provider: Arc<R>,
+        build_homspace: impl FnOnce() -> Result<FusionTreeHomSpace, E>,
+    ) -> Result<Self, E>
+    where
+        R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
+        E: From<tenet_core::FusionAlgebraError> + From<OperationError>,
+    {
+        let (homspace, prepared) = FusionTreeHomSpace::prepare_fusion_tree_layout_checked_with(
+            provider.as_ref(),
+            build_homspace,
+        )?;
+        let space = DynamicFusionMapSpace::from_final_homspace_with_prepared(
+            provider.as_ref(),
+            homspace,
+            super::PreparedLayoutKeys::Checked(prepared),
+        )?;
+        Self::from_derived_with_capability(provider, space, LayoutBuildCapability::checked())
+            .map_err(E::from)
     }
 
     /// Builds a multiplicity-aware contraction result and normalizes its

@@ -1362,6 +1362,23 @@ fn static_adjoint_preserves_strided_subset_block_order_and_alpha_beta() {
         .unwrap()
         .try_bind_rule(&SU2FusionRule)
         .unwrap();
+        let dynamic = crate::contract::DynamicFusionMapSpace::from_typed(&space);
+        let oriented = crate::contract::FusionOperand::prepare_storage_ordered_adjoint(
+            &dynamic,
+            &SU2FusionRule,
+        )
+        .unwrap();
+        let observed = oriented
+            .adjoint_logical_keys()
+            .unwrap()
+            .iter()
+            .map(|key| key.codomain_tree().coupled().id())
+            .collect::<Vec<_>>();
+        assert_eq!(observed, coupled_order);
+        assert_eq!(
+            oriented.adjoint_storage_indices().unwrap(),
+            (0..coupled_order.len()).collect::<Vec<_>>()
+        );
         let data = (0..space.required_len().unwrap())
             .map(|i| Complex64::new((i % 13) as f64 - 5.0, (i % 7) as f64 * 0.25 - 0.5))
             .collect();

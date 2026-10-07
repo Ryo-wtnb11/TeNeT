@@ -59,6 +59,12 @@ where
         provider: Arc<R>,
         homspace: FusionTreeHomSpace,
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError>;
+
+    /// Derives the final HomSpace before the existing root admission, in one epoch.
+    fn build_root_with(
+        provider: Arc<R>,
+        build_homspace: impl FnOnce() -> Result<FusionTreeHomSpace, Self::FacadeError>,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError>;
 }
 
 /// Tensor-side construction gate for payload/provider coefficient pairs.

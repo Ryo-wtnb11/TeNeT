@@ -430,6 +430,17 @@ mod multiplicity_free_projection {
             Ok(projection)
         }
 
+        pub(crate) fn has_strictly_ordered_structure_indices(&self) -> bool {
+            match self.source {
+                // SectorStructure rejects duplicate keys; swapping whole trees
+                // preserves that uniqueness for the adjoint projection.
+                PairSource::Structure { indices, .. } => {
+                    indices.windows(2).all(|pair| pair[0] < pair[1])
+                }
+                PairSource::Slice(_) => false,
+            }
+        }
+
         pub(crate) fn len(&self) -> usize {
             match self.source {
                 PairSource::Slice(keys) => keys.len(),

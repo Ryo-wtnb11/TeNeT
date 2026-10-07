@@ -58,6 +58,140 @@ fn identity_braid_tree_pair_skips_symbols_and_repartition() {
 }
 
 #[test]
+fn indexed_ordered_identity_preserves_duplicate_sources_and_skips_symbols() {
+    let source =
+        FusionTreePairKey::try_pair_from_sector_ids([1], [1], 1, [false], [false], [], [], [], [])
+            .unwrap();
+    let structure = BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
+        source.clone().into(),
+        vec![2, 3],
+        0,
+    )
+    .unwrap()])
+    .unwrap();
+    let braid = PreparedTreePairOperation::prepare_braid(
+        &IdentitySymbolPanicRule,
+        1,
+        1,
+        &[0],
+        &[1],
+        &[19],
+        &[3],
+    )
+    .unwrap();
+    let map = multiplicity_free_braid_tree_pair_block_ordered_indexed(
+        &IdentitySymbolPanicRule,
+        &structure,
+        &[0, 0],
+        FusionTreePairOrientation::Adjoint,
+        &braid,
+    )
+    .unwrap();
+    assert_eq!(map.destinations(), &[source]);
+    assert_eq!(map.source_count(), 2);
+    assert_eq!(
+        map.storage(),
+        &OrderedBlockLinearStorage::SingletonColumns {
+            destination_rows: vec![0, 0],
+            coefficients: vec![1.0, 1.0]
+        }
+    );
+    let scalar =
+        FusionTreePairKey::try_pair_from_sector_ids([], [], 0, [], [], [], [], [], []).unwrap();
+    let scalar_structure = BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
+        scalar.clone().into(),
+        vec![],
+        0,
+    )
+    .unwrap()])
+    .unwrap();
+    let transpose = PreparedTreePairOperation::prepare_transpose(0, 0, &[], &[]).unwrap();
+    let map = multiplicity_free_transpose_tree_pair_block_ordered_indexed(
+        &IdentitySymbolPanicRule,
+        &scalar_structure,
+        &[0, 0],
+        FusionTreePairOrientation::Direct,
+        &transpose,
+    )
+    .unwrap();
+    assert_eq!(map.destinations(), &[scalar]);
+    assert_eq!(
+        map.storage(),
+        &OrderedBlockLinearStorage::SingletonColumns {
+            destination_rows: vec![0, 0],
+            coefficients: vec![1.0, 1.0]
+        }
+    );
+}
+
+#[test]
+fn indexed_ordered_identity_preserves_distinct_and_reordered_columns() {
+    let keys: Vec<_> = [0, 2]
+        .into_iter()
+        .map(|coupled| {
+            FusionTreePairKey::try_pair_from_sector_ids(
+                [1, 1],
+                [1, 1],
+                coupled,
+                [false, false],
+                [false, false],
+                [],
+                [],
+                [1],
+                [1],
+            )
+            .unwrap()
+        })
+        .collect();
+    let structure = BlockStructure::from_blocks(
+        keys.iter()
+            .enumerate()
+            .map(|(index, key)| {
+                BlockSpec::column_major_with_key(key.clone().into(), vec![1; 4], index).unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let prepared =
+        PreparedTreePairOperation::prepare_permute(&SU2FusionRule, 2, 2, &[0, 1], &[2, 3]).unwrap();
+    for (indices, destinations, rows) in [
+        (
+            vec![0, 1],
+            vec![keys[0].clone(), keys[1].clone()],
+            vec![0, 1],
+        ),
+        (
+            vec![1, 0],
+            vec![keys[1].clone(), keys[0].clone()],
+            vec![0, 1],
+        ),
+        (
+            vec![1, 0, 1],
+            vec![keys[1].clone(), keys[0].clone()],
+            vec![0, 1, 0],
+        ),
+    ] {
+        let map = multiplicity_free_braid_tree_pair_block_ordered_indexed(
+            &SU2FusionRule,
+            &structure,
+            &indices,
+            FusionTreePairOrientation::Adjoint,
+            &prepared,
+        )
+        .unwrap();
+        assert_eq!(map.destinations(), destinations);
+        assert_eq!(map.source_count(), indices.len());
+        assert_eq!(
+            map.storage(),
+            &OrderedBlockLinearStorage::SingletonColumns {
+                destination_rows: rows,
+                coefficients: vec![1.0; indices.len()],
+            }
+        );
+    }
+}
+
+#[test]
 fn braid_tree_block_matches_per_source_su2_rows() {
     use std::collections::BTreeMap;
 
