@@ -878,11 +878,15 @@ fn checked_generic_svd_truncation_reconstructs_and_preserves_provider() {
 #[test]
 fn checked_generic_compact_svd_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(122));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
     let before = source.dense_data().unwrap().to_vec();
+    // The construction published the layouts this operation walks; a
+    // provider whose answers change is not one identity, so the cached
+    // layouts go first (#2030). The tag is this test's alone.
+    forget_cached_structures();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = source.svd_compact(&[0, 1], &[2]).unwrap_err();
     assert!(matches!(

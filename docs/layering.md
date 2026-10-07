@@ -256,7 +256,7 @@ Structure caches (`structure_cache_infos` reports them):
 
 | Cache | Key | Crate | Scope | TensorKit cfaa073 |
 | --- | --- | --- | --- | --- |
-| Sector structure: fusion-tree keys and the shared `SectorStructure` | rule, sectors and duality per leg (no degeneracies); MF and Generic apart; checked Generic builds join in #2030 | `tenet-core` | process-global | `sectorstructure` |
+| Sector structure: fusion-tree keys and the shared `SectorStructure` | rule, sectors and duality per leg (no degeneracies); MF and Generic apart | `tenet-core` | process-global | `sectorstructure` |
 | Degeneracy structure: complete `BlockStructure` | rule and the full HomSpace | `tenet-core` | process-global | `degeneracystructure` |
 | Tree transformer | dst, src, operation | `tenet-tensors` (`RuntimeTreeTransformStore` structures tier, `TreeTransformCache`) | per `Runtime` today; process-global in #2014 PR 3 | `treetransposer` / `treebraider` |
 | Transformation coefficients, Simple and Generic only | fusion-tree group | `tenet-tensors` (`RuntimeTreeTransformStore` plans and groups tiers) | per `Runtime` today; process-global in #2014 PR 4 | `fstranspose` / `fsbraid` (`NoCache` for Unique) |

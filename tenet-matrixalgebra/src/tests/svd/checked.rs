@@ -134,10 +134,9 @@ fn checked_generic_svd_compact_empty_input_skips_dense_execution() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let data = Vec::<f64>::new();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<CountingDense>::default();
@@ -192,12 +191,9 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked = BoundDynamicFusionMapSpace::bind_generic(
-        source.space().clone(),
-        Arc::clone(&checked_provider),
-    )
-    .unwrap();
+    let checked = bind_to_spy(&source, &checked_provider);
     checked_provider.calls.set(0);
     // A non-bond space is misuse for diagonal storage, refused before any
     // provider query (MAK `@assert m == n && isdiag(A)`).
@@ -259,12 +255,9 @@ fn checked_compact_diagonal_full_svd_has_no_post_preflight_provider_query() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let successful = BoundDynamicFusionMapSpace::bind_generic(
-        source.space().clone(),
-        Arc::clone(&successful_provider),
-    )
-    .unwrap();
+    let successful = bind_to_spy(&source, &successful_provider);
     successful_provider.calls.set(0);
     coupled_sector_block_dimensions_generic_checked(
         successful.space().homspace().codomain(),
@@ -293,9 +286,9 @@ fn checked_generic_full_svd_failure_publishes_no_factors() {
         rule: FactorGenericRule,
         fail_at: 2,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), failing).unwrap();
+    let checked = bind_to_spy(&source, &failing);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let result = svd_full_dyn_checked_generic(&mut dense, &input);
@@ -373,6 +366,7 @@ fn checked_generic_full_svd_completes_unmatched_columns_and_disjoint_space() {
             rule: FactorGenericRule,
             fail_at: usize::MAX,
             calls: Cell::new(0),
+            identity: FactorGenericRule.rule_identity(),
         }),
     )
     .unwrap();
@@ -399,6 +393,7 @@ fn checked_generic_full_svd_completes_unmatched_columns_and_disjoint_space() {
             rule: FactorGenericRule,
             fail_at: usize::MAX,
             calls: Cell::new(0),
+            identity: FactorGenericRule.rule_identity(),
         }),
     )
     .unwrap();
@@ -418,10 +413,9 @@ fn assert_checked_full_svd_builder_failure(fail_at: usize) {
         rule: FactorGenericRule,
         fail_at,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let before = input.data().to_vec();
     let mut dense = ScriptedExecutor::<CountingDense>::default();
@@ -484,10 +478,9 @@ fn checked_generic_full_svd_enumerates_each_output_layout_once() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<CountingDense>::default();
     let output = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
@@ -498,6 +491,7 @@ fn checked_generic_full_svd_enumerates_each_output_layout_once() {
             rule: FactorGenericRule,
             fail_at: usize::MAX,
             calls: Cell::new(0),
+            identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         };
         run(&probe);
         probe.calls.get()
@@ -540,10 +534,9 @@ fn checked_native_full_svd_stages_before_unchanged_provider_admission() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let Some(mut dense) = NativeFullSvdSpy::new() else {
         return;
@@ -571,10 +564,9 @@ fn checked_generic_full_svd_local_shape_error_precedes_provider_query() {
         rule: FactorGenericRule,
         fail_at: 1,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let error = match BoundDynamicTensorRef::try_new(&checked, &data[..data.len() - 1]) {
         Ok(_) => panic!("short storage must be rejected"),
         Err(error) => error,
@@ -599,6 +591,7 @@ fn checked_native_full_svd_reconstructs_complex_interleaved_square_trees() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: FactorGenericRule.rule_identity(),
     });
     let space = BoundDynamicFusionMapSpace::bind_generic(
         interleaved_space.space().clone(),
@@ -683,11 +676,25 @@ struct FailSingleLegFold {
     rule: FactorGenericRule,
     fail_at: usize,
     single_leg_folds: Cell<usize>,
+    /// Its own identity: it fails where `rule` does not, so no structure
+    /// cache may answer for it from `rule`'s entries.
+    identity: RuleIdentity,
+}
+
+impl SpyTwin for FailSingleLegFold {
+    fn twin(&self) -> Self {
+        Self {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            single_leg_folds: Cell::new(0),
+            identity: self.identity.clone(),
+        }
+    }
 }
 
 impl FusionRule for FailSingleLegFold {
     fn rule_identity(&self) -> RuleIdentity {
-        self.rule.rule_identity()
+        self.identity.clone()
     }
     fn fusion_style(&self) -> FusionStyleKind {
         self.rule.fusion_style()
@@ -713,7 +720,7 @@ impl CheckedGenericFusion for FailSingleLegFold {
     type Error = LateGenericError;
 
     fn rule_identity(&self) -> RuleIdentity {
-        self.rule.rule_identity()
+        self.identity.clone()
     }
     fn fusion_style(&self) -> FusionStyleKind {
         self.rule.fusion_style()
@@ -820,12 +827,9 @@ fn checked_generic_svd_compact_preserves_a_diagonal_s_fold_failure() {
         rule: FactorGenericRule,
         fail_at: FIRST_S_FOLD,
         single_leg_folds: Cell::new(0),
+        identity: RuleIdentity::new_unique::<FailSingleLegFold>(),
     });
-    let failing_space = BoundDynamicFusionMapSpace::bind_generic(
-        source.space().clone(),
-        Arc::clone(&failing_provider),
-    )
-    .unwrap();
+    let failing_space = bind_to_spy(&source, &failing_provider);
     let input = BoundDynamicTensorRef::try_new(&failing_space, &data).unwrap();
     let before = input.data().to_vec();
     let mut dense = ScriptedExecutor::<CountingDense>::default();
@@ -858,10 +862,9 @@ fn checked_generic_svd_compact_enumerates_each_factor_layout_once() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<CountingDense>::default();
     let Svd { u, s, vh } = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
@@ -901,10 +904,9 @@ fn compact_diagonal_on_an_expert_bond_layout_is_normalized_not_refused() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let canonical =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let canonical = bind_to_spy(&source, &provider);
     let source_structure = source.space().structure();
     let mut offset = 1usize;
     let mut blocks = Vec::new();
@@ -923,7 +925,7 @@ fn compact_diagonal_on_an_expert_bond_layout_is_normalized_not_refused() {
         structure,
     )
     .unwrap()
-    .try_bind_rule(source.provider())
+    .try_bind_rule(provider.as_ref())
     .unwrap();
     let expert = BoundDynamicFusionMapSpace::bind_generic(
         DynamicFusionMapSpace::from_typed(&typed),

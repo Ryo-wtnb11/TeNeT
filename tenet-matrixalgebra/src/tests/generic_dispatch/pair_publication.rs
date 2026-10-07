@@ -232,10 +232,9 @@ fn staged_generic_pair_callers_publish_canonical_owned_payloads() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let checked_input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     crate::factorize::reset_generic_pair_publication_probe();
@@ -367,10 +366,9 @@ fn checked_generic_compact_pair_builder_failure_preserves_provider_context() {
             rule: FactorGenericRule,
             fail_at,
             calls: Cell::new(0),
+            identity: RuleIdentity::new_unique::<LateGenericSpy>(),
         });
-        let checked =
-            BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-                .unwrap();
+        let checked = bind_to_spy(&source, &provider);
         let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
         let mut dense = ScriptedExecutor::<CountingDense>::default();
         let result = qr_compact_dyn_checked_generic(&mut dense, &input);
@@ -387,10 +385,9 @@ fn checked_generic_compact_pair_builder_failure_preserves_provider_context() {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
+    let checked = bind_to_spy(&source, &provider);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let Qr { q, r } =
         qr_compact_dyn_checked_generic(&mut ScriptedExecutor::<CountingDense>::default(), &input)

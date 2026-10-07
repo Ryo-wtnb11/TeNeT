@@ -987,6 +987,8 @@ fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
             expected.dense_data().unwrap(),
             2,
         );
-        assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 8);
+        // Includes one identity query for the sector-structure cache key
+        // (#2030).
+        assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 9);
     }
 }

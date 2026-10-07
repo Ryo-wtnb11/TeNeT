@@ -555,6 +555,10 @@ pub(super) struct LateGenericSpy {
     pub(super) rule: FactorGenericRule,
     pub(super) fail_at: usize,
     pub(super) calls: Cell<usize>,
+    /// Its own identity: a spy that counts and fails its calls does not
+    /// answer as `rule` does, so structure caches must not share entries
+    /// between spies (or with `rule`).
+    pub(super) identity: RuleIdentity,
 }
 
 /// Forwards the factorization entries and counts them; see [`CountingDense`]
@@ -648,7 +652,7 @@ impl Observer for FullQrInputSpy {
 
 impl FusionRule for LateGenericSpy {
     fn rule_identity(&self) -> RuleIdentity {
-        self.rule.rule_identity()
+        self.identity.clone()
     }
     fn fusion_style(&self) -> FusionStyleKind {
         self.rule.fusion_style()
@@ -686,7 +690,7 @@ impl CheckedGenericFusion for LateGenericSpy {
     type Error = LateGenericError;
 
     fn rule_identity(&self) -> RuleIdentity {
-        self.rule.rule_identity()
+        self.identity.clone()
     }
 
     fn fusion_style(&self) -> FusionStyleKind {
@@ -776,6 +780,7 @@ pub(super) fn late_spy_calls(run: &dyn Fn(&LateGenericSpy)) -> usize {
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: RuleIdentity::new_unique::<LateGenericSpy>(),
     };
     run(&probe);
     probe.calls.get()
@@ -811,4 +816,47 @@ pub(super) fn matrix_function_spy(
         );
     }
     spy
+}
+
+/// A spy whose never-failing twin shares its identity.
+pub(super) trait SpyTwin: CheckedGenericFusion + FusionRule + Sized {
+    fn twin(&self) -> Self;
+}
+
+impl SpyTwin for LateGenericSpy {
+    fn twin(&self) -> Self {
+        Self {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            calls: Cell::new(0),
+            identity: self.identity.clone(),
+        }
+    }
+}
+
+/// `source`'s layout bound to `spy`. Why not `bind_generic(source, spy)`:
+/// a spy that fails, or whose call counts a test compares against a cold
+/// walk, has its own identity (to a structure cache it is not
+/// `FactorGenericRule`, #2030), so the space is admitted for the spy by a
+/// twin that neither fails nor counts. That admission walks the source layout
+/// once, outside the spy's own counts.
+pub(super) fn bind_to_spy<P>(
+    source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
+    spy: &Arc<P>,
+) -> BoundDynamicFusionMapSpace<P>
+where
+    P: SpyTwin + 'static,
+    P::Error: std::fmt::Debug,
+{
+    let admitted = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::new(spy.twin()),
+        source.space().homspace().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        admitted.space().structure().as_ref(),
+        source.space().structure().as_ref(),
+        "the spy admits the source layout"
+    );
+    BoundDynamicFusionMapSpace::bind_generic(admitted.space().clone(), Arc::clone(spy)).unwrap()
 }

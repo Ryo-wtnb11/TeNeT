@@ -431,6 +431,9 @@ fn zero_leg_side_matrix<D: FactorScalar>(
 struct RecordingGeneric {
     rule: TestGenericRule,
     log: RefCell<Vec<String>>,
+    /// Its own identity, so that the sector-structure cache never answers a
+    /// recorder's walk from another recorder's: each test counts queries.
+    identity: tenet_core::RuleIdentity,
 }
 
 impl RecordingGeneric {
@@ -438,6 +441,7 @@ impl RecordingGeneric {
         Self {
             rule: TestGenericRule,
             log: RefCell::new(Vec::new()),
+            identity: tenet_core::RuleIdentity::new_unique::<Self>(),
         }
     }
 
@@ -455,7 +459,7 @@ impl CheckedGenericFusion for RecordingGeneric {
     type Error = std::convert::Infallible;
 
     fn rule_identity(&self) -> tenet_core::RuleIdentity {
-        self.rule.rule_identity()
+        self.identity.clone()
     }
 
     fn fusion_style(&self) -> tenet_core::FusionStyleKind {

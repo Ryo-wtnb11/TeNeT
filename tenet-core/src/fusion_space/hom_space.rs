@@ -869,8 +869,9 @@ impl FusionTreeHomSpace {
     }
 
     /// Checked Generic-fusion structural staging from this HomSpace's leg
-    /// degeneracies. No layout or complete-HomSpace cache is consulted or
-    /// populated until the fallible provider walk has succeeded.
+    /// degeneracies. A failed provider walk is never cached; a successful one
+    /// may be answered by the sector-structure cache, since the layout is a
+    /// pure function of the rule identity and the sector signature.
     pub fn coupled_subblock_structure_from_leg_degeneracies_generic_checked<R>(
         &self,
         rule: &R,
@@ -895,9 +896,9 @@ impl FusionTreeHomSpace {
     where
         R: CheckedGenericFusion,
     {
-        // Why not through the sector-structure cache: the checked transaction
-        // consults no structure cache before its provider walk succeeds.
-        let layout = self.fusion_tree_layout_data_generic_checked(rule)?;
+        let layout = self.generic_sector_layout(rule.rule_identity(), || {
+            self.fusion_tree_layout_data_generic_checked(rule)
+        })?;
         let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
         PreparedBlockStructure::from_shared_parts(sector, degeneracy)
             .map(PreparedBlockStructure::with_storage_tiling)

@@ -736,6 +736,9 @@ fn assert_injected_recovery(
     ordinal: usize,
 ) {
     let mut workspace = NetworkExecutionWorkspace::default();
+    // The isolated subprocess owns this global reset. Discard layouts built by
+    // the fixture so `ordinal` names a query of the execution under test.
+    tenet::expert::reset_core_intern_tables();
     provider.arm_symbol(ordinal);
     assert!(matches!(
         planned.execute(tensors, &mut workspace),
@@ -780,6 +783,9 @@ fn injected_plan_case(
 fn cold_query_count(operands: usize, permute_output: bool) -> usize {
     let (provider, tensors, planned) = injected_plan_case(operands, permute_output);
     let refs = tensors.iter().take(operands).collect::<Vec<_>>();
+    // Each spy has the same semantic identity, so measure after discarding a
+    // layout an earlier fixture may legitimately have published.
+    tenet::expert::reset_core_intern_tables();
     provider.reset_symbols();
     planned.execute(&refs, &mut Default::default()).unwrap();
     provider.symbol_calls.load(Ordering::SeqCst)
@@ -787,6 +793,24 @@ fn cold_query_count(operands: usize, permute_output: bool) -> usize {
 
 #[test]
 fn checked_generic_failures_stay_typed_and_workspace_recovers_at_every_step() {
+    const ISOLATED: &str = "TENET_CHECKED_GENERIC_NETWORK_FAILURES_ISOLATED";
+    if std::env::var_os(ISOLATED).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "checked_generic_failures_stay_typed_and_workspace_recovers_at_every_step",
+            ])
+            .env(ISOLATED, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated checked-Generic network failure test failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(InjectedGeneric::new());
 

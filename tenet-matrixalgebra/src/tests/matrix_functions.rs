@@ -413,7 +413,10 @@ fn solve_left_direct_into_rejects_foreign_authority_and_wrong_output_before_exec
         foreign,
     )
     .unwrap_err();
-    assert!(matches!(error, OperationError::StructureMismatch { .. }));
+    assert!(
+        matches!(error, OperationError::StructureMismatch { .. }),
+        "{error:?}"
+    );
 
     let wrong = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
         provider,
@@ -433,7 +436,10 @@ fn solve_left_direct_into_rejects_foreign_authority_and_wrong_output_before_exec
         wrong,
     )
     .unwrap_err();
-    assert!(matches!(error, OperationError::StructureMismatch { .. }));
+    assert!(
+        matches!(error, OperationError::StructureMismatch { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -449,6 +455,7 @@ fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution(
         rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
+        identity: FactorGenericRule.rule_identity(),
     });
     let source =
         BoundDynamicFusionMapSpace::bind_generic(base.space().clone(), Arc::clone(&provider))
@@ -459,11 +466,13 @@ fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution(
         source.space().homspace().codomain().clone(),
     );
 
+    // Same identity, another allocation: the foreign authority.
     let foreign = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         Arc::new(LateGenericSpy {
             rule: FactorGenericRule,
             fail_at: usize::MAX,
             calls: Cell::new(0),
+            identity: provider.identity.clone(),
         }),
         expected.clone(),
     )
@@ -475,7 +484,10 @@ fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution(
         0.0,
     )
     .unwrap_err();
-    assert!(matches!(error, OperationError::StructureMismatch { .. }));
+    assert!(
+        matches!(error, OperationError::StructureMismatch { .. }),
+        "{error:?}"
+    );
 
     let wrong = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         provider,
@@ -495,7 +507,10 @@ fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution(
         0.0,
     )
     .unwrap_err();
-    assert!(matches!(error, OperationError::StructureMismatch { .. }));
+    assert!(
+        matches!(error, OperationError::StructureMismatch { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -2687,11 +2702,14 @@ fn checked_factor_isomorphism_queries_codomain_then_domain_without_shortcut() {
     // What: the checked inverse/solve admission compares the coupled
     // dimensions of both sides, codomain first, even when the two sides are
     // equal, and reports a provider failure as a plan error.
+    // The sources are admitted for `FactorGenericRule`, and this admission
+    // reads no structure cache, so the spies may answer under its identity.
     let spy = |fail_at| {
         Arc::new(LateGenericSpy {
             rule: FactorGenericRule,
             fail_at,
             calls: Cell::new(0),
+            identity: FactorGenericRule.rule_identity(),
         })
     };
     let (square, _, _) = generic_values_endomorphism_input();
