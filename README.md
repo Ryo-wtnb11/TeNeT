@@ -26,7 +26,7 @@ See [provenance and references](tenet/references.md) for detailed source corresp
 
 ## Citation
 
-**If you use TeNeT in research, please cite TensorKit.** This requests scholarly credit for the work on which
+**If you use TeNeT in research, please cite TensorKit and QSpace.** This requests scholarly credit for the work on which
 TeNeT builds; it does not add a condition to the software license.
 
 - **TensorKit:** Lukas Devos and Jutho Haegeman, *TensorKit.jl: A Julia package
