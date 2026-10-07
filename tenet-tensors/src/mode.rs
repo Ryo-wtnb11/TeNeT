@@ -25,9 +25,10 @@
 //! widen the facade dispatch that forwards to them (`TypedAdjointSpace`,
 //! `TypedSpaceModeDispatch`) to complex-scalar rules.
 
+use core::ops::{Add, Mul};
 use std::sync::Arc;
 
-use num_traits::One;
+use num_traits::{One, Zero};
 use tenet_core::{
     BlockStructure, BraidingStyleKind, CheckedFusionAlgebra, CheckedGenericAdmissionMode,
     CheckedGenericFusion, CheckedGenericPivotal, CheckedGenericRigidSymbols, FusionTreeKey,
@@ -190,7 +191,9 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
         rhs: OrientedFusionTreeHomSpace<'_>,
         rhs_contracting_axes: &[usize],
         row_trees: impl IntoIterator<Item = &'t FusionTreeKey>,
-    ) -> Result<Option<Self::Scalar>, Self::Error>;
+    ) -> Result<Option<Self::Scalar>, Self::Error>
+    where
+        Self::Scalar: DenseBlockScalar;
 
     /// The tree-pair transform structure `dst <- operation(src)`.
     fn tree_structure(
@@ -205,7 +208,11 @@ pub(crate) trait PlanningAlgebra<R>: sealed::Sealed {
 impl<R> PlanningAlgebra<R> for MultiplicityFreeAdmissionMode
 where
     R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey,
-    R::Scalar: DenseBlockScalar + Send + Sync + 'static,
+    // Why only the tree-structure cache's bounds here: the eager transform
+    // entries share this impl without `DenseBlockScalar`, which only
+    // `core_alpha` needs.
+    R::Scalar:
+        Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync + 'static,
 {
     type Scalar = R::Scalar;
     type Error = OperationError;
@@ -219,7 +226,10 @@ where
         rhs: OrientedFusionTreeHomSpace<'_>,
         rhs_contracting_axes: &[usize],
         row_trees: impl IntoIterator<Item = &'t FusionTreeKey>,
-    ) -> Result<Option<R::Scalar>, OperationError> {
+    ) -> Result<Option<R::Scalar>, OperationError>
+    where
+        R::Scalar: DenseBlockScalar,
+    {
         let mut row_trees = row_trees.into_iter();
         let Some(first) = row_trees.next() else {
             return Err(OperationError::UnsupportedTensorContractScope {
