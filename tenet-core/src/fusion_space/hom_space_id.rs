@@ -57,11 +57,3 @@ impl std::hash::Hash for HomSpaceId {
         self.prehash.hash(state);
     }
 }
-
-#[cfg(test)]
-pub(crate) fn reset_hom_space_intern_calls() {}
-
-#[cfg(test)]
-pub(crate) fn hom_space_intern_calls() -> usize {
-    0
-}

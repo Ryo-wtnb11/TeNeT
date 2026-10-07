@@ -1,8 +1,8 @@
 //! `StructureSignature` is content identity (#1495, leaf L0 of #1287).
 //!
 //! Every test takes one process-wide lock: the eviction, reset and
-//! pointer-sharing cases observe the global intern tables. Those cases read
-//! the intern content id from the `Debug` rendering: two signatures of the
+//! pointer-sharing cases observe the global structure caches. Those cases read
+//! the content id from the `Debug` rendering: two signatures of the
 //! same rule, placement and live runtime render differently only when their
 //! content ids differ.
 
@@ -11,8 +11,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use tenet::expert::{
-    block_structure_intern_cache_info, reset_core_intern_tables, set_structure_cache_byte_budget,
-    structure_cache_info, StructureCacheKind,
+    reset_core_intern_tables, set_structure_cache_byte_budget, structure_cache_info,
+    StructureCacheKind,
 };
 use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep,
@@ -21,7 +21,6 @@ use tenet::sector::{
 use tenet::sector::{Fz2SectorLayout, PackedProductCodec, U1SectorLayout};
 use tenet::typed::Runtime;
 use tenet::typed::{GradedSpace, StructureSignature, TensorMap};
-use tenet_core::BlockStructure;
 
 type Fz2U1Rule = ProductFusionRule<
     FermionParityFusionRule,
@@ -217,21 +216,19 @@ fn equal_across_reset_core_intern_tables() {
 }
 
 #[test]
-fn equal_across_interner_eviction() {
+fn equal_across_complete_owner_eviction() {
     let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let before = u1_signature(&runtime, &u1_leg(-3..=3, 5));
-    let evictions = block_structure_intern_cache_info().pressure_evictions();
-    // Push the space out of the degeneracy-structure cache (a zero budget
-    // evicts everything), then its content out of the block-structure
-    // interner, with more distinct entries than it holds.
-    let budget = structure_cache_info(StructureCacheKind::DegeneracyStructure).byte_budget();
-    set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, 0);
-    set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, budget);
-    for extent in 1..=block_structure_intern_cache_info().entry_capacity() + 16 {
-        BlockStructure::trivial(&[extent]).unwrap();
-    }
-    assert!(block_structure_intern_cache_info().pressure_evictions() > evictions);
+    let cache = StructureCacheKind::DegeneracyStructure;
+    let before_info = structure_cache_info(cache);
+    let budget = before_info.byte_budget();
+    // Evict the actual complete owner while the signature keeps its content
+    // alive. Rebuilding must preserve semantic equality, not the process id.
+    set_structure_cache_byte_budget(cache, 0);
+    assert_eq!(structure_cache_info(cache).entries(), 0);
+    assert!(structure_cache_info(cache).evictions() > before_info.evictions());
+    set_structure_cache_byte_budget(cache, budget);
     let after = u1_signature(&runtime, &u1_leg(-3..=3, 5));
     assert_ne!(
         format!("{before:?}"),
@@ -245,23 +242,29 @@ fn equal_across_interner_eviction() {
 fn equal_for_oversized_structures_above_the_complete_cache_budget() {
     let _guard = counting_alloc::serial();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    // One block per charge: a complete structure above the complete-HomSpace
-    // cache's 64 MiB budget, so that cache does not retain it (#1993). Its
-    // content is still interned: since #1998 the interner keys a content by
-    // a hash, so no content is too large for it, and every derivation while
-    // one is live shares that content.
-    let leg = u1_leg(-35_000..=35_000, 1);
+    // An explicit small budget rejects this otherwise ordinary complete layout.
+    // Rejected layouts receive distinct process ids but remain semantically
+    // equal while each signature owns its independently constructed content.
+    let leg = u1_leg(-3..=3, 1);
+    let cache = StructureCacheKind::DegeneracyStructure;
+    let budget = structure_cache_info(cache).byte_budget();
+    set_structure_cache_byte_budget(cache, 1);
     let signature = || {
         TensorMap::<_, f64>::zeros(&runtime, [&leg], [&leg])
             .unwrap()
             .structure_signature()
     };
-    let bypasses = block_structure_intern_cache_info().oversized_admission_bypasses();
+    let rejected = structure_cache_info(StructureCacheKind::DegeneracyStructure).rejections();
     let before = signature();
     let after = signature();
-    assert_eq!(
-        block_structure_intern_cache_info().oversized_admission_bypasses(),
-        bypasses
+    set_structure_cache_byte_budget(cache, budget);
+    assert!(
+        structure_cache_info(StructureCacheKind::DegeneracyStructure).rejections() >= rejected + 2
+    );
+    assert_ne!(
+        format!("{before:?}"),
+        format!("{after:?}"),
+        "premise: independently rejected"
     );
     assert_same(&before, &after, "oversized");
 }

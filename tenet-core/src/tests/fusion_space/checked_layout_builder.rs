@@ -708,13 +708,9 @@ fn assert_failed_checked_build_is_transactional<R>(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     reset_core_intern_tables();
     reset_fusion_tree_layout_probe_side_effect_calls();
-    reset_hom_space_intern_calls();
-    reset_block_structure_intern_calls();
     let error = hom.prepare_fusion_tree_layout_checked(rule).unwrap_err();
     assert_eq!(error, expected);
     assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
-    assert_eq!(hom_space_intern_calls(), 0);
-    assert_eq!(block_structure_intern_calls(), 0);
 }
 
 #[test]

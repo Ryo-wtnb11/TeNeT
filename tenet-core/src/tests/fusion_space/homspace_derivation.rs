@@ -151,18 +151,14 @@ fn uncached_coupled_layout_probe_does_not_publish_identity_or_cache_state() {
         .coupled_subblock_structure_from_leg_degeneracies(&rule)
         .unwrap();
 
-    crate::reset_block_structure_intern_calls();
     crate::reset_fusion_tree_layout_probe_side_effect_calls();
-    crate::reset_hom_space_intern_calls();
     let (required_len, source_matches) = homspace
         .coupled_subblock_layout_probe_uncached(&rule, source.as_ref())
         .unwrap();
 
     assert_eq!(required_len, source.required_len().unwrap());
     assert!(source_matches);
-    assert_eq!(crate::block_structure_intern_calls(), 0);
     assert_eq!(crate::fusion_tree_layout_probe_side_effect_calls(), (0, 0));
-    assert_eq!(crate::hom_space_intern_calls(), 0);
     let cached_again = homspace
         .coupled_subblock_structure_from_leg_degeneracies(&rule)
         .unwrap();

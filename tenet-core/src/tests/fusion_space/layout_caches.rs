@@ -33,7 +33,6 @@ fn complete_homspace_layout_cache_reuses_semantic_content_and_excludes_regions()
             .coupled_subblock_structure_from_leg_degeneracies(rule)
             .unwrap();
         let info = degeneracy_cache_info();
-        let interned = block_structure_intern_calls();
         // Live wrapper: the hit returns the canonical Arc itself, without
         // re-interning content.
         let second = second_hom
@@ -44,7 +43,6 @@ fn complete_homspace_layout_cache_reuses_semantic_content_and_excludes_regions()
         assert_eq!(after.hits(), info.hits() + 1);
         assert_eq!(after.misses(), info.misses());
         assert_eq!(after.admissions(), info.admissions());
-        assert_eq!(block_structure_intern_calls(), interned);
 
         // Dead wrapper: content stays cached (a hit, not a miss), only the
         // wrapper is rebuilt; region state died with the old wrapper.
@@ -62,7 +60,6 @@ fn complete_homspace_layout_cache_reuses_semantic_content_and_excludes_regions()
         assert_eq!(after.hits(), info.hits() + 2);
         assert_eq!(after.misses(), info.misses());
         assert_eq!(after.admissions(), info.admissions());
-        assert_eq!(block_structure_intern_calls(), interned);
         // The entry's Weak was refreshed: the next hit is the rebuilt Arc.
         let fourth = first_hom
             .coupled_subblock_structure_from_leg_degeneracies(rule)

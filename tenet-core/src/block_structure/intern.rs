@@ -70,14 +70,6 @@ where
 /// reset or reused, even when the complete-layout cache is cleared.
 pub(crate) static BLOCK_STRUCTURE_CONTENT_ID: AtomicUsize = AtomicUsize::new(1);
 
-#[cfg(test)]
-pub(crate) fn reset_block_structure_intern_calls() {}
-
-#[cfg(test)]
-pub(crate) fn block_structure_intern_calls() -> usize {
-    0
-}
-
 pub(super) fn new_block_structure_content(
     sector: Arc<SectorStructure>,
     degeneracy: DegeneracyStructure,

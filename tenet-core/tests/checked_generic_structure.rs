@@ -1,10 +1,9 @@
 use std::{cell::Cell, error::Error, fmt};
 
 use tenet_core::{
-    block_structure_intern_cache_info, structure_cache_info, BraidingStyleKind,
-    CheckedGenericFusion, CheckedGenericStructureError, CoreError, CoupledSectorFold,
-    FusionProductSpace, FusionStyleKind, FusionTreeHomSpace, RuleIdentity, SectorId, SectorLeg,
-    SectorVec, StructureCacheKind,
+    structure_cache_info, BraidingStyleKind, CheckedGenericFusion, CheckedGenericStructureError,
+    CoreError, CoupledSectorFold, FusionProductSpace, FusionStyleKind, FusionTreeHomSpace,
+    RuleIdentity, SectorId, SectorLeg, SectorVec, StructureCacheKind,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -295,7 +294,6 @@ fn checked_generic_structure_preserves_order_and_never_publishes_on_provider_fai
         let before = (
             structure_cache_info(StructureCacheKind::SectorStructure),
             structure_cache_info(StructureCacheKind::DegeneracyStructure),
-            block_structure_intern_cache_info(),
         );
         let error = hom()
             .coupled_subblock_structure_from_leg_degeneracies_generic_checked(&Toy::new(fail))
@@ -314,7 +312,6 @@ fn checked_generic_structure_preserves_order_and_never_publishes_on_provider_fai
             (
                 structure_cache_info(StructureCacheKind::SectorStructure),
                 structure_cache_info(StructureCacheKind::DegeneracyStructure),
-                block_structure_intern_cache_info()
             )
         );
     }

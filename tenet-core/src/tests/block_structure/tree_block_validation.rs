@@ -624,7 +624,6 @@ fn checked_layout_and_space_admission_reject_finite_nonclosure_transactionally()
             left: i32::MAX,
             right: 1,
         }));
-    reset_block_structure_intern_calls();
     assert_eq!(
         BlockStructure::coupled_sector_matrix_with_keys_checked(
             &U1FusionRule,
@@ -634,7 +633,6 @@ fn checked_layout_and_space_admission_reject_finite_nonclosure_transactionally()
         ),
         Err(expected.clone())
     );
-    assert_eq!(block_structure_intern_calls(), 0);
 
     let probe = CheckedTreeProbe::default();
     let failing_pair = FusionTreePairKey::pair(
@@ -697,7 +695,6 @@ fn checked_coupled_layout_finishes_structural_preflight_before_algebra() {
 
     let wrong_split = CheckedTreeProbe::default();
     let rank_one = FusionTreeKey::new([SectorId::new(0)], SectorId::new(0), [false], [], []);
-    reset_block_structure_intern_calls();
     assert_eq!(
         BlockStructure::coupled_sector_matrix_with_keys_checked(
             &wrong_split,
@@ -719,10 +716,8 @@ fn checked_coupled_layout_finishes_structural_preflight_before_algebra() {
     );
     assert_eq!(wrong_split.channel_calls.load(Ordering::Relaxed), 0);
     assert_eq!(wrong_split.nsymbol_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(block_structure_intern_calls(), 0);
 
     let missing_grid = CheckedTreeProbe::default();
-    reset_block_structure_intern_calls();
     assert_eq!(
         BlockStructure::coupled_sector_matrix_with_keys_checked(
             &missing_grid,
@@ -748,10 +743,8 @@ fn checked_coupled_layout_finishes_structural_preflight_before_algebra() {
     );
     assert_eq!(missing_grid.channel_calls.load(Ordering::Relaxed), 0);
     assert_eq!(missing_grid.nsymbol_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(block_structure_intern_calls(), 0);
 
     let conflicting_extent = CheckedTreeProbe::default();
-    reset_block_structure_intern_calls();
     assert_eq!(
         BlockStructure::coupled_sector_matrix_with_keys_checked(
             &conflicting_extent,
@@ -777,10 +770,8 @@ fn checked_coupled_layout_finishes_structural_preflight_before_algebra() {
     );
     assert_eq!(conflicting_extent.channel_calls.load(Ordering::Relaxed), 0);
     assert_eq!(conflicting_extent.nsymbol_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(block_structure_intern_calls(), 0);
 
     let overflowing_extent = CheckedTreeProbe::default();
-    reset_block_structure_intern_calls();
     assert_eq!(
         BlockStructure::coupled_sector_matrix_with_keys_checked(
             &overflowing_extent,
@@ -797,7 +788,6 @@ fn checked_coupled_layout_finishes_structural_preflight_before_algebra() {
     );
     assert_eq!(overflowing_extent.channel_calls.load(Ordering::Relaxed), 0);
     assert_eq!(overflowing_extent.nsymbol_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(block_structure_intern_calls(), 0);
 }
 
 #[test]
