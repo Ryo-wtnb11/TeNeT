@@ -3,12 +3,12 @@ use crate::tests::GenericMultiplicityRule;
 use crate::BoundDynamicTensorRef;
 use std::cell::Cell;
 use tenet_core::{
-    block_structure_intern_cache_info, reset_core_intern_tables, structure_cache_info, BlockSpec,
-    BraidingStyleKind, CoupledSectorFold, FermionParityFusionRule, FusionAlgebraError,
-    FusionProductSpace, FusionTreePairKey, Fz2SectorLayout, InfallibleGeneric, PackedProductCodec,
-    ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId,
-    SectorLeg, SectorVec, StructureCacheKind, Su2SectorLayout, TensorMapSpace, U1FusionRule,
-    U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
+    reset_core_intern_tables, structure_cache_info, BlockSpec, BraidingStyleKind,
+    CoupledSectorFold, FermionParityFusionRule, FusionAlgebraError, FusionProductSpace,
+    FusionTreePairKey, Fz2SectorLayout, InfallibleGeneric, PackedProductCodec, ProductFusionRule,
+    ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
+    SectorVec, StructureCacheKind, Su2SectorLayout, TensorMapSpace, U1FusionRule, U1Irrep,
+    U1SectorLayout, Z2FusionRule, Z2Irrep,
 };
 
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
@@ -502,7 +502,6 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
         (
             structure_cache_info(StructureCacheKind::SectorStructure),
             structure_cache_info(StructureCacheKind::DegeneracyStructure),
-            block_structure_intern_cache_info(),
         )
     };
 
@@ -552,10 +551,7 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
         after_prepare.0.admissions(),
         before_prepare.0.admissions() + 1
     );
-    assert_eq!(
-        (after_prepare.1, after_prepare.2),
-        (before_prepare.1, before_prepare.2)
-    );
+    assert_eq!(after_prepare.1, before_prepare.1);
 
     let before_commit = snapshots();
     let committed = source
@@ -572,8 +568,8 @@ fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration()
         FusionSpaceAdmission::Complete(_)
     ));
     assert_eq!(
-        block_structure_intern_cache_info().entries(),
-        before_commit.2.entries() + 1
+        structure_cache_info(StructureCacheKind::DegeneracyStructure).entries(),
+        before_commit.1.entries() + 1
     );
 
     // Both walks below are cold: each must query the provider in full.

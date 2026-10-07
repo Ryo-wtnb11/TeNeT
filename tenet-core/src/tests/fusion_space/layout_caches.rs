@@ -1,4 +1,5 @@
 use super::*;
+use std::convert::Infallible;
 
 fn degeneracy_cache_info() -> StructureCacheInfo {
     structure_cache_info(StructureCacheKind::DegeneracyStructure)
@@ -362,14 +363,100 @@ fn complete_cache_publishes_a_build_that_saw_no_reset() {
     let epoch = core_reset_epoch();
     let (key, built) = complete_build(&homspace);
 
-    let published = admit_complete_hom_space_structure(key, Arc::clone(&built), epoch);
+    let (published, canonical) = admit_complete_hom_space_structure(key, Arc::clone(&built), epoch);
 
     // What: the epoch check does not block an ordinary miss.
-    assert!(Arc::ptr_eq(&published, &built));
+    assert!(Arc::ptr_eq(&canonical, &built));
+    assert!(Arc::ptr_eq(&published.structure(), &built));
     let hit = homspace
         .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
         .unwrap();
     assert!(Arc::ptr_eq(&hit, &built));
+}
+
+#[test]
+fn complete_admission_preserves_the_winner_wrapper_and_region_memo() {
+    let _guard = test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_core_intern_tables();
+    let homspace = reset_test_homspace();
+    let epoch = core_reset_epoch();
+    let (key, winner) = complete_build(&homspace);
+    let regions = winner.coupled_sector_regions(1).unwrap().unwrap();
+
+    let (_, canonical) = admit_complete_hom_space_structure(key, Arc::clone(&winner), epoch);
+    assert!(Arc::ptr_eq(&canonical, &winner));
+    assert!(Arc::ptr_eq(
+        &canonical.coupled_sector_regions(1).unwrap().unwrap(),
+        &regions
+    ));
+
+    let (same_key, loser) = complete_build(&homspace);
+    assert_ne!(loser.content_id(), winner.content_id());
+    let (_, raced) = admit_complete_hom_space_structure(same_key, loser, epoch);
+    assert!(Arc::ptr_eq(&raced, &winner));
+    assert!(Arc::ptr_eq(
+        &raced.coupled_sector_regions(1).unwrap().unwrap(),
+        &regions
+    ));
+}
+
+#[test]
+fn complete_cache_separates_multiplicity_free_and_generic_modes() {
+    if test_support::run_isolated_or_return(
+        "TENET_COMPLETE_OWNER_MODE_ISOLATED",
+        "tests::fusion_space::layout_caches::complete_cache_separates_multiplicity_free_and_generic_modes",
+    ) { return; }
+    let _guard = test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_core_intern_tables();
+    let hom = FusionTreeHomSpace::from_sectors([(su2(1), 2)], [(su2(1), 3)]);
+
+    let multiplicity_free = hom
+        .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
+        .unwrap();
+    let generic = hom
+        .coupled_subblock_structure_from_leg_degeneracies_generic(&SU2FusionRule)
+        .unwrap();
+
+    assert_eq!(multiplicity_free.as_ref(), generic.as_ref());
+    assert_ne!(multiplicity_free.content_id(), generic.content_id());
+    assert_eq!(degeneracy_cache_info().entries(), 2);
+}
+
+#[test]
+fn checked_homspace_factory_captures_reset_epoch_before_the_producer() {
+    if test_support::run_isolated_or_return(
+        "TENET_COMPLETE_OWNER_PRODUCER_EPOCH_ISOLATED",
+        "tests::fusion_space::layout_caches::checked_homspace_factory_captures_reset_epoch_before_the_producer",
+    ) { return; }
+    let _guard = test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_core_intern_tables();
+    let rule = InfallibleGeneric::new(&SU2FusionRule);
+    let hom = || FusionTreeHomSpace::from_sectors([(su2(1), 2)], [(su2(1), 3)]);
+
+    let prepared =
+        FusionTreeHomSpace::prepare_complete_coupled_subblock_structure_generic_checked_with(
+            &rule,
+            || {
+                reset_core_intern_tables();
+                Ok::<_, CheckedGenericStructureError<Infallible>>(hom())
+            },
+        )
+        .unwrap();
+    let stale = prepared.commit_with_complete_homspace().1;
+    assert_eq!(degeneracy_cache_info().entries(), 0);
+
+    let fresh = hom()
+        .coupled_subblock_structure_from_leg_degeneracies_generic_checked(&rule)
+        .unwrap();
+    assert_eq!(stale.as_ref(), fresh.as_ref());
+    assert_ne!(stale.content_id(), fresh.content_id());
+    assert_eq!(degeneracy_cache_info().entries(), 1);
 }
 
 #[test]
@@ -385,11 +472,12 @@ fn complete_cache_drops_a_build_that_started_before_a_reset() {
     let (key, stale) = complete_build(&homspace);
     reset_core_intern_tables();
 
-    let returned = admit_complete_hom_space_structure(key, Arc::clone(&stale), epoch);
+    let (returned, canonical) = admit_complete_hom_space_structure(key, Arc::clone(&stale), epoch);
 
     // What: the straddling build keeps its correct result, but the cache does
     // not publish it, so a post-reset build mints a fresh content identity.
-    assert!(Arc::ptr_eq(&returned, &stale));
+    assert!(Arc::ptr_eq(&canonical, &stale));
+    assert!(Arc::ptr_eq(&returned.structure(), &stale));
     let fresh = homspace
         .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
         .unwrap();
@@ -420,7 +508,8 @@ fn complete_cache_drops_a_build_that_ran_inside_a_reset() {
     });
     reset_core_intern_tables();
     let (epoch, (key, stale)) = during.borrow_mut().take().unwrap();
-    assert_eq!(stale.content_id(), source.content_id());
+    assert_eq!(stale.as_ref(), source.as_ref());
+    assert_ne!(stale.content_id(), source.content_id());
 
     admit_complete_hom_space_structure(key, stale, epoch);
 
@@ -461,14 +550,14 @@ fn overlapping_resets_wait_so_the_epoch_stays_odd_until_the_first_finishes() {
             }));
             std::thread::sleep(std::time::Duration::from_millis(50));
             // What: B cannot run inside A, so the epoch stays odd and a build
-            // here (which interns A's not-yet-cleared content) is not
-            // published.
+            // here is not published.
             assert!(!done.load(std::sync::atomic::Ordering::SeqCst));
             assert_eq!(core_reset_epoch(), start + 1);
             let inside = hom
                 .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
                 .unwrap();
-            assert_eq!(inside.content_id(), source_id);
+            assert_eq!(inside.as_ref(), source.as_ref());
+            assert_ne!(inside.content_id(), source_id);
         })));
     });
     reset_core_intern_tables();

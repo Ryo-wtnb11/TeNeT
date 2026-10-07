@@ -385,8 +385,16 @@ impl FusionTreeHomSpace {
     #[inline]
     pub fn id(&self) -> HomSpaceId {
         self.id
-            .get_or_init(|| intern_hom_space(&self.content.codomain, &self.content.domain))
+            .get_or_init(|| HomSpaceId::from_content(Arc::clone(&self.content)))
             .clone()
+    }
+
+    pub(crate) fn with_canonical_id(self, id: HomSpaceId) -> Self {
+        debug_assert_eq!(self.content, id.content);
+        Self {
+            content: Arc::clone(&id.content),
+            id: OnceLock::from(id),
+        }
     }
 
     /// Returns the already-published semantic identity without initializing it.
@@ -813,19 +821,41 @@ impl FusionTreeHomSpace {
     {
         let epoch = core_reset_epoch();
         let key = CompleteHomSpaceStructureCacheKey::new(rule, self);
-        if let Some(structure) = complete_hom_space_structure_cached(&key) {
-            return Ok(structure);
+        if let Some(entry) = complete_hom_space_structure_cached(&key) {
+            return Ok(entry.structure());
         }
 
         let layout = self.cached_fusion_tree_layout(rule);
-        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
+        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(&self, &layout)?;
         let built = BlockStructure::from_shared_parts(sector, degeneracy)?;
         built.record_storage_tiling();
-        Ok(admit_complete_hom_space_structure(
-            key,
-            built.into_shared(),
-            epoch,
-        ))
+        Ok(admit_complete_hom_space_structure(key, built.into_shared(), epoch).1)
+    }
+
+    /// The canonical complete layout together with the HomSpace backing owned
+    /// by the same cache entry.
+    #[doc(hidden)]
+    pub fn canonical_coupled_subblock_structure_from_leg_degeneracies<R>(
+        self,
+        rule: &R,
+    ) -> Result<(Self, Arc<BlockStructure>), CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let epoch = core_reset_epoch();
+        let key = CompleteHomSpaceStructureCacheKey::new(rule, &self);
+        let (entry, structure) = if let Some(entry) = complete_hom_space_structure_cached(&key) {
+            let structure = entry.structure();
+            (entry, structure)
+        } else {
+            let layout = self.cached_fusion_tree_layout(rule);
+            let (sector, degeneracy) =
+                coupled_subblock_parts_from_leg_degeneracies(&self, &layout)?;
+            let built = BlockStructure::from_shared_parts(sector, degeneracy)?;
+            built.record_storage_tiling();
+            admit_complete_hom_space_structure(key, built.into_shared(), epoch)
+        };
+        Ok((self.with_canonical_id(entry.homspace_id()), structure))
     }
 
     #[doc(hidden)]
@@ -838,7 +868,7 @@ impl FusionTreeHomSpace {
         R: MultiplicityFreeFusionRule,
     {
         let layout = self.fusion_tree_layout_data_uncached(rule);
-        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
+        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(&self, &layout)?;
         let required_len = degeneracy.required_len()?;
         Ok((
             required_len,
@@ -859,13 +889,37 @@ impl FusionTreeHomSpace {
     where
         R: FusionRule,
     {
-        let layout = self.generic_sector_layout(rule.rule_identity(), || {
+        self.clone()
+            .canonical_coupled_subblock_structure_from_leg_degeneracies_generic(rule)
+            .map(|(_, structure)| structure)
+    }
+
+    /// Canonical complete Generic layout and its cache-owned HomSpace backing.
+    #[doc(hidden)]
+    pub fn canonical_coupled_subblock_structure_from_leg_degeneracies_generic<R>(
+        self,
+        rule: &R,
+    ) -> Result<(Self, Arc<BlockStructure>), CoreError>
+    where
+        R: FusionRule,
+    {
+        let epoch = core_reset_epoch();
+        let rule_identity = rule.rule_identity();
+        let layout = self.generic_sector_layout(rule_identity.clone(), || {
             self.fusion_tree_layout_data_generic(rule)
         })?;
-        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
-        let built = BlockStructure::from_shared_parts(sector, degeneracy)?;
-        built.record_storage_tiling();
-        Ok(built.into_shared())
+        let key = CompleteHomSpaceStructureCacheKey::generic(rule_identity, &self);
+        let (entry, structure) = if let Some(entry) = complete_hom_space_structure_cached(&key) {
+            let structure = entry.structure();
+            (entry, structure)
+        } else {
+            let (sector, degeneracy) =
+                coupled_subblock_parts_from_leg_degeneracies(&self, &layout)?;
+            let built = BlockStructure::from_shared_parts(sector, degeneracy)?;
+            built.record_storage_tiling();
+            admit_complete_hom_space_structure(key, built.into_shared(), epoch)
+        };
+        Ok((self.with_canonical_id(entry.homspace_id()), structure))
     }
 
     /// Checked Generic-fusion structural staging from this HomSpace's leg
@@ -879,10 +933,10 @@ impl FusionTreeHomSpace {
     where
         R: CheckedGenericFusion,
     {
-        Ok(self
-            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(rule)?
-            .commit()
-            .into_shared())
+        let prepared = self
+            .clone()
+            .prepare_complete_coupled_subblock_structure_generic_checked_after(rule, || Ok(()))?;
+        Ok(prepared.commit_with_complete_homspace().1)
     }
 
     /// Stage checked Generic block metadata without entering the block
@@ -896,13 +950,90 @@ impl FusionTreeHomSpace {
     where
         R: CheckedGenericFusion,
     {
-        let layout = self.generic_sector_layout(rule.rule_identity(), || {
+        let epoch = core_reset_epoch();
+        let rule_identity = rule.rule_identity();
+        let layout = self.generic_sector_layout(rule_identity.clone(), || {
             self.fusion_tree_layout_data_generic_checked(rule)
         })?;
         let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
-        PreparedBlockStructure::from_shared_parts(sector, degeneracy)
-            .map(PreparedBlockStructure::with_storage_tiling)
-            .map_err(Into::into)
+        let candidate = PreparedBlockStructure::from_shared_parts(sector, degeneracy)
+            .map(PreparedBlockStructure::with_storage_tiling)?;
+        Ok(PreparedBlockStructure::complete_miss(
+            self.clone(),
+            candidate,
+            CompleteHomSpaceStructureCacheKey::generic(rule_identity, self),
+            epoch,
+            true,
+        ))
+    }
+
+    /// Begins one complete checked Generic layout transaction. The reset epoch
+    /// is captured before `admit` reads provider identity or style; checked
+    /// sector admission then precedes the complete-cache probe. A hit reuses
+    /// its canonical HomSpace/structure pair without building degeneracy
+    /// metadata, while a miss carries one unpublished candidate to commit.
+    #[doc(hidden)]
+    pub fn prepare_complete_coupled_subblock_structure_generic_checked_after<R, A>(
+        self,
+        rule: &R,
+        admit: A,
+    ) -> Result<PreparedBlockStructure, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+        A: FnOnce() -> Result<(), CheckedGenericStructureError<R::Error>>,
+    {
+        Self::prepare_complete_coupled_subblock_structure_generic_checked_with(rule, || {
+            admit()?;
+            Ok(self)
+        })
+    }
+
+    /// Begins one complete checked Generic layout transaction whose HomSpace
+    /// is itself produced by checked operation admission. The reset epoch is
+    /// captured before `build_homspace` performs any provider query.
+    #[doc(hidden)]
+    pub fn prepare_complete_coupled_subblock_structure_generic_checked_with<R, E, B>(
+        rule: &R,
+        build_homspace: B,
+    ) -> Result<PreparedBlockStructure, E>
+    where
+        R: CheckedGenericFusion,
+        E: From<CheckedGenericStructureError<R::Error>>,
+        B: FnOnce() -> Result<Self, E>,
+    {
+        let epoch = core_reset_epoch();
+        let homspace = build_homspace()?;
+        homspace
+            .prepare_complete_coupled_subblock_structure_generic_checked_at(rule, epoch)
+            .map_err(E::from)
+    }
+
+    fn prepare_complete_coupled_subblock_structure_generic_checked_at<R>(
+        self,
+        rule: &R,
+        epoch: usize,
+    ) -> Result<PreparedBlockStructure, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        let rule_identity = rule.rule_identity();
+        let layout = self.generic_sector_layout(rule_identity.clone(), || {
+            self.fusion_tree_layout_data_generic_checked(rule)
+        })?;
+        let key = CompleteHomSpaceStructureCacheKey::generic(rule_identity, &self);
+        if let Some(entry) = complete_hom_space_structure_cached(&key) {
+            return Ok(PreparedBlockStructure::complete_hit(
+                self,
+                entry.homspace_id(),
+                entry.structure(),
+            ));
+        }
+        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(&self, &layout)?;
+        let candidate = PreparedBlockStructure::from_shared_parts(sector, degeneracy)
+            .map(PreparedBlockStructure::with_storage_tiling)?;
+        Ok(PreparedBlockStructure::complete_miss(
+            self, candidate, key, epoch, false,
+        ))
     }
 
     #[cfg(test)]

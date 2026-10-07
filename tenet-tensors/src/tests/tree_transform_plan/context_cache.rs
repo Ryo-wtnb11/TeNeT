@@ -41,6 +41,8 @@ fn independent_tree_transform_contexts_compile_their_own_artifacts() {
     let calls = Arc::new(AtomicUsize::new(0));
     let rule = AdmissionCountingSu2Rule {
         nsymbol_calls: Arc::clone(&calls),
+        fusion_style: None,
+        braiding_style: None,
     };
     let mut first = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     let run = |context: &mut TreeTransformExecutionContext<f64, RuleIdentity>| {
@@ -78,6 +80,8 @@ fn concurrent_tree_transform_contexts_do_not_share_compiled_artifacts() {
             let calls = Arc::new(AtomicUsize::new(0));
             let rule = AdmissionCountingSu2Rule {
                 nsymbol_calls: Arc::clone(&calls),
+                fusion_style: None,
+                braiding_style: None,
             };
             let structure = simple_su2_vertex_structure(1);
             let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);

@@ -12,6 +12,7 @@ use tenet_core::{
     CategoricalScalar, GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure,
 };
 
+use crate::contract::{DynamicFusionMapSpace, FusionOperand};
 use crate::lowering::{adjoint_fusion_space_view, lower_tensoradd_source_operation};
 use crate::tensortrace::{
     tensortrace_fusion_structure, tensortrace_structure, TensorTraceFusionStructure,
@@ -426,17 +427,16 @@ where
     let lowered =
         lower_tensoradd_source_operation::<SRC_NOUT, SRC_NIN>(operation, source_conjugate)?;
     if lowered.storage_conjugate() {
-        let adjoint_src = adjoint_fusion_space_view(rule, src_fusion)?;
+        let storage_src = DynamicFusionMapSpace::from_typed(src_fusion);
+        let oriented_src = FusionOperand::prepare_storage_ordered_adjoint(&storage_src, rule)?;
         let dst_structure = std::sync::Arc::clone(dst.structure());
-        let src_replay_structure = std::sync::Arc::clone(adjoint_src.subblock_structure());
-        context.tree_transform_into_raw_with_storage_conjugation(
+        context.tree_transform_into_raw_oriented(
             rule,
             lowered.into_operation(),
             &dst_structure,
-            &src_replay_structure,
+            &oriented_src,
             dst.data_mut(),
             src.data(),
-            true,
             alpha,
             beta,
         )

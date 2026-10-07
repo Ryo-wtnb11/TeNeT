@@ -11,6 +11,7 @@ use super::metadata::{
     dispatch_prepare, LayoutBuildCapability, LayoutKeyBuilder, MetadataOutput, MetadataRequest,
 };
 use super::{tree_transform_operation_axes, DynamicFusionMapSpace, TransformedLayoutProbe};
+use crate::tree_transform::OrientedBasisOrder;
 use crate::{OperationError, TreeTransformOperation};
 
 /// Internal contraction operand separating categorical and storage authority.
@@ -35,6 +36,7 @@ pub(crate) struct FusionOperandLayout<'a> {
     operand: FusionOperand<'a>,
     homspace: Cow<'a, FusionTreeHomSpace>,
     projection: FusionOperandProjection,
+    basis_order: OrientedBasisOrder,
 }
 
 enum FusionOperandProjection {
@@ -136,9 +138,9 @@ impl<'a> FusionOperandLayout<'a> {
 
     /// The parent storage index of each logical key, in logical order.
     ///
-    /// Its errors are unreachable under the Complete admission invariant (the
-    /// parent holds exactly the canonical keys), which is why deferring them
-    /// past `prepare` is safe.
+    /// Canonical preparation proves the parent-key bijection; storage-ordered
+    /// preparation derives each logical key from its parent index. Both allow
+    /// this projection to be deferred until a compiler miss.
     ///
     /// # Panics
     ///
@@ -152,7 +154,12 @@ impl<'a> FusionOperandLayout<'a> {
             unreachable!("only adjoint operands carry a storage projection")
         };
         storage_indices
-            .get_or_init(|| adjoint_storage_indices(self.storage_space(), logical_keys))
+            .get_or_init(|| match self.basis_order {
+                OrientedBasisOrder::Canonical => {
+                    adjoint_storage_indices(self.storage_space(), logical_keys)
+                }
+                OrientedBasisOrder::Storage => Ok((0..logical_keys.len()).collect()),
+            })
             .as_deref()
             .map_err(Clone::clone)
     }
@@ -162,7 +169,7 @@ impl<'a> FusionOperandLayout<'a> {
         matches!(self.projection, FusionOperandProjection::Direct)
     }
 
-    /// The canonical logical keys of an adjoint operand; `None` when direct.
+    /// The logical keys in the prepared basis order; `None` when direct.
     #[inline]
     pub(crate) fn adjoint_logical_keys(&self) -> Option<&[FusionTreePairKey]> {
         match &self.projection {
@@ -179,6 +186,11 @@ impl<'a> FusionOperandLayout<'a> {
     #[inline]
     pub(crate) fn storage_conjugate(&self) -> bool {
         self.operand.storage_conjugate()
+    }
+
+    #[inline]
+    pub(crate) fn basis_order(&self) -> OrientedBasisOrder {
+        self.basis_order
     }
 
     #[inline]
@@ -307,6 +319,7 @@ impl<'a> FusionOperand<'a> {
                 operand: self,
                 homspace: Cow::Borrowed(self.storage_space.homspace()),
                 projection: FusionOperandProjection::Direct,
+                basis_order: OrientedBasisOrder::Canonical,
             });
         }
 
@@ -355,6 +368,48 @@ impl<'a> FusionOperand<'a> {
             operand: self,
             homspace,
             projection,
+            basis_order: OrientedBasisOrder::Canonical,
+        })
+    }
+
+    /// Static adjoint views retain the parent's block order, including an
+    /// admitted subset and arbitrary strides. Canonical enumeration would
+    /// change group/provider and accumulation order; derive only swapped keys.
+    /// TensorKit preserves parent block traversal while swapping trees and axes:
+    /// <https://github.com/QuantumKitHub/TensorKit.jl/blob/cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91/src/tensors/adjoint.jl#L22-L50>.
+    /// The borrowed parent and index projection are the Rust ownership adaptation.
+    pub(crate) fn prepare_storage_ordered_adjoint<R>(
+        storage_space: &'a DynamicFusionMapSpace,
+        rule: &R,
+    ) -> Result<FusionOperandLayout<'a>, OperationError>
+    where
+        R: tenet_core::FusionRule,
+    {
+        let operand = Self::adjoint(storage_space);
+        storage_space.validate_rule(rule)?;
+        let structure = storage_space.structure();
+        let mut logical_keys = Vec::with_capacity(structure.block_count());
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(OperationError::ExpectedFusionTreeBlock {
+                    tensor: "src",
+                    index,
+                });
+            };
+            logical_keys.push(FusionTreePairKey::pair(
+                key.domain_tree().clone(),
+                key.codomain_tree().clone(),
+            ));
+        }
+        Ok(FusionOperandLayout {
+            operand,
+            homspace: Cow::Owned(operand.oriented_homspace().materialize()),
+            projection: FusionOperandProjection::Adjoint {
+                logical_keys: logical_keys.into(),
+                storage_indices: OnceLock::new(),
+            },
+            basis_order: OrientedBasisOrder::Storage,
         })
     }
 

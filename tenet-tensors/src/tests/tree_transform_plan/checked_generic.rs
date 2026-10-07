@@ -591,7 +591,7 @@ fn checked_generic_adjoint_late_provider_failure_does_not_publish_cache() {
 #[test]
 #[allow(clippy::arc_with_non_send_sync)] // The API requires Arc; this single-threaded spy uses Cells for deterministic failures.
 fn checked_generic_owned_failure_does_not_publish_destination_state() {
-    use tenet_core::{block_structure_intern_cache_info, structure_cache_info, StructureCacheKind};
+    use tenet_core::{structure_cache_info, StructureCacheKind};
 
     const ISOLATED: &str = "TENET_CHECKED_GENERIC_OWNED_FAILURE_ISOLATED";
     // What: exact global-cache snapshots run outside the parallel unit-test process.
@@ -645,7 +645,6 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         provider.fail.set(Some((CheckedPlanCall::N, 1)));
         let layout_before = structure_cache_info(StructureCacheKind::SectorStructure);
         let complete_before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
-        let interner_before = block_structure_intern_cache_info();
         let runtime_before = store.info();
 
         let error = crate::tree_transform_dyn_owned_checked_generic(
@@ -672,11 +671,13 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         let layout_after = structure_cache_info(StructureCacheKind::SectorStructure);
         assert!(layout_after.admissions() <= layout_before.admissions() + 1);
         assert_eq!(layout_after.rejections(), layout_before.rejections());
+        let complete_after = structure_cache_info(StructureCacheKind::DegeneracyStructure);
+        assert_eq!(complete_after.entries(), complete_before.entries());
         assert_eq!(
-            structure_cache_info(StructureCacheKind::DegeneracyStructure),
-            complete_before
+            complete_after.charged_bytes(),
+            complete_before.charged_bytes()
         );
-        assert_eq!(block_structure_intern_cache_info(), interner_before);
+        assert_eq!(complete_after.admissions(), complete_before.admissions());
         assert_eq!(store.info(), runtime_before);
         assert_eq!(src_space, source_before);
         assert_eq!(src_data, data_before);
@@ -705,7 +706,6 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         }
         let layout_before = structure_cache_info(StructureCacheKind::SectorStructure);
         let complete_before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
-        let interner_before = block_structure_intern_cache_info();
         let runtime_before = store.info();
 
         let error = crate::tree_transform_dyn_owned_checked_generic(
@@ -734,11 +734,13 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         let layout_after = structure_cache_info(StructureCacheKind::SectorStructure);
         assert!(layout_after.admissions() <= layout_before.admissions() + 1);
         assert_eq!(layout_after.rejections(), layout_before.rejections());
+        let complete_after = structure_cache_info(StructureCacheKind::DegeneracyStructure);
+        assert_eq!(complete_after.entries(), complete_before.entries());
         assert_eq!(
-            structure_cache_info(StructureCacheKind::DegeneracyStructure),
-            complete_before
+            complete_after.charged_bytes(),
+            complete_before.charged_bytes()
         );
-        assert_eq!(block_structure_intern_cache_info(), interner_before);
+        assert_eq!(complete_after.admissions(), complete_before.admissions());
         assert_eq!(store.info(), runtime_before);
         assert_eq!(src_space, source_before);
         assert_eq!(src_data, data_before);
@@ -762,7 +764,6 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
     provider.calls.set([0; CheckedPlanCall::COUNT]);
     let layout_before = structure_cache_info(StructureCacheKind::SectorStructure);
     let complete_before = structure_cache_info(StructureCacheKind::DegeneracyStructure);
-    let interner_before = block_structure_intern_cache_info();
     provider
         .fail
         .set(Some((CheckedPlanCall::FrobeniusSchur, 1)));
@@ -782,11 +783,13 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
     let layout_after = structure_cache_info(StructureCacheKind::SectorStructure);
     assert!(layout_after.admissions() <= layout_before.admissions() + 1);
     assert_eq!(layout_after.rejections(), layout_before.rejections());
+    let complete_after = structure_cache_info(StructureCacheKind::DegeneracyStructure);
+    assert_eq!(complete_after.entries(), complete_before.entries());
     assert_eq!(
-        structure_cache_info(StructureCacheKind::DegeneracyStructure),
-        complete_before
+        complete_after.charged_bytes(),
+        complete_before.charged_bytes()
     );
-    assert_eq!(block_structure_intern_cache_info(), interner_before);
+    assert_eq!(complete_after.admissions(), complete_before.admissions());
 }
 
 #[test]

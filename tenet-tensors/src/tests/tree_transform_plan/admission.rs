@@ -56,6 +56,8 @@ pub(super) fn simple_su2_vertex_structure(vertex: usize) -> Arc<BlockStructure> 
 #[derive(Clone)]
 pub(super) struct AdmissionCountingSu2Rule {
     pub(super) nsymbol_calls: Arc<AtomicUsize>,
+    pub(super) fusion_style: Option<FusionStyleKind>,
+    pub(super) braiding_style: Option<BraidingStyleKind>,
 }
 
 impl FusionRule for AdmissionCountingSu2Rule {
@@ -64,11 +66,13 @@ impl FusionRule for AdmissionCountingSu2Rule {
     }
 
     fn fusion_style(&self) -> FusionStyleKind {
-        SU2FusionRule.fusion_style()
+        self.fusion_style
+            .unwrap_or_else(|| SU2FusionRule.fusion_style())
     }
 
     fn braiding_style(&self) -> BraidingStyleKind {
-        SU2FusionRule.braiding_style()
+        self.braiding_style
+            .unwrap_or_else(|| SU2FusionRule.braiding_style())
     }
 
     fn vacuum(&self) -> SectorId {
@@ -369,6 +373,8 @@ fn exact_warm_structure_reuses_prior_local_admission_proof() {
     let calls = Arc::new(AtomicUsize::new(0));
     let rule = AdmissionCountingSu2Rule {
         nsymbol_calls: Arc::clone(&calls),
+        fusion_style: None,
+        braiding_style: None,
     };
     let structure = simple_su2_vertex_structure(1);
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
@@ -461,6 +467,8 @@ fn prelowered_same_content_roles_share_one_local_admission() {
     let calls = Arc::new(AtomicUsize::new(0));
     let rule = AdmissionCountingSu2Rule {
         nsymbol_calls: Arc::clone(&calls),
+        fusion_style: None,
+        braiding_style: None,
     };
     let logical = simple_su2_vertex_structure(1);
     let storage = Arc::new((*logical).clone());
@@ -560,6 +568,7 @@ fn no_cache_tree_transform_paths_compile_without_retaining_structures() {
                 || Ok(&storage_indices),
                 &structure,
                 tenet_core::FusionTreePairOrientation::Direct,
+                crate::tree_transform::OrientedBasisOrder::Canonical,
                 structure.rank(),
                 Ok,
             )
@@ -651,6 +660,7 @@ fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
             || Ok(&storage_indices),
             &storage,
             tenet_core::FusionTreePairOrientation::Adjoint,
+            crate::tree_transform::OrientedBasisOrder::Canonical,
             4,
             |axis| Ok(storage_axes[axis]),
         )
@@ -758,6 +768,7 @@ fn runtime_bound_adjoint_oriented_plan_is_reused_and_keyed_by_orientation() {
                 || Ok(if direct { &[0, 1] } else { &storage_indices }),
                 &storage,
                 orientation,
+                crate::tree_transform::OrientedBasisOrder::Canonical,
                 4,
                 |axis| Ok(if direct { axis } else { storage_axes[axis] }),
             )
@@ -822,6 +833,50 @@ fn runtime_bound_adjoint_oriented_plan_is_reused_and_keyed_by_orientation() {
     assert!(!Arc::ptr_eq(&direct_first, &plain));
     assert!(!Arc::ptr_eq(&direct_first, &direct_second));
     assert_eq!((store.info().hits(), store.info().misses()), (1, 4));
+
+    let storage_ordered = |cache: &mut TreeTransformCache<f64, RuleIdentity>| {
+        cache
+            .get_or_compile_tree_pair_oriented(
+                &SU2FusionRule,
+                &operation,
+                &destination,
+                &storage_keys,
+                || Ok(&[0, 1]),
+                &storage,
+                adjoint,
+                crate::tree_transform::OrientedBasisOrder::Storage,
+                4,
+                |axis| Ok(storage_axes[axis]),
+            )
+            .unwrap()
+    };
+    let storage_first = storage_ordered(&mut cache);
+    assert!(!Arc::ptr_eq(&first, &storage_first));
+    assert!(Arc::ptr_eq(&storage_first, &storage_ordered(&mut cache)));
+    assert!(Arc::ptr_eq(
+        &first,
+        &oriented(&mut cache, &operation, adjoint)
+    ));
+    assert_eq!(store.info().entries(), 5);
+    assert_eq!(
+        storage_first.as_ref(),
+        storage_ordered(&mut uncached).as_ref()
+    );
+
+    // A bound context never creates a second retention owner after its Runtime dies,
+    // even if callers subsequently enable the public local-cache policy.
+    drop(store);
+    for _ in 0..2 {
+        cache.set_policy(OperationCachePolicy::TaskLocalLru { max_entries: 4 });
+        cache.reset_stats();
+        let expired_first = storage_ordered(&mut cache);
+        let expired_second = storage_ordered(&mut cache);
+        assert!(!Arc::ptr_eq(&expired_first, &expired_second));
+        assert_eq!(cache.structure_len(), 0);
+        assert_eq!(cache.stats().structure_hits(), 0);
+        assert_eq!(cache.stats().structure_misses(), 2);
+        cache.set_policy(OperationCachePolicy::NoCache);
+    }
 }
 
 #[test]
@@ -872,6 +927,7 @@ fn adjoint_oriented_degeneracy_change_reuses_the_categorical_plan() {
                     || Ok(&storage_indices),
                     storage,
                     tenet_core::FusionTreePairOrientation::Adjoint,
+                    crate::tree_transform::OrientedBasisOrder::Canonical,
                     4,
                     |axis| Ok(storage_axes[axis]),
                 )
@@ -941,6 +997,7 @@ fn runtime_bound_adjoint_oriented_projection_errors_match_the_local_path() {
                     || Ok(storage_indices),
                     &storage,
                     tenet_core::FusionTreePairOrientation::Adjoint,
+                    crate::tree_transform::OrientedBasisOrder::Canonical,
                     4,
                     Ok,
                 )
@@ -1541,4 +1598,80 @@ fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
     // scope without publishing cache state.
     assert_eq!(cache.stats(), TreeTransformCacheStats::default());
     assert!(cache.is_empty());
+}
+
+#[test]
+fn oriented_cold_and_warm_admission_rejects_equal_key_capability_changes() {
+    let storage = simple_su2_vertex_structure(1);
+    let BlockKey::FusionTree(parent) = storage.block(0).unwrap().key() else {
+        unreachable!()
+    };
+    let logical_keys = [FusionTreePairKey::pair(
+        parent.domain_tree().clone(),
+        parent.codomain_tree().clone(),
+    )];
+    let destination =
+        Arc::new(packed_fixture_structure(2, [(logical_keys[0].clone(), vec![1, 1])]).unwrap());
+    let operation = TreeTransformOperation::permute([], [1, 0]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut rule = AdmissionCountingSu2Rule {
+        nsymbol_calls: calls,
+        fusion_style: None,
+        braiding_style: None,
+    };
+    for runtime_bound in [false, true] {
+        let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+        let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
+        if runtime_bound {
+            cache.bind_runtime_store(Arc::downgrade(&store));
+        }
+        let compile = |cache: &mut TreeTransformCache<f64, RuleIdentity>,
+                       rule: &AdmissionCountingSu2Rule| {
+            cache.get_or_compile_tree_pair_oriented(
+                rule,
+                &operation,
+                &destination,
+                &logical_keys,
+                || Ok(&[0]),
+                &storage,
+                tenet_core::FusionTreePairOrientation::Adjoint,
+                crate::tree_transform::OrientedBasisOrder::Storage,
+                2,
+                Ok,
+            )
+        };
+        for warm in [false, true] {
+            rule.fusion_style = Some(FusionStyleKind::Generic);
+            assert_eq!(
+                compile(&mut cache, &rule).unwrap_err(),
+                OperationError::UnsupportedFusionStyle {
+                    operation: Box::new(operation.clone()),
+                    style: FusionStyleKind::Generic,
+                }
+            );
+            rule.fusion_style = None;
+            rule.braiding_style = Some(BraidingStyleKind::Anyonic);
+            assert_eq!(
+                compile(&mut cache, &rule).unwrap_err(),
+                OperationError::UnsupportedBraidingStyle {
+                    operation: Box::new(operation.clone()),
+                    style: BraidingStyleKind::Anyonic,
+                }
+            );
+            rule.braiding_style = None;
+            crate::tree_transform::reset_multiplicity_free_capability_validations();
+            compile(&mut cache, &rule).unwrap();
+            assert_eq!(
+                crate::tree_transform::multiplicity_free_capability_validations(),
+                1
+            );
+            if runtime_bound {
+                assert_eq!(store.info().entries(), 1);
+                assert_eq!(store.info().hits(), usize::from(warm));
+            } else {
+                assert_eq!(cache.structure_len(), 1);
+                assert_eq!(cache.stats().structure_hits(), usize::from(warm));
+            }
+        }
+    }
 }

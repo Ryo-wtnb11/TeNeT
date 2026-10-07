@@ -6,7 +6,6 @@ mod coupled_regions;
 mod generic_bend;
 mod generic_braid;
 mod generic_fold_and_transpose;
-mod intern_cache;
 mod sector_structure;
 mod staged_content;
 mod storage_injective;

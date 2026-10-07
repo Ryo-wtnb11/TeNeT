@@ -1774,7 +1774,7 @@ where
     clippy::too_many_arguments,
     reason = "the oriented planner keeps logical keys, storage authority, projection, orientation, rank, and thread policy explicit"
 )]
-pub(crate) fn build_oriented_tree_pair_transform_group_plan_with_threads<R>(
+pub(crate) fn build_oriented_tree_pair_transform_group_plan_capability_validated<R>(
     rule: &R,
     operation: TreeTransformOperation,
     logical_keys: &[FusionTreePairKey],
@@ -1789,7 +1789,8 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
-    validate_multiplicity_free_tree_transform_capability(rule, &operation)?;
+    // The sole cache caller admits capability before lookup, for both hits
+    // and misses; do not query mutable provider capability a second time here.
     validate_tree_transform_rank_syntax(&operation, logical_rank)?;
     let source_axes = operation_source_axes(&operation);
     // Why the logical keys suffice for a group: the adjoint orientation maps

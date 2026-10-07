@@ -1260,7 +1260,13 @@ mod tests {
                 CheckedGenericPlanError::Provider(SpyError(actual)) if actual == query
             ));
             assert_eq!(right.algebra_calls(), 0);
-            assert_eq!(tenet_core::block_structure_intern_cache_info().entries(), 0);
+            assert_eq!(
+                tenet_core::structure_cache_info(
+                    tenet_core::StructureCacheKind::DegeneracyStructure
+                )
+                .entries(),
+                0
+            );
         }
 
         left.reset();
@@ -1282,7 +1288,11 @@ mod tests {
             CheckedGenericPlanError::SymbolShape { symbol: "R", .. }
         ));
         assert_eq!(right.algebra_calls(), 0);
-        assert_eq!(tenet_core::block_structure_intern_cache_info().entries(), 0);
+        assert_eq!(
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .entries(),
+            0
+        );
     }
 
     #[test]
@@ -1341,7 +1351,11 @@ mod tests {
                 .entries(),
             0
         );
-        assert_eq!(tenet_core::block_structure_intern_cache_info().entries(), 0);
+        assert_eq!(
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .entries(),
+            0
+        );
     }
 
     #[test]
@@ -1382,7 +1396,11 @@ mod tests {
 
         assert!(Arc::ptr_eq(output.provider_arc(), &left));
         assert_eq!(right.algebra_calls(), 0);
-        assert_eq!(tenet_core::block_structure_intern_cache_info().entries(), 1);
+        assert_eq!(
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .entries(),
+            1
+        );
         assert!(left
             .events
             .borrow()

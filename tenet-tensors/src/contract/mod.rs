@@ -73,12 +73,14 @@ pub use context::{
 };
 #[cfg(test)]
 pub(crate) use dynamic_space::{
-    checked_layout_primer, checked_metadata_dispatcher, encoded_layout_primer,
-    fusion_operand_projection_prepares, reset_fusion_operand_projection_prepares,
-    reset_scratch_publication_observations, scratch_publication_observations, MetadataOutput,
-    MetadataRequest,
+    checked_layout_primer, checked_metadata_dispatcher, fusion_operand_projection_prepares,
+    reset_fusion_operand_projection_prepares, reset_scratch_publication_observations,
+    scratch_publication_observations, MetadataOutput, MetadataRequest,
 };
-pub(crate) use dynamic_space::{dispatch_prepare, FusionOperandLayout, LayoutKeyBuilder};
+pub(crate) use dynamic_space::{
+    dispatch_prepare, encoded_layout_primer, tree_transform_operation_axes, FusionOperandLayout,
+    LayoutKeyBuilder,
+};
 pub use dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,

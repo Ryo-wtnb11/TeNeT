@@ -570,12 +570,9 @@ mod tests {
         );
         racah::cache::reset();
         assert_eq!(rule.rule_identity(), identity);
-        assert_eq!(
-            BlockStructure::trivial(&[700_000_001])
-                .unwrap()
-                .content_id(),
-            structure_id
-        );
+        let rebuilt = BlockStructure::trivial(&[700_000_001]).unwrap();
+        assert_eq!(rebuilt, structure);
+        assert_ne!(rebuilt.content_id(), structure_id);
 
         let _ = rule.f_symbol_scalar(
             sector(1),

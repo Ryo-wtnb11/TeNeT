@@ -6,13 +6,17 @@ use num_traits::Zero;
 #[cfg(any(test, feature = "testing"))]
 use tenet_core::GenericRigidSymbols;
 use tenet_core::{
-    BlockKey, BlockStructure, CategoricalScalar, CheckedGenericRigidSymbols, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeAdmissionMode, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, Placement, RuleIdentity, TensorMap,
+    BlockKey, BlockStructure, CategoricalScalar, CheckedGenericRigidSymbols, FusionTreeHomSpace,
+    HostReadableStorage, HostWritableStorage, MultiplicityFreeAdmissionMode,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, Placement, RuleIdentity,
+    TensorMap,
 };
 
 use crate::cache::OperationCachePolicy;
-use crate::contract::{BoundDynamicFusionMapSpace, FusionOperand};
+use crate::contract::{
+    tree_transform_operation_axes, BoundDynamicFusionMapSpace, FusionOperand,
+    PreparedCheckedGenericDynamicSpace,
+};
 use crate::mode::{PlanningAlgebra, TreeStructureSource};
 use crate::tree_transform::{
     build_checked_generic_tree_pair_transform_group_plan_validated,
@@ -187,49 +191,87 @@ where
         }
         .into());
     }
-    let identity = source.validate_transformed_generic_checked_identity(provider)?;
-    if provider.fusion_style() != tenet_core::FusionStyleKind::Generic {
-        return Err(tenet_core::CoreError::UnsupportedFusionStyle {
-            expected: tenet_core::FusionStyleKind::Generic,
-            actual: provider.fusion_style(),
-        }
-        .into());
-    }
-    let logical_source_key = if operand.storage_conjugate() {
-        if !Arc::ptr_eq(logical_space.provider_arc(), storage_space.provider_arc()) {
-            return Err(OperationError::StructureMismatch {
-                tensor: "checked adjoint provider",
+    let identity = std::cell::OnceCell::new();
+    let destination = std::cell::OnceCell::new();
+    let source_proof = std::cell::OnceCell::new();
+    let (codomain_axes, domain_axes) = tree_transform_operation_axes(&operation);
+    let structure =
+        FusionTreeHomSpace::prepare_complete_coupled_subblock_structure_generic_checked_with::<
+            _,
+            CheckedGenericPlanError<P::Error>,
+            _,
+        >(provider, || {
+            let actual = source.validate_transformed_generic_checked_identity(provider)?;
+            if provider.fusion_style() != tenet_core::FusionStyleKind::Generic {
+                return Err(tenet_core::CoreError::UnsupportedFusionStyle {
+                    expected: tenet_core::FusionStyleKind::Generic,
+                    actual: provider.fusion_style(),
+                }
+                .into());
             }
-            .into());
-        }
-        if storage_source.validate_transformed_generic_checked_identity(provider)? != identity {
-            return Err(OperationError::StructureMismatch {
-                tensor: "checked adjoint identity",
+            if operand.storage_conjugate() {
+                if !Arc::ptr_eq(logical_space.provider_arc(), storage_space.provider_arc()) {
+                    return Err(OperationError::StructureMismatch {
+                        tensor: "checked adjoint provider",
+                    }
+                    .into());
+                }
+                if storage_source.validate_transformed_generic_checked_identity(provider)? != actual
+                {
+                    return Err(OperationError::StructureMismatch {
+                        tensor: "checked adjoint identity",
+                    }
+                    .into());
+                }
+                if source.nout() != storage_source.nin()
+                    || source.nin() != storage_source.nout()
+                    || source.homspace().codomain() != storage_source.homspace().domain()
+                    || source.homspace().domain() != storage_source.homspace().codomain()
+                {
+                    return Err(OperationError::StructureMismatch {
+                        tensor: "checked adjoint relation",
+                    }
+                    .into());
+                }
+                validate_oriented_fusion_layout(source.structure(), operand)?;
             }
-            .into());
-        }
-        if source.nout() != storage_source.nin()
-            || source.nin() != storage_source.nout()
-            || source.homspace().codomain() != storage_source.homspace().domain()
-            || source.homspace().domain() != storage_source.homspace().codomain()
-        {
-            return Err(OperationError::StructureMismatch {
-                tensor: "checked adjoint relation",
+            let proof = validate_checked_generic_tree_pair_plan_preflight(
+                provider,
+                &operation,
+                source.structure(),
+            )?;
+            let homspace = source.homspace().try_permute_generic_checked(
+                provider,
+                codomain_axes,
+                domain_axes,
+            )?;
+            identity.set(actual).expect("checked producer runs once");
+            if source_proof.set(proof).is_err() {
+                unreachable!("checked producer runs once");
             }
-            .into());
-        }
-        validate_oriented_fusion_layout(source.structure(), operand)?;
-        Some(source.structure().as_ref())
-    } else {
-        None
-    };
-    let source_proof = validate_checked_generic_tree_pair_plan_preflight(
-        provider,
-        &operation,
-        source.structure(),
-    )?;
-    let prepared =
-        source.prepare_transformed_generic_checked(provider, &operation, identity.clone())?;
+            destination
+                .set(homspace.clone())
+                .expect("checked producer runs once");
+            Ok(homspace)
+        })?;
+    let identity = identity
+        .into_inner()
+        .expect("successful checked producer records identity");
+    let prepared = PreparedCheckedGenericDynamicSpace::from_complete_parts(
+        codomain_axes.len(),
+        domain_axes.len(),
+        destination
+            .into_inner()
+            .expect("successful checked producer records destination"),
+        structure,
+        identity.clone(),
+    );
+    let source_proof = source_proof
+        .into_inner()
+        .expect("successful checked producer records source proof");
+    let logical_source_key = operand
+        .storage_conjugate()
+        .then(|| source.structure().as_ref());
     let runtime_store = context.cache.runtime_store();
     let (cached, generation) = match &runtime_store {
         Some(store) => store.lookup_checked_generic(
@@ -893,6 +935,39 @@ where
             &structure,
             dst_structure,
             src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tree_transform_into_raw_oriented<R>(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperation,
+        dst_structure: &std::sync::Arc<BlockStructure>,
+        source: &crate::contract::FusionOperandLayout<'_>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let structure = self.tree_structure(
+            rule,
+            &operation,
+            dst_structure,
+            TreeStructureSource::Oriented(source),
+        )?;
+        self.backend.tree_transform_structure_into_raw(
+            &mut self.workspace,
+            &structure,
+            dst_structure,
+            source.storage_space().structure(),
             dst_data,
             src_data,
             alpha,

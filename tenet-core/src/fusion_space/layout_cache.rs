@@ -62,13 +62,17 @@ fn hash_product_space_signature<H: std::hash::Hasher>(space: &FusionProductSpace
     }
 }
 
-/// Semantic identity of one complete multiplicity-free block layout.
-///
-/// This deliberately owns neither a lazy `HomSpaceId` nor a layout id: both
-/// are process-local accelerators and are not part of the represented space.
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum CompleteFusionMode {
+    MultiplicityFree,
+    Generic,
+}
+
+/// Semantic identity of one complete block layout.
+#[derive(Clone, Debug)]
 pub(crate) struct CompleteHomSpaceStructureCacheKey {
     pub(crate) rule: RuleIdentity,
+    pub(crate) mode: CompleteFusionMode,
     pub(crate) homspace: Arc<FusionTreeHomSpaceContent>,
 }
 
@@ -79,6 +83,15 @@ impl CompleteHomSpaceStructureCacheKey {
     {
         Self {
             rule: rule.rule_identity(),
+            mode: CompleteFusionMode::MultiplicityFree,
+            homspace: Arc::clone(&homspace.content),
+        }
+    }
+
+    pub(crate) fn generic(rule: RuleIdentity, homspace: &FusionTreeHomSpace) -> Self {
+        Self {
+            rule,
+            mode: CompleteFusionMode::Generic,
             homspace: Arc::clone(&homspace.content),
         }
     }
@@ -86,7 +99,7 @@ impl CompleteHomSpaceStructureCacheKey {
 
 impl PartialEq for CompleteHomSpaceStructureCacheKey {
     fn eq(&self, other: &Self) -> bool {
-        self.rule == other.rule && self.homspace == other.homspace
+        self.rule == other.rule && self.mode == other.mode && self.homspace == other.homspace
     }
 }
 
@@ -95,6 +108,7 @@ impl Eq for CompleteHomSpaceStructureCacheKey {}
 impl std::hash::Hash for CompleteHomSpaceStructureCacheKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.rule.hash(state);
+        self.mode.hash(state);
         self.homspace.hash(state);
     }
 }
@@ -190,13 +204,15 @@ pub(crate) fn charged_fusion_tree_layout_bytes(
 /// Why weak: the wrapper carries lazily derived region state that is not
 /// charged here; while some owner keeps it alive, every hit shares it.
 pub(crate) struct DegeneracyStructureEntry {
+    homspace: HomSpaceId,
     content: Arc<BlockStructureContent>,
     wrapper: Mutex<Weak<BlockStructure>>,
 }
 
 impl DegeneracyStructureEntry {
-    fn new(structure: &Arc<BlockStructure>) -> Self {
+    fn new(key: &CompleteHomSpaceStructureCacheKey, structure: &Arc<BlockStructure>) -> Self {
         Self {
+            homspace: HomSpaceId::from_content(Arc::clone(&key.homspace)),
             content: structure.content_key(),
             wrapper: Mutex::new(Arc::downgrade(structure)),
         }
@@ -214,6 +230,10 @@ impl DegeneracyStructureEntry {
         let structure = BlockStructure::from_content(Arc::clone(&self.content)).into_shared();
         *wrapper = Arc::downgrade(&structure);
         structure
+    }
+
+    pub(crate) fn homspace_id(&self) -> HomSpaceId {
+        self.homspace.clone()
     }
 }
 
@@ -237,12 +257,10 @@ pub(crate) fn degeneracy_structure_cache(
 
 /// The cached complete structure of `key`: one shard read and the entry's
 /// wrapper.
-pub(super) fn complete_hom_space_structure_cached(
+pub(crate) fn complete_hom_space_structure_cached(
     key: &CompleteHomSpaceStructureCacheKey,
-) -> Option<Arc<BlockStructure>> {
-    degeneracy_structure_cache()
-        .get(key)
-        .map(|entry| entry.structure())
+) -> Option<Arc<DegeneracyStructureEntry>> {
+    degeneracy_structure_cache().get(key)
 }
 
 #[cfg(test)]
@@ -265,17 +283,18 @@ pub(crate) fn admit_complete_hom_space_structure(
     key: CompleteHomSpaceStructureCacheKey,
     structure: Arc<BlockStructure>,
     epoch: usize,
-) -> Arc<BlockStructure> {
+) -> (Arc<DegeneracyStructureEntry>, Arc<BlockStructure>) {
     #[cfg(test)]
     COMPLETE_HOM_SPACE_MISS_OBSERVATIONS.set(COMPLETE_HOM_SPACE_MISS_OBSERVATIONS.get() + 1);
     let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &structure.content_key());
-    let entry = Arc::new(DegeneracyStructureEntry::new(&structure));
+    let entry = Arc::new(DegeneracyStructureEntry::new(&key, &structure));
     let published = degeneracy_structure_cache().publish(&key, entry, charged_bytes, epoch);
-    // Our own entry, whose wrapper is `structure` (kept alive across the
-    // upgrade), or one another caller published first.
+    // Keep the offered wrapper live until the published winner is resolved.
+    // On an uncontended admission this preserves the candidate's lazy region
+    // memo; after a race this returns the actual winner instead.
     let canonical = published.structure();
     drop(structure);
-    canonical
+    (published, canonical)
 }
 
 pub(crate) fn charged_complete_hom_space_structure_bytes(

@@ -273,6 +273,7 @@ where
                 || source.adjoint_storage_indices(),
                 source.storage_space().structure(),
                 source.orientation(),
+                source.basis_order(),
                 source.rank(),
                 |axis| source.storage_axis(axis),
             ),
