@@ -1248,6 +1248,7 @@ fn memoized_adjoint_view_reads_the_current_admission() {
 }
 
 #[test]
+#[allow(clippy::arc_with_non_send_sync)] // The bound API requires Arc; this isolated spy uses Cell counters.
 fn checked_adjoint_provider_derivation_cannot_republish_after_reset() {
     if crate::test_support::run_isolated_or_return(
         "TENET_CHECKED_ADJOINT_PRODUCER_RESET", "contract::dynamic_space::bound_invariant_tests::checked_adjoint_provider_derivation_cannot_republish_after_reset",

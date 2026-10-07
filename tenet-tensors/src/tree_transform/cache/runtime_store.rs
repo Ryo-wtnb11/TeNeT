@@ -233,6 +233,7 @@ pub(super) struct CategoricalTransformKey {
 }
 
 impl CategoricalTransformKey {
+    #[allow(clippy::too_many_arguments)] // Every independent semantic determinant belongs in the key.
     pub(super) fn new(
         rule: RuleIdentity,
         operation: &TreeTransformOperation,

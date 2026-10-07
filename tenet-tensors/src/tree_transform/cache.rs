@@ -306,6 +306,7 @@ where
         self.runtime_store.as_ref().and_then(Weak::upgrade)
     }
 
+    #[allow(clippy::too_many_arguments)] // Keep the complete key determinants explicit.
     fn structure_key(
         rule: RuleKey,
         scope: TreeTransformScope,

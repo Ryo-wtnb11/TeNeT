@@ -813,10 +813,7 @@ fn generic_complete_owner_keeps_canonical_identity_regions_and_budget() {
         .legs()
         .iter()
         .chain(canonical_hom.domain().legs())
-        .map(|leg| {
-            leg.sectors().len() * std::mem::size_of::<SectorId>()
-                + leg.degeneracies().len() * std::mem::size_of::<usize>()
-        })
+        .map(|leg| std::mem::size_of_val(leg.sectors()) + std::mem::size_of_val(leg.degeneracies()))
         .sum::<usize>()
         + canonical_hom.rank() * std::mem::size_of::<SectorLeg>();
     assert!(

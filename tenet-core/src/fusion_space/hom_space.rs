@@ -856,7 +856,7 @@ impl FusionTreeHomSpace {
         }
 
         let layout = self.cached_fusion_tree_layout(rule);
-        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(&self, &layout)?;
+        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
         let built = BlockStructure::from_shared_parts(sector, degeneracy)?;
         built.record_storage_tiling();
         Ok(admit_complete_hom_space_structure(key, built.into_shared(), epoch).1)
@@ -898,7 +898,7 @@ impl FusionTreeHomSpace {
         R: MultiplicityFreeFusionRule,
     {
         let layout = self.fusion_tree_layout_data_uncached(rule);
-        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(&self, &layout)?;
+        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
         let required_len = degeneracy.required_len()?;
         Ok((
             required_len,

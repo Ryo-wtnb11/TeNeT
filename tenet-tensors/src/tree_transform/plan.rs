@@ -1921,6 +1921,7 @@ where
 }
 
 /// Builds the listed staged oriented groups, in order.
+#[allow(clippy::too_many_arguments)] // Borrow the existing source/projection state without a second owner.
 fn build_oriented_tree_pair_groups<R>(
     rule: &R,
     operation: &TreeTransformOperation,

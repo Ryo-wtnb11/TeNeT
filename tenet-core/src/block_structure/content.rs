@@ -352,6 +352,8 @@ mod collision_tests {
         let mut right = (*right.content_key()).clone();
         right.semantic_hash = left.semantic_hash;
         assert_ne!(left.as_ref(), &right);
+        // The sector charge memo is excluded from semantic equality and hashing.
+        #[allow(clippy::mutable_key_type)]
         let mut map = rustc_hash::FxHashMap::default();
         map.insert((*left).clone(), 1);
         map.insert(right.clone(), 2);
