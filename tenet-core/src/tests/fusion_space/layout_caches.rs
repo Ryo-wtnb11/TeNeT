@@ -424,6 +424,44 @@ fn complete_cache_separates_multiplicity_free_and_generic_modes() {
     assert_eq!(multiplicity_free.as_ref(), generic.as_ref());
     assert_ne!(multiplicity_free.content_id(), generic.content_id());
     assert_eq!(degeneracy_cache_info().entries(), 2);
+    for _ in 0..2 {
+        assert!(Arc::ptr_eq(
+            &generic,
+            &hom.coupled_subblock_structure_from_leg_degeneracies_generic(&SU2FusionRule)
+                .unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &multiplicity_free,
+            &hom.coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
+                .unwrap()
+        ));
+    }
+    let budget = degeneracy_cache_info().byte_budget();
+    set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, 0);
+    let rejected_mf = hom
+        .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
+        .unwrap();
+    let rejected_generic = hom
+        .coupled_subblock_structure_from_leg_degeneracies_generic(&SU2FusionRule)
+        .unwrap();
+    assert_eq!(rejected_mf.as_ref(), multiplicity_free.as_ref());
+    assert_eq!(rejected_generic.as_ref(), generic.as_ref());
+    assert_ne!(rejected_mf.content_id(), multiplicity_free.content_id());
+    assert_ne!(rejected_generic.content_id(), generic.content_id());
+    assert_eq!(degeneracy_cache_info().entries(), 0);
+    assert_eq!(degeneracy_cache_info().charged_bytes(), 0);
+    assert!(degeneracy_cache_info().rejections() >= 2);
+    set_structure_cache_byte_budget(StructureCacheKind::DegeneracyStructure, budget);
+    reset_core_intern_tables();
+    let fresh_generic = hom
+        .coupled_subblock_structure_from_leg_degeneracies_generic(&SU2FusionRule)
+        .unwrap();
+    let fresh_mf = hom
+        .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
+        .unwrap();
+    assert_ne!(fresh_mf.content_id(), rejected_mf.content_id());
+    assert_ne!(fresh_generic.content_id(), rejected_generic.content_id());
+    assert_eq!(degeneracy_cache_info().entries(), 2);
 }
 
 #[test]

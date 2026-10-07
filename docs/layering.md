@@ -142,12 +142,16 @@ application owns clearing them. A change of degeneracy alone must still hit
 caches 1 and 4.
 
 **Current caches.**
-- The process-global layout cache, intern tables and complete-HomSpace cache
-  live in `tenet-core`.
+- The process-global sector-layout and complete-HomSpace caches live in
+  `tenet-core`. The complete entry owns canonical HomSpace and block content;
+  a weak wrapper link shares a live `BlockStructure` without retaining it.
+- Separate block-content, wrapper and HomSpace intern tables are removed.
+  Deprecated block-intern diagnostics report zero retained entries.
 - The tree-transform stores live in `tenet-tensors` and are owned by each
   `Runtime`. Each store has its own byte budget, clear and info.
 - `tenet-tensors` keeps an operation-cache policy.
-- There is no shared wrapper and no single stats API yet.
+- The two core caches share `StructureCache` and `structure_cache_infos`.
+  Runtime tiers remain separate; the four-cache migration is unfinished.
 
 ### 3. tenferro and strided-rs (dense backend)
 
@@ -257,14 +261,15 @@ Structure caches (`structure_cache_infos` reports them):
 | Cache | Key | Crate | Scope | TensorKit cfaa073 |
 | --- | --- | --- | --- | --- |
 | Sector structure: fusion-tree keys and the shared `SectorStructure` | rule, sectors and duality per leg (no degeneracies); MF and Generic apart | `tenet-core` | process-global | `sectorstructure` |
-| Degeneracy structure: complete `BlockStructure` | rule and the full HomSpace | `tenet-core` | process-global | `degeneracystructure` |
+| Degeneracy structure: complete `BlockStructure` | rule, MF/Generic mode and the full HomSpace | `tenet-core` | process-global | `degeneracystructure` |
 | Tree transformer | dst, src, operation | `tenet-tensors` (`RuntimeTreeTransformStore` structures tier, `TreeTransformCache`) | per `Runtime` today; process-global in #2014 PR 3 | `treetransposer` / `treebraider` |
 | Transformation coefficients, Simple and Generic only | fusion-tree group | `tenet-tensors` (`RuntimeTreeTransformStore` plans and groups tiers) | per `Runtime` today; process-global in #2014 PR 4 | `fstranspose` / `fsbraid` (`NoCache` for Unique) |
 
-Still to be absorbed or removed by #2014: the block-structure and HomSpace
-intern tables (`tenet-core`, PR 2), the `DynamicFusionSpaceCache` of derived
-spaces (`tenet-tensors`, PR 3), and the operation-cache policy of the
-standalone contexts.
+The complete-HomSpace owner replaces the separate block-structure and
+HomSpace intern tables (#2014 PR 2). Still to be absorbed or removed: the
+`DynamicFusionSpaceCache` of derived spaces (`tenet-tensors`, PR 3) and the
+operation-cache policy of standalone contexts. Transformer and coefficient
+retention work in PRs 3 and 4 remains separate.
 
 Outside the four, by design:
 

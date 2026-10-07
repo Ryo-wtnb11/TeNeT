@@ -88,8 +88,10 @@ pub(super) fn new_block_structure_content(
 
 /// Clears the two bounded core structure caches.
 ///
-/// Live HomSpace identities and block-content ids remain valid. A build that
-/// straddles the reset returns a correct uncached value and cannot publish it.
+/// Live HomSpace identities and block-content ids remain valid. Complete-layout
+/// builds whose captured epoch straddles the reset cannot publish stale content;
+/// they may still use a current canonical hit. Identity-free prepared sector
+/// layouts retain their separate rule: commit may publish under the current epoch.
 pub fn reset_core_intern_tables() {
     let _serial = CORE_RESET_LOCK
         .lock()

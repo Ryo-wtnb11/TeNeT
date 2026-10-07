@@ -132,7 +132,7 @@ impl FusionTreeBlockGroup {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct SectorStructure {
     rank: usize,
     key_kind: Option<BlockKeyKind>,
@@ -140,7 +140,37 @@ pub struct SectorStructure {
     pub(super) fusion_tree_groups: Vec<FusionTreeBlockGroup>,
     pub(super) sorted_indices: DimVec,
     pub(super) compact_lookup: Option<CompactBlockLookup>,
+    pub(super) charged_heap_bytes: OnceLock<usize>,
 }
+
+impl Clone for SectorStructure {
+    fn clone(&self) -> Self {
+        Self {
+            rank: self.rank,
+            key_kind: self.key_kind,
+            blocks: self.blocks.clone(),
+            fusion_tree_groups: self.fusion_tree_groups.clone(),
+            sorted_indices: self.sorted_indices.clone(),
+            compact_lookup: self.compact_lookup.clone(),
+            // Vec cloning may change capacity, so the backing census cannot
+            // be copied even though semantic equality is preserved.
+            charged_heap_bytes: OnceLock::new(),
+        }
+    }
+}
+
+impl PartialEq for SectorStructure {
+    fn eq(&self, other: &Self) -> bool {
+        self.rank == other.rank
+            && self.key_kind == other.key_kind
+            && self.blocks == other.blocks
+            && self.fusion_tree_groups == other.fusion_tree_groups
+            && self.sorted_indices == other.sorted_indices
+            && self.compact_lookup == other.compact_lookup
+    }
+}
+
+impl Eq for SectorStructure {}
 
 impl SectorStructure {
     pub fn dense(rank: usize) -> Self {
@@ -155,6 +185,7 @@ impl SectorStructure {
             fusion_tree_groups: Vec::new(),
             sorted_indices: DimVec::new(),
             compact_lookup: None,
+            charged_heap_bytes: OnceLock::new(),
         }
     }
 
@@ -255,6 +286,7 @@ impl SectorStructure {
             fusion_tree_groups,
             sorted_indices,
             compact_lookup,
+            charged_heap_bytes: OnceLock::new(),
         }
     }
 

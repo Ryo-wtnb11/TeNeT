@@ -199,7 +199,12 @@ pub(crate) fn charged_fusion_tree_layout_bytes(
 }
 
 /// One complete block structure: the content strongly, the canonical wrapper
-/// weakly.
+/// weakly. TensorKit's complete dimensions/strides/offsets boundary is
+/// [degeneracystructure](https://github.com/QuantumKitHub/TensorKit.jl/blob/cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91/src/spaces/structure.jl#L114-L198).
+/// [QSpace's QIDX/DATA/CGR ownership](https://bitbucket.org/qspace4u/qspace-v4-pub/src/d2d3d7da6a59a2e8f2cb7dc8f33e7c345af59371/Source/QSpace.hh#lines-124:260)
+/// keeps runtime structural records with the tensor; it has no corresponding
+/// global interner. Bounded Arc/Weak canonical reuse and reset epochs are the
+/// Rust adaptation of that complete-geometry boundary.
 ///
 /// Why weak: the wrapper carries lazily derived region state that is not
 /// charged here; while some owner keeps it alive, every hit shares it.

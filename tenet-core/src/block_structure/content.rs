@@ -270,6 +270,15 @@ impl BlockStructureContent {
 impl SectorStructure {
     /// Conservative heap bytes this sector structure retains.
     pub(crate) fn charged_heap_bytes(&self) -> usize {
+        // Sector and complete-layout entries share this immutable backing.
+        // Repeating its frozen-slice census would allocate a dedup set on
+        // every complete-layout miss, including degeneracy-only changes.
+        *self
+            .charged_heap_bytes
+            .get_or_init(|| self.count_heap_bytes())
+    }
+
+    fn count_heap_bytes(&self) -> usize {
         fn key_bytes(key: &BlockKey, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {
             match key {
                 BlockKey::Dense => 0,
@@ -316,6 +325,24 @@ impl SectorStructure {
 #[cfg(test)]
 mod collision_tests {
     use super::*;
+
+    #[test]
+    fn sector_charge_recomputes_cloned_capacity_without_changing_equality() {
+        let mut sector = SectorStructure::dense(2);
+        sector.blocks.reserve(17);
+        assert!(sector.charged_heap_bytes.get().is_none());
+        let original = sector.charged_heap_bytes();
+        assert_eq!(sector.charged_heap_bytes.get(), Some(&original));
+        let cloned = sector.clone();
+        assert_eq!(sector, cloned);
+        assert!(cloned.charged_heap_bytes.get().is_none());
+        assert!(cloned.blocks.capacity() < sector.blocks.capacity());
+        let copied = cloned.charged_heap_bytes();
+        assert!(copied < original);
+        assert_eq!(copied, cloned.count_heap_bytes());
+        assert_eq!(original, sector.charged_heap_bytes());
+        assert_eq!(sector, cloned);
+    }
 
     #[test]
     fn unequal_content_with_equal_semantic_hash_remains_distinct() {
