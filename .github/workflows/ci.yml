@@ -413,6 +413,7 @@ jobs:
             -- --color never 2>&1 | tee "$test_output"
           test "$(grep -Ec '^test cuda_adapter::tests::[^ ]+ \.\.\. ok$' "$test_output")" -ge 9
           test "$(grep -Ec '^test (runtime::tests::cuda_device_lock_is_one_per_ordinal|typed::batched::contract_batch::fermionic_unit_tests::(signed_direct_can_leave_inactive_destination_blocks|cuda_dynamic_tree_admission_is_single_only)|typed::representation_gates::cuda::[^ ]+|typed::representation_gates::cuda_factorize::typed_cuda_[^ ]+) \.\.\. ok$' "$test_output")" -ge 8
+          grep -Fxq 'test typed::batched::contract_batch::fermionic_unit_tests::cuda_dynamic_tree_admission_is_single_only ... ok' "$test_output"
       - name: Run GPU-free CUDA tree-transform admission tests
         working-directory: tenet
         run: |
