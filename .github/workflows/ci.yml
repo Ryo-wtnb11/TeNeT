@@ -390,6 +390,8 @@ jobs:
             exit 1
           fi
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
@@ -401,6 +403,31 @@ jobs:
       # before any device access.
       - run: cargo test --locked -p tenet-dense --no-default-features --features cuda,cpu-faer --test cuda_stream_config_conflict --test cuda_stream_config_single
         working-directory: tenet
+      - name: Run GPU-free CUDA library tests
+        working-directory: tenet
+        run: |
+          set -euo pipefail
+          test_output="$(mktemp)"
+          trap 'rm -f "$test_output"' EXIT
+          cargo test --locked -p tenet-dense -p tenet-rs --lib --no-default-features --features cuda,cpu-faer \
+            -- --color never 2>&1 | tee "$test_output"
+          test "$(grep -Ec '^test cuda_adapter::tests::[^ ]+ \.\.\. ok$' "$test_output")" -ge 9
+          test "$(grep -Ec '^test (runtime::tests::cuda_device_lock_is_one_per_ordinal|typed::batched::contract_batch::fermionic_unit_tests::(signed_direct_can_leave_inactive_destination_blocks|cuda_dynamic_tree_admission_is_single_only)|typed::representation_gates::cuda::[^ ]+|typed::representation_gates::cuda_factorize::typed_cuda_[^ ]+) \.\.\. ok$' "$test_output")" -ge 8
+          grep -Fxq 'test typed::batched::contract_batch::fermionic_unit_tests::cuda_dynamic_tree_admission_is_single_only ... ok' "$test_output"
+      - name: Run GPU-free CUDA tree-transform admission tests
+        working-directory: tenet
+        run: |
+          set -euo pipefail
+          test_output="$(mktemp)"
+          trap 'rm -f "$test_output"' EXIT
+          cargo test --locked -p tenet-operations --test cuda_tree_transform --no-default-features --features cuda,cpu-faer \
+            -- --color never 2>&1 | tee "$test_output"
+          grep -Fxq 'test unit_single_member_preflight_rejects_cross_member_geometry ... ok' "$test_output"
+          grep -Fxq 'test single_member_admission_accepts_nonzero_and_rejects_zero ... ok' "$test_output"
+          grep -Eq '^test result: ok\. ([2-9]|[1-9][0-9]+) passed;' "$test_output"
+      - name: Clippy all CUDA-feature targets
+        working-directory: tenet
+        run: cargo clippy --locked --workspace --all-targets --no-default-features --features cuda,cpu-faer -- -D warnings
 
   test-linux:
     name: cargo test (ubuntu-latest)

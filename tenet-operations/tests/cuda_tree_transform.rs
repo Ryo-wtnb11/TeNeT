@@ -7,8 +7,8 @@
 //! compiled structure, which catches a device/host divergence even where both
 //! disagree with the fixture's intent.
 //!
-//! The device is the unit under test, so every test is `#[ignore]` like the
-//! rest of the device suite.
+//! Numerical device tests are `#[ignore]`; metadata and admission tests run
+//! without a device in ordinary CUDA-feature CI.
 
 #![cfg(feature = "cuda")]
 
