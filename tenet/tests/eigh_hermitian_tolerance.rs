@@ -17,7 +17,8 @@ fn leg() -> GradedSpace<U1FusionRule> {
 }
 
 /// `[[1, δ], [0, 2]]`: Hermitian to relative tolerance `tol` exactly when
-/// `δ/√2 ≤ tol·√5`, i.e. `δ ≤ tol·√10` (independent hand calculation).
+/// `|δ|/√2 ≤ tol·√(5 + δ²)` (independent hand calculation).
+/// The tests use the small-δ threshold `tol·√10` with a 3% margin.
 fn dense(runtime: &Runtime, delta: f64) -> TensorMap<U1FusionRule, f64> {
     let leg = leg();
     TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |_, index| match index {
@@ -29,7 +30,8 @@ fn dense(runtime: &Runtime, delta: f64) -> TensorMap<U1FusionRule, f64> {
     .unwrap()
 }
 
-/// `diag(1 + iδ, 2)`: Hermitian to `tol` exactly when `δ ≤ tol·√5`.
+/// `diag(1 + iδ, 2)`: Hermitian to `tol` when `|δ| ≤ tol·√(5 + δ²)`.
+/// The tests use the small-δ threshold `tol·√5` with a 3% margin.
 fn diagonal(runtime: &Runtime, delta: f64) -> TensorMap<U1FusionRule, Complex64> {
     TensorMap::diagonal(
         runtime,

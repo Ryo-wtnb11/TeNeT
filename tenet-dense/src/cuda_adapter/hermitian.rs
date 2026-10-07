@@ -67,13 +67,14 @@ fn magnitudes_for_sum_squares<D: CudaScalar>(
         .map_err(|err| cuda_error(op, err))
 }
 /// Tests packed square CUDA regions `(offset, n)` of `src` with the host EIGH
-/// rule `||(A - A^H)/2||_F <= 64 eps(real(D)) ||A||_F`, returning one decision
-/// per region. The residual uses the *conjugate* transpose, so a
+/// rule `||(A - A^H)/2||_F <= relative_tolerance * ||A||_F`, returning one
+/// decision per region. The residual uses the *conjugate* transpose, so a
 /// complex-symmetric non-Hermitian block is rejected.
 ///
 /// `relative_tolerance` is the caller's resolved eigh admission tolerance
 /// (TeNeT's `HermitianTol` at the payload's real-lane epsilon), the same one
 /// the host twin `normwise_hermitian` applies.
+/// The caller must supply a finite, non-negative value.
 ///
 /// A complex entry whose modulus overflows the lane is rejected here (the
 /// `hypot`-based `abs` gives infinity) but admitted by the component-scaled
@@ -219,6 +220,7 @@ pub fn cuda_hermitian_regions<D: CudaScalar>(
 /// regions, member `b` of region `(offset, n)` at `offset + b *
 /// member_stride`. Returns one decision per (member, region), member-major:
 /// `decisions[b * regions.len() + r]`.
+/// The caller must supply a finite, non-negative `relative_tolerance`.
 ///
 /// Each (member, region) pair is decided by exactly the rule and the three
 /// scalar stages of [`cuda_hermitian_regions`], with its own power-of-two

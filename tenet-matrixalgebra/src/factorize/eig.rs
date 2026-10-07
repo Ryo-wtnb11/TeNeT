@@ -20,12 +20,10 @@ impl HermitianReal for f64 {
 /// `hermitian_tol`: every coupled-sector block `A` must satisfy
 /// `‖(A − Aᴴ)/2‖_F ≤ tol · ‖A‖_F` at the payload's working precision.
 ///
-/// Why relative where MAK's `hermitian_tol` is an absolute `atol` against
-/// `eps(norm(A, Inf))^(3/4)` (`common/defaults.jl:default_hermitian_tol`,
-/// `norm(A, Inf)` the largest entry modulus `m`): TeNeT's decision is
-/// invariant under rescaling `A` (#1983, #1987). The two thresholds agree
-/// when `‖A‖_F = m ∈ [1, 2)`; otherwise TeNeT's is `‖A‖_F / 2^⌊log₂ m⌋`
-/// times MAK's, looser for large blocks and stricter for tiny ones.
+/// MAK uses an absolute `atol`, defaulting to `eps(norm(A, Inf))^(3/4)`
+/// (`common/defaults.jl:default_hermitian_tol`). TeNeT keeps a relative
+/// threshold so admission is invariant under rescaling `A` (#1983, #1987).
+/// The defaults agree for a scalar of unit magnitude, not at arbitrary scales.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HermitianTol {
     relative: Option<f64>,
@@ -61,10 +59,9 @@ impl HermitianTol {
 }
 
 /// `exp`'s spectral-route predicate in machine epsilons. Why not
-/// [`HermitianTol::DEFAULT`]: this picks an algorithm, not an admission. The
-/// spectral route exponentiates the Hermitian part, so a looser threshold
-/// would trade Padé's accuracy for a projection error of up to
-/// `tol · ‖A‖_F` on nearly-Hermitian input.
+/// [`HermitianTol::DEFAULT`]: this picks an algorithm, not an admission.
+/// The eigensolver reads a Hermitian triangle; retaining this threshold avoids
+/// sending additional nearly-Hermitian inputs from Padé to that spectral route.
 pub(crate) const EXP_SPECTRAL_ROUTE_EPSILONS: f64 = 64.0;
 
 #[cfg(test)]
@@ -1351,7 +1348,8 @@ pub fn validate_hermitian_regions<D: FactorScalar>(
 /// Hermitian input, and everything else goes to blockwise Padé. Inferring it
 /// from a failed EIGH would conflate hermiticity with a backend failure, so
 /// this asks directly, over the same direct-region / packed matricization
-/// split and the same relative Frobenius tolerance [`eigh_full_dyn`] uses.
+/// split and relative Frobenius measure as [`eigh_full_dyn`], with the
+/// separate threshold [`EXP_SPECTRAL_ROUTE_EPSILONS`].
 ///
 /// A non-endomorphism, a malformed layout or a non-square block is still an
 /// error — only non-hermiticity is `Ok(false)`. Nonfinite entries make

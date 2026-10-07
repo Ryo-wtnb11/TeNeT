@@ -630,8 +630,8 @@ fn eigh_vals_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
     assert_eq!(nonhermitian.data(), before);
 }
 
-/// `[[1, δ], [0, 2]]` is Hermitian to relative tolerance `tol` exactly when
-/// `‖(A − Aᴴ)/2‖_F = δ/√2 ≤ tol·‖A‖_F ≈ tol·√5`, that is `δ ≤ tol·√10`.
+/// `[[1, δ], [0, 2]]` passes when `|δ|/√2 ≤ tol·√(5 + δ²)`.
+/// Use the small-δ threshold `tol·√10` with a 3% margin.
 fn hermitian_threshold_pair<D: FactorScalar>(tol: f64, scale: f64) -> [TensorMap<D, 1, 1>; 2] {
     let threshold = tol * 10.0_f64.sqrt();
     let matrix = |delta: f64| {
