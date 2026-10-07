@@ -184,8 +184,8 @@ impl PartialEq for BlockStructureContent {
 }
 
 impl BlockStructureContent {
-    /// Process-local intern id (insertion-order counter into the block-structure
-    /// intern table). Identical content shares one `Arc` and id while its
+    /// Process-local, monotonically assigned, never-reused content identity.
+    /// Identical content shares one `Arc` and id while its
     /// interner key remains resident and at least one strong owner is live.
     /// Rebuilding after owner death, eviction, or reset issues a fresh id.
     /// It is not semantic identity and must never be serialized.

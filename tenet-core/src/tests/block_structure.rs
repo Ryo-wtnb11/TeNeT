@@ -8,6 +8,7 @@ mod generic_braid;
 mod generic_fold_and_transpose;
 mod intern_cache;
 mod sector_structure;
+mod staged_content;
 mod storage_injective;
 mod subblock_lookup_and_product_sectors;
 mod tree_block_validation;

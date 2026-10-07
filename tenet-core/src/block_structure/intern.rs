@@ -331,6 +331,40 @@ pub(super) fn intern_block_structure_content(
     })
 }
 
+// Previewed checked work already owns immutable content. Reuse its allocation
+// while keeping the same canonical winner, bounds and collision policy as the
+// ordinary interner; old staged identities must not cross a reset publication.
+pub(super) fn intern_prepared_block_structure_content(
+    candidate: Arc<BlockStructureContent>,
+    epoch: usize,
+) -> Arc<BlockStructureContent> {
+    #[cfg(test)]
+    BLOCK_STRUCTURE_INTERN_CALLS.set(BLOCK_STRUCTURE_INTERN_CALLS.get() + 1);
+    let key = BlockStructureInternKey::of(&candidate.sector, &candidate.degeneracy);
+    let table = block_structure_intern_table();
+    if let Ok(read) = table.read() {
+        if let Some(content) = read.lookup(&key, |content| content == candidate.as_ref()) {
+            return content;
+        }
+    }
+    let mut write = table
+        .write()
+        .expect("block structure intern table poisoned");
+    if let Some(content) = write.lookup(&key, |content| content == candidate.as_ref()) {
+        return content;
+    }
+    if !may_publish_since(epoch) {
+        return candidate;
+    }
+    #[cfg(test)]
+    PREPARED_INTERN_BEFORE_INSERT_HOOK.with(|hook| {
+        if let Some(hook) = hook.take() {
+            hook();
+        }
+    });
+    write.intern_with(key, charged_block_structure_intern_key_bytes, || candidate)
+}
+
 type BlockStructureArcTable = lru::LruCache<usize, Weak<BlockStructure>, rustc_hash::FxBuildHasher>;
 
 fn block_structure_arc_table() -> &'static RwLock<BlockStructureArcTable> {
@@ -379,9 +413,10 @@ pub(super) fn canonicalize_block_structure_arc(
 ///
 /// Reset contract: no identity created before the reset cleared the owning
 /// table is published after it. A build that straddles a reset still returns a correct result,
-/// but the result is not cached. The two intern tables uphold this by
-/// construction, because each mints its identity inside the write-locked
-/// insert, so whatever lands in a cleared table is new. The structure caches
+/// but the result is not cached. Ordinary intern entries mint their identity
+/// inside the write-locked insert. Already identified checked previews instead
+/// check their candidate-creation epoch under that same lock before publication.
+/// The structure caches
 /// publish values built earlier, so their admission checks
 /// `may_publish_since` under a lock that their clear takes exclusively
 /// (`StructureCache::publish`).
@@ -438,6 +473,10 @@ pub(crate) fn may_publish_since(epoch: usize) -> bool {
 
 #[cfg(test)]
 std::thread_local! {
+    /// Runs once with the candidate interner write lock held after the epoch guard.
+    pub(crate) static PREPARED_INTERN_BEFORE_INSERT_HOOK: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
+
     /// Runs once inside the next reset on this thread, after the complete
     /// cache is cleared and before the intern tables are.
     pub(crate) static MID_RESET_HOOK: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
