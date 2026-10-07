@@ -49,6 +49,7 @@ fn fixture_with_rule(
             rule,
             operation: TreeTransformOperation::permute([tag], []),
             orientation: tenet_core::FusionTreePairOrientation::Direct,
+            basis_order: super::OrientedBasisOrder::Canonical,
             logical_source: None,
         },
         &structure,
@@ -83,6 +84,7 @@ fn complex_fixture(
             rule: RuleIdentity::of_type::<TestRuleIdentity>(),
             operation: TreeTransformOperation::permute([tag], []),
             orientation: tenet_core::FusionTreePairOrientation::Direct,
+            basis_order: super::OrientedBasisOrder::Canonical,
             logical_source: None,
         },
         &structure,
@@ -106,7 +108,11 @@ fn pair_fixture(
         BlockStructure::from_blocks_with_rank(1, vec![block]).unwrap()
     };
     let dst = structure(dst_tag);
-    let src = structure(src_tag);
+    let src = if src_tag == dst_tag {
+        dst.clone()
+    } else {
+        structure(src_tag)
+    };
     let compiled = Arc::new(
         TreeTransformStructure::compile_structures(
             &dst,
@@ -120,6 +126,7 @@ fn pair_fixture(
             rule: RuleIdentity::of_type::<TestRuleIdentity>(),
             operation: TreeTransformOperation::permute([0], []),
             orientation: tenet_core::FusionTreePairOrientation::Direct,
+            basis_order: super::OrientedBasisOrder::Canonical,
             logical_source: None,
         },
         &dst,
@@ -843,6 +850,7 @@ fn plan_key(tag: usize, degeneracy: usize) -> super::CategoricalTransformKey {
         RuleIdentity::of_type::<TestRuleIdentity>(),
         &TreeTransformOperation::permute([0], []),
         tenet_core::FusionTreePairOrientation::Direct,
+        super::OrientedBasisOrder::Canonical,
         false,
         &structure,
         &structure,
@@ -1087,6 +1095,7 @@ fn structure_and_plan_entries_charge_a_shared_content_once() {
         RuleIdentity::of_type::<TestRuleIdentity>(),
         &TreeTransformOperation::permute([0], []),
         tenet_core::FusionTreePairOrientation::Direct,
+        super::OrientedBasisOrder::Canonical,
         false,
         &structure,
         &structure,

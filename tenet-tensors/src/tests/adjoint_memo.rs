@@ -163,7 +163,7 @@ where
     )
     .unwrap();
     assert_eq!(memoized.structure().as_ref(), &rebuilt);
-    assert_eq!(memoized.structure().content_id(), rebuilt.content_id());
+    assert_ne!(memoized.structure().content_id(), rebuilt.content_id());
     assert_eq!(
         memoized.adjoint_view().unwrap(),
         *lhs.space(),

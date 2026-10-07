@@ -10,6 +10,7 @@
 
 /// Process-wide structural layout and intern caches: bounded, observable and
 /// resettable between workloads.
+#[allow(deprecated)]
 pub use tenet_core::{
     block_structure_intern_cache_info, reset_core_intern_tables, set_structure_cache_byte_budget,
     structure_cache_info, structure_cache_infos, BlockStructureInternCacheInfo, StructureCacheInfo,

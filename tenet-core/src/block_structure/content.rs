@@ -122,6 +122,7 @@ pub(super) type CoupledRegionCache = Arc<[OnceLock<CoupledRegionResult>]>;
 #[derive(Clone, Eq)]
 pub struct BlockStructureContent {
     pub(crate) id: usize,
+    semantic_hash: u64,
     /// Shared with every structure of the same sector layout: a
     /// degeneracy-only change reuses it (TensorKit `sectorstructure`).
     pub(crate) sector: Arc<SectorStructure>,
@@ -135,7 +136,7 @@ pub struct BlockStructureContent {
 /// equality compares, so the bit is sound on every structure sharing this
 /// content and is excluded from equality. Why not compute it on demand: the
 /// general check (`coupled_sector_regions`) allocates and hashes, and is
-/// cached on the short-lived wrapper, not on this interned content.
+/// cached on the short-lived wrapper, not on this immutable content.
 #[derive(Debug, Default)]
 pub(crate) struct StorageTilingProof(core::sync::atomic::AtomicBool);
 
@@ -167,28 +168,56 @@ impl core::fmt::Debug for BlockStructureContent {
     }
 }
 
-// Content equality deliberately ignores `id`: the id is a process-local
-// intern handle (monotonic since the bounded-FIFO change, never reused across
-// eviction or reset), not part of the content. Including it in the derived
-// PartialEq made content-equal structures interned in different reset
-// epochs compare unequal, which broke replay's content-fallback validation
-// (caught by reset_and_concurrent_rebuild_keep_structure_semantics in CI).
-// Id-keyed caches are unaffected: they key on `id()` explicitly and rely on
-// monotonicity, not on equality of the full content struct.
+// Content equality deliberately treats `id` only as a same-instance shortcut:
+// independently built equal content has a distinct process-local id and must
+// still compare equal by geometry. Id-keyed caches remain intentionally
+// stricter: they key on `id()` explicitly and rely on monotonicity.
 impl PartialEq for BlockStructureContent {
     fn eq(&self, other: &Self) -> bool {
-        self.sector == other.sector
-            && self.degeneracy == other.degeneracy
-            && self.required_len == other.required_len
+        self.id == other.id
+            || (self.semantic_hash == other.semantic_hash
+                && self.sector == other.sector
+                && self.degeneracy == other.degeneracy
+                && self.required_len == other.required_len)
+    }
+}
+
+impl std::hash::Hash for BlockStructureContent {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.semantic_hash.hash(state);
     }
 }
 
 impl BlockStructureContent {
+    pub(crate) fn new(
+        sector: Arc<SectorStructure>,
+        degeneracy: DegeneracyStructure,
+        required_len: usize,
+    ) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        sector.rank().hash(&mut hasher);
+        for block in sector.blocks() {
+            block.key().hash(&mut hasher);
+        }
+        degeneracy.rank.hash(&mut hasher);
+        degeneracy.dims.hash(&mut hasher);
+        degeneracy.offsets.hash(&mut hasher);
+        required_len.hash(&mut hasher);
+        Self {
+            id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
+            semantic_hash: hasher.finish(),
+            sector,
+            degeneracy,
+            required_len,
+            storage_tiling: StorageTilingProof::default(),
+        }
+    }
+
     /// Process-local, monotonically assigned, never-reused content identity.
-    /// Identical content shares one `Arc` and id while its
-    /// interner key remains resident and at least one strong owner is live.
-    /// Rebuilding after owner death, eviction, or reset issues a fresh id.
-    /// It is not semantic identity and must never be serialized.
+    /// One canonical complete-HomSpace cache entry and its live consumers
+    /// share an id. Independently constructed or rebuilt equal content receives
+    /// a fresh id. It is not semantic identity and must never be serialized.
     #[inline]
     pub fn id(&self) -> usize {
         self.id
@@ -241,6 +270,15 @@ impl BlockStructureContent {
 impl SectorStructure {
     /// Conservative heap bytes this sector structure retains.
     pub(crate) fn charged_heap_bytes(&self) -> usize {
+        // Sector and complete-layout entries share this immutable backing.
+        // Repeating its frozen-slice census would allocate a dedup set on
+        // every complete-layout miss, including degeneracy-only changes.
+        *self
+            .charged_heap_bytes
+            .get_or_init(|| self.count_heap_bytes())
+    }
+
+    fn count_heap_bytes(&self) -> usize {
         fn key_bytes(key: &BlockKey, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {
             match key {
                 BlockKey::Dense => 0,
@@ -281,5 +319,46 @@ impl SectorStructure {
             .saturating_add(groups)
             .saturating_add(spilled_smallvec_heap_bytes(&self.sorted_indices))
             .saturating_add(compact_lookup)
+    }
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+
+    #[test]
+    fn sector_charge_recomputes_cloned_capacity_without_changing_equality() {
+        let mut sector = SectorStructure::dense(2);
+        sector.blocks.reserve(17);
+        assert!(sector.charged_heap_bytes.get().is_none());
+        let original = sector.charged_heap_bytes();
+        assert_eq!(sector.charged_heap_bytes.get(), Some(&original));
+        let cloned = sector.clone();
+        assert_eq!(sector, cloned);
+        assert!(cloned.charged_heap_bytes.get().is_none());
+        assert!(cloned.blocks.capacity() < sector.blocks.capacity());
+        let copied = cloned.charged_heap_bytes();
+        assert!(copied < original);
+        assert_eq!(copied, cloned.count_heap_bytes());
+        assert_eq!(original, sector.charged_heap_bytes());
+        assert_eq!(sector, cloned);
+    }
+
+    #[test]
+    fn unequal_content_with_equal_semantic_hash_remains_distinct() {
+        let left = BlockStructure::packed_column_major(2, [vec![2, 3]]).unwrap();
+        let right = BlockStructure::packed_column_major(2, [vec![3, 2]]).unwrap();
+        let left = left.content_key();
+        let mut right = (*right.content_key()).clone();
+        right.semantic_hash = left.semantic_hash;
+        assert_ne!(left.as_ref(), &right);
+        // The sector charge memo is excluded from semantic equality and hashing.
+        #[allow(clippy::mutable_key_type)]
+        let mut map = rustc_hash::FxHashMap::default();
+        map.insert((*left).clone(), 1);
+        map.insert(right.clone(), 2);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[left.as_ref()], 1);
+        assert_eq!(map[&right], 2);
     }
 }

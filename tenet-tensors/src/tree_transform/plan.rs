@@ -1,7 +1,7 @@
 use core::ops::{Add, Mul};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use std::{collections::hash_map::Entry, sync::Arc};
+use std::{borrow::Cow, collections::hash_map::Entry, sync::Arc};
 
 use num_traits::Zero;
 #[cfg(any(test, feature = "testing"))]
@@ -24,13 +24,26 @@ use tenet_core::{
 
 use crate::{OperationError, TreeTransformStructure};
 
-use super::cache::{GroupSlot, GroupSpecReuse, SourceGroup};
+use super::cache::{GroupSlot, GroupSpecReuse, OrientedBasisOrder, SourceGroup};
 use super::operation::{
     TreeTransformOperation, TreeTransformOperationKind, ValidateBraidingSupport,
 };
 
-/// One oriented source group: logical keys, storage indices and split.
-type OrientedGroup<'k> = (Vec<&'k FusionTreePairKey>, Vec<usize>, (usize, usize));
+struct OrientedGroup<'k> {
+    // Storage order uses the parent's group indices directly; canonical order
+    // needs the logical-to-storage bijection already admitted by the operand.
+    logical_indices: Option<Vec<usize>>,
+    storage_indices: Cow<'k, [usize]>,
+    source_split: (usize, usize),
+}
+
+impl OrientedGroup<'_> {
+    fn logical_indices(&self) -> &[usize] {
+        self.logical_indices
+            .as_deref()
+            .unwrap_or(&self.storage_indices)
+    }
+}
 
 pub use tenet_operations::transform_plan::{
     TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
@@ -1774,12 +1787,13 @@ where
     clippy::too_many_arguments,
     reason = "the oriented planner keeps logical keys, storage authority, projection, orientation, rank, and thread policy explicit"
 )]
-pub(crate) fn build_oriented_tree_pair_transform_group_plan_with_threads<R>(
+pub(crate) fn build_oriented_tree_pair_transform_group_plan_capability_validated<R>(
     rule: &R,
     operation: TreeTransformOperation,
     logical_keys: &[FusionTreePairKey],
     storage_structure: &BlockStructure,
     orientation: FusionTreePairOrientation,
+    basis_order: OrientedBasisOrder,
     logical_rank: usize,
     storage_projection: &FxHashMap<&FusionTreePairKey, usize>,
     threads: usize,
@@ -1789,53 +1803,85 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
-    validate_multiplicity_free_tree_transform_capability(rule, &operation)?;
+    // The sole cache caller admits capability before lookup, for both hits
+    // and misses; do not query mutable provider capability a second time here.
     validate_tree_transform_rank_syntax(&operation, logical_rank)?;
     let source_axes = operation_source_axes(&operation);
     // Why the logical keys suffice for a group: the adjoint orientation maps
     // each logical tree pair to exactly one storage tree pair, and that pair
     // is all the builder reads at the projected storage index.
     let reuse = reuse.filter(|_| rule.fusion_style() != FusionStyleKind::Unique);
-    let mut group_indices = FxHashMap::default();
     let mut group_keys = Vec::new();
     let mut staged_groups = Vec::<OrientedGroup<'_>>::new();
-    for key in logical_keys {
-        let group_key = key.group_key();
-        let group_index = match group_indices.entry(group_key) {
-            Entry::Occupied(entry) => *entry.get(),
-            Entry::Vacant(entry) => {
-                let group_index = staged_groups.len();
-                if reuse.is_some() {
-                    group_keys.push(entry.key().clone());
-                }
-                entry.insert(group_index);
-                staged_groups.push((
-                    Vec::new(),
-                    Vec::new(),
-                    (
-                        key.codomain_tree().uncoupled().len(),
-                        key.domain_tree().uncoupled().len(),
-                    ),
-                ));
-                group_index
+    if basis_order == OrientedBasisOrder::Storage {
+        // Swapping whole trees is a bijection on group keys. Parent groups
+        // therefore preserve logical first appearance and member order without
+        // rebuilding a hash grouping or allocating per-group index vectors.
+        // TensorKit likewise traverses an adjoint through its parent's blocks:
+        // https://github.com/QuantumKitHub/TensorKit.jl/blob/cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91/src/tensors/adjoint.jl#L29-L44
+        // The sole production Storage constructor makes one swapped key per
+        // present parent block and the identity storage-index projection.
+        for group in storage_structure.fusion_tree_group_slice() {
+            let indices = group.block_indices();
+            let key = &logical_keys[indices[0]];
+            if reuse.is_some() {
+                group_keys.push(key.group_key());
             }
-        };
-        staged_groups[group_index].0.push(key);
-        staged_groups[group_index]
-            .1
-            .push(
+            staged_groups.push(OrientedGroup {
+                logical_indices: None,
+                storage_indices: Cow::Borrowed(indices),
+                source_split: (
+                    key.codomain_tree().uncoupled().len(),
+                    key.domain_tree().uncoupled().len(),
+                ),
+            });
+        }
+    } else {
+        let mut group_indices = FxHashMap::default();
+        for (logical_index, key) in logical_keys.iter().enumerate() {
+            let group_index = match group_indices.entry(key.group_key()) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => {
+                    let group_index = staged_groups.len();
+                    if reuse.is_some() {
+                        group_keys.push(entry.key().clone());
+                    }
+                    entry.insert(group_index);
+                    staged_groups.push(OrientedGroup {
+                        logical_indices: Some(Vec::new()),
+                        storage_indices: Cow::Owned(Vec::new()),
+                        source_split: (
+                            key.codomain_tree().uncoupled().len(),
+                            key.domain_tree().uncoupled().len(),
+                        ),
+                    });
+                    group_index
+                }
+            };
+            staged_groups[group_index]
+                .logical_indices
+                .as_mut()
+                .expect("canonical group")
+                .push(logical_index);
+            staged_groups[group_index].storage_indices.to_mut().push(
                 *storage_projection
                     .get(key)
                     .ok_or(OperationError::StructureMismatch {
                         tensor: "oriented source projection",
                     })?,
             );
+        }
     }
 
     let flat_keys: Option<Vec<&FusionTreePairKey>> = reuse.map(|_| {
         staged_groups
             .iter()
-            .flat_map(|(src_keys, _, _)| src_keys.iter().copied())
+            .flat_map(|group| {
+                group
+                    .logical_indices()
+                    .iter()
+                    .map(|&index| &logical_keys[index])
+            })
             .collect()
     });
     let groups = flat_keys.as_deref().map(|keys| {
@@ -1843,7 +1889,7 @@ where
             group_keys
                 .iter()
                 .zip(&staged_groups)
-                .map(|(group_key, (src_keys, _, _))| (group_key, src_keys.len())),
+                .map(|(group_key, group)| (group_key, group.storage_indices.len())),
             keys,
         )
     });
@@ -1867,6 +1913,7 @@ where
             storage_structure,
             orientation,
             &source_axes,
+            logical_keys,
             staged_groups,
             threads,
         )
@@ -1874,12 +1921,14 @@ where
 }
 
 /// Builds the listed staged oriented groups, in order.
+#[allow(clippy::too_many_arguments)] // Borrow the existing source/projection state without a second owner.
 fn build_oriented_tree_pair_groups<R>(
     rule: &R,
     operation: &TreeTransformOperation,
     storage_structure: &BlockStructure,
     orientation: FusionTreePairOrientation,
     source_axes: &Arc<[usize]>,
+    logical_keys: &[FusionTreePairKey],
     staged_groups: Vec<&OrientedGroup<'_>>,
     threads: usize,
 ) -> Result<Vec<Vec<TreeTransformGroupBlockSpec<R::Scalar>>>, OperationError>
@@ -1889,19 +1938,19 @@ where
 {
     let mut primary_prepared = None;
     let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
-    for (_, _, source_split) in &staged_groups {
+    for group in &staged_groups {
         prepared_tree_pair_operation_for_split(
             &mut primary_prepared,
             &mut additional_prepared,
             rule,
             operation,
-            *source_split,
+            group.source_split,
         )?;
     }
 
     execute_staged_groups(staged_groups, threads, |group| {
-        let (src_keys, storage_indices, source_split) = group;
-        let source_split = *source_split;
+        let storage_indices = group.storage_indices.as_ref();
+        let source_split = group.source_split;
         let prepared = primary_prepared
             .as_ref()
             .filter(|(split, _)| *split == source_split)
@@ -1934,7 +1983,10 @@ where
         }
         .map_err(OperationError::from_core_preserving_context)?;
         assemble_ordered_tree_pair_group_specs_from_keys(
-            src_keys.iter().map(|key| (*key).clone()).collect(),
+            group
+                .logical_indices()
+                .iter()
+                .map(|&index| logical_keys[index].clone()),
             source_axes,
             ordered,
         )
@@ -1999,16 +2051,17 @@ where
         src_keys.push(src_key.clone());
     }
 
-    assemble_ordered_tree_pair_group_specs_from_keys(src_keys, source_axes, ordered)
+    assemble_ordered_tree_pair_group_specs_from_keys(src_keys.into_iter(), source_axes, ordered)
 }
 
-fn assemble_ordered_tree_pair_group_specs_from_keys<T>(
-    src_keys: Vec<FusionTreePairKey>,
+fn assemble_ordered_tree_pair_group_specs_from_keys<T, I>(
+    src_keys: I,
     source_axes: &Arc<[usize]>,
     ordered: OrderedBlockLinearMap<FusionTreePairKey, T>,
 ) -> Result<Vec<TreeTransformGroupBlockSpec<T>>, OperationError>
 where
     T: Clone + Zero,
+    I: ExactSizeIterator<Item = FusionTreePairKey>,
 {
     let (destinations, source_count, storage) = ordered.into_parts();
     if source_count != src_keys.len() {
@@ -2030,6 +2083,21 @@ where
                     tensor: "ordered singleton tree-pair columns",
                 });
             }
+            if destinations.len() == source_count
+                && destination_rows
+                    .iter()
+                    .enumerate()
+                    .all(|(index, &row)| index == row)
+            {
+                return Ok(src_keys
+                    .zip(destinations)
+                    .zip(coefficients)
+                    .map(|((source, destination), coefficient)| {
+                        TreeTransformGroupBlockSpec::single(destination, source, coefficient)
+                            .with_shared_source_axes(Arc::clone(source_axes))
+                    })
+                    .collect());
+            }
             let mut destination_seen = vec![false; destinations.len()];
             let mut is_injective = true;
             for &destination_row in &destination_rows {
@@ -2045,7 +2113,6 @@ where
             if is_injective {
                 let mut destination_slots = destinations.into_iter().map(Some).collect::<Vec<_>>();
                 return Ok(src_keys
-                    .into_iter()
                     .zip(destination_rows)
                     .zip(coefficients)
                     .map(|((source, destination_row), coefficient)| {

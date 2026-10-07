@@ -48,7 +48,7 @@ impl BlockStructure {
     }
 }
 
-/// Fully validated block metadata that has not entered the global interner.
+/// Fully validated block metadata staged before its final owner is selected.
 ///
 /// Structural ownership follows [TensorKit's sector/degeneracy structure](https://github.com/Jutho/TensorKit.jl/blob/cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91/src/spaces/structure.jl#L114)
 /// and [QSpace's grouped reduced-block trace](https://bitbucket.org/qspace4u/qspace-v4-pub/src/d2d3d7da6a59a2e8f2cb7dc8f33e7c345af59371/Source/QSpace.cc#lines-4501:4625).
@@ -59,11 +59,31 @@ impl BlockStructure {
 /// [`Self::commit`] only after all later validation has succeeded.
 #[doc(hidden)]
 pub struct PreparedBlockStructure {
+    state: PreparedBlockStructureState,
+    required_len: usize,
+    storage_tiling: bool,
+}
+
+enum PreparedBlockStructureState {
+    Fresh(PreparedBlockStructureCandidate),
+    CompleteHit {
+        homspace: FusionTreeHomSpace,
+        canonical_id: HomSpaceId,
+        structure: Arc<BlockStructure>,
+    },
+    CompleteMiss {
+        homspace: FusionTreeHomSpace,
+        candidate: PreparedBlockStructureCandidate,
+        key: CompleteHomSpaceStructureCacheKey,
+        epoch: usize,
+        probe_on_commit: bool,
+    },
+}
+
+struct PreparedBlockStructureCandidate {
     sector: Arc<SectorStructure>,
     degeneracy: std::sync::Mutex<Option<DegeneracyStructure>>,
-    required_len: usize,
-    preview: OnceLock<(BlockStructure, usize)>,
-    storage_tiling: bool,
+    preview: OnceLock<BlockStructure>,
 }
 
 impl PreparedBlockStructure {
@@ -106,12 +126,58 @@ impl PreparedBlockStructure {
         }
         let required_len = degeneracy.required_len()?;
         Ok(Self {
-            sector,
-            degeneracy: std::sync::Mutex::new(Some(degeneracy)),
+            state: PreparedBlockStructureState::Fresh(PreparedBlockStructureCandidate {
+                sector,
+                degeneracy: std::sync::Mutex::new(Some(degeneracy)),
+                preview: OnceLock::new(),
+            }),
             required_len,
-            preview: OnceLock::new(),
             storage_tiling: false,
         })
+    }
+
+    pub(crate) fn complete_hit(
+        homspace: FusionTreeHomSpace,
+        canonical_id: HomSpaceId,
+        structure: Arc<BlockStructure>,
+    ) -> Self {
+        Self {
+            required_len: structure.content.required_len,
+            storage_tiling: structure.storage_tiling_proven(),
+            state: PreparedBlockStructureState::CompleteHit {
+                homspace,
+                canonical_id,
+                structure,
+            },
+        }
+    }
+
+    pub(crate) fn complete_miss(
+        homspace: FusionTreeHomSpace,
+        prepared: Self,
+        key: CompleteHomSpaceStructureCacheKey,
+        epoch: usize,
+        probe_on_commit: bool,
+    ) -> Self {
+        let Self {
+            state: PreparedBlockStructureState::Fresh(candidate),
+            required_len,
+            storage_tiling,
+        } = prepared
+        else {
+            unreachable!("complete miss must wrap one fresh candidate")
+        };
+        Self {
+            state: PreparedBlockStructureState::CompleteMiss {
+                homspace,
+                candidate,
+                key,
+                epoch,
+                probe_on_commit,
+            },
+            required_len,
+            storage_tiling,
+        }
     }
 
     /// Marks this staged geometry as built by the canonical coupled-sector
@@ -122,34 +188,16 @@ impl PreparedBlockStructure {
         self
     }
 
-    /// Borrow an uninterned structure for validation and plan compilation.
+    /// Borrow the staged structure for validation and plan compilation.
     #[doc(hidden)]
     pub fn structure(&self) -> &BlockStructure {
-        &self
-            .preview
-            .get_or_init(|| {
-                let epoch = core_reset_epoch();
-                // The mutex transfers ownership through &self once; release it
-                // before allocating the immutable preview or deriving its witness.
-                let degeneracy = self
-                    .degeneracy
-                    .lock()
-                    .expect("staged degeneracy ownership poisoned")
-                    .take()
-                    .expect("staged degeneracy already moved");
-                let preview = BlockStructure::from_content(Arc::new(BlockStructureContent {
-                    id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
-                    sector: Arc::clone(&self.sector),
-                    degeneracy,
-                    required_len: self.required_len,
-                    storage_tiling: StorageTilingProof::default(),
-                }));
-                if self.storage_tiling {
-                    preview.record_storage_tiling();
-                }
-                (preview, epoch)
-            })
-            .0
+        match &self.state {
+            PreparedBlockStructureState::CompleteHit { structure, .. } => structure,
+            PreparedBlockStructureState::Fresh(candidate)
+            | PreparedBlockStructureState::CompleteMiss { candidate, .. } => candidate
+                .preview
+                .get_or_init(|| self.preview_candidate(candidate)),
+        }
     }
 
     #[doc(hidden)]
@@ -161,27 +209,134 @@ impl PreparedBlockStructure {
     /// prevalidation must not allocate the preview's immutable content.
     #[doc(hidden)]
     pub fn sector_structure(&self) -> &SectorStructure {
-        &self.sector
+        match &self.state {
+            PreparedBlockStructureState::CompleteHit { structure, .. } => {
+                structure.sector_structure()
+            }
+            PreparedBlockStructureState::Fresh(candidate)
+            | PreparedBlockStructureState::CompleteMiss { candidate, .. } => &candidate.sector,
+        }
     }
 
-    /// Publish the validated structure through the existing interner.
+    /// Finish the validated structure, publishing through the complete-space
+    /// cache when this preparation carries a complete-space transaction.
     #[doc(hidden)]
     pub fn commit(self) -> BlockStructure {
-        let structure = match self.preview.into_inner() {
-            Some((preview, epoch)) => BlockStructure {
-                content: intern_prepared_block_structure_content(preview.content, epoch),
-                regions: preview.regions,
-            },
-            None => BlockStructure::from_content(intern_block_structure_content(
-                self.sector,
-                self.degeneracy
+        let Self {
+            state,
+            required_len,
+            storage_tiling,
+        } = self;
+        match state {
+            PreparedBlockStructureState::Fresh(candidate) => {
+                Self::finish_candidate(candidate, required_len, storage_tiling)
+            }
+            PreparedBlockStructureState::CompleteHit { structure, .. } => {
+                structure.as_ref().clone()
+            }
+            PreparedBlockStructureState::CompleteMiss {
+                candidate,
+                key,
+                epoch,
+                probe_on_commit,
+                ..
+            } => {
+                if probe_on_commit {
+                    if let Some(entry) = complete_hom_space_structure_cached(&key) {
+                        return entry.structure().as_ref().clone();
+                    }
+                }
+                let structure =
+                    Self::finish_candidate(candidate, required_len, storage_tiling).into_shared();
+                admit_complete_hom_space_structure(key, structure, epoch)
+                    .1
+                    .as_ref()
+                    .clone()
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn commit_with_complete_homspace(
+        self,
+    ) -> (Option<FusionTreeHomSpace>, Arc<BlockStructure>) {
+        let Self {
+            state,
+            required_len,
+            storage_tiling,
+        } = self;
+        match state {
+            PreparedBlockStructureState::CompleteHit {
+                homspace,
+                canonical_id,
+                structure,
+            } => (Some(homspace.with_canonical_id(canonical_id)), structure),
+            PreparedBlockStructureState::CompleteMiss {
+                homspace,
+                candidate,
+                key,
+                epoch,
+                probe_on_commit,
+            } => {
+                if probe_on_commit {
+                    if let Some(entry) = complete_hom_space_structure_cached(&key) {
+                        return (
+                            Some(homspace.with_canonical_id(entry.homspace_id())),
+                            entry.structure(),
+                        );
+                    }
+                }
+                let structure =
+                    Self::finish_candidate(candidate, required_len, storage_tiling).into_shared();
+                let (entry, structure) = admit_complete_hom_space_structure(key, structure, epoch);
+                (
+                    Some(homspace.with_canonical_id(entry.homspace_id())),
+                    structure,
+                )
+            }
+            PreparedBlockStructureState::Fresh(candidate) => (
+                None,
+                Self::finish_candidate(candidate, required_len, storage_tiling).into_shared(),
+            ),
+        }
+    }
+
+    fn preview_candidate(&self, candidate: &PreparedBlockStructureCandidate) -> BlockStructure {
+        let degeneracy = candidate
+            .degeneracy
+            .lock()
+            .expect("staged degeneracy ownership poisoned")
+            .take()
+            .expect("staged degeneracy already moved");
+        let preview = BlockStructure::from_content(Arc::new(BlockStructureContent::new(
+            Arc::clone(&candidate.sector),
+            degeneracy,
+            self.required_len,
+        )));
+        if self.storage_tiling {
+            preview.record_storage_tiling();
+        }
+        preview
+    }
+
+    fn finish_candidate(
+        candidate: PreparedBlockStructureCandidate,
+        required_len: usize,
+        storage_tiling: bool,
+    ) -> BlockStructure {
+        let structure = match candidate.preview.into_inner() {
+            Some(preview) => preview,
+            None => BlockStructure::from_content(Arc::new(BlockStructureContent::new(
+                candidate.sector,
+                candidate
+                    .degeneracy
                     .into_inner()
                     .expect("staged degeneracy ownership poisoned")
                     .expect("staged degeneracy already moved"),
-                self.required_len,
-            )),
+                required_len,
+            ))),
         };
-        if self.storage_tiling {
+        if storage_tiling {
             structure.record_storage_tiling();
         }
         structure
@@ -214,7 +369,7 @@ impl BlockStructure {
     pub fn empty(rank: usize) -> Self {
         let sector = Arc::new(SectorStructure::empty(rank));
         let degeneracy = DegeneracyStructure::empty(rank);
-        Self::from_content(intern_block_structure_content(sector, degeneracy, 0))
+        Self::from_content(new_block_structure_content(sector, degeneracy, 0))
     }
 
     pub fn from_blocks(blocks: Vec<BlockSpec>) -> Result<Self, CoreError> {
@@ -245,11 +400,11 @@ impl BlockStructure {
     }
 
     pub fn into_shared(self) -> Arc<Self> {
-        canonicalize_block_structure_arc(Arc::new(self))
+        Arc::new(self)
     }
 
     pub fn canonicalize_shared(structure: Arc<Self>) -> Arc<Self> {
-        canonicalize_block_structure_arc(structure)
+        structure
     }
 
     pub fn packed_column_major<I>(rank: usize, shapes: I) -> Result<Self, CoreError>

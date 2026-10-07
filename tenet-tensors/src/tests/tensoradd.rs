@@ -1323,3 +1323,129 @@ fn tensoradd_structure_rejects_incompatible_replay_structure() {
 
     assert_eq!(err, OperationError::StructureMismatch { tensor: "dst" });
 }
+
+#[test]
+fn static_adjoint_preserves_strided_subset_block_order_and_alpha_beta() {
+    let tree = |sector, coupled| {
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            [SectorId::new(sector); 2],
+            SectorId::new(coupled),
+            [false; 2],
+            [],
+            [MultiplicityIndex::ONE],
+        )
+        .unwrap()
+    };
+    for coupled_order in [vec![2, 0], vec![2]] {
+        let structure = BlockStructure::from_blocks(
+            coupled_order
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| {
+                    BlockSpec::with_key(
+                        FusionTreePairKey::pair(tree(1, c), tree(2, c)).into(),
+                        vec![2, 3, 2, 2],
+                        vec![1, 3, 11, 23],
+                        5 + 100 * i,
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+        let space = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<2, 2>::from_dims([2, 3], [2, 2]).unwrap(),
+            FusionTreeHomSpace::from_sector_ids([(1, 2), (1, 3)], [(2, 2), (2, 2)]),
+            structure,
+        )
+        .unwrap()
+        .try_bind_rule(&SU2FusionRule)
+        .unwrap();
+        let dynamic = crate::contract::DynamicFusionMapSpace::from_typed(&space);
+        let oriented = crate::contract::FusionOperand::prepare_storage_ordered_adjoint(
+            &dynamic,
+            &SU2FusionRule,
+        )
+        .unwrap();
+        let observed = oriented
+            .adjoint_logical_keys()
+            .unwrap()
+            .iter()
+            .map(|key| key.codomain_tree().coupled().id())
+            .collect::<Vec<_>>();
+        assert_eq!(observed, coupled_order);
+        assert_eq!(
+            oriented.adjoint_storage_indices().unwrap(),
+            (0..coupled_order.len()).collect::<Vec<_>>()
+        );
+        let data = (0..space.required_len().unwrap())
+            .map(|i| Complex64::new((i % 13) as f64 - 5.0, (i % 7) as f64 * 0.25 - 0.5))
+            .collect();
+        let src = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(data, space).unwrap();
+        // Literal old static route: swap trees/axes while retaining source block
+        // order, offset and strides, then compile the resulting stored view.
+        let logical =
+            crate::lowering::adjoint_fusion_space_view(&SU2FusionRule, src.fusion_space().unwrap())
+                .unwrap();
+        let make_dst = || {
+            TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+                vec![Complex64::new(0.75, -0.25); logical.required_len().unwrap()],
+                logical.clone(),
+            )
+            .unwrap()
+        };
+        let mut actual = make_dst();
+        let mut expected = make_dst();
+        let operation = TreeTransformOperation::permute([2, 3], [0, 1]);
+        let lowered =
+            crate::lowering::lower_tensoradd_source_operation::<2, 2>(operation.clone(), true)
+                .unwrap();
+        let alpha = Complex64::new(1.25, -0.75);
+        let beta = Complex64::new(0.375, 0.25);
+        let mut old_context = TreeTransformExecutionContext::<
+            Complex64,
+            RuleIdentity,
+            f64,
+            DenseTreeTransformOperations,
+        >::default();
+        old_context
+            .tree_transform_into_raw_with_storage_conjugation(
+                &SU2FusionRule,
+                lowered.into_operation(),
+                &std::sync::Arc::clone(expected.structure()),
+                logical.subblock_structure(),
+                expected.data_mut(),
+                src.data(),
+                true,
+                alpha,
+                beta,
+            )
+            .unwrap();
+        let mut context = TreeTransformExecutionContext::<
+            Complex64,
+            RuleIdentity,
+            f64,
+            DenseTreeTransformOperations,
+        >::default();
+        for pass in 0..2 {
+            if pass == 1 {
+                actual = make_dst();
+            }
+            tensoradd_fusion_into_with_context(
+                &mut context,
+                &SU2FusionRule,
+                &mut actual,
+                &src,
+                operation.clone(),
+                true,
+                alpha,
+                beta,
+            )
+            .unwrap();
+            assert_eq!(actual.data(), expected.data());
+        }
+        assert_eq!(context.cache().stats().structure_misses(), 1);
+        assert_eq!(context.cache().stats().structure_hits(), 1);
+    }
+}

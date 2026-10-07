@@ -287,7 +287,6 @@ fn checked_homspace_derivation_keeps_semantic_identity_lazy() {
         FusionProductSpace::new([leg.clone(), leg]),
         FusionProductSpace::new([]),
     );
-    crate::reset_hom_space_intern_calls();
     let selected = hom.try_select_checked(&rule, &[1, 0], &[]).unwrap();
     let permuted = hom.try_permute_checked(&rule, &[1, 0], &[]).unwrap();
     let scalar = FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
@@ -301,7 +300,9 @@ fn checked_homspace_derivation_keeps_semantic_identity_lazy() {
         2,
     )
     .unwrap();
-    assert_eq!(crate::hom_space_intern_calls(), 0);
+    for derived in [&hom, &scalar, &selected, &permuted, &contracted] {
+        assert!(derived.existing_id().is_none());
+    }
     assert_eq!(selected, permuted);
     assert_eq!(contracted, permuted);
 }

@@ -391,9 +391,10 @@ fn complete_structure_split_and_fermionic_rule_force_misses() {
     reset_coupled_grid_build_observations();
     let fermionic = finalize_complete(&FermionParityFusionRule, &parity_hom).unwrap();
     let after = structure_cache_info(StructureCacheKind::DegeneracyStructure);
-    // Equal content ids are expected: the block-structure interner keys
-    // on rank and blocks only, so the rule shows up in the cache key.
-    assert_eq!(bosonic.content_id(), fermionic.content_id());
+    // The geometry is equal, but distinct rule keys own distinct complete
+    // entries and therefore distinct monotonic operation ids.
+    assert_eq!(bosonic, fermionic);
+    assert_ne!(bosonic.content_id(), fermionic.content_id());
     assert!(coupled_grid_build_observations().1 > 0);
     assert_eq!(after.misses(), before.misses() + 1);
     assert_eq!(after.admissions(), before.admissions() + 1);
@@ -707,13 +708,9 @@ fn assert_failed_checked_build_is_transactional<R>(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     reset_core_intern_tables();
     reset_fusion_tree_layout_probe_side_effect_calls();
-    reset_hom_space_intern_calls();
-    reset_block_structure_intern_calls();
     let error = hom.prepare_fusion_tree_layout_checked(rule).unwrap_err();
     assert_eq!(error, expected);
     assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
-    assert_eq!(hom_space_intern_calls(), 0);
-    assert_eq!(block_structure_intern_calls(), 0);
 }
 
 #[test]

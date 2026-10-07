@@ -715,3 +715,63 @@ thread_local! {
     /// (`Arc::ptr_eq`) across repeated calls.
     pub(crate) static MF_FACTOR_SPACE_STAGES: Cell<usize> = const { Cell::new(0) };
 }
+
+#[cfg(test)]
+mod publication_order_tests {
+    use super::*;
+
+    #[test]
+    fn checked_factor_pre_commit_error_precedes_late_style_and_publication() {
+        const FILTER: &str = "factorize::authority::publication_order_tests::checked_factor_pre_commit_error_precedes_late_style_and_publication";
+        if std::env::var_os("TENET_FACTOR_LATE_STYLE").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", FILTER])
+                .env("TENET_FACTOR_LATE_STYLE", "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+                "{stdout} {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        tenet_core::reset_core_intern_tables();
+        let rule = tenet_core::SU2FusionRule;
+        let provider = Arc::new(tenet_core::InfallibleGeneric::new(&rule));
+        let authority = CheckedAuthority(&provider);
+        let hom = FusionTreeHomSpace::from_sector_ids([(1, 2)], [(1, 3)]);
+        let stage = authority.stage(hom.clone()).unwrap();
+        let sentinel = OperationError::InvalidArgument {
+            message: "placement sentinel",
+        };
+        let error = authority
+            .commit(stage, |_| Err(sentinel.clone()))
+            .unwrap_err();
+        assert!(
+            matches!(error, CheckedGenericFactorPlanError::Operation(ref actual) if actual == &sentinel)
+        );
+        let entries = || {
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .entries()
+        };
+        assert_eq!(entries(), 0);
+        let stage = authority.stage(hom).unwrap();
+        let checked = std::cell::Cell::new(false);
+        let error = authority
+            .commit(stage, |_| {
+                checked.set(true);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(checked.get());
+        assert!(matches!(
+            error,
+            CheckedGenericFactorPlanError::Operation(OperationError::Core(
+                CoreError::UnsupportedFusionStyle { .. }
+            ))
+        ));
+        assert_eq!(entries(), 0);
+    }
+}

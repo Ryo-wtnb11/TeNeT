@@ -186,21 +186,24 @@ where
         {
             return Err(Error::RuleMismatch.into());
         }
-        let raw_domain = domain
-            .iter()
-            .map(GradedSpace::try_dual)
-            .collect::<Result<Vec<_>, _>>()?;
-        let homspace = FusionTreeHomSpace::new(
-            FusionProductSpace::new(codomain.iter().map(|leg| leg.network_sector_leg().clone())),
-            FusionProductSpace::new(
-                raw_domain
-                    .iter()
-                    .map(|leg| leg.network_sector_leg().clone()),
-            ),
-        );
-        let space = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+        let space = <R::Mode as TypedTensorRootDispatch<R>>::build_root_with(
             Arc::clone(self.logical_space().provider_arc()),
-            homspace,
+            || {
+                let raw_domain = domain
+                    .iter()
+                    .map(GradedSpace::try_dual)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(FusionTreeHomSpace::new(
+                    FusionProductSpace::new(
+                        codomain.iter().map(|leg| leg.network_sector_leg().clone()),
+                    ),
+                    FusionProductSpace::new(
+                        raw_domain
+                            .iter()
+                            .map(|leg| leg.network_sector_leg().clone()),
+                    ),
+                ))
+            },
         )?;
         let len = space
             .space()

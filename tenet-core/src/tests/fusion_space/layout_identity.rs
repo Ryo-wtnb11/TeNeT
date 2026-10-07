@@ -44,7 +44,7 @@ fn assert_direct_generic_leg_degeneracy_structure_matches_legacy<R>(
         .coupled_subblock_structure_from_leg_degeneracies_generic(rule)
         .unwrap();
     assert_eq!(actual, expected);
-    assert_eq!(actual.content_id(), expected.content_id());
+    assert_ne!(actual.content_id(), expected.content_id());
 }
 
 #[test]

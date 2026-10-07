@@ -80,13 +80,7 @@ fn hom_space_id_separates_sectors_degeneracy_and_rank() {
 }
 
 #[test]
-fn hom_space_id_remains_semantic_after_intern_eviction() {
-    // What: floods the shared hom-space intern table past its cap, which
-    // races `concurrent_equal_hom_spaces_share_semantic_identity` (asserts
-    // ptr_eq on entries of that same table) if both run concurrently.
-    let _guard = test_support::CACHE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+fn independently_allocated_hom_space_ids_remain_semantic() {
     let build = || {
         FusionTreeHomSpace::new(
             FusionProductSpace::new([u1_leg(17, 2, false)]),
@@ -94,15 +88,8 @@ fn hom_space_id_remains_semantic_after_intern_eviction() {
         )
     };
     let before = build().id();
-    for charge in 10_000..10_000 + HOM_SPACE_INTERN_CAP as i32 + 1 {
-        let _ = FusionTreeHomSpace::new(
-            FusionProductSpace::new([u1_leg(charge, 1, false)]),
-            FusionProductSpace::new([u1_leg(charge, 1, false)]),
-        )
-        .id();
-    }
     let after = build().id();
-    assert!(!Arc::ptr_eq(&before.key, &after.key));
+    assert!(!Arc::ptr_eq(&before.content, &after.content));
     assert_eq!(before, after);
     let hash = |id: &HomSpaceId| {
         let mut state = rustc_hash::FxHasher::default();
@@ -110,10 +97,6 @@ fn hom_space_id_remains_semantic_after_intern_eviction() {
         std::hash::Hasher::finish(&state)
     };
     assert_eq!(hash(&before), hash(&after));
-    assert_eq!(
-        hom_space_intern_table().read().unwrap().entries.len(),
-        HOM_SPACE_INTERN_CAP
-    );
 }
 
 #[test]
@@ -180,11 +163,11 @@ fn concurrent_eager_hom_space_derivation_does_not_touch_lazy_id_interner() {
 }
 
 #[test]
-fn resetting_lazy_hom_space_interner_preserves_semantic_identity() {
+fn resetting_structure_caches_preserves_standalone_semantic_identity() {
     let _guard = test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_hom_space_intern_table();
+    reset_core_intern_tables();
     let build = || {
         FusionTreeHomSpace::new(
             FusionProductSpace::new([u1_leg(23, 2, false)]),
@@ -192,10 +175,10 @@ fn resetting_lazy_hom_space_interner_preserves_semantic_identity() {
         )
     };
     let before = build().id();
-    reset_hom_space_intern_table();
+    reset_core_intern_tables();
     let after = build().id();
     assert_eq!(before, after);
-    assert!(!Arc::ptr_eq(&before.key, &after.key));
+    assert!(!Arc::ptr_eq(&before.content, &after.content));
 }
 
 #[test]

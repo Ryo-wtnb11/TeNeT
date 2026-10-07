@@ -161,12 +161,17 @@ where
     if operation.is_identity_for(source.space().nout(), source.space().nin()) {
         return Ok(CheckedStagedOperand::Borrowed(source.space()));
     }
-    let homspace = source.space().homspace().try_permute_generic_checked(
-        provider,
-        operation.codomain_permutation(),
-        operation.domain_permutation(),
-    )?;
-    let prepared = authority.prepare_final_homspace_generic_with_checked(provider, homspace)?;
+    let prepared = authority.prepare_final_homspace_generic_from_checked(provider, || {
+        source
+            .space()
+            .homspace()
+            .try_permute_generic_checked(
+                provider,
+                operation.codomain_permutation(),
+                operation.domain_permutation(),
+            )
+            .map_err(CheckedGenericPlanError::from)
+    })?;
     let destination = Arc::new(prepared.structure().clone());
     let replay = <CheckedGenericAdmissionMode as PlanningAlgebra<P>>::tree_structure(
         &mut (),
@@ -370,17 +375,18 @@ where
         axes.rhs_contracting_axes(),
         [],
     )?;
-    let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
-        provider,
-        lhs_space.space().homspace(),
-        rhs_space.space().homspace(),
-        axes.lhs_contracting_axes(),
-        axes.rhs_contracting_axes(),
-        &axis_plan.output_axes,
-        dst_nout,
-    )?;
-    let destination =
-        lhs_space.prepare_final_homspace_generic_with_checked(provider, destination_homspace)?;
+    let destination = lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
+        FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+            provider,
+            lhs_space.space().homspace(),
+            rhs_space.space().homspace(),
+            axes.lhs_contracting_axes(),
+            axes.rhs_contracting_axes(),
+            &axis_plan.output_axes,
+            dst_nout,
+        )
+        .map_err(CheckedGenericPlanError::from)
+    })?;
     let (candidate, orientation) = select_complete_bosonic_contract_candidate(
         dst_nout,
         output_rank,
@@ -444,17 +450,18 @@ where
         axis_plan,
     } = validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, lhs_nout)?;
     let provider = crate::admission::admit_checked_generic_pair(lhs_space, rhs_space)?;
-    let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
-        provider,
-        lhs_space.space().homspace(),
-        rhs_space.space().homspace(),
-        &lhs_axes,
-        &rhs_axes,
-        &axis_plan.output_axes,
-        lhs_nout,
-    )?;
-    let destination =
-        lhs_space.prepare_final_homspace_generic_with_checked(provider, destination_homspace)?;
+    let destination = lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
+        FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+            provider,
+            lhs_space.space().homspace(),
+            rhs_space.space().homspace(),
+            &lhs_axes,
+            &rhs_axes,
+            &axis_plan.output_axes,
+            lhs_nout,
+        )
+        .map_err(CheckedGenericPlanError::from)
+    })?;
     // Both axis lists are ascending, so the sole candidate is the given order.
     let candidate = super::fusion::contracted_axis_order_candidates(&lhs_axes, &rhs_axes).remove(0);
     let (
@@ -588,17 +595,18 @@ where
         candidate.rhs(),
         [],
     )?;
-    let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
-        provider,
-        lhs_space.space().homspace(),
-        rhs_space.space().homspace(),
-        candidate.lhs(),
-        candidate.rhs(),
-        &axis_plan.output_axes,
-        dst_nout,
-    )?;
-    let destination =
-        lhs_space.prepare_final_homspace_generic_with_checked(provider, destination_homspace)?;
+    let destination = lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
+        FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+            provider,
+            lhs_space.space().homspace(),
+            rhs_space.space().homspace(),
+            candidate.lhs(),
+            candidate.rhs(),
+            &axis_plan.output_axes,
+            dst_nout,
+        )
+        .map_err(CheckedGenericPlanError::from)
+    })?;
     execute_preselected_checked_generic_contract(
         lhs_space,
         lhs_data,
@@ -686,17 +694,19 @@ where
         output_rank,
         core_axes,
     )?;
-    let core_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
-        provider,
-        core_left.homspace(),
-        core_right.homspace(),
-        core_axes.lhs_contracting_axes(),
-        core_axes.rhs_contracting_axes(),
-        &core_axis_plan.output_axes,
-        plan.core_dst_open_lhs_rank(),
-    )?;
     let core_destination =
-        lhs_space.prepare_final_homspace_generic_with_checked(provider, core_homspace)?;
+        lhs_space.prepare_final_homspace_generic_from_checked(provider, || {
+            FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+                provider,
+                core_left.homspace(),
+                core_right.homspace(),
+                core_axes.lhs_contracting_axes(),
+                core_axes.rhs_contracting_axes(),
+                &core_axis_plan.output_axes,
+                plan.core_dst_open_lhs_rank(),
+            )
+            .map_err(CheckedGenericPlanError::from)
+        })?;
     let core_structure = Arc::new(core_destination.structure().clone());
     let core_plan = compile_checked_generic_core_plan(
         &core_structure,
@@ -1260,7 +1270,13 @@ mod tests {
                 CheckedGenericPlanError::Provider(SpyError(actual)) if actual == query
             ));
             assert_eq!(right.algebra_calls(), 0);
-            assert_eq!(tenet_core::block_structure_intern_cache_info().entries(), 0);
+            assert_eq!(
+                tenet_core::structure_cache_info(
+                    tenet_core::StructureCacheKind::DegeneracyStructure
+                )
+                .entries(),
+                0
+            );
         }
 
         left.reset();
@@ -1282,7 +1298,11 @@ mod tests {
             CheckedGenericPlanError::SymbolShape { symbol: "R", .. }
         ));
         assert_eq!(right.algebra_calls(), 0);
-        assert_eq!(tenet_core::block_structure_intern_cache_info().entries(), 0);
+        assert_eq!(
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .entries(),
+            0
+        );
     }
 
     #[test]
@@ -1341,7 +1361,11 @@ mod tests {
                 .entries(),
             0
         );
-        assert_eq!(tenet_core::block_structure_intern_cache_info().entries(), 0);
+        assert_eq!(
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .entries(),
+            0
+        );
     }
 
     #[test]
@@ -1382,7 +1406,11 @@ mod tests {
 
         assert!(Arc::ptr_eq(output.provider_arc(), &left));
         assert_eq!(right.algebra_calls(), 0);
-        assert_eq!(tenet_core::block_structure_intern_cache_info().entries(), 1);
+        assert_eq!(
+            tenet_core::structure_cache_info(tenet_core::StructureCacheKind::DegeneracyStructure)
+                .entries(),
+            1
+        );
         assert!(left
             .events
             .borrow()

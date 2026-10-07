@@ -85,6 +85,7 @@ pub(super) enum PreparedFusionTreeLayoutState {
 #[derive(Debug)]
 pub struct PreparedFusionTreeLayout {
     pub(super) state: PreparedFusionTreeLayoutState,
+    pub(super) complete_epoch: usize,
 }
 
 impl PreparedFusionTreeLayout {
@@ -155,9 +156,10 @@ impl PreparedFusionTreeLayout {
         homspace: &FusionTreeHomSpace,
     ) -> Result<Arc<BlockStructure>, CoreError> {
         self.validate_homspace_signature(homspace)?;
-        let epoch = core_reset_epoch();
+        let epoch = self.complete_epoch;
         let key = CompleteHomSpaceStructureCacheKey {
             rule: self.cache_key().rule.clone(),
+            mode: CompleteFusionMode::MultiplicityFree,
             homspace: Arc::clone(&homspace.content),
         };
         // Why no extent walk before the lookup: entries are admitted only
@@ -166,12 +168,36 @@ impl PreparedFusionTreeLayout {
         // the key because `RuleIdentity` determines the fusion enumeration.
         // A hit therefore proves the walk would succeed; a miss walks once,
         // inside the builder, before any statistic changes.
-        if let Some(structure) = complete_hom_space_structure_cached(&key) {
-            return Ok(structure);
+        if let Some(entry) = complete_hom_space_structure_cached(&key) {
+            return Ok(entry.structure());
         }
 
         let built = self.build_from_leg_degeneracies(homspace)?;
-        Ok(admit_complete_hom_space_structure(key, built, epoch))
+        Ok(admit_complete_hom_space_structure(key, built, epoch).1)
+    }
+
+    /// Completes the prepared MF layout and returns the HomSpace backing owned
+    /// by the same complete-cache entry.
+    #[doc(hidden)]
+    pub fn build_complete_homspace_from_leg_degeneracies(
+        &self,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<(FusionTreeHomSpace, Arc<BlockStructure>), CoreError> {
+        self.validate_homspace_signature(&homspace)?;
+        let epoch = self.complete_epoch;
+        let key = CompleteHomSpaceStructureCacheKey {
+            rule: self.cache_key().rule.clone(),
+            mode: CompleteFusionMode::MultiplicityFree,
+            homspace: Arc::clone(&homspace.content),
+        };
+        let (entry, structure) = if let Some(entry) = complete_hom_space_structure_cached(&key) {
+            let structure = entry.structure();
+            (entry, structure)
+        } else {
+            let built = self.build_from_leg_degeneracies(&homspace)?;
+            admit_complete_hom_space_structure(key, built, epoch)
+        };
+        Ok((homspace.with_canonical_id(entry.homspace_id()), structure))
     }
 
     /// Publishes the prepared layout and returns its shared key storage.

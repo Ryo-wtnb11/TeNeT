@@ -494,16 +494,12 @@ fn execution_layout_primer_runs_only_after_dynamic_space_cache_misses() {
 }
 
 #[test]
-fn dynamic_fusion_fast_space_key_uses_structure_content_identity() {
-    // What: held across both builds so a concurrent `reset_global_operation_caches`
-    // cannot evict `first_structure` and hand `second_structure` a fresh id.
-    let _guard = crate::test_support::CACHE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+fn dynamic_fusion_fast_space_key_requires_shared_structure_content_identity() {
     let first_structure = one_block_structure();
     let second_structure = one_block_structure();
     assert!(!Arc::ptr_eq(&first_structure, &second_structure));
-    assert_eq!(first_structure.content_id(), second_structure.content_id());
+    assert_eq!(first_structure.as_ref(), second_structure.as_ref());
+    assert_ne!(first_structure.content_id(), second_structure.content_id());
 
     let homspace = Arc::new(FusionTreeHomSpace::from_sector_ids([(0, 2)], []));
     let first = DynamicFusionFastSpaceKey {
@@ -517,7 +513,7 @@ fn dynamic_fusion_fast_space_key_uses_structure_content_identity() {
         structure_id: second_structure.content_id(),
     };
 
-    assert_eq!(first, second);
+    assert_ne!(first, second);
 
     let operation = TreeTransformOperation::permute([0], []);
     let first_transform = DynamicFusionTransformedSourceFastKey::<&'static str> {
@@ -536,7 +532,7 @@ fn dynamic_fusion_fast_space_key_uses_structure_content_identity() {
         operation,
         source_conjugate: false,
     };
-    assert_eq!(first_transform, second_transform);
+    assert_ne!(first_transform, second_transform);
 }
 
 #[test]

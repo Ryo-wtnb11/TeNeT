@@ -400,7 +400,7 @@ where
         .coupled_subblock_structure_from_leg_degeneracies(rule)
         .unwrap();
     assert_eq!(actual, expected);
-    assert_eq!(actual.content_id(), expected.content_id());
+    assert_ne!(actual.content_id(), expected.content_id());
     assert_eq!(
         actual.required_len().unwrap(),
         expected.required_len().unwrap()

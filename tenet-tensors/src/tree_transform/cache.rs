@@ -25,7 +25,7 @@ use super::operation::{TreeTransformOperation, TreeTransformRuleCacheKey};
 use super::plan::{
     build_all_codomain_tree_transform_group_plan_validated_with_threads,
     build_multiplicity_free_tree_pair_plan_after_capability_with_threads,
-    build_oriented_tree_pair_transform_group_plan_with_threads,
+    build_oriented_tree_pair_transform_group_plan_capability_validated,
     compile_multiplicity_free_tree_pair_structure_after_capability_with_threads,
     compile_multiplicity_free_tree_pair_structure_with_threads,
     validate_all_codomain_namespace_before_cache,
@@ -83,6 +83,7 @@ fn compile_oriented_tree_pair_structure<R, FAxis>(
     logical_keys: &[FusionTreePairKey],
     storage_src_structure: &Arc<BlockStructure>,
     orientation: FusionTreePairOrientation,
+    basis_order: OrientedBasisOrder,
     logical_rank: usize,
     projection: &FxHashMap<&FusionTreePairKey, usize>,
     logical_to_storage_axis: FAxis,
@@ -98,12 +99,13 @@ where
     #[cfg(test)]
     ORIENTED_TREE_PAIR_COMPILES.set(ORIENTED_TREE_PAIR_COMPILES.get() + 1);
     let build = |reuse: Option<&GroupSpecReuse<'_, R::Scalar>>| {
-        build_oriented_tree_pair_transform_group_plan_with_threads(
+        build_oriented_tree_pair_transform_group_plan_capability_validated(
             rule,
             operation.clone(),
             logical_keys,
             storage_src_structure,
             orientation,
+            basis_order,
             logical_rank,
             projection,
             threads,
@@ -119,6 +121,7 @@ where
                 rule.rule_identity(),
                 operation,
                 orientation,
+                basis_order,
                 orientation == FusionTreePairOrientation::Adjoint,
                 dst_structure,
                 storage_src_structure,
@@ -303,6 +306,7 @@ where
         self.runtime_store.as_ref().and_then(Weak::upgrade)
     }
 
+    #[allow(clippy::too_many_arguments)] // Keep the complete key determinants explicit.
     fn structure_key(
         rule: RuleKey,
         scope: TreeTransformScope,
@@ -310,6 +314,8 @@ where
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
         storage_conjugate: bool,
+        orientation: FusionTreePairOrientation,
+        basis_order: OrientedBasisOrder,
     ) -> Result<
         TreeTransformStructureCacheKey<TreeTransformStructureOperationKey<RuleKey>>,
         OperationError,
@@ -319,6 +325,8 @@ where
                 rule,
                 scope,
                 operation,
+                orientation,
+                basis_order,
             },
             dst_structure,
             src_structure,
@@ -442,6 +450,7 @@ where
                     rule: rule.rule_identity(),
                     operation: operation.clone(),
                     orientation: FusionTreePairOrientation::Direct,
+                    basis_order: OrientedBasisOrder::Canonical,
                     logical_source: None,
                 },
                 dst_structure,
@@ -454,6 +463,7 @@ where
                     rule.rule_identity(),
                     operation,
                     FusionTreePairOrientation::Direct,
+                    OrientedBasisOrder::Canonical,
                     storage_conjugate,
                     dst_structure,
                     src_structure,
@@ -502,6 +512,8 @@ where
             dst_structure,
             src_structure,
             storage_conjugate,
+            FusionTreePairOrientation::Direct,
+            OrientedBasisOrder::Canonical,
         )?;
         if let Some(structure) = self.cached_structure(&key) {
             return Ok(structure);
@@ -583,6 +595,7 @@ where
         storage_indices: FIndices,
         storage_src_structure: &Arc<BlockStructure>,
         orientation: FusionTreePairOrientation,
+        basis_order: OrientedBasisOrder,
         logical_rank: usize,
         logical_to_storage_axis: FAxis,
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
@@ -593,6 +606,8 @@ where
         FIndices: FnOnce() -> Result<&'p [usize], OperationError>,
         FAxis: Fn(usize) -> Result<usize, OperationError>,
     {
+        validate_multiplicity_free_tree_transform_capability(rule, operation)?;
+        validate_tree_pair_namespace_before_cache(operation, storage_src_structure)?;
         // Why lazy: only a store miss reads the storage map, so a warm call
         // derives no per-block projection.
         let projection = || {
@@ -615,6 +630,7 @@ where
                 logical_keys,
                 storage_src_structure,
                 orientation,
+                basis_order,
                 logical_rank,
                 projection,
                 logical_to_storage_axis,
@@ -628,17 +644,17 @@ where
         let runtime_store = storage_conjugate.then(|| self.runtime_store()).flatten();
         if let Some(store) = runtime_store {
             // Why not key the logical keys, projection, rank, or axis map: the
-            // only caller derives all four from the parent structure
-            // (`FusionOperand::prepare` enumerates the adjoint HomSpace in its
-            // canonical sorted-sector order restricted to the parent's blocks;
-            // `FusionOperand::storage_axis` reads the parent split carried by
-            // its block keys; a blockless parent compiles no spec).
+            // two operand preparations derive them from the parent structure
+            // and the keyed basis order: canonical enumeration for Dynamic,
+            // parent block order for static views. The axis map reads the
+            // parent split; a blockless parent compiles no spec.
             let key = TreeTransformStructureCacheKey::from_structures_with_storage_conjugation(
                 RuntimeTreeTransformOperationKey {
                     rule: rule.rule_identity(),
                     operation: operation.clone(),
                     logical_source: None,
                     orientation,
+                    basis_order,
                 },
                 dst_structure,
                 storage_src_structure,
@@ -647,9 +663,31 @@ where
             return store
                 .get_or_compile(key, || compile(&projection()?, Some(&store)).map(Arc::new));
         }
+        let key = if self.runtime_store.is_none() && self.policy.stores_entries() {
+            let key = Self::structure_key(
+                rule.tree_transform_rule_cache_key(),
+                TreeTransformScope::TreePair,
+                operation.clone(),
+                dst_structure,
+                storage_src_structure,
+                storage_conjugate,
+                orientation,
+                basis_order,
+            )?;
+            if let Some(structure) = self.cached_structure(&key) {
+                return Ok(structure);
+            }
+            Some(key)
+        } else {
+            None
+        };
         let projection = projection()?;
         self.stats.structure_misses += 1;
-        compile(&projection, None).map(Arc::new)
+        let structure = compile(&projection, None).map(Arc::new)?;
+        if let Some(key) = key {
+            self.retain_structure(key, Arc::clone(&structure));
+        }
+        Ok(structure)
     }
 
     /// Structure-only Generic-fusion sibling of [`Self::get_or_compile_tree_pair`].
@@ -731,6 +769,8 @@ where
                 dst.structure(),
                 src.structure(),
                 false,
+                FusionTreePairOrientation::Direct,
+                OrientedBasisOrder::Canonical,
             )?;
             if let Some(structure) = self.cached_structure(&key) {
                 return Ok(structure);

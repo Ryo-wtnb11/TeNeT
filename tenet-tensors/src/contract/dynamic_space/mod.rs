@@ -267,6 +267,22 @@ pub struct PreparedCheckedGenericDynamicSpace {
 }
 
 impl PreparedCheckedGenericDynamicSpace {
+    pub(crate) fn from_complete_parts(
+        nout: usize,
+        nin: usize,
+        homspace: FusionTreeHomSpace,
+        structure: PreparedBlockStructure,
+        identity: RuleIdentity,
+    ) -> Self {
+        Self {
+            nout,
+            nin,
+            homspace,
+            structure,
+            identity,
+        }
+    }
+
     #[doc(hidden)]
     pub fn structure(&self) -> &BlockStructure {
         self.structure.structure()
@@ -286,11 +302,14 @@ impl PreparedCheckedGenericDynamicSpace {
     }
 
     pub(crate) fn commit(self) -> DynamicFusionMapSpace {
+        let (canonical_homspace, subblock_structure) =
+            self.structure.commit_with_complete_homspace();
+        let homspace = canonical_homspace.unwrap_or(self.homspace);
         DynamicFusionMapSpace {
             nout: self.nout,
             nin: self.nin,
-            homspace: Arc::new(self.homspace),
-            subblock_structure: self.structure.commit().into_shared(),
+            homspace: Arc::new(homspace),
+            subblock_structure,
             admission: FusionSpaceAdmission::Complete(self.identity),
             adjoint: OnceLock::new(),
         }
@@ -336,8 +355,8 @@ impl DynamicFusionMapSpace {
         if let Some(prepared) = staged {
             let nout = homspace.codomain().len();
             let nin = homspace.domain().len();
-            let subblock_structure = prepared
-                .build_complete_from_leg_degeneracies(&homspace)
+            let (homspace, subblock_structure) = prepared
+                .build_complete_homspace_from_leg_degeneracies(homspace)
                 .map_err(OperationError::from_core_preserving_context)?;
             // All fallible final-storage work is complete. Why not commit
             // before building: malformed leg degeneracies or extent overflow
@@ -354,8 +373,8 @@ impl DynamicFusionMapSpace {
         }
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
-        let subblock_structure = homspace
-            .coupled_subblock_structure_from_leg_degeneracies(rule)
+        let (homspace, subblock_structure) = homspace
+            .canonical_coupled_subblock_structure_from_leg_degeneracies(rule)
             .map_err(OperationError::from_core_preserving_context)?;
         Ok(Self {
             nout,
@@ -378,8 +397,8 @@ impl DynamicFusionMapSpace {
         observe_final_result_layout_build();
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
-        let subblock_structure = homspace
-            .coupled_subblock_structure_from_leg_degeneracies_generic(rule)
+        let (homspace, subblock_structure) = homspace
+            .canonical_coupled_subblock_structure_from_leg_degeneracies_generic(rule)
             .map_err(OperationError::from_core_preserving_context)?;
         Ok(Self {
             nout,
@@ -695,27 +714,53 @@ impl DynamicFusionMapSpace {
         Ok(actual)
     }
 
+    #[cfg(all(test, feature = "racah-generated"))]
     pub(crate) fn prepare_transformed_generic_checked<R>(
         &self,
         rule: &R,
         operation: &TreeTransformOperation,
-        identity: RuleIdentity,
     ) -> Result<PreparedCheckedGenericDynamicSpace, CheckedGenericStructureError<R::Error>>
     where
         R: CheckedGenericFusion,
     {
         let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
-        let homspace =
-            self.homspace()
-                .try_permute_generic_checked(rule, codomain_axes, domain_axes)?;
-        let structure = homspace
-            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(rule)?;
+        let homspace = std::cell::OnceCell::new();
+        let actual = std::cell::OnceCell::new();
+        let structure =
+            FusionTreeHomSpace::prepare_complete_coupled_subblock_structure_generic_checked_with::<
+                R,
+                CheckedGenericStructureError<R::Error>,
+                _,
+            >(rule, || {
+                let actual_identity = self.validate_transformed_generic_checked_identity(rule)?;
+                if rule.fusion_style() != FusionStyleKind::Generic {
+                    return Err(CoreError::UnsupportedFusionStyle {
+                        expected: FusionStyleKind::Generic,
+                        actual: rule.fusion_style(),
+                    }
+                    .into());
+                }
+                let destination = self.homspace().try_permute_generic_checked(
+                    rule,
+                    codomain_axes,
+                    domain_axes,
+                )?;
+                actual.set(actual_identity).expect("producer runs once");
+                homspace
+                    .set(destination.clone())
+                    .expect("producer runs once");
+                Ok(destination)
+            })?;
         Ok(PreparedCheckedGenericDynamicSpace {
             nout: codomain_axes.len(),
             nin: domain_axes.len(),
-            homspace,
+            homspace: homspace
+                .into_inner()
+                .expect("successful producer records HomSpace"),
             structure,
-            identity,
+            identity: actual
+                .into_inner()
+                .expect("successful producer records identity"),
         })
     }
 
@@ -1120,7 +1165,9 @@ impl DynamicFusionMapSpace {
     }
 }
 
-fn tree_transform_operation_axes(operation: &TreeTransformOperation) -> (&[usize], &[usize]) {
+pub(crate) fn tree_transform_operation_axes(
+    operation: &TreeTransformOperation,
+) -> (&[usize], &[usize]) {
     (
         operation.codomain_permutation(),
         operation.domain_permutation(),

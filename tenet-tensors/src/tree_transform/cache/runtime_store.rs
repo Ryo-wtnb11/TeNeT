@@ -6,11 +6,19 @@ pub(super) enum TreeTransformScope {
     TreePair,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub(crate) enum OrientedBasisOrder {
+    Canonical,
+    Storage,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(super) struct TreeTransformStructureOperationKey<RuleKey> {
     pub(super) rule: RuleKey,
     pub(super) scope: TreeTransformScope,
     pub(super) operation: TreeTransformOperation,
+    pub(super) orientation: FusionTreePairOrientation,
+    pub(super) basis_order: OrientedBasisOrder,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -22,6 +30,7 @@ pub(super) struct RuntimeTreeTransformOperationKey {
     // reads storage keys directly, while an adjoint-oriented source reads
     // them through the adjoint key and axis projection.
     pub(super) orientation: FusionTreePairOrientation,
+    pub(super) basis_order: OrientedBasisOrder,
 }
 
 pub(super) type RuntimeTreeTransformKey =
@@ -214,6 +223,7 @@ pub(super) struct CategoricalTransformKey {
     rule: RuleIdentity,
     operation: TreeTransformOperation,
     orientation: FusionTreePairOrientation,
+    basis_order: OrientedBasisOrder,
     // Why keep it although no plan builder reads it: the key mirrors the
     // completed-structure key, so it can only split entries, never merge two.
     storage_conjugate: bool,
@@ -223,10 +233,12 @@ pub(super) struct CategoricalTransformKey {
 }
 
 impl CategoricalTransformKey {
+    #[allow(clippy::too_many_arguments)] // Every independent semantic determinant belongs in the key.
     pub(super) fn new(
         rule: RuleIdentity,
         operation: &TreeTransformOperation,
         orientation: FusionTreePairOrientation,
+        basis_order: OrientedBasisOrder,
         storage_conjugate: bool,
         dst: &BlockStructure,
         src: &BlockStructure,
@@ -236,6 +248,7 @@ impl CategoricalTransformKey {
             rule,
             operation: operation.clone(),
             orientation,
+            basis_order,
             storage_conjugate,
             dst: SectorKey::of(dst),
             src: SectorKey::of(src),
@@ -1369,6 +1382,7 @@ impl<T> RuntimeTreeTransformStore<T> {
                 rule,
                 operation: operation.clone(),
                 orientation: FusionTreePairOrientation::Direct,
+                basis_order: OrientedBasisOrder::Canonical,
                 logical_source: logical_src_structure
                     .map(BlockStructureCacheKey::from_structure)
                     .transpose()?,
@@ -1390,6 +1404,7 @@ impl<T> RuntimeTreeTransformStore<T> {
                 (candidate.plan().rule == key.plan().rule
                     && candidate.plan().operation == key.plan().operation
                     && candidate.plan().orientation == key.plan().orientation
+                    && candidate.plan().basis_order == key.plan().basis_order
                     && match (&candidate.plan().logical_source, &key.plan().logical_source) {
                         (Some(candidate), Some(key)) => candidate.same_content(key),
                         (None, None) => true,
@@ -1433,6 +1448,7 @@ impl<T> RuntimeTreeTransformStore<T> {
                 rule,
                 operation: operation.clone(),
                 orientation: FusionTreePairOrientation::Direct,
+                basis_order: OrientedBasisOrder::Canonical,
                 logical_source: logical_src_structure
                     .map(BlockStructureCacheKey::from_structure)
                     .transpose()?,
@@ -1465,6 +1481,7 @@ impl<T> RuntimeTreeTransformStore<T> {
                 rule,
                 operation,
                 FusionTreePairOrientation::Direct,
+                OrientedBasisOrder::Canonical,
                 storage_conjugate,
                 dst_structure,
                 src_structure,
@@ -1520,6 +1537,7 @@ impl<T> RuntimeTreeTransformStore<T> {
                 rule,
                 operation: operation.clone(),
                 orientation: FusionTreePairOrientation::Direct,
+                basis_order: OrientedBasisOrder::Canonical,
                 logical_source: None,
             },
             dst_structure,

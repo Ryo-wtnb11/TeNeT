@@ -1,14 +1,7 @@
 use super::*;
 
 #[test]
-fn concurrent_equal_hom_spaces_share_semantic_identity() {
-    // What: asserts ptr_eq across concurrently-built identical hom spaces
-    // in the shared intern table; a concurrent flood from
-    // `hom_space_id_remains_semantic_after_intern_eviction` could evict an
-    // entry mid-build and hand a later thread a fresh (non-aliased) Arc.
-    let _guard = test_support::CACHE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+fn concurrent_equal_hom_spaces_share_semantics_without_global_interning() {
     let ids = std::thread::scope(|scope| {
         (0..8)
             .map(|_| {
@@ -26,7 +19,7 @@ fn concurrent_equal_hom_spaces_share_semantic_identity() {
     assert!(ids.windows(2).all(|pair| pair[0] == pair[1]));
     assert!(ids
         .windows(2)
-        .all(|pair| Arc::ptr_eq(&pair[0].key, &pair[1].key)));
+        .all(|pair| !Arc::ptr_eq(&pair[0].content, &pair[1].content)));
 }
 
 #[test]

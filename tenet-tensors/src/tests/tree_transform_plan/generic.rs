@@ -1285,7 +1285,7 @@ fn measure_checked_generic_transform_case(
         .map(|index| index as f64 + 1.0)
         .collect::<Vec<_>>();
 
-    let identity = measured_provider_phase(provider.as_ref(), case, "owned_preflight", || {
+    let _identity = measured_provider_phase(provider.as_ref(), case, "owned_preflight", || {
         let identity = source
             .space()
             .validate_transformed_generic_checked_identity(provider.as_ref())
@@ -1301,7 +1301,7 @@ fn measure_checked_generic_transform_case(
     let prepared = measured_provider_phase(provider.as_ref(), case, "destination_layout", || {
         source
             .space()
-            .prepare_transformed_generic_checked(provider.as_ref(), &operation, identity)
+            .prepare_transformed_generic_checked(provider.as_ref(), &operation)
             .unwrap()
     });
     let plan = measured_provider_phase(

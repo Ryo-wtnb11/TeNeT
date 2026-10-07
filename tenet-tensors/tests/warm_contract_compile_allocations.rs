@@ -355,8 +355,6 @@ fn warm_copy_c_planning_is_bounded_and_no_costlier_than_the_dynamic_tree() {
         let layout_bypasses =
             tenet_core::structure_cache_info(tenet_core::StructureCacheKind::SectorStructure)
                 .rejections();
-        let intern_bypasses =
-            tenet_core::block_structure_intern_cache_info().oversized_admission_bypasses();
         let [copy_c, dynamic_tree] = copy_c_plan_allocations(rank);
         eprintln!("rank {rank}: warm CopyC plan {copy_c}, DynamicTree ladder {dynamic_tree}");
         // What: device-eager CopyC planning stays a small bounded count once
@@ -381,37 +379,26 @@ fn warm_copy_c_planning_is_bounded_and_no_costlier_than_the_dynamic_tree() {
             layout_bypasses,
             "rank {rank}: a fusion-tree layout bypassed the cache"
         );
-        assert_eq!(
-            tenet_core::block_structure_intern_cache_info().oversized_admission_bypasses(),
-            intern_bypasses,
-            "rank {rank}: a block-structure content bypassed the interner"
-        );
     }
 }
 
 #[test]
-fn rank_six_block_structure_content_is_interned_across_derivations() {
+fn rank_six_complete_owner_reuses_content_across_derivations() {
     let _serial = counting_alloc::serial();
-    // What (#1998): the U(1) `V^6 <- V^6` content (73,789 blocks) is
-    // interned, so equal derivations share one content id while it is live.
-    // Before #1998 its copied intern key exceeded the 8 MiB entry limit and
-    // every derivation minted a new id, missing every id-keyed cache.
+    // What (#1998): the U(1) `V^6 <- V^6` content (73,789 blocks) fits the
+    // complete owner, so independent ordinary derivations share its content.
+    // Expert from_parts construction is deliberately fresh after #2044.
     let provider = Arc::new(U1FusionRule);
-    let structure = Arc::clone(space(&provider, 6, 6).space().structure());
-    let bypasses = tenet_core::block_structure_intern_cache_info().oversized_admission_bypasses();
-    let derive = || {
-        tenet_core::BlockStructure::from_parts(
-            structure.sector_structure().clone(),
-            structure.degeneracy_structure().clone(),
-        )
-        .unwrap()
-    };
-    let first = derive();
-    let second = derive();
-    assert_eq!(first.content_id(), structure.content_id());
-    assert_eq!(second.content_id(), structure.content_id());
+    let first = space(&provider, 6, 6);
+    let cache = tenet_core::StructureCacheKind::DegeneracyStructure;
+    let bypasses = tenet_core::structure_cache_info(cache).rejections();
+    let second = space(&provider, 6, 6);
+    assert!(Arc::ptr_eq(
+        first.space().structure(),
+        second.space().structure()
+    ));
     assert_eq!(
-        tenet_core::block_structure_intern_cache_info().oversized_admission_bypasses(),
+        tenet_core::structure_cache_info(cache).rejections(),
         bypasses
     );
 }
