@@ -20,18 +20,9 @@ applications use the `tenet-rs` package (imported as `tenet`). Add
 
 ## Acknowledgments and upstream work
 
-TeNeT builds on the mathematical, architectural, and implementation work of
-[TensorKit.jl](https://github.com/QuantumKitHub/TensorKit.jl), developed by
-Lukas Devos, Jutho Haegeman, and contributors, and
-[QSpace](https://bitbucket.org/qspace4u/), developed by Andreas Weichselbaum
-and contributors. TensorKit and the related QuantumKitHub libraries provide
-foundations for tensor-map semantics, fusion-tree bases, duality, categorical
-operations, and their algorithmic decomposition. QSpace provides foundations
-for reduced-block representations, structural-data handling, and sector-wise
-execution. Their contributions inform TeNeT's design and implementation as well
-as its validation. We gratefully acknowledge this upstream work; the
-[provenance and references](tenet/references.md) record specific TensorKit and
-related-library correspondences.
+TeNeT builds on [TensorKit.jl](https://github.com/QuantumKitHub/TensorKit.jl) and [QSpace](https://bitbucket.org/qspace4u/). We thank their authors and contributors.
+
+See [provenance and references](tenet/references.md) for detailed source correspondences.
 
 ## Citation
 
