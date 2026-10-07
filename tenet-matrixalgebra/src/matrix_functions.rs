@@ -17,7 +17,7 @@ use crate::factorize::{
     is_hermitian_endomorphism_dyn, map_square_sectors_dyn, map_square_sectors_dyn_into,
     pinv_by_sector_dyn_into, pinv_cutoff, scale_axis_by_spectrum, solve_left_by_sector_dyn,
     solve_left_by_sector_dyn_into, svd_compact_factors_dyn, BoundDynFactor, BoundDynamicTensorRef,
-    FactorScalar, SectorSpectrum, SvdFactorsDyn,
+    FactorScalar, HermitianTol, SectorSpectrum, SvdFactorsDyn, EXP_SPECTRAL_ROUTE_EPSILONS,
 };
 #[cfg(test)]
 use crate::factorize::{typed_from_bound_factor, BoundTensorMap, BoundTensorMapRef};
@@ -29,11 +29,12 @@ use crate::factorize::{typed_from_bound_factor, BoundTensorMap, BoundTensorMapRe
 /// Padé [13/13] (Higham 2005) around LAPACK `gebal('B')` balancing, the
 /// algorithm behind the `LinearAlgebra.exp!` TensorKit calls.
 ///
-/// The route is selected by the same fixed criterion used by EIGH:
-/// `||(A - A†)/2||_F <= 64 * eps(real(D)) * ||A||_F` in every
+/// The route is selected by EIGH's relative measure at its own fixed
+/// threshold: `||(A - A†)/2||_F <= 64 * eps(real(D)) * ||A||_F` in every
 /// coupled-sector block, where `real(D)` is the real component type of `D`.
-/// This machine-precision multiple is not currently user-configurable;
-/// changing it can change whether [`exp`] uses the spectral or Padé algorithm.
+/// It is an algorithm choice, not eigh's admission tolerance, and is not
+/// user-configurable; changing it can change whether [`exp`] uses the
+/// spectral or Padé algorithm.
 pub(crate) fn exp<E, RuleKey, BT, BC, R, D, const N: usize>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -810,7 +811,11 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    let (v, eigenvalues) = eigh_full_dyn(dense, input)?.into_parts();
+    // Admit at the route predicate's own tolerance, so every block the
+    // predicate sends here is admitted: `HermitianTol::DEFAULT` is stricter
+    // than the route in single precision (`eps^(3/4) < 64·eps` for f32).
+    let route = HermitianTol::relative(EXP_SPECTRAL_ROUTE_EPSILONS * D::epsilon())?;
+    let (v, eigenvalues) = eigh_full_dyn(dense, input, route)?.into_parts();
     let mapped: Vec<SectorSpectrum> = eigenvalues
         .iter()
         .map(|entry| SectorSpectrum {

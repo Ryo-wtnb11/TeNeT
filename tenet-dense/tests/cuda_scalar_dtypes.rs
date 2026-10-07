@@ -4,7 +4,7 @@
 //! What this file owns that the `f64`/`Complex64` suites do not: the paths
 //! that were typed by `f64` rather than by the payload's real lane — the
 //! spectrum and reduction downloads, the rank-0 divisor of the Hermitian
-//! test, and its `64 * eps` tolerance — plus complex device QR, the last
+//! test, and its tolerance — plus complex device QR, the last
 //! dtype gate (tenferro-rs#1833, lifted by #1271).
 //!
 //! Oracles are host computations in **double precision** over the widened
@@ -36,7 +36,12 @@ fn cuda_is_hermitian_region<D: CudaScalar>(
     offset: usize,
     n: usize,
 ) -> Result<bool, tenet_dense::DenseError> {
-    Ok(cuda_hermitian_regions::<D>(ctx, src, &[(offset, n)])?[0])
+    Ok(cuda_hermitian_regions::<D>(
+        ctx,
+        src,
+        &[(offset, n)],
+        <D::Real as tenet_dense::CudaRealScalar>::EPSILON.powf(0.75),
+    )?[0])
 }
 
 /// The payload dtypes under test, with just enough host arithmetic for a
@@ -700,16 +705,16 @@ fn hermitian_extremes_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
     }
 }
 
-/// The C1 tolerance change, on device: a block whose anti-Hermitian residual
-/// is a few epsilons **of the payload's own lane** is Hermitian, and one whose
-/// residual is far outside that lane is not. For `f32` the accepted block is
-/// the one the old `64 * eps(f64)` constant rejected; for `f64` both decisions
-/// are what they always were.
+/// The device Hermitian admission at the default tolerance of the payload's
+/// own lane, `eps(real(D))^(3/4)` (#1987): a block whose relative residual
+/// sits at half of it is Hermitian, and one at twice it is not.
 fn hermitian_tolerance_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
-    // [[1, delta], [0, 1]]: the shared half-residual rule changes truth value
-    // at `delta = 128 * eps` up to a negligible O(delta^2).
-    let block = |ctx: &CudaDenseContext, epsilons: f64| {
-        let delta = epsilons * D::EPSILON;
+    // [[1, delta], [0, 1]]: the relative residual is `delta / 2` up to a
+    // negligible O(delta^2), so the rule changes truth value at
+    // `delta = 2 * eps^(3/4)`.
+    let threshold = 2.0 * D::EPSILON.powf(0.75);
+    let block = |ctx: &CudaDenseContext, of_threshold: f64| {
+        let delta = of_threshold * threshold;
         upload::<D>(
             ctx,
             &[
@@ -721,17 +726,17 @@ fn hermitian_tolerance_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
         )
     };
 
-    let below = block(ctx, 120.0);
+    let below = block(ctx, 0.5);
     assert!(
         cuda_is_hermitian_region::<D>(ctx, &below, 0, 2).expect("below"),
-        "{}: a residual of 120 eps(real(D)) must be admitted",
+        "{}: half the default threshold must be admitted",
         D::NAME
     );
 
-    let above = block(ctx, 4096.0);
+    let above = block(ctx, 2.0);
     assert!(
         !cuda_is_hermitian_region::<D>(ctx, &above, 0, 2).expect("above"),
-        "{}: a residual of 4096 eps(real(D)) must be rejected",
+        "{}: twice the default threshold must be rejected",
         D::NAME
     );
 
@@ -771,21 +776,14 @@ fn the_hermitian_rule_scales_with_the_payload_real_lane() {
     hermitian_extremes_case::<Complex32>(&mut ctx);
     hermitian_extremes_case::<Complex64>(&mut ctx);
 
-    // The hazard itself, as a device decision rather than host arithmetic: the
-    // residual an `f32` block is entitled to, expressed in `f64` epsilons, is
-    // what the pre-C1 constant measured every payload against. The same
-    // *element pattern* is therefore Hermitian in the single-precision lane and
-    // not in the double-precision one — the one comparison that fails if the
-    // tolerance stops following `D::Real`.
-    let single = |ctx: &CudaDenseContext| {
-        upload::<f32>(
-            ctx,
-            &[1.0, 0.0, (120.0 * f64::from(f32::EPSILON)) as f32, 1.0],
-        )
-    };
-    let double = |ctx: &CudaDenseContext| {
-        upload::<f64>(ctx, &[1.0, 0.0, 120.0 * f64::from(f32::EPSILON), 1.0])
-    };
+    // The lane hazard, as a device decision rather than host arithmetic: a
+    // residual an `f32` block is entitled to (half its default threshold) is
+    // Hermitian in the single-precision lane and not in the double-precision
+    // one — the one comparison that fails if the tolerance stops following
+    // `D::Real`.
+    let delta = f64::from(f32::EPSILON).powf(0.75);
+    let single = |ctx: &CudaDenseContext| upload::<f32>(ctx, &[1.0, 0.0, delta as f32, 1.0]);
+    let double = |ctx: &CudaDenseContext| upload::<f64>(ctx, &[1.0, 0.0, delta, 1.0]);
     let single = single(&ctx);
     let double = double(&ctx);
     assert!(

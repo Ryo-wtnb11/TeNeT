@@ -4,7 +4,7 @@
 //!
 //! The decisions are asserted against hand-known truth values (exactly
 //! Hermitian, asymmetric by a whole unit, zero, empty, non-finite, and
-//! residuals just inside and far outside `64 * eps(real(D))`), at both ends
+//! residuals inside and outside the default `eps(real(D))^(3/4)`), at both ends
 //! of each lane's normal range. The deltas read the calling thread's
 //! [`cuda_transfer_stats`] counters.
 //!
@@ -26,7 +26,12 @@ fn cuda_is_hermitian_region<D: CudaScalar>(
     offset: usize,
     n: usize,
 ) -> Result<bool, tenet_dense::DenseError> {
-    Ok(cuda_hermitian_regions::<D>(ctx, src, &[(offset, n)])?[0])
+    Ok(cuda_hermitian_regions::<D>(
+        ctx,
+        src,
+        &[(offset, n)],
+        <D::Real as tenet_dense::CudaRealScalar>::EPSILON.powf(0.75),
+    )?[0])
 }
 
 trait Payload: CudaScalar + Copy {
@@ -106,12 +111,14 @@ fn asymmetric(n: usize, scale: f64) -> Vec<Complex64> {
     block
 }
 
-/// `[[1, delta], [0, 1]]` with `delta = epsilons * eps(real(D))`: admitted
-/// below `128 * eps`, rejected above.
-fn skewed<D: Payload>(epsilons: f64) -> Vec<Complex64> {
+/// `[[1, delta], [0, 1]]`, relative residual `delta / 2`, with `delta` the
+/// fraction `of_threshold` of `2 * eps(real(D))^(3/4)`: admitted below 1,
+/// rejected above.
+fn skewed<D: Payload>(of_threshold: f64) -> Vec<Complex64> {
     let one = Complex64::new(1.0, 0.0);
     let zero = Complex64::new(0.0, 0.0);
-    vec![one, zero, Complex64::new(epsilons * D::EPSILON, 0.0), one]
+    let delta = of_threshold * 2.0 * D::EPSILON.powf(0.75);
+    vec![one, zero, Complex64::new(delta, 0.0), one]
 }
 
 fn poisoned(bad: f64) -> Vec<Complex64> {
@@ -133,8 +140,8 @@ fn cases<D: Payload>() -> Vec<(Vec<Complex64>, bool)> {
         (asymmetric(4, D::TINY), false),
         (poisoned(f64::NAN), false),
         (poisoned(f64::INFINITY), false),
-        (skewed::<D>(120.0), true),
-        (skewed::<D>(4096.0), false),
+        (skewed::<D>(0.5), true),
+        (skewed::<D>(2.0), false),
         (hermitian(33, 1.0), true),
     ]
 }
@@ -163,7 +170,13 @@ fn case<D: Payload>(ctx: &mut CudaDenseContext, name: &str) {
         let src = CudaDenseStorage::upload::<D>(ctx, &data).expect("upload");
 
         let before = cuda_transfer_stats().d2h_calls;
-        let batched = cuda_hermitian_regions::<D>(ctx, &src, &regions).expect("batched");
+        let batched = cuda_hermitian_regions::<D>(
+            ctx,
+            &src,
+            &regions,
+            <D::Real as tenet_dense::CudaRealScalar>::EPSILON.powf(0.75),
+        )
+        .expect("batched");
         downloads.push(cuda_transfer_stats().d2h_calls - before);
 
         assert_eq!(batched, expected, "{name}: batched decisions x{copies}");
@@ -197,7 +210,8 @@ fn batched_admission_matches_the_per_region_rule_with_bounded_downloads() {
     let empty = CudaDenseStorage::upload::<f64>(&ctx, &[0.0]).expect("upload");
     let before = cuda_transfer_stats().d2h_calls;
     assert_eq!(
-        cuda_hermitian_regions::<f64>(&mut ctx, &empty, &[]).expect("no regions"),
+        cuda_hermitian_regions::<f64>(&mut ctx, &empty, &[], f64::EPSILON.powf(0.75))
+            .expect("no regions"),
         Vec::<bool>::new()
     );
     assert_eq!(

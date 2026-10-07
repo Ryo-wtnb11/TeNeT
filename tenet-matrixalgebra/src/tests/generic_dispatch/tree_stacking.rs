@@ -317,8 +317,14 @@ where
         BoundDynamicTensorRef::try_new(&hermitian_adjoint, hermitian_bound.data()).unwrap();
     assert_stacking_refusal(eig_vals_dyn(&mut dense, &general_adjoint), "eig_vals ");
     assert_stacking_refusal(eig_full_dyn(&mut dense, &general_adjoint), "eig_full ");
-    assert_stacking_refusal(eigh_vals_dyn(&mut dense, &hermitian_adjoint), "eigh_vals ");
-    assert_stacking_refusal(eigh_full_dyn(&mut dense, &hermitian_adjoint), "eigh_full ");
+    assert_stacking_refusal(
+        eigh_vals_dyn(&mut dense, &hermitian_adjoint, HermitianTol::DEFAULT),
+        "eigh_vals ",
+    );
+    assert_stacking_refusal(
+        eigh_full_dyn(&mut dense, &hermitian_adjoint, HermitianTol::DEFAULT),
+        "eigh_full ",
+    );
     assert_stacking_refusal(exp_dyn(&mut dense, &mut context, &general_adjoint), "exp ");
 }
 
@@ -595,7 +601,7 @@ where
     let input = bound_tensor(Arc::clone(&provider), &reordered_hermitian);
     let input = input.as_ref();
     let input = input.dynamic();
-    let eigh = eigh_full_dyn(&mut dense, &input).unwrap();
+    let eigh = eigh_full_dyn(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
     let vh = crate::factorize::adjoint_bound_factor(eigh.v()).unwrap();
     let mut vd = eigh.v().clone();
     let vd_space = vd.space().space().clone();

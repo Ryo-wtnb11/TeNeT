@@ -84,7 +84,7 @@ macro_rules! is_posdef {
         let t = &$tensor;
         is_hermitian!(t, $tol) && {
             let threshold = ($tol) * t.norm(2.0).unwrap().max(1.0);
-            t.eigh_vals(&codomain_axes(&t), &domain_axes(&t))
+            t.eigh_vals(&codomain_axes(&t), &domain_axes(&t), tenet::typed::HermitianTol::DEFAULT)
                 .unwrap()
                 .iter()
                 .flat_map(|spectrum| spectrum.values.iter())

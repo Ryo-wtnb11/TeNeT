@@ -88,7 +88,7 @@ fn typed_cuda_factorizations_reject_compact_lazy_and_truncation_before_runtime_w
         Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
     ));
     assert!(matches!(
-        device_diagonal.eigh_full(&codomain_axes(&device_diagonal), &domain_axes(&device_diagonal)),
+        device_diagonal.eigh_full(&codomain_axes(&device_diagonal), &domain_axes(&device_diagonal), HermitianTol::DEFAULT),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
     ));
     // #1452: the adjoint of a compact diagonal is the owned (conjugated)
@@ -107,7 +107,7 @@ fn typed_cuda_factorizations_reject_compact_lazy_and_truncation_before_runtime_w
         Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
     ));
     assert!(matches!(
-        adjoint.eigh_full(&codomain_axes(&adjoint), &domain_axes(&adjoint)),
+        adjoint.eigh_full(&codomain_axes(&adjoint), &domain_axes(&adjoint), HermitianTol::DEFAULT),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
     ));
 
@@ -166,7 +166,7 @@ fn typed_cuda_factorizations_reject_lazy_adjoint_before_runtime_work() {
         Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
     ));
     assert!(matches!(
-        lazy.eigh_full(&codomain_axes(&lazy), &domain_axes(&lazy)),
+        lazy.eigh_full(&codomain_axes(&lazy), &domain_axes(&lazy), HermitianTol::DEFAULT),
         Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
     ));
 }
@@ -196,13 +196,21 @@ fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
     let device = source.to_cuda().unwrap();
 
     let expected_full = source
-        .eigh_full(&codomain_axes(&source), &domain_axes(&source))
+        .eigh_full(
+            &codomain_axes(&source),
+            &domain_axes(&source),
+            HermitianTol::DEFAULT,
+        )
         .unwrap();
     let Eigh {
         d: d_device,
         v: v_device,
     } = device
-        .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+        .eigh_full(
+            &codomain_axes(&device),
+            &domain_axes(&device),
+            HermitianTol::DEFAULT,
+        )
         .unwrap();
     assert_eq!(d_device.placement(), Placement::Cuda(0));
     assert_eq!(v_device.placement(), Placement::Cuda(0));
@@ -239,7 +247,11 @@ fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
     assert!(su2_source.subblock_count() >= 2);
     let su2_device = su2_source.to_cuda().unwrap();
     let Eigh { d: su2_d, v: su2_v } = su2_device
-        .eigh_full(&codomain_axes(&su2_device), &domain_axes(&su2_device))
+        .eigh_full(
+            &codomain_axes(&su2_device),
+            &domain_axes(&su2_device),
+            HermitianTol::DEFAULT,
+        )
         .unwrap();
     assert!(Arc::ptr_eq(
         su2_v.logical_space().provider_arc(),
@@ -257,7 +269,11 @@ fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
     for failure in [("decomposition", 2), ("assembly", 2)] {
         CUDA_EIGH_FAILURE.with(|injected| injected.set(Some(failure)));
         assert!(device
-            .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+            .eigh_full(
+                &codomain_axes(&device),
+                &domain_axes(&device),
+                HermitianTol::DEFAULT
+            )
             .is_err());
         CUDA_EIGH_FAILURE.with(|injected| injected.set(None));
         assert_typed_map_close(
@@ -277,7 +293,7 @@ fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
     .to_cuda()
     .unwrap();
     assert!(matches!(
-        nonhermitian.eigh_full(&codomain_axes(&nonhermitian), &domain_axes(&nonhermitian)),
+        nonhermitian.eigh_full(&codomain_axes(&nonhermitian), &domain_axes(&nonhermitian), HermitianTol::DEFAULT),
         Err(Error::Operation(error))
             if matches!(
                 error.as_ref(),
@@ -361,7 +377,12 @@ fn mis_stacked_hermitian_z2(runtime: &Runtime) -> TensorMap<Z2FusionRule, f64> {
 fn host_eigh_refuses_a_mis_stacked_block_that_stays_hermitian() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let tensor = mis_stacked_hermitian_z2(&runtime);
-    let error = format!("{:?}", tensor.eigh_full(&[0, 1], &[2, 3]).err());
+    let error = format!(
+        "{:?}",
+        tensor
+            .eigh_full(&[0, 1], &[2, 3], HermitianTol::DEFAULT)
+            .err()
+    );
     assert!(error.contains("eigh_full requires identical"), "{error}");
 }
 
@@ -375,7 +396,7 @@ fn typed_cuda_eigh_refuses_a_mis_stacked_block_that_stays_hermitian() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let device = mis_stacked_hermitian_z2(&runtime).to_cuda().unwrap();
     assert!(matches!(
-        device.eigh_full(&codomain_axes(&device), &domain_axes(&device)),
+        device.eigh_full(&codomain_axes(&device), &domain_axes(&device), HermitianTol::DEFAULT),
         Err(Error::Operation(error))
             if matches!(
                 error.as_ref(),
@@ -425,7 +446,11 @@ fn typed_cuda_eigh_aligned_assembly_matches_the_per_tree_path_bitwise() {
         CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
         CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.set(Some(0)));
         let Eigh { d, v } = device
-            .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+            .eigh_full(
+                &codomain_axes(&device),
+                &domain_axes(&device),
+                HermitianTol::DEFAULT,
+            )
             .unwrap();
         CUDA_EIGH_TREEWISE.with(|flag| flag.set(false));
         assert_eq!(

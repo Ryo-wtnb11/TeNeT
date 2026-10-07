@@ -1,5 +1,6 @@
 use std::hint::black_box;
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::Runtime;
@@ -63,8 +64,14 @@ fn second_compact_factorization_builds_the_plan_with_a_bounded_constant() {
     drop(warm_qr);
 
     let hermitian = a.adjoint().unwrap().compose(&a).unwrap();
-    let warm_eigh = hermitian.eigh_full(&[0, 1], &[2, 3]).unwrap();
-    let (Eigh { d, v }, eigh_calls) = measured(|| hermitian.eigh_full(&[0, 1], &[2, 3]).unwrap());
+    let warm_eigh = hermitian
+        .eigh_full(&[0, 1], &[2, 3], HermitianTol::DEFAULT)
+        .unwrap();
+    let (Eigh { d, v }, eigh_calls) = measured(|| {
+        hermitian
+            .eigh_full(&[0, 1], &[2, 3], HermitianTol::DEFAULT)
+            .unwrap()
+    });
     black_box((&d, &v));
     assert!(
         eigh_calls <= 120,

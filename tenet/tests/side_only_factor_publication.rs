@@ -5,6 +5,8 @@
 //! complementary on the complete fused spaces.
 
 use std::sync::Arc;
+#[cfg(feature = "racah-generated")]
+use tenet::typed::HermitianTol;
 
 use num_complex::Complex64;
 use tenet::sector::{
@@ -197,7 +199,11 @@ macro_rules! full_qr_lq_bond_case {
         // dimension rules out an unstored (zero) side-only block.
         let identity = |gram: TensorMap<_, $scalar>, reduced: usize| {
             let values = gram
-                .eigh_vals(&codomain_axes(&gram), &domain_axes(&gram))
+                .eigh_vals(
+                    &codomain_axes(&gram),
+                    &domain_axes(&gram),
+                    HermitianTol::DEFAULT,
+                )
                 .unwrap()
                 .into_iter()
                 .flat_map(|spectrum| spectrum.values)

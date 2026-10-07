@@ -9,6 +9,7 @@
 //! finite maximum from the first.
 
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use num_complex::Complex64;
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
@@ -73,12 +74,11 @@ macro_rules! assert_nan_spectrum_is_rejected {
                         s.domain()[0].find_truncated(&s.diagview()?, &policy)
                     });
             assert!(svd.is_err(), "svd composition {policy:?}");
-            let eigh =
-                diagonal
-                    .eigh_full(&[0], &[1])
-                    .and_then(|tenet::typed::Eigh { d, .. }| {
-                        d.domain()[0].find_truncated(&d.diagview()?, &policy)
-                    });
+            let eigh = diagonal
+                .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+                .and_then(|tenet::typed::Eigh { d, .. }| {
+                    d.domain()[0].find_truncated(&d.diagview()?, &policy)
+                });
             assert!(eigh.is_err(), "eigh composition {policy:?}");
         }
     }};

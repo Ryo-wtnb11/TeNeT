@@ -22,7 +22,7 @@ fn compact_diagonal_eigh_full_skips_dense_input_and_solver() {
     )
     .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let Eigh { d, v } = input.eigh_full(&[0], &[1]).unwrap();
+    let Eigh { d, v } = input.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert_eq!(
         d.diagview().unwrap()[0].values,
         vec![
@@ -35,7 +35,7 @@ fn compact_diagonal_eigh_full_skips_dense_input_and_solver() {
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(calls.total(), 0);
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let _ = input.eigh_full(&[1], &[0]).unwrap();
+    let _ = input.eigh_full(&[1], &[0], HermitianTol::DEFAULT).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(calls.total(), 0);
 }
@@ -56,9 +56,13 @@ fn compact_diagonal_eigh_full_hand_permutation_all_scalars() {
             )
             .unwrap();
             let saved = input.diagview().unwrap();
-            let dense = input.materialize().unwrap().eigh_full(&[0], &[1]).unwrap();
+            let dense = input
+                .materialize()
+                .unwrap()
+                .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+                .unwrap();
             DIAGONAL_MATERIALIZATIONS.set(0);
-            let Eigh { d, v } = input.eigh_full(&[0], &[1]).unwrap();
+            let Eigh { d, v } = input.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
             assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
             assert_eq!(input.diagview().unwrap(), saved);
             assert_eq!(d.diagview().unwrap()[0].values, $sorted);
@@ -153,9 +157,13 @@ fn compact_diagonal_eigh_full_signed_zeros_remain_a_valid_eigenbasis() {
         }],
     )
     .unwrap();
-    let dense = input.materialize().unwrap().eigh_full(&[0], &[1]).unwrap();
+    let dense = input
+        .materialize()
+        .unwrap()
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+        .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let Eigh { d, v } = input.eigh_full(&[0], &[1]).unwrap();
+    let Eigh { d, v } = input.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(
         d.diagview().unwrap()[0].values,
@@ -189,9 +197,13 @@ fn compact_diagonal_eigh_full_preserves_sector_spaces_and_zero_regions() {
         ($leg:expr, $spectra:expr, $expected:expr) => {{
             let input: TensorMap<_, f64> = TensorMap::diagonal(&runtime, &$leg, $spectra).unwrap();
             let saved = input.diagview().unwrap();
-            let dense = input.materialize().unwrap().eigh_full(&[0], &[1]).unwrap();
+            let dense = input
+                .materialize()
+                .unwrap()
+                .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+                .unwrap();
             DIAGONAL_MATERIALIZATIONS.set(0);
-            let Eigh { d, v } = input.eigh_full(&[0], &[1]).unwrap();
+            let Eigh { d, v } = input.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
             assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
             assert_eq!(input.diagview().unwrap(), saved);
             assert_eq!(d.diagview().unwrap(), $expected);
@@ -368,7 +380,7 @@ fn compact_diagonal_eigh_full_is_direct_for_near_hermitian_and_refuses_nonfinite
     // the eigenvalue is its real part; the diagonal applies the same check
     // directly, with no materialization and no dense EIGH.
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let Eigh { d, .. } = near.eigh_full(&[0], &[1]).unwrap();
+    let Eigh { d, .. } = near.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert_eq!(d.diagview().unwrap()[0].values, [Complex64::new(1.0, 0.0)]);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(calls.total(), 0);
@@ -386,7 +398,10 @@ fn compact_diagonal_eigh_full_is_direct_for_near_hermitian_and_refuses_nonfinite
         )
         .unwrap();
         DIAGONAL_MATERIALIZATIONS.set(0);
-        let actual = input.eigh_full(&[0], &[1]).map(drop).unwrap_err();
+        let actual = input
+            .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+            .map(drop)
+            .unwrap_err();
         assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
         assert!(actual
             .to_string()
@@ -404,7 +419,13 @@ fn compact_diagonal_eigh_full_is_direct_for_near_hermitian_and_refuses_nonfinite
     let calls_before = calls.total();
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert_eq!(
-        extreme.eigh_full(&[0], &[1]).unwrap().d.diagview().unwrap()[0].values,
+        extreme
+            .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
+            .unwrap()
+            .d
+            .diagview()
+            .unwrap()[0]
+            .values,
         [f32::MAX]
     );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
@@ -420,7 +441,7 @@ fn compact_diagonal_eigh_full_is_direct_for_near_hermitian_and_refuses_nonfinite
     .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
     assert!(matches!(
-        input.eigh_full(&[0, 1], &[]),
+        input.eigh_full(&[0, 1], &[], HermitianTol::DEFAULT),
         Err(Error::Operation(error))
             if matches!(error.as_ref(), tenet_tensors::OperationError::UnsupportedTensorContractScope {
                 message: "eigh requires an endomorphism (codomain == domain)"
@@ -459,10 +480,10 @@ fn compact_diagonal_eigh_full_changed_roles_match_explicit_dense_permute() {
     let reference = swapped
         .materialize()
         .unwrap()
-        .eigh_full(&[0], &[1])
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
         .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let Eigh { d, v } = input.eigh_full(&[1], &[0]).unwrap();
+    let Eigh { d, v } = input.eigh_full(&[1], &[0], HermitianTol::DEFAULT).unwrap();
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(d.diagview().unwrap(), reference.d.diagview().unwrap());
     assert_eq!(d.codomain(), reference.d.codomain());
@@ -1305,7 +1326,7 @@ fn compact_diagonal_eigh_vals_skips_dense_input_and_solver() {
     )
     .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let result = source.eigh_vals(&[0], &[1]).unwrap();
+    let result = source.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert_eq!(result[0].values, vec![-4.0, 1.0, 0.0]);
     assert_eq!(result[1].values, vec![-2.0, 2.0]);
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
@@ -1321,9 +1342,9 @@ fn compact_diagonal_eigh_vals_match_hand_spectra_across_scalars_and_sectors() {
                 TensorMap::diagonal(&runtime, &$leg, $spectra).unwrap();
             let saved = input.diagview().unwrap();
             let dense = input.materialize().unwrap();
-            let dense_values = dense.eigh_vals(&[0], &[1]).unwrap();
+            let dense_values = dense.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
             DIAGONAL_MATERIALIZATIONS.set(0);
-            let actual = input.eigh_vals(&[0], &[1]).unwrap();
+            let actual = input.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
             assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
             assert_eq!(input.diagview().unwrap(), saved);
             let expected: Vec<Vec<f64>> = $expected;
@@ -1462,7 +1483,10 @@ fn compact_diagonal_eigh_vals_match_hand_spectra_across_scalars_and_sectors() {
     let input: TensorMap<_, f64> =
         TensorMap::diagonal(&runtime, &empty, Vec::<SectorSpectrum<_, f64>>::new()).unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    assert!(input.eigh_vals(&[0], &[1]).unwrap().is_empty());
+    assert!(input
+        .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+        .unwrap()
+        .is_empty());
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
 }
 
@@ -1486,7 +1510,10 @@ fn compact_diagonal_eigh_vals_applies_the_dense_hermiticity_check_directly() {
     // Within the dense route's relative Hermiticity tolerance the eigenvalue
     // is the real part, read directly.
     DIAGONAL_MATERIALIZATIONS.set(0);
-    assert_eq!(near.eigh_vals(&[0], &[1]).unwrap()[0].values, [1.0]);
+    assert_eq!(
+        near.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap()[0].values,
+        [1.0]
+    );
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);
     assert_eq!(calls.total(), 0);
 
@@ -1501,7 +1528,9 @@ fn compact_diagonal_eigh_vals_applies_the_dense_hermiticity_check_directly() {
     .unwrap();
     // NaN is refused by the shared finite-input stage.
     DIAGONAL_MATERIALIZATIONS.set(0);
-    let error = nonfinite.eigh_vals(&[0], &[1]).unwrap_err();
+    let error = nonfinite
+        .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
+        .unwrap_err();
     assert!(error
         .to_string()
         .contains("eigh input components must be finite"));
@@ -1536,7 +1565,10 @@ fn compact_diagonal_eigh_vals_widens_stored_single_precision_values() {
     )
     .unwrap();
     DIAGONAL_MATERIALIZATIONS.set(0);
-    for actual in [real.eigh_vals(&[0], &[1]), complex.eigh_vals(&[0], &[1])] {
+    for actual in [
+        real.eigh_vals(&[0], &[1], HermitianTol::DEFAULT),
+        complex.eigh_vals(&[0], &[1], HermitianTol::DEFAULT),
+    ] {
         assert_eq!(actual.unwrap()[0].values, expected);
     }
     assert_eq!(DIAGONAL_MATERIALIZATIONS.get(), 0);

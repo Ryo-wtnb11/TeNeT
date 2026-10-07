@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::Eigh;
@@ -59,7 +60,7 @@ fn typed_real_c64_eigenvalue_readback_stays_compact() {
             )
         })
         .unwrap();
-    let Eigh { d: diagonal, .. } = source.eigh_full(&[0], &[1]).unwrap();
+    let Eigh { d: diagonal, .. } = source.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     assert_eq!(
         tenet::expert::diagonal_spectrum(&diagonal)
             .unwrap()

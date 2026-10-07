@@ -15,6 +15,7 @@ use tenet_core::{
     BlockStructureContent, CheckedFusionAlgebra, CoupledSectorRegion, HomSpaceId,
     MultiplicityFreeRigidSymbols, Placement, RuleIdentity, SectorCodec, SectorId, TensorStorage,
 };
+use tenet_matrixalgebra::HermitianTol;
 use tenet_operations::stacked::{StackedDirectReplay, StackedStorageView, StackedStorageViewMut};
 use tenet_operations::FusionBlockContractPlan;
 use tenet_tensors::{zeroed_payload, BoundDynamicTensorRef, FusionOperand, OperationError};
@@ -1273,7 +1274,9 @@ pub struct EighStackOutput<'a, R: SectorCodec, D, S = Vec<D>> {
 /// ```
 /// use std::sync::Arc;
 /// use tenet::sector::{U1FusionRule, U1Irrep};
-/// use tenet::typed::{EighFullPlan, GradedSpace, Runtime, StackedTensorMap, TensorMap};
+/// use tenet::typed::{
+///     EighFullPlan, GradedSpace, HermitianTol, Runtime, StackedTensorMap, TensorMap,
+/// };
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let runtime = Runtime::builder().build()?;
@@ -1281,7 +1284,7 @@ pub struct EighStackOutput<'a, R: SectorCodec, D, S = Vec<D>> {
 /// let stack = StackedTensorMap::pack(&[TensorMap::<_, f64>::zeros(
 ///     &runtime, [&leg], [&leg],
 /// )?])?;
-/// let plan = EighFullPlan::new(&stack, &[0], &[1])?;
+/// let plan = EighFullPlan::new(&stack, &[0], &[1], HermitianTol::DEFAULT)?;
 /// let mut workspace = plan.workspace()?;
 /// let _output = plan.execute(&stack, &mut workspace)?;
 /// # Ok(())
@@ -1296,6 +1299,7 @@ pub struct EighFullPlan<R: SectorCodec, D, S = Vec<D>> {
     regions: Arc<[CoupledSectorRegion]>,
     /// The source's coupled sectors in label order, as eager reports them.
     labels: Vec<(SectorId, <R as SectorCodec>::Sector)>,
+    hermitian_tol: HermitianTol,
     #[cfg(feature = "cuda")]
     device: Option<DeviceEighPlan<R>>,
     _payload: PhantomData<(D, S)>,
@@ -1359,8 +1363,10 @@ where
     /// Why a stack and not a bare signature: the plan needs the bound space
     /// and its provider, which a signature does not carry.
     ///
-    /// `rows` and `cols` are the leg roles of the eager
-    /// [`TensorMap::eigh_full`]. A stack has no batched permute, so only the
+    /// `rows`, `cols` and `hermitian_tol` are the leg roles and the
+    /// Hermiticity admission of the eager [`TensorMap::eigh_full`]; the plan
+    /// fixes the tolerance for every execution. A stack has no batched
+    /// permute, so only the
     /// members' current split (`rows = 0..nout`, `cols = nout..rank`) is
     /// supported here.
     ///
@@ -1374,6 +1380,7 @@ where
         source: &StackedTensorMap<R, D, S>,
         rows: &[usize],
         cols: &[usize],
+        hermitian_tol: HermitianTol,
     ) -> Result<Self, Error> {
         let nout = source.space.space().nout();
         if !rows.iter().copied().eq(0..nout)
@@ -1434,6 +1441,7 @@ where
             member_len: source.member_len,
             regions,
             labels,
+            hermitian_tol,
             #[cfg(feature = "cuda")]
             device,
             _payload: PhantomData,
@@ -1669,7 +1677,11 @@ where
             .take(members)
             .enumerate()
             .filter_map(|(member, data)| {
-                match tenet_matrixalgebra::seam::validate_hermitian_regions(data, &self.regions) {
+                match tenet_matrixalgebra::seam::validate_hermitian_regions(
+                    data,
+                    &self.regions,
+                    self.hermitian_tol,
+                ) {
                     Ok(()) => None,
                     // Shapes were admitted by `new`, so this is the content
                     // rule, the only other error the check reports.
@@ -1690,20 +1702,23 @@ where
         for member in 0..members {
             let data = &source.storage[member * len..(member + 1) * len];
             let input = BoundDynamicTensorRef::try_new(&self.space, data).map_err(Error::from)?;
-            let (v, mut eigenvalues) =
-                match tenet_matrixalgebra::seam::eigh_full_dyn(dense.dense(), &input) {
-                    Ok(out) => out.into_parts(),
-                    // The eager rejection of a non-finite eigenvalue; every
-                    // other member is still solved so all of them are named.
-                    Err(OperationError::InvalidArgument {
-                        message: "eigenvalues must be finite",
-                    }) => {
-                        faults.push((member, MemberFault::NonFiniteEigenvalue));
-                        spectra.push(Vec::new());
-                        continue;
-                    }
-                    Err(other) => return Err(Error::from(other).into()),
-                };
+            let (v, mut eigenvalues) = match tenet_matrixalgebra::seam::eigh_full_dyn(
+                dense.dense(),
+                &input,
+                self.hermitian_tol,
+            ) {
+                Ok(out) => out.into_parts(),
+                // The eager rejection of a non-finite eigenvalue; every
+                // other member is still solved so all of them are named.
+                Err(OperationError::InvalidArgument {
+                    message: "eigenvalues must be finite",
+                }) => {
+                    faults.push((member, MemberFault::NonFiniteEigenvalue));
+                    spectra.push(Vec::new());
+                    continue;
+                }
+                Err(other) => return Err(Error::from(other).into()),
+            };
             // As eager `diagonal_factor`: the bond is built in sector order.
             eigenvalues.sort_unstable_by_key(|entry| entry.sector);
             let (v_space, v_data) = v.into_parts();
@@ -2039,6 +2054,8 @@ where
             &device.admission,
             members,
             self.member_len,
+            self.hermitian_tol
+                .resolve(<D as tenet_matrixalgebra::FactorScalar>::epsilon()),
         )
         .map_err(dense_err)?;
         let rejected: Vec<_> = accepted
@@ -2225,8 +2242,9 @@ where
         source: &StackedTensorMap<R, D, S>,
         rows: &[usize],
         cols: &[usize],
+        hermitian_tol: HermitianTol,
     ) -> Result<Self, Error> {
-        let plan = EighFullPlan::new(source, rows, cols)?;
+        let plan = EighFullPlan::new(source, rows, cols, hermitian_tol)?;
         let workspace = plan.workspace()?;
         Ok(Self { plan, workspace })
     }
@@ -2403,7 +2421,8 @@ mod tests {
         let x = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1).unwrap();
         let input = x.axpby(1.0, &x.adjoint().unwrap(), 1.0).unwrap();
         let stack = super::StackedTensorMap::pack(&[input]).unwrap();
-        let mut plan = super::EighFullPlan::new(&stack, &[0], &[1]).unwrap();
+        let mut plan =
+            super::EighFullPlan::new(&stack, &[0], &[1], super::HermitianTol::DEFAULT).unwrap();
         let mut workspace = plan.workspace().unwrap();
         plan.labels[0].0 = SectorId::new(usize::MAX);
 
@@ -2439,7 +2458,9 @@ mod tests {
             .unwrap();
         let run = |treewise: bool| {
             FORCE_TREEWISE.with(|flag| flag.set(treewise));
-            let mut handle = PreparedEighFull::new(&stack, &[0, 1], &[2, 3]).unwrap();
+            let mut handle =
+                PreparedEighFull::new(&stack, &[0, 1], &[2, 3], super::HermitianTol::DEFAULT)
+                    .unwrap();
             FORCE_TREEWISE.with(|flag| flag.set(false));
             let copies: usize = handle
                 .plan
@@ -2470,7 +2491,8 @@ mod tests {
             .to_cuda()
             .unwrap();
         FORCE_TREEWISE.with(|flag| flag.set(true));
-        let mut handle = PreparedEighFull::new(&single, &[0, 1], &[2, 3]).unwrap();
+        let mut handle =
+            PreparedEighFull::new(&single, &[0, 1], &[2, 3], super::HermitianTol::DEFAULT).unwrap();
         FORCE_TREEWISE.with(|flag| flag.set(false));
         let v = handle
             .execute(&single)
@@ -2483,7 +2505,7 @@ mod tests {
         let crate::typed::Eigh { v: eager_v, .. } = members[0]
             .to_cuda()
             .unwrap()
-            .eigh_full(&[0, 1], &[2, 3])
+            .eigh_full(&[0, 1], &[2, 3], super::HermitianTol::DEFAULT)
             .unwrap();
         assert!(v.dense_data().unwrap() == eager_v.to_host().unwrap().dense_data().unwrap());
     }

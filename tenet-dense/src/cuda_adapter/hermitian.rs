@@ -18,10 +18,6 @@ fn upload_scalar<R: CudaRealScalar>(
     record_h2d(std::mem::size_of::<R>());
     Ok(tensor)
 }
-/// The relative anti-Hermitian residual this payload's real lane admits.
-pub(super) fn hermitian_tolerance<D: CudaScalar>() -> f64 {
-    HERMITIAN_TOLERANCE_EPSILONS * <D::Real as CudaRealScalar>::EPSILON
-}
 /// The rank-0 lane operand through which [`scale_by_power_of_two`] multiplies
 /// a payload by the exact power of two `normalizer`.
 fn power_of_two_operand<D: CudaScalar>(
@@ -71,13 +67,14 @@ fn magnitudes_for_sum_squares<D: CudaScalar>(
         .map_err(|err| cuda_error(op, err))
 }
 /// Tests packed square CUDA regions `(offset, n)` of `src` with the host EIGH
-/// rule `||(A - A^H)/2||_F <= 64 eps(real(D)) ||A||_F`, returning one decision
-/// per region. The residual uses the *conjugate* transpose, so a
+/// rule `||(A - A^H)/2||_F <= relative_tolerance * ||A||_F`, returning one
+/// decision per region. The residual uses the *conjugate* transpose, so a
 /// complex-symmetric non-Hermitian block is rejected.
 ///
-/// The epsilon is the payload's own real lane
-/// ([`crate::cuda_hermitian::HERMITIAN_TOLERANCE_EPSILONS`]), matching the
-/// host twin `normwise_hermitian`.
+/// `relative_tolerance` is the caller's resolved eigh admission tolerance
+/// (TeNeT's `HermitianTol` at the payload's real-lane epsilon), the same one
+/// the host twin `normwise_hermitian` applies.
+/// The caller must supply a finite, non-negative value.
 ///
 /// A complex entry whose modulus overflows the lane is rejected here (the
 /// `hypot`-based `abs` gives infinity) but admitted by the component-scaled
@@ -103,6 +100,7 @@ pub fn cuda_hermitian_regions<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     src: &CudaDenseStorage,
     regions: &[(usize, usize)],
+    relative_tolerance: f64,
 ) -> Result<Vec<bool>, DenseError> {
     const OP: &str = "cuda_hermitian";
     ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
@@ -213,7 +211,7 @@ pub fn cuda_hermitian_regions<D: CudaScalar>(
             // Exact: the reciprocal of a normal power of two.
             residual_normalizer.recip(),
             residual_ss,
-            hermitian_tolerance::<D>(),
+            relative_tolerance,
         );
     }
     Ok(accepted)
@@ -222,6 +220,7 @@ pub fn cuda_hermitian_regions<D: CudaScalar>(
 /// regions, member `b` of region `(offset, n)` at `offset + b *
 /// member_stride`. Returns one decision per (member, region), member-major:
 /// `decisions[b * regions.len() + r]`.
+/// The caller must supply a finite, non-negative `relative_tolerance`.
 ///
 /// Each (member, region) pair is decided by exactly the rule and the three
 /// scalar stages of [`cuda_hermitian_regions`], with its own power-of-two
@@ -243,6 +242,7 @@ pub fn cuda_hermitian_regions_batched<D: CudaScalar>(
     regions: &[(usize, usize)],
     members: usize,
     member_stride: usize,
+    relative_tolerance: f64,
 ) -> Result<Vec<bool>, DenseError> {
     const OP: &str = "cuda_hermitian_batched";
     ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
@@ -389,7 +389,7 @@ pub fn cuda_hermitian_regions_batched<D: CudaScalar>(
                 // Exact: the reciprocal of a normal power of two.
                 residual_normalizer.recip(),
                 residual_ss[member],
-                hermitian_tolerance::<D>(),
+                relative_tolerance,
             );
         }
     }

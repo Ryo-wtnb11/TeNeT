@@ -727,7 +727,9 @@ where
         scalar_bits(eig.v().data()),
         spectrum_bits(eig.eigenvalues()),
     ]);
-    let eigh = measured_into(&mut bytes, || eigh_full_dyn(&mut dense, hermitian).unwrap());
+    let eigh = measured_into(&mut bytes, || {
+        eigh_full_dyn(&mut dense, hermitian, HermitianTol::DEFAULT).unwrap()
+    });
     bits.extend([
         scalar_bits(eigh.v().data()),
         spectrum_bits(eigh.eigenvalues()),
@@ -879,7 +881,7 @@ where
             "eig_full ",
         );
         assert_stacking_refusal(
-            refusal(eigh_full_dyn(dense, &mis_stacked_hermitian).err()),
+            refusal(eigh_full_dyn(dense, &mis_stacked_hermitian, HermitianTol::DEFAULT).err()),
             "eigh_full ",
         );
         [
@@ -954,7 +956,7 @@ where
         spectrum_bits(eig.eigenvalues()),
     ]);
     let eigh = measured_into(&mut bytes, || {
-        eigh_full_dyn_checked_generic(&mut dense, hermitian).unwrap()
+        eigh_full_dyn_checked_generic(&mut dense, hermitian, HermitianTol::DEFAULT).unwrap()
     });
     bits.extend([
         scalar_bits(eigh.v().data()),

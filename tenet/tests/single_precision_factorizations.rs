@@ -36,6 +36,7 @@ include!("common/predicate_chain_coefficients.rs");
 
 use num_complex::{Complex32, Complex64};
 use tenet::sector::{U1FusionRule, U1Irrep};
+use tenet::typed::HermitianTol;
 use tenet::typed::{Eigh, LeftPolar, Lq, Qr, RightPolar, Svd};
 use tenet::typed::{TensorMap, Truncation};
 
@@ -497,7 +498,7 @@ macro_rules! factor_checks {
         );
         let h_terms = wide_h.dense_data().unwrap().len();
 
-        let Eigh { d, v } = h.eigh_full(&[0], &[1]).unwrap();
+        let Eigh { d, v } = h.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
         assert_reconstruction!(
             format!("{name}: eigh_full"),
             &v.compose(&d)
@@ -510,8 +511,8 @@ macro_rules! factor_checks {
         );
         assert_unitary!(format!("{name}: eigh_full V"), &rt, &v, h_terms, $narrow);
 
-        let eigenvalues = h.eigh_vals(&[0], &[1]).unwrap();
-        let wide_eigenvalues = wide_h.eigh_vals(&[0], &[1]).unwrap();
+        let eigenvalues = h.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
+        let wide_eigenvalues = wide_h.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap();
         assert_spectra_agree!(
             format!("{name}: eigh_vals"),
             &eigenvalues,
@@ -529,8 +530,14 @@ macro_rules! factor_checks {
             );
         }
 
-        let truncated = eigen_trunc!(h.eigh_full(&[0], &[1]), &Truncation::rank(1));
-        let wide_truncated = eigen_trunc!(wide_h.eigh_full(&[0], &[1]), &Truncation::rank(1));
+        let truncated = eigen_trunc!(
+            h.eigh_full(&[0], &[1], HermitianTol::DEFAULT),
+            &Truncation::rank(1)
+        );
+        let wide_truncated = eigen_trunc!(
+            wide_h.eigh_full(&[0], &[1], HermitianTol::DEFAULT),
+            &Truncation::rank(1)
+        );
         assert!(
             truncated.error > 0.0,
             "{name}: eigh_trunc discarded nothing"
@@ -612,7 +619,7 @@ macro_rules! factor_checks {
         );
         assert_isometry!(format!("{name}: left_polar W"), &rt, &w, terms, $narrow);
         assert!(
-            p.eigh_vals(&[0], &[1])
+            p.eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
                 .unwrap()
                 .iter()
                 .flat_map(|entry| &entry.values)
@@ -953,7 +960,7 @@ mod checked_generic {
                     // spectrum factor instead: `d` must carry exactly the
                     // eigenvalues `eigh_vals` reports, which are themselves
                     // compared against the widened oracle just below.
-                    let Eigh { d, v } = h.eigh_full(&[0], &[1]).unwrap();
+                    let Eigh { d, v } = h.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
                     assert_spectra_agree!(
                         format!("{name}: eigh_full D against eigh_vals"),
                         &d.diagview()
@@ -970,7 +977,7 @@ mod checked_generic {
                                     .collect::<Vec<f64>>(),
                             })
                             .collect::<Vec<_>>(),
-                        &h.eigh_vals(&[0], &[1]).unwrap(),
+                        &h.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap(),
                         h_terms
                     );
                     // `v` is checked by the law that does not need an adjoint
@@ -984,13 +991,18 @@ mod checked_generic {
                     );
                     assert_spectra_agree!(
                         format!("{name}: eigh_vals"),
-                        &h.eigh_vals(&[0], &[1]).unwrap(),
-                        &wide_h.eigh_vals(&[0], &[1]).unwrap(),
+                        &h.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap(),
+                        &wide_h.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap(),
                         h_terms
                     );
-                    let truncated = eigen_trunc!(h.eigh_full(&[0], &[1]), &Truncation::rank(1));
-                    let wide_truncated =
-                        eigen_trunc!(wide_h.eigh_full(&[0], &[1]), &Truncation::rank(1));
+                    let truncated = eigen_trunc!(
+                        h.eigh_full(&[0], &[1], HermitianTol::DEFAULT),
+                        &Truncation::rank(1)
+                    );
+                    let wide_truncated = eigen_trunc!(
+                        wide_h.eigh_full(&[0], &[1], HermitianTol::DEFAULT),
+                        &Truncation::rank(1)
+                    );
                     assert_scalars_agree(
                         &format!("{name}: eigh_trunc error"),
                         Complex64::new(truncated.error, 0.0),
@@ -1118,8 +1130,8 @@ mod compact_diagonal {
                     );
                     assert_spectra_agree!(
                         "compact eigh_vals",
-                        &narrow.eigh_vals(&[0], &[1]).unwrap(),
-                        &wide.eigh_vals(&[0], &[1]).unwrap(),
+                        &narrow.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap(),
+                        &wide.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap(),
                         terms
                     );
                     assert!(

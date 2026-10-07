@@ -32,6 +32,7 @@
 //! selection breaks ties in, so the kept bond is part of the exact gate.
 
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use num_complex::{Complex32, Complex64};
 use tenet::sector::{
@@ -201,7 +202,7 @@ macro_rules! assert_eigh_composition {
         let truncation: &Truncation = &$truncation;
         let case: &str = $case;
 
-        let Eigh { d, v } = source.eigh_full(&[0], &[1]).unwrap();
+        let Eigh { d, v } = source.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
         let bond = d.domain()[0].clone();
         let spectra = d.diagview().unwrap();
         let found = bond.find_truncated(&spectra, truncation).unwrap();
@@ -610,7 +611,7 @@ fn signed_cross_sector_eigenvalue_ties_are_broken_in_tensorkit_sector_order() {
         .unwrap();
     assert_eq!(identity.subblock_count(), source.subblock_count());
     let magnitudes: Vec<f64> = source
-        .eigh_full(&[0], &[1])
+        .eigh_full(&[0], &[1], HermitianTol::DEFAULT)
         .unwrap()
         .d
         .diagview()

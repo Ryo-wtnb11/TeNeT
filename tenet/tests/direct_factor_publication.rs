@@ -8,6 +8,8 @@ mod numerics;
 
 use std::hint::black_box;
 use std::sync::Arc;
+#[cfg(feature = "racah-generated")]
+use tenet::typed::HermitianTol;
 
 use tenet::sector::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::{Complex32, Complex64, Runtime};
@@ -249,7 +251,7 @@ mod checked_generic {
             assert_residual!("A = polar product", $d, &product, a, terms);
             assert_residual!("P = Pᴴ", $d, &owned_adjoint!($d, p), &p, terms);
             let one = numerics::tolerance::<$d>(terms, 1.0);
-            for spectrum in gram.eigh_vals(&[0], &[1]).unwrap() {
+            for spectrum in gram.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap() {
                 for value in spectrum.values {
                     assert!(
                         (value - 1.0).abs() <= one,
@@ -259,7 +261,7 @@ mod checked_generic {
             }
             let psd = numerics::tolerance::<$d>(terms, p.norm(2.0).unwrap());
             let mut p_values = 0;
-            for spectrum in p.eigh_vals(&[0], &[1]).unwrap() {
+            for spectrum in p.eigh_vals(&[0], &[1], HermitianTol::DEFAULT).unwrap() {
                 for value in spectrum.values {
                     p_values += 1;
                     assert!(value >= -psd, "P is not PSD: eigenvalue {value:e}");

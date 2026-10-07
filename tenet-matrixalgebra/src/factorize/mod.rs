@@ -134,7 +134,7 @@ pub use compact_plan::CheckedGenericFactorPlanError;
 pub use eig::{
     eig_full_dyn, eig_full_from_source, eig_vals_dyn, eig_vals_from_source, eigh_full_dyn,
     eigh_full_from_source, eigh_vals_dyn, eigh_vals_from_source, validate_hermitian_regions,
-    EigFullDyn, EighFullDyn,
+    EigFullDyn, EighFullDyn, HermitianTol,
 };
 pub use matricize::{
     coupled_sector_block_dimensions_generic_checked, validate_endomorphism_region_stacking,

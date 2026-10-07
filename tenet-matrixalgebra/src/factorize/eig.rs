@@ -2,16 +2,11 @@ use super::*;
 
 pub(super) trait HermitianReal: Float {
     fn from_f64(value: f64) -> Self;
-    fn relative_tolerance() -> Self;
 }
 
 impl HermitianReal for f32 {
     fn from_f64(value: f64) -> Self {
         value as Self
-    }
-
-    fn relative_tolerance() -> Self {
-        64.0 * Self::EPSILON
     }
 }
 
@@ -19,11 +14,55 @@ impl HermitianReal for f64 {
     fn from_f64(value: f64) -> Self {
         value
     }
+}
 
-    fn relative_tolerance() -> Self {
-        64.0 * Self::EPSILON
+/// The tolerance of eigh's Hermiticity admission, MatrixAlgebraKit's
+/// `hermitian_tol`: every coupled-sector block `A` must satisfy
+/// `‖(A − Aᴴ)/2‖_F ≤ tol · ‖A‖_F` at the payload's working precision.
+///
+/// MAK uses an absolute `atol`, defaulting to `eps(norm(A, Inf))^(3/4)`
+/// (`common/defaults.jl:default_hermitian_tol`). TeNeT keeps a relative
+/// threshold so admission is invariant under rescaling `A` (#1983, #1987).
+/// The defaults agree for a scalar of unit magnitude, not at arbitrary scales.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HermitianTol {
+    relative: Option<f64>,
+}
+
+impl HermitianTol {
+    /// `eps(real(D))^(3/4)`.
+    pub const DEFAULT: Self = Self { relative: None };
+
+    /// An explicit relative tolerance.
+    ///
+    /// # Errors
+    ///
+    /// [`OperationError::InvalidArgument`] unless `tol` is finite and
+    /// non-negative.
+    pub fn relative(tol: f64) -> Result<Self, OperationError> {
+        if !tol.is_finite() || tol < 0.0 {
+            return Err(OperationError::InvalidArgument {
+                message: "hermitian_tol must be finite and non-negative",
+            });
+        }
+        Ok(Self {
+            relative: Some(tol),
+        })
+    }
+
+    /// The relative tolerance at a payload precision with machine epsilon
+    /// `epsilon`.
+    #[doc(hidden)]
+    pub fn resolve(self, epsilon: f64) -> f64 {
+        self.relative.unwrap_or_else(|| epsilon.powf(0.75))
     }
 }
+
+/// `exp`'s spectral-route predicate in machine epsilons. Why not
+/// [`HermitianTol::DEFAULT`]: this picks an algorithm, not an admission.
+/// The eigensolver reads a Hermitian triangle; retaining this threshold avoids
+/// sending additional nearly-Hermitian inputs from Padé to that spectral route.
+pub(crate) const EXP_SPECTRAL_ROUTE_EPSILONS: f64 = 64.0;
 
 #[cfg(test)]
 /// Full (untruncated) Hermitian eigendecomposition `t = V * D * Vh`.
@@ -68,10 +107,8 @@ impl<R, D> EighFullDyn<R, D> {
 #[cfg(test)]
 /// Full Hermitian eigendecomposition through the device boundary.
 ///
-/// Before any dense call, every coupled-sector block `A` must satisfy
-/// `||(A - A†)/2||_F <= 64 * eps(real(D)) * ||A||_F`, where `real(D)` is
-/// the real component type of `D`. This fixed machine-precision multiple is
-/// not currently user-configurable in this API.
+/// Before any dense call, every coupled-sector block must pass the
+/// Hermiticity admission at [`HermitianTol::DEFAULT`].
 pub(crate) fn eigh_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -82,7 +119,7 @@ where
     D: FactorScalar,
 {
     let dynamic = input.dynamic();
-    let out = eigh_full_dyn(dense, &dynamic)?;
+    let out = eigh_full_dyn(dense, &dynamic, HermitianTol::DEFAULT)?;
     // Materialize the dense diagonal here (the typed API returns a `TensorMap`);
     // the dyn producer no longer builds it (#56 item N).
     let d = diagonal_bond_svd_factor(dynamic.space(), &out.eigenvalues, &D::from_real)?;
@@ -93,11 +130,12 @@ where
     })
 }
 
-/// Dynamic-rank [`eigh_full`]: the shared core, with the same fixed
-/// relative-Frobenius Hermiticity criterion.
+/// Dynamic-rank [`eigh_full`]: the shared core, admitting Hermitian blocks
+/// at `hermitian_tol`.
 pub fn eigh_full_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
+    hermitian_tol: HermitianTol,
 ) -> Result<EighFullDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
@@ -113,7 +151,7 @@ where
     if let Some(plan) = compact_factor_plan(input.space())? {
         // The plan proves the stacking.
         require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eigh)?;
-        return eigh_full_direct_regions(dense, input, &plan);
+        return eigh_full_direct_regions(dense, input, &plan, hermitian_tol);
     }
     let matricizations =
         multiplicity_free_input_matricizations(space.structure(), input.data(), space.nout())?;
@@ -123,7 +161,7 @@ where
     }
     matricizations.validate_endomorphism_stacking(EIGH_FULL_STACKING)?;
     require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eigh)?;
-    matricizations.validate_hermitian()?;
+    matricizations.validate_hermitian(hermitian_tol)?;
     with_input_geometry!(&matricizations, |geometry| eigh_full_scattered(
         dense,
         input,
@@ -207,6 +245,7 @@ pub(super) fn eigh_full_direct_regions<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
     plan: &CompactFactorPlan,
+    hermitian_tol: HermitianTol,
 ) -> Result<EighFullDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
@@ -216,7 +255,7 @@ where
     let space = input.space().space();
     debug_assert_eq!(plan.source_layout, input.space().validated_layout());
     validate_endomorphism_tree_stacking(plan.source_regions.as_ref(), EIGH_FULL_STACKING)?;
-    validate_hermitian_regions(input.data(), &plan.source_regions)?;
+    validate_hermitian_regions(input.data(), &plan.source_regions, hermitian_tol)?;
 
     let v_space = input.space().rebind_validated(&plan.left_layout)?;
     let v_len = plan.left_layout.required_len()?;
@@ -278,12 +317,14 @@ where
 pub(super) fn eigh_full_diagonal_dyn<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
+    hermitian_tol: HermitianTol,
 ) -> Result<EighFullDyn<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let bond = hermitian_diagonal_bond(&MfAuthority(authority), authority, spectrum)?;
+    let bond =
+        hermitian_diagonal_bond(&MfAuthority(authority), authority, spectrum, hermitian_tol)?;
     let authority = bond.space();
     let space = authority.space();
     let plan = compact_factor_plan(authority)?.ok_or(missing_compact_plan())?;
@@ -330,6 +371,7 @@ fn compact_diagonal_eigh_sector<D: FactorScalar>(values: &[D], vectors: &mut [D]
 pub(super) fn eigh_full_diagonal_dyn_checked_generic<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
+    hermitian_tol: HermitianTol,
 ) -> Result<EighFullDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
@@ -339,6 +381,7 @@ where
         &CheckedAuthority(authority.provider_arc()),
         authority,
         spectrum,
+        hermitian_tol,
     )?;
     let authority = bond.space();
     let space = authority.space();
@@ -651,13 +694,14 @@ fn eigh_vals_diagonal<A, R, D>(
     authority: &A,
     space: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
+    hermitian_tol: HermitianTol,
 ) -> Result<Vec<SectorSpectrum>, A::Error>
 where
     A: FactorSpaceAuthority<R>,
     A::Error: From<OperationError>,
     D: FactorScalar,
 {
-    let bond = hermitian_diagonal_bond(authority, space, spectrum)?;
+    let bond = hermitian_diagonal_bond(authority, space, spectrum, hermitian_tol)?;
     let mut result = Vec::with_capacity(bond.len());
     for region in bond.iter() {
         let mut values: Vec<f64> = bond
@@ -680,12 +724,13 @@ where
 }
 
 /// A finite compact diagonal that passes the dense route's
-/// relative-Frobenius Hermiticity check, applied to the diagonal matrix
-/// itself; its real parts are its eigenvalues.
+/// relative-Frobenius Hermiticity check at `hermitian_tol`, applied to the
+/// diagonal matrix itself; its real parts are its eigenvalues.
 fn hermitian_diagonal_bond<'a, A, R, D>(
     authority: &A,
     space: &'a BoundDynamicFusionMapSpace<R>,
     spectrum: &'a [SectorSpectrum<D>],
+    hermitian_tol: HermitianTol,
 ) -> Result<DiagonalBond<'a, R, D>, A::Error>
 where
     A: FactorSpaceAuthority<R>,
@@ -693,12 +738,13 @@ where
     D: FactorScalar,
 {
     let bond = diagonal_bond(authority, space, spectrum, FactorFamily::Eigh)?;
+    let tol = hermitian_tol.resolve(D::epsilon());
     for region in bond.iter() {
         let values = &bond.entry(region).values;
         let hermitian = if D::epsilon() == f32::EPSILON as f64 {
-            normwise_hermitian_diagonal::<D, f32>(values)
+            normwise_hermitian_diagonal::<D, f32>(values, f32::from_f64(tol))
         } else if D::epsilon() == f64::EPSILON {
-            normwise_hermitian_diagonal::<D, f64>(values)
+            normwise_hermitian_diagonal::<D, f64>(values, tol)
         } else {
             false
         };
@@ -716,7 +762,7 @@ where
 /// without forming it. Off-diagonal zeros and the zero real residuals of the
 /// diagonal add nothing to either scaled sum, and both sums visit the
 /// diagonal in the same order as the dense scan, so the decision is equal.
-fn normwise_hermitian_diagonal<D: FactorScalar, R: HermitianReal>(values: &[D]) -> bool {
+fn normwise_hermitian_diagonal<D: FactorScalar, R: HermitianReal>(values: &[D], tol: R) -> bool {
     let mut input = ScaledFrobenius::zero();
     for &value in values {
         let value = value.widen_complex();
@@ -738,8 +784,7 @@ fn normwise_hermitian_diagonal<D: FactorScalar, R: HermitianReal>(values: &[D]) 
             return false;
         }
     }
-    residual.scaled_norm(R::one())
-        <= (R::one() + R::one()) * R::relative_tolerance() * input.sum_squares.sqrt()
+    residual.scaled_norm(R::one()) <= (R::one() + R::one()) * tol * input.sum_squares.sqrt()
 }
 
 /// General eigenvalues of a compact diagonal: the values themselves in
@@ -784,8 +829,7 @@ fn missing_compact_plan() -> OperationError {
 /// All Hermitian eigenvalues per coupled sector, descending by magnitude
 /// (MatrixAlgebraKit `eigh_vals`).
 ///
-/// Uses the same fixed relative-Frobenius Hermiticity criterion as
-/// [`eigh_full`]; this API does not expose `atol` or `rtol`.
+/// Admits Hermitian blocks at [`HermitianTol::DEFAULT`].
 pub(crate) fn eigh_vals<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -795,13 +839,14 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    eigh_vals_dyn(dense, &input.dynamic())
+    eigh_vals_dyn(dense, &input.dynamic(), HermitianTol::DEFAULT)
 }
 
 /// Dynamic-rank [`eigh_vals`]: the dense stage, the same in every fusion mode.
 pub fn eigh_vals_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
+    hermitian_tol: HermitianTol,
 ) -> Result<Vec<SectorSpectrum>, OperationError>
 where
     E: DenseExecutor + ?Sized,
@@ -824,7 +869,7 @@ where
         "eigh_vals requires identical endomorphism row/column fusion-tree stacking",
     )?;
     require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eigh)?;
-    matricizations.validate_hermitian()?;
+    matricizations.validate_hermitian(hermitian_tol)?;
     eigh_vals_spectra(dense, &matricizations)
 }
 
@@ -1171,11 +1216,15 @@ pub(super) fn hermitian_residual_norm<D: FactorScalar, R: HermitianReal>(
     Some(residual)
 }
 
-/// Tests `||(A - A†)/2||_F <= 64 * eps(R) * ||A||_F`.
+/// Tests `||(A - A†)/2||_F <= tol * ||A||_F`.
 ///
 /// The scaled sums keep that relative decision stable when either norm would
 /// overflow or underflow if formed directly.
-pub(super) fn normwise_hermitian<D: FactorScalar, R: HermitianReal>(data: &[D], n: usize) -> bool {
+pub(super) fn normwise_hermitian<D: FactorScalar, R: HermitianReal>(
+    data: &[D],
+    n: usize,
+    tol: R,
+) -> bool {
     let mut input = ScaledFrobenius::zero();
     for &value in data {
         let value = value.widen_complex();
@@ -1195,8 +1244,7 @@ pub(super) fn normwise_hermitian<D: FactorScalar, R: HermitianReal>(data: &[D], 
     let Some(residual) = hermitian_residual_norm::<D, R>(data, n, input.scale) else {
         return false;
     };
-    residual.scaled_norm(R::one())
-        <= (R::one() + R::one()) * R::relative_tolerance() * input.sum_squares.sqrt()
+    residual.scaled_norm(R::one()) <= (R::one() + R::one()) * tol * input.sum_squares.sqrt()
 }
 
 pub(super) fn validate_hermitian_matrix_shape<D>(
@@ -1221,16 +1269,18 @@ pub(super) fn validate_hermitian_matrix_shape<D>(
     Ok(())
 }
 
-/// Scale-invariant normwise hermiticity predicate at the working precision of `D`.
+/// Scale-invariant normwise hermiticity predicate at the working precision of
+/// `D`, with relative tolerance `tol`.
 ///
 /// Extracted from [`validate_hermitian_matrix_contents`] so the `exp` dispatch
 /// (issue #577) can ask the question without provoking — and then having to
-/// interpret — an EIGH failure. Same data, same tolerance, no second policy.
-pub(super) fn hermitian_matrix_contents<D: FactorScalar>(data: &[D], n: usize) -> bool {
+/// interpret — an EIGH failure. Same measure; `exp` passes its own route
+/// threshold ([`EXP_SPECTRAL_ROUTE_EPSILONS`]).
+pub(super) fn hermitian_matrix_contents<D: FactorScalar>(data: &[D], n: usize, tol: f64) -> bool {
     if D::epsilon() == f32::EPSILON as f64 {
-        normwise_hermitian::<D, f32>(data, n)
+        normwise_hermitian::<D, f32>(data, n, f32::from_f64(tol))
     } else if D::epsilon() == f64::EPSILON {
-        normwise_hermitian::<D, f64>(data, n)
+        normwise_hermitian::<D, f64>(data, n, tol)
     } else {
         false
     }
@@ -1239,8 +1289,9 @@ pub(super) fn hermitian_matrix_contents<D: FactorScalar>(data: &[D], n: usize) -
 pub(super) fn validate_hermitian_matrix_contents<D: FactorScalar>(
     data: &[D],
     n: usize,
+    hermitian_tol: HermitianTol,
 ) -> Result<(), OperationError> {
-    if !hermitian_matrix_contents(data, n) {
+    if !hermitian_matrix_contents(data, n, hermitian_tol.resolve(D::epsilon())) {
         return Err(OperationError::InvalidArgument {
             message: "eigh requires Hermitian coupled-sector blocks",
         });
@@ -1250,12 +1301,13 @@ pub(super) fn validate_hermitian_matrix_contents<D: FactorScalar>(
 
 pub(super) fn validate_hermitian_matricizations<D: FactorScalar>(
     matricizations: &[SectorMatricization<D>],
+    hermitian_tol: HermitianTol,
 ) -> Result<(), OperationError> {
     for matrix in matricizations {
         validate_hermitian_matrix_shape(&matrix.data, matrix.rows, matrix.cols)?;
     }
     for matrix in matricizations {
-        validate_hermitian_matrix_contents(&matrix.data, matrix.rows)?;
+        validate_hermitian_matrix_contents(&matrix.data, matrix.rows, hermitian_tol)?;
     }
     Ok(())
 }
@@ -1264,6 +1316,7 @@ pub(super) fn validate_hermitian_matricizations<D: FactorScalar>(
 pub fn validate_hermitian_regions<D: FactorScalar>(
     data: &[D],
     regions: &[CoupledSectorRegion],
+    hermitian_tol: HermitianTol,
 ) -> Result<(), OperationError> {
     for region in regions {
         let range = region.range();
@@ -1283,7 +1336,7 @@ pub fn validate_hermitian_regions<D: FactorScalar>(
                 expected: range.end,
                 actual: data.len(),
             })?;
-        validate_hermitian_matrix_contents(matrix, region.rows())?;
+        validate_hermitian_matrix_contents(matrix, region.rows(), hermitian_tol)?;
     }
     Ok(())
 }
@@ -1295,7 +1348,8 @@ pub fn validate_hermitian_regions<D: FactorScalar>(
 /// Hermitian input, and everything else goes to blockwise Padé. Inferring it
 /// from a failed EIGH would conflate hermiticity with a backend failure, so
 /// this asks directly, over the same direct-region / packed matricization
-/// split and the same relative Frobenius tolerance [`eigh_full_dyn`] uses.
+/// split and relative Frobenius measure as [`eigh_full_dyn`], with the
+/// separate threshold [`EXP_SPECTRAL_ROUTE_EPSILONS`].
 ///
 /// A non-endomorphism, a malformed layout or a non-square block is still an
 /// error — only non-hermiticity is `Ok(false)`. Nonfinite entries make
@@ -1317,6 +1371,7 @@ where
             message: "eigh requires an endomorphism (codomain == domain)",
         });
     }
+    let exp_route_tol = EXP_SPECTRAL_ROUTE_EPSILONS * D::epsilon();
     // Why `checked_sector_regions` and not `compact_factor_plan` as
     // `eigh_full_dyn` does: the plan is `Some` exactly when the regions are
     // (`build_compact_factor_plan` returns early otherwise), and building it
@@ -1332,7 +1387,7 @@ where
         for region in regions.iter() {
             let range = region.range();
             let matrix = data_region(input.data(), &range)?;
-            if !hermitian_matrix_contents(matrix, region.rows()) {
+            if !hermitian_matrix_contents(matrix, region.rows(), exp_route_tol) {
                 return Ok(false);
             }
         }
@@ -1345,7 +1400,7 @@ where
     }
     Ok(matricizations
         .iter()
-        .all(|matrix| hermitian_matrix_contents(&matrix.data, matrix.rows)))
+        .all(|matrix| hermitian_matrix_contents(&matrix.data, matrix.rows, exp_route_tol)))
 }
 
 pub(super) fn invalid_eigenvalues() -> OperationError {
@@ -1384,6 +1439,7 @@ pub(super) fn validate_complex_eigenvalues(values: &[Complex64]) -> Result<(), O
 pub(crate) fn eigh_full_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
+    hermitian_tol: HermitianTol,
 ) -> Result<EighFullDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     E: DenseExecutor + ?Sized,
@@ -1409,7 +1465,7 @@ where
         .map_err(CheckedGenericFactorPlanError::from)?;
     require_finite_factor_input(input.data().iter().copied(), FactorFamily::Eigh)?;
     matrices
-        .validate_hermitian()
+        .validate_hermitian(hermitian_tol)
         .map_err(CheckedGenericFactorPlanError::from)?;
 
     let max_n = with_input_geometry!(&matrices, |geometry| geometry
@@ -1599,6 +1655,7 @@ where
 pub fn eigh_vals_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
+    hermitian_tol: HermitianTol,
 ) -> Result<Vec<SectorSpectrum>, M::Error>
 where
     M: FactorMode<R>,
@@ -1610,8 +1667,8 @@ where
         lease,
         source,
         None,
-        |space, spectrum| eigh_vals_diagonal(&M::authority(space), space, spectrum),
-        |dense, input| Ok(eigh_vals_dyn(dense, input)?),
+        |space, spectrum| eigh_vals_diagonal(&M::authority(space), space, spectrum, hermitian_tol),
+        |dense, input| Ok(eigh_vals_dyn(dense, input, hermitian_tol)?),
     )
     .map(|(values, _)| values)
 }
@@ -1646,6 +1703,7 @@ where
 pub fn eigh_full_from_source<M, L, E, R, D>(
     lease: L,
     source: FactorSource<'_, R, D>,
+    hermitian_tol: HermitianTol,
 ) -> Result<(EighFullDyn<R, D>, FactorRoute), M::Error>
 where
     M: FactorMode<R>,
@@ -1657,8 +1715,8 @@ where
         lease,
         source,
         None,
-        M::eigh_full_diagonal,
-        M::eigh_full_dense,
+        |space, spectrum| M::eigh_full_diagonal(space, spectrum, hermitian_tol),
+        |dense, input| M::eigh_full_dense(dense, input, hermitian_tol),
     )
 }
 

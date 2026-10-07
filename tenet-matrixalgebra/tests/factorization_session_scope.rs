@@ -339,6 +339,7 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
         eigh_full_dyn, left_polar_checked_generic, pinv_direct_into_dyn,
         svd_compact_dyn_checked_generic,
     };
+    use tenet_matrixalgebra::HermitianTol;
     let _guard = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let dense = &mut dense;
 
@@ -372,11 +373,11 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     let h_matricized = BoundDynamicTensorRef::try_new(&h_adjoint, hermitian.data()).unwrap();
     assert_one_admission(
         "eigh direct",
-        admissions_during(|| eigh_full_dyn(dense, &h_direct).unwrap()),
+        admissions_during(|| eigh_full_dyn(dense, &h_direct, HermitianTol::DEFAULT).unwrap()),
     );
     assert_one_admission(
         "eigh matricized",
-        admissions_during(|| eigh_full_dyn(dense, &h_matricized).unwrap()),
+        admissions_during(|| eigh_full_dyn(dense, &h_matricized, HermitianTol::DEFAULT).unwrap()),
     );
 
     let homspace = FusionTreeHomSpace::new(
@@ -706,5 +707,5 @@ where
         _,
         _,
         _,
-    >(lease, source)
+    >(lease, source, tenet_matrixalgebra::HermitianTol::DEFAULT)
 }

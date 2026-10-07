@@ -25,7 +25,9 @@ mod matrix_functions;
 mod results;
 pub mod truncation;
 
-pub use factorize::{BoundDynFactor, FactorScalar, SectorSpectrum, SpectrumMagnitude};
+pub use factorize::{
+    BoundDynFactor, FactorScalar, HermitianTol, SectorSpectrum, SpectrumMagnitude,
+};
 pub use results::{Eig, Eigh, LeftPolar, Lq, Qr, RightPolar, Svd};
 pub use truncation::{
     select_truncation, Truncation, TruncationDecision, TruncationError, TruncationSpace,

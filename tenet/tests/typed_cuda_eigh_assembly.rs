@@ -10,6 +10,7 @@
 #![cfg(feature = "cuda")]
 
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use tenet::expert::cuda_transfer_stats;
 use tenet::sector::{U1FusionRule, U1Irrep};
@@ -67,7 +68,11 @@ fn eigh_assembly_gemms_and_uploads_do_not_depend_on_the_tree_count() {
 
         let before = cuda_transfer_stats();
         let Eigh { d, v } = device
-            .eigh_full(&codomain_axes(&device), &domain_axes(&device))
+            .eigh_full(
+                &codomain_axes(&device),
+                &domain_axes(&device),
+                HermitianTol::DEFAULT,
+            )
             .unwrap();
         let after = cuda_transfer_stats();
         let gemms = after.gemm_calls - before.gemm_calls;
@@ -81,7 +86,11 @@ fn eigh_assembly_gemms_and_uploads_do_not_depend_on_the_tree_count() {
         // Device vs host: the same descending-|λ| spectrum, and the device
         // eigenvectors (raw cuSOLVER gauge) satisfy the eigen equation.
         let Eigh { d: host_d, .. } = source
-            .eigh_full(&codomain_axes(&source), &domain_axes(&source))
+            .eigh_full(
+                &codomain_axes(&source),
+                &domain_axes(&source),
+                HermitianTol::DEFAULT,
+            )
             .unwrap();
         let d = d.to_host().unwrap();
         let v = v.to_host().unwrap();

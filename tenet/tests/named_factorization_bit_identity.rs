@@ -17,6 +17,7 @@ use tenet::sector::{
     SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::__network::NetworkReuseClass;
+use tenet::typed::HermitianTol;
 use tenet::typed::{Eig, Eigh, GradedSpace, LeftPolar, Lq, Qr, RightPolar, Svd, TensorMap};
 
 // The old tuple order of every result.
@@ -130,7 +131,12 @@ macro_rules! fingerprints {
             factors!(tall.lq_full(&[0, 1], &[2]), lq, 0, 1),
             factors!(tall.left_polar(&[0, 1], &[2]), left_polar, 0, 1),
             factors!(wide.right_polar(&[0], &[1, 2]), right_polar, 0, 1),
-            factors!(herm.eigh_full(&[0], &[1]), eigh, 0, 1),
+            factors!(
+                herm.eigh_full(&[0], &[1], HermitianTol::DEFAULT),
+                eigh,
+                0,
+                1
+            ),
             factors!(endo.eig_full(&[0], &[1]), eig, 0, 1),
             factors!(wide_h.svd_compact(&[0, 1], &[2]), svd, 0, 1, 2),
             factors!(tall_h.svd_full(&[0], &[1, 2]), svd, 0, 1, 2),
@@ -140,7 +146,12 @@ macro_rules! fingerprints {
             factors!(wide_h.lq_full(&[0, 1], &[2]), lq, 0, 1),
             factors!(wide_h.left_polar(&[0, 1], &[2]), left_polar, 0, 1),
             factors!(tall_h.right_polar(&[0], &[1, 2]), right_polar, 0, 1),
-            factors!(herm_h.eigh_full(&[0], &[1]), eigh, 0, 1),
+            factors!(
+                herm_h.eigh_full(&[0], &[1], HermitianTol::DEFAULT),
+                eigh,
+                0,
+                1
+            ),
             factors!(endo_h.eig_full(&[0], &[1]), eig, 0, 1),
         ]
         .iter()

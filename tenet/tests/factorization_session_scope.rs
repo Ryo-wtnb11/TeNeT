@@ -14,6 +14,7 @@
 #![cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
 
 use std::sync::Mutex;
+use tenet::typed::HermitianTol;
 
 use tenet::expert::cpu_session_stats;
 use tenet::sector::{
@@ -150,7 +151,7 @@ fn streaming_factorizations_from_rayon_workers_and_threads_match_serial_results(
         let Eigh { d: w, v } = tensor
             .compose(&tensor.adjoint().unwrap())
             .unwrap()
-            .eigh_full(&[0, 1], &[2, 3])
+            .eigh_full(&[0, 1], &[2, 3], HermitianTol::DEFAULT)
             .unwrap();
         [l, q, null, w, v]
             .iter()

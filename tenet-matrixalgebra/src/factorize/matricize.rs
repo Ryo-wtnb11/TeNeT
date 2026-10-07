@@ -201,10 +201,15 @@ impl<'a, D: FactorScalar> InputMatricizations<'a, D> {
         }
     }
 
-    pub(super) fn validate_hermitian(&self) -> Result<(), OperationError> {
+    pub(super) fn validate_hermitian(
+        &self,
+        hermitian_tol: HermitianTol,
+    ) -> Result<(), OperationError> {
         match self {
-            Self::Regions { data, regions } => validate_hermitian_regions(data, regions),
-            Self::Packed(matrices) => validate_hermitian_matricizations(matrices),
+            Self::Regions { data, regions } => {
+                validate_hermitian_regions(data, regions, hermitian_tol)
+            }
+            Self::Packed(matrices) => validate_hermitian_matricizations(matrices, hermitian_tol),
         }
     }
 }

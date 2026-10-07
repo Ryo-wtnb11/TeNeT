@@ -14,6 +14,7 @@
 //! TeNeT.
 
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
@@ -228,7 +229,7 @@ fn svd_and_eigh_truncation_keep_tensorkits_sector_at_a_tie() {
         .restrict_leg(&[(u.codomain_rank(), &found.selection)])
         .unwrap();
     assert_eq!(u.domain()[0], expected);
-    let Eigh { d, .. } = source.eigh_full(&[0], &[1]).unwrap();
+    let Eigh { d, .. } = source.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
     let found = d.domain()[0]
         .find_truncated(&d.diagview().unwrap(), &Truncation::rank(2))
         .unwrap();

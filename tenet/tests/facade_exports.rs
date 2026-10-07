@@ -337,6 +337,7 @@ const TYPED: &[&str] = &[
     "PreparedEighFull",
     "Qr",
     "RecouplingCoefficientAction",
+    "HermitianTol",
     "RightPolar",
     "Runtime",
     "RuntimeBuilder",

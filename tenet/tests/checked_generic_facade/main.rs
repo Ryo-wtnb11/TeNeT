@@ -7,6 +7,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tenet::typed::ContractSpec;
+use tenet::typed::HermitianTol;
 use tenet::typed::Side;
 
 use tenet::expert::DenseBackend;

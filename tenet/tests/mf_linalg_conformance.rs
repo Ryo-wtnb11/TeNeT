@@ -7,6 +7,7 @@ include!("common/predicate_chains.rs");
 include!("common/predicate_chain_coefficients.rs");
 
 use std::sync::Arc;
+use tenet::typed::HermitianTol;
 
 use tenet::sector::{
     product_sector, FermionParityFusionRule, ProductFusionRule, SU2FusionRule, SU2Irrep,
@@ -206,7 +207,7 @@ macro_rules! factor_conformance {
         assert_close!(&w.adjoint().unwrap().compose(&w).unwrap(), &id);
         assert!(is_hermitian!(p, 1e-10));
         assert!(p
-            .eigh_vals(&[0], &[1])
+            .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
             .unwrap()
             .iter()
             .flat_map(|s| &s.values)
@@ -218,7 +219,7 @@ macro_rules! factor_conformance {
         assert_close!(&w.compose(&w.adjoint().unwrap()).unwrap(), &id);
         assert!(is_hermitian!(p, 1e-10));
         assert!(p
-            .eigh_vals(&[0], &[1])
+            .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
             .unwrap()
             .iter()
             .flat_map(|s| &s.values)
@@ -229,7 +230,7 @@ macro_rules! factor_conformance {
                 [[3.0, 1.0], [1.0, 3.0]][index[0]][index[1]]
             })
             .unwrap();
-        let Eigh { d, v } = h.eigh_full(&[0], &[1]).unwrap();
+        let Eigh { d, v } = h.eigh_full(&[0], &[1], HermitianTol::DEFAULT).unwrap();
         assert_provider!(provider; d, v);
         assert_close!(
             &v.compose(&d)
@@ -239,7 +240,7 @@ macro_rules! factor_conformance {
             &h
         );
         assert!(h
-            .eigh_vals(&[0], &[1])
+            .eigh_vals(&[0], &[1], HermitianTol::DEFAULT)
             .unwrap()
             .iter()
             .all(|entry| entry.values == [4.0, 2.0]));

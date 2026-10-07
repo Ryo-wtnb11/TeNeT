@@ -676,11 +676,21 @@ pub(super) fn assert_eigh_preflight<D: FactorScalar + std::fmt::Debug>(
     tensor: &TensorMap<D, 1, 1>,
     accepted: bool,
 ) {
+    assert_eigh_preflight_at(tensor, accepted, HermitianTol::DEFAULT);
+}
+
+pub(super) fn assert_eigh_preflight_at<D: FactorScalar + std::fmt::Debug>(
+    tensor: &TensorMap<D, 1, 1>,
+    accepted: bool,
+    hermitian_tol: HermitianTol,
+) {
     let mut dense = ScriptedExecutor::<EighCallSpy>::default();
-    let error = eigh_full(
+    let error = eigh_full_dyn(
         &mut dense,
-        &bound_tensor_ref!(Arc::new(Z2FusionRule), tensor),
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), tensor).dynamic(),
+        hermitian_tol,
     )
+    .map(drop)
     .unwrap_err();
 
     if accepted {

@@ -315,7 +315,7 @@ fn sites<D: Sample>(threads: Option<usize>, dtype: &str) {
     let h_matricized = BoundDynamicTensorRef::try_new(&h_adjoint, hermitian.data()).unwrap();
     for (label, input) in [("direct", &h_direct), ("matricized", &h_matricized)] {
         run(&format!("{dtype} u1 eigh {label}"), || {
-            let (v, values) = eigh_full_dyn(dense, input).unwrap().into_parts();
+            let (v, values) = eigh_full_dyn(dense, input, HermitianTol::DEFAULT).unwrap().into_parts();
             let mut d = Digest::default();
             d.factor(&v).spectrum(&values);
             d
@@ -423,7 +423,7 @@ fn sites<D: Sample>(threads: Option<usize>, dtype: &str) {
     ));
     let input = BoundDynamicTensorRef::try_new(&endo, &data).unwrap();
     run(&format!("{dtype} checked eigh"), || {
-        let (v, values) = eigh_full_dyn_checked_generic(dense, &input)
+        let (v, values) = eigh_full_dyn_checked_generic(dense, &input, HermitianTol::DEFAULT)
             .unwrap()
             .into_parts();
         let mut d = Digest::default();

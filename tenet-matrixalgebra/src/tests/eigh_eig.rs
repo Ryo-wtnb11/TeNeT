@@ -82,7 +82,7 @@ fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<CountingDense>::default();
     assert!(matches!(
-        eigh_full_dyn_checked_generic(&mut dense, &input),
+        eigh_full_dyn_checked_generic(&mut dense, &input, HermitianTol::DEFAULT),
         Err(CheckedGenericFactorPlanError::Provider(LateGenericError(1)))
     ));
     assert_eq!(dense.counts().of(&[Op::Eigh, Op::EighInto]), 2);
@@ -97,7 +97,7 @@ fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
     let checked = bind_to_spy(&source, &complete);
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<CountingDense>::default();
-    let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    let full = eigh_full_dyn_checked_generic(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
     assert_eq!(dense.counts().of(&[Op::Eigh, Op::EighInto]), 2);
     assert!(Arc::ptr_eq(full.v().space().provider_arc(), &complete));
     assert!(full
@@ -140,7 +140,7 @@ fn checked_generic_eigh_late_dense_failure_publishes_no_factors() {
     });
     crate::factorize::reset_one_sided_publication_probe();
 
-    let result = eigh_full_dyn_checked_generic(&mut dense, &input);
+    let result = eigh_full_dyn_checked_generic(&mut dense, &input, HermitianTol::DEFAULT);
 
     assert!(matches!(
         result,
@@ -185,7 +185,7 @@ fn checked_generic_eigh_uses_owned_dense_output() {
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = ScriptedExecutor::<RejectEighInto>::default();
 
-    let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    let full = eigh_full_dyn_checked_generic(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
 
     assert_eq!(dense.counts().eigh, 2);
     assert_eq!(dense.counts().eigh_into, 0);
@@ -221,7 +221,7 @@ fn checked_generic_eigh_keeps_owned_vectors_in_live_pairs_before_publication() {
     let mut dense = ScriptedExecutor::<RejectEighInto>::default();
     crate::factorize::reset_checked_eigh_pair_pointers();
 
-    let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    let full = eigh_full_dyn_checked_generic(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
     let before_publication = crate::factorize::checked_eigh_pair_pointers();
 
     assert_eq!(dense.counts().eigh_into, 0);
@@ -258,7 +258,7 @@ fn assert_checked_generic_eigh_live_pair_owners<D: crate::factorize::FactorScala
     let mut dense = ScriptedExecutor::<RejectEighInto>::default();
     crate::factorize::reset_checked_eigh_pair_pointers();
 
-    let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    let full = eigh_full_dyn_checked_generic(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
 
     assert_eq!(dense.counts().eigh_into, 0);
     assert_eq!(
@@ -349,8 +349,12 @@ fn checked_generic_eigh_reconstructs_complex_unequal_multi_tree_sectors() {
 
     let (provider, checked) = bind_checked_only(&source);
     let input = BoundDynamicTensorRef::try_new(&checked, &hermitian).unwrap();
-    let full = eigh_full_dyn_checked_generic(&mut tenet_dense::DefaultDenseExecutor::new(), &input)
-        .unwrap();
+    let full = eigh_full_dyn_checked_generic(
+        &mut tenet_dense::DefaultDenseExecutor::new(),
+        &input,
+        HermitianTol::DEFAULT,
+    )
+    .unwrap();
     assert_complex_checked_eigh_reconstruction(&source_regions, &hermitian, &full);
     assert!(Arc::ptr_eq(full.v().space().provider_arc(), &provider));
 }
@@ -386,8 +390,12 @@ fn checked_generic_eigh_reconstructs_padded_reordered_complex_input() {
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let before = input.data().to_vec();
-    let full = eigh_full_dyn_checked_generic(&mut tenet_dense::DefaultDenseExecutor::new(), &input)
-        .unwrap();
+    let full = eigh_full_dyn_checked_generic(
+        &mut tenet_dense::DefaultDenseExecutor::new(),
+        &input,
+        HermitianTol::DEFAULT,
+    )
+    .unwrap();
     assert_complex_checked_eigh_reconstruction(&source_regions, &hermitian, &full);
     assert_eq!(input.data(), before);
     assert!(Arc::ptr_eq(full.v().space().provider_arc(), &provider));
@@ -419,7 +427,7 @@ fn checked_generic_eigh_stably_keeps_raw_exact_signed_ties() {
     let input = BoundDynamicTensorRef::try_new(&checked, &hermitian).unwrap();
     let mut dense = ScriptedExecutor::<RecordingEigh>::default();
 
-    let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    let full = eigh_full_dyn_checked_generic(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
 
     let tied_sector = full
         .eigenvalues()
@@ -502,7 +510,7 @@ fn eigh_noncanonical_layout_uses_copy_fallback() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     crate::factorize::reset_eigh_copy_probe();
-    eigh_full_dyn(&mut dense, &input).unwrap();
+    eigh_full_dyn(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
     let probe = crate::factorize::eigh_copy_probe();
 
     assert!(probe.input_pack_bytes > 0);
@@ -573,7 +581,7 @@ fn eigh_fallback_rejects_nonhermitian_complex_input_before_dense_execution() {
     let mut dense = ScriptedExecutor::<EighCallSpy>::default();
 
     crate::factorize::reset_eigh_copy_probe();
-    let error = eigh_full_dyn(&mut dense, &input).unwrap_err();
+    let error = eigh_full_dyn(&mut dense, &input, HermitianTol::DEFAULT).unwrap_err();
 
     assert_eq!(
         error,
@@ -622,84 +630,76 @@ fn eigh_vals_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
     assert_eq!(nonhermitian.data(), before);
 }
 
-#[test]
-fn eigh_uses_64_epsilon_relative_tolerance_for_every_factor_dtype() {
-    // What: normalized residuals below 64 eps pass and those above it fail for every dtype.
-    let within_f32_delta = 62.0 * f32::EPSILON * 10.0_f32.sqrt();
-    let outside_f32_delta = 66.0 * f32::EPSILON * 10.0_f32.sqrt();
-    let within_f64_delta = 62.0 * f64::EPSILON * 10.0_f64.sqrt();
-    let outside_f64_delta = 66.0 * f64::EPSILON * 10.0_f64.sqrt();
-    let within_f32 = one_sector_matrix(vec![1.0_f32, within_f32_delta, 0.0, 2.0]);
-    let outside_f32 = one_sector_matrix(vec![1.0_f32, outside_f32_delta, 0.0, 2.0]);
-    let within_c32 = one_sector_matrix(vec![
-        Complex32::new(1.0, 0.0),
-        Complex32::new(within_f32_delta, 0.0),
-        Complex32::new(0.0, 0.0),
-        Complex32::new(2.0, 0.0),
-    ]);
-    let outside_c32 = one_sector_matrix(vec![
-        Complex32::new(1.0, 0.0),
-        Complex32::new(outside_f32_delta, 0.0),
-        Complex32::new(0.0, 0.0),
-        Complex32::new(2.0, 0.0),
-    ]);
-    let within_f64 = one_sector_matrix(vec![1.0_f64, within_f64_delta, 0.0, 2.0]);
-    let outside_f64 = one_sector_matrix(vec![1.0_f64, outside_f64_delta, 0.0, 2.0]);
-    let within_c64 = one_sector_matrix(vec![
-        Complex64::new(1.0, 0.0),
-        Complex64::new(within_f64_delta, 0.0),
-        Complex64::new(0.0, 0.0),
-        Complex64::new(2.0, 0.0),
-    ]);
-    let outside_c64 = one_sector_matrix(vec![
-        Complex64::new(1.0, 0.0),
-        Complex64::new(outside_f64_delta, 0.0),
-        Complex64::new(0.0, 0.0),
-        Complex64::new(2.0, 0.0),
-    ]);
+/// `[[1, δ], [0, 2]]` passes when `|δ|/√2 ≤ tol·√(5 + δ²)`.
+/// Use the small-δ threshold `tol·√10` with a 3% margin.
+fn hermitian_threshold_pair<D: FactorScalar>(tol: f64, scale: f64) -> [TensorMap<D, 1, 1>; 2] {
+    let threshold = tol * 10.0_f64.sqrt();
+    let matrix = |delta: f64| {
+        one_sector_matrix(
+            [1.0, delta, 0.0, 2.0]
+                .into_iter()
+                .map(|value| D::from_real(value * scale))
+                .collect(),
+        )
+    };
+    [matrix(0.97 * threshold), matrix(1.03 * threshold)]
+}
 
-    assert_eigh_preflight(&within_f32, true);
-    assert_eigh_preflight(&outside_f32, false);
-    assert_eigh_preflight(&within_c32, true);
-    assert_eigh_preflight(&outside_c32, false);
-    assert_eigh_preflight(&within_f64, true);
-    assert_eigh_preflight(&outside_f64, false);
-    assert_eigh_preflight(&within_c64, true);
-    assert_eigh_preflight(&outside_c64, false);
+#[test]
+fn eigh_uses_eps_three_quarters_relative_tolerance_for_every_factor_dtype() {
+    // What: by default (#1987) normalized residuals below eps^(3/4) pass and
+    // those above it fail, at the payload's own precision.
+    fn check<D: FactorScalar + std::fmt::Debug>() {
+        let [within, outside] = hermitian_threshold_pair::<D>(D::epsilon().powf(0.75), 1.0);
+        assert_eigh_preflight(&within, true);
+        assert_eigh_preflight(&outside, false);
+    }
+    check::<f32>();
+    check::<Complex32>();
+    check::<f64>();
+    check::<Complex64>();
+}
+
+#[test]
+fn eigh_explicit_hermitian_tol_moves_the_threshold() {
+    // What: an explicit tolerance replaces the default in both directions;
+    // the former 64·eps rule is one such tolerance.
+    for tol in [64.0 * f64::EPSILON, 1.0e-6] {
+        let hermitian_tol = HermitianTol::relative(tol).unwrap();
+        let [within, outside] = hermitian_threshold_pair::<f64>(tol, 1.0);
+        assert_eigh_preflight_at(&within, true, hermitian_tol);
+        assert_eigh_preflight_at(&outside, false, hermitian_tol);
+    }
+    // Zero admits only exactly Hermitian blocks.
+    let exact = HermitianTol::relative(0.0).unwrap();
+    assert_eigh_preflight_at(
+        &one_sector_matrix(vec![1.0_f64, 0.5, 0.5, 2.0]),
+        true,
+        exact,
+    );
+    let [nearly, _] = hermitian_threshold_pair::<f64>(f64::EPSILON, 1.0);
+    assert_eigh_preflight_at(&nearly, false, exact);
+    for invalid in [-1.0e-12, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            HermitianTol::relative(invalid),
+            Err(OperationError::InvalidArgument {
+                message: "hermitian_tol must be finite and non-negative"
+            })
+        ));
+    }
 }
 
 #[test]
 fn eigh_hermitian_preflight_is_invariant_under_finite_rescaling() {
     // What: multiplying a block cannot change a fixed relative perturbation's classification.
     for scale in [1.0e-200, 1.0, 1.0e200] {
-        let accepted = one_sector_matrix(vec![
-            scale,
-            62.0 * f64::EPSILON * 10.0_f64.sqrt() * scale,
-            0.0,
-            2.0 * scale,
-        ]);
-        let rejected = one_sector_matrix(vec![
-            scale,
-            66.0 * f64::EPSILON * 10.0_f64.sqrt() * scale,
-            0.0,
-            2.0 * scale,
-        ]);
+        let [accepted, rejected] = hermitian_threshold_pair::<f64>(f64::EPSILON.powf(0.75), scale);
         assert_eigh_preflight(&accepted, true);
         assert_eigh_preflight(&rejected, false);
     }
-    for scale in [1.0e-30_f32, 1.0, 1.0e30] {
-        let accepted = one_sector_matrix(vec![
-            scale,
-            62.0 * f32::EPSILON * 10.0_f32.sqrt() * scale,
-            0.0,
-            2.0 * scale,
-        ]);
-        let rejected = one_sector_matrix(vec![
-            scale,
-            66.0 * f32::EPSILON * 10.0_f32.sqrt() * scale,
-            0.0,
-            2.0 * scale,
-        ]);
+    for scale in [1.0e-30, 1.0, 1.0e30] {
+        let [accepted, rejected] =
+            hermitian_threshold_pair::<f32>(f64::from(f32::EPSILON).powf(0.75), scale);
         assert_eigh_preflight(&accepted, true);
         assert_eigh_preflight(&rejected, false);
     }
@@ -751,7 +751,7 @@ fn eigh_rejects_a_large_nonhermitian_input() {
 #[test]
 fn eigh_relative_hermitian_preflight_is_block_size_independent() {
     // What: repeating the same relative diagonal defect cannot change acceptance with block size.
-    let rtol = 64.0 * f64::EPSILON;
+    let rtol = f64::EPSILON.powf(0.75);
     for n in [2, 64] {
         for (delta, accepted) in [(rtol / 2.0, true), (2.0 * rtol, false)] {
             let mut data = vec![Complex64::new(0.0, 0.0); n * n];
@@ -767,7 +767,7 @@ fn eigh_relative_hermitian_preflight_is_block_size_independent() {
 fn eigh_relative_hermitian_preflight_counts_cross_block_pairs_twice() {
     // What: a defect spanning the 32x32 traversal boundary contributes both conjugate positions.
     const N: usize = 33;
-    let rtol = 64.0 * f64::EPSILON;
+    let rtol = f64::EPSILON.powf(0.75);
     for (factor, accepted) in [(1.3, true), (1.6, false)] {
         let mut data = vec![0.0; N * N];
         for diagonal in 0..N {
@@ -1144,7 +1144,7 @@ fn eigh_fallback_keeps_owned_vectors_until_the_final_scatter_for_every_dtype() {
         let mut dense = ScriptedExecutor::<RejectEighInto>::default();
         crate::factorize::reset_eigh_owned_vector_pointers();
 
-        let eigh = eigh_full_dyn(&mut dense, &input).unwrap();
+        let eigh = eigh_full_dyn(&mut dense, &input, HermitianTol::DEFAULT).unwrap();
         let before_scatter = crate::factorize::eigh_owned_vector_pointers();
 
         assert!(!before_scatter.is_empty());
@@ -1729,4 +1729,62 @@ fn scripted_default_eig_vals_reaches_the_forwarded_eig() {
     assert_eq!(values.shape(), [2]);
     assert_eq!(dense.counts().eig_vals, 1);
     assert_eq!(dense.counts().eig, 1);
+}
+
+#[test]
+fn eigh_admits_gemm_built_gram_and_congruence_matrices_at_n_1000() {
+    // What (#1987): `AᵀA` and `Aᵀ(HA)` (`H = B + Bᵀ`) formed by the dense
+    // backend's gemm are admitted by the default tolerance. Independent
+    // oracle: their relative anti-Hermitian residual by direct summation,
+    // which must sit below `eps^(3/4)`.
+    let n = 1000;
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut random = || {
+        (0..n * n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+            })
+            .collect::<Vec<f64>>()
+    };
+    let (a, b) = (random(), random());
+    let product = |lhs: &[f64], lhs_strides: [usize; 2], rhs: &[f64]| {
+        let mut out = vec![0.0; n * n];
+        tenet_dense::DefaultDenseExecutor::new()
+            .matmul_into(
+                tenet_dense::DenseWrite::F64(
+                    tenet_dense::DenseViewMut::new(&mut out, &[n, n], &[1, n], 0).unwrap(),
+                ),
+                tenet_dense::DenseRead::F64(
+                    tenet_dense::DenseView::new(lhs, &[n, n], &lhs_strides, 0).unwrap(),
+                ),
+                tenet_dense::DenseRead::F64(
+                    tenet_dense::DenseView::new(rhs, &[n, n], &[1, n], 0).unwrap(),
+                ),
+            )
+            .unwrap();
+        out
+    };
+    let transposed = [n, 1];
+    let h: Vec<f64> = (0..n * n)
+        .map(|index| b[index] + b[(index % n) * n + index / n])
+        .collect();
+    let gram = product(&a, transposed, &a);
+    let congruence = product(&a, transposed, &product(&h, [1, n], &a));
+    for matrix in [gram, congruence] {
+        let (mut residual, mut norm) = (0.0_f64, 0.0_f64);
+        for col in 0..n {
+            for row in 0..n {
+                let value = matrix[row + n * col];
+                let half = 0.5 * (value - matrix[col + n * row]);
+                residual += half * half;
+                norm += value * value;
+            }
+        }
+        let relative = residual.sqrt() / norm.sqrt();
+        assert!(relative < f64::EPSILON.powf(0.75), "{relative:e}");
+        assert_eigh_preflight(&one_sector_rectangular_matrix(matrix, n, n), true);
+    }
 }

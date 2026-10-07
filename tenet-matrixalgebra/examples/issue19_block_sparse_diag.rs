@@ -3,6 +3,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use tenet_matrixalgebra::HermitianTol;
 
 use tenet_core::{
     FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeAdmissionMode,
@@ -70,7 +71,7 @@ fn main() {
         .coupled_sector_regions(hermitian_space.space().nout())
         .unwrap()
         .expect("synthetic Hermitian layout must expose coupled-sector regions");
-    validate_hermitian_regions(hermitian_input.data(), &regions)
+    validate_hermitian_regions(hermitian_input.data(), &regions, HermitianTol::DEFAULT)
         .expect("synthetic factorization input must be Hermitian");
 
     let mut summaries = sector_matricization_diagnostic(&general_input).unwrap();
@@ -145,11 +146,11 @@ fn main() {
         allocation_calls as f64 / qr_iters as f64
     );
 
-    black_box(eigh_full_dyn(&mut dense, &hermitian_input).unwrap());
+    black_box(eigh_full_dyn(&mut dense, &hermitian_input, HermitianTol::DEFAULT).unwrap());
     ALLOCATIONS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..eigh_iters {
-        black_box(eigh_full_dyn(&mut dense, &hermitian_input).unwrap());
+        black_box(eigh_full_dyn(&mut dense, &hermitian_input, HermitianTol::DEFAULT).unwrap());
     }
     let elapsed = start.elapsed();
     let allocation_calls = ALLOCATIONS.load(Ordering::Relaxed);
