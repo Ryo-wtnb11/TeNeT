@@ -50,14 +50,19 @@ impl BlockStructure {
 
 /// Fully validated block metadata that has not entered the global interner.
 ///
+/// Structural ownership follows [TensorKit's sector/degeneracy structure](https://github.com/Jutho/TensorKit.jl/blob/cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91/src/spaces/structure.jl#L114)
+/// and [QSpace's grouped reduced-block trace](https://bitbucket.org/qspace4u/qspace-v4-pub/src/d2d3d7da6a59a2e8f2cb7dc8f33e7c345af59371/Source/QSpace.cc#lines-4501:4625).
+/// Deferred checked publication is a Rust ownership adaptation: neither
+/// reference supplies this reset-aware transaction.
+///
 /// The borrowed preview is suitable for fallible plan compilation. Call
 /// [`Self::commit`] only after all later validation has succeeded.
 #[doc(hidden)]
 pub struct PreparedBlockStructure {
     sector: Arc<SectorStructure>,
-    degeneracy: DegeneracyStructure,
+    degeneracy: std::sync::Mutex<Option<DegeneracyStructure>>,
     required_len: usize,
-    preview: OnceLock<BlockStructure>,
+    preview: OnceLock<(BlockStructure, usize)>,
     storage_tiling: bool,
 }
 
@@ -102,7 +107,7 @@ impl PreparedBlockStructure {
         let required_len = degeneracy.required_len()?;
         Ok(Self {
             sector,
-            degeneracy,
+            degeneracy: std::sync::Mutex::new(Some(degeneracy)),
             required_len,
             preview: OnceLock::new(),
             storage_tiling: false,
@@ -120,19 +125,31 @@ impl PreparedBlockStructure {
     /// Borrow an uninterned structure for validation and plan compilation.
     #[doc(hidden)]
     pub fn structure(&self) -> &BlockStructure {
-        self.preview.get_or_init(|| {
-            let preview = BlockStructure::from_content(Arc::new(BlockStructureContent {
-                id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
-                sector: Arc::clone(&self.sector),
-                degeneracy: self.degeneracy.clone(),
-                required_len: self.required_len,
-                storage_tiling: StorageTilingProof::default(),
-            }));
-            if self.storage_tiling {
-                preview.record_storage_tiling();
-            }
-            preview
-        })
+        &self
+            .preview
+            .get_or_init(|| {
+                let epoch = core_reset_epoch();
+                // The mutex transfers ownership through &self once; release it
+                // before allocating the immutable preview or deriving its witness.
+                let degeneracy = self
+                    .degeneracy
+                    .lock()
+                    .expect("staged degeneracy ownership poisoned")
+                    .take()
+                    .expect("staged degeneracy already moved");
+                let preview = BlockStructure::from_content(Arc::new(BlockStructureContent {
+                    id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
+                    sector: Arc::clone(&self.sector),
+                    degeneracy,
+                    required_len: self.required_len,
+                    storage_tiling: StorageTilingProof::default(),
+                }));
+                if self.storage_tiling {
+                    preview.record_storage_tiling();
+                }
+                (preview, epoch)
+            })
+            .0
     }
 
     #[doc(hidden)]
@@ -141,7 +158,7 @@ impl PreparedBlockStructure {
     }
 
     /// Borrow the staged block keys alone. Why not `structure()`: key-only
-    /// prevalidation must not pay for cloning both structures into the preview.
+    /// prevalidation must not allocate the preview's immutable content.
     #[doc(hidden)]
     pub fn sector_structure(&self) -> &SectorStructure {
         &self.sector
@@ -150,11 +167,20 @@ impl PreparedBlockStructure {
     /// Publish the validated structure through the existing interner.
     #[doc(hidden)]
     pub fn commit(self) -> BlockStructure {
-        let structure = BlockStructure::from_content(intern_block_structure_content(
-            self.sector,
-            self.degeneracy,
-            self.required_len,
-        ));
+        let structure = match self.preview.into_inner() {
+            Some((preview, epoch)) => BlockStructure {
+                content: intern_prepared_block_structure_content(preview.content, epoch),
+                regions: preview.regions,
+            },
+            None => BlockStructure::from_content(intern_block_structure_content(
+                self.sector,
+                self.degeneracy
+                    .into_inner()
+                    .expect("staged degeneracy ownership poisoned")
+                    .expect("staged degeneracy already moved"),
+                self.required_len,
+            )),
+        };
         if self.storage_tiling {
             structure.record_storage_tiling();
         }
