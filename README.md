@@ -18,6 +18,38 @@ TeNeT is under active development; the public API is not yet stable. Ordinary
 applications use the `tenet-rs` package (imported as `tenet`). Add
 `tenet-network` for labeled tensor networks and network planning.
 
+## Acknowledgments and upstream work
+
+TeNeT builds on the mathematical, architectural, and implementation work of
+[TensorKit.jl](https://github.com/QuantumKitHub/TensorKit.jl), developed by
+Lukas Devos, Jutho Haegeman, and contributors, and
+[QSpace](https://bitbucket.org/qspace4u/), developed by Andreas Weichselbaum
+and contributors. TensorKit and the related QuantumKitHub libraries provide
+foundations for tensor-map semantics, fusion-tree bases, duality, categorical
+operations, and their algorithmic decomposition. QSpace provides foundations
+for reduced-block representations, structural-data handling, and sector-wise
+execution. Their contributions inform TeNeT's design and implementation as well
+as its validation. We gratefully acknowledge this upstream work; the
+[provenance and references](tenet/references.md) record specific TensorKit and
+related-library correspondences.
+
+## Citation
+
+**If you use TeNeT in research, please cite TensorKit and QSpace in addition to
+acknowledging TeNeT.** This requests scholarly credit for the work on which
+TeNeT builds; it does not add a condition to the software license.
+
+- **TensorKit:** Lukas Devos and Jutho Haegeman, *TensorKit.jl: A Julia package
+  for large-scale tensor computations, with a hint of category theory* (2025),
+  [doi:10.48550/arXiv.2508.10076](https://doi.org/10.48550/arXiv.2508.10076).
+  See TensorKit's [official citation metadata](https://github.com/QuantumKitHub/TensorKit.jl/blob/main/CITATION.cff)
+  for its preferred citation and software record.
+- **QSpace:** Andreas Weichselbaum, *QSpace — An open-source tensor library for
+  Abelian and non-Abelian symmetries*, SciPost Physics Codebases **40** (2024),
+  [doi:10.21468/SciPostPhysCodeb.40](https://doi.org/10.21468/SciPostPhysCodeb.40).
+  When using QSpace directly, also cite the release used, following the
+  [QSpace publication's citation guidance](https://scipost.org/SciPostPhysCodeb.40).
+
 ## Start with a tensor
 
 This example creates two U(1)-symmetric maps and composes them. A `GradedSpace`
