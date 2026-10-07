@@ -2437,7 +2437,7 @@ mod tests {
         // What: the per-tree placement (one copy per codomain tree) writes
         // exactly the bits of the aligned placement (one copy per sector),
         // and both are eager's device `v` at B = 1.
-        use super::PreparedEighFull;
+        use super::EighFullPlan;
         use tenet_core::{SU2FusionRule, SU2Irrep};
 
         let runtime = Runtime::builder().cuda(0).build().unwrap();
@@ -2458,12 +2458,11 @@ mod tests {
             .unwrap();
         let run = |treewise: bool| {
             FORCE_TREEWISE.with(|flag| flag.set(treewise));
-            let mut handle =
-                PreparedEighFull::new(&stack, &[0, 1], &[2, 3], super::HermitianTol::DEFAULT)
-                    .unwrap();
+            let plan =
+                EighFullPlan::new(&stack, &[0, 1], &[2, 3], super::HermitianTol::DEFAULT).unwrap();
+            let mut workspace = plan.workspace().unwrap();
             FORCE_TREEWISE.with(|flag| flag.set(false));
-            let copies: usize = handle
-                .plan
+            let copies: usize = plan
                 .device
                 .as_ref()
                 .unwrap()
@@ -2471,8 +2470,8 @@ mod tests {
                 .iter()
                 .map(Vec::len)
                 .sum();
-            let routes = handle.plan.device.as_ref().unwrap().copies.len();
-            let output = handle.execute(&stack).unwrap();
+            let routes = plan.device.as_ref().unwrap().copies.len();
+            let output = plan.execute(&stack, &mut workspace).unwrap();
             (
                 copies,
                 routes,
@@ -2491,11 +2490,12 @@ mod tests {
             .to_cuda()
             .unwrap();
         FORCE_TREEWISE.with(|flag| flag.set(true));
-        let mut handle =
-            PreparedEighFull::new(&single, &[0, 1], &[2, 3], super::HermitianTol::DEFAULT).unwrap();
+        let plan =
+            EighFullPlan::new(&single, &[0, 1], &[2, 3], super::HermitianTol::DEFAULT).unwrap();
+        let mut workspace = plan.workspace().unwrap();
         FORCE_TREEWISE.with(|flag| flag.set(false));
-        let v = handle
-            .execute(&single)
+        let v = plan
+            .execute(&single, &mut workspace)
             .unwrap()
             .v
             .to_host()
