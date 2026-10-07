@@ -20,8 +20,8 @@ use crate::tree_transform::{
     TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use crate::{
-    validate_oriented_fusion_layout, DenseBlockScalar, RecouplingCoefficientAction,
-    ReportsPlacement, TreeTransformReplayProfile, TreeTransformStructure,
+    validate_oriented_fusion_layout, RecouplingCoefficientAction, ReportsPlacement,
+    TreeTransformReplayProfile, TreeTransformStructure,
 };
 use tenet_dense::DefaultDenseExecutor;
 use tenet_operations::OperationError;
@@ -540,18 +540,15 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        // One knob: compile parallelism follows the backend's replay setting.
-        self.cache
-            .set_recoupling_threads(self.backend.recoupling_threads());
-        let structure = self
-            .cache
-            .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
-                rule,
-                operation,
-                dst_structure,
-                src_structure,
-                false,
-            )?;
+        let structure = self.tree_structure(
+            rule,
+            operation,
+            dst_structure,
+            TreeStructureSource::Stored {
+                structure: src_structure,
+                storage_conjugate: false,
+            },
+        )?;
         self.backend
             .try_tree_transform_structure_overwrite_owned_raw(
                 &mut self.workspace,
@@ -645,15 +642,23 @@ where
         DDst: HostWritableStorage<D>,
         DSrc: HostReadableStorage<D>,
     {
-        let Self {
-            backend,
-            workspace,
-            cache,
-        } = self;
-        // One knob: compile parallelism follows the backend's replay setting.
-        cache.set_recoupling_threads(backend.recoupling_threads());
-        let structure = cache.get_or_compile_tree_pair(rule, operation, dst, src)?;
-        backend.tree_transform_structure_into(workspace, &structure, dst, src, alpha, beta)
+        let structure = self.tree_structure(
+            rule,
+            &operation,
+            dst.structure(),
+            TreeStructureSource::Stored {
+                structure: src.structure(),
+                storage_conjugate: false,
+            },
+        )?;
+        self.backend.tree_transform_structure_into(
+            &mut self.workspace,
+            &structure,
+            dst,
+            src,
+            alpha,
+            beta,
+        )
     }
 
     pub fn tree_transform_overwrite_into<
@@ -741,21 +746,17 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        let Self {
-            backend,
-            workspace,
-            cache,
-        } = self;
-        cache.set_recoupling_threads(backend.recoupling_threads());
-        let structure = cache.get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+        let structure = self.tree_structure(
             rule,
             operation,
             dst_structure,
-            src_structure,
-            false,
+            TreeStructureSource::Stored {
+                structure: src_structure,
+                storage_conjugate: false,
+            },
         )?;
-        backend.tree_transform_structure_into_raw(
-            workspace,
+        self.backend.tree_transform_structure_into_raw(
+            &mut self.workspace,
             &structure,
             dst_structure,
             src_structure,
@@ -782,13 +783,15 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
         self.compile_and_replay_overwrite(
-            |cache| {
-                cache.get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            |context| {
+                context.tree_structure(
                     rule,
                     operation,
                     dst_structure,
-                    src_structure,
-                    false,
+                    TreeStructureSource::Stored {
+                        structure: src_structure,
+                        storage_conjugate: false,
+                    },
                 )
             },
             dst_structure,
@@ -824,7 +827,6 @@ where
     ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        C: DenseBlockScalar,
     {
         self.tree_structure(
             rule,
@@ -837,7 +839,8 @@ where
         )
     }
 
-    /// The planner's one tree-structure compile: the multiplicity-free
+    /// The one tree-structure compile of the planner and the eager
+    /// transform entries: the multiplicity-free
     /// [`PlanningAlgebra::tree_structure`] through this context's cache.
     pub(crate) fn tree_structure<R>(
         &mut self,
@@ -848,7 +851,6 @@ where
     ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        C: DenseBlockScalar,
     {
         self.cache
             .set_recoupling_threads(self.backend.recoupling_threads());
@@ -877,22 +879,17 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        let Self {
-            backend,
-            workspace,
-            cache,
-        } = self;
-        // One knob: compile parallelism follows the backend's replay setting.
-        cache.set_recoupling_threads(backend.recoupling_threads());
-        let structure = cache.get_or_compile_tree_pair_structures_with_storage_conjugation(
+        let structure = self.tree_structure(
             rule,
-            operation,
+            &operation,
             dst_structure,
-            src_structure,
-            storage_conjugate,
+            TreeStructureSource::Stored {
+                structure: src_structure,
+                storage_conjugate,
+            },
         )?;
-        backend.tree_transform_structure_into_raw(
-            workspace,
+        self.backend.tree_transform_structure_into_raw(
+            &mut self.workspace,
             &structure,
             dst_structure,
             src_structure,
@@ -919,13 +916,15 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
         self.compile_and_replay_overwrite(
-            |cache| {
-                cache.get_or_compile_tree_pair_structures_with_storage_conjugation(
+            |context| {
+                context.tree_structure(
                     rule,
-                    operation,
+                    &operation,
                     dst_structure,
-                    src_structure,
-                    storage_conjugate,
+                    TreeStructureSource::Stored {
+                        structure: src_structure,
+                        storage_conjugate,
+                    },
                 )
             },
             dst_structure,
@@ -1000,8 +999,8 @@ where
         C: CategoricalScalar,
     {
         self.compile_and_replay_overwrite(
-            |cache| {
-                cache.get_or_compile_tree_pair_structures_generic(
+            |context| {
+                context.cache.get_or_compile_tree_pair_structures_generic(
                     rule,
                     operation,
                     dst_structure,
@@ -1027,17 +1026,14 @@ where
         alpha: D,
     ) -> Result<(), OperationError>
     where
-        F: FnOnce(
-            &mut TreeTransformCache<C, RuleKey>,
-        ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>,
+        F: FnOnce(&mut Self) -> Result<Arc<TreeTransformStructure<C>>, OperationError>,
     {
+        self.cache
+            .set_recoupling_threads(self.backend.recoupling_threads());
+        let structure = compile(self)?;
         let Self {
-            backend,
-            workspace,
-            cache,
+            backend, workspace, ..
         } = self;
-        cache.set_recoupling_threads(backend.recoupling_threads());
-        let structure = compile(cache)?;
         replay_structure_overwrite(
             backend,
             workspace,
