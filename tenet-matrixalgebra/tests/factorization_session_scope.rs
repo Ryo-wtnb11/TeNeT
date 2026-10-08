@@ -336,7 +336,7 @@ fn assert_one_admission(label: &str, (sessions, admissions): (u64, u64)) {
 
 fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     use tenet_matrixalgebra::seam::{
-        eigh_full_dyn, left_polar_checked_generic, pinv_direct_into_dyn,
+        eigh_full_dyn, left_polar_from_source, pinv_direct_into_dyn,
         svd_compact_dyn_checked_generic,
     };
     use tenet_matrixalgebra::HermitianTol;
@@ -453,7 +453,11 @@ fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
     assert_one_admission(
         "checked left_polar",
         admissions_during(|| {
-            left_polar_checked_generic(&mut *dense, dense_source(&input)).unwrap()
+            left_polar_from_source::<tenet_core::CheckedGenericAdmissionMode, _, _, _, _>(
+                &mut *dense,
+                dense_source(&input),
+            )
+            .unwrap()
         }),
     );
     let swapped = FusionTreeHomSpace::new(

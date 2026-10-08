@@ -70,8 +70,7 @@ fn direct_compact_svd_uses_owned_executor_outputs_only() {
 
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
     let mut polar = ScriptedExecutor::<RejectSvdInto>::default();
-    let mut context = default_context();
-    left_polar(&mut polar, &mut context, &bound.as_ref()).unwrap();
+    left_polar(&mut polar, &bound.as_ref()).unwrap();
     assert_eq!(polar.counts().svd, 1);
     assert_eq!(polar.counts().svd_into, 0);
 

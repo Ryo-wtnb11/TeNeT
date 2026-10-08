@@ -59,31 +59,6 @@ impl Observer for RejectExecutorCalls {
     }
 }
 
-/// Factorizations panic; every recomposition GEMM fails.
-#[derive(Default)]
-pub(super) struct FailComposition;
-
-impl Observer for FailComposition {
-    fn script(script: &mut Script) {
-        script
-            .set(
-                Op::Svd,
-                Action::Panic("composition backend must not run SVD"),
-            )
-            .set(Op::Qr, Action::Panic("composition backend must not run QR"))
-            .set(
-                Op::Eigh,
-                Action::Panic("composition backend must not run EIGH"),
-            )
-            .fail(
-                &[Op::DotGeneral],
-                None,
-                "dot_general_into",
-                "injected recomposition failure",
-            );
-    }
-}
-
 /// Forwards; tests read `counts().svd`.
 #[derive(Default)]
 pub(super) struct SvdCallSpy;
