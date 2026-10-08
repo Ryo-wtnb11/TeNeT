@@ -24,11 +24,12 @@ uv run --project tools/cotengra-python python -c \
 Use it from Rust:
 
 ```rust
-use tenet::plancache::{CotengraPythonConfig, Optimizer};
+use tenet_network::{configure_plan_cache, CotengraPythonConfig, Optimizer, PlanCacheConfig};
 
 let optimizer = Optimizer::CotengraPython(
     CotengraPythonConfig::with_uv_project("/path/to/TeNeT/tools/cotengra-python"),
 );
+configure_plan_cache(&runtime, PlanCacheConfig { optimizer, ..Default::default() });
 ```
 
 The opt-in integration test takes the project path from its own environment
