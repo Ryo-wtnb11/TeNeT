@@ -22,11 +22,11 @@ tenet-core = { version = "0.1.1", path = "../tenet-core", features = ["testing"]
 
 [features]
 default = ["cpu-faer"]
-cpu-faer = ["tenet-dense/cpu-faer", "tenet-tensors/cpu-faer"]
-cpu-blas = ["tenet-dense/cpu-blas", "tenet-tensors/cpu-blas"]
-blas-accelerate = ["tenet-dense/blas-accelerate", "tenet-tensors/blas-accelerate"]
-blas-openblas = ["tenet-dense/blas-openblas", "tenet-tensors/blas-openblas"]
-blas-mkl = ["tenet-dense/blas-mkl", "tenet-tensors/blas-mkl"]
+cpu-faer = ["tenet-tensors/cpu-faer"]
+cpu-blas = ["tenet-tensors/cpu-blas"]
+blas-accelerate = ["tenet-tensors/blas-accelerate"]
+blas-openblas = ["tenet-tensors/blas-openblas"]
+blas-mkl = ["tenet-tensors/blas-mkl"]
 # Routes per-sector SVD/eigh (the DenseExecutor boundary) to the tenferro CUDA
 # backend (cuBLAS/cuSOLVER). Necessary but NOT sufficient for GPU finite-torus:
 # the recoupling replay still runs through the host-only StridedHostKernelAdapter
