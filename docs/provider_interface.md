@@ -171,7 +171,8 @@ or panic — and callers gate with `nsymbol`, as the engine does. Do not rely on
 a zero. TensorKitSectors multiplies by or gates on the `Nsymbol`s, so its
 off-shell value is `0`; the TeNeT providers do not all agree (Abelian rules
 return `1`, `FermionParity` `R` returns `-1` for two odd legs, CU(1),
-Fibonacci and SU(2) `R` return `0`). `a_symbol_scalar`, `b_symbol_scalar`
+Fibonacci and SU(2) `R` return `0`). `ProductFusionRule` multiplies its components' values, so it inherits each
+component's off-shell value and panics. `a_symbol_scalar`, `b_symbol_scalar`
 inherit the contract: they are defined for `N(left,right,coupled) != 0`.
 
 `MultiplicityFreeRigidSymbols` adds `dim_scalar`, `inv_dim_scalar`,

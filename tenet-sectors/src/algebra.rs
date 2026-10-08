@@ -662,6 +662,9 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
     /// (`0` for an inadmissible 6j), and `CategoryDataFibonacci` returns its
     /// table entry. A label outside a provider's sector domain panics for
     /// the `nsymbol`-gated, SU(2) and table-backed providers.
+    /// `ProductFusionRule` multiplies its components' values, so it inherits
+    /// each component's off-shell value and panics if a component panics or
+    /// an id does not decode into the product domain.
     fn f_symbol_scalar(
         &self,
         left: SectorId,
@@ -691,6 +694,8 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
     /// panic for the CU(1), Fibonacci, SU(2) and table-backed providers, and
     /// `SU2FusionRule` also panics when the closure of `left x right` leaves
     /// its supported spin range, even for an admissible `coupled`.
+    /// `ProductFusionRule` multiplies its components' values and inherits
+    /// their off-shell behaviour and panics.
     fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar;
 }
 
