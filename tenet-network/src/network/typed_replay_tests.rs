@@ -1872,7 +1872,10 @@ fn typed_split_moving_step_is_one_contract_equal_to_contract_then_permute() {
 #[test]
 fn default_cached_macro_replays_rank_four_orientation_after_shape_drift_f64() {
     let runtime = Runtime::builder().build().unwrap();
-    assert_eq!(runtime.plan_cache_config().optimizer, Optimizer::Greedy);
+    assert_eq!(
+        crate::plan_cache_config(&runtime).optimizer,
+        Optimizer::Greedy
+    );
     let provider = Arc::new(U1FusionRule);
     assert_rank_four_orientation_replay(&runtime, &provider, |real, _| real);
 }
@@ -1880,7 +1883,10 @@ fn default_cached_macro_replays_rank_four_orientation_after_shape_drift_f64() {
 #[test]
 fn default_cached_macro_replays_rank_four_orientation_after_shape_drift_c64() {
     let runtime = Runtime::builder().build().unwrap();
-    assert_eq!(runtime.plan_cache_config().optimizer, Optimizer::Greedy);
+    assert_eq!(
+        crate::plan_cache_config(&runtime).optimizer,
+        Optimizer::Greedy
+    );
     let provider = Arc::new(U1FusionRule);
     assert_rank_four_orientation_replay(&runtime, &provider, Complex64::new);
 }

@@ -32,7 +32,6 @@ use tenet_tensors::{
 };
 
 use crate::error::Error;
-use crate::plancache::PlanCacheConfig;
 use crate::typed::ScalarOps;
 
 mod host_scratch;
@@ -525,22 +524,6 @@ macro_rules! define_runtime_state {
 
 rule_lanes!(define_runtime_state);
 
-/// Contraction-plan cache home, behind its own mutex in [`RuntimeInner`] rather
-/// than the coarse `state` mutex (#155): the network hot path locks only this,
-/// never contending with standalone ops, and reads config + accesses the slot
-/// in one acquisition (see [`Runtime::with_plan_cache`]).
-struct PlanCacheHome {
-    /// Contraction-plan cache configuration (the cache state itself lives
-    /// in `slot`).
-    config: PlanCacheConfig,
-    /// Type-keyed downstream extensions. Currently holds the
-    /// contraction-plan cache: the cache and plan types live in
-    /// `tenet-network`, which depends on this crate, so the runtime can only
-    /// hold them behind `dyn Any`; `tenet-network` claims its entry on first
-    /// use.
-    slot: ExtensionSlot,
-}
-
 /// Type-keyed storage for state a downstream crate keeps on a [`Runtime`].
 ///
 /// Each value lives under its own type, so a lookup returns the value of the
@@ -606,7 +589,7 @@ struct RuntimeInner {
     max_idle: usize,
     /// Contraction-plan cache behind its own mutex, separate from `state` but
     /// still synchronized while cache work is in progress.
-    plan_cache: Mutex<PlanCacheHome>,
+    extensions: Mutex<ExtensionSlot>,
     /// The single CUDA context of this runtime and its device's process-wide
     /// lock. Device operations serialize on both (see [`CudaLease`]) instead
     /// of on `state`.
@@ -659,7 +642,7 @@ pub(crate) struct CudaDeviceState {
     /// Grow-only execution scratch, bounded by the largest contraction run
     /// and observable through [`Runtime::cuda_contract_scratch_bytes`]. Like
     /// the executor's workspaces it is not charged to
-    /// `PlanCacheConfig::workspace_budget_bytes`, which admits idle network
+    /// `tenet-network`'s `PlanCacheConfig::workspace_budget_bytes`, which admits idle network
     /// workspaces and has no eviction protocol for a Runtime singleton.
     contract_scratch: tenet_tensors::CudaContractScratch,
 }
@@ -804,7 +787,7 @@ impl std::ops::DerefMut for CudaLease<'_> {
 /// the device context's own ones and zero templates, which many device
 /// operations share and which the executor does not own; the two are reported
 /// separately so neither is charged twice. Neither is charged to
-/// `PlanCacheConfig::workspace_budget_bytes`, which admits idle *network*
+/// `tenet-network`'s `PlanCacheConfig::workspace_budget_bytes`, which admits idle *network*
 /// workspaces and has no eviction protocol for a Runtime singleton.
 #[cfg(feature = "cuda")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1211,55 +1194,19 @@ impl Runtime {
         }
     }
 
-    fn lock_plan_cache(&self) -> MutexGuard<'_, PlanCacheHome> {
-        self.inner
-            .plan_cache
-            .lock()
-            .expect("tenet plan-cache poisoned")
-    }
-
-    /// Snapshot of this runtime's contraction-plan-cache configuration.
-    pub fn plan_cache_config(&self) -> PlanCacheConfig {
-        self.lock_plan_cache().config.clone()
-    }
-
-    /// Atomically updates the plan-cache configuration and its downstream
-    /// type-erased state under the Runtime's plan-cache lock.
-    ///
-    /// `tenet_network::configure_plan_cache` is the one public setter and the
-    /// only caller of this seam: the cache type lives in `tenet-network`, so
-    /// only it can retain eligible plans across a configuration change.
-    pub(crate) fn replace_plan_cache_config<R>(
-        &self,
-        config: PlanCacheConfig,
-        f: impl FnOnce(&PlanCacheConfig, &PlanCacheConfig, &mut ExtensionSlot) -> R,
-    ) -> R {
-        let mut home = self.lock_plan_cache();
-        let previous = home.config.clone();
-        let result = f(&previous, &config, &mut home.slot);
-        home.config = config;
-        result
-    }
-
-    /// Locked access to the type-erased downstream extension slot
-    /// (currently the contraction-plan cache: the cache type lives in
-    /// `tenet-network`, which claims and downcasts the slot on first use).
-    /// Expert seam for `tenet-network`; do not hold tensors' operations
-    /// inside `f` (the plan-cache mutex is held for its duration).
+    /// Locked access to the type-erased downstream extension slot (the
+    /// contraction-plan cache and its configuration: the types live in
+    /// `tenet-network`, which depends on this crate and claims and downcasts
+    /// its entry on first use). Behind its own mutex rather than the coarse
+    /// `state` one (#155), so the network hot path never contends with
+    /// standalone ops. Expert seam for `tenet-network`; the mutex is held for
+    /// the duration of `f`, so do not run tensor operations inside it.
     pub(crate) fn with_extension_slot<R>(&self, f: impl FnOnce(&mut ExtensionSlot) -> R) -> R {
-        f(&mut self.lock_plan_cache().slot)
-    }
-
-    /// Reads the plan-cache config AND accesses the slot under ONE plan-cache
-    /// lock (#155): the network hot path resolves enable/replan policy and the
-    /// cache lookup in a single acquisition instead of two.
-    pub(crate) fn with_plan_cache<R>(
-        &self,
-        f: impl FnOnce(&PlanCacheConfig, &mut ExtensionSlot) -> R,
-    ) -> R {
-        let mut home = self.lock_plan_cache();
-        let home = &mut *home;
-        f(&home.config, &mut home.slot)
+        f(&mut self
+            .inner
+            .extensions
+            .lock()
+            .expect("tenet extension slot poisoned"))
     }
 
     /// CUDA device ordinal fixed when this runtime was built. Lock-free: the
@@ -1346,7 +1293,7 @@ impl Runtime {
     /// [`Self::clear_tree_transform_cache`]. It is
     /// reported apart from [`CudaTreeTransformStats`] so each device byte is
     /// counted once, and is not charged to
-    /// `PlanCacheConfig::workspace_budget_bytes`. Takes the device lease like
+    /// `tenet-network`'s `PlanCacheConfig::workspace_budget_bytes`. Takes the device lease like
     /// [`Self::cuda_tree_transform_stats`].
     #[cfg(feature = "cuda")]
     pub fn cuda_contract_scratch_bytes(&self) -> Option<usize> {
@@ -1459,7 +1406,6 @@ impl std::error::Error for RuntimeConfigError {}
 pub struct RuntimeBuilder {
     #[cfg(feature = "cuda")]
     cuda_device: Option<usize>,
-    plan_cache: PlanCacheConfig,
     dense_threads: Option<usize>,
     recoupling_threads: Option<usize>,
     /// User-injected CPU linear-algebra backend. When absent, the selected
@@ -1481,8 +1427,7 @@ impl std::fmt::Debug for RuntimeBuilder {
         let mut s = f.debug_struct("RuntimeBuilder");
         #[cfg(feature = "cuda")]
         s.field("cuda_device", &self.cuda_device);
-        s.field("plan_cache", &self.plan_cache)
-            .field("dense_threads", &self.dense_threads)
+        s.field("dense_threads", &self.dense_threads)
             .field("recoupling_threads", &self.recoupling_threads)
             .field("dense_executor", &self.dense_executor.is_some())
             .field("linalg_backend", &self.linalg_backend)
@@ -1499,13 +1444,6 @@ impl RuntimeBuilder {
     #[cfg(feature = "cuda")]
     pub fn cuda(mut self, device: usize) -> Self {
         self.cuda_device = Some(device);
-        self
-    }
-
-    /// Sets the contraction-plan-cache configuration (capacity, replan
-    /// policy, default optimizer) for this runtime.
-    pub fn plan_cache(mut self, config: PlanCacheConfig) -> Self {
-        self.plan_cache = config;
         self
     }
 
@@ -1675,10 +1613,6 @@ impl RuntimeBuilder {
         };
         let gemm_kind = self.gemm_backend.map(LinalgBackend::to_kind);
         let mut state = RuntimeState::with_config(dense, &shared_ctx, gemm_kind)?;
-        let plan_cache = PlanCacheHome {
-            config: self.plan_cache,
-            slot: ExtensionSlot::default(),
-        };
         if let Some(threads) = recoupling_threads {
             state.set_recoupling_threads(threads);
         }
@@ -1738,7 +1672,7 @@ impl RuntimeBuilder {
                 executor_pool: Mutex::new(Vec::new()),
                 executor_mintable,
                 max_idle,
-                plan_cache: Mutex::new(plan_cache),
+                extensions: Mutex::new(ExtensionSlot::default()),
                 #[cfg(feature = "cuda")]
                 cuda,
                 #[cfg(feature = "cuda")]

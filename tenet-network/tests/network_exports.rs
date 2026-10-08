@@ -184,6 +184,7 @@ fn tenet_network_exports_exactly_the_pinned_names() {
         "clear_plan_cache",
         "configure_plan_cache",
         "load_plan_cache",
+        "plan_cache_config",
         "plan_cache_stats",
         "save_plan_cache",
         "Optimizer",
@@ -192,6 +193,7 @@ fn tenet_network_exports_exactly_the_pinned_names() {
         "ReplanPolicy",
         "DEFAULT_PLAN_CACHE_CAPACITY",
         "DEFAULT_REPLAN_DRIFT_FACTOR",
+        "DEFAULT_WORKSPACE_BUDGET_BYTES",
         // slice
         "best_next_internal_index",
         "best_next_slice_index",

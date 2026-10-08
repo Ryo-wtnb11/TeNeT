@@ -21,12 +21,6 @@ blas-mkl = ["tenet-dense/blas-mkl", "tenet-tensors/blas-mkl", "tenet-matrixalgeb
 provider-inject = ["tenet-dense/provider-inject", "tenet-tensors/provider-inject"]
 cuda = ["tenet-dense/cuda", "tenet-tensors/cuda"]
 racah-generated = ["tenet-core/racah-generated", "tenet-tensors/racah-generated"]
-# Marker only: adds the Optimizer::Optimal variant; the search itself lives
-# in tenet-network (whose opt-path feature enables this one).
-opt-path = []
-# Marker only: adds the Optimizer::CotengraPython variant; the subprocess
-# planner itself lives in tenet-network.
-cotengra-python = []
 
 [dependencies]
 num-complex = "0.4"

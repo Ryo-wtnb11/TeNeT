@@ -23,9 +23,9 @@ racah-generated = ["tenet/racah-generated"]
 cuda = ["tenet/cuda"]
 # Wraps the `opt-einsum-path` crate (Apache-2.0) as a
 # `DenseContractionOptimizer` backend (optimal / dp / branch / random-greedy).
-opt-path = ["dep:opt-einsum-path", "tenet/opt-path"]
+opt-path = ["dep:opt-einsum-path"]
 # Calls the installed Python `cotengra` package as an external path planner.
-cotengra-python = ["dep:command-group", "dep:libc", "dep:serde_json", "tenet/cotengra-python"]
+cotengra-python = ["dep:command-group", "dep:libc", "dep:serde_json"]
 
 [dependencies]
 command-group = { version = "5.0.1", optional = true }
