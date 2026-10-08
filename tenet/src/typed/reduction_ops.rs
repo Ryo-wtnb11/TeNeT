@@ -142,22 +142,6 @@ where
     }
 }
 
-/// Checked Generic reductions require dense payloads until #1867 gives them
-/// the compact arms.
-fn checked_generic_dense_only<R>(compact: bool) -> Result<(), TypedFacadeError<R>>
-where
-    R: TypedSectorAdmission,
-    R::Mode: TypedTensorModeDispatch<R>,
-{
-    if compact && <R::Mode as TypedTensorModeDispatch<R>>::CHECKED_GENERIC {
-        return Err(Error::InvalidArgument(
-            "checked Generic reductions require dense payloads".to_string(),
-        )
-        .into());
-    }
-    Ok(())
-}
-
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
@@ -383,15 +367,15 @@ where
     /// ```
     ///
     /// `p == 2.0` is the quantum-dimension-weighted Frobenius norm and is the
-    /// only exponent every storage supports; `p` is an `f64` exactly as in
+    /// only exponent the CUDA storage supports; `p` is an `f64` exactly as in
     /// TensorKit, so each norm has one spelling. The entrywise norm is never
     /// an operator norm, matrices included.
     ///
     /// For `p == 2`, abelian providers have `dim(c) = 1`, giving the ordinary Frobenius
-    /// norm. Multiplicity-free compact diagonal input is reduced directly in
-    /// `O(sum_c k_c)`; dense input is one pass over the payload. Lazy adjoints
-    /// read their parent orientation without materializing.
-    /// Checked-Generic reductions currently require dense payloads.
+    /// norm. Compact diagonal input is reduced directly in `O(sum_c k_c)`;
+    /// dense input is one pass over the payload. Lazy adjoints read their
+    /// parent orientation without materializing. Both admission modes share
+    /// this one body; they differ only in how `dim(c)` is asked for.
     ///
     /// The Host norm does not overflow or underflow while the norm itself is
     /// representable: when the unscaled sum of squares leaves the `f64` range,
@@ -409,8 +393,6 @@ where
     ///
     /// - [`Error::InvalidArgument`] when `p` is NaN, zero, negative, or
     ///   `-inf`; TensorKit throws `ArgumentError` over the same domain.
-    /// - [`Error::InvalidArgument`] for `p != 2` on a checked-Generic
-    ///   provider, which has only the Frobenius reduction.
     /// - If a checked provider cannot supply a quantum dimension, its original
     ///   error is available as the source. An invalid coupled-sector layout
     ///   returns [`Error::Core`].
@@ -434,14 +416,6 @@ where
         // Checked before any dispatch so an invalid `p` is rejected the same
         // way on compact and dense storage.
         validate_norm_p(p)?;
-        if p != 2.0 && <R::Mode as TypedTensorModeDispatch<R>>::CHECKED_GENERIC {
-            // Until #1868 gives checked Generic the other exponents.
-            return Err(Error::InvalidArgument(format!(
-                "checked Generic norm supports only p = 2, got {p}"
-            ))
-            .into());
-        }
-        checked_generic_dense_only::<R>(self.spectrum().is_some())?;
         if p == 2.0 {
             return self.frobenius_norm();
         }
@@ -456,15 +430,14 @@ where
     ///
     /// The product is conjugate-linear in `self`, and `self.inner(&self)` is
     /// `self.norm(2.0)^2` up to floating-point error. Both tensors must share the
-    /// same runtime, hom space, and block layout. A multiplicity-free compact
+    /// same runtime, hom space, and block layout. A compact
     /// diagonal operand is reduced directly from its stored spectrum in
     /// `O(sum_c k_c)` payload reads, including against a dense lazy adjoint;
     /// it is never densified. Its off-diagonal entries are structural zeros,
     /// so matching dense off-diagonal values are not read even when they are
     /// `NaN` or infinite. This deliberately differs from TensorKit 0.17's
     /// current generic mixed-block reduction, which visits those stored dense
-    /// positions and therefore propagates their non-finite values.
-    /// Checked-Generic reductions currently require dense payloads. See
+    /// positions and therefore propagates their non-finite values. See
     /// [`Self::norm`] for the weighting, lazy behavior, and example.
     #[doc(alias = "dot")]
     pub fn inner<'a>(
@@ -483,7 +456,6 @@ where
             )
             .into());
         }
-        checked_generic_dense_only::<R>(self.spectrum().is_some() || other.spectrum().is_some())?;
         let provider = self.logical_space().provider();
         // Compact operands reduce without materializing their structural zeros.
         if let (Some(lhs), Some(rhs)) = (self.spectrum(), other.spectrum()) {
@@ -559,8 +531,7 @@ where
     /// applied. Use [`Self::trace_pairs`] for the categorical contraction
     /// trace, which includes the provider's pivotal/twist data.
     ///
-    /// Multiplicity-free compact diagonal input is summed directly in
-    /// `O(sum_c k_c)`. Checked-Generic reductions require dense payloads. A
+    /// Compact diagonal input is summed directly in `O(sum_c k_c)`. A
     /// lazy adjoint returns the conjugate of its parent's trace without
     /// materializing. See [`Self::norm`] for a runnable example.
     pub fn tr(&self) -> Result<D, TypedFacadeError<R>> {
@@ -573,7 +544,6 @@ where
             )
             .into());
         }
-        checked_generic_dense_only::<R>(self.spectrum().is_some())?;
         let provider = self.logical_space().provider();
         if let Some(spectrum) = self.spectrum() {
             // `Σ_c dim(c) * Σ_i d_i`: TensorKit's block trace on a
