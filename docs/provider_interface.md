@@ -166,8 +166,8 @@ panicking — the engine prunes on it.
 
 `MultiplicityFreeRigidSymbols` adds `dim_scalar`, `inv_dim_scalar`,
 `sqrt_dim_scalar`, `inv_sqrt_dim_scalar`, `twist_scalar`, and
-`frobenius_schur_phase_scalar`. `a_symbol`
-and `b_symbol` have correct default bodies derived from F; override only with a
+`frobenius_schur_phase_scalar`. `a_symbol_scalar`
+and `b_symbol_scalar` have correct default bodies derived from F; override only with a
 reference to justify it.
 
 Two capability flags, both defaulting to the conservative answer:

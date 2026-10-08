@@ -118,7 +118,7 @@
 //! operation that is not implemented for `CudaStorage` does not exist for it
 //! rather than falling back to Host. See the crate-level documentation for the
 //! device synchronization model. [`TensorMap::placement`] is diagnostic
-//! metadata; no operation dispatches on it.
+//! metadata; no `TensorMap` operation dispatches on it.
 //!
 //! # Compact diagonal storage
 //!

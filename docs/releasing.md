@@ -1,7 +1,7 @@
 # Releasing TeNeT
 
-This is the checklist for a future registry release. The published facade is
-`tenet-rs` 0.1.1 and uses the published Tenferro 0.7.1 line. Its Rust library
+This is the checklist for a future registry release. The facade is
+`tenet-rs` 0.1.1; the workspace pins the Tenferro 0.7.1 line. Its Rust library
 target remains `tenet`, so
 downstream code imports from `tenet::typed` and `tenet::sector`.
 

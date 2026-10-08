@@ -26,7 +26,7 @@
 //! identifier lists given to [`Network::new`] and lower directly to
 //! [`NetworkIR`].
 //!
-//! ## Follow-ups (intentionally not in this round)
+//! ## Path search and slicing
 //!
 //! - **cotengra external path search**: the optional `cotengra-python`
 //!   feature calls the installed Python `cotengra` package for path search
