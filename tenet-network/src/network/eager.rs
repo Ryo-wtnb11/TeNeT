@@ -83,7 +83,7 @@ where
 {
     tensors
         .first()
-        .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
+        .map(|tensor| crate::plan_cache_config(tensor.runtime()).optimizer)
         .unwrap_or_default()
 }
 

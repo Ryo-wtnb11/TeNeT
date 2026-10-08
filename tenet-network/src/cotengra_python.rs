@@ -12,11 +12,11 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use command_group::{CommandGroup, GroupChild};
-use serde_json::{json, Value};
-use tenet::plancache::{
+use crate::plancache::{
     CotengraMinimize, CotengraPythonConfig, CotengraPythonMethod, CotengraSlicingConfig,
 };
+use command_group::{CommandGroup, GroupChild};
+use serde_json::{json, Value};
 
 use crate::cost::DenseCostModel;
 use crate::error::{ContractError, Result};

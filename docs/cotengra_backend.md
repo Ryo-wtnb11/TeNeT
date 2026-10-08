@@ -46,26 +46,24 @@ uv run --project tools/cotengra-python python -c \
 
 ## Enabling it in a crate
 
-Turn on the `cotengra-python` feature on `tenet` and `tenet-network`:
+Turn on the `cotengra-python` feature on `tenet-network`:
 
 ```toml
-tenet         = { path = "...", features = ["cotengra-python"] }
 tenet-network = { path = "...", features = ["cotengra-python"] }
 ```
 
 ## Using it from Rust
 
 ```rust
-use tenet::plancache::{CotengraPythonConfig, Optimizer, PlanCacheConfig};
+use tenet_network::{configure_plan_cache, CotengraPythonConfig, Optimizer, PlanCacheConfig};
 use std::time::Duration;
 
 let optimizer = Optimizer::CotengraPython(
     CotengraPythonConfig::with_uv_project("/path/to/TeNeT/tools/cotengra-python")
         .timeout(Duration::from_secs(120)),
 );
-let rt = Runtime::builder()
-    .plan_cache(PlanCacheConfig { optimizer, ..Default::default() })
-    .build()?;
+let rt = Runtime::builder().build()?;
+configure_plan_cache(&rt, PlanCacheConfig { optimizer, ..Default::default() });
 ```
 
 The project path is stored verbatim and resolved by `uv` against the process

@@ -5,8 +5,8 @@ use tenet::sector::{U1FusionRule, U1Irrep};
 use tenet::typed::{Complex32, Complex64};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{
-    clear_plan_cache, configure_plan_cache, load_plan_cache, plan_cache_stats, save_plan_cache,
-    PlanCacheConfig, ReplanPolicy,
+    clear_plan_cache, configure_plan_cache, load_plan_cache, plan_cache_config, plan_cache_stats,
+    save_plan_cache, PlanCacheConfig, ReplanPolicy,
 };
 
 #[path = "../../tests/support/network.rs"]
@@ -591,13 +591,13 @@ fn enabled_reconfiguration_retains_plans_and_workspaces() {
     );
 
     let grown = PlanCacheConfig {
-        capacity: 2 * runtime.plan_cache_config().capacity,
-        workspace_budget_bytes: 2 * runtime.plan_cache_config().workspace_budget_bytes,
+        capacity: 2 * plan_cache_config(&runtime).capacity,
+        workspace_budget_bytes: 2 * plan_cache_config(&runtime).workspace_budget_bytes,
         replan: ReplanPolicy::AlwaysReuse,
         ..Default::default()
     };
     configure_plan_cache(&runtime, grown.clone());
-    let config = runtime.plan_cache_config();
+    let config = plan_cache_config(&runtime);
     assert_eq!(
         (
             config.capacity,

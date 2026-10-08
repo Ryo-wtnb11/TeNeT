@@ -86,18 +86,18 @@ pub use plan::{
     ActivePair, ContractionPlan,
 };
 pub use plancache::{
-    clear_plan_cache, configure_plan_cache, load_plan_cache, plan_cache_stats, save_plan_cache,
-    Optimizer, PlanCacheConfig, PlanCacheStats, ReplanPolicy, DEFAULT_PLAN_CACHE_CAPACITY,
-    DEFAULT_REPLAN_DRIFT_FACTOR,
+    clear_plan_cache, configure_plan_cache, load_plan_cache, plan_cache_config, plan_cache_stats,
+    save_plan_cache, Optimizer, PlanCacheConfig, PlanCacheStats, ReplanPolicy,
+    DEFAULT_PLAN_CACHE_CAPACITY, DEFAULT_REPLAN_DRIFT_FACTOR, DEFAULT_WORKSPACE_BUDGET_BYTES,
+};
+#[cfg(feature = "cotengra-python")]
+pub use plancache::{
+    CotengraMinimize, CotengraPythonConfig, CotengraPythonMethod, CotengraSlicingConfig,
 };
 pub use slice::{
     best_next_internal_index, best_next_slice_index, contraction_width, greedy_slice,
     slice_plan_for, DegeneracyRange, SectorSlice, SliceKind, SliceLabels, SlicePlan, SlicedPlan,
     SymmetricIndexSlice, SymmetricSlicePlan, SymmetricSliceSpec, SymmetricSlicedPlan,
-};
-#[cfg(feature = "cotengra-python")]
-pub use tenet::plancache::{
-    CotengraMinimize, CotengraPythonConfig, CotengraPythonMethod, CotengraSlicingConfig,
 };
 pub use tree::ContractionTree;
 

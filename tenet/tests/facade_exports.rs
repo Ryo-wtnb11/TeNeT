@@ -200,11 +200,6 @@ fn facade_exports_are_exactly_the_reviewed_names() {
     assert_exports("tenet::expert", &module_exports("expert.rs").0, EXPERT);
     assert_exports("tenet::cache", &module_exports("cache.rs").0, CACHE);
     assert_exports(
-        "tenet::plancache",
-        &module_exports("plancache.rs").0,
-        PLANCACHE,
-    );
-    assert_exports(
         "tenet::typed::__network",
         &module_exports("typed/__network.rs").0,
         NETWORK,
@@ -236,7 +231,6 @@ fn each_name_has_one_path() {
         ("sector", SECTOR),
         ("expert", EXPERT),
         ("cache", CACHE),
-        ("plancache", PLANCACHE),
         ("typed::__network", NETWORK),
     ];
     for (index, (left, left_names)) in modules.iter().enumerate() {
@@ -272,14 +266,7 @@ fn scanner_reads_nested_groups_renames_and_inline_modules() {
     );
 }
 
-const ROOT: &[&str] = &[
-    "cache",
-    "expert",
-    "mathematics",
-    "plancache",
-    "sector",
-    "typed",
-];
+const ROOT: &[&str] = &["cache", "expert", "mathematics", "sector", "typed"];
 const TYPED: &[&str] = &[
     "AdvancedLinalgScalar",
     "Alternative",
@@ -404,10 +391,8 @@ const NETWORK: &[&str] = &[
     "network_sector_leg",
     "network_source_leg",
     "network_zeros_from_effective_legs",
-    "replace_plan_cache_config",
     "runtime_identity",
     "with_extension_slot",
-    "with_plan_cache",
 ];
 const SECTOR: &[&str] = &[
     "BraidingStyleKind",
@@ -521,17 +506,4 @@ const CACHE: &[&str] = &[
     "clear",
     "configure_budgets",
     "stats",
-];
-const PLANCACHE: &[&str] = &[
-    "CotengraMinimize",
-    "CotengraPythonConfig",
-    "CotengraPythonMethod",
-    "CotengraSlicingConfig",
-    "DEFAULT_PLAN_CACHE_CAPACITY",
-    "DEFAULT_REPLAN_DRIFT_FACTOR",
-    "DEFAULT_WORKSPACE_BUDGET_BYTES",
-    "Optimizer",
-    "PlanCacheConfig",
-    "PlanCacheStats",
-    "ReplanPolicy",
 ];
