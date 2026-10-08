@@ -530,8 +530,7 @@ where
     for index in 0..matricizations.len() {
         let matrix = matricizations.get(index)?;
         let n = matrix.rows;
-        let (sorted_values, sorted_vectors) =
-            eig_sector_stage(dense, matrix.data, n, |_, _| Ok(()))?;
+        let (sorted_values, sorted_vectors) = eig_sector_stage(dense, matrix.data, n)?;
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
             values: sorted_values,
@@ -626,8 +625,6 @@ fn compact_diagonal_eig_sector<D: FactorScalar>(
 
 /// Checked-provider full general eigenbasis of an owned compact diagonal;
 /// output uses the checked factor builder over the bond's region geometry.
-/// The dense route's eigenvector `svd_vals` rank gate is not run: every
-/// singular value of a permutation is 1, so the gate cannot fail.
 pub(super) fn eig_full_diagonal_dyn_checked_generic<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<D>],
@@ -970,16 +967,23 @@ where
     Ok((sorted_values, vectors))
 }
 
-/// General eigendecomposition of one `n x n` endomorphism sector:
-/// values descending by magnitude (stable on ties), eigenvectors reordered
-/// to match and phase-gauged. `rank_gate` runs on the raw eigenvectors after
-/// the eigenvalue check; the checked mode passes its diagonalizability gate
-/// there until #1798 decides it, the multiplicity-free mode a no-op.
+/// General eigendecomposition of one `n x n` endomorphism sector, shared by
+/// both fusion modes: values descending by magnitude (stable on ties),
+/// eigenvectors reordered to match and phase-gauged.
+///
+/// Borrowed contract: MatrixAlgebraKit v0.6.8 `eig_full_qr_iteration!`
+/// (<https://github.com/QuantumKitHub/MatrixAlgebraKit.jl/blob/33d77fdf032d5ffa36310a04c21aef0c51a554f3/src/implementations/eig.jl#L117>)
+/// runs `geev!` and then `gaugefix!`, promising `A V = V D` to backward error
+/// and certifying no eigenvector rank, so a defective sector returns its
+/// computed eigenvectors. Why no rank SVD here: a numerical-rank threshold on
+/// `V` neither detects every defective input nor changes the eigenpair
+/// equation, and `V^-1` reconstruction is promised only for diagonalizable
+/// inputs. The callers' strict finite-input stage is TeNeT's approved
+/// deviation (#1983); MAK passes non-finite input to LAPACK.
 fn eig_sector_stage<E, D>(
     dense: &mut E,
     matrix: &[D],
     n: usize,
-    rank_gate: impl FnOnce(&mut E, &[D::Eig]) -> Result<(), OperationError>,
 ) -> Result<(Vec<Complex64>, Vec<D::Eig>), OperationError>
 where
     E: DenseExecutor + ?Sized,
@@ -1005,7 +1009,6 @@ where
     let complex_values: Vec<Complex64> =
         values.iter().map(|&value| value.widen_complex()).collect();
     validate_complex_eigenvalues(&complex_values)?;
-    rank_gate(dense, vectors)?;
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
         complex_values[b]
@@ -1514,55 +1517,6 @@ where
     Ok(EighFullDyn { v, eigenvalues })
 }
 
-/// Checked-mode diagonalizability gate on raw eigenvectors; stays an explicit
-/// call until #1798 decides whether it belongs to every mode.
-fn eig_rank_gate<E, D>(dense: &mut E, vectors: &[D::Eig], n: usize) -> Result<(), OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    D: FactorScalar,
-{
-    if vectors.iter().any(|&value| {
-        let value = value.widen_complex();
-        !value.re.is_finite() || !value.im.is_finite()
-    }) {
-        return Err(eig_not_numerically_diagonalizable());
-    }
-    let shape = [n, n];
-    let strides = [1usize, n];
-    let vector_view =
-        DenseView::new(vectors, &shape, &strides, 0).map_err(OperationError::Dense)?;
-    let singular_values = dense
-        .svd_vals(<D::Eig as DenseBlockScalar>::dense_read(vector_view))
-        .map_err(OperationError::Dense)?;
-    validate_dense_shape(singular_values.shape(), &[n])?;
-    let singular_values =
-        <D::Eig as FactorScalar>::real_spectrum(&singular_values).map_err(OperationError::Dense)?;
-    validate_eigenvector_singular_values(&singular_values, n, <D::Eig as FactorScalar>::epsilon())
-}
-
-pub(super) fn eig_not_numerically_diagonalizable() -> OperationError {
-    OperationError::InvalidArgument {
-        message: "eig requires a numerically diagonalizable coupled-sector matrix",
-    }
-}
-
-pub(crate) fn validate_eigenvector_singular_values(
-    singular_values: &[f64],
-    n: usize,
-    epsilon: f64,
-) -> Result<(), OperationError> {
-    if singular_values.len() != n || singular_values.iter().any(|value| !value.is_finite()) {
-        return Err(eig_not_numerically_diagonalizable());
-    }
-    let sigma_max = singular_values.first().copied().unwrap_or(0.0);
-    let tolerance = n as f64 * epsilon * sigma_max;
-    if singular_values.iter().all(|&sigma| sigma > tolerance) {
-        Ok(())
-    } else {
-        Err(eig_not_numerically_diagonalizable())
-    }
-}
-
 /// Checked-Generic full general eigendecomposition. All input components and
 /// dense results are validated before the exact source provider is asked to
 /// admit either output factor.
@@ -1613,10 +1567,7 @@ where
             .map_err(CheckedGenericFactorPlanError::from)?;
         let n = matrix.rows;
         let (sorted_values, sorted_vectors) =
-            eig_sector_stage(dense, matrix.data, n, |dense, vectors| {
-                eig_rank_gate::<E, D>(dense, vectors, n)
-            })
-            .map_err(CheckedGenericFactorPlanError::from)?;
+            eig_sector_stage(dense, matrix.data, n).map_err(CheckedGenericFactorPlanError::from)?;
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
             values: sorted_values,

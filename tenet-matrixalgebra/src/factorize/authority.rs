@@ -181,8 +181,7 @@ pub trait FactorMode<R>: sealed::Sealed {
     ) -> Result<BoundDynFactor<R, D>, Self::Error>;
 
     // Eigendecomposition stages, publishing through each mode's own
-    // builders (the checked dense `eig_full` also keeps its rank gate, D4 of
-    // the one-path audit, #1798).
+    // builders.
     fn eigh_full_diagonal<D: FactorScalar>(
         space: &BoundDynamicFusionMapSpace<R>,
         spectrum: &[SectorSpectrum<D>],

@@ -977,11 +977,11 @@ fn checked_compact_diagonal_eig_full_avoids_input_materialization_and_solver() {
             assert_eq!(v.dense_data().unwrap(), expected.dense_data().unwrap());
 
             // The counters observe the dense route: changed leg roles
-            // materialize and run one EIG and one rank gate per sector.
+            // materialize and run one EIG per sector and no eigenvector SVD.
             DIAGONAL_MATERIALIZATIONS.set(0);
             input.eig_full(&[1], &[0]).unwrap();
             assert_eq!(calls.of(EIG_FULL), 2);
-            assert_eq!(svd_vals_calls.get(Kernel::SvdVals), 2);
+            assert_eq!(svd_vals_calls.get(Kernel::SvdVals), 0);
         }};
     }
     // Magnitudes: sector (0,0) 4 > 0.25; sector (1,0) 5 > |-2+0.5i| > |1+i|.

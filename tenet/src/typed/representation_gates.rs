@@ -78,7 +78,6 @@ const POLAR: &[Kernel] = &[
 ];
 const EIGH_FULL: &[Kernel] = &[Kernel::Eigh, Kernel::EighInto, Kernel::EighVals];
 const EIG_FULL: &[Kernel] = &[Kernel::Eig, Kernel::EigVals];
-const EIG_FULL_AND_SVD_VALS: &[Kernel] = &[Kernel::Eig, Kernel::EigVals, Kernel::SvdVals];
 
 /// SVD (`POLAR_SVD`) and GEMM (`Kernel::GEMM`) only.
 fn polar_spy(counts: &Arc<SpyCounts>) -> SpyExecutor {
@@ -93,9 +92,10 @@ fn eigh_full_spy(counts: &Arc<SpyCounts>) -> SpyExecutor {
     SpyExecutor::counting(counts).only(EIGH_FULL, "test only exercises eigh_full")
 }
 
-/// EIG (`EIG_FULL`) and the values-only SVD rank check.
+/// EIG (`EIG_FULL`) only: any other kernel, such as an eigenvector SVD,
+/// panics.
 fn eig_full_spy(counts: &Arc<SpyCounts>) -> SpyExecutor {
-    SpyExecutor::counting(counts).only(EIG_FULL_AND_SVD_VALS, "test only exercises eig_full")
+    SpyExecutor::counting(counts).only(EIG_FULL, "test only exercises eig_full")
 }
 
 fn eig_vals_spy(counts: &Arc<SpyCounts>) -> SpyExecutor {

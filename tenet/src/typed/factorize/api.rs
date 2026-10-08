@@ -698,9 +698,7 @@ where
     /// finite`; dense input too, after the endomorphism and stacking checks),
     /// and an eigenvalue of infinite magnitude fails the dense
     /// route's eigenvalue check. Lazy adjoints use an operation-local dense
-    /// payload. Unlike
-    /// [`Self::eig_full`], no eigenvector-rank gate is needed because no
-    /// eigenbasis is returned.
+    /// payload.
     ///
     /// `rows` and `cols` are the leg roles: the operation acts on the matrix
     /// view `self.permute(rows, cols)`, and the current split costs nothing
@@ -742,20 +740,18 @@ where
     /// eigenvector is made real and non-negative. Degenerate eigenbases remain
     /// backend-dependent.
     ///
-    /// Checked Generic retains the exact source provider `Arc` and rejects an
-    /// eigenvector matrix that is not numerically full rank under
-    /// `n * epsilon * sigma_max`. This is an operational gate on the computed
-    /// matrix, not a universal detector for every defective floating-point
-    /// input. The multiplicity-free path forwards the dense backend result
-    /// without this additional rank gate. An owned Host compact diagonal reads
-    /// its eigenvalues directly and builds a dense permutation factor, for both
-    /// multiplicity-free and checked-Generic providers, after the same
-    /// finite-input and eigenvalue checks as [`Self::eig_vals`]; the rank gate
-    /// is not evaluated there because a permutation has unit singular values.
-    /// Lazy adjoints use an operation-local dense payload.
+    /// Both fusion modes promise `self * v ≈ v * d` to backward error and
+    /// certify no eigenvector rank, as MatrixAlgebraKit `eig_full!`: a finite
+    /// defective input returns its computed, possibly nearly parallel,
+    /// eigenvectors. Checked Generic retains the exact source provider `Arc`.
+    /// An owned Host compact diagonal reads its eigenvalues directly and
+    /// builds a dense permutation factor, for both multiplicity-free and
+    /// checked-Generic providers, after the same finite-input and eigenvalue
+    /// checks as [`Self::eig_vals`]. Lazy adjoints use an operation-local
+    /// dense payload.
     ///
-    /// A non-endomorphism, invalid/non-finite dense result, checked rank-gate
-    /// failure, factor-layout failure, or provider failure returns no factors.
+    /// A non-endomorphism, non-finite input, invalid/non-finite eigenvalue,
+    /// factor-layout failure, or provider failure returns no factors.
     /// The direct compact path sorts in `O(Σ_c n_c log n_c)` time and writes
     /// `O(Σ_c n_c²)` eigenvector elements; the dense route costs
     /// `O(Σ_c n_c³)` time.

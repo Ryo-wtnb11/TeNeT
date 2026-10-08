@@ -456,14 +456,6 @@ fn checked_generic_eigh_stably_keeps_raw_exact_signed_ties() {
 }
 
 #[test]
-fn checked_generic_eig_uses_the_existing_numerical_rank_boundary() {
-    let epsilon = f64::EPSILON;
-    assert!(validate_eigenvector_singular_values(&[1.0, 2.0 * epsilon], 2, epsilon).is_err());
-    assert!(validate_eigenvector_singular_values(&[1.0, 2.0 * epsilon * 1.01], 2, epsilon).is_ok());
-    assert!(validate_eigenvector_singular_values(&[1.0, f64::NAN], 2, epsilon).is_err());
-}
-
-#[test]
 #[expect(
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
@@ -495,7 +487,7 @@ fn checked_generic_eig_stages_dense_work_before_checked_factor_admission() {
         Err(CheckedGenericFactorPlanError::Provider(LateGenericError(1)))
     ));
     assert_eq!(dense.counts().eig, 2);
-    assert_eq!(dense.counts().svd_vals, 2);
+    assert_eq!(dense.counts().svd_vals, 0);
     assert_eq!(input.data(), data);
 }
 
