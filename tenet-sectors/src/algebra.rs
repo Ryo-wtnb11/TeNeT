@@ -637,6 +637,31 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
         false
     }
 
+    /// `F^{left middle right}_{coupled}[left_coupled, right_coupled]`, in
+    /// TensorKitSectors' `Fsymbol(a, b, c, d, e, f)` argument order.
+    ///
+    /// # Admissible labels only
+    ///
+    /// The value is defined only when all four vertices exist:
+    /// `N(left, middle, left_coupled)`, `N(left_coupled, right, coupled)`,
+    /// `N(middle, right, right_coupled)` and `N(left, right_coupled, coupled)`
+    /// are all nonzero, i.e. the labels come from valid fusion trees. For any
+    /// other labels the value is unspecified: an implementation may return
+    /// any scalar, `0`, or panic. Callers must gate with
+    /// [`FusionRule::nsymbol`] first; the tree engine does (its trees are
+    /// validated, and its multi-associator gates the cross channel
+    /// explicitly), and no engine path relies on a zero.
+    ///
+    /// TensorKitSectors differs only in that most of its providers multiply
+    /// by the `Nsymbol`s (Abelian irreps, `FermionParity`, `CU1Irrep`) or
+    /// gate on them (`FibonacciAnyon`, `IsingAnyon`), so their off-shell value
+    /// is `0`; `SU2Irrep` does not gate and defers to `WignerSymbols.racahW`.
+    /// The TeNeT providers differ off-shell as well: the Abelian rules return
+    /// `1` for any labels, `CU1FusionRule` and `FibonacciFusionRule` return
+    /// `0` after an `nsymbol` gate, `SU2FusionRule` returns the `racah` value
+    /// (`0` for an inadmissible 6j), and `CategoryDataFibonacci` returns its
+    /// table entry. A label outside a provider's sector domain panics for
+    /// the `nsymbol`-gated, SU(2) and table-backed providers.
     fn f_symbol_scalar(
         &self,
         left: SectorId,
@@ -647,6 +672,25 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
         right_coupled: SectorId,
     ) -> Self::Scalar;
 
+    /// `R^{left right}_{coupled}`, in TensorKitSectors'
+    /// `Rsymbol(a, b, c)` argument order.
+    ///
+    /// # Admissible labels only
+    ///
+    /// The value is defined only when `N(left, right, coupled)` is nonzero.
+    /// For any other labels it is unspecified: an implementation may return
+    /// any scalar, `0`, or panic, and callers must gate with
+    /// [`FusionRule::nsymbol`]. TensorKitSectors multiplies by or gates on
+    /// `Nsymbol(a, b, c)` (`irreps.jl` `Rsymbol`, `fermions.jl`, `cu1irrep.jl`,
+    /// `su2irrep.jl`, `anyons.jl`), so its off-shell value is `0`. Of the
+    /// TeNeT providers, `ZNFusionRule`/`Z2FusionRule`/`U1FusionRule` return
+    /// `1` and `FermionParityFusionRule` returns `-1` for two odd legs and
+    /// `1` otherwise, whatever `coupled` is; `CU1FusionRule`,
+    /// `FibonacciFusionRule` and `SU2FusionRule` return `0`;
+    /// `CategoryDataFibonacci` returns its table entry. Out-of-domain labels
+    /// panic for the CU(1), Fibonacci, SU(2) and table-backed providers, and
+    /// `SU2FusionRule` also panics when the closure of `left x right` leaves
+    /// its supported spin range, even for an admissible `coupled`.
     fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar;
 }
 
@@ -667,6 +711,8 @@ pub trait MultiplicityFreeRigidSymbols: MultiplicityFreeFusionSymbols + Sync {
 
     fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar;
 
+    /// Defined only for `N(left, right, coupled) != 0`; the default body
+    /// is an `F` evaluation, so see [`MultiplicityFreeFusionSymbols::f_symbol_scalar`].
     fn a_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar
     where
         Self::Scalar: Mul<Output = Self::Scalar>,
@@ -679,6 +725,8 @@ pub trait MultiplicityFreeRigidSymbols: MultiplicityFreeFusionSymbols + Sync {
         factor * symbol.conj()
     }
 
+    /// Defined only for `N(left, right, coupled) != 0`; the default body
+    /// is an `F` evaluation, so see [`MultiplicityFreeFusionSymbols::f_symbol_scalar`].
     fn b_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar
     where
         Self::Scalar: Mul<Output = Self::Scalar>,

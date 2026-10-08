@@ -161,8 +161,18 @@ fn r_symbol_scalar(&self, a: SectorId, b: SectorId, c: SectorId) -> Self::Scalar
 
 Argument order is TensorKitSectors' `Fsymbol(a,b,c,d,e,f)` / `Rsymbol(a,b,c)`
 verbatim: `e` is the `(a,b)` channel, `f` is the `(b,c)` channel, `d` is the
-total. Return the additive zero for a disallowed configuration rather than
-panicking — the engine prunes on it.
+total.
+
+Both symbols are defined only for admissible labels: every `N`-symbol of the
+configuration is nonzero (for `R`, `N(a,b,c)`; for `F`, `N(a,b,e)`,
+`N(e,c,d)`, `N(b,c,f)`, `N(a,f,d)`), i.e. the labels come from a valid fusion
+tree. Off-shell values are unspecified — a provider may return any scalar, `0`,
+or panic — and callers gate with `nsymbol`, as the engine does. Do not rely on
+a zero. TensorKitSectors multiplies by or gates on the `Nsymbol`s, so its
+off-shell value is `0`; the TeNeT providers do not all agree (Abelian rules
+return `1`, `FermionParity` `R` returns `-1` for two odd legs, CU(1),
+Fibonacci and SU(2) `R` return `0`). `a_symbol_scalar`, `b_symbol_scalar`
+inherit the contract: they are defined for `N(left,right,coupled) != 0`.
 
 `MultiplicityFreeRigidSymbols` adds `dim_scalar`, `inv_dim_scalar`,
 `sqrt_dim_scalar`, `inv_sqrt_dim_scalar`, `twist_scalar`, and
