@@ -81,7 +81,7 @@ fn tensorcontract_fusion_parallel_transform_replay_matches_serial() {
                 .unwrap();
         let mut parallel_context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
         let backend = parallel_context.tree_context_mut().backend_mut();
-        backend.set_recoupling_threads(4);
+        backend.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
         backend.set_transform_parallel_min_len(0);
         // Two runs: cold (structure compile + replay) and warm (replay only).
         for _ in 0..2 {
@@ -172,7 +172,7 @@ fn tensorcontract_fusion_parallel_replay_keeps_fermion_twist_reference() {
             .unwrap();
 
     let mut backend = DenseTreeTransformOperations::default_executor();
-    backend.set_recoupling_threads(4);
+    backend.set_recoupling_threads(std::num::NonZeroUsize::new(4).unwrap());
     backend.set_transform_parallel_min_len(0);
     TensorContractFusionExecutionContext::<f64, RuleIdentity>::new(
         DenseTreeTransformOperations::default_executor(),

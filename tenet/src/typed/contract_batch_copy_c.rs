@@ -100,7 +100,7 @@ where
     let lane = lease.context().multiplicity_free_lane::<D>()?;
     lane.execute_stacked_signed_direct_host(replay, &mut temporary, &left, &right, true)?;
     let backend = lane.tree_context_mut().backend_mut();
-    let threads = backend.recoupling_threads();
+    let threads = backend.recoupling_threads().get();
     tree_transform_members_overwrite_raw(
         &mut StridedHostKernelAdapter::default(),
         backend.dense_mut(),

@@ -35,6 +35,7 @@
 use core::ops::{Add, Mul};
 use std::any::{Any, TypeId};
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, OnceLock};
 
 use num_traits::Zero;
@@ -735,14 +736,14 @@ where
 /// categorical-coefficient store (cache 4, per Runtime until #2014-4).
 pub(crate) struct TreeTransformPlanning<T> {
     coefficients: Option<std::sync::Weak<RuntimeCoefficientStore<T>>>,
-    recoupling_threads: usize,
+    recoupling_threads: NonZeroUsize,
 }
 
 impl<T> Default for TreeTransformPlanning<T> {
     fn default() -> Self {
         Self {
             coefficients: None,
-            recoupling_threads: 1,
+            recoupling_threads: NonZeroUsize::MIN,
         }
     }
 }
@@ -767,8 +768,7 @@ impl<T> std::fmt::Debug for TreeTransformPlanning<T> {
 }
 
 impl<T> TreeTransformPlanning<T> {
-    pub(crate) fn set_recoupling_threads(&mut self, threads: usize) {
-        debug_assert!(threads >= 1, "recoupling_threads must be at least 1");
+    pub(crate) fn set_recoupling_threads(&mut self, threads: NonZeroUsize) {
         self.recoupling_threads = threads;
     }
 
@@ -817,7 +817,7 @@ where
             storage_conjugate,
         );
         let may_publish = publishable([dst_structure.as_ref(), src_structure.as_ref()]);
-        let threads = self.recoupling_threads;
+        let threads = self.recoupling_threads.get();
         resolve(
             key,
             may_publish,
@@ -895,7 +895,7 @@ where
         validate_multiplicity_free_tree_transform_capability(rule, operation)?;
         validate_tree_pair_namespace_before_cache(operation, storage_src_structure)?;
         let storage_conjugate = orientation == FusionTreePairOrientation::Adjoint;
-        let threads = self.recoupling_threads;
+        let threads = self.recoupling_threads.get();
         // Why lazy: only a miss reads the storage map, so a warm call derives
         // no per-block projection.
         let build = |store: Option<&RuntimeCoefficientStore<T>>| {
@@ -988,7 +988,7 @@ where
             src_structure,
         );
         let may_publish = publishable([dst_structure.as_ref(), src_structure.as_ref()]);
-        let threads = self.recoupling_threads;
+        let threads = self.recoupling_threads.get();
         resolve(
             key,
             may_publish,
@@ -1062,7 +1062,7 @@ where
         let plan = super::plan::build_tree_pair_transform_group_plan_validated_with_threads(
             &source_proof,
             operation.clone(),
-            self.recoupling_threads,
+            self.recoupling_threads.get(),
         )?;
         plan.compile_shared_structures_with_storage_mapping(
             Arc::clone(dst_structure),

@@ -1,4 +1,5 @@
 use core::ops::{Add, Mul};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use num_traits::{One, Zero};
@@ -36,8 +37,8 @@ where
     /// The execution context mirrors it into the plan-compile cache, so the
     /// one configured knob drives both replay and compile parallelism;
     /// backends without a thread setting stay serial.
-    fn recoupling_threads(&self) -> usize {
-        1
+    fn recoupling_threads(&self) -> NonZeroUsize {
+        NonZeroUsize::MIN
     }
 
     fn tree_transform_structure_into<
@@ -286,7 +287,7 @@ pub struct DenseTreeTransformOperations<E = DefaultDenseExecutor> {
     dense: E,
     // Replay parallelism is a property of this backend: worker count for the
     // tree-transform replay phases (1 = serial, the default).
-    recoupling_threads: usize,
+    recoupling_threads: NonZeroUsize,
     // Size gate paired with recoupling_threads; see TRANSFORM_PARALLEL_MIN_LEN.
     transform_parallel_min_len: usize,
 }
@@ -327,7 +328,7 @@ impl<E> DenseTreeTransformOperations<E> {
     pub fn new(dense: E) -> Self {
         Self {
             dense,
-            recoupling_threads: 1,
+            recoupling_threads: NonZeroUsize::MIN,
             transform_parallel_min_len: TRANSFORM_PARALLEL_MIN_LEN,
         }
     }
@@ -347,15 +348,14 @@ impl<E> DenseTreeTransformOperations<E> {
 
     /// Worker count for tree-transform replays (default 1 = serial).
     #[inline]
-    pub fn recoupling_threads(&self) -> usize {
+    pub fn recoupling_threads(&self) -> NonZeroUsize {
         self.recoupling_threads
     }
 
-    /// Sets the tree-transform replay worker count; must be at least 1.
+    /// Sets the tree-transform replay worker count (1 = serial).
     /// Values `> 1` parallelize replays whose destination length
     /// exceeds [`Self::transform_parallel_min_len`].
-    pub fn set_recoupling_threads(&mut self, threads: usize) {
-        assert!(threads >= 1, "recoupling_threads must be at least 1");
+    pub fn set_recoupling_threads(&mut self, threads: NonZeroUsize) {
         self.recoupling_threads = threads;
     }
 
@@ -380,8 +380,8 @@ impl<E> DenseTreeTransformOperations<E> {
     /// otherwise 1 (the untouched serial path).
     #[inline]
     fn effective_recoupling_threads(&self, dst_len: usize) -> usize {
-        if self.recoupling_threads > 1 && dst_len > self.transform_parallel_min_len {
-            self.recoupling_threads
+        if self.recoupling_threads.get() > 1 && dst_len > self.transform_parallel_min_len {
+            self.recoupling_threads.get()
         } else {
             1
         }
@@ -596,7 +596,7 @@ where
     type Workspace = TreeTransformWorkspace<D>;
 
     #[inline]
-    fn recoupling_threads(&self) -> usize {
+    fn recoupling_threads(&self) -> NonZeroUsize {
         DenseTreeTransformOperations::recoupling_threads(self)
     }
 
@@ -858,7 +858,7 @@ mod tests {
     #[test]
     fn transform_parallel_gate_is_strictly_past_the_threshold() {
         let mut backend = DenseTreeTransformOperations::default();
-        backend.set_recoupling_threads(4);
+        backend.set_recoupling_threads(NonZeroUsize::new(4).unwrap());
         backend.set_transform_parallel_min_len(8);
 
         assert_eq!(backend.effective_recoupling_threads(8), 1);
