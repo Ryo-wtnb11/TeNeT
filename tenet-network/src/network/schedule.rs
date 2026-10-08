@@ -181,79 +181,69 @@ mod flow_tests {
     use super::*;
     use crate::cost::{DenseCostModel, DenseTensorInfo};
     use crate::optimizer::{
-        dense_orientation_for_next_use, DenseContractionOptimizer, GreedyDenseOptimizer,
+        charge_dense_orientation_costs, ContractionStep, DenseContractionOptimizer,
+        GreedyDenseOptimizer,
     };
     use crate::parse::parse_einsum;
 
-    /// The planner's orientation pass and the compiled schedule must orient every
-    /// intermediate identically: both consume `stepflow`, and the executor tracks
-    /// oriented operand labels while the planner looks up unoriented planned ones.
+    /// The cost the real planner path (`charge_dense_orientation_costs`, run
+    /// inside the optimizer) charges per step must equal the orientation work
+    /// the compiled schedule actually performs: one result-sized charge per
+    /// intermediate the schedule orients away from the pairwise order, plus the
+    /// final permute when the last result is not already in output order.
     #[test]
-    fn planner_and_schedule_agree_on_label_flow() {
+    fn planner_charges_match_schedule_orientation() {
         let ir = parse_einsum("abx,xcy,ydz,zea->bcde").unwrap();
         let infos = [(2, 3, 4), (4, 5, 6), (6, 7, 8), (8, 9, 2)]
             .map(|(p, q, r)| DenseTensorInfo::new(vec![p, q, r]))
             .to_vec();
         let cost = DenseCostModel::from_network(&ir, &infos).unwrap();
         let steps = GreedyDenseOptimizer.optimize(&ir, &cost).unwrap();
+
+        // Uncharged baseline: re-running the charge pass on zero-cost steps
+        // yields exactly the orientation charges.
+        let mut charged: Vec<_> = steps
+            .iter()
+            .map(|s| {
+                ContractionStep::new(s.lhs(), s.rhs(), s.result(), 0, s.result_labels().to_vec())
+            })
+            .collect();
+        charge_dense_orientation_costs(&ir, &cost, &mut charged).unwrap();
+
         let plan = ContractionPlan::from_steps(&ir, steps).unwrap();
         let schedule = compile_schedule(&ir, &plan, None, &[1; 4]).unwrap();
 
-        let planned = planned_label_orders(&ir, plan.steps()).unwrap();
-        let consumers = consumers(plan.steps());
-        let mut planner_labels: HashMap<usize, Vec<TemporaryLabel>> = HashMap::new();
+        let mut labels: HashMap<usize, Vec<TemporaryLabel>> = ir
+            .tensors()
+            .iter()
+            .enumerate()
+            .map(|(slot, node)| (slot, node.labels().to_vec()))
+            .collect();
         let mut oriented_any = false;
-        let mut schedule_labels: HashMap<usize, Vec<TemporaryLabel>> = HashMap::new();
-        for (slot, node) in ir.tensors().iter().enumerate() {
-            planner_labels.insert(slot, node.labels().to_vec());
-            schedule_labels.insert(slot, node.labels().to_vec());
-        }
-        for (index, (step, compiled)) in plan.steps().iter().zip(&schedule.steps).enumerate() {
-            let lhs = planner_labels.remove(&compiled.lhs_slot).unwrap();
-            let rhs = planner_labels.remove(&compiled.rhs_slot).unwrap();
+        let last = schedule.steps.len() - 1;
+        for (index, compiled) in schedule.steps.iter().enumerate() {
+            let lhs = labels.remove(&compiled.lhs_slot).unwrap();
+            let rhs = labels.remove(&compiled.rhs_slot).unwrap();
             let raw = pair_result_labels(&lhs, &rhs);
-            let raw_codomain_rank = lhs.iter().filter(|l| !rhs.contains(l)).count();
-            let oriented = match consumers.get(&step.result()) {
-                Some(&(future, result_is_lhs)) => {
-                    let future = &plan.steps()[future];
-                    let sibling = if result_is_lhs {
-                        future.rhs()
-                    } else {
-                        future.lhs()
-                    };
-                    dense_orientation_for_next_use(
-                        &raw,
-                        raw_codomain_rank,
-                        result_is_lhs,
-                        &planned[&sibling],
-                    )
-                    .1
-                }
-                None => raw.clone(),
-            };
-            let slhs = schedule_labels.remove(&compiled.lhs_slot).unwrap();
-            let srhs = schedule_labels.remove(&compiled.rhs_slot).unwrap();
-            let sraw = pair_result_labels(&slhs, &srhs);
-            let soriented: Vec<_> = compiled
+            let oriented: Vec<_> = compiled
                 .codomain
                 .iter()
                 .chain(&compiled.domain)
-                .map(|&axis| sraw[axis].clone())
+                .map(|&axis| raw[axis].clone())
                 .collect();
-            oriented_any |= oriented != raw;
-            if consumers.contains_key(&step.result()) {
-                assert_eq!(oriented, soriented, "step {index}");
-                // Planner label set matches the declared step labels.
-                assert_eq!(
-                    planned[&step.result()],
-                    step.result_labels(),
-                    "step {index}"
-                );
+            let mut expected = 0;
+            if index < last {
+                if oriented != raw {
+                    oriented_any = true;
+                    expected += cost.tensor_size(&raw);
+                }
+            } else if raw != ir.output_labels() {
+                expected += cost.tensor_size(&raw);
             }
-            planner_labels.insert(compiled.result_slot, oriented);
-            schedule_labels.insert(compiled.result_slot, soriented);
+            assert_eq!(charged[index].cost(), expected, "step {index}");
+            labels.insert(compiled.result_slot, oriented);
         }
-        assert!(plan.steps().len() >= 3);
+        assert!(schedule.steps.len() >= 3);
         assert!(
             oriented_any,
             "fixture must exercise a non-trivial orientation"
