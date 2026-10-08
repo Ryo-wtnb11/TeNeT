@@ -224,6 +224,205 @@ fn legacy_generic_associator_keeps_raw_f_shape_policy() {
     );
 }
 
+// A4 provider whose `malformed_call`-th F block keeps its data but reports an
+// inconsistent shape, as an infallible provider may.
+struct MalformedA4FProbe {
+    f_calls: std::cell::Cell<usize>,
+    malformed_call: usize,
+    malform: fn(GenericFArray<f64>) -> GenericFArray<f64>,
+}
+
+impl MalformedA4FProbe {
+    fn new(malformed_call: usize, malform: fn(GenericFArray<f64>) -> GenericFArray<f64>) -> Self {
+        Self {
+            f_calls: std::cell::Cell::new(0),
+            malformed_call,
+            malform,
+        }
+    }
+}
+
+impl FusionRule for MalformedA4FProbe {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionRule::fusion_style(&A4FoldRule)
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        FusionRule::braiding_style(&A4FoldRule)
+    }
+    fn vacuum(&self) -> SectorId {
+        FusionRule::vacuum(&A4FoldRule)
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        FusionRule::dual(&A4FoldRule, sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        FusionRule::fusion_channels(&A4FoldRule, left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        FusionRule::nsymbol(&A4FoldRule, left, right, coupled)
+    }
+}
+
+impl GenericFusionSymbols for MalformedA4FProbe {
+    type Scalar = f64;
+
+    fn f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> GenericFArray<Self::Scalar> {
+        let call = self.f_calls.get() + 1;
+        self.f_calls.set(call);
+        let valid = GenericFusionSymbols::f_symbol_generic(&A4FoldRule, a, b, c, d, e, f);
+        if call == self.malformed_call {
+            (self.malform)(valid)
+        } else {
+            valid
+        }
+    }
+
+    fn r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> GenericRMatrix<Self::Scalar> {
+        GenericFusionSymbols::r_symbol_generic(&A4FoldRule, a, b, c)
+    }
+}
+
+impl GenericRigidSymbols for MalformedA4FProbe {
+    fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        GenericRigidSymbols::sqrt_dim_scalar(&A4FoldRule, sector)
+    }
+    fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        GenericRigidSymbols::inv_sqrt_dim_scalar(&A4FoldRule, sector)
+    }
+    fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+        GenericRigidSymbols::frobenius_schur_phase_scalar(&A4FoldRule, sector)
+    }
+}
+
+// (μ, ν, κ, λ) shape reported as (κ, λ, μ, ν) over unchanged row-major data.
+fn swap_f_axis_pairs(f: GenericFArray<f64>) -> GenericFArray<f64> {
+    let (mu, nu, kappa, lambda) = f.shape();
+    GenericFArray::new(f.data().to_vec(), (kappa, lambda, mu, nu))
+}
+
+// One extra zero μ row: every in-range read is unchanged.
+fn pad_f_mu_axis(f: GenericFArray<f64>) -> GenericFArray<f64> {
+    let (mu, nu, kappa, lambda) = f.shape();
+    let mut data = f.data().to_vec();
+    data.resize(data.len() + nu * kappa * lambda, 0.0);
+    GenericFArray::new(data, (mu + 1, nu, kappa, lambda))
+}
+
+// Last μ row dropped: the incoming vector is longer than the μ axis.
+fn shrink_f_mu_axis(f: GenericFArray<f64>) -> GenericFArray<f64> {
+    let (mu, nu, kappa, lambda) = f.shape();
+    let mut data = f.data().to_vec();
+    data.truncate((mu - 1) * nu * kappa * lambda);
+    GenericFArray::new(data, (mu - 1, nu, kappa, lambda))
+}
+
+fn assert_malformed_f_shape<T>(
+    result: Result<T, CheckedGenericSymbolError<std::convert::Infallible>>,
+) {
+    assert!(matches!(
+        result,
+        Err(CheckedGenericSymbolError::Core(
+            CoreError::MalformedFusionTree { .. }
+        ))
+    ));
+}
+
+// What: the raw infallible associator rejects a fixed F label outside the
+// returned shape instead of reading a neighbouring entry. F(3,3,3,3,1,3) is
+// (1,1,2,2); reported as (2,2,1,1), κ = 2 is out of axis while the flat
+// index stays in range.
+#[test]
+fn raw_generic_associator_rejects_f_label_outside_returned_shape() {
+    let long = a4f_rank3(1, 1, 1);
+    let tail = generic_multi_fmove_tree(&A4FoldRule, &long)
+        .unwrap()
+        .into_iter()
+        .find(|(tree, _)| tree.coupled().id() == 3 && tree.vertices()[0].get() == 2)
+        .unwrap()
+        .0;
+    let valid = MalformedA4FProbe::new(usize::MAX, swap_f_axis_pairs);
+    assert!(
+        generic_multi_associator_result(&InfallibleGenericFR(&valid), &long, &tail)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(valid.f_calls.get(), 1);
+
+    let probe = MalformedA4FProbe::new(1, swap_f_axis_pairs);
+    assert_malformed_f_shape(generic_multi_associator_result(
+        &InfallibleGenericFR(&probe),
+        &long,
+        &tail,
+    ));
+}
+
+// What: at k > 2 the incoming coefficient vector must match the μ axis exactly;
+// TensorKit's `transpose(view(F, :, ν, κ, :)) * coeff` throws on the same
+// length mismatch.
+#[test]
+fn raw_generic_associator_rejects_coefficient_length_mismatch() {
+    let t = SectorId::new(3);
+    let label = |n| MultiplicityIndex::new(n).expect("test multiplicity label is one-based");
+    let long = FusionTreeKey::new(
+        [t, t, t, t],
+        t,
+        [false; 4],
+        [t, t],
+        [label(1), label(1), label(1)],
+    );
+    // Both F slices are F(3,3,3,3,3,3), the modelled rank-4 A4 family.
+    let tail = FusionTreeKey::new([t, t, t], t, [false; 3], [t], [label(1), label(1)]);
+    let valid = MalformedA4FProbe::new(usize::MAX, pad_f_mu_axis);
+    assert!(
+        generic_multi_associator_result(&InfallibleGenericFR(&valid), &long, &tail)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(valid.f_calls.get(), 2);
+
+    for malform in [pad_f_mu_axis, shrink_f_mu_axis] {
+        let probe = MalformedA4FProbe::new(2, malform);
+        assert_malformed_f_shape(generic_multi_associator_result(
+            &InfallibleGenericFR(&probe),
+            &long,
+            &tail,
+        ));
+    }
+}
+
+// What: the default A/B derivations on the raw infallible path validate the
+// whole F shape before their reshape reads.
+#[test]
+fn raw_generic_a_and_b_reject_malformed_f_shape() {
+    let t = SectorId::new(3);
+    let bad_b = MalformedA4FProbe::new(1, swap_f_axis_pairs);
+    assert!(matches!(
+        GenericRigidAccess::try_b_symbol_generic(&InfallibleGenericFR(&bad_b), t, t, t),
+        Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })
+    ));
+    let bad_a = MalformedA4FProbe::new(1, swap_f_axis_pairs);
+    assert!(matches!(
+        GenericRigidAccess::try_a_symbol_generic(&InfallibleGenericFR(&bad_a), t, t, t),
+        Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })
+    ));
+}
+
 // Build the full foldright coefficient map keyed by output tree pair. The
 // output collapses multiple (codomain', domain') paths per pair (the A-matrix
 // contraction) — the accumulator already summed them.

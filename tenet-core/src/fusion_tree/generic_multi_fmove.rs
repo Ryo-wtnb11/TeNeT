@@ -250,6 +250,16 @@ where
 /// Returns `None` iff the uncoupled/dual tails do not match (the `zero(...)`
 /// early return at TK `:141-142`), so callers filter exactly as the mult-free
 /// tree functions do.
+///
+/// Each F slice is read only after its fixed `μ`/`ν`/`κ` indices are inside the
+/// returned shape and, for `k > 2`, the incoming vector length equals the `μ`
+/// axis; otherwise this is `MalformedFusionTree`. Julia's bounds-checked
+/// `view`/`*` in TensorKit throw on the same mismatch. Residual: on the raw
+/// infallible path (`InfallibleGenericFR`) a wrong-size final `λ` axis is not
+/// detected, because checking it needs the extra `N(a,e′,d)` query that #682
+/// keeps out of this path. An intermediate `λ` is compared only with the next
+/// F's reported `μ` axis, so a provider that misreports the same `N(a,e′,d)`
+/// consistently in both F blocks is not detected either (nor by TensorKit).
 pub(crate) fn generic_multi_associator_result<C, L, S>(
     rule: &C,
     long: &L,
@@ -316,12 +326,26 @@ where
             middle_left,
             short_right,
         )?;
-        let n_lambda = f.shape().3;
+        let (n_mu, n_nu, n_kappa, n_lambda) = f.shape();
+        let mu0 = mu_index(long, 0)?;
+        let mu_in_shape = if tensor_kit_k == 2 {
+            mu0 < n_mu
+        } else {
+            coeff.len() == n_mu
+        };
+        // Why not rely on `GenericFArray::get`: it bounds-checks only the flat
+        // index, so an out-of-axis label silently reads a neighbouring entry.
+        if !mu_in_shape || nu0 >= n_nu || kappa0 >= n_kappa {
+            return Err(CheckedGenericSymbolError::Core(
+                CoreError::MalformedFusionTree {
+                    message: "multi_associator: Generic F shape disagrees with the tree labels",
+                },
+            ));
+        }
         let mut next = vec![C::Scalar::zero(); n_lambda];
         if tensor_kit_k == 2 {
             // `transpose(view(F, μ:μ, ν, κ, :)) * coeff` (TK `:159-160`): the μ
             // axis is fixed to `long.vertices[0]`, seed has length 1.
-            let mu0 = mu_index(long, 0)?;
             for (lambda, slot) in next.iter_mut().enumerate() {
                 *slot = f.get(mu0, nu0, kappa0, lambda).clone() * coeff[0].clone();
             }
