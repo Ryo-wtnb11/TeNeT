@@ -44,6 +44,13 @@ impl<R, D> TensorMap<R, D> {
     }
 }
 
+/// Whether `op` redirects a lazy adjoint: a body whose only lazy-adjoint arm
+/// is the redirect asserts it at compile time, so the rule table and the
+/// body cannot disagree.
+const fn redirects(op: FactorOp) -> bool {
+    matches!(op.adjoint_rule(), AdjointRule::Redirect)
+}
+
 /// The seam source of an owned checked body: its compact diagonal, or its
 /// dense payload bound to its space.
 fn owned_factor_source<'a, R, D>(
@@ -67,7 +74,7 @@ where
     D: TensorScalar,
 {
     /// The storage `op` reads: the receiver's own, or for a lazy adjoint
-    /// whatever the mode's adjoint rule (D1, #1755) selects. `local` holds an
+    /// whatever [`FactorOp::adjoint_rule`] selects. `local` holds an
     /// operation-local materialization.
     fn factor_input<'a>(
         &'a self,
@@ -78,10 +85,7 @@ where
             TypedTensorRepr::Owned(body) => return Ok(owned_factor_source(body)?),
             TypedTensorRepr::Adjoint(view) => view,
         };
-        match R::Mode::adjoint_rule(op) {
-            AdjointRule::Reject => {
-                Err(Error::InvalidArgument(op.lazy_adjoint_refusal().to_string()).into())
-            }
+        match op.adjoint_rule() {
             AdjointRule::Parent => Ok(tenet_matrixalgebra::seam::FactorSource::Dense(
                 BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
                     .map_err(Error::from)?,
@@ -99,6 +103,18 @@ where
             )
             .into()),
         }
+    }
+
+    /// `f(A)^H` for the lazy adjoint `self = A^H`, detached: the redirect
+    /// of an operation with `f(A^H) = f(A)^H`. The parent is owned, so `f`
+    /// never redirects again.
+    fn adjoint_of_parent(
+        &self,
+        f: impl FnOnce(&Self) -> Result<Self, TypedFacadeError<R>>,
+    ) -> Result<Self, TypedFacadeError<R>> {
+        Ok(f(&self.adjoint()?)?
+            .adjoint()?
+            .materialized_tensor_uncached()?)
     }
 
     /// The one body of the values-only factorizations: `stage` (the
@@ -175,7 +191,7 @@ where
         R::Mode: TypedAdjointSpace<R>,
     {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
-            && R::Mode::adjoint_rule(op) == AdjointRule::Redirect
+            && op.adjoint_rule() == AdjointRule::Redirect
         {
             let Qr { q, r } = qr(&self.adjoint()?)?;
             return Ok(Lq {
@@ -212,11 +228,9 @@ where
         R::Mode: TypedAdjointSpace<R>,
     {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
-            && R::Mode::adjoint_rule(op) == AdjointRule::Redirect
+            && op.adjoint_rule() == AdjointRule::Redirect
         {
-            return Ok(partner(&self.adjoint()?)?
-                .adjoint()?
-                .materialized_tensor_uncached()?);
+            return self.adjoint_of_parent(partner);
         }
         let mut local = None;
         let source = self.factor_input(op, &mut local)?;
@@ -225,15 +239,25 @@ where
         Ok(wrap_factor_on(&self.runtime, factor))
     }
 
-    /// The one body of the left polar decomposition. A lazy adjoint and a
-    /// dense input run the mode's own stage (D1, #1755; D5, #1752); a compact
-    /// diagonal factors directly on its bond.
+    /// The one body of the left polar decomposition. Under
+    /// [`AdjointRule::Redirect`] a lazy adjoint `A^H` is the adjoint-swapped
+    /// right polar of its parent `A = p wh`: `A^H = wh^H p`, with `wh^H`
+    /// detached. The parent's factors and a dense input's come from the
+    /// mode's own stages (D5, #1752); a compact diagonal factors directly on
+    /// its bond.
     fn factor_left_polar(&self) -> Result<LeftPolar<Self>, TypedFacadeError<R>>
     where
         D: FactorizationScalar,
     {
         match &self.repr {
-            TypedTensorRepr::Adjoint(_) => R::Mode::left_polar_adjoint(self),
+            TypedTensorRepr::Adjoint(_) => {
+                const { assert!(redirects(FactorOp::LeftPolar)) };
+                let RightPolar { p, wh } = R::Mode::left_polar_adjoint(self)?;
+                Ok(LeftPolar {
+                    w: wh.adjoint()?.materialized_tensor_uncached()?,
+                    p,
+                })
+            }
             TypedTensorRepr::Owned(body) => match body.data.as_ref() {
                 TypedData::Diagonal(spectrum) => {
                     let LeftPolar { w, p } = tenet_matrixalgebra::seam::left_polar_of_diagonal::<
@@ -259,7 +283,14 @@ where
         D: FactorizationScalar,
     {
         match &self.repr {
-            TypedTensorRepr::Adjoint(_) => R::Mode::right_polar_adjoint(self),
+            TypedTensorRepr::Adjoint(_) => {
+                const { assert!(redirects(FactorOp::RightPolar)) };
+                let LeftPolar { w, p } = R::Mode::right_polar_adjoint(self)?;
+                Ok(RightPolar {
+                    p,
+                    wh: w.adjoint()?.materialized_tensor_uncached()?,
+                })
+            }
             TypedTensorRepr::Owned(body) => match body.data.as_ref() {
                 TypedData::Diagonal(spectrum) => {
                     let RightPolar { p, wh } =
@@ -366,7 +397,7 @@ where
         >,
     ) -> Result<(T, tenet_matrixalgebra::seam::FactorRoute), TypedFacadeError<R>> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            if R::Mode::adjoint_rule(op) == AdjointRule::AdjointSeam {
+            if op.adjoint_rule() == AdjointRule::AdjointSeam {
                 let parent = BoundDynamicTensorRef::try_new(&view.parent.space, view.parent_data())
                     .map_err(Error::from)?;
                 let factors = adjoint_stage(RuntimeDense(&self.runtime), parent)

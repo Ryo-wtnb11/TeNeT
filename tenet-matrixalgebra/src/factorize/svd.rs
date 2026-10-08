@@ -2422,6 +2422,93 @@ where
     Ok((u, vh, singular_values))
 }
 
+/// Checked compact SVD factors of the logical adjoint of `parent`, read in
+/// place: `A = U S Vh` gives `(V, Uh)` on the swapped hom space, with the
+/// phase gauge applied to the final left factor `V` (the multiplicity-free
+/// [`svd_compact_adjoint_factors_dyn`] contract).
+pub(crate) fn svd_compact_adjoint_factors_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<CheckedCompactSvdFactorsWithSpectrum<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = parent.space().provider_arc();
+    let space = parent.space().space();
+    let matrices = generic_input_matricizations(space.structure(), parent.data(), space.nout())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut pairs = Vec::with_capacity(matrices.len());
+    let mut ranks = BTreeMap::new();
+    let mut singular_values = Vec::with_capacity(matrices.len());
+    in_linalg_scope(dense, |dense| {
+        for index in 0..matrices.len() {
+            let matrix = matrices.get(index)?;
+            let CompactSvdNumericalStage {
+                rows,
+                cols,
+                rank,
+                mut u,
+                singular_values: values,
+                mut vt,
+            } = compact_svd_stage(
+                dense,
+                matrix.data,
+                matrix.rows,
+                matrix.cols,
+                CompactSvdGauge::AdjointLeft,
+                |_, _| {},
+            )?;
+            adjoint_col_major_in_place(&mut vt, rank, cols);
+            adjoint_col_major_in_place(&mut u, rows, rank);
+            ranks.insert(matrix.sector, rank);
+            singular_values.push(SectorSpectrum {
+                sector: matrix.sector,
+                values,
+            });
+            pairs.push(FactorPair {
+                sector: matrix.sector,
+                kept: rank,
+                left: vt,
+                left_rows: cols,
+                right: u,
+                right_leading: rank,
+            });
+        }
+        Ok(())
+    })
+    .map_err(CheckedGenericFactorPlanError::from)?;
+    let adjoint = FusionTreeHomSpace::new(
+        space.homspace().domain().clone(),
+        space.homspace().codomain().clone(),
+    );
+    let authority = CheckedAuthority(provider);
+    let mut publish = |side| match &matrices {
+        InputMatricizations::Regions { regions, .. } => publish_one_sided_factor(
+            &authority,
+            &adjoint,
+            regions.as_ref(),
+            &mut pairs,
+            &ranks,
+            side,
+            FactorPlacement::Adjoint,
+        ),
+        InputMatricizations::Packed(packed) => publish_one_sided_factor(
+            &authority,
+            &adjoint,
+            packed,
+            &mut pairs,
+            &ranks,
+            side,
+            FactorPlacement::Adjoint,
+        ),
+    };
+    let u = publish(FactorSide::Left)?;
+    let vh = publish(FactorSide::Right)?;
+    Ok((u, vh, singular_values))
+}
+
 #[cfg(test)]
 /// Checked-Generic full SVD. Dense work is performed before any output-space
 /// publication; checked factor builders then admit square outer factors and
@@ -2464,6 +2551,33 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
+    svd_full_oriented_factors_dyn_checked_generic(dense, input, FactorPlacement::Direct)
+}
+
+/// Checked full-SVD factors of the logical adjoint of `parent`, read in
+/// place (the multiplicity-free [`svd_full_adjoint_factors_dyn`] contract).
+pub(crate) fn svd_full_adjoint_factors_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<SvdFullFactorsDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    svd_full_oriented_factors_dyn_checked_generic(dense, parent, FactorPlacement::Adjoint)
+}
+
+fn svd_full_oriented_factors_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    placement: FactorPlacement,
+) -> Result<SvdFullFactorsDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
     let provider = input.space().provider_arc();
     let space = input.space().space();
     // Why pack rather than borrow admitted regions: `owned_full_svd_stage`
@@ -2479,24 +2593,31 @@ where
     let mut pairs = Vec::with_capacity(matrices.len());
     let mut singular_values = Vec::with_capacity(matrices.len());
     for matrix in &mut matrices {
-        let (mut left, s_values, right) = full_svd_numerical_stage(
-            dense,
-            &mut matrix.data,
-            matrix.rows,
-            matrix.cols,
-            &mut workspace,
-        )?;
-        let mut right = match right {
-            FullSvdRight::Vh(vh_full) => vh_full,
-            FullSvdRight::V(v_full) => adjoint_col_major(&v_full, matrix.cols, matrix.cols),
+        let (rows, cols) = (matrix.rows, matrix.cols);
+        let (mut u_full, s_values, right) =
+            full_svd_numerical_stage(dense, &mut matrix.data, rows, cols, &mut workspace)?;
+        let (mut left, left_rows, mut right, right_leading) = match (placement, right) {
+            (FactorPlacement::Direct, FullSvdRight::Vh(vh_full)) => (u_full, rows, vh_full, cols),
+            (FactorPlacement::Direct, FullSvdRight::V(v_full)) => {
+                (u_full, rows, adjoint_col_major(&v_full, cols, cols), cols)
+            }
+            (FactorPlacement::Adjoint, FullSvdRight::Vh(mut vh_full)) => {
+                adjoint_square_col_major_in_place(&mut vh_full, cols);
+                adjoint_square_col_major_in_place(&mut u_full, rows);
+                (vh_full, cols, u_full, rows)
+            }
+            (FactorPlacement::Adjoint, FullSvdRight::V(v_full)) => {
+                adjoint_square_col_major_in_place(&mut u_full, rows);
+                (v_full, cols, u_full, rows)
+            }
         };
         svd_full_gauge(
             &mut left,
-            matrix.rows,
-            matrix.rows,
+            left_rows,
+            left_rows,
             &mut right,
-            matrix.cols,
-            matrix.cols,
+            right_leading,
+            right_leading,
         );
         singular_values.push(SectorSpectrum {
             sector: matrix.sector,
@@ -2504,28 +2625,41 @@ where
         });
         pairs.push(FactorPair {
             sector: matrix.sector,
-            kept: matrix.rows,
+            kept: left_rows,
             left,
-            left_rows: matrix.rows,
+            left_rows,
             right,
-            right_leading: matrix.cols,
+            right_leading,
         });
     }
-    let u = build_bound_factor_generic_checked(
-        provider,
-        space.homspace(),
+    let (homspace, row_dimensions, col_dimensions) = match placement {
+        FactorPlacement::Direct => (space.homspace().clone(), row_dimensions, col_dimensions),
+        FactorPlacement::Adjoint => (
+            FusionTreeHomSpace::new(
+                space.homspace().domain().clone(),
+                space.homspace().codomain().clone(),
+            ),
+            col_dimensions,
+            row_dimensions,
+        ),
+    };
+    let u = publish_one_sided_factor(
+        &checked,
+        &homspace,
         &matrices,
         &mut pairs,
         &row_dimensions,
         FactorSide::Left,
+        placement,
     )?;
-    let vh = build_bound_factor_generic_checked(
-        provider,
-        space.homspace(),
+    let vh = publish_one_sided_factor(
+        &checked,
+        &homspace,
         &matrices,
         &mut pairs,
         &col_dimensions,
         FactorSide::Right,
+        placement,
     )?;
     Ok(SvdFullFactorsDyn {
         u,

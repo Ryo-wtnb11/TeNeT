@@ -433,11 +433,7 @@ where
         E: DenseExecutor + ?Sized,
         D: FactorScalar,
     {
-        let _ = (dense, parent);
-        Err(OperationError::UnsupportedTensorContractScope {
-            message: "checked Generic SVD does not read lazy adjoints",
-        }
-        .into())
+        svd_compact_adjoint_factors_dyn_checked_generic(dense, parent)
     }
 
     fn svd_full_diagonal<D: FactorScalar>(
@@ -466,11 +462,7 @@ where
         E: DenseExecutor + ?Sized,
         D: FactorScalar,
     {
-        let _ = (dense, parent);
-        Err(OperationError::UnsupportedTensorContractScope {
-            message: "checked Generic SVD does not read lazy adjoints",
-        }
-        .into())
+        svd_full_adjoint_factors_dyn_checked_generic(dense, parent)
     }
 
     fn spectrum_bond<V>(
