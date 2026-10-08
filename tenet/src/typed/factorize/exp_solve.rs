@@ -1,4 +1,5 @@
 use super::*;
+use tenet_matrixalgebra::seam::FactorSpaceAuthority;
 
 impl<R, D> TensorMap<R, D>
 where
@@ -9,6 +10,16 @@ where
     /// The one body of the exponential: a compact diagonal exponentiates its
     /// entries, everything else takes the mode's dense route.
     pub(super) fn factor_exp(&self) -> Result<Self, TypedFacadeError<R>> {
+        // TensorKit `exp!`: `domain == codomain` before anything else.
+        let homspace = self.logical_space().space().homspace();
+        if homspace.codomain() != homspace.domain() {
+            return Err(Error::from(
+                tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                    message: "exp requires an endomorphism (codomain == domain)",
+                },
+            )
+            .into());
+        }
         // A lazy adjoint is never compact; `exp_dense` materializes it.
         const {
             assert!(matches!(
@@ -25,101 +36,139 @@ where
             self.admit_compact(spectrum)?;
             return Ok(self.with_spectrum(exp_spectrum(spectrum)?));
         }
-        R::Mode::exp_dense(self)
+        let space = self.logical_space();
+        let output = <R::Mode as tenet_matrixalgebra::seam::FactorMode<R>>::authority(space)
+            .same_homspace_output(space)
+            .map_err(R::Mode::map_root_error)?;
+        R::Mode::exp_dense(self, output)
     }
 
     /// The one body of `self \ rhs`, solved sector by sector without forming
     /// an inverse.
     ///
-    /// The two codomains must be exactly equal and `self` must have isomorphic
-    /// codomain and domain. The result is `domain(self) <- domain(rhs)`. A
-    /// nonsingular compact divisor scales `rhs` by its reciprocal spectrum;
-    /// every other divisor is solved densely into the final output.
+    /// One preflight in every mode (#1995): runtime, rule, codomain
+    /// equality, the divisor's isomorphism, then the borrowed-view
+    /// admission, before any representation work. The result is
+    /// `domain(self) <- domain(rhs)`. A nonsingular compact divisor scales
+    /// `rhs` by its reciprocal spectrum; every other divisor is solved
+    /// densely into the final output.
     pub(super) fn factor_solve(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
+        self.require_solve_operands(rhs)?;
+        if self.logical_space().space().homspace().codomain()
+            != rhs.logical_space().space().homspace().codomain()
+        {
+            return Err(Error::InvalidArgument(
+                "solve requires equal divisor and right-hand-side codomains".to_string(),
+            )
+            .into());
+        }
+        self.require_isomorphic("solve requires an isomorphic divisor codomain and domain")?;
+        let Some(spectrum) = self.spectrum() else {
+            // Only a compact divisor reads a lazy `rhs` in place; the dense
+            // route materializes both operands.
+            rhs.refuse_borrowed_view("solve")?;
+            let output = self.factor_output_space(self.solve_homspace(rhs))?;
+            return R::Mode::solve_dense(self, rhs, output);
+        };
+        self.admit_compact(spectrum)?;
+        reject_singular_compact_divisor(spectrum)?;
+        self.compact_divisor_solve(rhs, spectrum)
+    }
+
+    /// The operand checks of a solve, ahead of its operand shapes: runtime
+    /// first (a trust boundary, not an algebra error), then the rule.
+    pub(super) fn require_solve_operands(&self, rhs: &Self) -> Result<(), TypedFacadeError<R>> {
         if !self.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
-        let admission = R::Mode::solve_preflight(self, rhs)?;
-        if let Some(spectrum) = self.spectrum() {
-            self.admit_compact(spectrum)?;
-            reject_singular_compact_divisor(spectrum)?;
-            if let Some(solved) = R::Mode::solve_compact(self, rhs, spectrum, &admission)? {
-                return Ok(solved);
-            }
+        if self.logical_space().space().admission().rule_identity()
+            != rhs.logical_space().space().admission().rule_identity()
+        {
+            return Err(Error::RuleMismatch.into());
         }
-        R::Mode::solve_dense(self, rhs, admission)
+        Ok(())
     }
-}
 
-/// TensorKit `D \ t` on a `DiagonalTensorMap` divisor: `D \ D'` divides the
-/// spectra and stays compact, and `D \ t` scales each block's leading
-/// (bond) axis by the reciprocal spectrum, `O(Σ_c k_c m_c)` with no LU and no
-/// `Σ_c k_c²` divisor buffer. The divisor is admitted and nonsingular. A
-/// compact `rhs` is layout-free; `None` leaves a dense `rhs` that is not laid
-/// out as `output` to the dense route, which owns its validation order.
-pub(super) fn checked_compact_divisor_solve<R, D>(
-    tensor: &TensorMap<R, D>,
-    rhs: &TensorMap<R, D>,
-    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
-    output: &BoundDynamicFusionMapSpace<R>,
-) -> Result<Option<TensorMap<R, D>>, Error>
-where
-    D: TensorScalar,
-{
-    let inverse = inv_spectrum(spectrum)?;
-    let local = matches!(&rhs.repr, TypedTensorRepr::Adjoint(_))
-        .then(|| rhs.materialized_tensor_uncached())
-        .transpose()?;
-    let rhs_body = local
-        .as_ref()
-        .and_then(TensorMap::owned_body)
-        .unwrap_or_else(|| rhs.owned_body().expect("solve rhs is owned after refusal"));
-    match rhs_body.data.as_ref() {
-        TypedData::Diagonal(values) => {
-            if values.len() != inverse.len()
-                || values.iter().zip(&inverse).any(|(value, inverse)| {
-                    value.sector != inverse.sector || value.values.len() != inverse.values.len()
+    /// `domain(self) <- domain(rhs)`, the space of `self \ rhs`.
+    fn solve_homspace(&self, rhs: &Self) -> FusionTreeHomSpace {
+        FusionTreeHomSpace::new(
+            self.logical_space().space().homspace().domain().clone(),
+            rhs.logical_space().space().homspace().domain().clone(),
+        )
+    }
+
+    /// TensorKit `D \ t` on an admitted, nonsingular `DiagonalTensorMap`
+    /// divisor: `D \ D'` divides the spectra and stays compact on `D`'s own
+    /// space (`d1.domain`); any other `t` — dense, a mismatched compact
+    /// payload or a (borrowed) lazy adjoint read in place — lands in the
+    /// mode's output space with its leading (bond) axis scaled by the
+    /// reciprocal spectrum, `O(Σ_c k_c m_c)` with no LU and no `Σ_c k_c²`
+    /// divisor buffer.
+    fn compact_divisor_solve(
+        &self,
+        rhs: &Self,
+        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+    ) -> Result<Self, TypedFacadeError<R>> {
+        let inverse = inv_spectrum(spectrum)?;
+        if let Some(values) = rhs.spectrum() {
+            if values.len() == inverse.len()
+                && values.iter().zip(&inverse).all(|(value, inverse)| {
+                    value.sector == inverse.sector && value.values.len() == inverse.values.len()
                 })
             {
-                return Ok(None);
+                let quotient = values
+                    .iter()
+                    .zip(&inverse)
+                    .map(|(value, inverse)| tenet_matrixalgebra::SectorSpectrum {
+                        sector: value.sector,
+                        values: value
+                            .values
+                            .iter()
+                            .zip(&inverse.values)
+                            .map(|(&value, &inverse)| inverse * value)
+                            .collect(),
+                    })
+                    .collect();
+                return Ok(self.with_spectrum(quotient));
             }
-            let quotient = values
-                .iter()
-                .zip(&inverse)
-                .map(|(value, inverse)| tenet_matrixalgebra::SectorSpectrum {
-                    sector: value.sector,
-                    values: value
-                        .values
-                        .iter()
-                        .zip(&inverse.values)
-                        .map(|(&value, &inverse)| inverse * value)
-                        .collect(),
-                })
-                .collect();
-            Ok(Some(tensor.with_spectrum_on(output.clone(), quotient)))
         }
-        TypedData::Dense(values) => {
-            // The destination `domain(D) <- domain(rhs)` is `rhs`'s own
-            // space, because `D` is a bond (`domain == codomain ==
-            // codomain(rhs)`); the equality check proves it rather than
-            // trusting the provider `Arc`s, and it fixes the layout the
-            // scaled payload is read in.
-            if output.space() != rhs_body.space.space() {
-                return Ok(None);
+        let output = self.factor_output_space(self.solve_homspace(rhs))?;
+        let _host_pool = self.runtime.enter_host_pool();
+        // The scaled payload is the result's own buffer: a dense `rhs` laid
+        // out as the output is copied, anything else is read into it.
+        let mut data = match &rhs.repr {
+            TypedTensorRepr::Owned(body)
+                if matches!(body.data.as_ref(), TypedData::Dense(_))
+                    && body.space.space() == output.space() =>
+            {
+                body.materialized_dense_data().into_owned()
             }
-            let mut data = values.clone();
-            tenet_matrixalgebra::seam::scale_axis_by_spectrum_mapped(
-                output.space(),
-                &mut data,
-                Some(0),
-                &inverse,
-                |value| value,
-            )?;
-            Ok(Some(TensorMap {
-                runtime: tensor.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(output.clone(), data)),
-            }))
-        }
+            _ => {
+                let (operand, source) = rhs.fusion_operand_and_data();
+                tenet_tensors::oriented_fusion_add_owned(
+                    output.space().structure(),
+                    operand,
+                    &source,
+                    operand,
+                    &source,
+                    D::from_real(1.0),
+                    D::from_real(0.0),
+                )
+                .map_err(Error::from)?
+            }
+        };
+        tenet_matrixalgebra::seam::scale_axis_by_spectrum_mapped(
+            output.space(),
+            &mut data,
+            Some(0),
+            &inverse,
+            |value| value,
+        )
+        .map_err(Error::from)?;
+        Ok(TensorMap {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(output, data)),
+        })
     }
 }
 
