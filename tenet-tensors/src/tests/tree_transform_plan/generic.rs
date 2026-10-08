@@ -1288,7 +1288,9 @@ fn measure_checked_generic_transform_case(
     let _identity = measured_provider_phase(provider.as_ref(), case, "owned_preflight", || {
         let identity = source
             .space()
-            .validate_transformed_generic_checked_identity(provider.as_ref())
+            .validate_transformed_generic_checked_identity(&CheckedGenericFusion::rule_identity(
+                provider.as_ref(),
+            ))
             .unwrap();
         crate::tree_transform::validate_checked_generic_tree_pair_plan_preflight(
             provider.as_ref(),

@@ -965,7 +965,7 @@ impl FusionTreeHomSpace {
     {
         let prepared = self
             .clone()
-            .prepare_complete_coupled_subblock_structure_generic_checked_after(rule, || Ok(()))?;
+            .prepare_complete_coupled_subblock_structure_generic_checked_after(rule, |_| Ok(()))?;
         Ok(prepared.commit_with_complete_homspace().1)
     }
 
@@ -998,8 +998,8 @@ impl FusionTreeHomSpace {
     }
 
     /// Begins one complete checked Generic layout transaction. The reset epoch
-    /// is captured before `admit` reads provider identity or style; checked
-    /// sector admission then precedes the complete-cache probe. A hit reuses
+    /// is captured before the provider identity is read and handed to `admit`;
+    /// checked sector admission then precedes the complete-cache probe. A hit reuses
     /// its canonical HomSpace/structure pair without building degeneracy
     /// metadata, while a miss carries one unpublished candidate to commit.
     #[doc(hidden)]
@@ -1010,17 +1010,20 @@ impl FusionTreeHomSpace {
     ) -> Result<PreparedBlockStructure, CheckedGenericStructureError<R::Error>>
     where
         R: CheckedGenericFusion,
-        A: FnOnce() -> Result<(), CheckedGenericStructureError<R::Error>>,
+        A: FnOnce(&RuleIdentity) -> Result<(), CheckedGenericStructureError<R::Error>>,
     {
-        Self::prepare_complete_coupled_subblock_structure_generic_checked_with(rule, || {
-            admit()?;
+        Self::prepare_complete_coupled_subblock_structure_generic_checked_with(rule, |identity| {
+            admit(identity)?;
             Ok(self)
         })
     }
 
     /// Begins one complete checked Generic layout transaction whose HomSpace
     /// is itself produced by checked operation admission. The reset epoch is
-    /// captured before `build_homspace` performs any provider query.
+    /// captured before any provider query. `build_homspace` receives the
+    /// provider identity that also keys the structure caches, so admission
+    /// inside it compares against that one value instead of building another
+    /// (#2046).
     #[doc(hidden)]
     pub fn prepare_complete_coupled_subblock_structure_generic_checked_with<R, E, B>(
         rule: &R,
@@ -1029,24 +1032,29 @@ impl FusionTreeHomSpace {
     where
         R: CheckedGenericFusion,
         E: From<CheckedGenericStructureError<R::Error>>,
-        B: FnOnce() -> Result<Self, E>,
+        B: FnOnce(&RuleIdentity) -> Result<Self, E>,
     {
         let epoch = core_reset_epoch();
-        let homspace = build_homspace()?;
+        let rule_identity = rule.rule_identity();
+        let homspace = build_homspace(&rule_identity)?;
         homspace
-            .prepare_complete_coupled_subblock_structure_generic_checked_at(rule, epoch)
+            .prepare_complete_coupled_subblock_structure_generic_checked_at(
+                rule,
+                rule_identity,
+                epoch,
+            )
             .map_err(E::from)
     }
 
     fn prepare_complete_coupled_subblock_structure_generic_checked_at<R>(
         self,
         rule: &R,
+        rule_identity: RuleIdentity,
         epoch: usize,
     ) -> Result<PreparedBlockStructure, CheckedGenericStructureError<R::Error>>
     where
         R: CheckedGenericFusion,
     {
-        let rule_identity = rule.rule_identity();
         let layout = self.generic_sector_layout(rule_identity.clone(), || {
             self.fusion_tree_layout_data_generic_checked(rule)
         })?;

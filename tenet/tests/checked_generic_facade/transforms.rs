@@ -698,7 +698,7 @@ fn checked_only_otimes_preserves_typed_late_f_failures() {
         ))
     ));
     assert_eq!(provider.f_queries.load(Ordering::Relaxed), final_f_query);
-    assert_eq!(provider.commit_count.load(Ordering::Relaxed), 0);
+    assert!(!provider.final_style_guard_ran_last());
     provider.fail_f_on_query.store(0, Ordering::Relaxed);
 
     provider.f_queries.store(0, Ordering::Relaxed);
@@ -712,7 +712,7 @@ fn checked_only_otimes_preserves_typed_late_f_failures() {
             ..
         })
     ));
-    assert_eq!(provider.commit_count.load(Ordering::Relaxed), 0);
+    assert!(!provider.final_style_guard_ran_last());
     assert_eq!(provider.r_queries.load(Ordering::Relaxed), 0);
 }
 
@@ -803,14 +803,11 @@ fn checked_only_otimes_matches_fixed_heterogeneous_nonunit_oracle() {
     }
     let output = lhs.otimes(&rhs).unwrap();
     assert!(std::ptr::eq(output.provider(), first.as_ref()));
-    // One identity query more than the walks themselves: the
-    // sector-structure cache key (#2030).
-    assert_eq!(first.identity_queries.load(Ordering::Relaxed), 4);
+    // The sector-structure cache key (#2030) and the final commit guard
+    // reuse the identity the checked walk admitted (#2046).
+    assert_eq!(first.identity_queries.load(Ordering::Relaxed), 2);
     assert_eq!(second.identity_queries.load(Ordering::Relaxed), 1);
-    assert_eq!(first.commit_count.load(Ordering::Relaxed), 1);
-    assert_eq!(second.commit_count.load(Ordering::Relaxed), 0);
-    assert_eq!(first.postcommit_queries.load(Ordering::Relaxed), 0);
-    assert_eq!(second.postcommit_queries.load(Ordering::Relaxed), 0);
+    assert!(first.final_style_guard_ran_last());
     assert!(first.algebra_queries.load(Ordering::Relaxed) > 0);
     assert!(first.f_queries.load(Ordering::Relaxed) > 0);
     assert_eq!(first.r_queries.load(Ordering::Relaxed), 0);
@@ -1096,7 +1093,7 @@ fn checked_generic_cat_precedence_and_admission_failure_are_typed_nonpublishing(
             CheckedGenericStructureError::Provider(ToyError::Algebra)
         ))
     ));
-    assert_eq!(provider.commit_count.load(Ordering::Relaxed), 0);
+    assert!(!provider.final_style_guard_ran_last());
     assert_eq!(lhs.dense_data().unwrap(), lhs_before);
     assert_eq!(valid_rhs.dense_data().unwrap(), rhs_before);
 }

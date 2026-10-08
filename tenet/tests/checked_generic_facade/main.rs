@@ -140,7 +140,8 @@ struct CheckedOnlyToy {
     fail_f_on_query: AtomicUsize,
     identity_queries: AtomicUsize,
     style_queries: AtomicUsize,
-    commit_identity_seen: AtomicBool,
+    last_f_query: AtomicUsize,
+    last_style_query: AtomicUsize,
     committed: AtomicBool,
     commit_count: AtomicUsize,
     postcommit_queries: AtomicUsize,
@@ -170,7 +171,8 @@ impl CheckedOnlyToy {
             fail_f_on_query: AtomicUsize::new(0),
             identity_queries: AtomicUsize::new(0),
             style_queries: AtomicUsize::new(0),
-            commit_identity_seen: AtomicBool::new(false),
+            last_f_query: AtomicUsize::new(0),
+            last_style_query: AtomicUsize::new(0),
             committed: AtomicBool::new(false),
             commit_count: AtomicUsize::new(0),
             postcommit_queries: AtomicUsize::new(0),
@@ -260,12 +262,25 @@ impl CheckedOnlyToy {
     }
 
     fn reset_commit_spy(&self) {
-        self.commit_identity_seen.store(false, Ordering::Relaxed);
+        self.last_f_query.store(0, Ordering::Relaxed);
+        self.last_style_query.store(0, Ordering::Relaxed);
         self.committed.store(false, Ordering::Relaxed);
         self.commit_count.store(0, Ordering::Relaxed);
         self.postcommit_queries.store(0, Ordering::Relaxed);
         self.commit_after_queries.store(0, Ordering::Relaxed);
         self.queries_since_reset.store(0, Ordering::Relaxed);
+    }
+
+    /// Whether the bound commit's final style guard ran after every F query
+    /// and nothing queried this provider afterwards. Why not detect the
+    /// commit online: the guard reads only the style, which F-phase symbol
+    /// queries also read, and it reuses the admitted identity (#2046).
+    /// It only detects the guard while an F query follows admission, so keep
+    /// exact query counts next to it.
+    fn final_style_guard_ran_last(&self) -> bool {
+        let style = self.last_style_query.load(Ordering::Relaxed);
+        style > self.last_f_query.load(Ordering::Relaxed)
+            && style == self.queries_since_reset.load(Ordering::Relaxed)
     }
 
     fn arm_commit_spy_after_queries(&self, query_count: usize) {
@@ -330,11 +345,6 @@ impl CheckedGenericFusion for CheckedOnlyToy {
     fn rule_identity(&self) -> RuleIdentity {
         self.identity_queries.fetch_add(1, Ordering::Relaxed);
         self.record_query();
-        if self.commit_after_queries.load(Ordering::Relaxed) == 0
-            && self.f_queries.load(Ordering::Relaxed) > 0
-        {
-            self.commit_identity_seen.store(true, Ordering::Relaxed);
-        }
         RuleIdentity::from_canonical_bytes::<Self>(
             0x677,
             Arc::<[u8]>::from([
@@ -347,13 +357,8 @@ impl CheckedGenericFusion for CheckedOnlyToy {
 
     fn fusion_style(&self) -> FusionStyleKind {
         let style_query = self.style_queries.fetch_add(1, Ordering::Relaxed) + 1;
-        self.record_query();
-        if self.commit_after_queries.load(Ordering::Relaxed) == 0
-            && self.commit_identity_seen.load(Ordering::Relaxed)
-            && !self.committed.swap(true, Ordering::Relaxed)
-        {
-            self.commit_count.fetch_add(1, Ordering::Relaxed);
-        }
+        let query = self.record_query();
+        self.last_style_query.store(query, Ordering::Relaxed);
         if self.invalid_style.load(Ordering::Relaxed)
             || (self.invalid_style_after_first_query.load(Ordering::Relaxed) && style_query > 1)
         {
@@ -470,7 +475,8 @@ impl CheckedGenericRigidSymbols for CheckedOnlyToy {
         e: SectorId,
         f: SectorId,
     ) -> Result<GenericFArray<f64>, Self::Error> {
-        self.record_query();
+        let index = self.record_query();
+        self.last_f_query.store(index, Ordering::Relaxed);
         self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
         let query = self.f_queries.fetch_add(1, Ordering::Relaxed) + 1;
         if self.fail_algebra.load(Ordering::Relaxed)

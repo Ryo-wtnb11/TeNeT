@@ -63,6 +63,7 @@ struct FailAtCallRule {
     identity: RuleIdentity,
     style: Cell<FusionStyleKind>,
     calls: Cell<usize>,
+    identity_calls: Cell<usize>,
     fail_at: Option<usize>,
     reset_on_query: Cell<bool>,
 }
@@ -81,6 +82,7 @@ impl FailAtCallRule {
             identity: RuleIdentity::of_type::<Self>(),
             style: Cell::new(FusionStyleKind::Generic),
             calls: Cell::new(0),
+            identity_calls: Cell::new(0),
             fail_at: None,
             reset_on_query: Cell::new(false),
         }
@@ -102,6 +104,7 @@ impl FailAtCallRule {
 
 impl FusionRule for FailAtCallRule {
     fn rule_identity(&self) -> RuleIdentity {
+        self.identity_calls.set(self.identity_calls.get() + 1);
         self.identity.clone()
     }
 
@@ -137,6 +140,7 @@ impl CheckedGenericFusion for FailAtCallRule {
     type Error = FailAtCallError;
 
     fn rule_identity(&self) -> RuleIdentity {
+        self.identity_calls.set(self.identity_calls.get() + 1);
         self.identity.clone()
     }
 
@@ -369,7 +373,34 @@ fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
 
 #[test]
 #[allow(clippy::arc_with_non_send_sync)] // The bound API requires Arc; the single-threaded spy uses Cell counters.
-fn checked_generic_preparation_rejects_legacy_binding_before_checker_queries() {
+fn checked_generic_bound_prepare_commit_builds_identity_once() {
+    let homspace = || FusionTreeHomSpace::from_sector_ids([(0, 1), (0, 1)], [(0, 1)]);
+    let identity = RuleIdentity::new_unique::<FailAtCallRule>();
+    let source_provider = Arc::new(FailAtCallRule::with_identity(identity.clone()));
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&source_provider),
+        homspace(),
+    )
+    .unwrap();
+    let checker = FailAtCallRule::with_identity(identity);
+    source_provider.identity_calls.set(0);
+
+    let prepared = source
+        .prepare_final_homspace_generic_with_checked(&checker, homspace())
+        .unwrap();
+    let checker_reads = checker.identity_calls.get();
+    source
+        .commit_final_homspace_generic_bound_checked(prepared)
+        .unwrap();
+
+    assert_eq!(checker_reads, 1);
+    assert_eq!(checker.identity_calls.get(), 1);
+    assert_eq!(source_provider.identity_calls.get(), 0);
+}
+
+#[test]
+#[allow(clippy::arc_with_non_send_sync)] // The bound API requires Arc; the single-threaded spy uses Cell counters.
+fn checked_generic_preparation_rejects_legacy_binding_before_checker_algebra_queries() {
     let source_provider = Arc::new(FailAtCallRule::new());
     let checker = FailAtCallRule::new();
     let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
@@ -387,6 +418,8 @@ fn checked_generic_preparation_rejects_legacy_binding_before_checker_queries() {
         CheckedGenericStructureError::Core(CoreError::MalformedFusionTree { .. })
     ));
     assert_eq!(checker.calls.get(), 0);
+    // The seam reads the checker identity once before the closure rejects (#2046).
+    assert_eq!(checker.identity_calls.get(), 1);
 }
 
 #[test]
