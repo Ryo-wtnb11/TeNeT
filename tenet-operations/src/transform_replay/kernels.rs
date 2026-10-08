@@ -720,6 +720,7 @@ mod allocation_replay_tests {
                 &mut dst,
                 &src,
                 1.0,
+                &[],
                 3,
             )
             .unwrap();

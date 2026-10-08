@@ -322,6 +322,7 @@ where
         dst.data_mut(),
         src.data(),
         alpha,
+        &[],
         threads,
     )
 }
@@ -363,12 +364,17 @@ where
         src_structure,
         dst_data,
         src_data,
-        alpha,
+        DestinationAlpha::uniform(alpha),
         DestinationMode::Axpby(beta),
         threads,
     )
 }
 
+/// Overwrite form of the structural-recoupling replay. The Single move or
+/// Multi scatter writing destination block `b` uses `alpha * θ_b` when
+/// `destination_scales` lists `(b, θ_b)` (strictly increasing block offsets;
+/// an unlisted block has `θ_b = 1`); packs, recoupling GEMMs and inactive
+/// zero fills stay unscaled, as on the device.
 #[allow(clippy::too_many_arguments)]
 pub fn tree_transform_structure_overwrite_with_structural_recoupling_raw<A, E, D, C>(
     kernels: &mut A,
@@ -380,6 +386,7 @@ pub fn tree_transform_structure_overwrite_with_structural_recoupling_raw<A, E, D
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
+    destination_scales: &[(usize, C)],
     threads: usize,
 ) -> Result<(), OperationError>
 where
@@ -397,7 +404,7 @@ where
         src_structure,
         dst_data,
         src_data,
-        alpha,
+        DestinationAlpha::new(alpha, destination_scales)?,
         DestinationMode::Overwrite,
         threads,
     )
@@ -413,7 +420,7 @@ fn tree_transform_structure_with_structural_recoupling_raw_mode<A, E, D, C>(
     src_structure: &Arc<BlockStructure>,
     dst_data: &mut [D],
     src_data: &[D],
-    alpha: D,
+    alpha: DestinationAlpha<'_, D, C>,
     mode: DestinationMode<D>,
     threads: usize,
 ) -> Result<(), OperationError>
@@ -502,7 +509,7 @@ where
         src_structure,
         dst_data,
         src_data,
-        alpha,
+        DestinationAlpha::uniform(alpha),
         DestinationMode::Axpby(beta),
         threads,
         profile,
@@ -525,6 +532,7 @@ pub(crate) fn tree_transform_structure_overwrite_with_structural_recoupling_raw_
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
+    destination_scales: &[(usize, C)],
     threads: usize,
     profile: &mut TreeTransformReplayProfile,
 ) -> Result<(), OperationError>
@@ -543,7 +551,7 @@ where
         src_structure,
         dst_data,
         src_data,
-        alpha,
+        DestinationAlpha::new(alpha, destination_scales)?,
         DestinationMode::Overwrite,
         threads,
         profile,
@@ -560,7 +568,7 @@ fn tree_transform_structure_with_structural_recoupling_raw_profiled_mode<A, E, D
     src_structure: &Arc<BlockStructure>,
     dst_data: &mut [D],
     src_data: &[D],
-    alpha: D,
+    alpha: DestinationAlpha<'_, D, C>,
     mode: DestinationMode<D>,
     threads: usize,
     profile: &mut TreeTransformReplayProfile,

@@ -8,6 +8,7 @@ use tenet_dense::{
 };
 
 mod compile_validation;
+mod destination_scales;
 mod overwrite;
 mod profile;
 mod threaded;

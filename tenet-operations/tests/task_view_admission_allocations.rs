@@ -35,6 +35,7 @@ fn warmed_public_host_admission_without_tasks_is_allocation_free() {
                 &mut destination,
                 &source,
                 1.0,
+                &[],
                 profile,
             )
             .unwrap();

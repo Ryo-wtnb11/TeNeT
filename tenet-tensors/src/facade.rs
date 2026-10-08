@@ -785,6 +785,7 @@ where
         dst.data_mut(),
         src.data(),
         alpha,
+        &[],
     )
 }
 

@@ -198,6 +198,54 @@ enum DestinationMode<D> {
     Overwrite,
 }
 
+/// The caller scale of the move or scatter writing each destination block:
+/// `alpha`, times `θ_b` for the destination block at offset `b` when
+/// `scales` lists `(b, θ_b)` (strictly increasing offsets). The fermionic
+/// contraction twist rides here, so the transform that materializes the
+/// twisted operand writes it already scaled — the same fold as the device's
+/// `replay_with_destination_scales`.
+#[derive(Clone, Copy)]
+struct DestinationAlpha<'a, D, C> {
+    alpha: D,
+    scales: &'a [(usize, C)],
+}
+
+impl<'a, D, C> DestinationAlpha<'a, D, C>
+where
+    D: Copy + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    fn uniform(alpha: D) -> Self {
+        Self { alpha, scales: &[] }
+    }
+
+    fn new(alpha: D, scales: &'a [(usize, C)]) -> Result<Self, OperationError> {
+        if scales.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(OperationError::InvalidArgument {
+                message: "tree transform destination scales must have strictly increasing offsets",
+            });
+        }
+        Ok(Self { alpha, scales })
+    }
+
+    #[inline]
+    fn at(self, offset: isize) -> D {
+        if self.scales.is_empty() {
+            return self.alpha;
+        }
+        usize::try_from(offset)
+            .ok()
+            .and_then(|offset| {
+                self.scales
+                    .binary_search_by_key(&offset, |&(block, _)| block)
+                    .ok()
+            })
+            .map_or(self.alpha, |index| {
+                self.alpha.scale_by_coefficient(self.scales[index].1)
+            })
+    }
+}
+
 struct PhysicalOverwriteProof<'a, C> {
     structure: &'a TreeTransformStructure<C>,
     dst_structure: &'a Arc<BlockStructure>,

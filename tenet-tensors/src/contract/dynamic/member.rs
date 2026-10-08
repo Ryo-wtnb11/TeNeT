@@ -380,6 +380,7 @@ where
             lhs_data,
             members,
             threads,
+            &[],
         )?;
     }
     if !artifact.rhs_borrowed {
@@ -394,6 +395,7 @@ where
             rhs_data,
             members,
             threads,
+            &[],
         )?;
     }
     if artifact.requires_source_twist() {
@@ -460,6 +462,7 @@ where
             &workspace.dst,
             members,
             threads,
+            &[],
         )?;
     }
     Ok(())

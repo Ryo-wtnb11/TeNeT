@@ -54,6 +54,7 @@ where
                 &mut host,
                 &source,
                 alpha,
+                &[],
             )
             .unwrap();
         dense_backend
@@ -65,6 +66,7 @@ where
                 &mut dense,
                 &source,
                 alpha,
+                &[],
             )
             .unwrap();
         tree_transform_structure_overwrite_with_strided_kernel_raw(

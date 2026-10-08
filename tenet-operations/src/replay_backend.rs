@@ -78,9 +78,16 @@ where
         beta: D,
     ) -> Result<(), OperationError>;
 
+    /// Overwrites `dst` with `alpha * T(src)`, the move writing destination
+    /// block `b` scaled by `θ_b` from `destination_scales` (`(b, θ_b)`,
+    /// strictly increasing offsets; unlisted blocks have `θ_b = 1`).
+    ///
+    /// The provided implementation has no per-move access, so it accepts
+    /// only an empty scale list and reports any other as unsupported; the
+    /// structural-recoupling backends fold the scales into their moves.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the overwrite backend contract keeps workspace, replay structures, buffers, and alpha explicit"
+        reason = "the overwrite backend contract keeps workspace, replay structures, buffers, alpha and destination scales explicit"
     )]
     fn tree_transform_structure_overwrite_into_raw(
         &mut self,
@@ -91,7 +98,13 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
+        destination_scales: &[(usize, C)],
     ) -> Result<(), OperationError> {
+        if !destination_scales.is_empty() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "tree transform backend does not fold destination scales into its moves",
+            });
+        }
         structure.validate_replay_structures(dst_structure, src_structure)?;
         crate::transform_replay::validate_replay_storage_len(src_structure, src_data.len())?;
         let mut kernels = StridedHostKernelAdapter::default();
@@ -152,6 +165,7 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
+        destination_scales: &[(usize, C)],
         profile: &mut TreeTransformReplayProfile,
     ) -> Result<(), OperationError> {
         let start = std::time::Instant::now();
@@ -163,6 +177,7 @@ where
             dst_data,
             src_data,
             alpha,
+            destination_scales,
         );
         profile.total += start.elapsed();
         result
@@ -560,6 +575,7 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
+        destination_scales: &[(usize, C)],
     ) -> Result<(), OperationError> {
         DenseTreeTransformOperations::default_executor()
             .tree_transform_structure_overwrite_into_raw(
@@ -570,6 +586,7 @@ where
                 dst_data,
                 src_data,
                 alpha,
+                destination_scales,
             )
     }
 }
@@ -659,6 +676,7 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
+        destination_scales: &[(usize, C)],
     ) -> Result<(), OperationError> {
         let threads = self.effective_recoupling_threads(dst_data.len());
         crate::tree_transform_structure_overwrite_with_structural_recoupling_raw(
@@ -671,6 +689,7 @@ where
             dst_data,
             src_data,
             alpha,
+            destination_scales,
             threads,
         )
     }
@@ -713,6 +732,7 @@ where
         dst_data: &mut [D],
         src_data: &[D],
         alpha: D,
+        destination_scales: &[(usize, C)],
         profile: &mut TreeTransformReplayProfile,
     ) -> Result<(), OperationError> {
         let threads = self.effective_recoupling_threads(dst_data.len());
@@ -726,6 +746,7 @@ where
             dst_data,
             src_data,
             alpha,
+            destination_scales,
             threads,
             profile,
         )
@@ -866,10 +887,32 @@ mod tests {
                 &mut dst,
                 &[3.0],
                 1.0,
+                &[],
             )
             .unwrap();
 
         assert_eq!(dst, [6.0, 0.0]);
+
+        // What: without per-move access the provided method cannot fold a
+        // destination scale; it says so before touching the destination.
+        let mut dst = [5.0; 2];
+        let error = RequiredMethodsOnlyBackend
+            .tree_transform_structure_overwrite_into_raw(
+                &mut TreeTransformWorkspace::default(),
+                &structure,
+                &dst_structure,
+                &src_structure,
+                &mut dst,
+                &[3.0],
+                1.0,
+                &[(0, -1.0)],
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope { .. }
+        ));
+        assert_eq!(dst, [5.0; 2]);
     }
 
     #[test]
@@ -905,6 +948,7 @@ mod tests {
                 &mut overwrite_dst,
                 &[3.0],
                 1.0,
+                &[],
                 &mut overwrite_profile,
             )
             .unwrap();
@@ -926,6 +970,7 @@ mod tests {
                 &mut host_dst,
                 &[3.0],
                 1.0,
+                &[],
             )
             .unwrap();
         assert_eq!(host_dst, [6.0, 0.0]);
@@ -941,6 +986,7 @@ mod tests {
                 &mut dense_dst,
                 &[3.0],
                 1.0,
+                &[],
             )
             .unwrap();
         assert_eq!(dense_dst, [6.0, 0.0]);
@@ -956,6 +1002,7 @@ mod tests {
                 &mut dense_dst,
                 &[3.0],
                 1.0,
+                &[],
                 &mut profile,
             )
             .unwrap();

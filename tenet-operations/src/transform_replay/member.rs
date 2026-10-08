@@ -303,7 +303,9 @@ where
 /// owns only execution scratch and can be reused at a different batch size.
 /// `threads` preserves the ordinary structural schedule for `members == 1`;
 /// larger batches submit member-expanded dense jobs together without an outer
-/// member thread pool.
+/// member thread pool. `destination_scales` folds `θ_b` into the moves
+/// writing destination block `b` of every member, as in
+/// [`tree_transform_structure_overwrite_with_structural_recoupling_raw`].
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn tree_transform_members_overwrite_raw<A, E, D, C>(
@@ -317,6 +319,7 @@ pub fn tree_transform_members_overwrite_raw<A, E, D, C>(
     src_data: &[D],
     members: usize,
     threads: usize,
+    destination_scales: &[(usize, C)],
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<D> + Clone + Send + Sync,
@@ -337,9 +340,11 @@ where
             dst_data,
             src_data,
             D::one(),
+            destination_scales,
             threads,
         );
     }
+    let alpha = DestinationAlpha::new(D::one(), destination_scales)?;
     let task = structure.task_view()?;
     admit::<D, C>(
         task,
@@ -431,7 +436,10 @@ where
             dst.offset,
             src.offset,
             task.storage_conjugate(),
-            TransformScale::new(D::one(), task.single_coefficients()[coefficient]),
+            TransformScale::new(
+                alpha.at(dst.offset),
+                task.single_coefficients()[coefficient],
+            ),
             None,
             None,
             None,
@@ -510,7 +518,7 @@ where
                 offset_to_isize(job.dst_offset + column * element_count)?,
                 members,
                 false,
-                D::one(),
+                alpha.at(layouts.entry(entry).offset),
             )?;
         }
     }
@@ -629,6 +637,7 @@ mod tests {
                 &source,
                 members,
                 2,
+                &[],
             )
             .unwrap();
             assert_eq!(dense.submissions, 1);
@@ -687,6 +696,7 @@ mod tests {
             &source,
             2,
             1,
+            &[],
         )
         .unwrap();
         assert_eq!(dense.submissions, 1);
@@ -722,6 +732,7 @@ mod tests {
             &source,
             2,
             1,
+            &[],
         )
         .unwrap_err();
         assert!(matches!(
@@ -783,6 +794,7 @@ mod tests {
             &source,
             members,
             1,
+            &[],
         )
         .unwrap();
         assert_eq!(dense.submissions, 1);
@@ -828,6 +840,7 @@ mod tests {
             &source,
             2,
             1,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -869,6 +882,7 @@ mod tests {
             &source,
             2,
             1,
+            &[],
         )
         .unwrap();
         assert_eq!(dense.submissions, 1);
@@ -900,6 +914,7 @@ mod tests {
                 &[1.0; 8],
                 members,
                 1,
+                &[],
             )
             .is_err());
         }
@@ -935,6 +950,7 @@ mod tests {
                     &source,
                     members,
                     1,
+                    &[],
                 )
                 .unwrap();
             };
@@ -950,6 +966,7 @@ mod tests {
                         &mut ordinary_destination[4 * member..4 * member + 4],
                         &source[4 * member..4 * member + 4],
                         1.0,
+                        &[],
                         1,
                     )
                     .unwrap();
